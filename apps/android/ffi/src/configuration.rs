@@ -56,6 +56,10 @@ pub struct AndroidGitConfigFfi {
 pub struct AndroidMobileLinuxConfigFfi {
     /// The Android runtime is always PRoot.
     pub mode: MobileLinuxRuntimeModeFfi,
+    /// Brand-owned guest identity copied from `MobileUserDirectories`.
+    pub brand_id: String,
+    pub linux_user: String,
+    pub config_dir_name: String,
     /// App-private root where rootfs state is managed.
     pub managed_root: String,
     /// Canonical app sandbox root (`Context.filesDir`) that owns app build roots.

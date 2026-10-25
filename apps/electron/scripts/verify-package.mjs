@@ -121,8 +121,10 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     join(extractedApp, 'out', 'main', 'index.js'),
     join(extractedApp, 'out', 'preload', 'index.cjs'),
     join(extractedApp, 'out', 'preload', 'localApp.cjs'),
+    join(extractedApp, 'out', 'preload', 'remoteRtc.cjs'),
     join(extractedApp, 'Dyad-LICENSE'),
     join(extractedApp, 'out', 'renderer', 'index.html'),
+    join(extractedApp, 'out', 'renderer', 'remote-rtc.html'),
     join(extractedApp, 'node_modules', '@lingxi', 'bridge-client', 'dist', 'index.js'),
     join(extractedApp, 'node_modules', 'ws', 'package.json'),
     join(extractedApp, 'node_modules', 'ws', 'lib', 'stream.js'),
@@ -131,6 +133,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   for (const path of expected) requirePath(path);
   assertSandboxedPreloadBundle(readFileSync(join(extractedApp, 'out', 'preload', 'index.cjs'), 'utf8'));
   assertSandboxedPreloadBundle(readFileSync(join(extractedApp, 'out', 'preload', 'localApp.cjs'), 'utf8'));
+  assertSandboxedPreloadBundle(readFileSync(join(extractedApp, 'out', 'preload', 'remoteRtc.cjs'), 'utf8'));
   const manifest = readJson(join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'));
   const identifiers = brokerIdentifiers(manifest.channel);
   verifyCrashlytics(resources, identifiers.desktopBundleId);

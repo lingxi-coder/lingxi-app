@@ -59,15 +59,19 @@ class UnifiedLocalApps private constructor(private val context: Context) {
         }
     }
 
-    val permissions = AppDevicePermissions(context)
-    val runtime = UnifiedAppWebRuntime(context, this)
     val market = UnifiedAppMarket(context, this)
     private val opened = context.getSharedPreferences("local-app-v2-opened", Context.MODE_PRIVATE)
     private val visible = mutableSetOf<android.app.Activity>()
     private val backgroundSettings = Mutex()
     private val browserRuns = mutableMapOf<String, AppLaunch>()
-    var browserReviewAppId: String? = null
-    fun consumeBrowserReview(id: String): Boolean = (browserReviewAppId == id).also { if (it) browserReviewAppId = null }
+    private val mutableBrowserReviewRequest = MutableStateFlow<BrowserReviewRequest?>(null)
+    val browserReviewRequest: StateFlow<BrowserReviewRequest?> = mutableBrowserReviewRequest.asStateFlow()
+    fun setBrowserReviewRequest(appId: String, runId: String?) {
+        mutableBrowserReviewRequest.value = BrowserReviewRequest(appId, runId)
+    }
+    fun clearBrowserReviewRequest(appId: String, runId: String?) {
+        if (mutableBrowserReviewRequest.value == BrowserReviewRequest(appId, runId)) mutableBrowserReviewRequest.value = null
+    }
     suspend fun openExternalBrowser(id: String): AppLaunch {
         val app = get(id)
         val release = release(id, app.currentRevision)
@@ -75,7 +79,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
         if ("agent" in release.capabilities) ensureAgentHost()
         // Start a user-visible foreground lease while LingXi is still visible;
         // browser foreground must not cancel its independently owned tasks.
-        withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id) }
+        withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id, app.name) }
         try {
             val launch = start(id)
             browserRuns[id] = launch
@@ -102,11 +106,10 @@ class UnifiedLocalApps private constructor(private val context: Context) {
                     try {
                         for (app in (request("list") as JSONArray).let { list -> (0 until list.length()).map { list.getJSONObject(it).appRecord() } }) {
                             if (visible.isNotEmpty()) break
-                            if (runtime.pendingDeviceRequest(app.id) != null || browserRuns.containsKey(app.id)) continue
+                            if (browserRuns.containsKey(app.id)) continue
                             val running = (request("status", app.id) as JSONObject).optJSONObject("run") ?: continue
                             val release = release(app.id, running.getLong("revision"))
-                            if ("agent" in release.capabilities) runtime.launch(app.id)?.let { runCatching { agentClosed(it) } }
-                            if (visible.isEmpty() && runtime.pendingDeviceRequest(app.id) == null && release.executesCode && !keepRunning(app.id, release.digest)) runCatching { suspend(app.id) }
+                            if (visible.isEmpty() && release.executesCode && !keepRunning(app.id, release.digest)) runCatching { suspend(app.id) }
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
                     catch (failure: Exception) { mutableState.value = mutableState.value.copy(error = failure.message) }
@@ -129,18 +132,26 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             }
         }.also { handle = it }
     }
-    suspend fun agentPage(launch: AppLaunch, method: String, args: JSONObject): Any? = withContext(Dispatchers.IO) {
-        ensureAgentHost()
-        decodeAppResponse(service().agentPageJson(launch.run.appId, launch.run.runId, method, args.toString()))
-    }
     /** Trusted app-details UI only; no WebView message can reach this method. */
     suspend fun agentHost(request: JSONObject): Any? = withContext(Dispatchers.IO) {
         ensureAgentHost()
         decodeAppResponse(service().agentHostJson(request.toString()))
     }
-    suspend fun agentClosed(launch: AppLaunch) = withContext(Dispatchers.IO) {
-        decodeAppResponse(service().agentPageClosed(launch.run.appId, launch.run.runId))
-        Unit
+    /** Trusted native authoring only. This registration must not boot the model host. */
+    suspend fun registerAuthoring(authoring: JSONObject): AppAuthoring = withContext(Dispatchers.IO) {
+        val request = JSONObject().put("op", "registerAuthoring").put("authoring", authoring)
+        (decodeAppResponse(service().agentHostJson(request.toString())) as JSONObject).appAuthoring()
+    }
+    suspend fun agentTasks(appId: String, revision: Long): List<AppAgentTask> {
+        val response = agentHost(JSONObject().put("op", "tasks.list").put("appId", appId).put("revision", revision)) as JSONObject
+        require(response.optString("appId") == appId && response.optLong("revision") == revision) {
+            "The Agent task list belongs to a different application release."
+        }
+        val tasks = response.getJSONArray("tasks")
+        return (0 until tasks.length()).map { tasks.getJSONObject(it).appAgentTask() }
+    }
+    suspend fun cancelAgentTask(appId: String, revision: Long, runId: String) {
+        agentHost(JSONObject().put("op", "tasks.cancel").put("appId", appId).put("revision", revision).put("runId", runId))
     }
     private suspend fun bindLinux() = creation.withLock {
         check(BuildConfig.MOBILE_LINUX_FULL) { "此发行渠道不支持 Linux 应用代码执行。" }
@@ -175,11 +186,9 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     suspend fun grant(id: String, digest: String) { request("grant", id) { put("digest", digest) }; refresh() }
     suspend fun revoke(id: String) {
         browserRuns.remove(id)
-        runtime.close(id)
         request("stop", id)
         LocalAppProcessService.release(context, id)
         request("revoke", id)
-        permissions.revoke(id)
         refresh()
     }
     suspend fun start(id: String, op: String = "start", revision: Long? = null): AppLaunch {
@@ -192,7 +201,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             check(BuildConfig.MOBILE_LINUX_FULL) { "此发行渠道不支持安装、构建或运行应用服务。" }
             require(release.digest in app.executionGrants) { "请先允许此版本在 Linux 用户空间中运行。" }
             bindLinux()
-            if (keepRunning(id, release.digest)) withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id) }
+            if (keepRunning(id, release.digest)) withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id, app.name) }
         }
         val value = try { request(op, id) { revision?.let { put("revision", it) } } as JSONObject } catch (error: Throwable) {
             // The shared service cancels only this preparation. An app-level
@@ -208,16 +217,14 @@ class UnifiedLocalApps private constructor(private val context: Context) {
         LocalAppProcessService.ready(id)
         return launch
     }
-    suspend fun stop(id: String) { browserRuns.remove(id); runtime.close(id); request("stop", id); LocalAppProcessService.release(context, id); refresh() }
-    suspend fun suspend(id: String) { browserRuns.remove(id); runtime.close(id); request("suspend", id); LocalAppProcessService.release(context, id) }
+    suspend fun stop(id: String) { browserRuns.remove(id); request("stop", id); LocalAppProcessService.release(context, id); refresh() }
+    suspend fun suspend(id: String) { browserRuns.remove(id); request("suspend", id); LocalAppProcessService.release(context, id) }
     suspend fun repair(id: String) {
-        val launch = start(id, "repair")
-        if (runtime.launch(id) != null) runtime.open(id, launch)
+        start(id, "repair")
         refresh()
     }
     suspend fun activate(id: String, revision: Long) {
-        val launch = start(id, revision = revision)
-        if (runtime.launch(id) != null) runtime.open(id, launch)
+        start(id, revision = revision)
         refresh()
     }
     suspend fun runs(id: String): List<AppRun> = (request("runs", id) as JSONArray).let { values ->
@@ -229,13 +236,14 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             item?.optionalString("text") ?: value.get(index).toString()
         } else value?.toString().orEmpty()
     }
-    suspend fun remove(id: String) { stop(id); request("remove", id); permissions.revoke(id); refresh() }
-    suspend fun prepareAuthoring(id: String, sessions: Map<String, String>): AppAuthoringResolution {
+    suspend fun remove(id: String) { stop(id); request("remove", id); refresh() }
+    suspend fun prepareAuthoring(id: String, sessions: Map<String, AppAuthoringSessionContext>): AppAuthoringResolution {
         val app = get(id)
         val source = app.authoring?.sourceDirectory
         val exists = source != null && withContext(Dispatchers.IO) { hostFile(source).isDirectory }
-        val value = request("prepareAuthoring", id) { put("sessionDirectories", JSONObject(sessions)); put("sourceExists", exists) } as JSONObject
-        return AppAuthoringResolution(value.getString("action"), value.getString("sourceDirectory"), value.optionalString("sessionId"))
+        val sessionBindings = JSONObject().apply { sessions.forEach { (id, binding) -> put(id, binding.toJson()) } }
+        val value = request("prepareAuthoring", id) { put("sessionBindings", sessionBindings); put("sourceExists", exists) } as JSONObject
+        return AppAuthoringResolution(value.getString("action"), value.getString("sourceDirectory"), value.optJSONObject("authoring")?.appAuthoring())
     }
     suspend fun importSource(sourcePath: String, marketOrigin: JSONObject? = null): AppRecord {
         val value = request("import") { put("sourcePath", sourcePath); marketOrigin?.let { put("marketOrigin", it) } } as JSONObject
@@ -272,12 +280,13 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             val previous = keepRunning(id, digest)
             val hadLease = LocalAppProcessService.owns(id)
             var acquiredLease = false
+            val appName = get(id).name
             val running = (request("status", id) as JSONObject).optJSONObject("run")
             val ownsRun = running?.optString("releaseDigest") == digest && running.optString("phase") == "running"
             val code = ownsRun && release(id, running!!.getLong("revision")).executesCode
             if (value && code) {
                 check(visible.isNotEmpty()) { "Open LingXi before enabling background execution" }
-                LocalAppProcessService.acquire(context, id)
+                LocalAppProcessService.acquire(context, id, appName)
                 LocalAppProcessService.ready(id)
                 acquiredLease = !hadLease
             }
@@ -297,7 +306,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
         }
     }
     suspend fun restoreSource(id: String, remix: Boolean): AppRecord {
-        val guest = "/home/lingxi/.lingxi/.apps/" + java.util.UUID.randomUUID()
+        val guest = MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/" + java.util.UUID.randomUUID()
         val source = hostFile(guest)
         val value = request(if (remix) "remix" else "restoreAuthoring", id) {
             put("sourcePath", source.absolutePath)
@@ -309,6 +318,8 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     fun markOpened(id: String) { opened.edit().putLong(id, System.currentTimeMillis()).apply(); mutableState.value = mutableState.value.copy(openedRevision = mutableState.value.openedRevision + 1) }
     fun drawerApps(records: List<AppRecord>) = records.map { MyApp(it.id, it.name, "", opened.getLong(it.id, 0).takeIf { time -> time > 0 }) }
     internal fun legacyMarketRoot(): File = File(context.filesDir, "local-app-market")
+    internal fun newLegacyImportGuestPath(): String =
+        MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/import-${java.util.UUID.randomUUID()}"
     fun hostFile(guestPath: String): File {
         val dirs = MobileUserStorage.directories(context)
         require(guestPath.startsWith(dirs.guestHome + "/") && guestPath.split('/').none { it == "." || it == ".." }) { "Invalid Linux user directory" }

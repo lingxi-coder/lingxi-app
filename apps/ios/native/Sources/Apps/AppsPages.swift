@@ -1,5 +1,4 @@
 import SwiftUI
-import WebKit
 import UniformTypeIdentifiers
 
 private struct LocalAppSourceDocument: FileDocument {
@@ -29,7 +28,7 @@ struct LocalAppDevelopmentRequest: Sendable {
     let appId: String?
     let name: String
     let sourceDirectory: String
-    let sourceSessionID: String?
+    let authoring: LocalAppAuthoring?
     let prompt: String
 }
 
@@ -109,7 +108,7 @@ struct AppsPage: View {
                     do {
                         let app = try await market.install(item.distribution,approved:true,remix:item.remix)
                         consent = nil
-                        if item.remix, let authoring = app.authoring { onDevelop(.init(appId:app.appId,name:app.name,sourceDirectory:authoring.sourceDirectory,sourceSessionID:nil,prompt:"继续开发这个应用。")) }
+                        if item.remix, let authoring = app.authoring { onDevelop(.init(appId:app.appId,name:app.name,sourceDirectory:authoring.sourceDirectory,authoring:authoring,prompt:"继续开发这个应用。")) }
                     } catch { self.error = error.localizedDescription; consent = nil }
                 }
             }
@@ -146,7 +145,7 @@ private struct LocalAppCreateSheet: View {
             Form {
                 TextField("应用名称",text:$name)
                 TextField("已有源码目录（可选）", text: $sourceDirectory).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Text("留空会在 ~/.lingxi/.apps/ 创建目录；已有源码请填写 Linux 用户目录。").font(.footnote).foregroundStyle(.secondary)
+                Text("留空会在 \(MobileUserStorage.directories().appsGuestPath) 创建目录；已有源码请填写 Linux 用户目录。").font(.footnote).foregroundStyle(.secondary)
                 TextField("希望应用完成什么？",text:$prompt,axis:.vertical).lineLimit(3...8)
                 Text("源码保存在本机 Linux 用户空间。创建后进入普通开发会话；本地发布与发布到市场是不同操作。").font(.footnote).foregroundStyle(.secondary)
                 if let error { Text(error).foregroundStyle(.red) }
@@ -165,7 +164,7 @@ private struct LocalAppCreateSheet: View {
                             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { throw LocalAppServiceFailure("SOURCE_MISSING", "请选择已存在的 Linux 用户目录。") }
                             directory = selected
                         }
-                        onCreate(.init(appId:nil,name:name,sourceDirectory:directory,sourceSessionID:nil,prompt:prompt)); dismiss()
+                        onCreate(.init(appId:nil,name:name,sourceDirectory:directory,authoring:nil,prompt:prompt)); dismiss()
                     } catch { self.error = error.localizedDescription }
                 }.disabled(name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty) }
             }
@@ -227,9 +226,10 @@ struct LocalAppDetailPage: View {
             if let app = library.record(appId) {
                 Section {
                     Text(app.name).font(.title2.weight(.semibold)); Text(app.summary).foregroundStyle(.secondary)
-                    LabeledContent("状态",value:library.isPaused(appId) ? "已暂停，等待恢复" : (library.runs[appId]?.phase ?? "stopped"))
-                    Button(library.isPaused(appId) ? "恢复运行" : "运行") { requestRun(app) }
-                    Button("停止") { operation("stop") }.disabled(library.runs[appId]?.isLive != true)
+                    let run = library.runs[appId]
+                    LabeledContent("状态", value: run?.phase ?? "stopped")
+                    Button(run?.phase == "running" ? "打开运行中的应用" : "运行") { requestRun(app) }
+                    Button("停止") { operation("stop") }.disabled(run?.isLive != true)
                     Button("继续开发") { onDevelop(app) }
                     if app.marketOrigin == nil { Button("从当前版本恢复源码副本") { restoring = true } }
                     Button("修复依赖并重试") { operation("repair") }
@@ -261,7 +261,7 @@ struct LocalAppDetailPage: View {
                         sourceDocument = .init(bytes: source.bytes); exportingSource = true
                     } catch { self.error = error.localizedDescription } } }
                     Text("源码包不包含运行数据库、浏览器数据、账号凭据或授权。").font(.footnote).foregroundStyle(.secondary)
-                    Text("浏览器中的餐食记录等站点数据，请在 Safari／默认浏览器的站点数据设置中清除。停止或移除灵犀应用不会自动清除浏览器数据。").font(.footnote).foregroundStyle(.secondary)
+                    Text("请在系统默认浏览器的站点数据设置中清除浏览器保存的数据。停止或移除灵犀应用不会自动清除浏览器数据。").font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("日志") { Text(logs.isEmpty ? "当前没有日志" : logs).font(.caption.monospaced()).textSelection(.enabled); Button("刷新日志") { Task { await load() } } }
                 Section("发布") {
@@ -333,7 +333,7 @@ struct LocalAppDetailPage: View {
     }
 }
 
-/// Trusted run controls; downloaded application pages live in Safari/default browser.
+/// Trusted run controls; downloaded application pages live in the system-selected browser.
 struct AppRuntimeView: View {
     @Environment(\.openURL) private var openURL
     let library: UnifiedLocalApps
@@ -350,12 +350,24 @@ struct AppRuntimeView: View {
     var body: some View {
         VStack(spacing: 20) {
             Text(library.record(appId)?.name ?? "本地应用").font(.title2)
-            Text("应用页面在外部浏览器打开。模型凭据、Agent 授权和工具审批由灵犀管理。")
-            Text("识别提交后可返回灵犀等待结果或处理审批。iOS 后台运行时间由系统限制；应用暂停后，请返回灵犀恢复，再重新打开浏览器页面。")
+            Text("应用页面在系统默认浏览器打开。模型凭据、Agent 授权和工具审批由灵犀管理。")
+            Text("iOS 26 会为已确认的 Agent 请求申请有限后台任务；系统仍可中断任务。普通浏览器页面暂停后，请返回灵犀重新打开。")
                 .font(.footnote).foregroundStyle(.secondary)
             if busy { ProgressView() }
             if let error { Text(error).foregroundStyle(.red) }
-            Button(launch == nil ? "启动并在浏览器打开" : "返回浏览器") { Task { await load(openBrowser: true) } }.disabled(busy)
+            if let wake = library.browserAgentWake(for: appId) {
+                Text("浏览器 Agent 请求等待后台任务许可。运行：\(wake.runID.prefix(8))")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button("开始 Agent 并返回应用") {
+                    guard let launch else { return }
+                    Task { await returnToBrowser(wake, url: launch.url) }
+                }.disabled(busy || launch == nil)
+                Button("取消此次 Agent 请求", role: .cancel) {
+                    Task { await library.cancelBrowserAgentHandoff(wake) }
+                }.disabled(busy)
+            } else {
+                Button(launch == nil ? "启动并在默认浏览器打开" : "返回默认浏览器") { Task { await load(openBrowser: true) } }.disabled(busy)
+            }
             Button("应用设置与 Agent 授权") { onShowDetails(appId) }
             Button("停止应用与 Agent 任务", role: .destructive) { Task {
                 do { try await library.stop(appId); onClose() } catch { self.error = error.localizedDescription }
@@ -371,7 +383,14 @@ struct AppRuntimeView: View {
                 catch { self.error = error.localizedDescription; consent = nil } }
             }
         }
-        .background { if hasAgent { LocalAppAgentInteractions(client: library.client, appID: appId) } }
+        .background {
+            if hasAgent {
+                LocalAppAgentInteractions(client: library.client, appID: appId)
+                if let revision = library.record(appId)?.currentRevision {
+                    LocalAppAgentTasks(client: library.client, appID: appId, revision: revision)
+                }
+            }
+        }
         .accessibilityIdentifier("app-runtime")
     }
     private func load(openBrowser: Bool) async {
@@ -385,9 +404,37 @@ struct AppRuntimeView: View {
             hasAgent = (release.manifest.capabilities ?? []).contains("agent")
             if release.manifest.executesCode && !app.executionGrants.contains(release.digest) { consent = release; return }
             let value = try await library.openExternalBrowser(appId)
+            guard LocalAppExternalBrowserURL.matches(value.url, origin: value.origin) else {
+                throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL is not its registered local origin.")
+            }
             launch = value; info.markOpened(app); opened = true
             if openBrowser {
-                openURL(value.url) { accepted in if !accepted { self.error = "无法打开外部浏览器。请检查默认浏览器设置。" } }
+                if let wake = library.browserAgentWake(for: appId) {
+                    await returnToBrowser(wake, url: value.url)
+                } else {
+                    openURL(value.url) { accepted in if !accepted { self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。" } }
+                }
+            }
+        } catch { self.error = error.localizedDescription }
+    }
+    private func returnToBrowser(_ wake: LocalAppAgentWakeRequest, url: URL) async {
+        let wasBusy = busy
+        busy = true
+        defer { busy = wasBusy }
+        do {
+            guard let origin = launch?.origin,
+                  LocalAppExternalBrowserURL.matches(url, origin: origin) else {
+                throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL is not its registered local origin.")
+            }
+            let readyURL = try await library.prepareBrowserAgentHandoff(wake, returnURL: url, origin: origin)
+            openURL(readyURL) { accepted in
+                Task { @MainActor in
+                    if accepted { library.clearBrowserAgentWake(wake) }
+                    else {
+                        self.error = "iOS could not return to the app page in the system default browser."
+                        await library.cancelBrowserAgentHandoff(wake)
+                    }
+                }
             }
         } catch { self.error = error.localizedDescription }
     }
@@ -439,7 +486,7 @@ struct MarketAppDetailPage: View {
                             let installed = try await market.install(distribution, approved: true, remix: remix)
                             consenting = false
                             if remix, let authoring = installed.authoring {
-                                onDevelop(.init(appId: installed.appId, name: installed.name, sourceDirectory: authoring.sourceDirectory, sourceSessionID: nil, prompt: "继续开发这个应用。"))
+                                onDevelop(.init(appId: installed.appId, name: installed.name, sourceDirectory: authoring.sourceDirectory, authoring: authoring, prompt: "继续开发这个应用。"))
                             } else { onOpenApp(installed.appId) }
                         } catch { self.error = error.localizedDescription; consenting = false }
                     }

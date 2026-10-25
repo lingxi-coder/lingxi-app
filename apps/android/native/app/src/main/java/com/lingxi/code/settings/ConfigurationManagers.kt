@@ -5,6 +5,8 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.lingxi.code.R
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -53,8 +55,8 @@ internal fun McpConfigurationPage(bridge: SettingsEngineBridge, initialName: Str
         Text(settingsLabel("MCP storage scopes are independent of settings layers. Writes use the loaded revision to prevent overwriting external edits."))
         if (!state.connected) { Text(settingsLabel("Connect an engine to manage MCP servers.")); return@Column }
         if (deepLinkMissing) {
-            Text(error ?: "MCP server is unavailable.", color = MaterialTheme.colorScheme.error)
-            TextButton(onClick = { deepLinkMissing = false; name = ""; config = "{}"; scope = "user"; error = null }) { Text("Back to servers") }
+            Text(error?.let { settingsLabel(it) } ?: stringResource(R.string.settings_mcp_unavailable), color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = { deepLinkMissing = false; name = ""; config = "{}"; scope = "user"; error = null }) { Text(settingsLabel("Back to servers")) }
             return@Column
         }
         TextButton(onClick = ::load) { Text(settingsLabel("Refresh servers")) }
@@ -94,11 +96,11 @@ internal fun McpConfigurationPage(bridge: SettingsEngineBridge, initialName: Str
                 } }) { Text(settingsLabel("$decision project approval")) }
             }
         }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        error?.let { Text(settingsLabel(it), color = MaterialTheme.colorScheme.error) }
         state.notice?.let { Text(it) }
     }
-    if (deleteRequested) AlertDialog(onDismissRequest = { deleteRequested = false }, title = { Text(settingsLabel("Remove $name?")) },
-        text = { Text(settingsLabel("Remove this definition from $scope. Other scopes remain unchanged.")) },
+    if (deleteRequested) AlertDialog(onDismissRequest = { deleteRequested = false }, title = { Text(stringResource(R.string.settings_mcp_remove_title_fmt, name)) },
+        text = { Text(stringResource(R.string.settings_mcp_remove_body_fmt, settingsLabel(scope))) },
         confirmButton = { TextButton(onClick = {
             deleteRequested = false
             coroutine.launch { runCatching { bridge.admin("mcp", "remove_server", scope = scope, revision = revisionAtEdit,
@@ -137,13 +139,13 @@ internal fun SkillManager(bridge: SettingsEngineBridge, initialId: String? = nul
         TextButton(onClick = { coroutine.launch { runCatching { bridge.admin("skills", "get_catalog") } } }) { Text(settingsLabel("Refresh catalog")) }
         catalog.optJSONArray("entries")?.records().orEmpty().forEach { entry ->
             TextButton(onClick = { selected = entry.optString("id"); coroutine.launch { runCatching { bridge.admin("skills", "get_document", target = selected) }.onFailure { error = it.message } } }) {
-                Text("${entry.optString("name")} · ${entry.optString("source")}")
+                Text("${entry.optString("name")} · ${settingsLabel(entry.optString("source"))}")
             }
         }
         TextButton(onClick = { selected = null; name = ""; markdown = "" }) { Text(settingsLabel("Create skill")) }
         if (selected == null) SingleChoiceRow(listOf("user", "project"), scope, { scope = it })
         val writable = selected == null || (loaded && document.optBoolean("writable"))
-        if (loaded && !writable) Text(document.optString("readonlyReason", "This skill is read-only"))
+        if (loaded && !writable) Text(document.optString("readonlyReason").ifBlank { stringResource(R.string.chat_agent_read_only) })
         OutlinedTextField(name, { name = it }, label = { Text(settingsLabel("Skill name")) }, readOnly = !writable, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(markdown, { markdown = it }, label = { Text(settingsLabel("SKILL.md")) }, readOnly = !writable, modifier = Modifier.fillMaxWidth())
         Button(enabled = writable && name.isNotBlank() && state.pending == null, onClick = {
@@ -161,15 +163,15 @@ internal fun SkillManager(bridge: SettingsEngineBridge, initialId: String? = nul
             TextButton(enabled = state.pending == null, onClick = { coroutine.launch {
                 runCatching { bridge.admin("skills", "move_skill", target = selected, scope = if (document.optString("source") == "user") "project" else "user",
                     revision = documentRevision, payload = JSONObject().put("name",name).toString()) }.onFailure { error = it.message }
-            } }) { Text("Move to ${if (document.optString("source") == "user") "project" else "user"} scope") }
+            } }) { Text(stringResource(R.string.settings_skill_move_fmt, settingsLabel(if (document.optString("source") == "user") "project" else "user"))) }
         }
         catalog.optJSONArray("trash")?.records().orEmpty().forEach { entry ->
             TextButton(enabled = state.pending == null, onClick = { coroutine.launch {
                 runCatching { bridge.admin("skills", "restore_skill", target = entry.optString("trashId"), scope = scope,
                     revision = entry.optString("revision"), payload = JSONObject().put("name",entry.optString("name")).toString()) }.onFailure { error = it.message }
-            } }) { Text("Restore ${entry.optString("name")} to $scope") }
+            } }) { Text(stringResource(R.string.settings_skill_restore_fmt, entry.optString("name"), settingsLabel(scope))) }
         }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        error?.let { Text(settingsLabel(it), color = MaterialTheme.colorScheme.error) }
     }
 }
 
@@ -207,26 +209,26 @@ internal fun PluginManager(bridge: SettingsEngineBridge, layer: String, onReconn
                 val fields = schema.optJSONObject("fields") ?: JSONObject()
                 androidx.compose.runtime.key(state.generation, id) { PluginSecretFields(id,fields,secrets,onReconnect) }
                 (if (plugin.optString("source") == "builtin") listOf("enable","disable") else listOf("enable", "disable", "update", "uninstall")).forEach { action ->
-                    TextButton(enabled = writable, onClick = { preview(JSONObject().put("action",action).put("plugin",id)) }) { Text(settingsLabel("Preview $action")) }
+                    TextButton(enabled = writable, onClick = { preview(JSONObject().put("action",action).put("plugin",id)) }) { Text(stringResource(R.string.settings_plugins_preview_fmt, pluginActionLabel(action))) }
                 }
             }
         }
         catalog.optJSONArray("available")?.records().orEmpty().forEach { plugin ->
             TextButton(enabled = writable, onClick = { preview(JSONObject().put("action",if (plugin.optBoolean("installed")) "update" else "install").put("plugin",plugin.optString("id"))) }) {
-                Text("${plugin.optString("name")} · ${plugin.optString("marketplace")} · Preview install/update")
+                Text("${plugin.optString("name")} · ${plugin.optString("marketplace")} · ${stringResource(R.string.settings_plugins_preview_install_update)}")
             }
         }
         catalog.optJSONArray("marketplaces")?.records().orEmpty().forEach { market ->
             Text(market.optString("name"))
             listOf("marketplace_update", "marketplace_remove").forEach { action ->
-                TextButton(enabled = writable, onClick = { preview(JSONObject().put("action",action).put("name",market.optString("name"))) }) { Text(settingsLabel("Preview $action")) }
+                TextButton(enabled = writable, onClick = { preview(JSONObject().put("action",action).put("name",market.optString("name"))) }) { Text(stringResource(R.string.settings_plugins_preview_fmt, pluginActionLabel(action))) }
             }
         }
         OutlinedTextField(marketplace, { marketplace = it }, label = { Text(settingsLabel("Marketplace source")) }, modifier = Modifier.fillMaxWidth())
         TextButton(enabled = writable && marketplace.isNotBlank(), onClick = { preview(JSONObject().put("action","marketplace_add").put("source",marketplace.trim())) }) { Text(settingsLabel("Preview adding marketplace")) }
         val result = state.operation
         if (proposal != null && result != null && result.operationId == previewId && result.status == com.lingxi.code.bindings.client.ConfigurationOperationStatusDto.SUCCEEDED) {
-            Text(result.message ?: "Review operation")
+            Text(result.message ?: stringResource(R.string.settings_plugins_review))
             result.detailsJson?.let { SelectionContainer { Text(prettyJson(it)) } }
             Button(enabled = writable && revision != null, onClick = {
                 coroutine.launch { runCatching {
@@ -236,7 +238,7 @@ internal fun PluginManager(bridge: SettingsEngineBridge, layer: String, onReconn
                 }.onFailure { error = it.message } }
             }) { Text(settingsLabel("Confirm and apply")) }
         }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        error?.let { Text(settingsLabel(it), color = MaterialTheme.colorScheme.error) }
     }
 }
 
@@ -260,7 +262,7 @@ internal fun HookManager(bridge: SettingsEngineBridge, layer: String) {
     ReportSettingsDraft("hooks/$layer",draft.dirty)
     val locked = layer == "managed" || "hooks" in state.snapshot?.locked.orEmpty()
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(settingsLabel("Hook document · $layer"))
+        Text(stringResource(R.string.settings_hooks_document_fmt, settingsLabel(layer)))
         if (!loaded) Text(settingsLabel("Waiting for this layer's hook document…"))
         if (locked) Text(settingsLabel("Managed policy: read-only"))
         OutlinedTextField(draft.value, { draft.edit(it) }, label = { Text(settingsLabel("Hook event matchers and handlers JSON")) }, readOnly = locked || !loaded, modifier = Modifier.fillMaxWidth())
@@ -271,7 +273,7 @@ internal fun HookManager(bridge: SettingsEngineBridge, layer: String) {
             } }) { Text(settingsLabel(label)) }
         }
         if (loaded) { Text(settingsLabel("Effective hooks")); SelectionContainer { Text(prettyJson(document.optString("effective_json","{}"))) } }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        error?.let { Text(settingsLabel(it), color = MaterialTheme.colorScheme.error) }
     }
 }
 
@@ -286,3 +288,13 @@ internal fun resolveMcpDeepLinkScope(scopes: List<JSONObject>, name: String, req
     require(candidates.size == 1) { "This MCP server exists in multiple scopes. Open a link with an explicit scope." }
     return candidates.single()
 }
+
+@Composable
+private fun pluginActionLabel(action: String): String = stringResource(when (action) {
+    "enable" -> R.string.settings_provider_enable
+    "disable" -> R.string.settings_plugins_disable
+    "install" -> R.string.plugins_action_install
+    "update", "marketplace_update" -> R.string.plugins_action_update
+    "uninstall" -> R.string.plugins_action_uninstall
+    else -> R.string.settings_parity_remove
+})

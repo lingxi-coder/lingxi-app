@@ -22,12 +22,36 @@ private struct AgentCatalog: Decodable, Sendable {
     let tools: [String: LocalAppJSON]
     let labels: [String: String]
 }
+private struct AgentSkillRequirement: Equatable, Identifiable, Sendable {
+    let id: String
+    let path: String
+}
 private struct AgentSettings: Codable, Sendable {
     let model: LocalAppAgentModelRef
     let tools: [String: LocalAppJSON]
+    let skills: [String]
     let background: Bool
     let maxTurns: Int
     let timeoutMs: Int
+
+    private enum CodingKeys: String, CodingKey { case model, tools, skills, background, maxTurns, timeoutMs }
+    init(model: LocalAppAgentModelRef, tools: [String: LocalAppJSON], skills: [String], background: Bool, maxTurns: Int, timeoutMs: Int) {
+        self.model = model
+        self.tools = tools
+        self.skills = skills
+        self.background = background
+        self.maxTurns = maxTurns
+        self.timeoutMs = timeoutMs
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        model = try values.decode(LocalAppAgentModelRef.self, forKey: .model)
+        tools = try values.decode([String: LocalAppJSON].self, forKey: .tools)
+        skills = try values.decodeIfPresent([String].self, forKey: .skills) ?? []
+        background = try values.decode(Bool.self, forKey: .background)
+        maxTurns = try values.decode(Int.self, forKey: .maxTurns)
+        timeoutMs = try values.decode(Int.self, forKey: .timeoutMs)
+    }
 }
 
 @MainActor
@@ -39,6 +63,7 @@ struct LocalAppAgentSettingsView: View {
     @State private var catalog: AgentCatalog?
     @State private var model = ""
     @State private var tools = Set<String>()
+    @State private var skills = Set<String>()
     @State private var turns = 20
     @State private var minutes = 10
     @State private var busy = false
@@ -47,6 +72,15 @@ struct LocalAppAgentSettingsView: View {
     private var declared: [String] {
         guard let requirements = release.manifest.agent, case .object(let agent) = requirements, let toolValues = agent["tools"], case .array(let values) = toolValues else { return [] }
         return values.compactMap(\.text)
+    }
+    private var declaredSkills: [AgentSkillRequirement] {
+        guard let requirements = release.manifest.agent, case .object(let agent) = requirements,
+              let skillValues = agent["skills"], case .array(let values) = skillValues else { return [] }
+        return values.compactMap { value in
+            guard case .object(let fields) = value, let id = fields["id"]?.text,
+                  let path = fields["path"]?.text else { return nil }
+            return AgentSkillRequirement(id: id, path: path)
+        }.sorted { $0.id < $1.id }
     }
     var body: some View {
         NavigationStack {
@@ -82,6 +116,17 @@ struct LocalAppAgentSettingsView: View {
                         }
                         Text("允许工具后，敏感操作仍由灵犀请求批准。工具或连接配置变化后需要重新授权。").font(.footnote)
                     }
+                    if !declaredSkills.isEmpty {
+                        Section("允许此应用使用的 Skills") {
+                            ForEach(declaredSkills) { skill in
+                                Toggle(skill.id, isOn: Binding(get: { skills.contains(skill.id) }, set: { value in
+                                    if value { skills.insert(skill.id) } else { skills.remove(skill.id) }
+                                }))
+                                Text(skill.path).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            }
+                            Text("Skill 指令来自此不可变发布版本；Skill 不会额外授予工具权限。").font(.footnote)
+                        }
+                    }
                     Section("每次任务限额") {
                         Stepper("最多 \(turns) 轮", value: $turns, in: 1...100)
                         Stepper("最多 \(minutes) 分钟", value: $minutes, in: 1...60)
@@ -107,7 +152,8 @@ struct LocalAppAgentSettingsView: View {
         do {
             catalog = try await call(["op": .string("catalog")], as: AgentCatalog.self)
             if let saved = try await call(["op": .string("settings"), "appId": .string(appID)], as: AgentSettings?.self) {
-                model = saved.model.key; tools = Set(saved.tools.keys); turns = saved.maxTurns; minutes = max(1, saved.timeoutMs / 60_000)
+                model = saved.model.key; tools = Set(saved.tools.keys); skills = Set(saved.skills)
+                turns = saved.maxTurns; minutes = max(1, saved.timeoutMs / 60_000)
             }
         } catch { self.error = error.localizedDescription }
     }
@@ -118,7 +164,11 @@ struct LocalAppAgentSettingsView: View {
     }
     private func save() {
         guard let catalog, let selected = catalog.models.first(where: { $0.id == model && $0.canSelect }) else { return }
-        let settings = AgentSettings(model: .init(providerId: selected.providerId, modelId: selected.modelId), tools: catalog.tools.filter { tools.contains($0.key) && declared.contains($0.key) }, background: false, maxTurns: turns, timeoutMs: minutes * 60_000)
+        let allowedSkills = Set(declaredSkills.map(\.id))
+        let settings = AgentSettings(model: .init(providerId: selected.providerId, modelId: selected.modelId),
+            tools: catalog.tools.filter { tools.contains($0.key) && declared.contains($0.key) },
+            skills: skills.filter { allowedSkills.contains($0) }.sorted(), background: false,
+            maxTurns: turns, timeoutMs: minutes * 60_000)
         Task { busy = true; defer { busy = false }; do {
             let _: LocalAppJSON = try await call(["op": .string("configure"), "appId": .string(appID), "settings": try .encode(settings)], as: LocalAppJSON.self)
             dismiss()
@@ -246,6 +296,78 @@ private struct LocalAppAgentInteractionSheet: View {
                 }
                 _ = try await client.agentHost(String(decoding: JSONEncoder().encode(fields), as: UTF8.self))
                 dismiss()
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+}
+
+/// Active Local App tasks are shown from host-observed state; the view never
+/// invents percentage progress or maps cancellation to another app's task.
+@MainActor
+struct LocalAppAgentTasks: View {
+    let client: LocalAppServiceClient
+    let appID: String
+    let revision: UInt64
+    @State private var tasks: [LocalAppAgentTaskSummary] = []
+    @State private var error: String?
+    @State private var cancelling = Set<String>()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if tasks.isEmpty {
+                Text("No Agent tasks for this app version.").font(.footnote).foregroundStyle(.secondary)
+            }
+            ForEach(tasks) { task in
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(task.phase ?? task.state).font(.subheadline.weight(.medium))
+                        if let progress = task.progress, progress.turnLimit > 0 {
+                            Text("Completed \(progress.completedModelTurns) model turns; limit \(progress.turnLimit)")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                        Text(task.runId).font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                    }
+                    Spacer(minLength: 4)
+                    if !task.isTerminal {
+                        Button("Stop", role: .destructive) { cancel(task) }
+                            .disabled(cancelling.contains(task.runId))
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            if let error { Text(error).font(.footnote).foregroundStyle(.red) }
+        }
+        .task(id: "\(appID):\(revision)") {
+            while !Task.isCancelled {
+                do {
+                    let response = try await client.agentHost([
+                        "op": .string("tasks.list"),
+                        "appId": .string(appID),
+                        "revision": .number(Double(revision))
+                    ], as: LocalAppAgentTaskListResponse.self)
+                    guard response.appId == appID, response.revision == revision else {
+                        throw LocalAppServiceFailure("INVALID_AGENT_TASK", "The host returned tasks for another app version.")
+                    }
+                    tasks = response.tasks.sorted { $0.sequence > $1.sequence }
+                    error = nil
+                } catch is CancellationError { return }
+                catch { self.error = error.localizedDescription }
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            }
+        }
+    }
+
+    private func cancel(_ task: LocalAppAgentTaskSummary) {
+        Task {
+            cancelling.insert(task.runId)
+            defer { cancelling.remove(task.runId) }
+            do {
+                let _: LocalAppJSON = try await client.agentHost([
+                    "op": .string("tasks.cancel"),
+                    "appId": .string(appID),
+                    "revision": .number(Double(revision)),
+                    "runId": .string(task.runId)
+                ], as: LocalAppJSON.self)
             } catch { self.error = error.localizedDescription }
         }
     }

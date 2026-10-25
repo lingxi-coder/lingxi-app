@@ -1,0 +1,33 @@
+<resources>
+    <string name="workspace_browser_title">ワークスペース</string>
+    <string name="workspace_browser_home">ホームフォルダ</string>
+    <string name="workspace_browser_workspace">作業フォルダ</string>
+    <string name="workspace_browser_current_folder">現在のフォルダ</string>
+    <string name="workspace_browser_locations">場所</string>
+    <string name="workspace_browser_saved_locations">保存した場所</string>
+    <string name="workspace_browser_projects">プロジェクト</string>
+    <string name="workspace_browser_browse_folders">フォルダをブラウズ</string>
+    <string name="workspace_browser_add_location">場所を追加</string>
+    <string name="workspace_browser_use_folder">このフォルダを使用</string>
+    <string name="workspace_browser_new_folder">新規フォルダ</string>
+    <string name="workspace_browser_rename_folder">フォルダ名を変更</string>
+    <string name="workspace_browser_delete_folder">フォルダを削除</string>
+    <string name="workspace_browser_remove_location">リストから削除</string>
+    <string name="workspace_browser_edit_location">場所を編集</string>
+    <string name="workspace_browser_location_name">表示名</string>
+    <string name="workspace_browser_folder_name">フォルダ名</string>
+    <string name="workspace_browser_path">フォルダのパス</string>
+    <string name="workspace_browser_go_to_folder">フォルダへ移動</string>
+    <string name="workspace_browser_show_hidden">隠しファイルを表示</string>
+    <string name="workspace_browser_open">開く</string>
+    <string name="workspace_browser_folder_actions">フォルダ操作</string>
+    <string name="workspace_browser_contents">内容</string>
+    <string name="workspace_browser_empty_title">このフォルダは空です</string>
+    <string name="workspace_browser_delete_warning">このフォルダと内容を完全に削除しますか？取り消せません。</string>
+    <string name="workspace_browser_edit_location_hint">保存した名前やパスを変更します。実際のフォルダ名や場所は変わりません。</string>
+    <string name="workspace_browser_operation_failed">操作を完了できません</string>
+    <string name="workspace_browser_unavailable">この会話では作業フォルダを変更できません。</string>
+    <string name="workspace_browser_busy">現在の応答が完了してからフォルダを変更してください。</string>
+    <string name="workspace_browser_session_folders">このセッションがアクセスできるフォルダ</string>
+    <string name="workspace_browser_parent_folder">親フォルダ</string>
+</resources>

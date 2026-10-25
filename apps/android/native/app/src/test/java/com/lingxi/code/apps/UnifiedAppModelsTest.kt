@@ -38,15 +38,43 @@ class UnifiedAppModelsTest {
         assertEquals("Allow this release first", error.message)
         assertNull(decodeAppResponse("""{"ok":true,"value":null}"""))
     }
-    @Test fun `schema two record keeps authoring and market identities separate`() {
-        val record = JSONObject("""{"appId":"a0123456789abcdef0123456789abcdef","name":"Calculator","summary":"Offline","currentRevision":2,"latestRevision":3,"originPort":49123,"executionGrants":["digest"],"updatedAtMs":3,"authoring":{"sourceDirectory":"/home/lingxi/.lingxi/.apps/calculator","sourceSessionId":"session-1"},"marketOrigin":{"appId":"market-calculator","releaseId":"release-3","digest":"public-digest"}}""").appRecord()
+    @Test fun `native task DTO retains observed progress usage and error`() {
+        val task = JSONObject("""{"runId":"run-1","requestId":"opaque-Request-1","state":"failed","sequence":4,"phase":"waiting_for_permission","progress":{"completedModelTurns":2,"turnLimit":8},"createdAt":10,"updatedAt":12,"model":{"provider":"fixture","model":"fixture"},"limits":{"maxTurns":8,"timeoutMs":60000},"usage":{"inputTokens":11,"outputTokens":7,"costUsd":0.0123,"costEstimated":true,"turns":2},"error":{"code":"permissionDenied","message":"Tool access was revoked"}}""").appAgentTask()
+        assertEquals("run-1", task.runId)
+        assertEquals("opaque-Request-1", task.requestId)
+        assertEquals("failed", task.state)
+        assertEquals("waiting_for_permission", task.phase)
+        assertEquals(2, task.progress?.getInt("completedModelTurns"))
+        assertEquals(8, task.progress?.getInt("turnLimit"))
+        assertEquals(11, task.usage?.getInt("inputTokens"))
+        assertEquals(0.0123, task.usage?.getDouble("costUsd") ?: 0.0, 0.00001)
+        assertEquals("permissionDenied", task.error?.getString("code"))
+        assertEquals("Tool access was revoked", task.error?.getString("message"))
+    }
+    @Test fun `schema two record preserves tagged authoring and market identities`() {
+        val workspaceId = "123e4567-e89b-12d3-a456-426614174000"
+        val projectId = "223e4567-e89b-12d3-a456-426614174000"
+        val sessionId = "323e4567-e89b-12d3-a456-426614174000"
+        val source = "/tmp/.lingxi/.apps/calculator"
+        val record = JSONObject("""{"appId":"a0123456789abcdef0123456789abcdef","name":"Calculator","summary":"Offline","currentRevision":2,"latestRevision":3,"originPort":49123,"executionGrants":["digest"],"updatedAtMs":3,"authoring":{"workspaceId":"$workspaceId","sourceDirectory":"$source","projectRef":{"kind":"mobileProject","projectId":"$projectId"},"authoringSessionId":"$sessionId","appId":"a0123456789abcdef0123456789abcdef"},"marketOrigin":{"appId":"market-calculator","releaseId":"release-3","digest":"public-digest"}}""").appRecord()
         assertEquals(33, record.id.length)
         assertEquals("market-calculator", record.marketOrigin?.appId)
-        assertEquals("session-1", record.authoring?.sourceSessionId)
+        assertEquals(workspaceId, record.authoring?.workspaceId)
+        assertEquals("mobileProject", record.authoring?.projectRef?.kind)
+        assertEquals(projectId, record.authoring?.projectRef?.projectId)
+        assertEquals(sessionId, record.authoring?.authoringSessionId)
+        assertTrue(record.authoring!!.isBoundTo(record.id, projectId, source))
+        assertFalse(record.authoring!!.isBoundTo(record.id, projectId, "$source/other"))
         assertEquals(2L, record.currentRevision)
         assertEquals(3L, record.latestRevision)
         val copy = JSONObject("""{"appId":"local-copy","name":"Custom","summary":"","currentRevision":1,"latestRevision":1,"originPort":49124,"executionGrants":[],"updatedAtMs":4,"marketOrigin":{"appId":"market-calculator","releaseId":"release-3","digest":"public-digest","remixedFrom":"market-calculator"}}""").appRecord()
         assertEquals("market-calculator", copy.marketOrigin?.remixedFrom)
+    }
+    @Test fun `legacy source pointer requires explicit authoring rebind`() {
+        val record = JSONObject("""{"appId":"a0123456789abcdef0123456789abcdef","name":"Calculator","summary":"","currentRevision":1,"latestRevision":1,"originPort":49123,"executionGrants":[],"updatedAtMs":3,"authoring":{"sourceDirectory":"/tmp/source","sourceSessionId":"old-session","projectId":"old-project"}}""").appRecord()
+        assertEquals("/tmp/source", record.authoring?.sourceDirectory)
+        assertFalse(record.authoring?.isComplete ?: true)
+        assertFalse(record.authoring!!.isBoundTo(record.id, "223e4567-e89b-12d3-a456-426614174000", "/tmp/source"))
     }
     @Test fun `execution consent includes build and install even for static entry`() {
         val static = AppRelease("app", 1, "digest", JSONObject("""{"entry":{"type":"static","path":"index.html"}}"""))

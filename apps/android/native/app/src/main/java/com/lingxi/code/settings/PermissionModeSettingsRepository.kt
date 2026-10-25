@@ -6,6 +6,7 @@ import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.StandardCopyOption
 
 /**
@@ -19,10 +20,21 @@ import java.nio.file.StandardCopyOption
  * process death cannot leave a partially-written settings document.
  */
 class PermissionModeSettingsRepository(context: Context) {
-    private val settingsDir = File(context.applicationContext.filesDir, ".lingxi")
+    private val directories = com.lingxi.code.project.MobileUserStorage.directories(context.applicationContext)
+    private val settingsDir = File(directories.configHome)
+    private val legacySettingsDir = permissionModeLegacySettingsDirectory(
+        context.applicationContext.filesDir,
+        directories.brandId,
+        directories.linuxUser,
+        directories.configDirName,
+    )
     private val settingsFile = File(settingsDir, "settings.json")
     private val lastModeFile = File(settingsDir, "last-permission-mode.json")
     private val lock = Any()
+
+    init {
+        legacySettingsDir?.let { legacy -> runCatching { copyPermissionSettingsIfMissing(legacy, settingsDir) } }
+    }
 
     fun load(): String = synchronized(lock) {
         PermissionModeSettingsJson.load(
@@ -65,6 +77,42 @@ class PermissionModeSettingsRepository(context: Context) {
     private fun readRoot(): JSONObject? {
         if (!settingsFile.isFile) return null
         return JSONObject(settingsFile.readText(StandardCharsets.UTF_8))
+    }
+}
+
+/** Import only the prior LingXi app-private files into the same LingXi profile. */
+internal fun permissionModeLegacySettingsDirectory(
+    filesDir: File,
+    brandId: String,
+    linuxUser: String,
+    configDirName: String,
+): File? = if (brandId == "lingxi" && linuxUser == "lingxi" && configDirName == ".lingxi") {
+    File(filesDir, ".lingxi")
+} else {
+    null
+}
+
+/** Copy the two owned files once; keep the source as a recoverable user-data copy. */
+internal fun copyPermissionSettingsIfMissing(sourceDirectory: File, targetDirectory: File) {
+    val files = listOf("settings.json", "last-permission-mode.json")
+    for (name in files) {
+        val source = File(sourceDirectory, name)
+        val target = File(targetDirectory, name)
+        if (!source.isFile || target.exists()) continue
+        targetDirectory.mkdirs()
+        val temporary = Files.createTempFile(targetDirectory.toPath(), ".$name.", ".profile-import")
+        try {
+            Files.copy(source.toPath(), temporary, StandardCopyOption.REPLACE_EXISTING)
+            try {
+                // No REPLACE_EXISTING: preserve a target created concurrently by the engine.
+                // The temp and destination share a directory, so the move stays on one filesystem.
+                Files.move(temporary, target.toPath())
+            } catch (_: FileAlreadyExistsException) {
+                // Another engine or repository writer initialized the target.
+            }
+        } finally {
+            Files.deleteIfExists(temporary)
+        }
     }
 }
 

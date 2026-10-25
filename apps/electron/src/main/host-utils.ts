@@ -32,6 +32,7 @@ export { parseNotificationPreferences } from '../shared/notificationPreferences.
 
 export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
+export const MAX_REMOTE_SESSIONS = 256;
 export const MAX_DIAGNOSTICS = 200;
 export const MAX_DIAGNOSTIC_LENGTH = 2_000;
 export const MAX_TRUST_FINGERPRINT_ENTRIES = 512;
@@ -101,6 +102,14 @@ export interface PersistedSettings {
   lastPermissionMode?: PermissionModeId;
   /** Last user-selected fast-mode state on this device. */
   fastMode?: boolean;
+  /** Whether this computer accepts Remote Control connections. Off until the user turns it on. */
+  remoteControlEnabled?: boolean;
+  /** The sessions viewers may see and drive (`/remote-control`, or the session menu's switch). */
+  remoteSessions?: SessionRef[];
+  /** Every new session starts with Remote Control on. */
+  remoteControlAtStartup?: boolean;
+  /** A viewer may answer a permission prompt with "always allow" (off unless this file says so). */
+  remoteAllowAlwaysAllow?: boolean;
   apiBaseUrl?: string;
   activeProject?: string;
   activeSession?: SessionRef;
@@ -210,6 +219,26 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
   if (typeof value['fastMode'] === 'boolean') {
     settings.fastMode = value['fastMode'];
+  }
+  if (typeof value['remoteControlEnabled'] === 'boolean') {
+    settings.remoteControlEnabled = value['remoteControlEnabled'];
+  }
+  if (Array.isArray(value['remoteSessions'])) {
+    const seen = new Set<string>();
+    settings.remoteSessions = value['remoteSessions'].flatMap((entry: unknown) => {
+      if (!isPlainObject(entry)) return [];
+      const projectPath = boundedString(entry['projectPath'], 4_096);
+      const sessionId = boundedString(entry['sessionId'], 128);
+      if (!projectPath || !sessionId || !SESSION_ID_PATTERN.test(sessionId) || seen.has(sessionId)) return [];
+      seen.add(sessionId);
+      return [{ projectPath, sessionId }];
+    }).slice(0, MAX_REMOTE_SESSIONS);
+  }
+  if (typeof value['remoteControlAtStartup'] === 'boolean') {
+    settings.remoteControlAtStartup = value['remoteControlAtStartup'];
+  }
+  if (typeof value['remoteAllowAlwaysAllow'] === 'boolean') {
+    settings.remoteAllowAlwaysAllow = value['remoteAllowAlwaysAllow'];
   }
   settings.apiBaseUrl = boundedString(value['apiBaseUrl'], 2_048);
   if (value['bypassPermissionsModeAccepted'] === true) {
@@ -684,6 +713,7 @@ export function buildBridgeArguments(config: {
   allowTeamOnboarding?: boolean;
   packagedCredentialBoundary?: boolean;
   scheduledController?: boolean;
+  remoteControlEnabled?: boolean;
 }): string[] {
   if (config.listSessionsJson) {
     return ['--cwd', config.workspace, '--list-sessions-json',
@@ -709,6 +739,7 @@ export function buildBridgeArguments(config: {
   if (typeof config.allowTeamOnboarding === 'boolean') {
     args.push('--host-team-onboarding-policy-gate', String(config.allowTeamOnboarding));
   }
+  if (config.remoteControlEnabled) args.push('--permission-timeout-secs', '1800', '--ask-user-question-timeout', 'never');
   if (config.scheduledController) args.push('--scheduled-controller');
   if (config.packagedCredentialBoundary) args.push('--packaged-credential-stdin-only');
   return args;

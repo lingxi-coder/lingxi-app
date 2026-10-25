@@ -1,6 +1,7 @@
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { randomBytes } from 'node:crypto';
+import { LOCAL_APP_CREDENTIALS_HEADER } from './serviceCookies.js';
 
 interface ServiceLease {
   appId: string; runId: string; name: string; port: number; origin?: string;
@@ -30,9 +31,11 @@ export class LocalAppServiceBroker {
     if (origin) lease.origin = origin;
     return lease;
   }
-  async fetch(appId: string, runId: string, name: string, port: number, path: string, request: Request): Promise<Response> {
+  async fetch(appId: string, runId: string, name: string, port: number, path: string, request: Request, cookieHeader = ''): Promise<Response> {
     const lease = this.lease(appId, runId, name, port);
-    const headers = new Headers(request.headers); for (const header of ['host', 'origin', 'connection', 'upgrade']) headers.delete(header);
+    const headers = new Headers(request.headers); for (const header of ['host', 'origin', 'connection', 'upgrade', LOCAL_APP_CREDENTIALS_HEADER]) headers.delete(header);
+    headers.delete('cookie');
+    if (cookieHeader) headers.set('cookie', cookieHeader);
     const signal = AbortSignal.any([request.signal, lease.controller.signal]);
     let body: BodyInit | null | undefined = request.body;
     // Custom protocol requests do not always retain Content-Length. Materialize

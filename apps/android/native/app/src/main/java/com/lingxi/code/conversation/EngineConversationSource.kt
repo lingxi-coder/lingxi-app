@@ -10,6 +10,9 @@ import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.ListingKindDto
 import com.lingxi.code.bindings.client.PromptModeDto
+import com.lingxi.code.bindings.runtime.ProviderConnectionTestDto
+import com.lingxi.code.bindings.client.ProviderCredentialSecretDto
+import com.lingxi.code.bindings.runtime.LocalAppHost
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.runtime.VisualizationHost
 import com.lingxi.code.bindings.client.PermissionResponseDto
@@ -88,12 +91,13 @@ class EngineConversationSource private constructor(
     @Volatile private var resumeOnUiAttach: Boolean,
     private val initialRecoverySpec: ConversationRecoverySpec,
     private val userHomePath: String,
+    private val userHomeGuestPath: String,
 ) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource {
 
     override val recoverySpec: ConversationRecoverySpec
         get() {
             val directory = workspace.value?.cwd ?: return initialRecoverySpec
-            val home = io.lingxi.mobilelinux.MobileLinuxGuestPaths.HOME
+            val home = userHomeGuestPath
             if (directory != home && !directory.startsWith("$home/")) return initialRecoverySpec
             val relative = directory.removePrefix(home).removePrefix("/")
             return initialRecoverySpec.copy(hostPath = java.io.File(userHomePath, relative).absolutePath, guestPath = directory, additionalDirectories = workspace.value?.additionalDirectories.orEmpty())
@@ -147,6 +151,16 @@ class EngineConversationSource private constructor(
 
     override suspend fun submitClientCommand(command: ClientCommand) {
         handle.submit(command)
+    }
+
+    override suspend fun testProviderConnection(
+        providerId: String,
+        providerPreset: String,
+        apiBase: String,
+        model: String,
+        credentialOverride: ProviderCredentialSecretDto?,
+    ): ProviderConnectionTestDto {
+        return handle.testProviderConnection(providerId, providerPreset, apiBase, model, credentialOverride)
     }
 
     override suspend fun refreshExecutionStatus() {
@@ -735,8 +749,9 @@ class EngineConversationSource private constructor(
             }
             val workspaceRestore = runCatching { kotlinx.coroutines.runBlocking {
                 val owner = handle.workspaceState().sessionId
-                val home = io.lingxi.mobilelinux.MobileLinuxGuestPaths.HOME
-                val userHome = com.lingxi.code.project.MobileUserStorage.directories(context).home
+                val userDirectories = com.lingxi.code.project.MobileUserStorage.directories(context)
+                val home = userDirectories.guestHome
+                val userHome = userDirectories.home
                 projectWorkspace?.additionalDirectories.orEmpty().forEach { directory ->
                     if ((directory == home || directory.startsWith("$home/")) && java.io.File(userHome, directory.removePrefix(home).removePrefix("/")).isDirectory) {
                         handle.addWorkspaceDirectory(directory, owner)
@@ -818,6 +833,7 @@ class EngineConversationSource private constructor(
                 resumeOnUiAttach = reuseProcessSource,
                 initialRecoverySpec = recoverySpec,
                 userHomePath = com.lingxi.code.project.MobileUserStorage.directories(context).home,
+                userHomeGuestPath = com.lingxi.code.project.MobileUserStorage.directories(context).guestHome,
             )
             ConversationHeadlessRecovery.register(recoverySpec.scopeKey, source)
             return source

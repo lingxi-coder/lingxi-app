@@ -51,6 +51,16 @@ test('committed API declarations link to their source revision', () => {
   assert.equal(html.includes('Working tree source'), false);
 });
 
+test('unpublished API declarations identify local commits without exposing a stale source URL', () => {
+  const html = renderToStaticMarkup(createElement(ApiDeclaration, {
+    locale: 'zh',
+    entry: { sdk: 'llm', name: 'Client', kind: 'struct', signature: 'pub struct Client', summary: '', file: 'src/lib.rs', line: 3, sourceState: 'unpublished', url: 'https://github.com/lingxi-coder/llm-client/blob/local/src/lib.rs#L3' },
+  }));
+  assert.match(html, /未发布源码/u);
+  assert.equal(html.includes('未提交源码'), false);
+  assert.equal(html.includes('href='), false);
+});
+
 
 test('source attribution marks working-tree files and omits URLs even if an outdated link exists', () => {
   const html = renderToStaticMarkup(createElement(DocSourceItem, {
@@ -71,4 +81,15 @@ test('source attribution links committed files without a worktree marker', () =>
   }));
   assert.ok(html.includes(`href="${url}"`));
   assert.equal(html.includes('未提交源码'), false);
+});
+
+test('source attribution distinguishes unpublished commits from working-tree edits', () => {
+  const html = renderToStaticMarkup(createElement(DocSourceItem, {
+    locale: 'en',
+    source: { repo: 'llm-client', path: 'src/lib.rs', revision: 'local-revision', sourceState: 'unpublished', url: 'https://github.com/lingxi-coder/llm-client/blob/local/src/lib.rs' },
+  }));
+  assert.match(html, /Unpublished source/u);
+  assert.match(html, /local-revision/u);
+  assert.equal(html.includes('Working tree source'), false);
+  assert.equal(html.includes('href='), false);
 });

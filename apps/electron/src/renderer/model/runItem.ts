@@ -108,6 +108,12 @@ export interface NarrationRunItem {
   readonly blockKey?: number;
   /** Explicit host-issued correlation token; never inferred from prompt text. */
   readonly transcriptRowToken?: string;
+  /**
+   * Set on a user row a paired device sent from Remote Control, so the row can
+   * say where the prompt came from. `turnId` is the turn the viewer's command
+   * was admitted under; it keeps a repeated echo from adding the row twice.
+   */
+  readonly origin?: { readonly kind: 'device'; readonly deviceName: string; readonly turnId: number };
   /** Model serving this response after a native server-fallback hop, if any. */
   readonly servedModel?: string;
   /** Durable image projections attached to a user prompt. */

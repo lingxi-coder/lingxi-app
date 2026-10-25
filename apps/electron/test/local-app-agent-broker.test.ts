@@ -1,20 +1,40 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { promises as fs } from 'node:fs';
+import { readFileSync, promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LocalAppAgentBroker, type LocalAppAgentAuthorization, type LocalAppAgentBrokerOptions, type LocalAppAgentExecution, type LocalAppAgentOwner } from '../src/main/local-apps/agentBroker.ts';
-import { agentDigest, parseAgentRunInput, sameAgentGrant } from '../src/main/local-apps/agentPolicy.ts';
-import type { LocalAppAgentEvent, LocalAppAgentRun, LocalAppAgentToolGrant } from '../src/shared/localAppAgent.ts';
+import type { BaseEvent } from '@ag-ui/core';
+import { EventSchema, MessageSchema } from '@lingxi/local-app-agui/client';
+import {
+  LocalAppAgentBroker,
+  type LocalAppAgentAuthorization,
+  type LocalAppAgentBrokerOptions,
+  type LocalAppAgentExecution,
+  type LocalAppAgentOwner,
+  type LocalAppAgentPrivateResult,
+} from '../src/main/local-apps/agentBroker.ts';
+import { agentDigest, parseRunAgentInput, sameAgentGrant } from '../src/main/local-apps/agentPolicy.ts';
+import type { LocalAppAgentTask, LocalAppAgentToolGrant } from '../src/shared/localAppAgent.ts';
 
-const principal: LocalAppAgentOwner = { appId: 'a11111111111111111111111111111111', revision: 1, invocationId: 'invocation-1', webContentsId: 123 };
-const other: LocalAppAgentOwner = { appId: 'a22222222222222222222222222222222', revision: 1, invocationId: 'invocation-2' };
-const read: LocalAppAgentToolGrant = { id: 'builtin:Read', kind: 'builtin', name: 'Read' };
-const nutrition: LocalAppAgentToolGrant = { id: 'mcp:nutrition:search', kind: 'mcp', serverConfigId: 'nutrition', configRevision: 'config-1', rawToolName: 'search_food', definitionDigest: 'definition-1' };
-const input = { requestId: 'photo-1', prompt: 'Describe the supplied test object.' };
+const AGUI_FIXTURE = JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json', import.meta.url), 'utf8')) as any;
+const principal: LocalAppAgentOwner = { appId: 'a11111111111111111111111111111111', releaseDigest: '1'.repeat(64), invocationId: 'invocation-1', webContentsId: 123 };
+const other: LocalAppAgentOwner = { appId: 'a22222222222222222222222222222222', releaseDigest: '2'.repeat(64), invocationId: 'invocation-2' };
+const readGrant: LocalAppAgentToolGrant = { id: 'builtin:Read', kind: 'builtin', name: 'Read' };
+const skill = { id: 'extract-text', path: 'skills/extract-text/SKILL.md' };
+
+function runInput(runId: string, threadId = `thread-${runId}`): any {
+  const input = structuredClone(AGUI_FIXTURE);
+  input.runId = runId;
+  input.threadId = threadId;
+  return input;
+}
 function auth(): LocalAppAgentAuthorization {
-  return { settings: { enabled: true, model: { providerId: 'test-provider', modelId: 'test-model' }, tools: [read, nutrition], background: false, maxTurns: 20, timeoutMs: 600_000 },
-    requestedTools: [read.id, nutrition.id], model: { providerId: 'test-provider', modelId: 'test-model', label: 'Test', canSelect: true, supportsImages: true, supportsStructuredOutput: true } };
+  return {
+    settings: { enabled: true, model: { providerId: 'test-provider', modelId: 'test-model' }, tools: [readGrant], skills: [skill.id], background: false, maxTurns: 20, timeoutMs: 600_000 },
+    requestedTools: [readGrant.id], requestedSkills: [skill.id], releaseRevision: 1, releaseSourceDirectory: '/release/source',
+    skillSpecs: [skill], releaseFiles: [{ path: skill.path, sha256: 'a'.repeat(64), bytes: 18, executable: false }],
+    model: { providerId: 'test-provider', modelId: 'test-model', label: 'Test', canSelect: true, supportsAttachments: true, supportsVision: true, supportsStructuredOutput: true },
+  };
 }
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
@@ -22,341 +42,336 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 async function fixture(t: { after(callback: () => Promise<void>): void }, overrides: Partial<LocalAppAgentBrokerOptions> = {}) {
-  const root = await fs.mkdtemp(join(tmpdir(), 'lingxi-agent-broker-'));
-  const options: LocalAppAgentBrokerOptions = { root, authorize: async () => auth(), revalidate: async () => true, execute: async () => ({ result: { text: 'done' } }), ...overrides };
+  const root = await fs.mkdtemp(join(tmpdir(), 'lingxi-agui-broker-'));
+  const options: LocalAppAgentBrokerOptions = {
+    root, authorize: async () => auth(), revalidate: async () => true,
+    execute: async execution => ({ result: { text: 'done', output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}`,
+      ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: { inputTokens: 8, outputTokens: 2, turns: 1 } }),
+    ...overrides,
+  };
   const broker = new LocalAppAgentBroker(options);
-  t.after(async () => {
-    try { await broker.dispose(); }
-    catch (error) { if ((error as { code?: string }).code !== 'ledger_invalid') throw error; }
-    finally { await fs.rm(root, { recursive: true, force: true }); }
-  });
+  t.after(async () => { await broker.dispose().catch(() => undefined); await fs.rm(root, { recursive: true, force: true }); });
   return { root, broker, options };
 }
-async function terminal(broker: LocalAppAgentBroker, caller: LocalAppAgentOwner, runId: string): Promise<LocalAppAgentRun> {
-  const done = deferred<LocalAppAgentRun>();
-  const timeout = setTimeout(() => done.reject(new Error('Task did not finish')), 2000);
-  const unsubscribe = await broker.subscribe(caller, runId, event => {
-    if (event.type === 'state' && ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(event.run.state)) done.resolve(event.run);
-  });
-  try { return await done.promise; } finally { clearTimeout(timeout); unsubscribe(); }
+async function terminal(broker: LocalAppAgentBroker, caller: LocalAppAgentOwner, runId: string): Promise<LocalAppAgentTask> {
+  const end = Date.now() + 3000;
+  while (Date.now() < end) {
+    const task = await broker.get(caller, runId);
+    if (['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task.state)) return task;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  throw new Error('AG-UI task did not finish');
 }
 
-test('concurrent retries create one durable task and a changed request cannot execute', async t => {
-  const started = deferred<LocalAppAgentExecution>(), completion = deferred<{ result: { text: string } }>();
+test('official SDK RunAgentInput fixture normalizes in order and retains digest bindings', () => {
+  const parsed = parseRunAgentInput(AGUI_FIXTURE);
+  assert.equal(parsed.threadId, 'thread-fixture-1');
+  assert.equal(parsed.runId, 'run-fixture-1');
+  assert.equal(parsed.executionInput.prompt, 'Inspect this image.');
+  assert.deepEqual(parsed.executionInput.contentParts, [
+    { kind: 'text', text: 'Inspect this image.' },
+    { kind: 'attachment', name: 'photo.png', mediaType: 'image/png', base64: 'iVBORw==' },
+  ]);
+  assert.equal(parsed.executionInput.protocolThreadId, parsed.threadId);
+  assert.equal(parsed.executionInput.protocolInputDigest, agentDigest(AGUI_FIXTURE));
+  assert.match(parsed.executionInput.protocolMessageSha256, /^[a-f0-9]{64}$/);
+});
+
+test('stateless runs reject browser supplied history and unsupported protocol controls', () => {
+  const base = runInput('unsupported-controls');
+  assert.throws(() => parseRunAgentInput({ ...base, messages: [...base.messages, { id: 'second', role: 'user', content: 'two' }] }), { code: 'stateless_history_unsupported' });
+  assert.throws(() => parseRunAgentInput({ ...base, parentRunId: 'parent' }), { code: 'unsupported_agent_input' });
+  assert.throws(() => parseRunAgentInput({ ...base, context: [{ description: 'ambient', value: 'untrusted' }] }), { code: 'context_unsupported' });
+  assert.throws(() => parseRunAgentInput({ ...base, resume: [{ interruptId: 'interrupt-1', status: 'resolved', payload: { answer: 'yes' } }] }), { code: 'resume_unsupported' });
+  assert.throws(() => parseRunAgentInput({ ...base, forwardedProps: { extra: true } }), { code: 'invalid_input' });
+  assert.throws(() => parseRunAgentInput({ ...base, forwardedProps: { 'com.lingxi.localApp': { version: 2 } } }), { code: 'invalid_input' });
+});
+
+test('idempotent task admission deduplicates by public runId and exposes only standard events', async t => {
+  const started = deferred<LocalAppAgentExecution>();
+  const completion = deferred<{ result: LocalAppAgentPrivateResult; usage: { inputTokens: number } }>();
   let calls = 0;
   const { broker } = await fixture(t, { execute: execution => { calls++; started.resolve(execution); return completion.promise; } });
-  const [one, two] = await Promise.all([broker.run(principal, input), broker.run(principal, input)]);
-  assert.equal(one.runId, two.runId);
-  await started.promise;
-  assert.equal(calls, 1);
-  await assert.rejects(broker.run(principal, { ...input, prompt: 'Different side effect' }), { code: 'request_conflict' });
-  completion.resolve({ result: { text: 'done' } });
-  assert.equal((await terminal(broker, principal, one.runId)).state, 'succeeded');
-  assert.deepEqual(await broker.run(principal, input), one);
-  assert.equal(calls, 1);
-});
-
-test('concurrency is per application across revisions while unrelated applications can execute', async t => {
-  const release = deferred<{ result: { text: string } }>();
-  const { broker } = await fixture(t, { execute: () => release.promise });
-  const first = await broker.run(principal, input);
-  await assert.rejects(broker.run(principal, { ...input, requestId: 'second' }), { code: 'busy' });
-  await assert.rejects(broker.run({ ...principal, revision: 2 }, input), { code: 'busy' });
-  const second = await broker.run(other, input);
-  assert.notEqual(first.runId, second.runId);
-  release.resolve({ result: { text: 'done' } });
-  await Promise.all([terminal(broker, principal, first.runId), terminal(broker, other, second.runId)]);
-});
-
-test('application, revision and live invocation ownership protect reads, subscriptions and cancellation', async t => {
-  const completion = deferred<{ result: { text: string } }>();
-  const { broker } = await fixture(t, { execute: () => completion.promise });
-  const { runId } = await broker.run(principal, input);
-  for (const forged of [other, { ...principal, revision: 2 }, { ...principal, invocationId: 'new-invocation' }]) {
-    await assert.rejects(broker.get(forged, runId), { code: 'not_found' });
-    await assert.rejects(broker.subscribe(forged, runId, () => {}), { code: 'not_found' });
-    await assert.rejects(broker.cancel(forged, runId), { code: 'not_found' });
-  }
-  // A page refresh does not replace the runtime invocation.
-  assert.equal((await broker.get({ ...principal, webContentsId: 456 }, runId)).runId, runId);
-  completion.resolve({ result: { text: 'done' } });
-  await terminal(broker, principal, runId);
-  assert.equal((await broker.get({ ...principal, invocationId: 'reopened-invocation' }, runId)).result?.text, 'done');
-});
-
-test('structured result, usage and ordered progress survive reload without persisting source input', async t => {
-  const gate = deferred<void>(), started = deferred<LocalAppAgentExecution>();
-  const { broker, root } = await fixture(t, { execute: async execution => {
-    started.resolve(execution); await gate.promise;
-    await execution.emit({ phase: 'thinking', text: 'Analyzing the supplied image' });
-    return { result: { output: { color: 'red' } }, usage: { inputTokens: 11, outputTokens: 3, costUsd: 0.001, turns: 1 } };
-  } });
-  const request = { ...input, prompt: 'PRIVATE_INPUT_SENTINEL', outputSchema: { type: 'object', properties: { color: { type: 'string' } }, required: ['color'] } };
-  const { runId } = await broker.run(principal, request);
-  await started.promise;
-  const events: LocalAppAgentEvent[] = [];
-  const unsubscribe = await broker.subscribe(principal, runId, event => events.push(event));
-  gate.resolve();
-  const done = await terminal(broker, principal, runId);
-  unsubscribe();
-  assert.equal(done.state, 'succeeded');
-  assert.deepEqual(done.result?.output, { color: 'red' });
-  assert.equal(done.usage?.inputTokens, 11);
-  assert.ok(events.some(event => event.type === 'progress'));
-  assert.ok(events.every((event, index) => index === 0 || event.sequence > events[index - 1].sequence));
-  const bytes = await fs.readFile(join(root, `${runId}.json`), 'utf8');
-  assert.ok(!bytes.includes('PRIVATE_INPUT_SENTINEL'));
-  assert.ok(!bytes.includes('webContentsId'));
-  const replay: LocalAppAgentEvent[] = [];
-  const stop = await broker.subscribe(principal, runId, event => replay.push(event), done.sequence - 1); stop();
-  assert.equal(replay.length, 1);
-  assert.equal(replay[0].type, 'state');
-  assert.equal(replay[0].sequence, done.sequence);
-});
-
-test('restart interrupts a previously committed intent and never replays its effects', async t => {
-  const { root, options, broker } = await fixture(t);
-  await fs.writeFile(join(root, 'old-run.json'), JSON.stringify({ schema: 1, owner: principal, fingerprint: agentDigest(parseAgentRunInput(input)),
-    run: { runId: 'old-run', requestId: input.requestId, state: 'running', sequence: 9, createdAt: 1, updatedAt: 1,
-      model: auth().settings.model, limits: { maxTurns: 20, timeoutMs: 600_000 } } }));
-  let calls = 0;
-  options.execute = async () => { calls++; return { result: { text: 'should not run' } }; };
-  await broker.initialize();
-  const reopened = { ...principal, invocationId: 'restarted-app' };
-  const result = await broker.get(reopened, 'old-run');
-  assert.equal(result.state, 'interrupted');
-  assert.equal(result.sequence, 10);
-  assert.equal(result.error?.code, 'host_restarted');
-  assert.deepEqual(await broker.run(reopened, input), { runId: 'old-run' });
-  assert.equal(calls, 0);
-  assert.equal(JSON.parse(await fs.readFile(join(root, 'old-run.json'), 'utf8')).run.state, 'interrupted');
-});
-
-test('cancel wins over a late successful executor and emits exactly one terminal state', async t => {
-  const started = deferred<LocalAppAgentExecution>(), completion = deferred<{ result: { text: string } }>();
-  const { broker } = await fixture(t, { execute: execution => { started.resolve(execution); return completion.promise; } });
-  const { runId } = await broker.run(principal, input), execution = await started.promise;
-  const events: LocalAppAgentEvent[] = [];
-  const stop = await broker.subscribe(principal, runId, event => events.push(event));
-  const cancelling = broker.cancel(principal, runId);
-  await terminal(broker, principal, runId);
-  assert.equal(execution.signal.aborted, true);
-  completion.resolve({ result: { text: 'too late' } });
-  await cancelling;
-  await broker.cancel(principal, runId);
-  const done = await broker.get(principal, runId); stop();
-  assert.equal(done.state, 'cancelled'); assert.equal(done.result, undefined);
-  assert.equal(events.filter(event => event.type === 'state' && ['succeeded', 'failed', 'cancelled'].includes(event.run.state)).length, 1);
-});
-
-test('lifecycle revocation invalidates authorization already waiting before execution', async t => {
-  const authorizing = deferred<void>(), authorization = deferred<LocalAppAgentAuthorization>();
-  let calls = 0;
-  const { broker } = await fixture(t, { authorize: async () => { authorizing.resolve(); return authorization.promise; }, execute: async () => { calls++; return { result: {} }; } });
-  const pending = broker.run(principal, input);
-  await authorizing.promise;
-  const cancelling = broker.cancelApp(principal.appId, 'Revoked during approval');
-  authorization.resolve(auth());
-  await assert.rejects(pending, { code: 'permission_revoked' });
-  await cancelling;
-  assert.equal(calls, 0);
-});
-
-test('revocation during a trusted approval blocks subsequent tool dispatch', async t => {
-  const started = deferred<LocalAppAgentExecution>(), proceed = deferred<void>();
-  let invoked = false;
-  const { broker } = await fixture(t, { execute: async execution => {
-    started.resolve(execution); await execution.emit({ phase: 'waiting_for_permission' });
-    await proceed.promise; await execution.assertAuthorized(); invoked = true;
-    return { result: {} };
-  } });
-  const { runId } = await broker.run(principal, { ...input, tools: [nutrition.id] }); await started.promise;
-  const cancelling = broker.cancelApp(principal.appId, 'MCP grant revoked'); proceed.resolve();
-  await cancelling;
-  assert.equal(invoked, false);
-  assert.equal((await broker.get(principal, runId)).state, 'cancelled');
-});
-
-test('each run fixes a grant subset and rechecks current provenance before dispatch', async t => {
-  const state = auth(), started = deferred<LocalAppAgentExecution>(), proceed = deferred<void>();
-  let dispatched = false;
-  const { broker } = await fixture(t, { authorize: async () => state,
-    revalidate: async (_owner, snapshot) => snapshot.settings.tools.every(tool => state.settings.tools.some(current => sameAgentGrant(tool, current))),
-    execute: async execution => { started.resolve(execution); await proceed.promise; await execution.assertAuthorized(); dispatched = true; return { result: {} }; } });
-  const { runId } = await broker.run(principal, { ...input, tools: [nutrition.id] });
+  const input = runInput('public-run-1');
+  const [first, retry] = await Promise.all([broker.run(principal, input), broker.run(principal, input)]);
+  assert.deepEqual(first, retry);
   const execution = await started.promise;
-  assert.deepEqual(execution.authorization.settings.tools, [nutrition]);
-  state.settings.tools.push({ id: 'mcp:new-tool', kind: 'builtin', name: 'Bash' });
-  assert.deepEqual(execution.authorization.settings.tools, [nutrition]);
-  state.settings.tools = [read, { ...nutrition, configRevision: 'changed-server-command' }];
-  proceed.resolve();
-  const done = await terminal(broker, principal, runId);
-  assert.equal(dispatched, false); assert.equal(done.state, 'cancelled'); assert.equal(done.error?.code, 'permission_revoked');
-});
-
-test('MCP configuration identity, raw name and definition each invalidate an old grant', () => {
-  assert.equal(sameAgentGrant(nutrition, { ...nutrition }), true);
-  for (const field of ['id', 'serverConfigId', 'configRevision', 'rawToolName', 'definitionDigest']) {
-    assert.equal(sameAgentGrant(nutrition, { ...nutrition, [field]: 'different' }), false, field);
-  }
-  assert.equal(sameAgentGrant(nutrition, { id: nutrition.id, kind: 'builtin', name: 'search_food' }), false);
-});
-
-test('requested tools require both manifest declaration and explicit grant; omitted tools are empty', async t => {
-  const state = auth(), seen: LocalAppAgentExecution[] = [];
-  const { broker } = await fixture(t, { authorize: async () => state, execute: async execution => { seen.push(execution); return { result: {} }; } });
-  await assert.rejects(broker.run(principal, { ...input, tools: ['builtin:Bash'] }), { code: 'tool_not_granted' });
-  state.requestedTools = [read.id];
-  await assert.rejects(broker.run(principal, { ...input, tools: [nutrition.id] }), { code: 'tool_not_granted' });
-  const { runId } = await broker.run(principal, input); await terminal(broker, principal, runId);
-  assert.deepEqual(seen[0].authorization.settings.tools, []);
-});
-
-test('host limits are enforced and applications may only lower them', async t => {
-  const seen = deferred<LocalAppAgentExecution>();
-  const { broker } = await fixture(t, { execute: async execution => { seen.resolve(execution); return { result: {} }; } });
-  for (const overrides of [{ maxTurns: 21 }, { timeoutMs: 600_001 }]) await assert.rejects(broker.run(principal, { ...input, ...overrides }), { code: 'limit_exceeded' });
-  const { runId } = await broker.run(principal, { ...input, maxTurns: 3, timeoutMs: 5000 });
-  const execution = await seen.promise;
-  assert.equal(execution.authorization.settings.maxTurns, 3); assert.equal(execution.authorization.settings.timeoutMs, 5000);
-  assert.deepEqual((await terminal(broker, principal, runId)).limits, { maxTurns: 3, timeoutMs: 5000 });
-});
-
-test('time budget ends a noncooperative executor without waiting for its promise', async t => {
-  const started = deferred<LocalAppAgentExecution>(), completion = deferred<{ result: {} }>();
-  const { broker } = await fixture(t, { execute: execution => { started.resolve(execution); return completion.promise; } });
-  const { runId } = await broker.run(principal, { ...input, timeoutMs: 40 });
-  const execution = await started.promise, done = await terminal(broker, principal, runId);
-  assert.equal(done.state, 'failed'); assert.equal(done.error?.code, 'timeout'); assert.equal(execution.signal.aborted, true);
-  await assert.rejects(broker.run(principal, { ...input, requestId: 'while-stopping' }), { code: 'busy' });
-  completion.resolve({ result: {} });
-});
-
-test('unconfigured and incompatible models are rejected before execution without fallback', async t => {
-  const state = auth(); let calls = 0;
-  const { broker } = await fixture(t, { authorize: async () => state, execute: async () => { calls++; return { result: {} }; } });
-  state.model.canSelect = false;
-  await assert.rejects(broker.run(principal, input), { code: 'model_unavailable' });
-  state.model.canSelect = true; state.model.supportsStructuredOutput = false;
-  await assert.rejects(broker.run(principal, { ...input, outputSchema: { type: 'object' } }), { code: 'structured_output_unsupported' });
-  state.model.supportsImages = false;
-  await assert.rejects(broker.run(principal, { ...input, images: [{ media_type: 'image/png', base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' }] }), { code: 'images_unsupported' });
-  assert.equal(calls, 0);
-});
-
-test('structured output cannot silently succeed with an unvalidated Markdown result', async t => {
-  const { broker } = await fixture(t, { execute: async () => ({ result: { text: '```json\n{"value":1}\n```' } }) });
-  const { runId } = await broker.run(principal, { ...input, outputSchema: { type: 'object' } });
-  const done = await terminal(broker, principal, runId);
-  assert.equal(done.state, 'failed'); assert.equal(done.error?.code, 'invalid_result'); assert.equal(done.result, undefined);
-});
-
-test('models without tool capability reject builtin and MCP calls before admission but can run text tasks', async t => {
-  const state = auth(); state.model.supportsStructuredOutput = false;
-  let calls = 0;
-  const { broker, root } = await fixture(t, { authorize: async () => state, execute: async () => { calls++; return { result: { text: 'Text remains supported' } }; } });
-  for (const tool of [read, nutrition]) {
-    await assert.rejects(broker.run(principal, { ...input, tools: [tool.id] }), { code: 'tools_unsupported' });
-    assert.equal(calls, 0);
-    assert.deepEqual(await fs.readdir(root), [], 'unsupported tool requests do not commit a task or consume the request ID');
-  }
-  const { runId } = await broker.run(principal, { ...input, tools: [] });
-  assert.equal((await terminal(broker, principal, runId)).state, 'succeeded');
+  assert.equal(execution.runId, input.runId);
+  assert.match(execution.taskStorageId, /^[0-9a-f-]{36}$/);
   assert.equal(calls, 1);
+  await assert.rejects(broker.run(principal, { ...input, forwardedProps: { ...input.forwardedProps, 'com.lingxi.localApp': { ...input.forwardedProps['com.lingxi.localApp'], maxTurns: 1 } } }), { code: 'request_conflict' });
+
+  completion.resolve({ result: { text: 'done', output: { ok: true }, attachments: [], messageId: 'assistant-public-run-1' }, usage: { inputTokens: 0 } });
+  const done = await terminal(broker, principal, input.runId);
+  assert.equal(done.state, 'succeeded');
+  assert.deepEqual(done.usage, { inputTokens: 0 });
+  assert.equal(done.threadId, input.threadId);
+  assert.equal('result' in done, false);
+  assert.equal('requestId' in done, false);
+  assert.equal('model' in done, false);
+  assert.equal((await broker.run(principal, input)).runId, input.runId, 'an exact terminal retry returns the prior public run');
+  assert.equal(calls, 1);
+
+  const page = await broker.events(principal, input.runId);
+  assert.ok(page.events.length >= 5);
+  assert.equal(page.events[0]?.type, 'RUN_STARTED');
+  assert.deepEqual(page.events.filter(event => ['TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_END'].includes(event.type)).map(event => event.type),
+    ['TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_END']);
+  for (const event of page.events) EventSchema.parse(event);
+  const start = page.events[0] as any;
+  const finish = page.events.at(-1) as any;
+  assert.equal(start.runId, input.runId);
+  assert.equal(start.threadId, input.threadId);
+  assert.equal(finish.type, 'RUN_FINISHED');
+  assert.deepEqual(finish.result, { ok: true });
+  const taskPage = await broker.list(principal, { limit: 10 });
+  assert.deepEqual(taskPage.tasks.map(task => task.runId), [input.runId]);
+  assert.ok(!('result' in taskPage.tasks[0]!));
+  assert.equal((await broker.get(other, input.runId).catch(() => undefined)), undefined);
 });
 
-test('provider diagnostics and unexpected fields do not cross the application boundary', async t => {
-  const { broker, root } = await fixture(t, { execute: async () => { throw new Error('Authorization: Bearer SECRET_PROVIDER_CREDENTIAL'); } });
-  await assert.rejects(broker.run(principal, { ...input, apiKey: 'do-not-accept' }), { code: 'invalid_input' });
-  const { runId } = await broker.run(principal, input);
-  const done = await terminal(broker, principal, runId);
-  assert.equal(done.error?.code, 'execution_failed');
-  assert.ok(!JSON.stringify(done).includes('SECRET_PROVIDER_CREDENTIAL'));
-  assert.ok(!(await fs.readFile(join(root, `${runId}.json`), 'utf8')).includes('SECRET_PROVIDER_CREDENTIAL'));
+test('public run IDs are deduplicated and stored within application ownership', async t => {
+  const executions: LocalAppAgentExecution[] = [];
+  const { broker } = await fixture(t, { execute: async execution => {
+    executions.push(execution);
+    return { result: { text: execution.owner.appId, output: { ok: true }, attachments: [], messageId: `assistant-${execution.owner.appId}` }, usage: {} };
+  } });
+  const input = runInput('same-public-run');
+  const [first, second] = await Promise.all([broker.run(principal, input), broker.run(other, input)]);
+  assert.equal(first.runId, second.runId);
+  assert.equal((await terminal(broker, principal, first.runId)).state, 'succeeded');
+  assert.equal((await terminal(broker, other, second.runId)).state, 'succeeded');
+  assert.equal(executions.length, 2);
+  assert.notEqual(executions[0]?.taskStorageId, executions[1]?.taskStorageId);
+  assert.equal((await broker.list(principal)).tasks.length, 1);
+  assert.equal((await broker.list(other)).tasks.length, 1);
+  assert.equal((await broker.events(principal, first.runId)).events.at(-1)?.type, 'RUN_FINISHED');
+  assert.equal((await broker.events(other, second.runId)).events.at(-1)?.type, 'RUN_FINISHED');
 });
 
-test('invalid images, external schema references and excessive schema depth are rejected', () => {
-  assert.throws(() => parseAgentRunInput({ ...input, images: [{ path: '/private/photo.png' }] }), { code: 'invalid_image' });
-  assert.throws(() => parseAgentRunInput({ ...input, images: [{ media_type: 'image/png', base64: Buffer.from('not an image').toString('base64') }] }), { code: 'invalid_image' });
-  assert.throws(() => parseAgentRunInput({ ...input, outputSchema: { $ref: 'https://private.example/schema' } }), { code: 'invalid_schema' });
-  const cycle: Record<string, unknown> = {}; cycle.properties = cycle;
-  assert.throws(() => parseAgentRunInput({ ...input, outputSchema: cycle }), { code: 'invalid_schema' });
-  assert.deepEqual(parseAgentRunInput({ ...input, outputSchema: { $ref: '#/definitions/Result', definitions: { Result: { type: 'object' } } } }).outputSchema?.$ref, '#/definitions/Result');
-});
-
-test('host shutdown interrupts active tasks and refuses new admission', async t => {
-  const started = deferred<LocalAppAgentExecution>();
-  const { broker } = await fixture(t, { execute: execution => { started.resolve(execution); return new Promise((_resolve, reject) => execution.signal.addEventListener('abort', () => reject(execution.signal.reason), { once: true })); } });
-  const { runId } = await broker.run(principal, input); const execution = await started.promise;
+test('event cursors replay bounded official pages and reconnect after host restart', async t => {
+  const { root, broker, options } = await fixture(t);
+  const input = runInput('cold-run');
+  await broker.run(principal, input);
+  await terminal(broker, principal, input.runId);
+  const first = await broker.events(principal, input.runId, 0);
+  assert.equal(first.events[0]?.type, 'RUN_STARTED');
+  const next = await broker.events(principal, input.runId, 1);
+  assert.ok(next.sequence > 1);
+  assert.equal(first.events.length, next.events.length + 1);
   await broker.dispose();
-  assert.equal(execution.signal.aborted, true); assert.equal((await broker.get(principal, runId)).state, 'interrupted');
-  await assert.rejects(broker.run(principal, { ...input, requestId: 'new' }), { code: 'host_stopped' });
+  const resumed = new LocalAppAgentBroker(options);
+  t.after(async () => { await resumed.dispose().catch(() => undefined); await fs.rm(root, { recursive: true, force: true }); });
+  const task = await resumed.get(principal, input.runId);
+  assert.equal(task.state, 'succeeded');
+  const replay = await resumed.events(principal, input.runId, 0);
+  assert.equal(replay.sequence, first.sequence);
+  assert.ok(replay.events.some(event => event.type === 'RUN_FINISHED'));
+  await assert.rejects(resumed.events(principal, input.runId, 10_000), { code: 'invalid_input' });
 });
 
-test('shutdown drains an authorization in progress before reporting completion', async t => {
-  const authorizing = deferred<void>(), release = deferred<LocalAppAgentAuthorization>(); let calls = 0;
-  const { broker } = await fixture(t, { authorize: async () => { authorizing.resolve(); return release.promise; }, execute: async () => { calls++; return { result: {} }; } });
-  const pending = broker.run(principal, input); await authorizing.promise;
-  let disposed = false;
-  const stopping = broker.dispose().then(() => { disposed = true; });
-  await new Promise(resolve => setImmediate(resolve)); assert.equal(disposed, false);
-  release.resolve(auth());
-  await assert.rejects(pending, { code: 'host_stopped' }); await stopping;
-  assert.equal(calls, 0);
-});
+test('durable broker replays a long AG-UI journal in bounded pages after restart', async t => {
+  const structuredResult = Array.from({ length: 200 }, (_, index) => ({ index }));
+  const { root, broker, options } = await fixture(t, {
+    execute: async execution => ({
+      result: { text: 'done', output: structuredResult, attachments: [], messageId: 'assistant-' + execution.runId },
+      usage: { turns: 1 },
+    }),
+  });
+  const input = runInput('long-event-journal');
+  await broker.run(principal, input);
+  await terminal(broker, principal, input.runId);
 
-test('cancel waits for child shutdown and does not admit a second app task in the meantime', async t => {
-  const started = deferred<void>(), closed = deferred<{ result: {} }>();
-  const { broker } = await fixture(t, { execute: () => { started.resolve(); return closed.promise; } });
-  const { runId } = await broker.run(principal, input); await started.promise;
-  let cancellationReturned = false;
-  const cancelling = broker.cancelApp(principal.appId, 'Replacing the runtime version').then(() => { cancellationReturned = true; });
-  await terminal(broker, principal, runId);
-  assert.equal(cancellationReturned, false);
-  await assert.rejects(broker.run(principal, { ...input, requestId: 'new-version' }), { code: 'busy' });
-  closed.resolve({ result: {} }); await cancelling;
-  assert.equal(cancellationReturned, true);
-});
+  const taskDirectory = join(root, 'apps', principal.appId, 'agent', 'tasks');
+  const taskFiles = await fs.readdir(taskDirectory);
+  assert.equal(taskFiles.length, 1);
+  const taskPath = join(taskDirectory, taskFiles[0]!);
+  const ledger = JSON.parse(await fs.readFile(taskPath, 'utf8'));
+  const startedEvent = ledger.events[0] as BaseEvent;
+  const terminalEvent = ledger.events.at(-1) as BaseEvent;
+  const messageEvents = Array.from({ length: 100 }, (_, index) => {
+    const messageId = 'assistant-stream-' + index;
+    return [
+      { type: 'TEXT_MESSAGE_START', messageId, role: 'assistant' },
+      { type: 'TEXT_MESSAGE_CONTENT', messageId, delta: 'chunk-' + index },
+      { type: 'TEXT_MESSAGE_END', messageId },
+    ];
+  }).flat() as BaseEvent[];
+  const expectedEvents = [
+    startedEvent,
+    ...messageEvents,
+    { ...terminalEvent, result: structuredResult },
+  ] as BaseEvent[];
+  for (const event of expectedEvents) EventSchema.parse(event);
+  ledger.events = expectedEvents;
+  ledger.eventSequence = expectedEvents.length;
 
-test('a failed terminal ledger write cannot publish a false successful snapshot', async t => {
-  const started = deferred<void>(), complete = deferred<{ result: { text: string } }>();
-  const { broker, root } = await fixture(t, { execute: () => { started.resolve(); return complete.promise; } });
-  const { runId } = await broker.run(principal, input); await started.promise;
-  const rename = fs.rename;
-  let fail = true;
-  fs.rename = (async (oldPath, newPath) => {
-    if (fail && String(newPath) === join(root, `${runId}.json`)) { fail = false; throw new Error('disk temporarily unavailable'); }
-    return rename(oldPath, newPath);
-  }) as typeof fs.rename;
+  await broker.dispose();
+  await fs.writeFile(taskPath, JSON.stringify(ledger), 'utf8');
+  const reopened = new LocalAppAgentBroker(options);
   try {
-    complete.resolve({ result: { text: 'do not publish before commit' } });
-    const done = await terminal(broker, principal, runId);
-    assert.equal(done.state, 'failed'); assert.equal(done.result, undefined);
-    assert.equal(JSON.parse(await fs.readFile(join(root, `${runId}.json`), 'utf8')).run.state, 'failed');
-  } finally { fs.rename = rename; }
+    assert.equal((await reopened.get(principal, input.runId)).state, 'succeeded');
+    const pages: Array<{ events: BaseEvent[]; sequence: number }> = [];
+    let afterSequence = 0;
+    while (afterSequence < expectedEvents.length) {
+      const page = await reopened.events(principal, input.runId, afterSequence);
+      assert.ok(page.events.length <= 128);
+      assert.equal(page.sequence, afterSequence + page.events.length);
+      for (const event of page.events) EventSchema.parse(event);
+      pages.push(page);
+      afterSequence = page.sequence;
+    }
+
+    assert.deepEqual(pages.map(page => page.events.length), [128, 128, 46]);
+    assert.deepEqual(pages.flatMap(page => page.events), expectedEvents);
+    assert.deepEqual((pages.at(-1)?.events.at(-1) as any).result, structuredResult);
+    assert.equal(pages.flatMap(page => page.events).filter(event => event.type === 'RUN_FINISHED').length, 1);
+  } finally {
+    await reopened.dispose();
+  }
 });
 
-test('a symlink ledger entry is refused rather than importing another app data', async t => {
-  const { broker, root } = await fixture(t);
-  const outside = join(root, 'private-data'); await fs.writeFile(outside, '{}');
-  await fs.symlink(outside, join(root, 'forged.json'));
-  await assert.rejects(broker.initialize(), { code: 'ledger_invalid' });
-  // Cleanup hook calls dispose; remove the deliberately corrupt fixture and
-  // use a separate broker to verify the original outside file was untouched.
-  assert.equal(await fs.readFile(outside, 'utf8'), '{}');
-});
-
-test('an unexpected executor disconnection records interruption and never replays the request', async t => {
-  const { LocalAppAgentError } = await import('../src/main/local-apps/agentPolicy.ts');
+test('durable chats persist standard Message content and accept exact terminal retries after history advances', async t => {
   let calls = 0;
-  const { broker } = await fixture(t, { execute: async () => { calls++; throw new LocalAppAgentError('executor_closed', 'The Agent host exited before completing the task.'); } });
-  const one = await broker.run(principal, input);
-  assert.equal((await terminal(broker, principal, one.runId)).state, 'interrupted');
-  assert.deepEqual(await broker.run(principal, input), one);
+  const { root, broker, options } = await fixture(t, { execute: async execution => {
+    calls++;
+    return { result: { text: `answer-${calls}`, output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}`,
+      ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: { turns: 1 } };
+  } });
+  const chat = await broker.createChat(principal, { title: 'Planning' });
+  assert.ok(!('sessionId' in chat));
+  const firstInput = runInput('chat-run-1', chat.chatId);
+  const firstRun = await broker.sendChat(principal, chat.chatId, firstInput);
+  await terminal(broker, principal, firstRun.runId);
   assert.equal(calls, 1);
+  const firstHistory = await broker.chatHistory(principal, chat.chatId, { limit: 1 });
+  assert.equal(firstHistory.messages[0]?.id, 'message-fixture-1');
+  assert.equal(firstHistory.messages[0]?.role, 'user');
+  assert.ok(Array.isArray(firstHistory.messages[0]?.content));
+  assert.ok(firstHistory.nextCursor);
+  const assistantPage = await broker.chatHistory(principal, chat.chatId, { cursor: firstHistory.nextCursor, limit: 1 });
+  assert.equal(assistantPage.messages[0]?.id, 'assistant-chat-run-1');
+  assert.equal(assistantPage.messages[0]?.role, 'assistant');
+  MessageSchema.parse(assistantPage.messages[0]);
+
+  const exactRetry = await broker.run(principal, firstInput);
+  assert.deepEqual(exactRetry, firstRun, 'dedupe runs before the now-advanced canonical history check');
+  assert.equal(calls, 1);
+
+  const newUser = { id: 'chat-user-2', role: 'user', content: 'Summarize the image in one sentence.' };
+  const secondInput = { ...runInput('chat-run-2', chat.chatId), messages: [...(await broker.chatHistory(principal, chat.chatId)).messages, newUser] };
+  const secondRun = await broker.sendChat(principal, chat.chatId, secondInput);
+  await terminal(broker, principal, secondRun.runId);
+  assert.equal(calls, 2);
+  assert.equal((await broker.chatHistory(principal, chat.chatId)).messages.length, 4);
+  const finalRunEvents = await broker.events(principal, secondRun.runId);
+  assert.equal((finalRunEvents.events.at(-1) as any).type, 'RUN_FINISHED');
+  const chats = await broker.listChats(principal);
+  assert.deepEqual(chats.chats.map(row => row.chatId), [chat.chatId]);
+  assert.ok(!('sessionId' in chats.chats[0]!));
+
+  await broker.dispose();
+  const resumed = new LocalAppAgentBroker(options);
+  t.after(async () => { await resumed.dispose().catch(() => undefined); await fs.rm(root, { recursive: true, force: true }); });
+  const recovered = await resumed.chatHistory(principal, chat.chatId);
+  assert.deepEqual(recovered.messages.map(message => message.id), ['message-fixture-1', 'assistant-chat-run-1', 'chat-user-2', 'assistant-chat-run-2']);
+  const disk = await fs.readFile(join(root, 'apps', principal.appId, 'agent', 'chats', chat.chatId, 'chat.json'), 'utf8');
+  assert.ok(disk.includes('sessionId'));
+  assert.ok(!disk.includes('iVBORw=='), 'inline attachment bytes are stored in the private per-chat asset directory');
+  assert.ok(await fs.readdir(join(root, 'apps', principal.appId, 'agent', 'chats', chat.chatId, 'assets')).then(rows => rows.length === 1));
 });
 
-test('prompt size uses the same UTF-8 byte budget as the execution bridge', () => {
-  assert.throws(() => parseAgentRunInput({ ...input, prompt: '图'.repeat(90_000) }), { code: 'invalid_input' });
-  assert.equal(parseAgentRunInput({ ...input, prompt: '图'.repeat(80_000) }).prompt.length, 80_000);
+test('chat rejects a forged supplied history prefix, duplicate user ID and cross-thread input', async t => {
+  const { broker } = await fixture(t);
+  const chat = await broker.createChat(principal);
+  const first = runInput('history-first', chat.chatId);
+  const accepted = await broker.sendChat(principal, chat.chatId, first);
+  await terminal(broker, principal, accepted.runId);
+  const movedRetry = structuredClone(first); movedRetry.threadId = 'another-thread';
+  await assert.rejects(broker.run(principal, movedRetry), { code: 'request_conflict' });
+  const history = (await broker.chatHistory(principal, chat.chatId)).messages;
+  const forged = structuredClone(history);
+  (forged[1] as any).content = 'renderer forged assistant text';
+  await assert.rejects(broker.sendChat(principal, chat.chatId, { ...runInput('forged-history', chat.chatId), messages: [...forged, { id: 'next', role: 'user', content: 'next' }] }), { code: 'history_mismatch' });
+  await assert.rejects(broker.sendChat(principal, chat.chatId, { ...runInput('duplicate-message', chat.chatId), messages: [...history, history[0]] }), { code: 'message_conflict' });
+  await assert.rejects(broker.sendChat(principal, chat.chatId, runInput('wrong-thread', 'another-thread')), { code: 'thread_mismatch' });
+});
+
+test('a structured null result fails with standard RUN_ERROR and never emits RUN_FINISHED result:null', async t => {
+  const { broker } = await fixture(t, { execute: async () => ({ result: { text: '', output: null, attachments: [], messageId: 'assistant-null' }, usage: {} }) });
+  const input = runInput('null-structured');
+  const { runId } = await broker.run(principal, input);
+  const task = await terminal(broker, principal, runId);
+  assert.equal(task.state, 'failed');
+  const events = (await broker.events(principal, runId)).events;
+  const terminalEvent = events.at(-1) as any;
+  assert.equal(terminalEvent.type, 'RUN_ERROR');
+  assert.equal(terminalEvent.code, 'structured_output_not_representable');
+  assert.ok(!events.some(event => event.type === 'RUN_FINISHED' && 'result' in event && event.result === null));
+  for (const event of events) EventSchema.parse(event);
+});
+
+test('tool and Skill IDs must be declared and host-granted, and applications may only lower host limits', async t => {
+  const state = auth(), seen: LocalAppAgentExecution[] = [];
+  const { broker } = await fixture(t, { authorize: async () => state, execute: async execution => { seen.push(execution); return {
+    result: { text: 'done', output: { ok: true }, attachments: [], messageId: 'assistant-limits' }, usage: {},
+  }; } });
+  const toolInput = runInput('bad-tool'); toolInput.forwardedProps['com.lingxi.localApp'].tools = ['builtin:Bash'];
+  await assert.rejects(broker.run(principal, toolInput), { code: 'tool_not_granted' });
+  const skillInput = runInput('bad-skill'); skillInput.forwardedProps['com.lingxi.localApp'].skills = ['undeclared'];
+  await assert.rejects(broker.run(principal, skillInput), { code: 'skill_not_granted' });
+  state.requestedTools = [];
+  const undeclaredTool = runInput('unrequested-tool');
+  await assert.rejects(broker.run(principal, undeclaredTool), { code: 'tool_not_granted' });
+  state.requestedTools = [readGrant.id];
+  for (const [runId, key, value] of [['too-many-turns', 'maxTurns', 21], ['too-long-timeout', 'timeoutMs', 600_001]] as const) {
+    const input = runInput(runId); input.forwardedProps['com.lingxi.localApp'][key] = value;
+    await assert.rejects(broker.run(principal, input), { code: 'limit_exceeded' });
+  }
+  const allowed = runInput('lower-limits');
+  allowed.forwardedProps['com.lingxi.localApp'].maxTurns = 3;
+  allowed.forwardedProps['com.lingxi.localApp'].timeoutMs = 5000;
+  const { runId } = await broker.run(principal, allowed);
+  assert.equal((await terminal(broker, principal, runId)).state, 'succeeded');
+  assert.deepEqual(seen[0]?.authorization.settings.tools, [readGrant]);
+  assert.deepEqual(seen[0]?.authorization.settings.skills, [skill.id]);
+  assert.equal(seen[0]?.authorization.settings.maxTurns, 3);
+  assert.equal(seen[0]?.authorization.settings.timeoutMs, 5000);
+});
+
+test('authorization revocation cancels an active task before later tool dispatch', async t => {
+  const started = deferred<LocalAppAgentExecution>(), proceed = deferred<void>();
+  let dispatched = false;
+  const state = auth();
+  const { broker } = await fixture(t, { authorize: async () => state,
+    revalidate: async (_owner, authorization) => authorization.settings.tools.every(tool => state.settings.tools.some(current => sameAgentGrant(tool, current))),
+    execute: async execution => { started.resolve(execution); await execution.emit({ phase: 'waiting_for_permission' }); await proceed.promise;
+      await execution.assertAuthorized(); dispatched = true; return { result: { text: '', output: { ok: true }, attachments: [], messageId: 'assistant-revoked' }, usage: {} }; } });
+  const input = runInput('revoke-run'); input.forwardedProps['com.lingxi.localApp'].tools = [readGrant.id];
+  const { runId } = await broker.run(principal, input);
+  await started.promise;
+  state.settings.tools = [];
+  proceed.resolve();
+  await broker.cancelApp(principal.appId, 'The grant changed');
+  assert.equal(dispatched, false);
+  assert.equal((await broker.get(principal, runId)).state, 'cancelled');
+  const events = await broker.events(principal, runId);
+  assert.equal((events.events.at(-1) as any).outcome.type, 'cancelled');
+});
+
+test('first AG-UI initialization clears only obsolete Agent ledgers under known app agent folders', async t => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'lingxi-agent-prototype-clear-'));
+  const appPath = join(root, 'apps', principal.appId);
+  await fs.mkdir(join(appPath, 'agent', 'tasks'), { recursive: true });
+  await fs.mkdir(join(appPath, 'agent', 'chats'), { recursive: true });
+  await fs.mkdir(join(appPath, 'agent', 'assets'), { recursive: true });
+  await fs.mkdir(join(appPath, 'workspace'), { recursive: true });
+  await fs.writeFile(join(appPath, 'agent', 'tasks', 'legacy.json'), '{}');
+  await fs.writeFile(join(appPath, 'workspace', 'keep.txt'), 'business data');
+  const broker = new LocalAppAgentBroker({ root, authorize: async () => auth(), revalidate: async () => true, execute: async () => { throw new Error('not run'); } });
+  t.after(async () => { await broker.dispose().catch(() => undefined); await fs.rm(root, { recursive: true, force: true }); });
+  await broker.initialize();
+  await assert.rejects(fs.stat(join(appPath, 'agent', 'tasks')));
+  await assert.rejects(fs.stat(join(appPath, 'agent', 'chats')));
+  assert.equal(await fs.readFile(join(appPath, 'workspace', 'keep.txt'), 'utf8'), 'business data');
 });

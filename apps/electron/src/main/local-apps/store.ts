@@ -2,7 +2,7 @@ import { promises as fs, constants, type BigIntStats } from 'node:fs';
 import { join, dirname, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import type { DesktopLocalApp } from '../../shared/localApps.js';
+import type { DesktopLocalApp, DesktopAuthoringRef } from '../../shared/localApps.js';
 import { relativePath } from './manifest.js';
 
 export function appId(value: unknown): string {
@@ -93,8 +93,8 @@ export async function copySource(source: string, destination: string): Promise<v
 }
 
 export interface LocalAppPublishInput {
-  id?: string; name?: string; summary?: string; html?: string; staged_path?: string; source_path?: string;
-  source_session?: DesktopLocalApp['sourceSession']; expectedRevision?: number;
+  id?: string; name?: string; summary?: string; html?: string; staged_path?: string;
+  authoring?: DesktopAuthoringRef; expectedRevision?: number;
 }
 /** Platform execution adapter contract. The Rust library is the production store. */
 export interface LocalAppStore {
@@ -106,6 +106,7 @@ export interface LocalAppStore {
   list(): Promise<DesktopLocalApp[]>;
   save(row: DesktopLocalApp): Promise<void>;
   publish(input: LocalAppPublishInput): Promise<DesktopLocalApp>;
+  bindAuthoring(id: string, authoring: DesktopAuthoringRef): Promise<DesktopAuthoringRef>;
   prepareWorkspace(row: DesktopLocalApp): Promise<string>;
   remove(id: string): Promise<void>;
 }

@@ -54,6 +54,17 @@ test('relocation carries archived metadata to the same UUID in the new directory
   assert.deepEqual(saved.getPublic().archivedSessions, [{ ...before, projectPath: f.target }]);
 });
 
+test('relocation carries Remote Control enablement to the new directory', (t) => {
+  const f = settingsFixture(t);
+  const other = { projectPath: f.old, sessionId: otherId };
+  f.settings.setRemoteSession(f.ref, true);
+  f.settings.setRemoteSession(other, true);
+  f.settings.relocateSession(f.ref, f.target);
+  const saved = new SettingsStore(f.userData);
+  assert.equal(saved.isRemoteSession(sessionId), true);
+  assert.deepEqual(saved.getRemoteSessions(), [f.moved, other]);
+});
+
 test('relocation carries a volatile draft without overwriting the last durable session', (t) => {
   const f = settingsFixture(t);
   f.settings.setActiveSession({ projectPath: f.old, sessionId: otherId });

@@ -35,6 +35,7 @@ uniffi = [
     "dep:platform-posix-minimal",
     "dep:tokio",
     "dep:orchestrator",
+    "dep:remote-control-client",
     "dep:tool-api",
     # P4-T11: the on-device `android_git_probe` export builds a
     # `BuiltinToolContext` via tool-api's test-support stubs (the git ops use
@@ -67,6 +68,8 @@ async-trait = { workspace = true, optional = true }
 client = { workspace = true, optional = true }
 platform-posix-minimal = { workspace = true, optional = true }
 orchestrator = { workspace = true, optional = true }
+# Remote Control viewer client (`lingxi-rc/1`), exposed to the app by `src/remote.rs`.
+remote-control-client = { path = "../../../packages/remote-control-client", optional = true, features = ["webrtc"] }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 # P3-T5: the `AndroidShellToolCtx` carrier type assigned onto `MobileConfig`
 # (the Shell-tool registration gate result). Optional + pulled under `uniffi` so
@@ -82,6 +85,8 @@ tool-git-mobile = { workspace = true }
 # F3-04: a sandboxed cwd/claude_home root for the handle-host tests (the host
 # fake `Platform` is rooted at a temp dir).
 tempfile = "3"
+# `remote.rs` tests drive the client on paused time against the crate's fake desktop.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

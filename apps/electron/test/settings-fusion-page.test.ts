@@ -1,4 +1,5 @@
-import { test } from 'node:test';
+import { currentLocale, translate } from '../src/renderer/i18n/locale';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { ModelDetailsDto } from '@lingxi/bridge-client';
@@ -11,6 +12,16 @@ import {
 } from '../src/renderer/components/settings/pages/Fusion';
 import { SETTINGS_NAV } from '../src/renderer/components/settings/nav';
 import { PAGE_CONTENT } from '../src/renderer/components/settings/SettingsScreen';
+
+
+const originalLanguageStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+before(() => Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true, value: { getItem: () => 'zh-Hans' },
+}));
+after(() => {
+  if (originalLanguageStorage) Object.defineProperty(globalThis, 'localStorage', originalLanguageStorage);
+  else Reflect.deleteProperty(globalThis, 'localStorage');
+});
 
 function model(id: string, overrides: Partial<ModelDetailsDto> = {}): ModelDetailsDto {
   return {
@@ -58,13 +69,13 @@ test('a one-model roster reports as missing, not as a small roster', () => {
     panelModels: [{ profile: 'anthropic', model: 'claude-opus-5' }],
     analystModel: { profile: 'openai', model: 'gpt-5.6-terra' },
   });
-  assert.deepEqual(missingRoles(roles), ['panel 模型']);
+  assert.deepEqual(missingRoles(roles), [translate('settings_parity_panel_models', currentLocale())]);
 });
 
 test('an empty fusion object reports every role missing, in engine order', () => {
   assert.deepEqual(
     missingRoles(rolesFromFusionObject({})),
-    ['panel 模型', 'analyst 模型'],
+    [translate('settings_parity_panel_models', currentLocale()), translate('settings_parity_analyst', currentLocale())],
   );
 });
 

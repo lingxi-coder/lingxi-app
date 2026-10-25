@@ -1,5 +1,9 @@
 import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
 import { CH_APPLICATION_ICON } from '../shared/applicationIcon.js';
+import { CH_COMPUTER_SETTINGS } from '../shared/computerSettings.js';
+import type { ComputerSettingsStore } from './computerSettings.js';
+import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
+import { nativeTr, setNativeLocale } from '../shared/nativeLocale.js';
 import { applicationIcon } from './applicationIcon.js';
 import type { AccountService } from './account.js';
 import { RealtimeAudioController } from './audio/realtimeAudioController.js';
@@ -9,6 +13,7 @@ import type { ScheduledTaskService } from './scheduled.js';
 import type { HostNotifier } from './notifications.js';
 import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
+import type { RemoteControlUi } from './remoteControl/rendererIpc.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
 import {
@@ -51,6 +56,7 @@ import { CH_SESSION_WORKSPACE, sessionCatalogScope, type SessionCatalogRow, type
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
 import {
+  readProviderEnvironmentCredential,
   resolveCodexOAuthSession,
   resolveProviderTestCredential,
   type CredentialBrokerStatus,
@@ -87,6 +93,8 @@ export interface CredentialMetadata {
   credentialPreview?: string;
   /** The running engine received a credential from an external runtime source. */
   runtimeOnly?: true;
+  /** An explicit process environment key currently overrides secure storage. */
+  environmentOverride?: true;
   /** Display-safe reason why the signed credential broker is unavailable. */
   storageError?: string;
   /**
@@ -331,10 +339,10 @@ const workspaceDialogs: WorkspaceDialogs = {
     return result.canceled ? undefined : result.filePaths[0];
   },
   async trustDirectory(directory) {
-    const result = await dialog.showMessageBox({ type: 'question', title: 'Trust directory',
-      message: `Do you trust the files in ${directory}?`,
-      detail: 'This chat will use this directory’s settings, hooks, MCP servers, skills and memory.',
-      buttons: ['Cancel', 'Trust and continue'], defaultId: 0, cancelId: 0, noLink: true });
+    const result = await dialog.showMessageBox({ type: 'question', title: nativeTr('native_trust_title'),
+      message: nativeTr('native_trust_message', directory),
+      detail: nativeTr('native_trust_detail'),
+      buttons: [nativeTr('common_cancel'), nativeTr('native_trust_continue')], defaultId: 0, cancelId: 0, noLink: true });
     return result.response === 1;
   },
 };
@@ -392,6 +400,8 @@ function workspaceRecovery(workspace: string, error: unknown): NonNullable<Works
 export class HostController {
   private git?: GitService;
   private offGit?: () => void;
+  private remoteControlUi?: RemoteControlUi;
+  private remoteControlChannels: string[] = [];
   private readonly gitWatches = new Map<WebContents, Map<string, Promise<() => void>>>();
   private terminals?: TerminalManager;
   private offTerminals?: () => void;
@@ -417,6 +427,8 @@ export class HostController {
   private codexAccountEmail: string | undefined;
   private credentialStatusPromise?: Promise<void>;
   private credentialStatusCacheExpiresAt = 0;
+  private credentialStatusGeneration = 0;
+  private readonly credentialMutations = new Map<string, Promise<unknown>>();
   private offNativeAudio?: () => void;
   private scheduled?: ScheduledTaskService;
   private notifier?: HostNotifier;
@@ -453,6 +465,32 @@ export class HostController {
   }
 
   attachScheduled(service: ScheduledTaskService): void { this.scheduled = service; }
+
+  private computerSettings?: ComputerSettingsStore;
+  attachComputerSettings(service: ComputerSettingsStore): void { this.computerSettings = service; }
+
+  /** The Remote Control settings page's handlers; registered with the rest by `registerIpc`. */
+  attachRemoteControl(ui: RemoteControlUi): void {
+    this.remoteControlUi = ui;
+    if (this.registered) this.registerRemoteControlIpc();
+  }
+
+  /** Send to every window of the app that is still alive. */
+  sendToWindows(channel: string, payload: unknown): void {
+    for (const target of this.targets.keys()) if (!target.isDestroyed()) target.send(channel, payload);
+  }
+
+  private registerRemoteControlIpc(): void {
+    const ui = this.remoteControlUi;
+    if (!ui || this.remoteControlChannels.length > 0) return;
+    for (const [channel, handler] of Object.entries(ui.handlers())) {
+      this.ipc.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+        this.assertSender(event);
+        return handler(...args);
+      });
+      this.remoteControlChannels.push(channel);
+    }
+  }
 
   /**
    * The notifier holds ARMED TIMERS, so it cannot poll the settings store —
@@ -557,12 +595,20 @@ export class HostController {
     if (this.registered) return;
     this.registered = true;
     this.bridge.registerIpc();
+    this.ipc.handle(CH_COMPUTER_SETTINGS, async (event: IpcMainInvokeEvent, command: unknown) => {
+      this.assertSender(event);
+      if (!this.computerSettings) throw new Error('Computer settings are unavailable');
+      const result = await this.computerSettings.execute(command, () => this.assertSender(event));
+      this.assertSender(event);
+      return result;
+    });
     this.ipc.handle(CH_APPLICATION_ICON, async (event: IpcMainInvokeEvent, bundleId: unknown) => {
       this.assertSender(event);
       const icon = await applicationIcon(bundleId);
       this.assertSender(event);
       return icon;
     });
+    this.registerRemoteControlIpc();
     this.ipc.handle(CH_ACCOUNT, (event: IpcMainInvokeEvent, command: unknown) => {
       this.assertSender(event);
       if (!this.account) throw new Error('Account service is unavailable');
@@ -1011,10 +1057,9 @@ export class HostController {
       const provider = await this.requireCredentialProvider(providerId);
       if (provider.id === CODEX_PROVIDER_ID) throw new Error('请使用 Codex 账号登录。');
       if (typeof credential !== 'string') throw new Error('invalid credential');
-      this.assertNoActiveTurn();
-      const credentialMetadata = this.credentialBroker
-        ? await this.setCredentialThroughBroker(provider.id, credential)
-        : await this.setCredentialThroughRuntime(provider.id, credential);
+      const credentialMetadata = await this.enqueueCredentialMutation(provider.id, () => this.credentialBroker
+        ? this.setCredentialThroughBroker(provider.id, credential)
+        : this.setCredentialThroughRuntime(provider.id, credential));
       return { credential: credentialMetadata, settings: this.settings.getPublic() };
     });
     this.ipc.handle(CH_CODEX_LOGIN, async (event: IpcMainInvokeEvent) => {
@@ -1053,8 +1098,8 @@ export class HostController {
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
       this.assertSender(event);
       const provider = await this.requireCredentialProvider(providerId);
-      this.assertNoActiveTurn();
       if (provider.id === CODEX_PROVIDER_ID) {
+        this.assertNoActiveTurn();
         this.codexLoginAbort?.abort();
         if (!this.credentialBroker) throw new Error('Codex 安全凭据存储不可用。');
         await this.requireCodexTokens().signOut();
@@ -1064,12 +1109,14 @@ export class HostController {
         this.bridge.invalidateLaunchConfigCache();
         return this.providerCredentialMetadata(CODEX_PROVIDER_ID);
       }
-      if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
-      else {
-        this.requireWorkspace();
-        await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
-        this.bridge.invalidateLaunchConfigCache();
-      }
+      await this.enqueueCredentialMutation(provider.id, async () => {
+        if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
+        else {
+          this.requireWorkspace();
+          await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
+          this.bridge.invalidateLaunchConfigCache();
+        }
+      });
       return this.providerCredentialMetadata(provider.id);
     });
     this.ipc.handle(CH_PROVIDER_CONNECTION_TEST, async (
@@ -1197,10 +1244,15 @@ export class HostController {
       this.assertSender(event);
       clipboard.writeText(validateClipboardText(text));
     });
+    this.ipc.handle(CH_INTERFACE_LOCALE, (event: IpcMainInvokeEvent, locale: unknown, followSystem: unknown) => {
+      this.assertSender(event);
+      if (typeof followSystem !== 'boolean') throw new TypeError('Invalid interface language preference');
+      setNativeLocale(locale, followSystem);
+    });
     this.ipc.handle(CH_DIAGNOSTICS_EXPORT, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       const result = await dialog.showSaveDialog({
-        title: 'Export sanitized LingXi diagnostics',
+        title: nativeTr('native_export_diagnostics'),
         defaultPath: `LingXi-Code-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
         filters: [{ name: 'JSON', extensions: ['json'] }],
       });
@@ -1454,6 +1506,7 @@ export class HostController {
       const codexEmail = providerId === CODEX_PROVIDER_ID && this.codexAccountEmail
         ? { codexAccountEmail: this.codexAccountEmail }
         : {};
+      const environmentOverride = readProviderEnvironmentCredential(providerId) ? { environmentOverride: true as const } : {};
       if (persistedProviders.has(providerId)) {
         return {
           providerId,
@@ -1463,6 +1516,7 @@ export class HostController {
             ? { credentialPreview: credentialPreviews[providerId] }
             : {}),
           ...codexEmail,
+          ...environmentOverride,
         };
       }
       if (activeProviders.has(providerId)) {
@@ -1475,6 +1529,7 @@ export class HostController {
             : {}),
           runtimeOnly: true,
           ...codexEmail,
+          ...environmentOverride,
         };
       }
       return {
@@ -1507,11 +1562,13 @@ export class HostController {
 
   private async refreshCredentialBrokerStatusUncached(previewProviderId?: string): Promise<void> {
     if (!this.credentialBroker) return;
+    const generation = this.credentialStatusGeneration;
     const nextConfigured = new Set(
       (await this.credentialBroker.listStatus(this.credentialProviderIds()))
         .filter((entry: CredentialBrokerStatus) => entry.configured)
         .map((entry: CredentialBrokerStatus) => entry.providerId),
     );
+    if (generation !== this.credentialStatusGeneration) return this.refreshCredentialBrokerStatusUncached(previewProviderId);
     this.brokerStorageError = undefined;
     this.brokerConfiguredProviders.clear();
     for (const providerId of nextConfigured) this.brokerConfiguredProviders.add(providerId);
@@ -1531,6 +1588,7 @@ export class HostController {
     }
     if (!previewProviderId || previewProviderId === CODEX_PROVIDER_ID) return;
     const preview = await this.credentialBroker.preview(previewProviderId);
+    if (generation !== this.credentialStatusGeneration) return this.refreshCredentialBrokerStatusUncached(previewProviderId);
     if (!preview.configured) {
       this.brokerConfiguredProviders.delete(previewProviderId);
       this.brokerCredentialPreviews.delete(previewProviderId);
@@ -1542,6 +1600,7 @@ export class HostController {
   }
 
   private invalidateCredentialBrokerStatus(): void {
+    this.credentialStatusGeneration += 1;
     this.credentialStatusCacheExpiresAt = 0;
   }
 
@@ -1565,36 +1624,48 @@ export class HostController {
   private async setCredentialThroughBroker(providerId: string, credential: string): Promise<ProviderCredentialMetadata> {
     const stored = await this.credentialBroker!.set(providerId, credential);
     if (!stored.configured) throw new Error(`provider credential was not persisted (${providerId})`);
-    await this.bridge.refreshCachedProviderCredential(providerId, credential);
     this.bridge.invalidateLaunchConfigCache();
+    const environmentCredential = readProviderEnvironmentCredential(providerId);
     this.brokerStorageError = undefined;
     this.brokerConfiguredProviders.add(providerId);
     this.invalidateCredentialBrokerStatus();
     if (stored.maskedValue) this.brokerCredentialPreviews.set(providerId, stored.maskedValue);
     else this.brokerCredentialPreviews.delete(providerId);
-    // Settings can contain a newly saved custom profile before this engine's
-    // provider registry does. Reassemble the owned session with the saved
-    // configuration, retaining the existing session and active-work guards.
-    if (!providerById(providerId)) await this.restartIfConfigured();
+    await this.bridge.refreshCachedProviderCredential(providerId, environmentCredential ?? credential);
     return {
       providerId,
       configured: true,
       encryptionAvailable: true,
+      ...(environmentCredential ? { environmentOverride: true } : {}),
       ...(stored.maskedValue ? { credentialPreview: stored.maskedValue } : {}),
     };
   }
 
   private async clearCredentialThroughBroker(providerId: string): Promise<void> {
-    await this.bridge.clearCachedProviderCredential(providerId);
     await this.credentialBroker!.delete(providerId);
+    this.bridge.invalidateLaunchConfigCache();
     this.brokerConfiguredProviders.delete(providerId);
     this.brokerCredentialPreviews.delete(providerId);
     this.brokerStorageError = undefined;
     this.invalidateCredentialBrokerStatus();
+    const environmentCredential = readProviderEnvironmentCredential(providerId);
+    if (environmentCredential) await this.bridge.refreshCachedProviderCredential(providerId, environmentCredential);
+    else await this.bridge.clearCachedProviderCredential(providerId);
+  }
+
+  private enqueueCredentialMutation<T>(providerId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.credentialMutations.get(providerId) ?? Promise.resolve();
+    const mutation = previous.catch(() => undefined).then(operation);
+    const completion = mutation.finally(() => {
+      if (this.credentialMutations.get(providerId) === completion) this.credentialMutations.delete(providerId);
+    });
+    this.credentialMutations.set(providerId, completion);
+    return completion;
   }
 
   private credentialProviderIds(): string[] {
-    return [...new Set([...PROVIDER_IDS, ...(this.currentRuntime()?.customProviderIds ?? [])])];
+    const runtime = this.currentRuntime();
+    return [...new Set([...PROVIDER_IDS, ...(runtime?.configuredCredentialIds ?? runtime?.customProviderIds ?? [])])];
   }
 
   private async requireCredentialProvider(providerId: unknown): Promise<{ id: string }> {
@@ -1603,10 +1674,11 @@ export class HostController {
     }
     if (providerById(providerId)) return this.requireProvider(providerId);
     const runtime = this.currentRuntime();
-    if (!runtime?.customProviderIds?.includes(providerId)) {
+    if (!(runtime?.configuredCredentialIds ?? runtime?.customProviderIds)?.includes(providerId)) {
       if (!runtime?.ensureCustomProviderConfigured) throw new Error('unsupported provider');
       await runtime.ensureCustomProviderConfigured(providerId);
-      if (runtime !== this.currentRuntime() || !runtime.customProviderIds.includes(providerId)) throw new Error('unsupported provider');
+      if (runtime !== this.currentRuntime()
+        || !(runtime.configuredCredentialIds ?? runtime.customProviderIds).includes(providerId)) throw new Error('unsupported provider');
     }
     return { id: providerId };
   }
@@ -1947,7 +2019,7 @@ export class HostController {
       this.settings.relocateSession({ projectPath: project, sessionId: ref.sessionId }, source, selection ? {
         catalogProjectPath: catalogProject, scope: selection.scope, transcriptPath: session!.path,
       } : undefined);
-      if (wasArchived) this.settings.setSessionArchived(canonical, false);
+      if (wasArchived) { this.settings.setSessionArchived(canonical, false); this.remoteControlUi?.sessionsChanged(); }
       if (wasArchived) await this.loadProjectSessions(source);
       return this.bootstrap();
     } finally { releaseCopy?.(); }
@@ -1977,6 +2049,7 @@ export class HostController {
           ?? this.catalogs.get(ref.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title;
         if (runtime.hasActiveWork) throw new Error('Wait for active work and pending interactions before archiving this chat.');
         this.settings.setSessionArchived(sourceRef, true, title);
+        this.remoteControlUi?.sessionsChanged();
         await this.terminals?.closeScope(sourceRef);
         await this.bridge.closeSession(sourceRef);
         this.sessionCatalog.invalidate(sourceRef.projectPath);
@@ -2165,6 +2238,10 @@ export class HostController {
     this.account?.dispose();
     this.ipc.removeHandler(CH_ACCOUNT);
     this.ipc.removeHandler(CH_SCHEDULED);
+    for (const channel of this.remoteControlChannels) this.ipc.removeHandler(channel);
+    this.remoteControlChannels = [];
+    this.remoteControlUi?.dispose();
+    this.remoteControlUi = undefined;
     this.codexLoginAbort?.abort();
     this.offTerminals?.();
     this.offGit?.();
@@ -2179,12 +2256,12 @@ export class HostController {
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_SESSION_WORKSPACE,
-      CH_WORKSPACE_FILES_SEARCH,
+      CH_WORKSPACE_FILES_SEARCH, CH_COMPUTER_SETTINGS,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_PROVIDER_CONNECTION_TEST, CH_CODEX_LOGIN, CH_CODEX_CANCEL,
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
-      CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,
+      CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_INTERFACE_LOCALE, CH_OPEN_SYSTEM_SETTINGS,
       CH_REALTIME_AUDIO_COMMAND, CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_OPERATION, CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_FINISH_LISTEN,
     ]) this.ipc.removeHandler(channel);
     this.offNativeAudio?.();

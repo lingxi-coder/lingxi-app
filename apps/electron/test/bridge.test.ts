@@ -3365,3 +3365,31 @@ test('Side Chat envelopes bypass parent turn state and retain independent identi
   client.emit('event', { type: 'side_chat_ended', side_id: 'side-1' });
   assert.equal(runtime.hasActiveWork, false);
 });
+
+test('computer policy failure revokes immediately and stops despite active Side Chats', async () => {
+  const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const calls: string[] = [];
+  const gate = deferred();
+  (runtime as any).restartChain = gate.promise;
+  (runtime as any).revokeComputerAccess = () => { calls.push('revoke'); };
+  (runtime as any).stopBridge = async () => { calls.push('stop'); };
+  (runtime as any).liveSideChats.add('side-1');
+  (runtime as any).pendingSideCreates.add('create-1');
+  const stopped = runtime.stopForComputerPolicyFailure();
+  assert.deepEqual(calls, ['revoke']);
+  gate.resolve();
+  await stopped;
+  assert.deepEqual(calls, ['revoke', 'stop']);
+  assert.equal((runtime as any).state.status, 'error');
+  assert.match((runtime as any).state.message, /Computer permissions/);
+});
+
+test('computer policy failure still tears down when revocation transport has failed', async () => {
+  const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  let stopped = false;
+  (runtime as any).revokeComputerAccess = () => { throw new Error('transport closed'); };
+  (runtime as any).stopBridge = async () => { stopped = true; };
+  await runtime.stopForComputerPolicyFailure();
+  assert.equal(stopped, true);
+  assert.equal((runtime as any).state.status, 'error');
+});

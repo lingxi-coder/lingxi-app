@@ -1,13 +1,11 @@
 import { useMemo, useState } from 'react';
 import { CodeTabs } from '../components/CodeTabs';
+import { HomeScenarios } from '../components/HomeScenarios';
 import {
   IconArrowRight,
   IconCheck,
   IconDocs,
   IconDownload,
-  IconDesktop,
-  IconPhone,
-  IconTerminal,
 } from '../components/Icons';
 import { RouteLink } from '../components/RouteLink';
 import { releaseArtifacts, subscriptionPlans } from '../data/mockData';
@@ -16,24 +14,24 @@ import { formatReleaseBadge, getReleaseStatusMeta, pickRecommendedArtifact } fro
 
 const homeSdks = [
   {
-    name: 'Harness Runtime',
-    Icon: IconDesktop,
+    name: 'LingXi Harness',
+    icon: '/brand/harness.svg',
     package: 'harness-runtime',
     href: '/docs/harness' as const,
     en: 'The foundation for agents. Sessions, tools, permissions, and memory.',
     zh: '构建代理的基础。会话、工具、权限与记忆，一处接入。',
   },
   {
-    name: 'LLM Client',
-    Icon: IconTerminal,
+    name: 'LingXi LLM Client',
+    icon: '/brand/sdk.svg',
     package: 'llm-client',
     href: '/docs/llm-client' as const,
     en: 'Connect your models with a unified Rust client and streaming API.',
     zh: '以统一的 Rust 客户端与流式 API，连接你的模型。',
   },
   {
-    name: 'Mobile Linux',
-    Icon: IconPhone,
+    name: 'LingXi Mobile Linux',
+    icon: '/brand/sdk.svg',
     package: 'mobile-linux-runtime',
     href: '/docs/mobile-linux' as const,
     en: 'Bring a Linux environment into your iOS and Android applications.',
@@ -61,7 +59,7 @@ export function HomePage({ locale }: { locale: Locale; region: Region }) {
         <div className="landing-actions">
           <RouteLink href="/download" className="landing-entry landing-entry-primary">
             <IconDownload width={22} height={22} />
-            <span><strong>{t('Get LingXi', '获取灵犀')}</strong><small>{t('Desktop · Mobile · CLI', '桌面 · 移动端 · CLI')}</small></span>
+            <span><strong>{t('Explore downloads', '查看下载选项')}</strong><small>{t('Platform versions & availability', '各平台版本与开放状态')}</small></span>
             <IconArrowRight width={17} height={17} />
           </RouteLink>
           <RouteLink href="/docs" className="landing-entry">
@@ -73,6 +71,8 @@ export function HomePage({ locale }: { locale: Locale; region: Region }) {
         <div className="landing-platforms"><span>{t('On the devices you use every day', '在你日常使用的设备上')}</span><span>macOS · Windows · Linux · iOS · Android</span></div>
       </section>
 
+      <HomeScenarios locale={locale} />
+
       <section className="landing-sdks" aria-labelledby="landing-sdk-title">
         <div className="landing-sdk-heading">
           <div><span className="landing-eyebrow">{t('For developers', '面向开发者')}</span><h2 id="landing-sdk-title">{t('Build with LingXi.', '将灵犀融入你的应用。')}</h2></div>
@@ -81,7 +81,7 @@ export function HomePage({ locale }: { locale: Locale; region: Region }) {
         <div className="landing-sdk-grid">
           {homeSdks.map((sdk, index) => (
             <RouteLink href={sdk.href} className="landing-sdk" key={sdk.package}>
-              <div className="landing-sdk-top"><span className="landing-sdk-icon"><sdk.Icon width={23} height={23} /></span><span className="landing-sdk-number">0{index + 1}</span><IconArrowRight width={18} height={18} /></div>
+              <div className="landing-sdk-top"><span className="landing-sdk-icon"><img src={sdk.icon} width={44} height={44} alt="" /></span><span className="landing-sdk-number">0{index + 1}</span><IconArrowRight width={18} height={18} /></div>
               <h3>{sdk.name}</h3>
               <p>{locale === 'zh' ? sdk.zh : sdk.en}</p>
               <span className="landing-package">{sdk.package}</span>

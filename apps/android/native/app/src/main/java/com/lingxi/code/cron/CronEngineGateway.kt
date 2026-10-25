@@ -136,7 +136,7 @@ internal class MobileCronEngineGateway(context: Context) : CronEngineGateway {
     ): T {
         val handle = HeadlessEngineFactory.build(appContext, scope)
             ?: throw CronPermanentExecutionException(
-                appContext.getString(R.string.cron_engine_unavailable),
+                com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.cron_engine_unavailable),
             )
         return try {
             block(handle)

@@ -1,3 +1,4 @@
+import { useI18n } from '../i18n/useI18n';
 import type { ReactNode } from 'react';
 import type { ToolRunItem } from '../model/runItem';
 import { Disclosure } from './Disclosure';
@@ -28,15 +29,16 @@ export function AskUserQuestionSummary({ id, rows, open, onToggle, keepMounted, 
   keepMounted?: boolean; renderBody?(body: ReactNode): ReactNode;
 }) {
   const t = useT();
+  const { tr } = useI18n();
   return <section className="ask-question-summary">
     <Disclosure id={id} open={open} onToggle={onToggle} keepMounted={keepMounted}
       buttonClassName="ask-question-summary-trigger"
       buttonStyle={{ color: t.text3, fontSize: 14, fontWeight: 400, opacity: .85, gap: 8, minHeight: 28 }}
-      summary={<><Icon name="question" size={16} /><span>Asked {rows.length} {rows.length === 1 ? 'question' : 'questions'}</span></>}>
+      summary={<><Icon name="question" size={16} /><span>{tr('chat_asked_questions %lld', rows.length)}</span></>}>
       {renderBody(<div className="ask-question-summary-list">
         {rows.map((row, index) => <div className="ask-question-summary-pair" key={index}>
           <p style={{ color: t.text3, opacity: .85 }}>{row.question}</p>
-          <p style={{ color: t.text3, opacity: .5 }}>{row.answer ?? 'No answer provided'}</p>
+          <p style={{ color: t.text3, opacity: .5 }}>{row.answer ?? tr("chat_question_no_answer")}</p>
         </div>)}
       </div>)}
     </Disclosure>

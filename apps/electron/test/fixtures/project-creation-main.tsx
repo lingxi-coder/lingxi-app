@@ -1,8 +1,12 @@
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
 import { createRoot } from 'react-dom/client';
 import { StrictMode } from 'react';
 import type { LocalAppEditRequest } from '../../src/shared/localApps';
 import { App } from '../../src/renderer/App';
 import '../../src/renderer/global.css';
+
+// Test labels are deterministic across developer system languages.
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en');
 
 const projectPath = '/fixture/Existing project';
 const projects = [projectPath];

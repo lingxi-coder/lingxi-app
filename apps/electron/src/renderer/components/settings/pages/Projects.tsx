@@ -1,3 +1,4 @@
+import { tr } from '../../../i18n/locale';
 import { useState } from 'react';
 import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
@@ -65,7 +66,7 @@ export function pinnedSessionRows(settings: { pinnedSessions: PinnedSessionRecor
  * that explains why a visibly present button does nothing — never showed.
  */
 export function removeDisabledReason(activeWork: boolean): string | null {
-  return activeWork ? '该项目有正在运行的会话，无法移除' : null;
+  return activeWork ? tr('desktop_shell_project_running') : null;
 }
 
 /** Element id for {@link removeDisabledReason}'s visible text, so the disabled button can point at it with `aria-describedby`. */
@@ -103,46 +104,46 @@ export function Projects({ bridge }: PageContentProps) {
   const pinnedSessionMeta = (row: PinnedSessionRow) => {
     const catalog = bridge.bootstrap?.projectCatalogs?.[row.projectPath];
     const current = catalog?.sessions.find((session) => session.uuid === row.sessionId);
-    const title = current?.title || row.title || '未命名会话';
-    const metadata = !catalog ? '加载中…' : current ? formatSessionMetadata(current.modified_rfc3339, current.message_count) : '不可用';
+    const title = current?.title || row.title || tr('session_untitled');
+    const metadata = !catalog ? tr('desktop_shell_reading') : current ? formatSessionMetadata(current.modified_rfc3339, current.message_count) : tr('settings_linux_task_unavailable');
     return { title, metadata };
   };
 
   const handleAdd = () => {
     setError(null);
-    void bridge.addProject().catch((cause) => setError(cause instanceof Error ? cause.message : '无法添加项目。'));
+    void bridge.addProject().catch((cause) => setError(cause instanceof Error ? cause.message : tr('desktop_shell_add_project_error')));
   };
   const handleActivate = (path: string) => {
     setError(null);
     setBusyPath(path);
     void bridge.activateProject(path)
-      .catch((cause) => setError(cause instanceof Error ? cause.message : '无法切换项目。'))
+      .catch((cause) => setError(cause instanceof Error ? cause.message : tr('desktop_shell_switch_project_error')))
       .finally(() => setBusyPath((current) => (current === path ? null : current)));
   };
   const handleRemove = (path: string) => {
     setError(null);
     setBusyPath(path);
     void bridge.removeProject(path)
-      .catch((cause) => setError(cause instanceof Error ? cause.message : '无法移除项目。'))
+      .catch((cause) => setError(cause instanceof Error ? cause.message : tr('desktop_shell_remove_project_error')))
       .finally(() => setBusyPath((current) => (current === path ? null : current)));
   };
   const handleUnpin = (row: PinnedSessionRow, title: string) => {
     setError(null);
     void bridge.setSessionPinned({ projectPath: row.projectPath, sessionId: row.sessionId, title }, false)
-      .catch((cause) => setError(cause instanceof Error ? cause.message : '无法取消置顶。'));
+      .catch((cause) => setError(cause instanceof Error ? cause.message : tr('desktop_shell_unpin_error')));
   };
 
   return (
     <>
-      <Card title="项目">
-        <Row title="已添加的项目" desc="Lingxi 只能访问这里列出的项目文件夹。" align="center">
+      <Card title={tr('cron_run_project_label')}>
+        <Row title={tr('desktop_shell_added_projects')} desc={tr('desktop_shell_projects_desc')} align="center">
           <button type="button" onClick={handleAdd} style={ghostButtonStyle(t)}>
-            <Icon name="plus" size={12} stroke={2} /> 添加项目
+            <Icon name="plus" size={12} stroke={2} /> {tr('desktop_chat_add_project')}
           </button>
         </Row>
         {rows.length === 0 && (
           <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>
-            还没有添加项目文件夹。
+            {tr('desktop_shell_no_projects')}
           </div>
         )}
         {rows.map((row) => {
@@ -159,7 +160,7 @@ export function Projects({ bridge }: PageContentProps) {
                   {projectDisplayName(row.path)}
                   {row.active && (
                     <span style={{ fontSize: 10.5, padding: '2px 7px', borderRadius: 5, background: t.surfaceHover, color: t.text3, fontWeight: 600 }}>
-                      当前
+                      {tr('chat_agent_group_current')}
                     </span>
                   )}
                 </span>
@@ -169,7 +170,7 @@ export function Projects({ bridge }: PageContentProps) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                 {!row.active && (
                   <button type="button" disabled={busy} onClick={() => handleActivate(row.path)} style={ghostButtonStyle(t, busy)}>
-                    切换
+                    {tr('desktop_shell_switch')}
                   </button>
                 )}
                 {removeReason && (
@@ -188,7 +189,7 @@ export function Projects({ bridge }: PageContentProps) {
                   onClick={() => handleRemove(row.path)}
                   style={ghostButtonStyle(t, busy || activeWork, true)}
                 >
-                  移除
+                  {tr('settings_parity_remove')}
                 </button>
               </div>
             </Row>
@@ -202,10 +203,10 @@ export function Projects({ bridge }: PageContentProps) {
         </div>
       )}
 
-      <Card title="置顶会话">
+      <Card title={tr('desktop_shell_pinned_chats')}>
         {pinnedRows.length === 0 && (
           <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>
-            还没有置顶的会话。
+            {tr('desktop_shell_no_pinned_chats')}
           </div>
         )}
         {pinnedRows.map((row) => {
@@ -218,7 +219,7 @@ export function Projects({ bridge }: PageContentProps) {
               desc={`${projectDisplayName(row.projectPath)} · ${metadata}`}
             >
               <button type="button" onClick={() => handleUnpin(row, title)} style={ghostButtonStyle(t)}>
-                <Icon name="pin" size={12} stroke={2} /> 取消置顶
+                <Icon name="pin" size={12} stroke={2} /> {tr('drawer_session_unpin')}
               </button>
             </Row>
           );
@@ -230,17 +231,17 @@ export function Projects({ bridge }: PageContentProps) {
           that returns trust for every listed project, so this can't be a
           per-row column above without inventing data the bridge doesn't have. */}
       {workspace?.path && (
-        <Card title="工作区信任">
-          <Row title="当前项目" desc={workspace.path} align="center">
+        <Card title={tr('desktop_shell_workspace_trust')}>
+          <Row title={tr('drawer_current_project_a11y')} desc={workspace.path} align="center">
             <span style={{
               fontSize: 10.5, padding: '2px 7px', borderRadius: 5, fontWeight: 600,
               background: t.surfaceHover, color: workspace.trusted ? t.ok : t.warn,
             }}>
-              {workspace.trusted ? '已信任' : '未信任'}
+              {workspace.trusted ? tr('desktop_shell_trusted') : tr('desktop_shell_untrusted')}
             </span>
           </Row>
           {workspace.fingerprint && (
-            <Row title="指纹" desc="用于检测项目的可执行配置自上次信任决定以来是否发生变化。" align="center">
+            <Row title={tr('desktop_shell_fingerprint')} desc={tr('desktop_shell_fingerprint_desc')} align="center">
               <span className="mono" style={{ fontSize: 11, color: t.text3 }}>{workspace.fingerprint.slice(0, 16)}…</span>
             </Row>
           )}

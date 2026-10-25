@@ -2,11 +2,15 @@ import MobileLinuxNativeSupport
 
 /// Product path profile over the independent SDK's guest conventions.
 enum LXISHGuestPaths {
-    static let home = MobileLinuxNativeSupport.LXISHGuestPaths.home
+    private static var directories: MobileUserDirectories { MobileUserStorage.directories() }
+
+    static var home: String { directories.guestHome }
     static let scratch = MobileLinuxNativeSupport.LXISHGuestPaths.scratch
-    static let workspaceRoot = MobileLinuxNativeSupport.LXISHGuestPaths.workspaceRoot
+    static var workspaceRoot: String { directories.defaultGuestCwd }
 
     static func workspace(_ stableWorkspaceId: String) -> String {
-        MobileLinuxNativeSupport.LXISHGuestPaths.workspace(stableWorkspaceId)
+        if stableWorkspaceId == "projects" { return directories.projectsGuestPath }
+        if stableWorkspaceId.isEmpty { return directories.defaultGuestCwd }
+        return directories.defaultGuestCwd + "/" + stableWorkspaceId
     }
 }

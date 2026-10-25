@@ -53,8 +53,48 @@ pub(crate) fn user_text_lines(body: &str, theme: &Theme) -> Vec<StyledLine> {
     if body.is_empty() {
         Vec::new()
     } else {
-        vec![StyledLine::plain(format!("> {body}"))]
+        if let Some((text, label)) = cross_session_message(body) {
+            let mut lines = colored_lines(&label, theme.dim);
+            lines.push(StyledLine::plain(format!("> {text}")));
+            lines
+        } else {
+            vec![StyledLine::plain(format!("> {body}"))]
+        }
     }
+}
+
+/// Project a complete peer envelope without changing the stored prompt.
+fn cross_session_message(body: &str) -> Option<(&str, String)> {
+    let wrapped = body.trim().strip_prefix("<cross-session-message")?;
+    if !wrapped.starts_with('>') && !wrapped.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (attrs, rest) = wrapped.split_once('>')?;
+    let text = rest.strip_suffix("</cross-session-message>")?.trim();
+    let attribute = |name: &str| -> Option<String> {
+        let key = format!("{name}=\"");
+        let start = attrs
+            .match_indices(&key)
+            .find(|(i, _)| *i == 0 || attrs[..*i].ends_with(char::is_whitespace))?
+            .0;
+        let value = attrs[start + key.len()..].split_once('"')?.0;
+        let decoded = value
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        let decoded = decoded.trim();
+        (!decoded.is_empty()).then(|| decoded.to_string())
+    };
+    let sender = attribute("from-name")
+        .or_else(|| attribute("from"))
+        .or_else(|| attribute("from-session"));
+    let label = sender.map_or_else(
+        || "来自其他会话".to_string(),
+        |name| format!("来自其他会话 · {name}"),
+    );
+    Some((text, label))
 }
 
 /// Markdown-render the assistant body, prefixing the first line with the
@@ -789,6 +829,21 @@ mod tests {
         let cell = UserTextCell::new("hello".to_string());
         assert_eq!(plain(&cell), vec!["> hello".to_string()]);
         assert_eq!(cell.body(), "hello");
+    }
+
+    #[test]
+    fn peer_source_precedes_body_without_modifying_stored_prompt() {
+        let body = "<cross-session-message from=\"session-a\" from-name=\"设计 &amp; 开发\">\n第一行🙂\n正文\n</cross-session-message>";
+        let cell = UserTextCell::new(body.to_string());
+        let lines = plain(&cell);
+        assert_eq!(lines[0], "来自其他会话 · 设计 & 开发");
+        assert!(lines[1].starts_with("> 第一行🙂"));
+        assert_eq!(cell.body(), body);
+        assert!(cross_session_message(
+            "Example: <cross-session-message>hi</cross-session-message>"
+        )
+        .is_none());
+        assert!(cross_session_message("<cross-session-message>incomplete").is_none());
     }
 
     #[test]

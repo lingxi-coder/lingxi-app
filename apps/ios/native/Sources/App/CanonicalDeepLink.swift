@@ -13,7 +13,7 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
     }
 
     func needsContextRebind(workspace: String, mode: String) -> Bool {
-        guard !["session", "new", "project", "market", "apps"].contains(parts[0]) else { return false }
+        guard !["session", "new", "project", "market", "apps", "remote"].contains(parts[0]) else { return false }
         return params["workspace"].map { $0 != workspace } == true
             || params["mode"].map { $0 != mode } == true
     }
@@ -50,19 +50,32 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
             || (parts.count == 3 && parts[0] == "cron" && ["job", "run"].contains(parts[1]))
             || (parts.count == 3 && parts[0] == "runtime" && ["agent", "task", "plan", "review", "activity"].contains(parts[1]))
             || (parts.count == 2 && parts[0] == "import" && ["mcp", "plugin", "skill", "provider"].contains(parts[1]))
-        guard valid else { return nil }
+        guard valid || (parts.count == 3 && parts[0] == "remote") else { return nil }
         var params: [String: String] = [:]
         for item in components.queryItems ?? [] {
-            guard ["workspace", "message", "mode", "scope"].contains(item.name), params[item.name] == nil,
+            guard ["workspace", "message", "mode", "scope", "review", "runId", "revision"].contains(item.name), params[item.name] == nil,
                   let value = item.value, !value.isEmpty, value.count <= 512,
                   !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { return nil }
             params[item.name] = value
+        }
+        if let review = params["review"] {
+            guard parts[0] == "apps", review == "agent" else { return nil }
+        }
+        if let runID = params["runId"] {
+            guard parts[0] == "apps", params["review"] == "agent",
+                  !runID.isEmpty, runID.utf8.count <= 128,
+                  !runID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+                  let revision = params["revision"], let value = UInt64(revision), value > 0,
+                  String(value) == revision else { return nil }
+        } else if params["revision"] != nil {
+            return nil
         }
         guard params["mode"].map({ ["chat", "code"].contains($0) }) ?? true else { return nil }
         if let message = params["message"] {
             guard parts[0] == "session", message.range(of: "^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil else { return nil }
         }
         if let message = params["message"] { params["message"] = message.lowercased() }
+        if parts.first == "remote", !params.isEmpty { return nil }
         var payloadJSON: String?
         if let fragment = components.percentEncodedFragment, !fragment.isEmpty {
             guard ["new", "terminal", "import"].contains(parts[0]),

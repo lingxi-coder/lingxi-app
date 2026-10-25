@@ -15,6 +15,7 @@ struct CronScope: Identifiable, Hashable, Codable, Sendable {
     let guestWorkspacePath: String?
 
     var id: String { scopeID }
+    var displayName: String { projectID == nil ? String(localized: "common_none") : projectName }
 
     static func global(appSandboxRoot: String) -> CronScope {
         CronScope(
@@ -29,16 +30,22 @@ struct CronScope: Identifiable, Hashable, Codable, Sendable {
 
 enum CronTaskStatus: String, Codable, CaseIterable, Sendable {
     case active, paused, completed
-    var label: String { rawValue.capitalized }
+    var label: String {
+        switch self {
+        case .active: String(localized: "cron_task_status_active")
+        case .paused: String(localized: "chat_status_paused")
+        case .completed: String(localized: "chat_status_completed")
+        }
+    }
 }
 
 enum CronRunMode: String, Codable, CaseIterable, Sendable {
     case newSession = "new_session", selectedSession = "selected_session", taskSession = "task_session"
     var label: String {
         switch self {
-        case .newSession: return "New chat each run"
-        case .selectedSession: return "Selected chat"
-        case .taskSession: return "Task chat"
+        case .newSession: return String(localized: "cron_run_mode_new_chat")
+        case .selectedSession: return String(localized: "cron_run_mode_selected_chat")
+        case .taskSession: return String(localized: "cron_run_mode_task_chat")
         }
     }
 }
@@ -51,9 +58,9 @@ enum CronNotificationPolicy: String, Codable, CaseIterable, Sendable {
     }
     var label: String {
         switch self {
-        case .all: return "All runs"
-        case .failed: return "Failures only"
-        case .none: return "Off"
+        case .all: return String(localized: "cron_notify_all")
+        case .failed: return String(localized: "cron_notify_failed")
+        case .none: return String(localized: "settings_typescript_lsp_off")
         }
     }
 }
@@ -191,7 +198,7 @@ enum CronRunStatus: String, Codable, CaseIterable, Sendable {
         case .timedOut: return String(localized: "chat_status_timed_out")
         case .cancelled: return String(localized: "chat_status_cancelled")
         case .skipped: return String(localized: "cron_status_skipped")
-        case .interrupted: return "Interrupted"
+        case .interrupted: return String(localized: "chat_result_interrupted")
         }
     }
 }
@@ -615,7 +622,7 @@ extension CronRepositoryState {
         return CronDiagnosticsSnapshot(
             backgroundTaskIdentifier: scheduling.backgroundTaskIdentifier,
             schedulingModeTitle: scheduling.mode.title,
-            activeScopeName: activeScope?.projectName ?? String(localized: "settings_cu_not_selected"),
+            activeScopeName: activeScope?.displayName ?? String(localized: "settings_cu_not_selected"),
             activeScopeID: activeScope?.scopeID ?? activeScopeID,
             taskCount: taskCount,
             historyCount: historyCount,
@@ -633,8 +640,10 @@ extension CronRepositoryState {
 
 func formatCronEpoch(_ epochMs: UInt64) -> String {
     let date = Date(timeIntervalSince1970: TimeInterval(epochMs) / 1000)
+    let language = Bundle._lxCurrentLanguageID.withLock { $0 }
     return date.formatted(
         .dateTime
+            .locale(language.isEmpty ? .autoupdatingCurrent : Locale(identifier: language))
             .year()
             .month(.twoDigits)
             .day(.twoDigits)

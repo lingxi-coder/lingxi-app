@@ -1,0 +1,33 @@
+<resources>
+    <string name="workspace_browser_title">工作区</string>
+    <string name="workspace_browser_home">用户主目录</string>
+    <string name="workspace_browser_workspace">工作区目录</string>
+    <string name="workspace_browser_current_folder">当前文件夹</string>
+    <string name="workspace_browser_locations">位置</string>
+    <string name="workspace_browser_saved_locations">已保存的位置</string>
+    <string name="workspace_browser_projects">项目</string>
+    <string name="workspace_browser_browse_folders">浏览文件夹</string>
+    <string name="workspace_browser_add_location">添加位置</string>
+    <string name="workspace_browser_use_folder">使用此文件夹</string>
+    <string name="workspace_browser_new_folder">新建文件夹</string>
+    <string name="workspace_browser_rename_folder">重命名文件夹</string>
+    <string name="workspace_browser_delete_folder">删除文件夹</string>
+    <string name="workspace_browser_remove_location">移出列表</string>
+    <string name="workspace_browser_edit_location">编辑位置</string>
+    <string name="workspace_browser_location_name">显示名称</string>
+    <string name="workspace_browser_folder_name">文件夹名称</string>
+    <string name="workspace_browser_path">文件夹路径</string>
+    <string name="workspace_browser_go_to_folder">前往文件夹</string>
+    <string name="workspace_browser_show_hidden">显示隐藏文件</string>
+    <string name="workspace_browser_open">打开</string>
+    <string name="workspace_browser_folder_actions">文件夹操作</string>
+    <string name="workspace_browser_contents">内容</string>
+    <string name="workspace_browser_empty_title">文件夹为空</string>
+    <string name="workspace_browser_delete_warning">永久删除此文件夹及其全部内容？此操作无法撤销。</string>
+    <string name="workspace_browser_edit_location_hint">这里只修改保存的位置名称或路径，不会重命名或移动磁盘上的文件夹。</string>
+    <string name="workspace_browser_operation_failed">无法完成操作</string>
+    <string name="workspace_browser_unavailable">当前会话无法切换工作目录。</string>
+    <string name="workspace_browser_busy">请等待当前回复完成后再修改文件夹。</string>
+    <string name="workspace_browser_session_folders">会话可访问的文件夹</string>
+    <string name="workspace_browser_parent_folder">上一级文件夹</string>
+</resources>

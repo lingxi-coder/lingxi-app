@@ -6,6 +6,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.lingxi.code.R
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.navigation.DeepLink
 import com.lingxi.code.bindings.client.ConfigurationOperationStatusDto
@@ -17,9 +19,12 @@ import org.json.JSONObject
 /** External data is an editable proposal. Only the final confirmation can write configuration. */
 @Composable
 internal fun DeepLinkImportPage(link: DeepLink, bridge: SettingsEngineBridge, onClose: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    fun copy(id: Int, vararg args: Any): String = context.getString(id, *args)
     val state by bridge.state.collectAsState()
     val coroutine = rememberCoroutineScope()
     val kind = link.route.substringAfter('/')
+    val kindLabel = settingsLabel(when (kind) { "mcp" -> "MCP servers"; "plugin" -> "Plugins & marketplace"; "skill" -> "Skills"; else -> "Custom providers & routing" })
     var draft by remember(link) { mutableStateOf(JSONObject(link.payload).toString(2)) }
     var scope by remember(link) { mutableStateOf(link.params["scope"] ?: "user") }
     var reviewed by remember(link, state.generation) { mutableStateOf<String?>(null) }
@@ -52,23 +57,23 @@ internal fun DeepLinkImportPage(link: DeepLink, bridge: SettingsEngineBridge, on
     }
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            TextButton(onClick = onClose) { Text(if (applied) "Done" else "Cancel import") }
-            Text("Import $kind", style = MaterialTheme.typography.headlineSmall)
-            Text("Review the source and destination. Links cannot supply credentials. Imported commands, skills and plugins may access your workspace when enabled.")
+            TextButton(onClick = onClose) { Text(stringResource(if (applied) R.string.common_done else R.string.settings_link_import_cancel)) }
+            Text(stringResource(R.string.settings_link_import_title_fmt, kindLabel), style = MaterialTheme.typography.headlineSmall)
+            Text(stringResource(R.string.settings_link_import_intro))
             SingleChoiceRow(if (kind == "skill") listOf("user", "project") else listOf("user", "project", "local"), scope, { scope = it; reviewed = null })
-            OutlinedTextField(draft, { draft = it; reviewed = null }, label = { Text("Import proposal") }, modifier = Modifier.fillMaxWidth(), minLines = 6, readOnly = applied)
+            OutlinedTextField(draft, { draft = it; reviewed = null }, label = { Text(stringResource(R.string.settings_link_import_proposal)) }, modifier = Modifier.fillMaxWidth(), minLines = 6, readOnly = applied)
             Button(enabled = !applied && state.connected && state.pending == null && !state.savingSettings, onClick = {
                 coroutine.launch {
                     runCatching {
                         val parsed = prepareDeepLinkImportProposal(kind, draft, scope)
-                        baseline = currentBaseline() ?: error("Waiting for the engine catalog. Retry preview when connected.")
+                        baseline = currentBaseline() ?: error(copy(R.string.settings_link_import_wait_catalog))
                         revision = when (kind) {
                             "mcp" -> JSONObject(baseline!!).optJSONArray("scopes")?.records()?.firstOrNull { it.optString("scope") == scope }?.optString("revision_sha256")?.takeIf(String::isNotBlank)
                             "plugin" -> JSONObject(baseline!!).optJSONObject("revisions")?.optString(scope)?.takeIf(String::isNotBlank)
                             "skill" -> "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                             else -> null
                         }
-                        if (kind in setOf("mcp", "plugin")) check(revision != null) { "Waiting for this scope configuration. Retry preview when loaded." }
+                        if (kind in setOf("mcp", "plugin")) check(revision != null) { copy(R.string.settings_link_import_wait_scope) }
                         conflicts = when (kind) {
                             "provider" -> {
                                 val existing = JSONObject(state.snapshot?.layersJson ?: "{}").optJSONObject(scope)?.optJSONObject("providers") ?: JSONObject()
@@ -86,29 +91,29 @@ internal fun DeepLinkImportPage(link: DeepLink, bridge: SettingsEngineBridge, on
                         }
                         reviewed = parsed.toString()
                         error = null
-                    }.onFailure { error = it.message ?: "Invalid import proposal."; reviewed = null }
+                    }.onFailure { error = it.message ?: copy(R.string.settings_link_import_invalid); reviewed = null }
                 }
-            }) { Text("Preview import") }
+            }) { Text(stringResource(R.string.settings_parity_import_preview)) }
             if (reviewed != null && !applied) {
-                Text("Destination: $scope · $kind")
-                if (conflicts.isNotEmpty()) Text("Existing definitions will be replaced: " + conflicts.joinToString(", "), color = MaterialTheme.colorScheme.error)
+                Text(stringResource(R.string.settings_link_import_destination_fmt, settingsLabel(scope), kindLabel))
+                if (conflicts.isNotEmpty()) Text(stringResource(R.string.settings_link_import_conflicts_fmt, conflicts.joinToString(", ")), color = MaterialTheme.colorScheme.error)
                 Text(JSONObject(reviewed!!).toString(2))
                 val pluginPreview = state.operation?.takeIf { it.operationId == previewId && it.status == ConfigurationOperationStatusDto.SUCCEEDED }
                 pluginPreview?.detailsJson?.let { Text(it) }
-                Button(enabled = state.pending == null && (kind != "plugin" || pluginPreview != null), onClick = { confirm = true }) { Text("Review and confirm import") }
+                Button(enabled = state.pending == null && (kind != "plugin" || pluginPreview != null), onClick = { confirm = true }) { Text(stringResource(R.string.settings_link_import_review_confirm)) }
             }
-            if (applied) Text("Import saved. Review its configuration before enabling or running it.")
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            if (applied) Text(stringResource(R.string.settings_link_import_saved))
+            error?.let { Text(settingsLabel(it), color = MaterialTheme.colorScheme.error) }
             state.notice?.let { Text(it) }
         }
     }
-    if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Import into $scope?") }, text = { Text("Save the reviewed $kind configuration? No command or prompt will be submitted by this link.") },
+    if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text(stringResource(R.string.settings_link_import_confirm_title_fmt, settingsLabel(scope))) }, text = { Text(stringResource(R.string.settings_link_import_confirm_body_fmt, kindLabel)) },
         confirmButton = { TextButton(onClick = {
             confirm = false
             coroutine.launch {
                 runCatching {
-                    check(baseline == currentBaseline()) { "Configuration changed. Preview the import again." }
-                    val parsed = JSONObject(reviewed ?: error("Preview this import first."))
+                    check(baseline == currentBaseline()) { copy(R.string.settings_link_import_config_changed) }
+                    val parsed = JSONObject(reviewed ?: error(copy(R.string.settings_link_import_preview_first)))
                     when (kind) {
                         "provider" -> {
                             val existing = JSONObject(state.snapshot?.layersJson ?: "{}").optJSONObject(scope)?.optJSONObject("providers") ?: JSONObject()
@@ -118,25 +123,25 @@ internal fun DeepLinkImportPage(link: DeepLink, bridge: SettingsEngineBridge, on
                             val generation = state.generation
                             bridge.update(scope, JSONObject().put("providers", providers))
                             val result = withTimeout(15_000) { bridge.state.first { it.generation != generation || !it.savingSettings } }
-                            check(result.generation == generation) { "Workspace changed. Preview the import again." }
+                            check(result.generation == generation) { copy(R.string.settings_link_import_workspace_changed) }
                             val stored = JSONObject(result.snapshot?.layersJson ?: "{}").optJSONObject(scope)?.optJSONObject("providers")
-                            check(jsonEquivalent(stored, providers)) { "The engine did not confirm this import. Review and retry." }
+                            check(jsonEquivalent(stored, providers)) { copy(R.string.settings_link_import_not_confirmed) }
                         }
                         else -> {
                             val domain = when (kind) { "skill" -> "skills"; "plugin" -> "plugins"; else -> "mcp" }
                             val action = when (kind) { "skill" -> "create_skill"; "plugin" -> "apply_operation"; else -> "save_server" }
                             if (kind == "plugin") parsed.put("confirmed", true)
                             if (kind == "mcp") parsed.put("scope", scope)
-                            val operation = bridge.admin(domain, action, scope = scope, revision = revision, payload = parsed.toString()) ?: error("No import operation returned.")
+                            val operation = bridge.admin(domain, action, scope = scope, revision = revision, payload = parsed.toString()) ?: error(copy(R.string.settings_link_import_no_operation))
                             val result = bridge.awaitOperation(operation)
-                            check(result.status == ConfigurationOperationStatusDto.SUCCEEDED) { result.message ?: "Import failed." }
+                            check(result.status == ConfigurationOperationStatusDto.SUCCEEDED) { result.message ?: copy(R.string.settings_link_import_failed) }
                         }
                     }
                     applied = true
                     error = null
-                }.onFailure { error = it.message ?: "Import failed." }
+                }.onFailure { error = it.message ?: copy(R.string.settings_link_import_failed) }
             }
-        }) { Text("Confirm import") } }, dismissButton = { TextButton(onClick = { confirm = false }) { Text("Keep reviewing") } })
+        }) { Text(stringResource(R.string.settings_link_import_confirm)) } }, dismissButton = { TextButton(onClick = { confirm = false }) { Text(stringResource(R.string.settings_link_import_keep_reviewing)) } })
 }
 
 internal fun prepareDeepLinkImportProposal(kind: String, draft: String, scope: String): JSONObject {

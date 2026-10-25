@@ -2,13 +2,14 @@ import { promises as fs } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { LocalAppAgentSettings } from '../../shared/localAppAgent.js';
-import type { DesktopAppManifest, DesktopLocalApp, LocalAppCapability, LocalAppPhase } from '../../shared/localApps.js';
+import type { DesktopAppManifest, DesktopLocalApp, DesktopAuthoringRef, DesktopAuthoringSourceRef, LocalAppCapability, LocalAppPhase } from '../../shared/localApps.js';
+import { isDesktopAuthoringRef } from '../../shared/localApps.js';
 import { LocalAppStore, appId, atomicJson } from './store.js';
 import type { LocalAppCoreTransport } from './coreClient.js';
 
 export interface AppRecord {
   appId: string; name: string; summary: string; currentRevision: number; latestRevision: number;
-  authoring?: { sourceDirectory: string; sourceSessionId?: string; projectId?: string };
+  authoring?: DesktopAuthoringRef | DesktopAuthoringSourceRef;
   marketOrigin?: { appId: string; releaseId: string; digest: string; remixedFrom?: string };
   executionGrants: string[]; createdAtMs: number; updatedAtMs: number;
 }
@@ -47,7 +48,7 @@ export class CoreLocalAppStore implements LocalAppStore {
     if (record.executionGrants.includes(release.digest)) grants.push('process');
     return { id: record.appId, name: manifest.name, summary: manifest.summary ?? '', revision: release.revision, currentRevision: record.currentRevision,
       releaseDigest: release.digest, marketOrigin: release.marketOrigin ?? record.marketOrigin, manifest, createdAt: record.createdAtMs, updatedAt: record.updatedAtMs,
-      sourcePath: record.authoring?.sourceDirectory, sourceSession: record.authoring?.sourceSessionId ? { projectPath: record.authoring.sourceDirectory, sessionId: record.authoring.sourceSessionId } : undefined,
+      authoring: record.authoring ? structuredClone(record.authoring) : undefined,
       background: prefs.background, grants, agent: prefs.agent, phase: 'stopped' };
   }
   async get(id: string): Promise<DesktopLocalApp> { return this.row(await this.core.request<AppRecord>({ op: 'get', appId: id })); }
@@ -81,12 +82,20 @@ export class CoreLocalAppStore implements LocalAppStore {
     } else throw new Error('Publishing requires html or a staged project');
     try {
       const previous = input.id ? await this.get(input.id) : undefined;
-      const source = previous?.sourcePath ?? input.source_path;
-      const session = previous?.sourceSession ?? input.source_session;
       const result = await this.core.request<{ record: AppRecord; release: AppRelease }>({ op: 'publish', appId: input.id, expectedRevision: input.expectedRevision ?? 0, sourcePath,
-        authoring: source ? { sourceDirectory: source, sourceSessionId: session?.sessionId, projectId: session?.projectPath } : undefined });
+        authoring: previous?.authoring ?? input.authoring });
       return this.row(result.record, result.release);
     } finally { if (temporary) await fs.rm(temporary, { recursive: true, force: true }); }
+  }
+  async bindAuthoring(id: string, authoring: DesktopAuthoringRef): Promise<DesktopAuthoringRef> {
+    const owner = appId(id);
+    if (authoring.appId !== undefined && authoring.appId !== owner) throw new Error('Authoring binding belongs to another application');
+    if (authoring.projectRef.kind !== 'desktopPath' || !authoring.projectRef.path || !authoring.sourceDirectory
+      || !authoring.workspaceId || !authoring.authoringSessionId) throw new Error('Invalid Desktop authoring binding');
+    await this.core.request({ op: 'bindAuthoring', appId: owner, authoring: { ...authoring, appId: owner } });
+    const saved = await this.get(owner);
+    if (!isDesktopAuthoringRef(saved.authoring) || saved.authoring.workspaceId !== authoring.workspaceId || saved.authoring.authoringSessionId !== authoring.authoringSessionId) throw new Error('Authoring binding was not saved');
+    return saved.authoring;
   }
   async assertTarget(row: DesktopLocalApp): Promise<void> {
     const platform = process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';

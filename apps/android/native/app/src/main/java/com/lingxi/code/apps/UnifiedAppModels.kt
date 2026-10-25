@@ -4,8 +4,32 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
 
+/** A host Project reference is platform-specific and never a page-controlled path. */
+data class AppProjectRef(val kind: String, val projectId: String? = null, val path: String? = null) {
+    fun toJson(): JSONObject = when (kind) {
+        "mobileProject" -> JSONObject().put("kind", kind).put("projectId", requireNotNull(projectId))
+        "desktopPath" -> JSONObject().put("kind", kind).put("path", requireNotNull(path))
+        else -> error("Unknown authoring project reference")
+    }
+}
+
 /** Schema-2 identities are independent from market IDs and conversation IDs. */
-data class AppAuthoring(val sourceDirectory: String, val sourceSessionId: String?, val projectId: String?)
+data class AppAuthoring(
+    val sourceDirectory: String,
+    val workspaceId: String?,
+    val projectRef: AppProjectRef?,
+    val authoringSessionId: String?,
+    val appId: String?,
+) {
+    val isComplete: Boolean get() = !workspaceId.isNullOrBlank() && projectRef != null && !authoringSessionId.isNullOrBlank()
+    fun isBoundTo(appId: String, projectId: String, sourceDirectory: String): Boolean =
+        isComplete && this.appId == appId && this.sourceDirectory == sourceDirectory &&
+            projectRef?.let { it.kind == "mobileProject" && it.projectId == projectId } == true &&
+            isCanonicalUuidValue(workspaceId) && isCanonicalUuidValue(projectId) && isCanonicalUuidValue(authoringSessionId)
+}
+internal fun isCanonicalUuidValue(value: String?): Boolean = value?.let {
+    runCatching { java.util.UUID.fromString(it).toString() == it }.getOrDefault(false)
+} == true
 data class AppMarketOrigin(val appId: String, val releaseId: String, val digest: String, val remixedFrom: String? = null)
 data class AppRecord(
     val id: String, val name: String, val summary: String,
@@ -18,21 +42,59 @@ data class AppRelease(val appId: String, val revision: Long, val digest: String,
     val executesCode: Boolean get() = "process" in capabilities || listOf("install", "build", "processes").any { (manifest.optJSONArray(it)?.length() ?: 0) > 0 }
 }
 data class AppRun(val appId: String, val runId: String, val revision: Long, val digest: String, val phase: String, val error: String?, val services: Set<String>)
+data class AppAgentTask(
+    val runId: String,
+    val requestId: String,
+    val state: String,
+    val phase: String?,
+    val progress: JSONObject?,
+    val updatedAt: Long,
+    val usage: JSONObject?,
+    val error: JSONObject?,
+)
 data class AppLaunch(val run: AppRun, val url: String, val origin: String)
-data class AppAuthoringResolution(val action: String, val sourceDirectory: String, val sessionId: String?)
+data class AppAuthoringSessionContext(
+    val workspaceId: String,
+    val sourceDirectory: String,
+    val projectRef: AppProjectRef,
+    val mode: String,
+) {
+    fun toJson(): JSONObject = JSONObject().put("workspaceId", workspaceId)
+        .put("sourceDirectory", sourceDirectory).put("projectRef", projectRef.toJson()).put("mode", mode)
+}
+data class AppAuthoringResolution(val action: String, val sourceDirectory: String, val authoring: AppAuthoring?)
+data class BrowserReviewRequest(val appId: String, val runId: String?)
 data class AppLibraryState(val apps: List<AppRecord> = emptyList(), val loading: Boolean = true, val error: String? = null, val openedRevision: Long = 0)
 class AppServiceException(val code: String, message: String) : Exception(message)
 
 internal fun JSONObject.optionalString(key: String): String? = if (!has(key) || isNull(key)) null else getString(key)
 internal fun JSONArray?.strings(): List<String> = if (this == null) emptyList() else (0 until length()).map(::getString)
+internal fun JSONObject.appAuthoring(): AppAuthoring = AppAuthoring(
+    sourceDirectory = getString("sourceDirectory"),
+    workspaceId = optionalString("workspaceId"),
+    projectRef = optJSONObject("projectRef")?.let { ref ->
+        when (ref.getString("kind")) {
+            "mobileProject" -> AppProjectRef("mobileProject", projectId = ref.getString("projectId"))
+            "desktopPath" -> AppProjectRef("desktopPath", path = ref.getString("path"))
+            else -> error("Unknown authoring project reference")
+        }
+    },
+    authoringSessionId = optionalString("authoringSessionId"),
+    appId = optionalString("appId"),
+)
 internal fun JSONObject.appRecord(): AppRecord = AppRecord(
     getString("appId"), getString("name"), getString("summary"), getLong("currentRevision"), getLong("latestRevision"),
-    optJSONObject("authoring")?.let { AppAuthoring(it.getString("sourceDirectory"), it.optionalString("sourceSessionId"), it.optionalString("projectId")) },
+    optJSONObject("authoring")?.appAuthoring(),
     optJSONObject("marketOrigin")?.let { AppMarketOrigin(it.getString("appId"), it.getString("releaseId"), it.getString("digest"), it.optionalString("remixedFrom")) },
     getInt("originPort"), getJSONArray("executionGrants").strings().toSet(), getLong("updatedAtMs"),
 )
 internal fun JSONObject.appRelease() = AppRelease(getString("appId"), getLong("revision"), getString("digest"), getJSONObject("manifest"),
     optJSONObject("marketOrigin")?.let { AppMarketOrigin(it.getString("appId"), it.getString("releaseId"), it.getString("digest"), it.optionalString("remixedFrom")) })
+internal fun JSONObject.appAgentTask() = AppAgentTask(
+    runId = getString("runId"), requestId = getString("requestId"), state = getString("state"),
+    phase = optionalString("phase"), progress = optJSONObject("progress"), updatedAt = getLong("updatedAt"),
+    usage = optJSONObject("usage"), error = optJSONObject("error"),
+)
 internal fun JSONObject.appRun() = AppRun(getString("appId"), getString("runId"), getLong("revision"), getString("releaseDigest"), getString("phase"), optionalString("error"), getJSONArray("services").let { a -> (0 until a.length()).map { a.getJSONObject(it).getString("name") }.toSet() })
 internal fun decodeAppResponse(raw: String): Any? {
     val result = JSONObject(raw)

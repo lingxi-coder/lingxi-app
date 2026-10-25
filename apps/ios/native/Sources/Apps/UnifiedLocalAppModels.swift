@@ -32,8 +32,108 @@ indirect enum LocalAppJSON: Codable, Equatable, Sendable {
 
 struct LocalAppAuthoring: Codable, Equatable, Sendable {
     var sourceDirectory: String
-    var sourceSessionId: String?
-    var projectId: String?
+    var workspaceId: String? = nil
+    var projectRef: ProjectRef? = nil
+    var authoringSessionId: String? = nil
+    var appId: String? = nil
+}
+struct LocalAppAuthoringSessionBinding: Encodable, Sendable {
+    let workspaceId: String
+    let sourceDirectory: String
+    let projectRef: ProjectRef
+    let mode: String
+}
+
+enum LocalAppAuthoringHostRequest {
+    static func registerPending(_ authoring: LocalAppAuthoring) throws -> [String: LocalAppJSON] {
+        guard authoring.appId == nil,
+              let workspaceID = authoring.workspaceId, !workspaceID.isEmpty,
+              case .mobileProject(let projectID)? = authoring.projectRef,
+              projectID == workspaceID,
+              let sessionID = authoring.authoringSessionId, !sessionID.isEmpty,
+              !authoring.sourceDirectory.isEmpty else {
+            throw LocalAppServiceFailure("INVALID_AUTHORING", "The new app authoring workspace is incomplete.")
+        }
+        return [
+            "op": .string("registerAuthoring"),
+            "authoring": try .encode(authoring)
+        ]
+    }
+}
+
+enum ProjectRef: Codable, Equatable, Sendable {
+    case desktopPath(String)
+    case mobileProject(String)
+
+    private enum CodingKeys: String, CodingKey { case kind, path, projectId }
+    private enum Kind: String, Codable { case desktopPath, mobileProject }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        switch try values.decode(Kind.self, forKey: .kind) {
+        case .desktopPath: self = .desktopPath(try values.decode(String.self, forKey: .path))
+        case .mobileProject: self = .mobileProject(try values.decode(String.self, forKey: .projectId))
+        }
+    }
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .desktopPath(let path):
+            try values.encode(Kind.desktopPath, forKey: .kind)
+            try values.encode(path, forKey: .path)
+        case .mobileProject(let projectID):
+            try values.encode(Kind.mobileProject, forKey: .kind)
+            try values.encode(projectID, forKey: .projectId)
+        }
+    }
+}
+struct LocalAppAgentWakeRequest: Equatable, Sendable {
+    let appID: String
+    let revision: UInt64
+    let runID: String
+}
+struct LocalAppAgentTaskProgress: Decodable, Equatable, Sendable {
+    let completedModelTurns: UInt64
+    let turnLimit: UInt64
+}
+struct LocalAppAgentTaskSummary: Decodable, Identifiable, Equatable, Sendable {
+    let runId: String
+    let requestId: String
+    let state: String
+    let sequence: UInt64
+    let createdAt: UInt64
+    let phase: String?
+    let progress: LocalAppAgentTaskProgress?
+    let limits: Limits
+    let result: Result?
+    let error: Failure?
+    struct Limits: Decodable, Equatable, Sendable {
+        let timeoutMs: UInt64
+        let maxTurns: UInt64
+    }
+    struct Result: Decodable, Equatable, Sendable {
+        let text: String
+        let output: LocalAppJSON?
+        let attachments: [LocalAppJSON]
+        let chatId: String?
+        let messageId: String?
+    }
+    struct Failure: Decodable, Equatable, Sendable {
+        let code: String
+        let message: String
+    }
+    var id: String { runId }
+    var isTerminal: Bool { ["succeeded", "failed", "cancelled", "interrupted"].contains(state) }
+}
+struct LocalAppAgentTaskListResponse: Decodable, Sendable {
+    let appId: String
+    let revision: UInt64
+    let tasks: [LocalAppAgentTaskSummary]
+}
+struct LocalAppWakeReservation: Decodable, Sendable {
+    let appId: String
+    let revision: UInt64
+    let runId: String
+    let expiresAtMs: UInt64
 }
 struct LocalAppMarketOrigin: Codable, Equatable, Sendable {
     let appId: String
@@ -112,7 +212,12 @@ struct UnifiedAppRun: Codable, Equatable, Identifiable, Sendable {
 struct LocalAppLaunch: Decodable, Sendable { let run: UnifiedAppRun; let url: URL; let origin: String }
 struct LocalAppRuntimeStatus: Decodable, Sendable { let run: UnifiedAppRun?; let preparingRun: UnifiedAppRun? }
 struct LocalAppPublishResult: Decodable, Sendable { let record: UnifiedAppRecord; let release: UnifiedAppRelease }
-struct LocalAppAuthoringResolution: Decodable, Sendable { let action: String; let sourceDirectory: String; let sessionId: String? }
+struct LocalAppAuthoringResolution: Decodable, Sendable {
+    let action: String
+    let sourceDirectory: String
+    let authoring: LocalAppAuthoring?
+    let authoringSessionId: String?
+}
 struct LocalAppLegacyArchive: Decodable, Identifiable, Sendable { var id: String { path }; let path: String; let kind: String; let status: String }
 struct LocalAppLayout: Decodable, Sendable { let sourcePath: String; let dataPath: String; let releasesPath: String; let runsPath: String }
 struct LocalAppServiceFailure: Error, LocalizedError, Codable, Sendable {

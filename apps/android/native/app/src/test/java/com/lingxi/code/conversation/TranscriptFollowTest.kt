@@ -83,4 +83,93 @@ class TranscriptFollowTest {
             atBottom(totalItemsCount = 3, lastVisibleIndex = null, lastVisibleEndOffset = null, canScrollForward = true),
         )
     }
+
+    @Test fun offscreenZeroHeightAnchorStillAllowsRejoiningInsideTheTailBand() {
+        assertTrue(TranscriptFollow.isAtBottom(
+            totalItemsCount = 6, lastVisibleIndex = 4, lastVisibleEndOffset = viewportEnd + 16,
+            viewportEndOffset = viewportEnd, slackPx = slack, hasBottomAnchor = true,
+            afterContentPadding = 8,
+        ))
+        assertFalse(TranscriptFollow.isAtBottom(
+            totalItemsCount = 6, lastVisibleIndex = 4, lastVisibleEndOffset = viewportEnd + 17,
+            viewportEndOffset = viewportEnd, slackPx = slack, hasBottomAnchor = true,
+            afterContentPadding = 8,
+        ))
+    }
+
+    @Test fun streamingGrowthAndKeyboardResizePreserveFollowingIntent() {
+        val follow = TranscriptFollowState()
+        assertTrue(follow.measured(atBottom = false, scrolling = false).shouldPin(scrolling = false))
+        assertTrue(follow.measured(atBottom = true, scrolling = false).followsLatest)
+    }
+
+    @Test fun layoutGrowthAndCollapseNeverReattachAHistoryReader() {
+        val reading = TranscriptFollowState().navigateToMessage()
+        assertFalse(reading.measured(atBottom = false, scrolling = false).followsLatest)
+        assertFalse(reading.measured(atBottom = true, scrolling = false).followsLatest)
+    }
+
+    @Test fun holdingTheTranscriptSuspendsCorrectionsWithoutDetaching() {
+        val held = TranscriptFollowState().pointerDown()
+        assertTrue(held.followsLatest)
+        assertFalse(held.shouldPin(scrolling = false))
+        assertTrue(held.pointerUp().shouldPin(scrolling = false))
+    }
+
+    @Test fun scrollingTowardHistoryCancelsFollowingThroughTheFling() {
+        val dragging = TranscriptFollowState().pointerDown().userScroll(deltaY = 80f)
+        assertFalse(dragging.followsLatest)
+        val flinging = dragging.pointerUp().measured(atBottom = false, scrolling = true)
+        assertFalse(flinging.shouldPin(scrolling = true))
+        val stopped = flinging.measured(atBottom = false, scrolling = false)
+        assertFalse(stopped.followsLatest)
+        assertFalse(stopped.measured(atBottom = true, scrolling = false).followsLatest)
+    }
+
+    @Test fun scrollingBackIntoTheTailBandRejoinsAfterInteraction() {
+        val dragging = TranscriptFollowState().navigateToMessage().pointerDown().userScroll(deltaY = -80f)
+        assertFalse(dragging.measured(atBottom = true, scrolling = true).shouldPin(scrolling = true))
+        val stopped = dragging.pointerUp().measured(atBottom = true, scrolling = false)
+        assertTrue(stopped.shouldPin(scrolling = false))
+    }
+
+    @Test fun sendAndJumpResumeEvenWhenTheLayoutHasNotChanged() {
+        val reading = TranscriptFollowState().navigateToMessage()
+        assertTrue(reading.resume().shouldPin(scrolling = false))
+        assertFalse(reading.resume().navigateToMessage().followsLatest)
+    }
+
+    @Test fun sendDuringMomentumCannotBeUndoneByTheOlderGestureSettling() {
+        val flinging = TranscriptFollowState().userScroll(80f)
+        val sent = flinging.resume().measured(atBottom = false, scrolling = true)
+        assertTrue(sent.followsLatest)
+        assertTrue(sent.shouldPin(scrolling = true))
+        assertFalse(sent.resumeHandled().shouldPin(scrolling = true))
+        assertTrue(sent.measured(atBottom = false, scrolling = false).shouldPin(scrolling = false))
+    }
+
+    @Test fun freshFingerDragCancelsAnExplicitJumpBeforeItExecutes() {
+        val requested = TranscriptFollowState().navigateToMessage().resume().pointerDown()
+        assertFalse(requested.shouldPin(scrolling = true))
+        val reading = requested.userScroll(40f).pointerUp()
+        assertFalse(reading.shouldPin(scrolling = false))
+        assertFalse(reading.explicitResume)
+    }
+
+    @Test fun rejectedSendDoesNotRearmFollow() {
+        var follow = TranscriptFollowState().navigateToMessage()
+        sendComposerIfAdmitted(
+            admitted = false,
+            send = { error("Rejected send must not run") },
+            clearDraft = { error("Rejected draft must survive") },
+            removeAttachment = { error("Rejected attachment must survive") },
+            followTail = { follow = follow.resume() },
+        )
+        assertFalse(follow.followsLatest)
+    }
+
+    @Test fun navigationDuringTouchDoesNotRejoinWhenThePointerLifts() {
+        val linked = TranscriptFollowState().pointerDown().userScroll(-20f).navigateToMessage()
+        assertFalse(linked.pointerUp().measured(atBottom = true, scrolling = false).followsLatest)
+    }
 }

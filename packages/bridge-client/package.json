@@ -20,6 +20,10 @@
     "./toolview": {
       "types": "./dist/toolview.d.ts",
       "import": "./dist/toolview.js"
+    },
+    "./remote": {
+      "types": "./dist/remote.d.ts",
+      "import": "./dist/remote.js"
     }
   },
   "files": [

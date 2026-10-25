@@ -1,7 +1,5 @@
 package com.lingxi.code.apps
 
-import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -23,16 +21,17 @@ import kotlinx.coroutines.launch
 fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> Unit, onShowDetails: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val browserReview by apps.browserReviewRequest.collectAsState()
+    val appReview = browserReview?.takeIf { it.appId == appId }
     var launch by remember(appId) { mutableStateOf<AppLaunch?>(null) }
     var release by remember(appId) { mutableStateOf<AppRelease?>(null) }
     var error by remember(appId) { mutableStateOf<String?>(null) }
     var busy by remember(appId) { mutableStateOf(false) }
     var needsConsent by remember(appId) { mutableStateOf(false) }
     var needsBrowserConsent by remember(appId) { mutableStateOf(false) }
-    var opened by rememberSaveable(appId) { mutableStateOf(apps.consumeBrowserReview(appId)) }
+    var opened by rememberSaveable(appId) { mutableStateOf(appReview != null) }
     fun display(value: AppLaunch) {
-        // ACTION_VIEW delegates the page to the user's external browser.
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(value.url)).addCategory(Intent.CATEGORY_BROWSABLE))
+        LocalAppBrowser.open(context, value.url)
         opened = true
     }
     suspend fun prepare(openBrowser: Boolean) {
@@ -43,13 +42,30 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
             val current = apps.release(appId, app.currentRevision); release = current
             if (current.executesCode && current.digest !in app.executionGrants) { needsConsent = true; return }
             if (!apps.keepRunning(appId, current.digest)) { needsBrowserConsent = true; return }
+            if (openBrowser) check(LocalAppBrowser.isAvailable(context, "http://127.0.0.1/")) {
+                "No installed browser can open this application page. Install or enable a browser, then try again."
+            }
             val value = apps.openExternalBrowser(appId)
             launch = value; apps.markOpened(appId)
             if (openBrowser) display(value)
         } catch (failure: Exception) { error = failure.message }
         finally { busy = false }
     }
-    LaunchedEffect(appId) { prepare(!opened) }
+    LaunchedEffect(appReview) {
+        if (appReview != null) {
+            opened = true
+            // A wake link can arrive on the already-visible native route after
+            // Android killed the non-sticky service. Re-establish the user
+            // lease only for that explicit handoff; ordinary page tasks do not
+            // bounce back into the native app.
+            if (!LocalAppProcessService.owns(appId)) prepare(openBrowser = false)
+        }
+    }
+    LaunchedEffect(appId) {
+        val reviewPending = apps.browserReviewRequest.value?.appId == appId
+        if (reviewPending) opened = true
+        prepare(!reviewPending)
+    }
     BackHandler(onBack = onClose)
     Column(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg).blockTouchesBehind().windowInsetsPadding(WindowInsets.systemBars).padding(24.dp).testTag(UiTags.APP_RUNTIME_PAGE), verticalArrangement = Arrangement.spacedBy(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Text("本地应用", style = MaterialTheme.typography.headlineSmall)
@@ -62,7 +78,7 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
         TextButton(onClick = onClose) { Text("关闭管理页面") }
         Text("关闭此管理页面不会停止浏览器中的应用。可通过此处或运行通知停止应用。", style = MaterialTheme.typography.bodySmall)
     }
-    if (release?.capabilities?.contains("agent") == true) LocalAppAgentInteractions(apps, appId)
+    if (release?.capabilities?.contains("agent") == true) LocalAppAgentInteractions(apps, appId, appReview?.runId)
     val selected = release
     if (needsBrowserConsent && selected != null) AlertDialog(
         onDismissRequest = { needsBrowserConsent = false; onClose() },

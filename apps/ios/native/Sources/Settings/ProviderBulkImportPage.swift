@@ -25,7 +25,7 @@ struct ProviderBulkImportPage: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("settings_parity_import_intro")
                         .font(.footnote).foregroundStyle(.secondary)
-                    LabeledContent("Settings layer", value: layer.title)
+                    LabeledContent(String(localized: "settings_layer_label"), value: layer.title)
                     if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
                     if let status { Text(status).foregroundStyle(.secondary) }
                     if let document {
@@ -52,7 +52,7 @@ struct ProviderBulkImportPage: View {
                             Button("settings_parity_import_preview") { preview() }.disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }.disabled(importing)
                     }
-                    if importing { ProgressView("Waiting for engine confirmation…") }
+                    if importing { ProgressView(String(localized: "settings_wait_engine_confirmation")) }
                 }.padding()
             }
             .navigationTitle("settings_parity_import_providers")
@@ -80,19 +80,19 @@ struct ProviderBulkImportPage: View {
                     Text(entry.name)
                 }
                 if own[entry.name] != nil { Text("settings_parity_import_conflict").font(.caption).foregroundStyle(.orange) }
-                TextField("Profile ID", text: string(entry.id, field: "name"))
+                TextField(String(localized: "settings_credential_profile_id"), text: string(entry.id, field: "name"))
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
-                Picker("Protocol", selection: string(entry.id, field: "type")) {
-                    Text("Choose protocol").tag("")
+                Picker(String(localized: "settings_provider_protocol"), selection: string(entry.id, field: "type")) {
+                    Text(String(localized: "settings_provider_choose_protocol")).tag("")
                     ForEach(ProviderBulkImport.supportedTypes, id: \.self) { Text($0).tag($0) }
                 }
-                TextField("Base URL", text: string(entry.id, field: "baseUrl")).textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("API key environment variable", text: string(entry.id, field: "apiKeyEnv")).textInputAutocapitalization(.never).autocorrectionDisabled()
-                SecureField("API key", text: string(entry.id, field: "credential")).textInputAutocapitalization(.never).autocorrectionDisabled()
+                TextField(String(localized: "settings_parity_base_url"), text: string(entry.id, field: "baseUrl")).textInputAutocapitalization(.never).autocorrectionDisabled()
+                TextField(String(localized: "settings_parity_api_key_env"), text: string(entry.id, field: "apiKeyEnv")).textInputAutocapitalization(.never).autocorrectionDisabled()
+                SecureField(String(localized: "settings_provider_api_key"), text: string(entry.id, field: "credential")).textInputAutocapitalization(.never).autocorrectionDisabled()
                 if entry.credential?.isEmpty == false { Text("settings_parity_import_secret_detected").font(.caption).foregroundStyle(.secondary) }
                 if let issue = ProviderBulkImport.validate(entry, credentialConfigured: configured.contains(entry.name)) { Text(issue).font(.caption).foregroundStyle(.red) }
                 ForEach(Array(entry.warnings.enumerated()), id: \.offset) { _, warning in Text(warning).font(.caption).foregroundStyle(.secondary) }
-                DisclosureGroup("Sanitized provider settings") {
+                DisclosureGroup(String(localized: "settings_provider_sanitized")) {
                     Text(DesktopSettingsRepository.json(entry.draft)).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 }
             }.textFieldStyle(.roundedBorder).disabled(importing)
@@ -164,11 +164,11 @@ struct ProviderBulkImportPage: View {
                 try validateScope(generation: generation, reviewed: reviewed)
                 await repository.save(key: "providers", json: DesktopSettingsRepository.json(merged), layer: layer)
                 try await repository.waitForConfirmation(generation: generation)
-                status = "Selected providers were saved and confirmed by the engine. Reconnect to apply provider changes."
+                status = String(localized: "settings_provider_import_saved")
                 self.document = nil
             } catch {
                 guard generation == repository.sourceGeneration else { return }
-                errorMessage = error.localizedDescription + (savedCredentials ? " Some credentials were already saved securely; provider settings were not confirmed." : "")
+                errorMessage = error.localizedDescription + (savedCredentials ? " " + String(localized: "settings_provider_import_partial_credentials") : "")
                 // Keep only sanitized configuration after any attempted write.
                 if var pending = self.document {
                     for i in pending.entries.indices { pending.entries[i].credential = nil }

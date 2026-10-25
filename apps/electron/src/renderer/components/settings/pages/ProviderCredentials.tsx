@@ -1,3 +1,5 @@
+import { useI18n } from '../../../i18n/useI18n';
+import { tr } from '../../../i18n/locale';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
@@ -58,17 +60,17 @@ export function providerCredentialStatus(
   providerAvailable: boolean,
 ): ProviderCredentialStatus {
   if (!providerAvailable) return { kind: 'unavailable', label: 'CLI / TUI' };
-  if (metadata?.storageError) return { kind: 'unavailable', label: '安全存储不可用' };
-  if (metadata?.runtimeOnly) return { kind: 'runtime', label: '仅运行时' };
-  if (metadata?.configured) return { kind: 'configured', label: '已配置' };
-  return { kind: 'unconfigured', label: '未配置' };
+  if (metadata?.storageError) return { kind: 'unavailable', label: tr('settings_provider_secure_storage_unavailable') };
+  if (metadata?.runtimeOnly) return { kind: 'runtime', label: tr('desktop_settings_59f46d1810') };
+  if (metadata?.configured) return { kind: 'configured', label: tr('settings_provider_status_configured') };
+  return { kind: 'unconfigured', label: tr('settings_provider_unconfigured') };
 }
 
 /** Saving a new value replaces any existing credential; the action name stays stable. */
 export function credentialSaveButtonLabel(state: { saving: boolean; modelApplying: boolean }): string {
-  if (state.saving) return '保存中…';
-  if (state.modelApplying) return '应用模型中…';
-  return '保存';
+  if (state.saving) return tr('desktop_settings_ff509c9ba0');
+  if (state.modelApplying) return tr('desktop_settings_de5336c85d');
+  return tr('voice_save_button');
 }
 
 export function shouldRequestCredentialPreview(
@@ -87,6 +89,7 @@ export function shouldRequestCredentialPreview(
 
 /** Built-in Provider credentials use their declared official API endpoints. */
 export function ProviderCredentials({ bridge, initialProviderId, pendingModelReference: requestedModelReference, onClose, snapshot: engineSnapshot, editingLayer, onJumpToLayer, onLayerLockChange }: PageContentProps) {
+  useI18n();
   const t = useT();
   const snapshot = bridge.bootstrap;
   const [key, setKey] = useState('');
@@ -95,6 +98,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   ));
   const [pendingModelReference, setPendingModelReference] = useState<string | null>(requestedModelReference ?? null);
   const [connecting, setConnecting] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [modelApplying, setModelApplying] = useState(false);
@@ -196,7 +200,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     } catch (cause) {
       if (generation === applyGenerationRef.current
         && isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) {
-        setApplyError(cause instanceof Error ? cause.message : '无法选择该模型。');
+        setApplyError(cause instanceof Error ? cause.message : tr('desktop_settings_1bf27e20c7'));
       }
       return false;
     } finally {
@@ -232,7 +236,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       );
     } catch (cause) {
       if (isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) {
-        setSaveError(cause instanceof Error ? cause.message : '无法保存该 Provider 凭据。');
+        setSaveError(cause instanceof Error ? cause.message : tr('desktop_settings_bc6770887a'));
       }
     } finally {
       if (isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) {
@@ -254,7 +258,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
         && pendingModelReference) await applyPendingModel(true, generation);
     } catch (cause) {
       if (isCurrentCredentialTransaction(mountedRef.current, generation, transactionGenerationRef.current)) {
-        setSaveError(cause instanceof Error ? cause.message : 'ChatGPT 登录失败，请重试。');
+        setSaveError(cause instanceof Error ? cause.message : tr('desktop_settings_07d73325e7'));
       }
     } finally {
       oauthActiveRef.current = false;
@@ -267,7 +271,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     try {
       await bridge.cancelCodexLogin();
     } catch (cause) {
-      if (mountedRef.current) setSaveError(cause instanceof Error ? cause.message : '无法取消登录。');
+      if (mountedRef.current) setSaveError(cause instanceof Error ? cause.message : tr('desktop_settings_02d84a144f'));
     }
   };
 
@@ -313,7 +317,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       if (mountedRef.current
         && generation === connectionTestGenerationRef.current
         && selectedProviderId === providerId) {
-        setConnectionTestError(cause instanceof Error ? cause.message : '连接测试失败。');
+        setConnectionTestError(cause instanceof Error ? cause.message : tr('desktop_settings_abadf257cb'));
       }
     } finally {
       if (mountedRef.current && generation === connectionTestGenerationRef.current) {
@@ -323,6 +327,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   };
 
   const clearCredential = async () => {
+    if (connecting || clearing || modelApplying || testingConnection) return;
+    const generation = ++transactionGenerationRef.current;
+    setClearing(true);
     ++connectionTestGenerationRef.current;
     setConnectionTestResult(null);
     setConnectionTestError(null);
@@ -330,9 +337,11 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     try {
       await bridge.clearProviderCredential(selectedProvider.id);
     } catch (cause) {
-      if (mountedRef.current) {
-        setSaveError(cause instanceof Error ? cause.message : '无法删除该 Provider 凭据。');
+      if (isCurrentCredentialTransaction(mountedRef.current, generation, transactionGenerationRef.current)) {
+        setSaveError(cause instanceof Error ? cause.message : tr('desktop_settings_58cd253c17'));
       }
+    } finally {
+      if (isCurrentCredentialTransaction(mountedRef.current, generation, transactionGenerationRef.current)) setClearing(false);
     }
   };
 
@@ -345,9 +354,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   };
 
   const statusMessage = saveError ?? applyError;
-  const busy = connecting || modelApplying;
+  const busy = connecting || clearing || modelApplying;
   const transactionLocked = busy || testingConnection;
-  const credentialWriteDisabled = transactionLocked || bridge.running;
+  const credentialWriteDisabled = transactionLocked || (isCodexAuth && bridge.running);
   const canTestConnection = selectedProvider.available
     && bridge.connected
     && !bridge.running
@@ -364,8 +373,8 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   return (
     <>
       {selectedProviderId === null ? (
-        <Card title="Provider">
-          <Row title="选择 Provider" desc="凭据与 Desktop、CLI、TUI 共享；选择一项登录账号或修改 API Key。" align="center">
+        <Card title={tr('model_detail_provider')}>
+          <Row title={tr('desktop_settings_295f21535b')} desc={tr('desktop_settings_c9b4966c44')} align="center">
             <span />
           </Row>
           {PROVIDERS.map((provider) => {
@@ -400,7 +409,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
                     {provider.label}
                   </span>
                   <span style={{ display: 'block', marginTop: 4, fontSize: 12.5, lineHeight: 1.45, color: t.text3 }}>
-                    {provider.available ? provider.description : '通过 CLI / TUI 登录'}
+                    {provider.available ? provider.description : tr('desktop_settings_ff2973f7ec')}
                   </span>
                 </span>
                 <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 7, minWidth: 96, color: statusColor, fontSize: 12.5, fontWeight: 500 }}>
@@ -440,53 +449,56 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
             editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} onLayerLockChange={onLayerLockChange} />
           <Card title={selectedProvider.label}>
         {pendingModelReference && (
-          <Row title="待应用的模型" desc={`${isCodexAuth ? '登录 ChatGPT 账号' : `保存 ${selectedProvider.label} API Key`}以使用 ${modelReference(pendingModelReference).label}。`} align="center">
+          <Row title={tr('desktop_settings_148ae692c1')} desc={tr('desktop_settings_d4c606e559', isCodexAuth ? tr('desktop_settings_1567161eda') : tr('desktop_settings_f30a4dcfe1', selectedProvider.label), modelReference(pendingModelReference).label)} align="center">
             <Icon name="spark" size={15} color={t.accent} />
           </Row>
         )}
         {statusKind === 'runtime' && (
-          <Row title="来源" desc="正在运行的引擎从外部运行时来源接收了该凭据；LingXi 未存储它。" align="center"><span /></Row>
+          <Row title={tr('audio_source_title')} desc={tr('desktop_settings_22d84d77c9')} align="center"><span /></Row>
+        )}
+        {selectedMetadata?.environmentOverride && (
+          <Row title={tr('desktop_settings_3af9fa5cc6')} desc={tr('desktop_settings_5f688b5996')} align="center"><span /></Row>
         )}
         {statusKind === 'secure' && (
-          <Row title="存储方式" desc="已安全保存在 macOS Data Protection Keychain 中，由签名凭据代理统一管理。" align="center"><span /></Row>
+          <Row title={tr('desktop_settings_0326a778db')} desc={tr('desktop_settings_d7b0a92ce6')} align="center"><span /></Row>
         )}
         {isCodexAuth && oauthStorageUnavailable && !selectedMetadata?.storageError && (
-          <Row title="安全存储不可用" desc="ChatGPT 登录需要可用的安全凭据存储。请检查系统钥匙串或凭据代理后重试。" align="center">
+          <Row title={tr('settings_provider_secure_storage_unavailable')} desc={tr('desktop_settings_b7207229c4')} align="center">
             <Icon name="shieldAlert" size={15} color={t.danger} />
           </Row>
         )}
         {statusKind === 'unavailable' && (
-          <Row title="安全存储不可用" desc={selectedMetadata?.storageError} align="center">
+          <Row title={tr('settings_provider_secure_storage_unavailable')} desc={selectedMetadata?.storageError} align="center">
             <Icon name="shieldAlert" size={15} color={t.danger} />
           </Row>
         )}
         {!isCodexAuth && statusKind === 'fallback-configured' && (
-          <Row title="存储方式" desc="当前凭据来自仅所有者可读的本地回退存储；引擎会在钥匙串可用时自动迁移。" align="center"><span /></Row>
+          <Row title={tr('desktop_settings_0326a778db')} desc={tr('desktop_settings_2fe8aeba2d')} align="center"><span /></Row>
         )}
         {!isCodexAuth && statusKind === 'fallback-unconfigured' && (
-          <Row title="存储方式" desc="安全存储当前处于本地回退模式；保存时会优先尝试 macOS 登录钥匙串。" align="center"><span /></Row>
+          <Row title={tr('desktop_settings_0326a778db')} desc={tr('desktop_settings_092a6dff70')} align="center"><span /></Row>
         )}
         {isCodexAuth ? (
-          <Row title="ChatGPT 账号" desc={connecting
-            ? '请在浏览器中完成 ChatGPT 登录。等待授权返回…'
+          <Row title={tr('desktop_settings_1dcf32a354')} desc={connecting
+            ? tr('desktop_settings_15706d2ff9')
             : selectedMetadata?.codexAccountEmail
-              ? `已登录：${selectedMetadata.codexAccountEmail}`
-              : '通过浏览器登录 ChatGPT 账号，授权凭据由安全存储管理。'} align="center">
+              ? tr('desktop_settings_9e3cec77a5', selectedMetadata.codexAccountEmail)
+              : tr('desktop_settings_785d9d7e44')} align="center">
             <div style={{ display: 'flex', gap: 7 }}>
               <button type="button" data-testid="codex-login" disabled={credentialWriteDisabled || oauthStorageUnavailable}
                 onClick={() => void loginCodex()} style={ghostButtonStyle(t, credentialWriteDisabled || oauthStorageUnavailable)}>
-                {connecting ? '等待登录…' : modelApplying ? '应用模型中…' : selectedMetadata?.configured ? '重新登录' : '登录'}
+                {connecting ? tr('desktop_settings_8e8e57279f') : modelApplying ? tr('desktop_settings_de5336c85d') : selectedMetadata?.configured ? tr('desktop_settings_957244cdb9') : tr('settings_provider_login')}
               </button>
               {connecting && !modelApplying && (
-                <button type="button" data-testid="codex-login-cancel" onClick={() => void cancelCodexLogin()} style={ghostButtonStyle(t, false)}>取消登录</button>
+                <button type="button" data-testid="codex-login-cancel" onClick={() => void cancelCodexLogin()} style={ghostButtonStyle(t, false)}>{tr('desktop_settings_531c764f9b')}</button>
               )}
               {selectedMetadata?.configured && !selectedMetadata.runtimeOnly && (
-                <button type="button" disabled={credentialWriteDisabled} onClick={() => void clearCredential()} style={ghostButtonStyle(t, credentialWriteDisabled, true)}>退出登录</button>
+                <button type="button" disabled={credentialWriteDisabled} onClick={() => void clearCredential()} style={ghostButtonStyle(t, credentialWriteDisabled, true)}>{tr('settings_logout')}</button>
               )}
             </div>
           </Row>
         ) : selectedProvider.available ? (
-          <Row title={selectedProvider.keyLabel} desc={selectedMetadata?.configured ? '输入新的 API Key 并保存，即可更新现有凭据。' : undefined} align="center">
+          <Row title={selectedProvider.keyLabel} desc={selectedMetadata?.configured ? tr('desktop_settings_1085f7e2c0') : undefined} align="center">
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 7 }}>
               <input
                 ref={credentialRef}
@@ -511,26 +523,25 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
                 rel="noreferrer"
                 style={{ color: t.link ?? t.accent, fontSize: 12, fontWeight: 500, textDecoration: 'none' }}
               >
-                获取或管理 API Key&nbsp;↗
-              </a>
+                {tr('desktop_settings_aab39b9ba5')}</a>
             </div>
           </Row>
         ) : (
-          <Row title={selectedProvider.keyLabel} desc={`${selectedProvider.label} 目前只能通过 CLI/TUI 配置凭据。`} align="center"><span /></Row>
+          <Row title={selectedProvider.keyLabel} desc={tr('desktop_settings_93dfefffab', selectedProvider.label)} align="center"><span /></Row>
         )}
         {selectedProvider.available && !isCodexAuth && (
           <Row
-            title="连接测试"
+            title={tr('desktop_settings_200f465659')}
             desc={testMessage ? (
               <span role={connectionTestError ? 'alert' : 'status'} aria-live="polite" style={{ color: testMessageColor }}>
                 {testMessage}
                 {connectionTestResult && (
                   <span style={{ color: t.text4 }}>
-                    {connectionTestResult.used_stored_credential ? ' · 已保存凭据' : ' · 当前输入'}
+                    {connectionTestResult.used_stored_credential ? tr('desktop_settings_71fa27d672') : tr('desktop_settings_e20d24b6e0')}
                   </span>
                 )}
               </span>
-            ) : '验证网络、API Key 与默认模型，不会发起推理请求。'}
+            ) : tr('desktop_settings_544b542fc9')}
             align="center"
           >
             <button
@@ -541,16 +552,16 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
               style={ghostButtonStyle(t, !canTestConnection)}
             >
               <Icon name="activity" size={13} color="currentColor" stroke={1.8} />
-              {testingConnection ? '测试中…' : '测试连接'}
+              {testingConnection ? tr('settings_provider_testing') : tr('settings_provider_test_connection')}
             </button>
           </Row>
         )}
         {selectedProvider.available && (
           <Row
-            title="对话模型列表"
+            title={tr('desktop_settings_a148f7060d')}
             desc={providerCatalogEntry
-              ? `${selectedModelIds.length} / ${providerCatalogEntry.models.length} 个模型可见`
-              : '正在等待共享 Provider 模型目录。'}
+              ? tr('desktop_settings_28e11f6cd1', selectedModelIds.length, providerCatalogEntry.models.length)
+              : tr('desktop_settings_71a4b21d4a')}
             align="center"
           >
             <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: t.text2, fontSize: 12.5 }}>
@@ -562,8 +573,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
                   visibleModelIds: visibility?.visibleModelIds,
                 })}
               />
-              显示此 Provider
-            </label>
+              {tr('desktop_settings_6a04127f16')}</label>
           </Row>
         )}
         {selectedProvider.available && providerCatalogEntry?.models.map((entry) => {
@@ -590,22 +600,21 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
                     });
                   }}
                 />
-                在模型列表中显示
-              </label>
+                {tr('desktop_settings_1d237711e4')}</label>
             </Row>
           );
         })}
         {selectedProvider.available && visibility?.showInModelPicker !== false && providerCatalogEntry && selectedModelIds.length === 0 && (
-          <Row title="提示" desc="当前没有可显示模型，这个 Provider 会从对话模型列表隐藏。" align="center">
+          <Row title={tr('desktop_settings_f56c6c8220')} desc={tr('settings_provider_picker_hidden_empty')} align="center">
             <Icon name="warning" size={15} color={t.warn} />
           </Row>
         )}
         {selectedProvider.available && !isCodexAuth && (
           <Row
-            title="凭据操作"
+            title={tr('desktop_settings_23f2e626ca')}
             desc={selectedMetadata?.configured
-              ? '保存新的 API Key，或删除已保存的凭据。'
-              : '将输入的 API Key 保存到安全凭据存储。'}
+              ? tr('desktop_settings_e105bf21f5')
+              : tr('desktop_settings_13f024018d')}
             align="center"
           >
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 7 }}>
@@ -625,20 +634,19 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
               </button>
               {selectedMetadata?.configured && !selectedMetadata.runtimeOnly && (
                 <button type="button" disabled={credentialWriteDisabled} onClick={() => void clearCredential()} style={ghostButtonStyle(t, credentialWriteDisabled, true)}>
-                  删除 API Key
-                </button>
+                  {tr('desktop_settings_fc150034cb')}</button>
               )}
             </div>
           </Row>
         )}
         {statusMessage && (
-          <Row title="错误" align="center">
+          <Row title={tr('cron_error_section')} align="center">
             <span role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{statusMessage}</span>
           </Row>
         )}
         {applyError && pendingModelReference && (
-          <Row title="应用模型" align="center">
-            <button type="button" disabled={busy} onClick={() => void applyPendingModel()} style={ghostButtonStyle(t, busy)}>使用该模型并返回对话</button>
+          <Row title={tr('desktop_settings_d1b40bcf37')} align="center">
+            <button type="button" disabled={busy} onClick={() => void applyPendingModel()} style={ghostButtonStyle(t, busy)}>{tr('desktop_settings_00a58a5b98')}</button>
           </Row>
         )}
           </Card>

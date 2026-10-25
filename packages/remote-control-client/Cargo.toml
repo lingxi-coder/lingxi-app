@@ -1,0 +1,36 @@
+[package]
+name = "remote-control-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Viewer-side client of the LingXi Remote Control protocol (lingxi-rc/1)."
+
+[features]
+webrtc = ["dep:lingxi-webrtc-core", "dep:webrtc"]
+
+[dependencies]
+# DTOs and `ClientEvent` come from the pinned runtime's client protocol; default
+# features only (no adapter, no presentation, no UniFFI).
+client = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
+tokio-util.workspace = true
+futures-util.workspace = true
+ring = "0.17"
+base64 = "0.22"
+zeroize = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+eventsource-stream = "0.2"
+lingxi-webrtc-core = { workspace = true, optional = true }
+webrtc = { version = "=0.20.3", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros", "test-util", "net", "io-util"] }
+
+[lints]
+workspace = true

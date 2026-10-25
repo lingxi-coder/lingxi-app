@@ -11,7 +11,7 @@ const labels: Readonly<Record<string, string>> = {
   ar: 'الإعدادات',
 };
 
-/** Settings entry follows the system locale until desktop UI locale selection exists. */
+/** Resolve the settings label for a supplied system locale. */
 export function settingsLabel(locale = typeof navigator === 'undefined' ? 'en' : navigator.language): string {
   const parts = locale.replace(/_/g, '-').toLowerCase().split('-');
   if (parts[0] === 'zh') {

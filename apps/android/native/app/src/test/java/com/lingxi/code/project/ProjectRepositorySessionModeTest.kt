@@ -12,11 +12,17 @@ import java.io.File
 
 class ProjectRepositorySessionModeTest {
 
+    private val guestHome = "/home/test_user"
+    private val projectsGuestRoot = "$guestHome/lingxi/projects"
+
     @get:Rule
     val temp = TemporaryFolder()
 
     private fun repository() = ProjectRepository(
         projectsRoot = File(temp.root, "projects"),
+        userHome = File(temp.root, "user-home"),
+        projectsGuestRoot = projectsGuestRoot,
+        userHomeGuestPath = guestHome,
         now = { 1000L },
     )
 
@@ -133,6 +139,39 @@ class ProjectRepositorySessionModeTest {
     }
 
     @Test
+    fun `second brand paths drive new project identity and preserve prior-brand directories`() {
+        val projectsRoot = File(temp.root, "atlas/projects")
+        val userHome = File(temp.root, "atlas/home")
+        val projectsGuest = "/home/atlas_guest/atlas/projects"
+        val guestHome = "/home/atlas_guest"
+        val repository = ProjectRepository(
+            projectsRoot = projectsRoot,
+            userHome = userHome,
+            projectsGuestRoot = projectsGuest,
+            userHomeGuestPath = guestHome,
+        )
+        val project = repository.createInternal("Atlas project")
+        assertEquals("$projectsGuest/${project.record.id}/workspace", project.record.directory)
+        assertEquals(project.record.directory, project.workspace.guestPath)
+
+        val oldBrandGuest = "$guestHome/lingxi/projects/linked"
+        val oldBrandHost = File(userHome, "lingxi/projects/linked").apply { mkdirs() }
+        repository.recordStartedSession(project.record.id, "session-atlas", "Atlas session", SessionMode.Code)
+        repository.recordWorkspace(
+            project.record.id,
+            SessionWorkspaceState("session-atlas", oldBrandGuest, project.record.directory, emptyList(), ""),
+        )
+        val restored = ProjectRepository(
+            projectsRoot = projectsRoot,
+            userHome = userHome,
+            projectsGuestRoot = projectsGuest,
+            userHomeGuestPath = guestHome,
+        ).project(project.record.id)
+        assertEquals(oldBrandHost.canonicalPath, restored.workspace.hostPath)
+        assertEquals(oldBrandGuest, restored.sessions.single().workspaceDirectory)
+    }
+
+    @Test
     fun `stale zero message catalog cannot acknowledge first submission`() {
         val repository = repository()
         val stale = ProjectSessionSummary("first", "New conversation", 0, "Before", 900L)
@@ -153,13 +192,13 @@ class ProjectRepositorySessionModeTest {
     fun `one project keeps its session and source while moving and cold reloading workspaces`() {
         val root = File(temp.root, "user/projects")
         val user = File(temp.root, "user")
-        val repository = ProjectRepository(projectsRoot = root, userHome = user)
+        val repository = ProjectRepository(projectsRoot = root, userHome = user, projectsGuestRoot = projectsGuestRoot, userHomeGuestPath = guestHome)
         val first = repository.createInternal("Workspace project")
         val linked = File(root, "linked").apply { mkdirs() }
-        val linkedGuest = "/home/lingxi/lingxi/projects/linked"
+        val linkedGuest = "$projectsGuestRoot/linked"
         repository.recordStartedSession(first.record.id, "session-one", "Shared session", SessionMode.Code)
-        repository.recordWorkspace(first.record.id, SessionWorkspaceState("session-one", linkedGuest, first.record.directory, listOf(linkedGuest), "/home/lingxi/.lingxi/projects/b/session-one.jsonl"))
-        val reloaded = ProjectRepository(projectsRoot = root, userHome = user).project(first.record.id)
+        repository.recordWorkspace(first.record.id, SessionWorkspaceState("session-one", linkedGuest, first.record.directory, listOf(linkedGuest), "$guestHome/.lingxi/projects/b/session-one.jsonl"))
+        val reloaded = ProjectRepository(projectsRoot = root, userHome = user, projectsGuestRoot = projectsGuestRoot, userHomeGuestPath = guestHome).project(first.record.id)
         assertEquals(linked.canonicalPath, reloaded.workspace.hostPath)
         assertEquals(first.sourceWorkspace, reloaded.sourceWorkspace)
         assertEquals(listOf("session-one"), reloaded.sessions.map { it.sessionId })
@@ -167,7 +206,7 @@ class ProjectRepositorySessionModeTest {
         assertEquals(first.record.directory, reloaded.sessions.single().originalProjectDirectory)
         assertEquals(listOf(linkedGuest), reloaded.workspace.additionalDirectories)
         linked.deleteRecursively()
-        assertEquals(first.record.id, ProjectRepository(projectsRoot = root, userHome = user).load().projects.single().record.id)
+        assertEquals(first.record.id, ProjectRepository(projectsRoot = root, userHome = user, projectsGuestRoot = projectsGuestRoot, userHomeGuestPath = guestHome).load().projects.single().record.id)
         assertFalse(linked.exists())
     }
 
@@ -176,7 +215,7 @@ class ProjectRepositorySessionModeTest {
         val repository = repository()
         val project = repository.createInternal("Empty draft")
         val linked = File(temp.root, "projects/linked").apply { mkdirs() }
-        val path = "/home/lingxi/lingxi/projects/linked"
+        val path = "$projectsGuestRoot/linked"
         repository.recordWorkspace(project.record.id, SessionWorkspaceState("draft", path, project.record.directory, listOf(path), ""))
         assertTrue(repository.project(project.record.id).sessions.isEmpty())
         val error = runCatching { repository.recordWorkspace(project.record.id, SessionWorkspaceState("draft", "/root", project.record.directory, emptyList(), "")) }.exceptionOrNull()
@@ -188,7 +227,7 @@ class ProjectRepositorySessionModeTest {
     fun `catalog in another workspace retains confirmed sessions and their exact directory`() {
         val repository = repository()
         val project = repository.createInternal("Linked directories")
-        val linked = "/home/lingxi/lingxi/projects/linked"
+        val linked = "$projectsGuestRoot/linked"
         File(temp.root, "projects/linked").mkdirs()
         val original = ProjectSessionSummary("a", "A", 2, "Now", 1000L,
             workspaceDirectory = project.record.directory, transcriptPath = "/catalog/a.jsonl")
@@ -210,7 +249,7 @@ class ProjectRepositorySessionModeTest {
     fun `missing linked directory does not prevent saving the live workspace`() {
         val repository = repository()
         val project = repository.createInternal("Missing linked folder")
-        val missing = "/home/lingxi/lingxi/projects/deleted"
+        val missing = "$projectsGuestRoot/deleted"
         repository.recordWorkspace(project.record.id, SessionWorkspaceState("draft", project.record.directory,
             project.record.directory, listOf(missing), ""))
         assertEquals(listOf(missing), repository.project(project.record.id).record.additionalDirectories)
@@ -223,9 +262,9 @@ class ProjectRepositorySessionModeTest {
         val projects = File(home, "lingxi/projects")
         val source = File(home, ".lingxi/.apps/counter").apply { mkdirs() }
         File(source, "index.html").writeText("unchanged")
-        val repo = ProjectRepository(projects, userHome = home)
-        val first = repo.registerAuthoringWorkspace("Counter", "/home/lingxi/.lingxi/.apps/counter")
-        val second = repo.registerAuthoringWorkspace("Counter", "/home/lingxi/.lingxi/.apps/counter")
+        val repo = ProjectRepository(projects, userHome = home, projectsGuestRoot = "$guestHome/lingxi/projects", userHomeGuestPath = guestHome)
+        val first = repo.registerAuthoringWorkspace("Counter", "$guestHome/.lingxi/.apps/counter")
+        val second = repo.registerAuthoringWorkspace("Counter", "$guestHome/.lingxi/.apps/counter")
         assertEquals(first.record.id, second.record.id)
         assertEquals(source.canonicalPath, first.workspace.hostPath)
         assertEquals("unchanged", File(source, "index.html").readText())
@@ -237,9 +276,9 @@ class ProjectRepositorySessionModeTest {
         val home = temp.newFolder("linux-home")
         val outside = temp.newFolder("outside")
         java.nio.file.Files.createSymbolicLink(File(home, "escape").toPath(), outside.toPath())
-        val repo = ProjectRepository(File(home, "lingxi/projects"), userHome = home)
+        val repo = ProjectRepository(File(home, "lingxi/projects"), userHome = home, projectsGuestRoot = "$guestHome/lingxi/projects", userHomeGuestPath = guestHome)
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            repo.registerAuthoringWorkspace("Escape", "/home/lingxi/escape")
+            repo.registerAuthoringWorkspace("Escape", "$guestHome/escape")
         }
         assertTrue(repo.load().projects.isEmpty())
     }

@@ -1,3 +1,5 @@
+import { useI18n } from '../../../i18n/useI18n';
+import { tr } from '../../../i18n/locale';
 import { useEffect, useRef, useState } from 'react';
 import type { PageContentProps } from '../SettingsScreen';
 import { Card, Row } from '../rows';
@@ -26,6 +28,7 @@ export function protocolSettingsPatch(routing: unknown, profile: string, format:
 
 export function ProviderProtocol({ providerId, bridge, snapshot, editingLayer, onLayerLockChange }: Pick<PageContentProps,
   'bridge' | 'snapshot' | 'editingLayer' | 'onJumpToLayer' | 'onLayerLockChange'> & { providerId: string }) {
+  useI18n();
   const t = useT();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,28 +53,28 @@ export function ProviderProtocol({ providerId, bridge, snapshot, editingLayer, o
     if (disabled) return;
     const token = generation.current; setSaving(true); setError(null); onLayerLockChange?.(true);
     try { await bridge.updateProviderSettings(editingLayer, protocolSettingsPatch(ownRouting, account.profile, format)); }
-    catch (cause) { if (token === generation.current) setError(cause instanceof Error ? cause.message : '无法保存默认格式。'); }
+    catch (cause) { if (token === generation.current) setError(cause instanceof Error ? cause.message : tr('desktop_settings_6cdef1b894')); }
     finally { if (token === generation.current) setSaving(false); onLayerLockChange?.(false); }
   };
-  return <Card title="请求格式">
-    <Row title="默认格式" desc="请求格式保存在所选配置层；账号凭据保存在此设备。搜索与语音使用各自支持的连接方式。" align="center">
-      <select aria-label="默认请求格式" value={typeof own === 'string' ? own : own === null ? '' : '__inherit__'} disabled={disabled || account.formats.length < 2}
+  return <Card title={tr('desktop_settings_e06568d15f')}>
+    <Row title={tr('desktop_settings_2746420a13')} desc={tr('desktop_settings_5334aa2c77')} align="center">
+      <select aria-label={tr('desktop_settings_bc58b64d0d')} value={typeof own === 'string' ? own : own === null ? '' : '__inherit__'} disabled={disabled || account.formats.length < 2}
         onChange={event => { void write(event.target.value); }}
         style={{ background: t.surface, color: t.text, border: `1px solid ${t.border}`, borderRadius: 7, padding: '6px 10px', maxWidth: '100%' }}>
-        <option value="__inherit__">继承（当前：{protocolLabel(String(desired))}）</option>
-        <option value="">自动（{protocolLabel(account.native)}）</option>
+        <option value="__inherit__">{tr('desktop_settings_inherit_current', protocolLabel(String(desired)))}</option>
+        <option value="">{tr('desktop_settings_auto_format', protocolLabel(account.native))}</option>
         {account.formats.map(format => <option key={format} value={format}>{protocolLabel(format)}</option>)}
       </select>
     </Row>
-    {active !== null && <Row title={`当前运行：${protocolLabel(String(active))}`}
-      desc={active !== desired ? `已保存：${protocolLabel(String(desired))}。重新连接或重启 app 后应用。` : undefined} align="center">
+    {active !== null && <Row title={tr('desktop_settings_09fef6487f', protocolLabel(String(active)))}
+      desc={active !== desired ? tr('desktop_settings_2b334ad347', protocolLabel(String(desired))) : undefined} align="center">
       {active !== desired && <button type="button" disabled={disabled} style={ghostButtonStyle(t)} onClick={() => {
         const token = generation.current; setSaving(true); setError(null);
         void bridge.restartBridge().catch((cause: unknown) => {
-          if (token === generation.current) setError(cause instanceof Error ? cause.message : '无法重新连接。');
+          if (token === generation.current) setError(cause instanceof Error ? cause.message : tr('desktop_settings_04a1a37d03'));
         }).finally(() => { if (token === generation.current) setSaving(false); });
-      }}>应用并重新连接</button>}
+      }}>{tr('settings_provider_apply_reconnect')}</button>}
     </Row>}
-    {error && <Row title="保存或应用失败"><span role="alert">{error}</span></Row>}
+    {error && <Row title={tr('desktop_settings_f48af7b362')}><span role="alert">{error}</span></Row>}
   </Card>;
 }

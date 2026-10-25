@@ -1,3 +1,5 @@
+import { tr } from './i18n/locale';
+import { useI18n } from './i18n/useI18n';
 import { LocalApps } from './components/LocalApps';
 import './components/LocalApps.css';
 import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
@@ -59,6 +61,8 @@ interface SessionPickerRequest {
 }
 
 export function App() {
+  const { locale, preference } = useI18n();
+  useEffect(() => { void window.lingxi?.setInterfaceLocale?.(locale, preference === '').catch(() => undefined); }, [locale, preference]);
   const [messageTarget, setMessageTarget] = useState<string | null>(null);
   const [messageRequest, setMessageRequest] = useState<{ projectPath: string; sessionId: string; uuid: string } | null>(null);
   const messageCompletion = useRef<((found: boolean) => void) | null>(null);
@@ -75,7 +79,7 @@ export function App() {
   const [sessionPicker, setSessionPicker] = useState<SessionPickerRequest | null>(null);
   const sessionPickerRequest = useRef<SessionPickerRequest | null>(null);
   const sessionPickerSequence = useRef(0);
-  const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
+  const palette = useMemo(() => tokens(theme === 'dark'), [theme, locale]);
   const bridge = useBridge();
   const localAppBridge = useRef(bridge);
   localAppBridge.current = bridge;
@@ -93,6 +97,16 @@ export function App() {
         openSession: current.openSession,
         addProject: current.addProject,
         newSession: current.newSession,
+        bindAuthoring: (appId, session) => {
+          const api = window.lingxi?.localApps;
+          if (!api) throw new Error('Desktop application host is unavailable');
+          return api.bindAuthoring(appId, session);
+        },
+        prepareAuthoring: session => {
+          const api = window.lingxi?.localApps;
+          if (!api) throw new Error('Desktop application host is unavailable');
+          return api.prepareAuthoring(session);
+        },
       }, () => localAppNavigation.current === nonce);
       if (!target || localAppNavigation.current !== nonce) return;
       setPage('chat');
@@ -254,7 +268,7 @@ export function App() {
       const delivery = await api.next();
       if (!delivery) return;
       if (sessionNavigationBlocked()) {
-        await api.acknowledge(delivery.id, 'Wait for the session to finish opening before navigating.');
+        await api.acknowledge(delivery.id, tr('desktop_link_wait'));
         return;
       }
       cancelLocalAppNavigation();
@@ -269,38 +283,38 @@ export function App() {
         if ((settingsTarget || kind === 'settings' || kind === 'provider') && delivery.projectPath && delivery.projectPath !== bridge.activeSession?.projectPath) {
           const catalog = await bridge.listProjectSessions(delivery.projectPath);
           const session = catalog?.sessions[0];
-          if (!session) throw new Error('Open a local conversation in this project before opening its configuration.');
-          if (!await bridge.openSession(delivery.projectPath, session.uuid)) throw new Error('Unable to open the linked project’s local conversation.');
+          if (!session) throw new Error(tr('desktop_link_open_project_config'));
+          if (!await bridge.openSession(delivery.projectPath, session.uuid)) throw new Error(tr('desktop_link_project_conversation_error'));
         }
         if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
         else if (kind === 'settings') {
-          if (!SETTINGS_NAV.some(page => page.id === id)) throw new Error('This settings page is unavailable.');
+          if (!SETTINGS_NAV.some(page => page.id === id)) throw new Error(tr('desktop_link_settings_unavailable'));
           linkSurfacePending.current = true;
           openSettings({ pageId: id });
         } else if (kind === 'provider') { linkSurfacePending.current = true; openSettings({ pageId: 'provider-credentials', providerId: id }); }
         else if (kind === 'session' || kind === 'project') {
           setMessageTarget(null);
-          if (!delivery.projectPath) throw new Error('This project is not registered on this device.');
-          if (kind === 'session' && !await bridge.openSession(delivery.projectPath, id!)) throw new Error('Unable to open this local conversation.');
+          if (!delivery.projectPath) throw new Error(tr('desktop_link_project_unregistered'));
+          if (kind === 'session' && !await bridge.openSession(delivery.projectPath, id!)) throw new Error(tr('desktop_link_conversation_error'));
           if (kind === 'project') await bridge.activateProject(delivery.projectPath);
           setPage('chat');
           setActivityView(false);
           if (params.message) {
             await new Promise<void>((resolve, reject) => {
-              messageCompletion.current = found => { messageCompletion.current = null; found ? resolve() : reject(new Error('This message is unavailable in the local conversation.')); };
+              messageCompletion.current = found => { messageCompletion.current = null; found ? resolve() : reject(new Error(tr('desktop_link_message_unavailable'))); };
               setMessageRequest({ projectPath: delivery.projectPath!, sessionId: id!, uuid: params.message! });
             });
           }
         } else if (kind === 'new') {
           const project = delivery.projectPath ?? bridge.bootstrap?.settings.activeProject;
-          if (!project) throw new Error('Select a local project before creating a conversation.');
+          if (!project) throw new Error(tr('desktop_link_select_project'));
           const session = await bridge.newSession(project);
-          if (!session) throw new Error('Unable to create conversation.');
+          if (!session) throw new Error(tr('desktop_link_create_error'));
           if (typeof delivery.target.payload?.prompt === 'string') bridge.offerLinkDraft({ sessionId: session.sessionId, text: delivery.target.payload.prompt, requestId: delivery.id });
           setPage('chat');
         } else if (kind === 'terminal') {
           const projectPath = delivery.projectPath ?? bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject;
-          if (!projectPath) throw new Error('Select a local project before opening a terminal.');
+          if (!projectPath) throw new Error(tr('desktop_link_terminal_project'));
           if (projectPath !== bridge.activeSession?.projectPath) await bridge.activateProject(projectPath);
           setPage('chat');
           setActivityView(false);
@@ -312,13 +326,13 @@ export function App() {
           setScheduledTarget({ requestId: delivery.id, kind: id as 'job' | 'run', id: detailId!, scope: delivery.projectPath ?? params.scope });
           setPage('scheduled');
         } else if (kind === 'runtime') {
-          if (delivery.projectPath && delivery.projectPath !== bridge.activeSession?.projectPath) throw new Error('Open this local project’s conversation before opening its runtime details.');
+          if (delivery.projectPath && delivery.projectPath !== bridge.activeSession?.projectPath) throw new Error(tr('desktop_link_runtime_project'));
           const item = runtimeLinkItem(id!, detailId!, bridge, planCalls);
           setPage('chat');
           if (item === 'activity') { setActivityView(true); bridge.setRuntimeCenterOverviewOpen(true); }
           else { setActivityView(false); bridge.openRuntimeItem(item); }
-        } else throw new Error('This destination is not available in Desktop.');
-      } catch (cause) { linkSurfacePending.current = false; error = cause instanceof Error ? cause.message : 'Unable to open destination'; }
+        } else throw new Error(tr('desktop_link_destination_unavailable'));
+      } catch (cause) { linkSurfacePending.current = false; error = cause instanceof Error ? cause.message : tr('desktop_link_open_failed'); }
       await api.acknowledge(delivery.id, error);
     })().catch(() => undefined).finally(() => {
       linkBusy.current = false;
@@ -347,12 +361,12 @@ export function App() {
   }, []);
 
   const emptyMessage = bridge.sessionLoading
-    ? 'Loading session…'
+    ? tr('desktop_shell_loading_session')
     : !workspace?.path
-    ? 'Add a project from the sidebar to start a session.'
+    ? tr('desktop_shell_start_project')
     : bridge.activeSession
-      ? 'This session has no messages yet. Ask LingXi to inspect the project.'
-      : 'Create a session and ask LingXi to inspect, explain, or change this project.';
+      ? tr('desktop_shell_empty_session')
+      : tr('desktop_shell_create_session');
   const askQuestion = bridge.pendingAskUserQuestion;
   const sessionPickerSuspended = Boolean(sessionPicker && bridge.sessionLoading
     && (bridge.pendingPermission || bridge.pendingAskUserQuestion || bridge.pendingComputerAccess));

@@ -5,6 +5,11 @@ import CryptoKit
 /// The private handle never receives prompts or application approval commands.
 actor LocalAppAgentModelHost {
     static let shared = LocalAppAgentModelHost()
+    #if LINGXI_FULL
+    static let usesMobileLinuxRuntime = true
+    #else
+    static let usesMobileLinuxRuntime = false
+    #endif
     private var handle: MobileEngineHandle?
     private struct Building {
         let id: UUID
@@ -21,19 +26,47 @@ actor LocalAppAgentModelHost {
         }
         let configuration: IosEngineLaunchConfigFfi = try await MainActor.run {
             let snapshot = ProviderRepository.shared.makeLaunchSnapshot()
+            let directories = MobileUserStorage.directories()
+            let sandbox = ConversationSourceFactory.appSandboxRoot()
+            let mobileLinux: IosMobileLinuxConfigFfi?
+            #if LINGXI_FULL
             let metadata = LXISHRuntimeBundleMetadata.current()
             let workspace = try MobileUserStorage.prepareProjectsDirectory()
-            let sandbox = ConversationSourceFactory.appSandboxRoot()
+            mobileLinux = IosMobileLinuxConfigFfi(
+                mode: .mobileLinux,
+                brandId: directories.brandId,
+                linuxUser: directories.linuxUser,
+                configDirName: directories.configDirName,
+                managedRoot: LXISHDefaultWorkspace.managedRootPath(),
+                workspaceHostPath: workspace.path,
+                stableWorkspaceId: LXISHDefaultWorkspace.stableID(),
+                abi: "arm64",
+                rootfsVersion: metadata.rootfsVersion,
+                archiveSha256: metadata.archiveSha256,
+                authorizationFile: LXISHRuntimeBundleResources.authorizationManifestURL()?.path,
+                appSandboxRoot: sandbox
+            )
+            #else
+            // Store App Agents use the provider-only host. They share the
+            // native Local App config directory, without preparing Linux
+            // workspace/rootfs resources or registering Linux-only tools.
+            mobileLinux = nil
+            #endif
             return IosEngineLaunchConfigFfi(
                 appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
                 appAgentHost: true,
+                brandId: directories.brandId,
+                linuxUser: directories.linuxUser,
+                configDirName: directories.configDirName,
+                nativeConfigHome: directories.configHome,
                 apiBase: Keychain.get(.apiBase) ?? "https://api.anthropic.com", apiKey: Keychain.get(.apiKey) ?? "",
                 model: snapshot.defaultModelID ?? "", sessionMode: .code, visionDelegationEnabled: false,
-                appSandboxRoot: sandbox, projectCwd: nil,
+                appSandboxRoot: sandbox,
+                projectCwd: nil,
+                projectAdditionalDirectories: [],
+                projectMountGrants: [],
                 providerConfig: IosProviderConfigFfi(providerProfilesJson: snapshot.providerProfilesJSON, routingJson: snapshot.routingJSON),
-                mobileLinux: IosMobileLinuxConfigFfi(mode: .mobileLinux, managedRoot: LXISHDefaultWorkspace.managedRootPath(), workspaceHostPath: workspace.path,
-                    stableWorkspaceId: LXISHDefaultWorkspace.stableID(), abi: "arm64", rootfsVersion: metadata.rootfsVersion, archiveSha256: metadata.archiveSha256,
-                    authorizationFile: LXISHRuntimeBundleResources.authorizationManifestURL()?.path, appSandboxRoot: sandbox),
+                mobileLinux: mobileLinux,
                 physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory, hostEnvironment: nil)
         }
         // The actor can reenter while the global snapshot is read.
@@ -42,7 +75,10 @@ actor LocalAppAgentModelHost {
             return try await ensure()
         }
         let identity = [configuration.providerConfig?.providerProfilesJson ?? "", configuration.providerConfig?.routingJson ?? "",
-                        configuration.apiBase, configuration.apiKey].joined(separator: "\u{0}")
+                        configuration.apiBase, configuration.apiKey, configuration.nativeConfigHome,
+                        configuration.appSandboxRoot, configuration.mobileLinux?.managedRoot ?? "",
+                        configuration.mobileLinux?.brandId ?? "", configuration.mobileLinux?.linuxUser ?? "",
+                        configuration.mobileLinux?.configDirName ?? ""].joined(separator: "\u{0}")
         let digest = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
         if handle != nil && configurationDigest == digest { return }
         let task = Task.detached(priority: .userInitiated) { () throws -> MobileEngineHandle in

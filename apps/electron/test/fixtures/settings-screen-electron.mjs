@@ -449,7 +449,7 @@ async function runBackClickScenario(webContents) {
     Object.assign(drag.style, { position: 'absolute', top: '38px', left: '0', width: '240px', height: '48px' });
     document.body.prepend(drag);
     const panel = document.querySelector('[role="dialog"]');
-    const button = document.querySelector('[aria-label="Back to app"]');
+    const button = document.querySelector('[aria-label="返回应用"]');
     const rect = button.getBoundingClientRect();
     return {
       panelRegion: getComputedStyle(panel).getPropertyValue('-webkit-app-region'),
@@ -488,7 +488,7 @@ async function runFocusTrapScenario(webContents) {
   // Closing restores focus to whatever had it before the dialog mounted —
   // the opener here, standing in for the gear icon / model picker button in
   // the real app.
-  await webContents.executeJavaScript(`document.querySelector('[aria-label="Back to app"]').click()`);
+  await webContents.executeJavaScript(`document.querySelector('[aria-label="返回应用"]').click()`);
   await delay(50);
   const afterClose = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   return { onMount, afterForwardTab, afterBackwardTab, afterClose };
@@ -854,7 +854,7 @@ async function runCustomizeScenario(window, webContents) {
       navigationLabel: navLink?.textContent.trim(),
       selectedNavigation: navLink?.getAttribute('aria-current'),
       settingsSearchVisible: visible(dialog.querySelector('[aria-label="搜索设置"]')),
-      backButtonCount: dialog.querySelectorAll('[aria-label="Back to app"]').length,
+      backButtonCount: dialog.querySelectorAll('[aria-label="返回应用"]').length,
       contentScrollCount: dialog.querySelectorAll('.settings-content-scroll').length,
       legacyChromeCount: dialog.querySelectorAll('.extension-customize-window, .extension-customize-rail, .extension-sidebar, .extension-window-navigation').length,
       duplicateHeadingCount: dialog.querySelectorAll('.extension-hub-header h1').length,
@@ -1026,7 +1026,7 @@ async function runMacosControls(window, webContents) {
     await run(`document.querySelector(${JSON.stringify(selector)}).click()`);
     await delay(40);
   };
-  await run('document.querySelector(\'[aria-label="Back to app"]\').focus()');
+  await run('document.querySelector(\'[aria-label="返回应用"]\').focus()');
   await webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
   await webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
   await waitFor(webContents, 'document.activeElement.matches(\'[aria-label="搜索设置"]\')');
@@ -1124,6 +1124,36 @@ async function runMacosEditors(window, webContents) {
   return results;
 }
 
+async function runLocalizationScenario(window, webContents) {
+  const run = expression => webContents.executeJavaScript(expression);
+  const rows = [];
+  window.setContentSize(760, 600);
+  for (const locale of ['en', 'ja', 'ko', 'zh-Hant', 'zh-Hans']) {
+    await run(`(() => { const select = document.querySelector('.settings-content-inner select'); window.__localeSelect = select; select.value = ${JSON.stringify(locale)}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await waitFor(webContents, `document.documentElement.lang === ${JSON.stringify(locale)}`);
+    rows.push(await run(`({locale: document.documentElement.lang, navigation: document.querySelector('[data-nav-page="general"]').textContent.trim(), search: document.querySelector('.settings-search input').placeholder, sameSelect: window.__localeSelect === document.querySelector('.settings-content-inner select'), selected: document.querySelector('.settings-content-inner select').value, overflow: document.querySelector('.settings-content-scroll').scrollWidth > document.querySelector('.settings-content-scroll').clientWidth + 1})`));
+  }
+  await run(`(() => { const search = document.querySelector('.settings-search input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(search, '音声'); search.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await run(`(() => { const select = document.querySelector('.settings-content-inner select'); select.value = 'en'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await waitFor(webContents, 'document.documentElement.lang === "en"');
+  const beforeSearch = await run(`Boolean(document.querySelector('[data-nav-page="voice"]'))`);
+  await run(`(() => { const select = document.querySelector('.settings-content-inner select'); select.value = 'ja'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await waitFor(webContents, `Boolean(document.querySelector('[data-nav-page="voice"]'))`);
+  const localizedSearch = await run(`({ before: ${beforeSearch}, after: Boolean(document.querySelector('[data-nav-page="voice"]')), query: document.querySelector('.settings-search input').value })`);
+  await run(`(() => { const search = document.querySelector('.settings-search input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(search, ''); search.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await run(`(() => { const select = document.querySelector('.settings-content-inner select'); select.value = 'en'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await waitFor(webContents, 'document.documentElement.lang === "en"');
+  await webContents.loadURL(url);
+  await waitFor(webContents, 'Boolean(window.__settingsScreenTest?.state().settingsSnapshotReady && document.documentElement.lang === "en")');
+  const restored = await run(`document.querySelector('.settings-content-inner select').value`);
+  await run(`(() => { const select = document.querySelector('.settings-content-inner select'); Object.defineProperty(navigator, 'languages', { configurable: true, value: ['fr-FR', 'ja-JP'] }); select.value = ''; select.dispatchEvent(new Event('change', { bubbles: true })); window.dispatchEvent(new Event('languagechange')); })()`);
+  await waitFor(webContents, 'document.documentElement.lang === "ja"');
+  const system = await run(`({lang: document.documentElement.lang, preference: document.querySelector('.settings-content-inner select').value})`);
+  await run(`localStorage.setItem('lingxi.desktop.language', 'ko'); window.dispatchEvent(new StorageEvent('storage', { key: 'lingxi.desktop.language' }));`);
+  await waitFor(webContents, 'document.documentElement.lang === "ko"');
+  return { rows, localizedSearch, restored, system, synced: await run('document.documentElement.lang') };
+}
+
 async function main() {
   await app.whenReady();
   const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true } });
@@ -1133,7 +1163,8 @@ async function main() {
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsScreenTest?.state().settingsSnapshotReady && document.querySelector(\'[role="dialog"]\'))');
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
-    const result = scenario === 'macos-editors' ? await runMacosEditors(window, webContents)
+    const result = scenario === 'localization' ? await runLocalizationScenario(window, webContents)
+      : scenario === 'macos-editors' ? await runMacosEditors(window, webContents)
       : scenario === 'macos-controls' ? await runMacosControls(window, webContents)
       : scenario === 'macos-audit' ? await runMacosAudit(window, webContents)
       : scenario === 'provider-region' ? await runProviderRegionScenario(window, webContents)
@@ -1155,7 +1186,7 @@ async function main() {
       : scenario === 'permission-rule-dispatch' ? await runPermissionRuleDispatchScenario(webContents)
       : scenario === 'remount-on-layer-switch' ? await runRemountOnLayerSwitchScenario(webContents)
       : await runLayerSwitcherScenario(webContents);
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    await new Promise(resolve => process.stdout.write(`${JSON.stringify(result)}\n`, resolve));
   } finally {
     if (!window.isDestroyed()) window.destroy();
     if (app.isReady()) await app.quit();

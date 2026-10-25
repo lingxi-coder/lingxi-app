@@ -1902,7 +1902,7 @@ impl CommandRouter for EngineCommandRouter {
                 } else if let Some(credentials) = self.credentials.as_ref() {
                     if self.provider_credentials_ephemeral {
                         credentials
-                            .delete_provider_key_ephemeral(&provider_id)
+                            .suppress_provider_key_ephemeral(&provider_id)
                             .await;
                         None
                     } else {

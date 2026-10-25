@@ -1,3 +1,4 @@
+import { tr } from '../../../i18n/locale';
 import { LingxiAccount } from './LingxiAccount';
 import type { AuthStateDto } from '@lingxi/bridge-client';
 
@@ -9,18 +10,18 @@ import { credentialStatusKind, type CredentialStatusKind } from './ProviderCrede
 import { providerById } from '../../../../shared/providers';
 
 function authSummary(auth: AuthStateDto | null | undefined): { title: string; detail: string } {
-  if (!auth) return { title: '状态未知', detail: '尚未收到 auth_state。' };
-  if (auth.type === 'signed_in') return { title: '已登录', detail: `${auth.email} · ${auth.org_id}` };
-  return { title: '未登录', detail: '当前引擎没有持久登录态。' };
+  if (!auth) return { title: tr('desktop_shell_auth_unknown'), detail: tr('desktop_shell_auth_pending') };
+  if (auth.type === 'signed_in') return { title: tr('account_signed_in'), detail: `${auth.email} · ${auth.org_id}` };
+  return { title: tr('desktop_shell_signed_out'), detail: tr('desktop_shell_engine_signed_out') };
 }
 
 function statusCopy(kind: CredentialStatusKind): string {
   switch (kind) {
-    case 'runtime': return '运行时提供';
-    case 'secure': return '安全存储';
-    case 'fallback-configured': return '已配置，回退存储';
-    case 'fallback-unconfigured': return '未配置，需回退';
-    default: return '未设置';
+    case 'runtime': return tr('desktop_shell_runtime_credential');
+    case 'secure': return tr('desktop_shell_secure_storage');
+    case 'fallback-configured': return tr('desktop_shell_fallback_configured');
+    case 'fallback-unconfigured': return tr('desktop_shell_fallback_unconfigured');
+    default: return tr('common_unset');
   }
 }
 
@@ -35,8 +36,8 @@ export function Account({ bridge, onNavigate }: PageContentProps) {
   return (
     <>
       <LingxiAccount />
-      <Card title="账户状态">
-        <Row title="引擎登录" desc="登录和登出通过引擎命令执行；这里展示当前 auth_state。">
+      <Card title={tr('desktop_shell_account_state')}>
+        <Row title={tr('desktop_shell_engine_login')} desc={tr('desktop_shell_engine_login_desc')}>
           <div style={{ display: 'grid', gap: 8, justifyItems: 'end' }}>
             <div style={{ textAlign: 'right' }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: t.text }}>{summary.title}</div>
@@ -49,7 +50,7 @@ export function Account({ bridge, onNavigate }: PageContentProps) {
                 onClick={() => { void bridge.refreshAuth().catch(() => undefined); }}
                 style={ghostButtonStyle(t, !sessionReady || turnBusy)}
               >
-                刷新状态
+                {tr('settings_linux_action_refresh')}
               </button>
               <button
                 type="button"
@@ -57,7 +58,7 @@ export function Account({ bridge, onNavigate }: PageContentProps) {
                 onClick={() => { void bridge.login().catch(() => undefined); }}
                 style={ghostButtonStyle(t, !sessionReady || turnBusy)}
               >
-                登录
+                {tr('settings_provider_login')}
               </button>
               <button
                 type="button"
@@ -65,30 +66,30 @@ export function Account({ bridge, onNavigate }: PageContentProps) {
                 onClick={() => { void bridge.logout().catch(() => undefined); }}
                 style={ghostButtonStyle(t, !sessionReady || turnBusy)}
               >
-                登出
+                {tr('settings_logout')}
               </button>
               <button
                 type="button"
                 onClick={() => onNavigate('provider-credentials')}
                 style={ghostButtonStyle(t)}
               >
-                打开凭据页
+                {tr('desktop_shell_open_credentials')}
               </button>
             </div>
           </div>
         </Row>
 
-        <Row title="可用说明" desc="auth_state 只告诉你是否登录；真正的密钥、API base URL 和提供者级别状态仍在 Provider 凭据页里编辑。">
-          <button type="button" onClick={() => onNavigate('provider-credentials')} style={ghostButtonStyle(t)}>管理 Provider 凭据</button>
+        <Row title={tr('desktop_shell_availability_info')} desc={tr('desktop_shell_auth_info')}>
+          <button type="button" onClick={() => onNavigate('provider-credentials')} style={ghostButtonStyle(t)}>{tr('settings_parity_manage_credentials')}</button>
         </Row>
       </Card>
 
-      <Card title="Provider 凭据概览">
+      <Card title={tr('desktop_shell_credentials_overview')}>
         <div style={{ padding: '10px 18px 0', color: t.text3, fontSize: 12.5, lineHeight: 1.55 }}>
-          这里只做状态总览，不替代安全编辑页。已配置的凭据与运行时提供的值都会显示出来。
+          {tr('desktop_shell_credentials_desc')}
         </div>
         {providerCredentials.length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有保存任何 Provider 凭据。</div>
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>{tr('desktop_shell_no_credentials')}</div>
         )}
         {providerCredentials.map((entry) => {
           const provider = providerById(entry.providerId);
@@ -97,7 +98,7 @@ export function Account({ bridge, onNavigate }: PageContentProps) {
             <Row
               key={entry.providerId}
               title={provider?.label ?? entry.providerId}
-              desc={`${statusCopy(kind)} · ${entry.configured ? '已配置' : '未配置'}${entry.encryptionAvailable ? ' · 可加密' : ''}${entry.runtimeOnly ? ' · 仅运行时' : ''}`}
+              desc={`${statusCopy(kind)} · ${entry.configured ? tr('settings_parity_secret_configured') : tr('settings_parity_not_configured')}${entry.encryptionAvailable ? ` · ${tr('desktop_shell_encryptable')}` : ''}${entry.runtimeOnly ? ` · ${tr('desktop_shell_runtime_only')}` : ''}`}
               align="center"
             >
               <button
@@ -105,7 +106,7 @@ export function Account({ bridge, onNavigate }: PageContentProps) {
                 onClick={() => onNavigate('provider-credentials')}
                 style={ghostButtonStyle(t)}
               >
-                打开
+                {tr('common_open')}
               </button>
             </Row>
           );

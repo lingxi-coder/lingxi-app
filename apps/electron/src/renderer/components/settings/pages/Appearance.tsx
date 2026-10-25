@@ -1,3 +1,4 @@
+import { tr } from '../../../i18n/locale';
 import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { ThemeMode } from '../../../theme/tokens';
@@ -15,9 +16,9 @@ export interface AppearanceOption {
  */
 export function appearanceOptions(): AppearanceOption[] {
   return [
-    { id: 'system', label: '跟随系统' },
-    { id: 'light', label: '浅色' },
-    { id: 'dark', label: '深色' },
+    { id: 'system', label: tr('settings_appearance_system') },
+    { id: 'light', label: tr('settings_appearance_light') },
+    { id: 'dark', label: tr('settings_appearance_dark') },
   ];
 }
 
@@ -49,8 +50,8 @@ export function Appearance({ bridge, onTheme }: PageContentProps) {
   };
 
   return (
-    <Card title="外观">
-      <Row title="主题" desc="选择浅色或深色外观，或跟随系统设置自动切换。" align="center">
+    <Card title={tr('settings_appearance')}>
+      <Row title={tr('settings_section_theme')} desc={tr('desktop_theme_desc')} align="center">
         {/* Not `primitives.tsx`'s `Segmented` — that export is gone (Task 20
             trimmed the file to just `Toggle`, the one primitive Skills/
             ToolsAgent/Plugins still import). Local pill, kept in this page
@@ -58,7 +59,7 @@ export function Appearance({ bridge, onTheme }: PageContentProps) {
             thing left in there and it isn't this control. This inline
             three-way pill mirrors the same look `SettingsScreen.tsx`'s own
             `LayerSwitcher` already uses. */}
-        <div className="settings-segmented" role="group" aria-label="主题" style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}>
+        <div className="settings-segmented" role="group" aria-label={tr('settings_section_theme')} style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}>
           {appearanceOptions().map((option) => {
             const active = preference === option.id;
             return (

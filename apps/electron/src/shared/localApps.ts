@@ -35,7 +35,7 @@ export interface DesktopAppManifest {
   processes?: LocalAppProcess[];
   capabilities?: LocalAppCapability[];
   /** Requested host catalog IDs. This declaration never grants tool access. */
-  agent?: { tools: string[] };
+  agent?: { tools: string[]; skills?: Array<{ id: string; path: string }> };
 }
 export interface LocalAppTarget {
   platform: 'android' | 'ios' | 'macos' | 'windows' | 'linux' | 'web';
@@ -51,9 +51,9 @@ export interface DesktopLocalApp {
   manifest: DesktopAppManifest;
   createdAt: number;
   updatedAt: number;
-  sourcePath?: string;
-  sourceMissing?: boolean;
-  sourceSession?: { projectPath: string; sessionId: string };
+  authoring?: DesktopAuthoringRef | DesktopAuthoringSourceRef;
+  authoringSourceMissing?: boolean;
+  authoringAction?: 'sourceMissing' | 'rebindRequired' | 'resumeSession' | 'createSession';
   background: boolean;
   grants: LocalAppCapability[];
   /** Trusted Apps settings, never supplied by an application manifest. */
@@ -70,9 +70,21 @@ export interface LocalAppLog { sequence: number; time: number; runId: string; pr
 export interface LocalAppEditRequest {
   id: string;
   name: string;
-  sourcePath?: string;
-  sourceMissing?: boolean;
-  sourceSession?: DesktopLocalApp['sourceSession'];
+  authoring?: DesktopAuthoringRef | DesktopAuthoringSourceRef;
+  authoringSourceMissing?: boolean;
+  authoringAction?: 'sourceMissing' | 'rebindRequired' | 'resumeSession' | 'createSession';
+}
+export interface DesktopAuthoringSourceRef { sourceDirectory: string }
+export type DesktopAuthoringProjectRef = { kind: 'desktopPath'; path: string };
+export interface DesktopAuthoringRef {
+  workspaceId: string;
+  sourceDirectory: string;
+  projectRef: DesktopAuthoringProjectRef;
+  authoringSessionId: string;
+  appId?: string;
+}
+export function isDesktopAuthoringRef(value: DesktopAuthoringRef | DesktopAuthoringSourceRef | undefined): value is DesktopAuthoringRef {
+  return Boolean(value && 'workspaceId' in value && 'projectRef' in value && 'authoringSessionId' in value);
 }
 export interface LocalAppAgentQuestion {
   id: string;
@@ -93,6 +105,9 @@ export interface LocalAppsApi {
   setBackground(id: string, enabled: boolean): Promise<void>;
   revoke(id: string): Promise<void>;
   edit(id: string): Promise<void>;
+  bindAuthoring(id: string, session: { projectPath: string; sessionId: string }): Promise<DesktopAuthoringRef>;
+  /** Persist a host-verified, ownerless source binding before a new app draft is shown. */
+  prepareAuthoring(session: { projectPath: string; sessionId: string }): Promise<DesktopAuthoringRef>;
   marketList(query?: string, owned?: boolean): Promise<LocalAppMarketRow[]>;
   marketInstall(remoteId: string, id?: string, expectedRevision?: number): Promise<DesktopLocalApp>;
   marketPublish(id: string, metadata: LocalAppMarketPublication, expectedRevision: number): Promise<{ appId: string; versionId: string; status: string } | undefined>;

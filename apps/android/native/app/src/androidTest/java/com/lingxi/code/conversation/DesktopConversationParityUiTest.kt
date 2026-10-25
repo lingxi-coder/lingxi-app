@@ -166,13 +166,13 @@ class DesktopConversationParityUiTest {
         }
         rule.onNode(hasSetTextAction()).performClick().performTextInput("Draft survives history")
         rule.waitUntil(timeoutMillis = 10_000) { imeVisible.get() }
-        rule.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
+        scrollToHistoryStart()
         rule.onNodeWithText("History 0").assertIsDisplayed()
         rule.runOnIdle {
             state.value = state.value.copy(messages = state.value.messages + Message(Role.Ai, "New reply", id = "incoming"))
         }
         rule.onNodeWithText("History 0").assertIsDisplayed()
-        rule.onNode(hasSetTextAction()).assertTextContains("Draft survives history")
+        rule.onNode(hasSetTextAction()).assertTextContains("Draft survives history").assertIsFocused()
         capture("android-conversation-keyboard-history")
         rule.onNode(hasSetTextAction()).performImeAction()
         rule.runOnIdle {
@@ -196,7 +196,7 @@ class DesktopConversationParityUiTest {
         }
         // Park at the top: the reader is detached, so the newest output is off
         // screen and the control is the way back.
-        rule.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
+        scrollToHistoryStart()
         rule.onNodeWithText("History 0").assertIsDisplayed()
         rule.onNodeWithTag(UiTags.CHAT_JUMP_TO_LATEST).assertIsDisplayed()
         capture("android-conversation-jump-control")
@@ -204,6 +204,12 @@ class DesktopConversationParityUiTest {
         // It re-armed the follow and caught up, and then retired itself.
         rule.onNodeWithText("History 34").assertIsDisplayed()
         rule.onNodeWithTag(UiTags.CHAT_JUMP_TO_LATEST).assertDoesNotExist()
+    }
+
+    private fun scrollToHistoryStart() {
+        // A semantic scrollToIndex is programmatic navigation; exercise real
+        // reader intent so the transcript's gesture/follow contract is covered.
+        repeat(8) { rule.onNode(hasScrollToIndexAction()).performTouchInput { swipeDown() } }
     }
 
     private fun capture(name: String, dialog: Boolean = false) {

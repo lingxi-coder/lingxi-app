@@ -46,8 +46,7 @@ struct ChatView: View {
     var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
     @ObservedObject private var convo: ConversationModel
 
-    @State private var followsLatestMessage = true
-    @State private var followsLatestAgentMessage = true
+    @State private var latestMessageRequestRevision: UInt64 = 0
     @State private var pendingAgentDetailID: String?
 
     // Composer draft, HOISTED up to RootView (the iOS analog of Android
@@ -316,10 +315,6 @@ struct ChatView: View {
             recentModels = modelRecents.resolved(against: visibleAvailableModels)
         }
         .onChange(of: session.id) { _, _ in
-            // Re-arm following only for a real session switch. A sheet or
-            // navigation presentation may cause this view to appear again;
-            // that must not discard the user's current scroll position.
-            followsLatestMessage = true
             pendingAgentDetailID = nil
             source.selectAgent(ConversationModel.mainAgentID)
             summaryCategory = nil
@@ -453,7 +448,6 @@ struct ChatView: View {
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
             .accessibilityIdentifier("conversation.agent-detail-sheet")
-            .onAppear { followsLatestAgentMessage = true }
         }
         // The chat is the detail column of RootView's split view. Its chrome is
         // the system navigation bar so that the leading item stays the system's
@@ -472,16 +466,22 @@ struct ChatView: View {
             if !source.isTemporaryConversation {
                 ToolbarItem(placement: .principal) {
                     Button { sessionPanelOpen = true } label: {
-                        VStack(spacing: 1) {
-                            Text(sessionTitle).font(.subheadline.weight(.semibold)).foregroundStyle(t.text)
-                            Text("\(sessionMode.title) · \(workspaceName)")
-                                .font(.caption2).foregroundStyle(sessionMode.color(t))
+                        HStack(spacing: 4) {
+                            Text(sessionTitle)
+                                .font(.headline)
+                                .foregroundStyle(t.text)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(t.text3)
                         }
-                        .lineLimit(1)
+                        .frame(minHeight: 44)
                         .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(String(localized: "chat_session_panel_a11y"))
+                    .accessibilityLabel(sessionTitle)
+                    .accessibilityHint(String(localized: "chat_session_panel_a11y"))
                     .accessibilityValue("\(sessionTitle), \(sessionMode.title) · \(workspaceName)")
                     .accessibilityIdentifier("conversation.project-context")
                 }
@@ -491,12 +491,14 @@ struct ChatView: View {
                         Button { sideChatSheetOpen = true } label: {
                             toolbarIcon("bubble.left.and.bubble.right", label: String(localized: "side_chats_title"))
                         }
+                        .tint(t.text)
                         .accessibilityIdentifier("conversation.side-chats")
                     }
                     #endif
                     Button(action: newChat) {
                         toolbarIcon("square.and.pencil", label: String(localized: "chat_new_chat"))
                     }
+                    .tint(t.text)
                     .accessibilityIdentifier("conversation.new-chat")
                     summaryMenu
                 }
@@ -505,25 +507,20 @@ struct ChatView: View {
     }
 
     private func toolbarIcon(_ symbol: String, label: String) -> some View {
-        Label {
-            Text(label)
-        } icon: {
-            Image(systemName: symbol)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 20, height: 20)
-        }
+        // The native toolbar supplies its touch target and optical sizing.
+        // A resizable symbol inside another 44pt frame enlarges the system
+        // chrome and takes space away from the conversation name.
+        Label(label, systemImage: symbol)
             .labelStyle(.iconOnly)
-            .font(.system(size: 17, weight: .medium))
+            .font(.system(size: 17, weight: .regular))
             .imageScale(.medium)
-            .frame(width: 44, height: 44)
-            .contentShape(.rect)
+            .foregroundStyle(t.text)
     }
 
     // MARK: session panel
 
     private var sessionTitle: String {
-        convo.isNew ? String(localized: "chat_new_conversation") : session.title
+        convo.sessionReference(for: session.id, cachedTitle: session.title).title
     }
 
     /// The new-chat strip is only for a chat that has not started yet.
@@ -582,12 +579,12 @@ struct ChatView: View {
                 .accessibilityIdentifier("conversation.summary.category.\(category.rawValue)")
             }
         } label: {
-            toolbarIcon("ellipsis", label: "Open conversation summary")
+            toolbarIcon("ellipsis", label: String(localized: "chat_open_summary"))
         }
         .menuStyle(.automatic)
         .buttonStyle(.automatic)
-        .tint(t.accent)
-        .accessibilityLabel("Open conversation summary")
+        .tint(t.text)
+        .accessibilityLabel(String(localized: "chat_open_summary"))
         .accessibilityIdentifier("conversation.summary-menu")
     }
 
@@ -655,8 +652,8 @@ struct ChatView: View {
                     }
                     .joined(separator: "|")
             ),
-            followsLatest: showsSelectedAgent ? $followsLatestAgentMessage : $followsLatestMessage,
             focused: showsSelectedAgent ? false : composerFocused,
+            latestRequestRevision: showsSelectedAgent ? 0 : latestMessageRequestRevision,
             accessibilityIdentifier: showsSelectedAgent ? "conversation.agent-message-list" : "conversation.message-list",
             maxContentWidth: 860,
             scrollScope: "\(session.id):\(showsSelectedAgent ? convo.selectedAgentID : ConversationModel.mainAgentID)",
@@ -816,14 +813,14 @@ struct ChatView: View {
                 .font(.system(size: 24, weight: .medium))
                 .foregroundStyle(t.accent)
             Text(projectName ?? String(localized: "chat_start_new_conversation"))
-                .font(.scaledSystem(20, weight: .semibold, relativeTo: .title2))
+                .font(.title2.weight(.semibold))
                 .foregroundStyle(t.text)
                 .lineLimit(2)
-            Text("Describe what you want LingXi to accomplish")
-                .font(.scaledSystem(14, relativeTo: .subheadline))
+            Text("chat_new_chat_hint")
+                .font(.subheadline)
                 .foregroundStyle(t.text3)
                 .multilineTextAlignment(.center)
-                .lineSpacing(7)
+                .lineSpacing(3)
                 .frame(maxWidth: 300)
         }
         .frame(maxWidth: .infinity, minHeight: 360)
@@ -1075,7 +1072,7 @@ struct ChatView: View {
         // Sending is an explicit re-engagement: a reader who had scrolled up to
         // re-read something must not have their own prompt land off screen. The
         // re-arm happens only after the turn was accepted.
-        followsLatestMessage = true
+        latestMessageRequestRevision &+= 1
         return true
     }
 
@@ -1195,7 +1192,7 @@ private struct CompactionRuntimeFooter: View {
                     title: unknownPhase ? String(localized: "chat_compacting_context") : phase == "preparing" ? String(localized: "chat_compaction_preparing")
                         : phase == "summarizing" ? String(localized: "chat_compaction_summarizing")
                         : String(localized: "chat_compaction_restoring"),
-                    detail: percent.map { String(format: String(localized: "chat_compaction_progress"), $0, Int(elapsed)) },
+                    detail: percent.map { String(localized: "chat_compaction_progress \($0) \(Int(elapsed))") },
                     icon: .book,
                     color: t.accent,
                     progress: percent,

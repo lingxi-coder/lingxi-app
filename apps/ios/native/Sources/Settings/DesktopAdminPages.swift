@@ -12,14 +12,14 @@ struct DesktopHooksPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsConnectionStatus()
-            Picker("Settings layer", selection: $layer) {
+            Picker(String(localized: "settings_layer_label"), selection: $layer) {
                 ForEach(DesktopSettingsLayer.allCases) { Text($0.title).tag($0) }
             }.pickerStyle(.segmented)
-            Text("Hooks run commands around engine events. Review the selected layer before saving.").font(.footnote)
+            Text(String(localized: "settings_hooks_intro")).font(.footnote)
             TextEditor(text: $draft).font(.system(.body, design: .monospaced)).frame(minHeight: 260)
                 .autocorrectionDisabled().textInputAutocapitalization(.never).disabled(!writable)
             HStack {
-                Button("Reload") { Task { await load() } }.disabled(!repository.connected)
+                Button(String(localized: "settings_reload")) { Task { await load() } }.disabled(!repository.connected)
                 Button("settings_parity_validate_hooks") { Task { await submit(action: "validate_document") } }.disabled(!writable)
                 Button("settings_save") { Task { await submit(action: "save_document") } }.disabled(!writable)
             }
@@ -36,7 +36,7 @@ struct DesktopHooksPage: View {
     }
     private func load() async { await repository.admin(domain: "hook", action: "get_document", scope: layer.rawValue) }
     private func submit(action: String) async {
-        guard let value = DesktopSettingsRepository.object(draft) else { repository.errorMessage = "Hooks must be a JSON object."; return }
+        guard let value = DesktopSettingsRepository.object(draft) else { repository.errorMessage = String(localized: "settings_hooks_json_required"); return }
         await repository.admin(domain: "hook", action: action, scope: layer.rawValue, revision: revision,
                                payload: DesktopSettingsRepository.json(["scope": layer.rawValue, "hooks": value]), mutation: true)
     }
@@ -59,7 +59,7 @@ struct DesktopPluginsPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsConnectionStatus()
-            Button("Refresh plugins and marketplaces") { Task { await load() } }.disabled(!repository.connected)
+            Button(String(localized: "plugins_refresh_all")) { Task { await load() } }.disabled(!repository.connected)
             SettingsLayerPicker(selection: $layer)
             ForEach(installed.compactMap { $0["id"] as? String }, id: \.self) { id in
                 let row = installed.first { $0["id"] as? String == id }
@@ -69,11 +69,11 @@ struct DesktopPluginsPage: View {
                         PluginSensitiveFields(pluginID: id, schemaJSON: row?["config_schema_json"] as? String,
                                               readOnly: !repository.canEdit(key: "pluginConfigs", layer: layer), reconnect: host.onReconnectAfterSecretChange)
                         HStack {
-                            Button("Enable") { preview(action: "enable", target: ["plugin": id]) }
-                            Button("Disable") { preview(action: "disable", target: ["plugin": id]) }
+                            Button(String(localized: "settings_provider_enable")) { preview(action: "enable", target: ["plugin": id]) }
+                            Button(String(localized: "plugins_action_disable")) { preview(action: "disable", target: ["plugin": id]) }
                             if row?["source"] as? String != "builtin" {
-                                Button("Update") { preview(action: "update", target: ["plugin": id]) }
-                                Button("Uninstall", role: .destructive) { preview(action: "uninstall", target: ["plugin": id]) }
+                                Button(String(localized: "plugins_action_update")) { preview(action: "update", target: ["plugin": id]) }
+                                Button(String(localized: "plugins_action_uninstall"), role: .destructive) { preview(action: "uninstall", target: ["plugin": id]) }
                             }
                         }.disabled(!writable)
                     }
@@ -83,23 +83,23 @@ struct DesktopPluginsPage: View {
                 HStack {
                     Label(name, systemImage: "shippingbox")
                     Spacer()
-                    Button("Update") { preview(action: "marketplace_update", target: ["name": name]) }
+                    Button(String(localized: "plugins_action_update")) { preview(action: "marketplace_update", target: ["name": name]) }
                     Button("settings_parity_remove", role: .destructive) { preview(action: "marketplace_remove", target: ["name": name]) }
                 }.disabled(!writable)
             }
-            if repository.catalogs["plugin"] != nil && installed.isEmpty { Text("No installed plugins.").foregroundStyle(.secondary) }
+            if repository.catalogs["plugin"] != nil && installed.isEmpty { Text(String(localized: "plugins_installed_empty")).foregroundStyle(.secondary) }
             ForEach(available.compactMap { $0["id"] as? String }, id: \.self) { id in
                 HStack {
                     Text(id)
                     Spacer()
-                    Button("Install / update") { preview(action: available.first { $0["id"] as? String == id }?["installed"] as? Bool == true ? "update" : "install", target: ["plugin": id]) }.disabled(!writable)
+                    Button(String(localized: "plugins_install_or_update")) { preview(action: available.first { $0["id"] as? String == id }?["installed"] as? Bool == true ? "update" : "install", target: ["plugin": id]) }.disabled(!writable)
                 }
             }
             TextField("settings_parity_marketplace_source", text: $marketplaceSource).textFieldStyle(.roundedBorder)
             Button("settings_parity_preview_marketplace") { preview(action: "marketplace_add", target: ["source": marketplaceSource]) }
                 .disabled(!writable || marketplaceSource.isEmpty)
             if let previewSummary {
-                GroupBox("Review operation") {
+                GroupBox(String(localized: "plugins_review_operation")) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(previewSummary).textSelection(.enabled)
                         Button("settings_parity_confirm_apply") { applyPreview() }.disabled(!writable || previewPayload == nil)
@@ -107,7 +107,7 @@ struct DesktopPluginsPage: View {
                     }
                 }
             }
-            DisclosureGroup("Advanced plugin configuration") { ForEach(["enabledPlugins", "pluginConfigs", "extraKnownMarketplaces"], id: \.self) { PluginConfigurationEditor(key: $0, layer: layer) } }
+            DisclosureGroup(String(localized: "plugins_advanced")) { ForEach(["enabledPlugins", "pluginConfigs", "extraKnownMarketplaces"], id: \.self) { PluginConfigurationEditor(key: $0, layer: layer) } }
         }.task(id: repository.sourceGeneration) { await load() }
         .onChange(of: repository.documents["plugin"]) { _, json in
             guard let json, let doc = DesktopSettingsRepository.object(json),
@@ -119,7 +119,7 @@ struct DesktopPluginsPage: View {
     }
     private func load() async { await repository.admin(domain: "plugin", action: "get_catalog") }
     private func preview(action: String, target: [String: String]) {
-        guard let currentRevision else { repository.errorMessage = "Refresh the plugin catalog before changing it."; return }
+        guard let currentRevision else { repository.errorMessage = String(localized: "plugins_catalog_refresh_first"); return }
         var payload: [String: Any] = target
         payload["action"] = action; payload["scope"] = layer.rawValue
         previewPayload = payload; previewRevision = currentRevision; previewSummary = nil
@@ -170,19 +170,19 @@ struct DesktopMCPAdminPage: View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsConnectionStatus()
             if let initialSelectionError {
-                ContentUnavailableView("MCP server unavailable", systemImage: "link", description: Text(initialSelectionError))
+                ContentUnavailableView(String(localized: "mcp_server_unavailable"), systemImage: "link", description: Text(initialSelectionError))
             }
-            Picker("MCP storage scope", selection: $scope) {
-                Text("User").tag("user"); Text("Local workspace").tag("local"); Text("Project .mcp.json").tag("project")
+            Picker(String(localized: "mcp_storage_scope"), selection: $scope) {
+                Text(String(localized: "settings_parity_user_layer")).tag("user"); Text(String(localized: "mcp_scope_local_title")).tag("local"); Text(String(localized: "mcp_scope_project_title")).tag("project")
             }.pickerStyle(.segmented)
             // MCP 的三个作用域和设置页的层用了同样的词，却是两套独立存储 —— 而且
             // 「本地」的含义正好相反：设置层的 local 在项目内，MCP 的 local 在主目录。
             // 刚在设置页学会一个意思的人，到这一页会把同一个词读成同一个意思。
             Text(mcpScopeDescription).font(.caption).foregroundStyle(.secondary)
             Text("mcp_scope_vs_layers_note").font(.caption2).foregroundStyle(.secondary)
-            Text(scopeRow["path"] as? String ?? "Load the engine configuration to view this scope.")
+            Text(scopeRow["path"] as? String ?? String(localized: "mcp_scope_load_hint"))
                 .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            DisclosureGroup("Runtime servers") {
+            DisclosureGroup(String(localized: "mcp_runtime_servers")) {
                 ForEach(host.convo.mcpServers) { server in
                     HStack {
                         Text(server.name)
@@ -231,9 +231,9 @@ struct DesktopMCPAdminPage: View {
         initialSelectionResolved = true
         switch MCPDeepLinkSelection.resolve(name: initialName, requestedScope: initialScope, snapshot: snapshot) {
         case .selected(let selectedScope): scope = selectedScope; select(initialName)
-        case .missing: initialSelectionError = "This server is not stored in the requested local scope."
-        case .ambiguous: initialSelectionError = "This server name exists in several scopes. Open a link that specifies its scope."
-        case .invalidScope: initialSelectionError = "This link specifies an invalid MCP scope."
+        case .missing: initialSelectionError = String(localized: "mcp_link_missing")
+        case .ambiguous: initialSelectionError = String(localized: "mcp_link_ambiguous")
+        case .invalidScope: initialSelectionError = String(localized: "mcp_link_scope_invalid")
         }
     }
     private func select(_ selected: String?) {
@@ -243,7 +243,7 @@ struct DesktopMCPAdminPage: View {
         draftRevision = scopeRow["revision_sha256"] as? String
     }
     private func save(remove: Bool) async {
-        guard writable, let config = DesktopSettingsRepository.object(draft) else { repository.errorMessage = "MCP configuration must be a JSON object."; return }
+        guard writable, let config = DesktopSettingsRepository.object(draft) else { repository.errorMessage = String(localized: "mcp_json_object_required"); return }
         let payload: [String: Any] = ["scope": scope, "name": name, "config": config]
         await repository.admin(domain: "mcp", action: remove ? "remove_server" : "save_server", target: name, scope: scope,
                                revision: draftRevision, payload: DesktopSettingsRepository.json(payload), mutation: true)
@@ -268,7 +268,7 @@ struct DesktopSkillsAdminPage: View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsConnectionStatus()
             if initialID != nil, repository.skillCatalog != nil, !openedInitialID {
-                ContentUnavailableView("Skill unavailable", systemImage: "link", description: Text(initialSkillError ?? "This skill is not stored in the local catalog."))
+                ContentUnavailableView(String(localized: "skills_unavailable"), systemImage: "link", description: Text(initialSkillError ?? String(localized: "skills_local_missing")))
             }
             HStack {
                 Button("settings_parity_refresh_catalog") { Task { await load() } }.disabled(!repository.connected)
@@ -285,16 +285,16 @@ struct DesktopSkillsAdminPage: View {
                 }
             }
             if writable || target != nil {
-                Picker("Skill source", selection: $scope) { Text("User").tag("user"); Text("Project").tag("project") }
+                Picker(String(localized: "skills_source_label"), selection: $scope) { Text(String(localized: "settings_parity_user_layer")).tag("user"); Text(String(localized: "settings_parity_project_layer")).tag("project") }
                     .disabled(target != nil)
                 TextField("settings_parity_skill_name", text: $name).textFieldStyle(.roundedBorder).disabled(!writable)
                 TextEditor(text: $markdown).font(.system(.body, design: .monospaced)).frame(minHeight: 260)
                     .disabled(!writable || repository.saving).autocorrectionDisabled().textInputAutocapitalization(.never)
-                if !writable { Label("Managed, bundled and plugin skills are read-only.", systemImage: "lock") }
+                if !writable { Label(String(localized: "skills_readonly_sources"), systemImage: "lock") }
                 Button("settings_parity_save_skill") { Task { await save() } }
                     .disabled(!writable || repository.saving || name.isEmpty || markdown.isEmpty)
                 if target != nil && writable {
-                    Menu("Move Skill") {
+                    Menu(String(localized: "skills_move")) {
                         Button("settings_parity_user_layer") { move(to: "user") }.disabled(scope == "user")
                         Button("settings_parity_project_layer") { move(to: "project") }.disabled(scope == "project")
                     }.disabled(repository.saving)
@@ -304,9 +304,9 @@ struct DesktopSkillsAdminPage: View {
                 }
             }
             if !trash.isEmpty {
-                Text("Trash").font(.headline)
+                Text(String(localized: "skills_trash_title")).font(.headline)
                 ForEach(trash) { entry in
-                    Button("Restore \(entry.name.displayValue)") {
+                    Button(String(localized: "skills_restore_name \(entry.name.displayValue)")) {
                         Task { await repository.admin(domain: "skill", action: "restore_skill", skillTarget: entry.identity,
                                                       scope: entry.source, mutation: true) }
                     }.disabled(repository.saving)
@@ -338,7 +338,7 @@ struct DesktopSkillsAdminPage: View {
             (initialScope == nil || entry.source == initialScope) && (entry.identity.id == initialID || entry.identity.displayValue == initialID || entry.name.displayValue == initialID)
         }
         guard candidates.count == 1, let entry = candidates.first else {
-            initialSkillError = candidates.count > 1 ? "Several skills have this name. Open a link with its source scope or full skill identity." : "This skill is not stored in the local catalog."
+            initialSkillError = candidates.count > 1 ? String(localized: "skills_link_ambiguous") : String(localized: "skills_local_missing")
             return
         }
         openedInitialID = true; target = entry.identity; writable = false
@@ -393,7 +393,7 @@ private struct PluginConfigurationEditor: View {
     }
     private func save() {
         guard let expectedRevision, let value = DesktopSettingsRepository.object(draft) else {
-            repository.errorMessage = "Plugin configuration must be a JSON object."; return
+            repository.errorMessage = String(localized: "plugins_configuration_json_required"); return
         }
         Task {
             await repository.admin(domain: "plugin", action: "save_config", scope: layer.rawValue, revision: expectedRevision,
@@ -422,7 +422,7 @@ struct PluginSensitiveFields: View {
                 if let message = repository.message { Text(message).font(.caption).foregroundStyle(.secondary) }
                 if let error = repository.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
                 if repository.needsReconnect {
-                    Text("Reconnect the engine when its current work has finished. Existing engine connections may cache an older secret.")
+                    Text(String(localized: "plugins_secret_reconnect_hint"))
                         .font(.caption).foregroundStyle(.secondary)
                     if let reconnect {
                         Button("settings_parity_reconnect") { Task { await repository.reconnect(using: reconnect) } }
@@ -457,7 +457,7 @@ private struct PluginSecretField: View {
                     secret = ""
                     Task { await repository.save(plugin: pluginID, key: fieldKey, secret: value) }
                 }.disabled(readOnly || repository.busy || secret.isEmpty)
-                Button("Delete stored secret", role: .destructive) {
+                Button(String(localized: "plugins_secret_delete"), role: .destructive) {
                     secret = ""
                     Task { await repository.delete(plugin: pluginID, key: fieldKey) }
                 }.disabled(readOnly || repository.busy || repository.isConfigured(plugin: pluginID, key: fieldKey) != true)

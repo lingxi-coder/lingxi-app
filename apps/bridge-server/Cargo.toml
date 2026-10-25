@@ -23,6 +23,7 @@ path = "src/lib.rs"
 audio-provider = { path = "../audio-provider" }
 # Shared question contracts used by production brokers and test tools.
 tool-api = { workspace = true }
+tool-ui = { workspace = true }
 # Namespace/branding literals (config-dir name, env var names) route through this
 # crate so the Claude namespace lives in one place.
 branding.workspace = true
@@ -82,6 +83,7 @@ core = { workspace = true }
 provider-config = { workspace = true }
 llm-runtime = { workspace = true }
 local-app = { workspace = true }
+cost = { workspace = true }
 # S2: resolve `~/.claude` (claude_home) + the global `.mcp.json` path, and the
 # F2-04 `~/.claude/bridge/<port>.lock` discovery dir.
 dirs = "5"

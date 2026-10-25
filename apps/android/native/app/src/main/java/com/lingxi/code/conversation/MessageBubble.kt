@@ -91,8 +91,11 @@ fun MessageBubble(
         // A subagent's dispatch prompt arrives as the first USER bubble of its
         // child transcript and runs to thousands of characters. Same policy and
         // the same two strings as the assistant branch below.
-        val isCollapsible = remember(message.text) {
-            AssistantMessageCollapsePolicy.shouldCollapse(message.text, isUser = true)
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val peer = remember(message.text, context) { crossSessionMessage(message.text, conversationStrings(context)) }
+        val displayText = peer?.text ?: message.text
+        val isCollapsible = remember(displayText) {
+            AssistantMessageCollapsePolicy.shouldCollapse(displayText, isUser = true)
         }
         var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
         Column(
@@ -100,6 +103,13 @@ fun MessageBubble(
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            (peer?.label ?: message.originLabel ?: message.tag)?.let { origin ->
+                Text(origin, color = t.text3,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.widthIn(max = 700.dp)
+                        .testTag("conversation.message.user.origin"))
+            }
             if (message.images.isNotEmpty()) {
                 AttachedImages(images = message.images)
             }
@@ -107,7 +117,7 @@ fun MessageBubble(
             Row(horizontalArrangement = Arrangement.End) {
                 Spacer(Modifier.weight(1f))
                 val shape = RoundedCornerShape(16.dp)
-                if (message.text.isNotBlank()) {
+                if (displayText.isNotBlank()) {
                     Box(
                         modifier = Modifier
                             .widthIn(max = 700.dp)
@@ -116,7 +126,7 @@ fun MessageBubble(
                             .padding(horizontal = 18.dp, vertical = 12.dp),
                     ) {
                         AIText(
-                            markdown = message.text,
+                            markdown = displayText,
                             onOpenLink = onOpenLink,
                             modifier = if (isCollapsible && !expanded) {
                                 Modifier.heightIn(max = 190.4.dp).clipToBounds()
@@ -160,7 +170,8 @@ fun MessageBubble(
         val isCollapsible = remember(message.text) {
             AssistantMessageCollapsePolicy.shouldCollapse(message.text)
         }
-        var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
+        var expandedOverride by rememberSaveable(message.id) { mutableStateOf<Boolean?>(null) }
+        val expanded = expandedOverride ?: message.streamed
         Row(
             modifier = modifier
                 .padding(bottom = bottomSpacing)
@@ -205,7 +216,7 @@ fun MessageBubble(
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .clickable { expanded = !expanded }
+                            .clickable { expandedOverride = !expanded }
                             .testTag("conversation.message.assistant.toggle")
                             .padding(horizontal = 6.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -252,7 +263,7 @@ private fun AttachedImages(images: List<ImageRefDto>) {
             if (bitmap != null) {
                 Image(
                     bitmap = bitmap,
-                    contentDescription = "Attached image ${index + 1}",
+                    contentDescription = stringResource(R.string.chat_attached_image_fmt, index + 1),
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                     modifier = Modifier
                         .size(116.dp)
@@ -530,9 +541,8 @@ private fun UserMessageActions(message: Message) {
             copied = false
         }
     }
-    val clock = message.sentAtMs?.let {
-        java.text.SimpleDateFormat("h:mm a", java.util.Locale.US).format(java.util.Date(it))
-    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val clock = message.sentAtMs?.let { android.text.format.DateFormat.getTimeFormat(context).format(java.util.Date(it)) }
     Row(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,

@@ -339,7 +339,15 @@ class ChatViewModel(
             }
             launch {
                 boundSource.sessionState.collect { engine ->
-                    if (sourceGeneration == generation) _sessions.value = engine
+                    if (sourceGeneration == generation) {
+                        _sessions.value = engine
+                        // The SDK catalog resolves custom title, AI title, summary and first prompt.
+                        // Keep the header and drawer synchronized, including later renames.
+                        _state.update { current ->
+                            val row = engine.rows.firstOrNull { canonicalSessionId(it.uuid) == canonicalSessionId(current.session.id) }
+                            if (row == null) current else current.copy(session = current.session.copy(title = row.title))
+                        }
+                    }
                 }
             }
             launch {
@@ -381,6 +389,15 @@ class ChatViewModel(
                     }
                     if (prompt == null && previous != null) {
                         backgroundExecution.settlePermission(previous.requestId)
+                    }
+                }
+            }
+            (boundSource as? ExternalTurnConversationSource)?.let { external ->
+                // Subscribe before anything can be reported: the feed starts the
+                // source following its session when it is collected.
+                launch(start = CoroutineStart.UNDISPATCHED) {
+                    external.externalFeed.collect { item ->
+                        if (sourceGeneration == generation) ingestExternal(item)
                     }
                 }
             }
@@ -433,6 +450,18 @@ class ChatViewModel(
      *    the plan outlives the turn that rewrote it.
      */
     internal fun reduceClientEvent(event: ClientEvent) {
+        if (source is ExternalTurnConversationSource && event is ClientEvent.SlashCommandResult) {
+            // A remote configuration command has no locally owned turn. Its result
+            // must also leave an unrelated running desktop turn intact.
+            val output = event.display.displayText()
+            _state.update {
+                it.copy(
+                    messages = it.messages + Message(role = Role.Ai, text = output),
+                    error = if (event.isError) ChatError(output, classifyError(output)) else it.error,
+                )
+            }
+            return
+        }
         planTasksFrom(event)?.let { tasks ->
             _state.update { it.copy(planTasks = tasks) }
             return
@@ -474,6 +503,7 @@ class ChatViewModel(
             is ClientEvent.TurnStarted -> {
                 pendingAssistantTranscriptUuids.clear()
                 _state.update { it.copy(promptSuggestion = null, promptSuggestionUuid = null, suggestionTurn = it.suggestionTurn + 1) }
+                if (source is ExternalTurnConversationSource) beginExternalTurn()
             }
             is ClientEvent.PromptSuggestionState -> _state.update {
                 it.copy(promptSuggestionEnabled = event.enabled, promptSuggestionNotice = event.notice)
@@ -958,6 +988,154 @@ class ChatViewModel(
                     durableRecoveryBlocked = true,
                     liveTurnWaitingForUser = false,
                 )
+            }
+        }
+    }
+
+    /** Rows of the followed session's user prompts, by the turn the desktop assigned. */
+    private val externalPromptRows = mutableMapOf<Long, String>()
+
+    /** Provisional rows of prompts this device sent, by outgoing prompt id. */
+    private val externalOutgoingRows = mutableMapOf<String, String>()
+    private val externalFailedPrompts = mutableSetOf<String>()
+    private val externalRetryPrompts = mutableMapOf<String, ExternalOutgoingPrompt>()
+    private val _externalSendFailures = MutableSharedFlow<ExternalSendFailure>(extraBufferCapacity = 4)
+
+    /** Failed drafts to restore in the composer, retaining attachments for an idempotent retry. */
+    internal val externalSendFailures = _externalSendFailures.asSharedFlow()
+
+    /**
+     * Show [session] as loading until the source reports its base. Called once,
+     * right after the view model of a followed session is created.
+     */
+    internal fun beginExternalLoading(session: SessionRef) {
+        _state.update {
+            it.copy(
+                session = session,
+                isNew = false,
+                sessionReady = false,
+                statusLine = strings.resolve(R.string.remote_session_loading, "正在加载会话…"),
+            )
+        }
+    }
+
+    /**
+     * Fold one change of a followed session into [ChatState]. The turn the phone
+     * did not start has no collector of its own, so its events take the same path
+     * a re-attached turn does (the tail of [reduceClientEvent]).
+     */
+    internal fun ingestExternal(item: ExternalFeedItem) {
+        when (item) {
+            is ExternalFeedItem.Base -> {
+                externalPromptRows.clear()
+                externalOutgoingRows.clear()
+                applyActivatedSession(item.session)
+                item.title?.let { title ->
+                    _state.update { it.copy(session = it.session.copy(title = title)) }
+                }
+            }
+            is ExternalFeedItem.OlderMessages ->
+                _state.update { it.copy(messages = item.messages + it.messages) }
+            is ExternalFeedItem.UserPrompt -> {
+                val row = Message(role = Role.User, text = item.text, originLabel = item.originLabel)
+                externalPromptRows[item.turnId] = row.id
+                _state.update { it.copy(isNew = false, messages = it.messages + row) }
+            }
+            is ExternalFeedItem.PromptImages -> externalPromptRows[item.turnId]?.let { rowId ->
+                _state.update { state ->
+                    state.copy(messages = state.messages.map { if (it.id == rowId) it.copy(images = item.images) else it })
+                }
+            }
+            is ExternalFeedItem.Event -> reduceClientEvent(item.event)
+            is ExternalFeedItem.Outgoing -> reduceExternalOutgoing(item.prompts)
+            is ExternalFeedItem.PendingQuestions -> _state.update { it.copy(pendingQuestions = item.questions) }
+            is ExternalFeedItem.Turn -> reconcileExternalTurn(item.running)
+            is ExternalFeedItem.Readiness -> _state.update {
+                it.copy(sessionReady = item.ready, statusLine = item.statusLine)
+            }
+            is ExternalFeedItem.Notice -> _state.update { it.copy(statusLine = item.text) }
+        }
+    }
+
+    /** A turn of the followed session started; idle means nothing else owns the reducer. */
+    private fun beginExternalTurn() {
+        if (turnJob != null || recoveredTurnToken != null) return
+        turnToken++
+        recoveredTurnToken = turnToken
+        recoveryReplayTurnId = null
+        durableTurnUiSequence = 0L
+        pendingRecoveredReplayAckTurnId = null
+        currentTurnOrigin = ConversationTurnOrigin.Ordinary
+        _state.update {
+            it.copy(
+                streaming = true,
+                error = null,
+                statusLine = null,
+                agentRun = AgentRunState(turnId = turnToken),
+            )
+        }
+    }
+
+    /**
+     * The source says whether a turn runs. Events normally settle it first; this
+     * covers a turn whose start or end the events did not carry (a snapshot taken
+     * mid-turn, an end the history page cut off).
+     */
+    private fun reconcileExternalTurn(running: Boolean) {
+        val token = recoveredTurnToken
+        if (running && token == null) {
+            beginExternalTurn()
+            recoveredTurnToken?.let { reduce(ReplyEvent.Thinking, it) }
+        } else if (!running && token != null) {
+            reduce(ReplyEvent.End, token)
+            recoveredTurnToken = null
+        }
+    }
+
+    private fun reduceExternalOutgoing(prompts: List<ExternalOutgoingPrompt>) {
+        val live = prompts.mapTo(mutableSetOf()) { it.id }
+        val gone = externalOutgoingRows.keys.filter { it !in live }
+        gone.forEach { id ->
+            val rowId = externalOutgoingRows.remove(id)
+            _state.update { state -> state.copy(messages = state.messages.filterNot { it.id == rowId }) }
+        }
+        externalFailedPrompts.retainAll(live)
+        externalRetryPrompts.keys.retainAll(live)
+        for (prompt in prompts) {
+            if (prompt.failed) {
+                if (!externalFailedPrompts.add(prompt.id)) continue
+                val rowId = externalOutgoingRows.remove(prompt.id)
+                _state.update { state -> state.copy(messages = state.messages.filterNot { it.id == rowId }) }
+                externalRetryPrompts[prompt.id] = prompt
+                _externalSendFailures.tryEmit(ExternalSendFailure(prompt.text, prompt.images))
+                reportHostError(strings.resolve(R.string.remote_send_failed, "消息未能发送，请重试。"))
+            } else {
+                externalFailedPrompts.remove(prompt.id)
+                externalRetryPrompts.remove(prompt.id)
+                if (prompt.id !in externalOutgoingRows) {
+                    val row = Message(role = Role.User, text = prompt.text, images = prompt.images)
+                    externalOutgoingRows[prompt.id] = row.id
+                    _state.update { it.copy(isNew = false, messages = it.messages + row) }
+                }
+            }
+        }
+    }
+
+    /** Send from the composer of a followed session: the row appears when the desktop reports it. */
+    private fun sendExternal(text: String, images: List<ImageRefDto>, external: ExternalTurnConversationSource) {
+        if (!_state.value.sessionReady) return
+        savedState?.set(KEY_DRAFT, "")
+        _state.update { it.copy(isNew = false, error = null) }
+        val retry = externalRetryPrompts.values.firstOrNull { it.text == text && it.images == images }
+        viewModelScope.launch {
+            try {
+                if (retry != null) external.retryExternalPrompt(retry.id)
+                else external.sendExternalPrompt(text, images)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                _externalSendFailures.tryEmit(ExternalSendFailure(text, images))
+                reportHostError(error.message ?: error::class.simpleName.orEmpty())
             }
         }
     }
@@ -1730,7 +1908,10 @@ class ChatViewModel(
             // collector or clearing the optimistic prompt and widget slots.
             if (current.session.id == "new") {
                 _state.update {
-                    it.copy(session = it.session.copy(id = restored.sessionId), sessionReady = true)
+                    val catalogTitle = _sessions.value.rows.firstOrNull { row ->
+                        canonicalSessionId(row.uuid) == canonicalSessionId(restored.sessionId)
+                    }?.title
+                    it.copy(session = it.session.copy(id = restored.sessionId, title = catalogTitle ?: it.session.title), sessionReady = true)
                 }
                 reportBackgroundTurnState()
                 return
@@ -1753,8 +1934,8 @@ class ChatViewModel(
         restoredTranscriptSessionId = restored.sessionId
             .takeIf { restored.kind == SessionActivationKind.Resumed }
             ?.let(::canonicalSessionId)
-        val title = _state.value.session.takeIf { it.id == restored.sessionId }?.title
-            ?: _sessions.value.rows.firstOrNull { it.uuid == restored.sessionId }?.title
+        val title = _sessions.value.rows.firstOrNull { canonicalSessionId(it.uuid) == canonicalSessionId(restored.sessionId) }?.title
+            ?: _state.value.session.takeIf { canonicalSessionId(it.id) == canonicalSessionId(restored.sessionId) }?.title
             ?: _state.value.session.title
         _state.update {
             it.copy(
@@ -2149,6 +2330,7 @@ class ChatViewModel(
      */
     /** Synchronous composer admission keeps rejected side commands editable. */
     fun admitComposerSend(text: String, hasImages: Boolean): Boolean {
+        if (source is ExternalTurnConversationSource) return true
         val rejection = sideChatSendRejection(text, hasImages, source is SideChatSource) ?: return true
         reportHostError(when (rejection) {
             SideChatSendRejection.Attachment -> strings.resolve(R.string.side_chat_attachment_rejected, "创建旁聊时请先移除图片附件。")
@@ -2164,6 +2346,12 @@ class ChatViewModel(
     ) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        (source as? ExternalTurnConversationSource)?.let { external ->
+            // No side chat, no local turn: the desktop validates the prompt and
+            // is the only place a turn starts.
+            sendExternal(trimmed, images, external)
+            return
+        }
         val isBashInput = text.startsWith("!")
         val submittedText = if (isBashInput) text.substring(1) else trimmed
         val promptMode = if (isBashInput) PromptModeDto.BASH else null
@@ -2323,6 +2511,13 @@ class ChatViewModel(
      * TurnRecoveryState arrives from the host.
      */
     fun cancel() {
+        if (source is ExternalTurnConversationSource) {
+            // The turn ends when the desktop reports it; nothing is settled here.
+            viewModelScope.launch {
+                runCatching { source.cancel() }.onFailure { reportHostError(it.message ?: it.toString()) }
+            }
+            return
+        }
         if (inactiveWaitingTurnId != null) {
             discardRecoveredTurn()
             return
@@ -2503,7 +2698,7 @@ class ChatViewModel(
                     // First delta of the turn: open a new assistant message.
                     s.copy(
                         streaming = true,
-                        streamingMessage = Message(role = Role.Ai, text = event.text, transcriptUuid = pendingAssistantTranscriptUuids.firstOrNull(), transcriptAliases = pendingAssistantTranscriptUuids.toSet()),
+                        streamingMessage = Message(role = Role.Ai, text = event.text, transcriptUuid = pendingAssistantTranscriptUuids.firstOrNull(), transcriptAliases = pendingAssistantTranscriptUuids.toSet(), streamed = true),
                         agentRun = run,
                     )
                 }
@@ -2737,7 +2932,7 @@ class ChatViewModel(
                 pendingAssistantIdentity = null
                 _state.update { state ->
                     val uuids = assistantTranscriptUuidsByIdentity[identity].orEmpty().ifEmpty { pendingAssistantTranscriptUuids.toList() }
-                    val completed = (state.streamingMessage?.let { live -> message.copy(id = live.id) } ?: message)
+                    val completed = (state.streamingMessage?.let { live -> message.copy(id = live.id, streamed = true) } ?: message)
                         .copy(transcriptUuid = message.transcriptUuid ?: uuids.firstOrNull(), transcriptAliases = message.transcriptAliases + uuids)
                     pendingAssistantTranscriptUuids.clear()
                     if (identity != null) assistantRowsByIdentity[identity] = completed.id
@@ -2802,7 +2997,7 @@ class ChatViewModel(
                 )
                 _state.update { s ->
                     val completed = s.streamingMessage
-                        ?.let { live -> event.message.copy(id = live.id) }
+                        ?.let { live -> event.message.copy(id = live.id, streamed = true) }
                         ?: event.message
                     // `MessageComplete` carries the assistant's text blocks ONLY —
                     // the engine keeps this turn's ToolUse in a separate field — so

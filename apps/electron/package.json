@@ -12,6 +12,8 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "test": "node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 test/*.test.ts test/*.test.mjs",
+    "sync:local-app-agui": "node scripts/sync-local-app-agui.mjs",
+    "typecheck:local-app-agui": "tsc --noEmit --strict --skipLibCheck false --target ES2022 --module ESNext --moduleResolution Bundler --types node scripts/check-local-app-agui-types.ts",
     "package:mac": "node scripts/package-mac.mjs",
     "package:mac:flare": "bash scripts/package-macos-flare.sh",
     "package:desktop": "node scripts/package-desktop.mjs",
@@ -28,6 +30,7 @@
     "@dnd-kit/dom": "^0.5.0",
     "@dnd-kit/react": "^0.5.0",
     "@lingxi/bridge-client": "file:../../packages/bridge-client",
+    "@lingxi/local-app-agui": "file:vendor/local-app-agui",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "firebase": "13.0.0",
@@ -47,6 +50,7 @@
     "highlight.js": "^11.12.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "resedit": "2.0.3",
     "typescript": "^5.7.3",
     "vite": "^7.3.6"
   }

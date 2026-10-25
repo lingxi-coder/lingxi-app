@@ -5,17 +5,17 @@ struct PermissionModePage: View {
     let host: SettingsHost
     @State private var pending: String?
 
-    private let options = [
-        RadioOption(value: "default", label: "询问（Default）", sub: "需要授权的操作显示确认。"),
-        RadioOption(value: "acceptEdits", label: "自动接受编辑", sub: "自动允许安全的文件编辑。"),
-        RadioOption(value: "plan", label: "计划模式", sub: "允许分析和读取，修改操作需要确认。"),
-        RadioOption(value: "auto", label: "自动（Auto）", sub: "由模型/Provider 安全门控决定是否自动放行。"),
-        RadioOption(value: "dontAsk", label: "不询问（Dont Ask）", sub: "不弹窗；未明确允许的操作直接拒绝。"),
-    ]
+    private var options: [RadioOption] { [
+        RadioOption(value: "default", label: String(localized: "settings_permission_mode_default"), sub: String(localized: "settings_permission_mode_default_detail")),
+        RadioOption(value: "acceptEdits", label: String(localized: "settings_permission_mode_accept_edits"), sub: String(localized: "settings_permission_mode_accept_edits_detail")),
+        RadioOption(value: "plan", label: String(localized: "settings_permission_mode_plan"), sub: String(localized: "settings_permission_mode_plan_detail")),
+        RadioOption(value: "auto", label: String(localized: "settings_permission_mode_auto"), sub: String(localized: "settings_permission_mode_auto_detail")),
+        RadioOption(value: "dontAsk", label: String(localized: "settings_permission_mode_dont_ask"), sub: String(localized: "settings_permission_mode_dont_ask_detail")),
+    ] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SettingsSection(label: "权限模式", footer: "自动模式会按当前模型和策略安全降级；当前选择会随会话保存。完整访问仅能从会话控制中确认启用。") {
+            SettingsSection(label: String(localized: "settings_permission_mode_title"), footer: String(localized: "settings_permission_mode_session_footer")) {
                 RadioList(options: options, value: Binding(
                     get: { store.permissionMode },
                     set: { mode in
@@ -28,7 +28,7 @@ struct PermissionModePage: View {
                 ))
             }
             if store.effectivePermissionMode != store.permissionMode {
-                Text("当前有效模式：\(store.effectivePermissionMode)")
+                Text(String(localized: "settings_permission_mode_effective \(store.effectivePermissionMode)"))
                     .font(.caption).foregroundColor(.secondary).padding(.horizontal, 4)
             }
             if let error = store.permissionModeError, !error.isEmpty {
@@ -36,17 +36,17 @@ struct PermissionModePage: View {
                     .font(.caption).foregroundColor(.red).padding(.horizontal, 4)
             }
         }
-        .alert("确认高风险权限模式", isPresented: Binding(
+        .alert(String(localized: "settings_permission_mode_confirm_title"), isPresented: Binding(
             get: { pending != nil },
             set: { if !$0 { pending = nil } }
         )) {
-            Button("确认应用", role: .destructive) {
+            Button(String(localized: "settings_permission_mode_confirm"), role: .destructive) {
                 if let mode = pending { host.applyPermissionMode(mode) }
                 pending = nil
             }
-            Button("取消", role: .cancel) { pending = nil }
+            Button(String(localized: "common_cancel"), role: .cancel) { pending = nil }
         } message: {
-            Text("该模式可能允许工具执行高风险操作。确认后才会应用。")
+            Text(String(localized: "settings_permission_mode_confirm_detail"))
         }
     }
 }
@@ -55,17 +55,17 @@ struct TypeScriptLspModePage: View {
     @Bindable var store: SettingsStore
     let host: SettingsHost
 
-    private let options = [
-        RadioOption(value: "auto", label: "自动（推荐）", sub: "不会自动启用，需要时请选择“始终开启”。"),
-        RadioOption(value: "off", label: "关闭", sub: "不启动语言服务器，也不暴露 LSP 工具。"),
-        RadioOption(value: "on", label: "始终开启", sub: "也允许在普通 JavaScript / JSX 工作区使用。"),
-    ]
+    private var options: [RadioOption] { [
+        RadioOption(value: "auto", label: String(localized: "settings_typescript_lsp_auto"), sub: String(localized: "settings_typescript_lsp_auto_detail")),
+        RadioOption(value: "off", label: String(localized: "settings_typescript_lsp_off"), sub: String(localized: "settings_typescript_lsp_off_detail")),
+        RadioOption(value: "on", label: String(localized: "settings_typescript_lsp_on"), sub: String(localized: "settings_typescript_lsp_on_detail")),
+    ] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             SettingsSection(
-                label: "TypeScript LSP",
-                footer: "使用内置固定版本 TypeScript 7；项目不能修改命令或路径。"
+                label: String(localized: "settings_typescript_lsp_title"),
+                footer: String(localized: "settings_typescript_lsp_pinned_footer")
             ) {
                 RadioList(
                     options: options,
@@ -76,10 +76,10 @@ struct TypeScriptLspModePage: View {
                 )
             }
             if !store.typescriptLspAvailable && store.typescriptLspMode != "off" {
-                Text("当前设备的 TypeScript 运行时不可用；已安全降级为关闭。")
+                Text(String(localized: "settings_typescript_lsp_unavailable"))
                     .font(.caption).foregroundColor(.secondary).padding(.horizontal, 4)
             } else if store.effectiveTypescriptLspMode != store.typescriptLspMode {
-                Text("当前有效模式：\(store.effectiveTypescriptLspMode)")
+                Text(String(localized: "settings_typescript_lsp_effective \(store.effectiveTypescriptLspMode)"))
                     .font(.caption).foregroundColor(.secondary).padding(.horizontal, 4)
             }
             if let error = store.typescriptLspError, !error.isEmpty {

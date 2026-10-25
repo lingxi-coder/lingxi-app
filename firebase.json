@@ -88,6 +88,33 @@
         ]
       },
       {
+        "source": "/remote",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "default-src 'none'; script-src 'self' 'sha256-7W/YoJpFCJstxnYHwNalADkRes3g4YLFL9UTNmX28eY='; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src https://lingxi-5e4b2-default-rtdb.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'"
+          }
+        ]
+      },
+      {
+        "source": "/remote/**",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "default-src 'none'; script-src 'self' 'sha256-7W/YoJpFCJstxnYHwNalADkRes3g4YLFL9UTNmX28eY='; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src https://lingxi-5e4b2-default-rtdb.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'"
+          }
+        ]
+      },
+      {
+        "source": "/login/remote",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+          }
+        ]
+      },
+      {
         "source": "/.well-known/**",
         "headers": [
           {

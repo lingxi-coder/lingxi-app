@@ -80,8 +80,8 @@ class MainActivity : ComponentActivity() {
         val raw = intent.dataString
         if (raw == null) return
         val notice = when {
-            com.lingxi.code.navigation.DeepLink.parse(raw) == null -> "Invalid or unsafe LingXi link."
-            !linkInbox.deliver(raw, restoringActivity) -> "Too many pending links. Open the link again after reviewing the current destination."
+            com.lingxi.code.navigation.DeepLink.parse(raw) == null -> getString(R.string.deep_link_invalid)
+            !linkInbox.deliver(raw, restoringActivity) -> getString(R.string.deep_link_queue_full)
             else -> null
         }
         notice?.let { android.widget.Toast.makeText(this, it, android.widget.Toast.LENGTH_LONG).show() }
@@ -254,6 +254,16 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(settingsState.linuxRuntime.selectedMode.name)
             }
             var terminalOpen by rememberSaveable { mutableStateOf(false) }
+            // Remote Control is a full-surface overlay like settings; a link or a
+            // notification names the destination, which the overlay consumes once.
+            var remoteOpen by rememberSaveable { mutableStateOf(false) }
+            var requestedRemoteRoute by remember { mutableStateOf<com.lingxi.code.remote.RemoteRoute?>(null) }
+            val openRemote: (com.lingxi.code.remote.RemoteRoute) -> Unit = { route ->
+                requestedRemoteRoute = route
+                remoteOpen = true
+                settingsOpen = false
+                terminalOpen = false
+            }
             var terminalSessionId by rememberSaveable { mutableStateOf("interactive") }
             var terminalInitCommand by rememberSaveable { mutableStateOf<String?>(null) }
             var terminalLaunchGeneration by rememberSaveable { mutableIntStateOf(0) }
@@ -283,7 +293,10 @@ class MainActivity : ComponentActivity() {
                     val id = parts.last()
                     var handled = true
                     var awaitingFeature = false
+                    // Any destination but a Remote Control session leaves the overlay behind.
+                    if (parts.first() != "remote") remoteOpen = false
                     when {
+                        parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)?.let(openRemote) ?: run { handled = false }
                         link.params["workspace"] != null && parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
                         parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import") -> { requestedFeatureLink = link; awaitingFeature = true }
                         parts.first() == "terminal" -> openTerminal(id, link.payload["command"] as? String)
@@ -380,6 +393,7 @@ class MainActivity : ComponentActivity() {
                             settingsOpen = true
                         },
                         onOpenTerminal = openTerminal,
+                        onOpenRemoteControl = { openRemote(com.lingxi.code.remote.RemoteRoute.Hosts) },
                         modelSetupRequired = settingsState.needsLlmSetup,
                         assistantName = prefs.assistantName,
                         inputDialog = prefs.inputDialog,
@@ -469,14 +483,34 @@ class MainActivity : ComponentActivity() {
                             onReconnectEngine = {
                                 if (activeConversationBusy) {
                                     android.widget.Toast.makeText(applicationContext, getString(R.string.voice_session_busy_retry), android.widget.Toast.LENGTH_SHORT).show()
+                                    false
                                 } else {
                                     engineReconnect += 1
                                     settingsOpen = false
+                                    true
                                 }
                             },
                             onOpenTerminal = {
                                 openTerminal(it.sessionId, it.initCommand)
                             },
+                        )
+                    }
+
+                    AnimatedVisibility(
+                        visible = remoteOpen,
+                        enter = slideInVertically(initialOffsetY = { it }),
+                        exit = slideOutVertically(targetOffsetY = { it }),
+                    ) {
+                        com.lingxi.code.remote.RemoteOverlay(
+                            requestedRoute = requestedRemoteRoute,
+                            onRouteHandled = { requestedRemoteRoute = null },
+                            isDark = darkTheme,
+                            onOpenAccount = {
+                                remoteOpen = false
+                                settingsInitialRoute = SettingsRoutes.ACCOUNT
+                                settingsOpen = true
+                            },
+                            onClose = { remoteOpen = false },
                         )
                     }
 

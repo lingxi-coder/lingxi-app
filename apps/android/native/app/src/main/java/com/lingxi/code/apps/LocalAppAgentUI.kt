@@ -18,11 +18,16 @@ internal fun LocalAppAgentSettingsDialog(apps: UnifiedLocalApps, release: AppRel
     var catalog by remember(release.digest) { mutableStateOf<JSONObject?>(null) }
     var selected by remember(release.digest) { mutableStateOf("") }
     var granted by remember(release.digest) { mutableStateOf(setOf<String>()) }
+    var grantedSkills by remember(release.digest) { mutableStateOf(setOf<String>()) }
     var turns by remember(release.digest) { mutableIntStateOf(20) }
     var minutes by remember(release.digest) { mutableIntStateOf(10) }
     var error by remember(release.digest) { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     val declared = release.manifest.optJSONObject("agent")?.optJSONArray("tools").strings()
+    val declaredSkills = release.manifest.optJSONObject("agent")?.optJSONArray("skills")?.let { rows ->
+        (0 until rows.length()).map { index -> rows.getJSONObject(index) }
+    }.orEmpty()
+    val declaredSkillIds = declaredSkills.map { it.getString("id") }.toSet()
     fun key(model: JSONObject) = model.getString("providerId") + "/" + model.getString("modelId")
     LaunchedEffect(release.digest) {
         try {
@@ -31,6 +36,7 @@ internal fun LocalAppAgentSettingsDialog(apps: UnifiedLocalApps, release: AppRel
             if (saved != null) {
                 selected = key(saved.getJSONObject("model"))
                 granted = saved.getJSONObject("tools").keys().asSequence().toSet()
+                grantedSkills = saved.optJSONArray("skills")?.strings()?.filter { it in declaredSkillIds }?.toSet().orEmpty()
                 turns = saved.getInt("maxTurns"); minutes = (saved.getLong("timeoutMs") / 60_000).toInt().coerceAtLeast(1)
             }
         } catch (failure: Exception) { error = failure.message }
@@ -42,10 +48,11 @@ internal fun LocalAppAgentSettingsDialog(apps: UnifiedLocalApps, release: AppRel
             val models = current.getJSONArray("models")
             val model = (0 until models.length()).map { models.getJSONObject(it) }.firstOrNull { key(it) == selected && it.optBoolean("canSelect") }
             val tools = JSONObject(); granted.filter { it in declared && current.getJSONObject("tools").has(it) }.forEach { tools.put(it, current.getJSONObject("tools").getJSONObject(it)) }
+            val skills = org.json.JSONArray(grantedSkills.filter { it in declaredSkillIds }.sorted())
             // Catalog labels/capabilities are presentation metadata. The
             // strict native settings contract accepts only the model identity.
             val modelRef = model?.let { JSONObject().put("providerId", it.getString("providerId")).put("modelId", it.getString("modelId")) }
-            val settings = if (revoke) JSONObject.NULL else JSONObject().put("model", modelRef ?: throw IllegalStateException("请选择可用模型")).put("tools", tools)
+            val settings = if (revoke) JSONObject.NULL else JSONObject().put("model", modelRef ?: throw IllegalStateException("请选择可用模型")).put("tools", tools).put("skills", skills)
                 .put("background", false).put("maxTurns", turns).put("timeoutMs", minutes * 60_000)
             apps.agentHost(JSONObject().put("op", "configure").put("appId", release.appId).put("settings", settings))
             onDismiss()
@@ -91,6 +98,21 @@ internal fun LocalAppAgentSettingsDialog(apps: UnifiedLocalApps, release: AppRel
                         Text(current.optJSONObject("labels")?.optString(id, id) ?: id, Modifier.padding(top = 12.dp))
                     }
                 }
+                Text("允许此版本请求的 Skill", style = MaterialTheme.typography.titleSmall)
+                if (declaredSkills.isEmpty()) Text("此版本不声明运行 Skill。")
+                declaredSkills.forEach { skill ->
+                    val id = skill.getString("id")
+                    Row(Modifier.fillMaxWidth()) {
+                        Checkbox(id in grantedSkills, onCheckedChange = { allowed ->
+                            grantedSkills = if (allowed) grantedSkills + id else grantedSkills - id
+                        })
+                        Column(Modifier.padding(top = 10.dp)) {
+                            Text(id)
+                            Text(skill.getString("path"), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+                Text("Skill 只提供此版本打包的说明，不会增加工具权限。", style = MaterialTheme.typography.bodySmall)
                 Text("敏感操作仍由灵犀请求批准；工具或连接配置变化后需要重新授权。", style = MaterialTheme.typography.bodySmall)
                 Row { Text("最多 $turns 轮", Modifier.weight(1f)); TextButton(onClick = { turns = (turns - 1).coerceAtLeast(1) }) { Text("−") }; TextButton(onClick = { turns = (turns + 1).coerceAtMost(100) }) { Text("＋") } }
                 Row { Text("最多 $minutes 分钟", Modifier.weight(1f)); TextButton(onClick = { minutes = (minutes - 1).coerceAtLeast(1) }) { Text("−") }; TextButton(onClick = { minutes = (minutes + 1).coerceAtMost(60) }) { Text("＋") } }
@@ -105,16 +127,18 @@ internal fun LocalAppAgentSettingsDialog(apps: UnifiedLocalApps, release: AppRel
 
 /** Trusted UI proposal polling; application JavaScript cannot obtain/answer it. */
 @Composable
-internal fun LocalAppAgentInteractions(apps: UnifiedLocalApps, appId: String) {
+internal fun LocalAppAgentInteractions(apps: UnifiedLocalApps, appId: String, reviewRunId: String? = null) {
     val scope = rememberCoroutineScope()
-    var pending by remember(appId) { mutableStateOf<JSONObject?>(null) }
+    var pending by remember(appId, reviewRunId) { mutableStateOf<JSONObject?>(null) }
     var error by remember(appId) { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
-    LaunchedEffect(appId) {
+    LaunchedEffect(appId, reviewRunId) {
         while (true) {
             try {
                 val requests = apps.agentHost(JSONObject().put("op", "interactions")) as org.json.JSONArray
-                val current = (0 until requests.length()).map { requests.getJSONObject(it) }.firstOrNull { it.optString("appId") == appId }
+                val current = (0 until requests.length()).map { requests.getJSONObject(it) }.firstOrNull {
+                    it.optString("appId") == appId && (reviewRunId == null || it.optString("runId") == reviewRunId)
+                }
                 if (current?.optString("requestId") != pending?.optString("requestId")) pending = current
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (_: Exception) { /* A get/run call exposes unavailable host errors in the app. */ }
@@ -144,6 +168,7 @@ internal fun LocalAppAgentInteractions(apps: UnifiedLocalApps, appId: String) {
                 answer.put("answers", values)
             }
             apps.agentHost(answer); pending = null
+            apps.clearBrowserReviewRequest(appId, reviewRunId)
         } catch (failure: Exception) { error = failure.message }
         finally { busy = false }
     } }

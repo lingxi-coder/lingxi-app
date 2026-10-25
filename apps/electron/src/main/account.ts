@@ -105,11 +105,14 @@ export class AccountService {
     this.expiresAt = Date.now() + Number(value.expiresIn) * 1000;
   }
 
-  /** For host-side authenticated requests only. Never forward this through generic renderer IPC. */
-  async getIdToken(): Promise<string> {
+  /**
+   * For host-side authenticated requests only. Never forward this through generic renderer IPC.
+   * `forceRefresh` skips the cached token, for a caller whose request was refused with it.
+   */
+  async getIdToken(forceRefresh = false): Promise<string> {
     await this.ready;
     if (!this.session) throw new Error('请先登录。');
-    if (this.idToken && this.expiresAt > Date.now() + 60_000) return this.idToken;
+    if (!forceRefresh && this.idToken && this.expiresAt > Date.now() + 60_000) return this.idToken;
     if (this.tokenRequest) return this.tokenRequest;
     this.tokenRequest = this.refreshToken().finally(() => { this.tokenRequest = undefined; });
     return this.tokenRequest;

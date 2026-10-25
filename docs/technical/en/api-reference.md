@@ -1,12 +1,45 @@
 # API reference
 
-Explore public source declarations across the LingXi SDKs. Search a symbol, filter by SDK, and open its implementation.
+Find the API for your task, follow a complete integration guide, and search the underlying public declarations.
+
+<a id="find-api"></a>
+
+## Start with your task
+
+An integration needs more than a type signature. Start with the guide for your task: it explains the inputs to construct, events or values to consume, resources you own, and failure paths to handle.
+
+| Task | API to look for | What the guide covers |
+| --- | --- | --- |
+| Run an agent | HarnessBuilder, SessionService, RunInput | Host services, a session, one turn, streamed events, and shutdown |
+| Call a model | ChatRequest, RequestOptions, ChatResponse | Provider selection, request credentials, response text, and errors |
+| Build a streaming UI | ModelStream, StreamEvent | Deltas, final output, cancellation, and structured results |
+| Execute commands on mobile | LinuxCommandRequest, LinuxProcessHandle | Boot, working directories, output, stdin, exit, and host lifecycle |
+
+- [Agent sessions and turns](harness-sessions.md)
+- [Send the first model request](llm-client.md#first-request)
+- [Consume a model stream](llm-streaming.md)
+- [Run a complete mobile command](mobile-rust.md#complete-command)
 
 <a id="declarations"></a>
 
-## Public declarations
+## Search API declarations
 
-This is a source declaration index, not a compiler-resolved export graph. Platform features and trait bounds are defined in the linked source. Integration guides describe the supported entry points.
+Search a type or method name, then narrow the SDK. Open its source to inspect the complete definition. Compiler-generated Rustdoc is available under the source and build profiles below.
+
+<a id="api-failures"></a>
+
+## When an integration fails
+
+| Symptom | First check |
+| --- | --- |
+| A symbol or method is unavailable | The selected source revision, Cargo features, imports, and the exact signature in Rustdoc |
+| A request fails before output appears | The selected provider/profile, per-request credentials, and the reported error class |
+| The agent waits while the model is idle | Pending permission or question events, tool completion, and event consumption in the host |
+| A mobile command cannot find a file | Guest-visible paths, cwd, mounts, and rootfs readiness rather than host filesystem paths |
+
+- [Request errors and accounting](llm-execution-accounting.md)
+- [Tools and permissions](harness-tools.md)
+- [Mobile execution policies](mobile-authorization.md)
 
 The dynamic declaration catalog is available in the [generated API JSON](../../../apps/web/public/api-index.json) and [published API search](https://lingxios.net/docs/api-reference). The published site may lag behind your working tree; start the local website and search `/docs/api-reference` for this snapshot. Source comments retain their original language. Generate compiler-resolved type and method documentation with `npm run docs:rustdoc`; the website links only successfully built profiles.
 
@@ -14,14 +47,14 @@ The dynamic declaration catalog is available in the [generated API JSON](../../.
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/packages/bridge-client/src/protocol.ts](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/packages/bridge-client/src/protocol.ts) — Committed source (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/api.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/lib.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [mobile-linux-runtime/crates/mobile-linux-api/src/lib.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-api/src/lib.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
+- [lingxi-app/packages/bridge-client/src/protocol.ts](https://github.com/lingxi-coder/lingxi-app/blob/abad4d9603ce6a0c032ddf089f69f88e927b76c4/packages/bridge-client/src/protocol.ts) — Committed source (abad4d9603ce6a0c032ddf089f69f88e927b76c4)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/runtime/src/api.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- llm-client/src/lib.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/lib.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/lib.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- lingxi-app: HEAD 04b1b6ea095a3e35e6ab76e12d1d78966339d9dd; Referenced input fingerprint sha256:e1c71b86dc9ad57148b7dad737d7ec053c7d8ce74d3e216a6b104e01638ba03f
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; Referenced input fingerprint sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; Product pin 6548b9d5e702f8e9d42772412cd65b72881e24b4
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
-- mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; Referenced input fingerprint sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; Product pin 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
+- lingxi-app: HEAD abad4d9603ce6a0c032ddf089f69f88e927b76c4; Referenced input fingerprint sha256:bbb3c48b6b5761f33d3d66eb68ccaf089f9fd5ffc104138cbe084fb24e3b4f5b
+- harness-runtime: HEAD a39da75f0985d61d90fffa255f7b4d90901b0e27; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin a39da75f0985d61d90fffa255f7b4d90901b0e27
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
+- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; Referenced input fingerprint sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; Product pin d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -1,3 +1,4 @@
+import { tr } from '../../i18n/locale';
 /**
  * Parses a textarea's raw text as a JSON *object* (never an array, string,
  * number, or other scalar) — the shape every MCP server config, plugin
@@ -19,16 +20,16 @@
  * function just to change one noun.
  */
 export function parseJsonObjectInput(
-  text: string, label = '配置',
+  text: string, label = tr('desktop_shell_json_config'),
 ): { config: Record<string, unknown> } | { error: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (cause) {
-    return { error: cause instanceof Error ? `不是合法的 JSON：${cause.message}` : '不是合法的 JSON。' };
+    return { error: cause instanceof Error ? tr('desktop_shell_json_invalid_detail', cause.message) : tr('desktop_shell_json_invalid') };
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { error: `${label}必须是一个 JSON 对象，例如 {"command":"npx","args":["-y","pkg"]}。` };
+    return { error: tr('desktop_shell_json_object', label) };
   }
   return { config: parsed as Record<string, unknown> };
 }

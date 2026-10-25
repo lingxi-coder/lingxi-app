@@ -35,6 +35,28 @@ use lingxi_core::host::Platform;
 use lingxi_core::host::{AudioService, CameraControl, SharingService};
 use std::sync::Arc;
 
+#[cfg(all(feature = "uniffi", target_os = "android"))]
+fn selected_mobile_brand_profile(
+    directories: &harness_runtime::mobile::MobileUserDirectories,
+    brand_id: &str,
+    linux_user: &str,
+    config_dir_name: &str,
+) -> Result<mobile_linux_api::BrandRuntimeProfile, MobileEngineError> {
+    let profile = mobile_linux_api::BrandRuntimeProfile::new(brand_id, linux_user, config_dir_name);
+    profile
+        .validate()
+        .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+    if directories.brand_id != brand_id
+        || directories.linux_user != linux_user
+        || directories.config_dir_name != config_dir_name
+    {
+        return Err(MobileEngineError::Internal(
+            "native MobileUserDirectories and runtime brand profile do not match".into(),
+        ));
+    }
+    Ok(profile)
+}
+
 /// Create a RAM-only side using the same typed callbacks as the main chat.
 #[cfg(feature = "uniffi")]
 #[uniffi::export(async_runtime = "tokio")]
@@ -170,6 +192,12 @@ pub fn build_mobile_engine(
         let directories = harness_runtime::mobile::mobile_user_directories(
             mobile_linux_config.managed_root.clone(),
         )?;
+        let brand_profile = selected_mobile_brand_profile(
+            &directories,
+            &mobile_linux_config.brand_id,
+            &mobile_linux_config.linux_user,
+            &mobile_linux_config.config_dir_name,
+        )?;
         directories.prepare()?;
         directories.validate_projects_mount(
             mobile_linux_config
@@ -185,9 +213,11 @@ pub fn build_mobile_engine(
         cfg.cwd = cwd;
         cfg.logical_cwd = Some(logical_cwd);
         cfg.lingxi_home = std::path::PathBuf::from(&directories.config_home);
+        cfg.brand_runtime_profile = brand_profile.clone();
         let mobile_linux = prepared_android_mobile_linux_runtime(mobile_linux_config)
             .map_err(MobileEngineError::Internal)?;
         let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new(AndroidPlatformInputs {
+            brand_profile: brand_profile.clone(),
             app_files_root: std::path::PathBuf::from(impls.app_files_root),
             camera: impls.camera,
             audio: impls.audio,
@@ -345,6 +375,12 @@ pub fn build_android_engine(
         }
         let directories =
             harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())?;
+        let brand_profile = selected_mobile_brand_profile(
+            &directories,
+            &linux.brand_id,
+            &linux.linux_user,
+            &linux.config_dir_name,
+        )?;
         directories.prepare()?;
         directories.validate_projects_mount(
             linux.workspace_host_path.as_deref().unwrap_or(""),
@@ -352,6 +388,7 @@ pub fn build_android_engine(
         )?;
         let (cwd, logical_cwd) = directories.resolve_cwd(project_cwd.as_deref())?;
         let mut cfg = MobileConfig {
+            brand_runtime_profile: brand_profile.clone(),
             app_agent_host,
             startup_catalog: app_version.as_ref().map(|version| {
                 harness_runtime::StartupCatalog::new(
@@ -419,6 +456,7 @@ pub fn build_android_engine(
         let runtime = prepared_android_mobile_linux_runtime(mobile_linux_config)
             .map_err(MobileEngineError::Internal)?;
         let android_platform = AndroidPlatform::new(AndroidPlatformInputs {
+            brand_profile: brand_profile.clone(),
             app_files_root: std::path::PathBuf::from(app_files_root),
             camera: Arc::new(AndroidCameraBridge { inner: camera }),
             audio,

@@ -8,7 +8,8 @@ evaluate platform/feature cfg, or include generated native bindings. The default
 committed mode uses HEAD blobs; the bridge repository is anchored to the latest
 bridge-client source commit so committing this catalog does not stale itself.
 Working-tree mode also includes local changes. Only declarations from files
-byte-identical to their committed source bytes receive committed links.
+byte-identical to a revision reachable from a known origin branch receive links.
+Local commits without that publication evidence are marked unpublished.
 
 Run from any directory: python3 apps/web/scripts/generate-api-index.py
 Use --workspace /path/to/lingxi when the sibling checkout directory differs.
@@ -331,6 +332,12 @@ def source_revision(repo: Path, sdk: str) -> str:
     return revision or head
 
 
+def revision_published(repo: Path, revision: str) -> bool:
+    """Check locally known origin refs only; generation never fetches or pushes."""
+    refs = git(repo, "for-each-ref", "--format=%(refname)", "--contains=" + revision, "refs/remotes/origin/").splitlines()
+    return any(ref != "refs/remotes/origin/HEAD" for ref in refs)
+
+
 def source_files(repo: Path, sdk: str, revision: str, source_mode: str) -> dict[str, bytes]:
     """Read selected UTF-8 sources without consulting index contents or timestamps."""
     if source_mode == "committed":
@@ -404,9 +411,10 @@ def build(workspace: Path, source_mode: str = "committed") -> dict:
         if not re.fullmatch(r"[0-9a-f]{40}", revision):
             raise ValueError(f"Invalid Git revision for {repo}")
         base = source_url(repo)
+        published = revision_published(repo, revision)
         committed_sources = source_files(repo, sdk, revision, "committed")
         source_bytes = committed_sources if source_mode == "committed" else source_files(repo, sdk, revision, source_mode)
-        repository = {"sdk": sdk, "revision": revision, "sourceUrl": base, "dirty": source_bytes != committed_sources, "treeFingerprint": tree_fingerprint(source_bytes)}
+        repository = {"sdk": sdk, "revision": revision, "sourceUrl": base, "published": published, "dirty": source_bytes != committed_sources, "treeFingerprint": tree_fingerprint(source_bytes)}
         if dirname in pins:
             repository["productPinnedRevision"] = pins[dirname]
         repositories.append(repository)
@@ -420,7 +428,7 @@ def build(workspace: Path, source_mode: str = "committed") -> dict:
             newlines = [pos for pos, char in enumerate(source) if char == "\n"]
             for name, kind, signature, docs, pos in declarations:
                 line = bisect.bisect_left(newlines, pos) + 1
-                source_state = "committed" if committed_sources.get(file) == source_bytes[file] else "working-tree"
+                source_state = ("committed" if published else "unpublished") if committed_sources.get(file) == source_bytes[file] else "working-tree"
                 entry = {"sdk": sdk, "name": name, "kind": kind, "signature": signature, "summary": docs, "file": file, "line": line, "sourceState": source_state}
                 if source_state == "committed":
                     entry["url"] = f"{base}/blob/{revision}/{quote(file, safe='/')}#L{line}"

@@ -1,3 +1,4 @@
+import { tr } from '../i18n/locale';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ProjectFolderSelection } from '../../shared/projectCreation';
 import { DesktopDialog } from './DesktopDialog';
@@ -25,7 +26,7 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
   const windows = window.lingxi?.platform === 'win32';
   const name = newDirectory ? directoryName : selection?.path.split(windows ? /[\\/]/ : /\//).filter(Boolean).at(-1) ?? selection?.path ?? '';
   const path = selection && newDirectory
-    ? `${selection.path.replace(windows ? /[\\/]$/ : /\/$/, '')}${windows ? '\\' : '/'}${directoryName.trim() || 'Project name'}` : selection?.path;
+    ? `${selection.path.replace(windows ? /[\\/]$/ : /\/$/, '')}${windows ? '\\' : '/'}${directoryName.trim() || tr('desktop_project_name')}` : selection?.path;
 
   useEffect(() => {
     dialog.current?.setAttribute('aria-modal', 'true');
@@ -71,7 +72,7 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
     }
   };
 
-  return <DesktopDialog ref={dialog} tabIndex={-1} title="Create project" ariaLabel="Create project"
+  return <DesktopDialog ref={dialog} tabIndex={-1} title={tr('desktop_create_project')} ariaLabel={tr('desktop_create_project')}
     className="create-project-dialog" onEscape={() => { if (canClose) onClose(); }}
     onKeyDown={(event) => {
       event.stopPropagation();
@@ -84,32 +85,32 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
       } else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }}>
-    <button className="create-project-close" type="button" aria-label="Close create project" disabled={!canClose} onClick={onClose}><Icon name="x" size={17} stroke={1.6} /></button>
+    <button className="create-project-close" type="button" aria-label={tr('desktop_create_project_close')} disabled={!canClose} onClick={onClose}><Icon name="x" size={17} stroke={1.6} /></button>
     <form onSubmit={(event) => { event.preventDefault(); void create(); }} aria-busy={Boolean(busy)}>
       <label className="create-project-name">
         <span className="create-project-name-icon" aria-hidden="true"><Icon name="folder" size={17} stroke={1.7} /></span>
-        <input ref={nameInput} aria-label="Project name" title={newDirectory ? 'Creates a folder with this name' : 'Uses the source folder’s name'} placeholder="Project name"
+        <input ref={nameInput} aria-label={tr('desktop_project_name')} title={newDirectory ? tr('desktop_project_create_folder') : tr('desktop_project_use_folder_name')} placeholder={tr('desktop_project_name')}
           value={name} readOnly={!newDirectory} disabled={Boolean(busy)} onChange={event => { setDirectoryName(event.target.value); setError(''); }} />
       </label>
-      <div className="create-project-sources-heading" id="create-project-sources-heading">Source folders</div>
+      <div className="create-project-sources-heading" id="create-project-sources-heading">{tr('desktop_project_sources')}</div>
       <div className="create-project-sources" role="group" aria-labelledby="create-project-sources-heading">
         {selection ? <div className="create-project-selected-folder">
           <Icon name="folder" size={22} stroke={1.6} />
-          <span className="create-project-folder-copy"><strong>{name || 'New app project'}</strong><span title={path}>{path}</span></span>
-          <button type="button" className="create-project-remove" aria-label="Remove source folder" disabled={Boolean(busy)}
+          <span className="create-project-folder-copy"><strong>{name || tr('desktop_project_new_app')}</strong><span title={path}>{path}</span></span>
+          <button type="button" className="create-project-remove" aria-label={tr('desktop_project_remove_source')} disabled={Boolean(busy)}
             onClick={() => { setSelection(null); setError(''); }}><Icon name="x" size={15} /></button>
-        </div> : <div className="create-project-source-location"><span>Add a folder</span>
-          <span className="create-project-location-select"><select aria-label="Source folder location" defaultValue="local" disabled={Boolean(busy)}><option value="local">on this computer</option></select><Icon name="chevron" size={14} stroke={1.7} /></span>
+        </div> : <div className="create-project-source-location"><span>{tr('desktop_project_add_folder')}</span>
+          <span className="create-project-location-select"><select aria-label={tr('desktop_project_source_location')} defaultValue="local" disabled={Boolean(busy)}><option value="local">{tr('desktop_project_on_computer')}</option></select><Icon name="chevron" size={14} stroke={1.7} /></span>
         </div>}
         <button className="create-project-add-folder" type="button" disabled={Boolean(busy)} onClick={() => void pickFolder(onPickFolder)}>
-          <Icon name="folderPlus" size={17} stroke={1.7} />{busy === 'loading' ? 'Loading…' : busy === 'selecting' ? 'Choosing…' : selection ? 'Change' : 'Add'}
+          <Icon name="folderPlus" size={17} stroke={1.7} />{busy === 'loading' ? tr('desktop_shell_reading') : busy === 'selecting' ? tr('desktop_project_choosing') : selection ? tr('desktop_project_change') : tr('workspace_confirm_add')}
         </button>
-        {localApp && !newDirectory && <button className="create-project-default-folder" type="button" disabled={Boolean(busy)} onClick={() => void pickFolder(onDefaultFolder, 'loading')}>Use default location</button>}
+        {localApp && !newDirectory && <button className="create-project-default-folder" type="button" disabled={Boolean(busy)} onClick={() => void pickFolder(onDefaultFolder, 'loading')}>{tr('desktop_project_use_default')}</button>}
       </div>
       {error && <p role="alert" className="create-project-error">{error}</p>}
       <div className="create-project-actions">
-        <button type="button" className="create-project-cancel" disabled={!canClose} onClick={onClose}>Cancel</button>
-        <button type="submit" className="create-project-submit" disabled={!selection || Boolean(busy) || (newDirectory && !directoryName.trim())}>{busy === 'creating' ? 'Creating…' : 'Create project'}</button>
+        <button type="button" className="create-project-cancel" disabled={!canClose} onClick={onClose}>{tr('common_cancel')}</button>
+        <button type="submit" className="create-project-submit" disabled={!selection || Boolean(busy) || (newDirectory && !directoryName.trim())}>{busy === 'creating' ? tr('desktop_project_creating') : tr('desktop_create_project')}</button>
       </div>
     </form>
   </DesktopDialog>;

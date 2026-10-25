@@ -42,6 +42,18 @@ final class MockConversationSource: ConversationSource {
             askQuestion: Bool = false
         ) -> MockConversationSource {
             let source = MockConversationSource(sessionMode: sessionMode)
+            if let title = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_SESSION_TITLE"] {
+                source.model.messages = []
+                source.model.items = []
+                source.model.activeSessionId = "ui-named-session"
+                source.model.isNew = true
+                source.model.engineSessions = [EngineSession(
+                    id: "ui-named-session", title: title, mode: sessionMode,
+                    messageCount: 0, modifiedAt: Date(), relativeTime: ""
+                )]
+                source.model.engineSessionsLoaded = true
+                return source
+            }
             if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_COMPACT_TRANSCRIPT"] == "1" {
                 var prompt = Message(
                     role: .user,
@@ -287,6 +299,11 @@ final class MockConversationSource: ConversationSource {
                 ),
             ]
             source.model.slashCommandsLoaded = true
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_TRANSCRIPT_SCROLL"] == "1" {
+                let history = (0..<35).map { Message(role: .user, text: "Scroll history \($0)") }
+                source.model.messages = history
+                source.model.items = history.map(ConversationRenderItem.message)
+            }
             return source
         }
 
@@ -383,6 +400,17 @@ final class MockConversationSource: ConversationSource {
         model.clearAgentState()
     }
 
+    func setWorkspaceDirectory(_ path: String, expectedSessionID: String) async throws {
+        guard expectedSessionID.isEmpty || expectedSessionID == model.activeSessionId else {
+            throw WorkspaceDirectoryError.sessionChanged
+        }
+        let path = try await WorkspaceDirectoryRepository().canonicalDirectory(path)
+        model.workspaceState = SessionWorkspaceState(sessionId: model.activeSessionId, cwd: path,
+            projectRoot: model.workspaceState?.projectRoot ?? LXISHGuestPaths.workspaceRoot,
+            additionalDirectories: model.workspaceState?.additionalDirectories ?? [],
+            transcriptPath: model.workspaceState?.transcriptPath ?? "")
+    }
+
     @discardableResult
     func send(_ text: String) -> ConversationTurnToken? {
         send(text, images: [])
@@ -417,6 +445,13 @@ final class MockConversationSource: ConversationSource {
         nextTurnId &+= 1
         activeTurnToken = token
         model.activeTurnToken = token
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_TRANSCRIPT_SCROLL"] == "1",
+               text == "Stream scroll probe" {
+                streamScrollTestReply(generation: generation, token: token)
+                return token
+            }
+        #endif
         DispatchQueue.main.asyncAfter(deadline: .now() + cannedReplyDelay) { [weak self] in
             guard let self,
                   self.turnToken == generation,
@@ -443,6 +478,44 @@ final class MockConversationSource: ConversationSource {
         }
         return token
     }
+
+    #if DEBUG
+        /// Drives the real ChatView/composer with same-identity text deltas,
+        /// without depending on provider latency or accessing user sessions.
+        private func streamScrollTestReply(generation: Int, token: ConversationTurnToken) {
+            let messageID = UUID()
+            var initial = Message(id: messageID, role: .ai, text: "Scroll stream tail 0")
+            initial.streamed = true
+            model.messages.append(initial)
+            model.items.append(.message(initial))
+            Task { @MainActor [weak self] in
+                var paragraphs: [String] = []
+                for index in 1...80 {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard let self, !Task.isCancelled,
+                          self.turnToken == generation, self.activeTurnToken == token else { return }
+                    paragraphs.append("Scroll delta \(index). A streamed paragraph keeps growing in this same message.")
+                    var reply = Message(id: messageID, role: .ai,
+                        text: paragraphs.joined(separator: "\n\n") + "\n\nScroll stream tail \(index)")
+                    reply.streamed = true
+                    if let messageIndex = self.model.messages.firstIndex(where: { $0.id == messageID }) {
+                        self.model.messages[messageIndex] = reply
+                    }
+                    if let itemIndex = self.model.items.firstIndex(where: {
+                        if case let .message(message) = $0 { return message.id == messageID }
+                        return false
+                    }) {
+                        self.model.items[itemIndex] = .message(reply)
+                    }
+                }
+                guard let self, self.turnToken == generation, self.activeTurnToken == token else { return }
+                self.model.streaming = false
+                self.model.updateMainAgent(status: "idle", latestActivity: String(localized: "chat_completed"))
+                self.activeTurnToken = nil
+                self.model.activeTurnToken = nil
+            }
+        }
+    #endif
 
     @discardableResult
     func send(

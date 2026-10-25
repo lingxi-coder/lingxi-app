@@ -8,15 +8,13 @@ import Foundation
 @MainActor
 final class MCPConfigurationRepository {
     static let shared = MCPConfigurationRepository(
-        appSandboxRoot: URL(fileURLWithPath: ConversationSourceFactory.appSandboxRoot(), isDirectory: true)
+        configHome: URL(fileURLWithPath: MobileUserStorage.directories().configHome, isDirectory: true)
     )
 
     private let settingsURL: URL
 
-    init(appSandboxRoot: URL) {
-        settingsURL = appSandboxRoot
-            .appendingPathComponent(".lingxi", isDirectory: true)
-            .appendingPathComponent("settings.json", isDirectory: false)
+    init(configHome: URL) {
+        settingsURL = configHome.appendingPathComponent("settings.json", isDirectory: false)
     }
 
     func loadServers(projectCwd: String? = nil) -> [MCPServer] {

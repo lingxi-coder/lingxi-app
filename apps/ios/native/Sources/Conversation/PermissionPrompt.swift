@@ -364,8 +364,21 @@ import UIKit
         }
     }
 
-    /// The sheet content for one engine-parked permission request (the head of
-    /// the queue). Renders nothing when there is no pending request.
+    private struct PermissionCapsuleStyle: ButtonStyle {
+        let foreground: Color
+        let background: Color
+        let border: Color
+
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .foregroundStyle(foreground)
+                .background(background, in: Capsule())
+                .overlay { Capsule().stroke(border, lineWidth: 1) }
+                .opacity(configuration.isPressed ? 0.7 : 1)
+        }
+    }
+
+    /// The sheet content for the head permission request; absent when none is pending.
     struct PermissionPrompt: View {
         @Environment(\.theme) private var t
 
@@ -381,37 +394,24 @@ import UIKit
                 let copy = Self.describe(pending.kind)
                 VStack(spacing: 0) {
                     HStack(spacing: 10) {
-                        Image(systemName: Self.isElevatedRisk(pending) ? "shield.lefthalf.filled" : "hand.raised.fill")
+                        Image(systemName: Self.isElevatedRisk(pending) ? "exclamationmark.shield" : "checkmark.shield")
                             .font(.body.weight(.medium))
-                            .foregroundStyle(Self.isElevatedRisk(pending) ? t.danger : t.text2)
-                            .frame(width: 34, height: 34)
-                            .background(t.surfaceActive, in: Circle())
                             .accessibilityHidden(true)
-                        Text(String(localized: "permission_request_title"))
-                            .font(.headline)
-                            .foregroundStyle(t.text)
+                        Text(Self.isElevatedRisk(pending)
+                             ? String(localized: "permission_elevated_risk")
+                             : String(localized: "permission_request_title"))
+                            .font(.subheadline.weight(.medium))
                         Spacer(minLength: 0)
-                        Button {
-                            onDeny(pending.requestId)
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.subheadline.weight(.medium))
-                                .foregroundStyle(t.text3)
-                                .frame(width: 36, height: 36)
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(String(localized: "permission_deny"))
-                        .accessibilityIdentifier("permission.deny.close")
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 18)
-                    .padding(.bottom, 12)
+                    .foregroundStyle(Self.isElevatedRisk(pending) ? riskColor : t.text2)
+                    .padding(.horizontal, 22)
+                    .padding(.top, 22)
+                    .padding(.bottom, 16)
 
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
                             Text(copy.title)
-                                .font(.title2.weight(.semibold))
+                                .font(.headline.weight(.semibold))
                                 .foregroundStyle(t.text)
                                 .fixedSize(horizontal: false, vertical: true)
                             Text(copy.summary)
@@ -436,12 +436,10 @@ import UIKit
                                     detailBlock(copy.detail)
                                 }
                             }
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: "info.circle")
-                                Text(Self.riskCopy(for: pending))
-                            }
-                            .font(.caption)
-                            .foregroundStyle(t.text3)
+                            Text(Self.riskCopy(for: pending))
+                                .font(.subheadline)
+                                .foregroundStyle(t.text2)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 20)
@@ -449,8 +447,6 @@ import UIKit
                     }
                     .scrollIndicators(.visible)
                     .scrollBounceBehavior(.basedOnSize)
-
-                    Divider().overlay(t.border)
 
                     actionStack(
                         requestId: pending.requestId,
@@ -462,7 +458,14 @@ import UIKit
                 }
                 .frame(maxWidth: 560)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .background(t.windowBg)
+                .background(t.windowBg, in: .rect(cornerRadius: 24))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 24)
+                        .stroke(t.border, lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
+                .padding(12)
+                .background(t.surface)
                 .accessibilityElement(children: .contain)
             }
         }
@@ -508,38 +511,52 @@ import UIKit
                 .padding(14)
         }
 
-        /// iOS uses a vertical action hierarchy: the safest approval is the
-        /// prominent action, broader grants are secondary, and denial remains a
-        /// clearly destructive choice. Response mapping is unchanged.
+        private var riskColor: Color {
+            t.isDark ? Color(red: 1, green: 0.624, blue: 0.4) : Color(red: 0.78, green: 0.263, blue: 0)
+        }
+
+        /// Broad grants stay secondary; the current request is the primary action.
+        /// At larger text sizes, the action row becomes a vertical stack.
         private func actionStack(
             requestId: UInt64,
             suppressAlwaysAllowRule: Bool,
             autoModePrompt: AutoModePromptDto?
         ) -> some View {
-            VStack(spacing: 10) {
-                promptButton(
-                    String(localized: "permission_allow"),
-                    prominent: true
-                ) {
-                    onApprove(requestId, .allowOnce)
-                }
+            VStack(alignment: .trailing, spacing: 10) {
                 if !suppressAlwaysAllowRule && autoModePrompt == nil {
                     promptButton(String(localized: "permission_allow_always")) {
                         onApprove(requestId, .allowAlways)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if !suppressAlwaysAllowRule, let autoModePrompt {
                     promptButton(autoModeApprovalLabel(autoModePrompt)) {
                         onApprove(requestId, .allowAuto)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                promptButton(
-                    String(localized: "permission_deny"),
-                    role: .destructive
-                ) {
-                    onDeny(requestId)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        decisionButtons(requestId: requestId)
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .trailing, spacing: 10) {
+                        decisionButtons(requestId: requestId)
+                    }
                 }
             }
+        }
+
+        @ViewBuilder
+        private func decisionButtons(requestId: UInt64) -> some View {
+            promptButton(String(localized: "permission_deny")) {
+                onDeny(requestId)
+            }
+            .accessibilityIdentifier("permission.deny")
+            promptButton(String(localized: "permission_allow"), prominent: true) {
+                onApprove(requestId, .allowOnce)
+            }
+            .accessibilityIdentifier("permission.allowOnce")
         }
 
         private func autoModeApprovalLabel(_ prompt: AutoModePromptDto) -> String {
@@ -551,26 +568,25 @@ import UIKit
             }
         }
 
-        @ViewBuilder
         private func promptButton(
             _ label: String,
-            role: ButtonRole? = nil,
             prominent: Bool = false,
             action: @escaping () -> Void
         ) -> some View {
-            let button = Button(role: role, action: action) {
+            Button(action: action) {
                 Text(label)
-                    .font(.body.weight(.semibold))
-                    .frame(maxWidth: .infinity)
+                    .font(.body.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 11)
+                    .frame(minHeight: 44)
             }
-            .controlSize(.large)
-            .tint(role == .destructive ? .red : t.accent)
-
-            if prominent {
-                button.buttonStyle(.borderedProminent)
-            } else {
-                button.buttonStyle(.bordered)
-            }
+            .buttonStyle(PermissionCapsuleStyle(
+                foreground: prominent ? t.windowBg : t.text,
+                background: prominent ? t.text : t.windowBg,
+                border: prominent ? t.text : t.border
+            ))
         }
 
         // MARK: copy

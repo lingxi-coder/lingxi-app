@@ -1,3 +1,4 @@
+import { currentLocale, tr } from '../../../i18n/locale';
 import { useState } from 'react';
 import type { ArchivedSessionRecord } from '../../../../shared/settings';
 import type { PageContentProps } from '../SettingsScreen';
@@ -6,8 +7,8 @@ import { useT } from '../../../theme/ThemeContext';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
 
 export function archivedChatRows(records: readonly ArchivedSessionRecord[], query: string) {
-  const needle = query.trim().toLocaleLowerCase();
-  return records.filter((row) => !needle || [row.title, row.projectPath, row.sessionId].some((value) => value?.toLocaleLowerCase().includes(needle)))
+  const needle = query.trim().toLocaleLowerCase(currentLocale());
+  return records.filter((row) => !needle || [row.title, row.projectPath, row.sessionId].some((value) => value?.toLocaleLowerCase(currentLocale()).includes(needle)))
     .slice().sort((a, b) => (b.archivedAt ?? '').localeCompare(a.archivedAt ?? ''));
 }
 
@@ -26,23 +27,23 @@ export function ArchivedChats({ bridge, onClose }: PageContentProps) {
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(null); }
   };
-  return <Card title={`Archived chats (${records.length})`}>
+  return <Card title={`${tr('settings_parity_archived')} (${records.length})`}>
     <div style={{ padding: 16 }}>
-    <p style={{ color: t.text3, fontSize: 13 }}>显示所有项目的已归档会话。恢复后会重新出现在侧栏。</p>
-    <input aria-label="搜索已归档会话" placeholder="搜索标题或项目…" value={query} onChange={(event) => setQuery(event.target.value)} style={{ ...inputStyle(t), width: '100%', boxSizing: 'border-box', marginBottom: 12 }} />
+    <p style={{ color: t.text3, fontSize: 13 }}>{tr('desktop_shell_archived_desc')}</p>
+    <input aria-label={tr('desktop_shell_archived_search')} placeholder={tr('desktop_shell_archived_placeholder')} value={query} onChange={(event) => setQuery(event.target.value)} style={{ ...inputStyle(t), width: '100%', boxSizing: 'border-box', marginBottom: 12 }} />
     {error && <p role="alert" style={{ color: t.danger }}>{error}</p>}
-    {!rows.length && <p role="status" style={{ color: t.text3, fontSize: 13 }}>{records.length ? '没有匹配的会话。' : '暂无已归档会话。'}</p>}
+    {!rows.length && <p role="status" style={{ color: t.text3, fontSize: 13 }}>{records.length ? tr('desktop_shell_no_matching_chat') : tr('desktop_shell_no_archived_chat')}</p>}
     <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
       {rows.map((row) => {
         const key = JSON.stringify([row.projectPath, row.sessionId]);
         const date = row.archivedAt ? new Date(row.archivedAt) : null;
         return <li key={key} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderTop: `1px solid ${t.border}` }}>
           <div style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
-            <div style={{ color: t.text, fontSize: 14 }}>{row.title || '未命名会话'}</div>
+            <div style={{ color: t.text, fontSize: 14 }}>{row.title || tr('session_untitled')}</div>
             <div style={{ color: t.text3, fontSize: 12, marginTop: 4 }}>{row.projectPath}</div>
-            {date && !Number.isNaN(date.getTime()) && <time dateTime={row.archivedAt} style={{ color: t.text3, fontSize: 12 }}>{date.toLocaleString()}</time>}
+            {date && !Number.isNaN(date.getTime()) && <time dateTime={row.archivedAt} style={{ color: t.text3, fontSize: 12 }}>{date.toLocaleString(currentLocale())}</time>}
           </div>
-          <button type="button" disabled={busy !== null} aria-label={`恢复并打开 ${row.title || '未命名会话'}`} onClick={() => void restore(row)} style={{ ...ghostButtonStyle(t, busy !== null), flexShrink: 0 }}>{busy === key ? '恢复中…' : '恢复并打开'}</button>
+          <button type="button" disabled={busy !== null} aria-label={tr('desktop_shell_restore_named', row.title || tr('session_untitled'))} onClick={() => void restore(row)} style={{ ...ghostButtonStyle(t, busy !== null), flexShrink: 0 }}>{busy === key ? tr('desktop_shell_restoring') : tr('desktop_shell_restore_open')}</button>
         </li>;
       })}
     </ul>

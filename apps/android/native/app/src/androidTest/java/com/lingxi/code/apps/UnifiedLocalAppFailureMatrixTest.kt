@@ -22,7 +22,7 @@ class UnifiedLocalAppFailureMatrixTest {
     @Test fun preparationWriteAndDownloadFailuresKeepServingReleaseAndData() = runBlocking<Unit> {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile("/home/lingxi/.lingxi/.apps/failure-matrix-${UUID.randomUUID()}")
+        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/failure-matrix-${UUID.randomUUID()}")
         check(File(context.filesDir, "local-app-acceptance-fixtures/python").copyRecursively(source))
         val manifestFile = File(source, "lingxi-app.json")
         val original = manifestFile.readText()
@@ -84,7 +84,7 @@ class UnifiedLocalAppFailureMatrixTest {
     @Test fun publicationCompareAndSwapAndOriginPortConflictHaveExplicitOutcomes() = runBlocking<Unit> {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile("/home/lingxi/.lingxi/.apps/conflict-matrix-${UUID.randomUUID()}")
+        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/conflict-matrix-${UUID.randomUUID()}")
         check(File(context.filesDir, "local-app-acceptance-fixtures/static").copyRecursively(source))
         val published = apps.request("publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject
         val record = published.getJSONObject("record").appRecord()

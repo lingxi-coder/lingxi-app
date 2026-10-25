@@ -17,6 +17,9 @@ class LinuxRuntimeStateTest {
     @Test
     fun mobile_linux_config_carries_app_sandbox_root() {
         val config = mobileLinuxConfig(
+            brandId = "fixture-brand",
+            linuxUser = "fixture-user",
+            configDirName = ".fixture-config",
             managedRoot = "/tmp/mobile-linux",
             appSandboxRoot = "/tmp",
             workspaceHostPath = "/tmp/workspaces/default",
@@ -27,6 +30,9 @@ class LinuxRuntimeStateTest {
         )
 
         assertEquals("/tmp", config.appSandboxRoot)
+        assertEquals("fixture-brand", config.brandId)
+        assertEquals("fixture-user", config.linuxUser)
+        assertEquals(".fixture-config", config.configDirName)
         assertEquals("fixture-v1", config.rootfsVersion)
         assertEquals("a".repeat(64), config.archiveSha256)
     }
@@ -35,6 +41,7 @@ class LinuxRuntimeStateTest {
     fun mobile_linux_config_rejects_wrong_abi_identity() {
         assertThrows(IllegalStateException::class.java) {
             mobileLinuxConfig(
+                "fixture-brand", "fixture-user", ".fixture-config",
                 "/tmp/runtime", "/tmp", "/tmp/workspace", "fixture", "arm64-v8a",
                 LinuxRuntimeMode.MobileLinux,
                 rootfsIdentity = RootfsArtifactIdentity("fixture-v1", "x86_64", "a".repeat(64), "rootfs.tar.gz", 123),
@@ -71,7 +78,7 @@ class LinuxRuntimeStateTest {
             lastError = null,
         )
 
-        val ui = linuxRuntimeUiStateFrom(LinuxRuntimeMode.MobileLinux, capability, status)
+        val ui = linuxRuntimeUiStateFrom(LinuxRuntimeMode.MobileLinux, capability, status, "/home/test_user/atlas")
 
         assertTrue(ui.installAllowed)
         assertFalse(ui.canOpenTerminal)
@@ -107,7 +114,7 @@ class LinuxRuntimeStateTest {
             lastError = "missing additional written authorization",
         )
 
-        val ui = linuxRuntimeUiStateFrom(LinuxRuntimeMode.MobileLinux, capability, status)
+        val ui = linuxRuntimeUiStateFrom(LinuxRuntimeMode.MobileLinux, capability, status, "/home/test_user/atlas")
 
         assertEquals("android-proot", ui.backend)
         assertEquals(MobileLinuxRootfsStateFfi.BLOCKED_BY_LICENSE, ui.rootfsState)
@@ -169,7 +176,7 @@ class LinuxRuntimeStateTest {
             stagedRoot = null,
             archiveSha256 = null,
             installedSizeBytes = 4096UL,
-            writableGuestPaths = listOf("/root", "/home/lingxi/lingxi"),
+            writableGuestPaths = listOf("/root", "/home/atlas_guest/atlas"),
             lastError = null,
         )
 
@@ -177,6 +184,7 @@ class LinuxRuntimeStateTest {
             mode = LinuxRuntimeMode.MobileLinux,
             capability = capability,
             status = status,
+            workspaceGuestPath = "/home/atlas_guest/atlas",
             tasks = listOf(
                 MobileLinuxTaskSnapshotFfi(
                     taskId = "run-1",
@@ -191,6 +199,7 @@ class LinuxRuntimeStateTest {
         )
 
         assertTrue(ui.canOpenTerminal)
+        assertEquals(R.string.settings_linux_mount_workspace_summary, ui.mounts.last().summaryRes)
         assertFalse(ui.installAllowed)
         assertEquals(1, ui.tasks.size)
         assertTrue(ui.tasks.first().stoppable)

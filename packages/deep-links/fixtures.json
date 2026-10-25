@@ -1,6 +1,14 @@
 {
   "valid": [
     {
+      "url": "lingxi://remote/Hk3xQ9vR2mT7wL1pZ8cN4a/11111111-2222-4333-8444-555555555555",
+      "route": "remote/Hk3xQ9vR2mT7wL1pZ8cN4a/11111111-2222-4333-8444-555555555555"
+    },
+    {
+      "url": "https://lingxios.net/open/remote/Hk3xQ9vR2mT7wL1pZ8cN4a/abc",
+      "route": "remote/Hk3xQ9vR2mT7wL1pZ8cN4a/abc"
+    },
+    {
       "url": "lingxi://session/abc?workspace=project.a",
       "route": "session/abc"
     },
@@ -129,6 +137,9 @@
     "lingxi://new#payload=%7B%7D&payload=%7B%7D",
     "https://lingxios.net/open/session/../new",
     "lingxi://session/../new",
-    "https://lingxios.net/open/session/%2e%2e/new"
+    "https://lingxios.net/open/session/%2e%2e/new",
+    "lingxi://remote/host-only",
+    "lingxi://remote/host/session/extra",
+    "lingxi://remote/host/session#payload=%7B%22prompt%22%3A%22x%22%7D"
   ]
 }

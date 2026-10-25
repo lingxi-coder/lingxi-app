@@ -4,6 +4,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.lingxi.code.R
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.bindings.client.ModelDetailsDto
 import org.json.JSONArray
@@ -16,7 +18,7 @@ internal fun TypedSettingField(key: String, value: String, onChange: (String) ->
     when {
         key in booleanSettings -> Row {
             Switch(checked = value == "true" || (key == "promptSuggestionEnabled" && value == "null"), onCheckedChange = { onChange(it.toString()) }, enabled = !readOnly)
-            Text(if (value == "null") "Inherited" else if (value == "true") "Enabled" else "Disabled")
+            Text(settingsLabel(if (value == "null") "Inherited" else if (value == "true") "Enabled" else "Disabled"))
             TextButton(enabled = !readOnly, onClick = { onChange("null") }) { Text(settingsLabel("Inherit")) }
         }
         key == "enabledTools" || key == "trustedDirectories" -> StringListField(key, value, onChange, readOnly)
@@ -47,7 +49,7 @@ private fun StringListField(label: String, value: String, onChange: (String) -> 
     val array = runCatching { JSONArray(value) }.getOrDefault(JSONArray())
     val lines = (0 until array.length()).joinToString("\n") { array.optString(it) }
     OutlinedTextField(lines, { text -> onChange(JSONArray(text.lines().map(String::trim).filter(String::isNotBlank).distinct()).toString()) },
-        label = { Text(settingsLabel("$label · one per line")) }, readOnly = readOnly, modifier = Modifier.fillMaxWidth())
+        label = { Text(stringResource(R.string.settings_list_one_per_line_fmt, settingsLabel(label))) }, readOnly = readOnly, modifier = Modifier.fillMaxWidth())
 }
 
 @Composable
@@ -62,7 +64,7 @@ private fun PermissionFields(value: String, onChange: (String) -> Unit, readOnly
         PermissionModeOptions.values.toList().forEach { mode ->
             Row {
                 RadioButton(permissions.optString("defaultMode", "default") == mode, onClick = { set("defaultMode",mode) }, enabled = !readOnly)
-                Text(mode)
+                Text(com.lingxi.code.conversation.permissionModeLabel(mode) ?: mode)
             }
         }
     }
@@ -87,7 +89,7 @@ private fun ProviderFields(value: String, onChange: (String) -> Unit, readOnly: 
             if (!Regex("[a-z0-9][a-z0-9._-]{0,63}").matches(newId) || newId in setOf("builtin","claude","prototype","constructor") || providers.has(newId)) error = "Use a unique lowercase profile ID (1–64 letters, digits, dots, underscores or hyphens)."
             else { selected = newId; onChange(JSONObject(providers.toString()).put(newId,JSONObject().put("type","openai").put("models",JSONArray())).toString()); newId = "" }
         }) { Text(settingsLabel("Add profile")) }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        error?.let { Text(settingsLabel(it), color = MaterialTheme.colorScheme.error) }
         if (current != null) {
             Text(settingsLabel("Protocol"))
             listOf("openai", "openai-responses", "anthropic", "gemini", "azure-openai", "bedrock-claude", "vertex-claude", "vertex-gemini", "foundry-claude").forEach { type ->
@@ -112,7 +114,7 @@ private fun ProviderFields(value: String, onChange: (String) -> Unit, readOnly: 
             ReportSettingsDraft("provider-advanced/$selected",advancedDraft.dirty)
             TextButton(onClick = { advanced = !advanced }) { Text(settingsLabel("Advanced")) }
             if (advanced) {
-                OutlinedTextField(advancedDraft.value,{advancedDraft.edit(it)},label={Text("Provider JSON · aliases, pricing, capabilities")},readOnly=readOnly,modifier=Modifier.fillMaxWidth())
+                OutlinedTextField(advancedDraft.value,{advancedDraft.edit(it)},label={Text(settingsLabel("Provider JSON · aliases, pricing, capabilities"))},readOnly=readOnly,modifier=Modifier.fillMaxWidth())
                 TextButton(enabled=!readOnly,onClick={
                     runCatching {
                         val definition=JSONObject(advancedDraft.value)
@@ -120,7 +122,7 @@ private fun ProviderFields(value: String, onChange: (String) -> Unit, readOnly: 
                         onChange(JSONObject(providers.toString()).put(selected,definition).toString())
                         advancedDraft.reset(definition.toString(2));error=null
                     }.onFailure { error=it.message }
-                }) {Text("Use advanced configuration")}
+                }) {Text(settingsLabel("Use advanced configuration"))}
             }
         }
     }
@@ -147,13 +149,13 @@ private fun RoutingFields(value: String, onChange: (String) -> Unit, readOnly: B
                 val next = JSONObject(retry.toString())
                 if (text.isBlank()) next.remove(key) else text.toIntOrNull()?.takeIf { it >= 0 }?.let { next.put(key,it) }
                 set("retry",next)
-            }, label = { Text(key) }, enabled = !readOnly)
+            }, label = { Text(stringResource(if (key == "maxAttempts") R.string.settings_retry_max_attempts else R.string.settings_retry_backoff_ms)) }, enabled = !readOnly)
         }
         var fallbackDraft by remember(routing.optJSONObject("fallback")?.toString()) { mutableStateOf(routing.optJSONObject("fallback")?.toString(2) ?: "{}") }
         val parsedFallback = runCatching { JSONObject(fallbackDraft) }.getOrNull()
         ReportSettingsDraft("routing-fallback",!jsonEquivalent(parsedFallback,routing.optJSONObject("fallback") ?: JSONObject()))
-        OutlinedTextField(fallbackDraft, { fallbackDraft = it }, label = { Text("Fallback routes JSON") }, readOnly = readOnly, isError = parsedFallback == null, modifier = Modifier.fillMaxWidth())
-        TextButton(enabled = !readOnly && parsedFallback != null, onClick = { set("fallback",parsedFallback!!) }) { Text("Use fallback routes") }
+        OutlinedTextField(fallbackDraft, { fallbackDraft = it }, label = { Text(settingsLabel("Fallback routes JSON")) }, readOnly = readOnly, isError = parsedFallback == null, modifier = Modifier.fillMaxWidth())
+        TextButton(enabled = !readOnly && parsedFallback != null, onClick = { set("fallback",parsedFallback!!) }) { Text(settingsLabel("Use fallback routes")) }
     }
 }
 
@@ -294,11 +296,11 @@ internal fun McpServerFields(value: String, onChange: (String) -> Unit, readOnly
             val args = config.optJSONArray("args") ?: JSONArray()
             OutlinedTextField((0 until args.length()).joinToString("\n") { args.optString(it) },
                 { text -> update("args",JSONArray(if (text.isEmpty()) emptyList<String>() else text.lines())) },
-                label = { Text("args · one argument per line") }, readOnly = readOnly, modifier = Modifier.fillMaxWidth())
+                label = { Text(settingsLabel("args · one argument per line")) }, readOnly = readOnly, modifier = Modifier.fillMaxWidth())
         }
         var advanced by remember { mutableStateOf(false) }
         TextButton(onClick = { advanced = !advanced }) { Text(settingsLabel("Advanced")) }
-        if (advanced) OutlinedTextField(value,onChange,label = { Text("JSON · env, headers, transport") },readOnly = readOnly,modifier = Modifier.fillMaxWidth())
+        if (advanced) OutlinedTextField(value,onChange,label = { Text(settingsLabel("JSON · env, headers, transport")) },readOnly = readOnly,modifier = Modifier.fillMaxWidth())
     }
 }
 

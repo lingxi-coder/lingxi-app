@@ -122,9 +122,11 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
     }
 
     func testGuestPathAtlasMatchesRustTwin() {
-        XCTAssertEqual(LXISHGuestPaths.home, "/home/lingxi")
+        let directories = MobileUserStorage.directories()
+        XCTAssertEqual(LXISHGuestPaths.home, directories.guestHome)
         XCTAssertEqual(LXISHGuestPaths.scratch, ["/tmp", "/var/tmp"])
-        XCTAssertEqual(LXISHGuestPaths.workspaceRoot, "/home/lingxi/lingxi")
-        XCTAssertEqual(LXISHGuestPaths.workspace("abc-123"), "/home/lingxi/lingxi/abc-123")
+        XCTAssertEqual(LXISHGuestPaths.workspaceRoot, directories.defaultGuestCwd)
+        XCTAssertEqual(LXISHGuestPaths.workspace("projects"), directories.projectsGuestPath)
+        XCTAssertEqual(LXISHGuestPaths.workspace("abc-123"), directories.defaultGuestCwd + "/abc-123")
     }
 }

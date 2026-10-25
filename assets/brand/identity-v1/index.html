@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>灵犀 LingXi — 品牌视觉系统</title>
+  <link rel="icon" href="svg/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="preview.css">
+  <script src="brand-data.js" defer></script>
+  <script src="preview.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="home" href="#overview" aria-label="灵犀品牌概览"><img src="svg/mark-blue.svg" alt=""><span>LingXi <span class="subtle">/ 品牌视觉系统</span></span></a>
+    <nav aria-label="页面导航"><a href="#family">产品系列</a><a href="#try">应用预览</a><a href="#names">名称规范</a></nav>
+    <a class="download top-download" href="lingxi-brand-kit.zip" download>下载品牌素材 <span aria-hidden="true">↗</span></a>
+  </header>
+
+  <main>
+    <section id="overview" class="overview">
+      <div class="eyebrow"><span class="dot"></span> LINGXI IDENTITY SYSTEM <span class="edition">01 / 2026</span></div>
+      <div class="hero">
+        <div class="hero-copy"><p class="chapter">灵犀结 · RESONANCE LINK</p><h1>心有灵犀，<br>万事相连<span class="blue">。</span></h1><p class="intro">一个连接的符号，一套共同的名字。<br>从想法、对话，到每一步行动。</p><div class="hero-signature"><img src="svg/lockup-bilingual-ink.svg" alt="灵犀 LingXi" width="350"></div></div>
+        <div class="hero-art"><div class="axis axis-h"></div><div class="axis axis-v"></div><div class="orbit"></div><img class="hero-mark" src="svg/mark-blue.svg" alt="灵犀结：向右上方倾斜的相连双环"><span class="art-label">相知 · 相连 · 相成</span><span class="art-index">LX—01</span></div>
+      </div>
+      <div class="principles"><p><span>01</span><strong>一个母标志</strong>双环相连，让所有入口拥有同一张面孔。</p><p><span>02</span><strong>一套名称</strong>LingXi + 产品后缀，中英文各有清晰写法。</p><p><span>03</span><strong>一种秩序</strong>颜色与功能符号区分产品，名称始终相伴。</p></div>
+    </section>
+
+    <section id="family" class="family-section">
+      <div class="section-head"><div><p class="chapter">01 / FAMILY</p><h2>同源，各有所长。</h2></div><p>同一枚灵犀结。<br>七种角色，共同组成灵犀。</p></div>
+      <div id="family-grid" class="family-grid"></div>
+      <div class="family-note"><span>产品 · Code / Chat / Control / Apps</span><span>功能 · Remote</span><span>开发者组件 · Harness / SDK</span></div>
+    </section>
+
+    <section id="try" class="try-section">
+      <div class="section-head"><div><p class="chapter">02 / IN CONTEXT</p><h2>放进产品，依然是灵犀。</h2></div><div class="controls"><fieldset><legend class="sr-only">标签语言</legend><button type="button" data-lang="zh" aria-pressed="true">中文</button><button type="button" data-lang="en" aria-pressed="false">EN</button></fieldset><fieldset><legend class="sr-only">预览主题</legend><button type="button" data-theme="light" aria-pressed="true">浅色</button><button type="button" data-theme="dark" aria-pressed="false">深色</button></fieldset></div></div>
+      <div id="product-selector" class="product-selector" role="group" aria-label="选择预览产品"></div>
+      <div class="context-grid" id="context" data-theme="light">
+        <div class="app-context">
+          <div class="window-top"><div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div><span>工作空间</span><span aria-hidden="true">↗</span></div>
+          <div class="window-body"><aside><div class="sidebar-identity"><img id="sidebar-icon" src="products/code/icon.svg" alt=""><strong id="sidebar-label">灵犀</strong></div><div class="nav-item active"><span aria-hidden="true">⌘</span> 工作台</div><div class="nav-item"><span aria-hidden="true">▤</span> 我的项目</div><div class="nav-item"><span aria-hidden="true">◷</span> 最近打开</div><div class="sidebar-footer">你的想法，从这里出发。</div></aside><div class="workspace"><div class="workspace-brand"><img id="workspace-lockup" src="products/code/lockup-light.svg" alt="LingXi Code"></div><p id="workspace-purpose">把想法变成作品</p><div class="prompt-box"><span>今天，想一起完成什么？</span><span class="send" aria-hidden="true">↑</span></div><p class="example-caption">品牌应用示意</p></div></div>
+        </div>
+        <div class="device-context"><span class="context-caption">启动图标 / LAUNCHER</span><img id="launcher-icon" src="products/code/icon.svg" alt="灵犀应用图标"><strong id="launcher-label">灵犀</strong><div class="dock-rule"></div><div class="favicon-demo"><img id="favicon-icon" src="products/code/small.svg" alt=""><span id="favicon-label">LingXi Code</span><span class="subtle" aria-hidden="true">×</span></div><span class="context-caption lower">16 PX · 与名称共同出现</span></div>
+      </div>
+      <div class="preview-footer"><p id="preview-status" aria-live="polite">正在预览：灵犀 Code · 浅色</p><a id="selected-download" href="products/code/icon.svg" download>下载当前 SVG <span aria-hidden="true">↓</span></a></div>
+    </section>
+
+    <section class="details-section">
+      <div class="wordmark-panel"><p class="chapter">03 / WORDMARK</p><div class="label-pair"><img src="svg/lockup-en-ink.svg" alt="LingXi 英文字标"><img src="svg/lockup-zh-ink.svg" alt="灵犀中文字标"></div><div class="inverse-lockup"><img src="svg/lockup-bilingual-white.svg" alt="深底反白：灵犀 LingXi"></div><p>英文固定 <strong>LingXi</strong>，L、X 大写。<br>中文字标使用「灵犀」；产品后缀沿用标准名称。</p></div>
+      <div class="scale-panel"><p class="chapter">04 / SMALL & CLEAR</p><h3>小到一个标签页，<br>也能一眼认出。</h3><div class="scale-row"><figure><img src="png/lingxi-16.png" width="16" height="16" alt="16 像素"><figcaption>16</figcaption></figure><figure><img src="png/lingxi-32.png" width="32" height="32" alt="32 像素"><figcaption>32</figcaption></figure><figure><img src="png/lingxi-48.png" width="48" height="48" alt="48 像素"><figcaption>48</figcaption></figure><figure><img src="png/lingxi-64.png" width="64" height="64" alt="64 像素"><figcaption>64</figcaption></figure><figure><img src="png/lingxi-128.png" width="96" height="96" alt="96 像素"><figcaption>96 px</figcaption></figure></div><div class="mono-row"><span><img src="svg/mark-ink.svg" alt="单黑标志"></span><span><img src="svg/mark-white.svg" alt="单白标志"></span><p>单色成立，深浅皆宜。<br>16–32 px 省略产品小符号。</p></div></div>
+    </section>
+
+    <section class="palette-section"><p class="chapter">05 / PALETTE</p><div class="palette"><div style="--swatch:#4167ED;color:white"><strong>灵犀蓝</strong><span>LINGXI BLUE<br>#4167ED</span></div><div style="--swatch:#202632;color:white"><strong>墨色</strong><span>INK<br>#202632</span></div><div style="--swatch:#F6F5F0"><strong>纸白</strong><span>PAPER<br>#F6F5F0</span></div><div style="--swatch:#FFFFFF"><strong>纯白</strong><span>WHITE<br>#FFFFFF</span></div></div></section>
+
+    <section id="names" class="names-section"><div class="section-head"><div><p class="chapter">06 / NAMING</p><h2>名字清晰，品牌一致。</h2></div><a href="brand.json" download>下载名称与颜色清单 ↗</a></div><div class="table-wrap"><table><thead><tr><th scope="col">产品 / 角色</th><th scope="col">英文名称</th><th scope="col">中文名称</th><th scope="col">启动标签（中文）</th></tr></thead><tbody id="name-rows"></tbody></table></div><p class="naming-note">命名提案：Computer Use 对外显示为 <strong>LingXi Control / 灵犀操控</strong>；主应用保留 <strong>LingXi Code</strong> 完整名称，启动标签为 <strong>灵犀 / LingXi</strong>。Remote 为功能标识，Harness 与 SDK 为开发者组件。技术包名、仓库名与应用 ID 保持各自定义。</p></section>
+
+    <footer><div><img src="svg/mark-blue.svg" alt=""><p><strong>灵犀 LingXi</strong><span>相知，让行动自然发生。</span></p></div><a class="download" href="lingxi-brand-kit.zip" download>下载完整品牌包 <span aria-hidden="true">↗</span></a><p class="footer-note">IDENTITY V1 · DESIGN PROPOSAL<br>SVG / PNG / LABELS / TOKENS</p></footer>
+  </main>
+</body>
+</html>

@@ -1,3 +1,4 @@
+import { withDesktopLocale } from './support/language';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { composerGoalState, goalMessageObjective } from '../src/renderer/components/goalPresentation';
@@ -24,10 +25,10 @@ test('goal toolbar orders delete, pause or resume, and expand; cancellation disa
   const { GoalStatus } = await import('../src/renderer/components/GoalStatus');
   const { Theme } = await import('../src/renderer/theme/ThemeContext');
   const { tokens } = await import('../src/renderer/theme/tokens');
-  const render = (running: boolean, cancelling = false) => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, React.createElement(GoalStatus, {
+  const render = (running: boolean, cancelling = false) => withDesktopLocale('en', () => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, React.createElement(GoalStatus, {
     objective: 'Ship the desktop', disabled: false, running, cancelling,
     onClear: async () => {}, onPause: async () => {}, onResume: async () => {},
-  })));
+  }))));
   const active = render(true);
   assert.match(active, /Clear goal[\s\S]*Pause goal[\s\S]*Expand goal/);
   assert.match(active, />Pursuing goal<\/span>/);

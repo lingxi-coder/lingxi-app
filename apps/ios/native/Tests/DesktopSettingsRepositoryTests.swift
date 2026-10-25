@@ -79,17 +79,151 @@ final class DesktopSettingsRepositoryTests: XCTestCase {
     func testCredentialChangeWaitsForMatchingSecureStorageStatus() async {
         let repository = DesktopSettingsRepository()
         var operationID: UInt64?
+        var modelRefreshes = 0
         repository.configure { command in
             if case let .setProviderCredential(operationId, _, _) = command { operationID = operationId }
+            if case .listModels = command { modelRefreshes += 1 }
         }
         await repository.saveCredential(providerID: "test-profile", secret: "test-value")
         XCTAssertTrue(repository.saving)
         guard let operationID else { XCTFail("Credential command was not submitted"); return }
         repository.consume(.providerCredentialStatus(operationId: operationID, configuredProviderIds: ["test-profile"],
                                                      unavailableProviderIds: [], storageEncrypted: true, credentialPreviews: [:], error: nil))
+        for _ in 0..<100 where repository.saving { await Task.yield() }
         XCTAssertFalse(repository.saving)
         XCTAssertEqual(repository.credentialStates["test-profile"], true)
         XCTAssertEqual(repository.credentialStorageEncrypted, true)
+        XCTAssertEqual(modelRefreshes, 1)
+        XCTAssertFalse(repository.restartRequested)
+    }
+
+    func testCredentialDeleteRefreshesModelsWithoutRequestingRestart() async throws {
+        let repository = DesktopSettingsRepository()
+        var operationID: UInt64?
+        var modelRefreshes = 0
+        repository.configure { command in
+            if case let .deleteProviderCredential(operationId, _) = command { operationID = operationId }
+            if case .listModels = command { modelRefreshes += 1 }
+        }
+        await repository.saveCredential(providerID: "test-profile", secret: nil)
+        let operation = try XCTUnwrap(operationID)
+        repository.consume(.providerCredentialStatus(
+            operationId: operation, configuredProviderIds: [], unavailableProviderIds: [],
+            storageEncrypted: true, credentialPreviews: [:], error: nil))
+        for _ in 0..<100 where repository.saving { await Task.yield() }
+
+        XCTAssertEqual(repository.credentialStates["test-profile"], false)
+        XCTAssertEqual(modelRefreshes, 1)
+        XCTAssertFalse(repository.restartRequested)
+        XCTAssertNil(repository.errorMessage)
+    }
+
+    func testCredentialCommitCallbackFiresOnlyAfterConfirmedMutationAndIgnoresOlderListings() async throws {
+        let repository = DesktopSettingsRepository()
+        var listing: UInt64?
+        var mutation: UInt64?
+        var commits: [([String], Set<String>, Bool)] = []
+        repository.credentialCommitHandler = { commits.append(($0, $1, $2)) }
+        repository.configure { command in
+            switch command {
+            case let .listProviderCredentials(operationID, _, _): listing = operationID
+            case let .setProviderCredential(operationID, _, _): mutation = operationID
+            default: break
+            }
+        }
+        await repository.refreshCredentials(providerIDs: ["openai"])
+        let oldListing = try XCTUnwrap(listing)
+        await repository.saveCredential(providerID: "openai", secret: "fixture-key")
+        XCTAssertTrue(commits.isEmpty)
+        repository.consume(.providerCredentialStatus(
+            operationId: try XCTUnwrap(mutation), configuredProviderIds: ["openai"],
+            unavailableProviderIds: [], storageEncrypted: true, credentialPreviews: [:], error: nil))
+        repository.consume(.providerCredentialStatus(
+            operationId: oldListing, configuredProviderIds: [], unavailableProviderIds: [],
+            storageEncrypted: true, credentialPreviews: [:], error: nil))
+
+        XCTAssertEqual(commits.count, 1)
+        XCTAssertEqual(commits.first?.0, ["openai"])
+        XCTAssertEqual(commits.first?.1, ["openai"])
+        XCTAssertEqual(commits.first?.2, true)
+        XCTAssertEqual(repository.credentialStates["openai"], true)
+        for _ in 0..<100 where repository.saving { await Task.yield() }
+    }
+
+    func testPartialCredentialListingAppliesHealthyResultsWithoutClaimingMutation() async throws {
+        let repository = DesktopSettingsRepository()
+        var operation: UInt64?
+        var commits = 0
+        repository.credentialCommitHandler = { _, _, _ in commits += 1 }
+        repository.configure { command in
+            if case let .listProviderCredentials(operationID, _, _) = command { operation = operationID }
+        }
+        await repository.refreshCredentials(providerIDs: ["openai", "kimi"])
+        repository.consume(.providerCredentialStatus(
+            operationId: try XCTUnwrap(operation), configuredProviderIds: [],
+            unavailableProviderIds: ["openai"], storageEncrypted: true, credentialPreviews: [:],
+            error: "one credential is unavailable"))
+
+        XCTAssertNil(repository.credentialStates["openai"])
+        XCTAssertEqual(repository.credentialStates["kimi"], false)
+        XCTAssertEqual(commits, 0)
+        XCTAssertFalse(repository.needsReconnect)
+    }
+
+    func testFailedCredentialWritePreservesConfirmedPresenceAndDoesNotNotifyProfiles() async throws {
+        let repository = DesktopSettingsRepository()
+        var operation: UInt64?
+        var commits = 0
+        repository.credentialCommitHandler = { _, _, _ in commits += 1 }
+        repository.configure { command in
+            switch command {
+            case let .listProviderCredentials(operationID, _, _): operation = operationID
+            case let .deleteProviderCredential(operationID, _): operation = operationID
+            default: break
+            }
+        }
+        await repository.refreshCredentials(providerIDs: ["openai"])
+        repository.consume(.providerCredentialStatus(
+            operationId: try XCTUnwrap(operation), configuredProviderIds: ["openai"],
+            unavailableProviderIds: [], storageEncrypted: true, credentialPreviews: [:], error: nil))
+        await repository.saveCredential(providerID: "openai", secret: nil)
+        repository.consume(.providerCredentialStatus(
+            operationId: try XCTUnwrap(operation), configuredProviderIds: [], unavailableProviderIds: [],
+            storageEncrypted: true, credentialPreviews: [:], error: "Secure storage failed"))
+
+        XCTAssertEqual(repository.credentialStates["openai"], true)
+        XCTAssertEqual(repository.errorMessage, "Secure storage failed")
+        XCTAssertEqual(commits, 0)
+        XCTAssertFalse(repository.saving)
+    }
+
+    func testCredentialModelRefreshCannotPublishIntoReplacementSource() async throws {
+        let repository = DesktopSettingsRepository()
+        var operationID: UInt64?
+        var refresh: CheckedContinuation<Void, Error>?
+        repository.configure { command in
+            if case let .setProviderCredential(operationId, _, _) = command { operationID = operationId }
+            if case .listModels = command {
+                try await withCheckedThrowingContinuation { refresh = $0 }
+            }
+        }
+        await repository.saveCredential(providerID: "test-profile", secret: "fixture-value")
+        let operation = try XCTUnwrap(operationID)
+        repository.consume(.providerCredentialStatus(
+            operationId: operation, configuredProviderIds: ["test-profile"], unavailableProviderIds: [],
+            storageEncrypted: true, credentialPreviews: [:], error: nil))
+        for _ in 0..<100 where refresh == nil { await Task.yield() }
+        XCTAssertNotNil(refresh)
+
+        repository.configure(submitter: nil)
+        refresh?.resume(throwing: NSError(domain: "OldModelRefresh", code: 1))
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertFalse(repository.connected)
+        XCTAssertNil(repository.statusMessage)
+        XCTAssertTrue(repository.credentialStates.isEmpty)
+        XCTAssertFalse(repository.restartRequested)
+        XCTAssertFalse(repository.errorMessage?.contains("OldModelRefresh") ?? false)
     }
 
     func testPendingSaveCannotRefreshOrPublishErrorIntoNewSource() async {

@@ -30,6 +30,8 @@ import org.json.JSONObject
 object LinuxRuntimeBridge {
     @Volatile
     private var cachedRuntime: Pair<String, AndroidMobileLinuxRuntimeHandle>? = null
+    private fun workspaceGuestPath(context: Context): String =
+        com.lingxi.code.project.MobileUserStorage.directories(context).defaultGuestCwd
     // Packaged assets are immutable for the APK lifetime; event polling must
     // not parse the full rootfs inventory on every request.
     @Volatile
@@ -58,6 +60,9 @@ object LinuxRuntimeBridge {
         val selectedAbi = abi()
         val identity = bundledIdentity(context, selectedAbi)
         return mobileLinuxConfig(
+            brandId = paths.brandId,
+            linuxUser = paths.linuxUser,
+            configDirName = paths.configDirName,
             managedRoot = managedRoot(context),
             appSandboxRoot = appSandboxRoot(context),
             workspaceHostPath = hostPath,
@@ -132,6 +137,7 @@ object LinuxRuntimeBridge {
                 mode = mode,
                 capability = capability,
                 status = status,
+                workspaceGuestPath = workspaceGuestPath(context),
                 lastAction = LinuxRuntimeAction.Refresh,
                 tasks = runtime.listTasks(),
             )
@@ -170,7 +176,7 @@ object LinuxRuntimeBridge {
             val runtime = runtime(config)
             val capability = runtime.capability()
             val status = runtime.verifyRootfs()
-            linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Verify)
+            linuxRuntimeUiStateFrom(mode, capability, status, workspaceGuestPath(context), LinuxRuntimeAction.Verify)
         }
 
     /**
@@ -194,7 +200,7 @@ object LinuxRuntimeBridge {
                 }
             })
             val capability = runtime.capability()
-            linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Install)
+            linuxRuntimeUiStateFrom(mode, capability, status, workspaceGuestPath(context), LinuxRuntimeAction.Install)
         }
 
     /**
@@ -246,7 +252,7 @@ object LinuxRuntimeBridge {
                     stageBundledRootfs(context.applicationContext, config)
                 }
             })
-            linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Repair)
+            linuxRuntimeUiStateFrom(mode, capability, status, workspaceGuestPath(context), LinuxRuntimeAction.Repair)
         }
 
     suspend fun reset(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
@@ -256,7 +262,7 @@ object LinuxRuntimeBridge {
             val capability = runtime.capability()
             requireMaintenanceIdle(context, runtime)
             val status = runtime.resetRootfs()
-            linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Reset)
+            linuxRuntimeUiStateFrom(mode, capability, status, workspaceGuestPath(context), LinuxRuntimeAction.Reset)
         }
 
     suspend fun boot(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
@@ -265,7 +271,7 @@ object LinuxRuntimeBridge {
             val runtime = runtime(config)
             val capability = runtime.capability()
             val status = runtime.boot()
-            linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Boot)
+            linuxRuntimeUiStateFrom(mode, capability, status, workspaceGuestPath(context), LinuxRuntimeAction.Boot)
         }
 
     suspend fun shutdown(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
@@ -276,7 +282,7 @@ object LinuxRuntimeBridge {
             runtime.shutdown()
             val capability = runtime.capability()
             val status = runtime.status()
-            linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Shutdown)
+            linuxRuntimeUiStateFrom(mode, capability, status, workspaceGuestPath(context), LinuxRuntimeAction.Shutdown)
         }
 
     suspend fun refreshTasks(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
@@ -289,6 +295,7 @@ object LinuxRuntimeBridge {
                 mode = mode,
                 capability = capability,
                 status = status,
+                workspaceGuestPath = workspaceGuestPath(context),
                 lastAction = LinuxRuntimeAction.RefreshTasks,
                 tasks = runtime.listTasks(),
             )

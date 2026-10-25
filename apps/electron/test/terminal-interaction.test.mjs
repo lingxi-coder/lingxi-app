@@ -5,13 +5,13 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import electronBinary from 'electron';
 
 import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
 
 const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
-const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'terminal-electron.mjs');
 
 test('terminal retains shells across hide and session switches, renders output, and preserves focus', async () => {
@@ -38,7 +38,7 @@ test('terminal retains shells across hide and session switches, renders output, 
     const fixtureUrl = `http://127.0.0.1:${address.port}/terminal-fixture.html`;
     const output = [];
     const errors = [];
-    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
+    child = spawn(electronBinary, [electronDriver, fixtureUrl], {
       cwd: electronRoot,
       env: {
         ...process.env,
@@ -54,7 +54,7 @@ test('terminal retains shells across hide and session switches, renders output, 
     const result = await new Promise((resolveResult, rejectResult) => {
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
-        rejectResult(new Error(`Electron terminal fixture timed out\n${errors.join('')}`));
+        rejectResult(new Error(`Electron terminal fixture timed out\n${output.join('')}\n${errors.join('')}`));
       }, 20_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {

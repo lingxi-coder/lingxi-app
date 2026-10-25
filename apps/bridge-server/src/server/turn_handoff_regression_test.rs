@@ -103,7 +103,12 @@ impl TurnDriver for CancelBoundaryDriver {
 #[tokio::test]
 async fn cancellation_cleanup_fences_successor_question_admission() {
     use lingxi_core::host::PermissionGate;
+    let (endpoint, mut socket, sink) = captured_sink().await;
     let connection = BridgeConnection::new();
+    // The successor's question must have a live owner; unconnected questions
+    // are correctly rejected instead of remaining parked in the broker.
+    assert!(connection.claim_outbound(&sink).await);
+    connection.handshaken.store(true, Ordering::SeqCst);
     let barrier = Arc::new(GateDrainBarrier {
         published: Notify::new(),
         draining: Notify::new(),
@@ -188,6 +193,8 @@ async fn cancellation_cleanup_fences_successor_question_admission() {
         .unwrap()
         .unwrap();
     checking.await.unwrap();
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
 }
 
 struct FirstTextBarrier {

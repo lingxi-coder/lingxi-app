@@ -36,6 +36,8 @@ object TranscriptFollow {
         viewportEndOffset: Int,
         slackPx: Int,
         canScrollForward: Boolean = true,
+        hasBottomAnchor: Boolean = false,
+        afterContentPadding: Int = 0,
     ): Boolean {
         if (totalItemsCount == 0) return true
         // A fresh measure pass leaves `visibleItemsInfo` transiently empty even
@@ -43,7 +45,45 @@ object TranscriptFollow {
         // follow precisely on the updates that arrive with a re-measure, so fall
         // back to the list's own scroll capability, which survives the window.
         if (lastVisibleIndex == null || lastVisibleEndOffset == null) return !canScrollForward
-        if (lastVisibleIndex != totalItemsCount - 1) return false
-        return lastVisibleEndOffset - viewportEndOffset <= slackPx
+        val finalContentIndex = totalItemsCount - if (hasBottomAnchor) 2 else 1
+        if (lastVisibleIndex < finalContentIndex) return false
+        // The zero-height anchor may be just outside the viewport while the
+        // final real row's end is still inside the near-tail band.
+        return lastVisibleEndOffset + afterContentPadding - viewportEndOffset <= slackPx
     }
+}
+
+/** Reader intent survives row growth, keyboard resizing and other layout changes. */
+internal data class TranscriptFollowState(
+    val followsLatest: Boolean = true,
+    val pointerDown: Boolean = false,
+    val userScrolled: Boolean = false,
+    val explicitResume: Boolean = false,
+) {
+    fun pointerDown() = copy(pointerDown = true)
+
+    fun pointerUp() = copy(pointerDown = false)
+
+    /** Positive nested-scroll Y moves the content down, revealing older messages. */
+    fun userScroll(deltaY: Float) = when {
+        deltaY > 0 -> copy(followsLatest = false, userScrolled = true, explicitResume = false)
+        deltaY < 0 -> copy(userScrolled = true, explicitResume = false)
+        else -> this
+    }
+
+    fun measured(atBottom: Boolean, scrolling: Boolean): TranscriptFollowState {
+        // Geometry alone never changes intent. Only a user's scroll can rejoin
+        // the tail; in particular, collapsing a row cannot end history reading.
+        if (!userScrolled) return this
+        if (pointerDown || scrolling) return this
+        return copy(followsLatest = atBottom, userScrolled = false)
+    }
+
+    fun resume() = copy(followsLatest = true, userScrolled = false, explicitResume = true)
+
+    fun resumeHandled() = copy(explicitResume = false)
+
+    fun navigateToMessage() = copy(followsLatest = false, userScrolled = false, explicitResume = false)
+
+    fun shouldPin(scrolling: Boolean) = followsLatest && !pointerDown && (!scrolling || explicitResume)
 }

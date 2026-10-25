@@ -120,6 +120,9 @@ protocol ConversationSource: AnyObject {
     /// (which keeps the canned drawer lists). Called when the drawer opens so the
     /// history is fresh.
     func changeWorkspace(_ path: String, expectedSessionID: String)
+    /// Await the runtime operation so a native folder picker can display an
+    /// error in place and dismiss only after the directory change succeeds.
+    func setWorkspaceDirectory(_ path: String, expectedSessionID: String) async throws
     func addWorkspaceDirectory(_ path: String, expectedSessionID: String)
     func listSessions()
     /// Resume a prior session by its engine UUID (submit
@@ -184,6 +187,9 @@ protocol ConversationSource: AnyObject {
 /// hooks are no-ops by default; the engine source may override foregrounding to
 /// refresh state, but backgrounding never implies cancellation.
 extension ConversationSource {
+    func setWorkspaceDirectory(_ path: String, expectedSessionID: String) async throws {
+        throw WorkspaceDirectoryError.unavailable
+    }
     func changeWorkspace(_ path: String, expectedSessionID: String) { model.error = ConversationError(kind: .host, message: "Workspace navigation is unavailable") }
     func addWorkspaceDirectory(_ path: String, expectedSessionID: String) { model.error = ConversationError(kind: .host, message: "Workspace navigation is unavailable") }
 

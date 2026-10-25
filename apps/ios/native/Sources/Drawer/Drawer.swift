@@ -25,6 +25,7 @@ struct Drawer: View {
     let account: DrawerAccountSummary?
     let openSettings: () -> Void
     let openAccount: () -> Void
+    let openRemoteControl: () -> Void
     let openTerminal: () -> Void
     let openCron: (String?, String?) -> Void
     let openProjects: () -> Void
@@ -56,6 +57,7 @@ struct Drawer: View {
         account: DrawerAccountSummary? = nil,
         openSettings: @escaping () -> Void,
         openAccount: @escaping () -> Void = {},
+        openRemoteControl: @escaping () -> Void = {},
         openTerminal: @escaping () -> Void,
         openCron: @escaping (String?, String?) -> Void = { _, _ in },
         openProjects: @escaping () -> Void = {},
@@ -80,6 +82,7 @@ struct Drawer: View {
         self.account = account
         self.openSettings = openSettings
         self.openAccount = openAccount
+        self.openRemoteControl = openRemoteControl
         self.openTerminal = openTerminal
         self.openCron = openCron
         self.openProjects = openProjects
@@ -331,6 +334,12 @@ struct Drawer: View {
 
     private var entries: some View {
         VStack(spacing: 2) {
+            Button(action: openRemoteControl) {
+                Label("remote_title", systemImage: "desktopcomputer")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20).padding(.vertical, 10)
+            }.buttonStyle(.plain).accessibilityIdentifier("drawer.remote-control")
+
             appsEntry
             entryRow(
                 icon: .clock,

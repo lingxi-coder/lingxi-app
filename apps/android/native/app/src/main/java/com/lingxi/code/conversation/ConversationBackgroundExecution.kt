@@ -321,10 +321,10 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
         manager.createNotificationChannel(
             NotificationChannel(
                 TERMINAL_CHANNEL_ID,
-                appContext.getString(R.string.chat_background_result_channel),
+                com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.chat_background_result_channel),
                 NotificationManager.IMPORTANCE_DEFAULT,
             ).apply {
-                description = appContext.getString(R.string.chat_background_result_channel_description)
+                description = com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.chat_background_result_channel_description)
             },
         )
         val (title, body) = when (alert) {
@@ -348,9 +348,9 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
         if (!deliveredAlertTags.add(tag)) return
         val notification = NotificationCompat.Builder(appContext, TERMINAL_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher_foreground)
-            .setContentTitle(appContext.getString(title))
+            .setContentTitle(com.lingxi.code.theme.LocaleWrapper.getString(appContext, title))
             .setContentText(
-                if (bodyArg != null) appContext.getString(body, bodyArg) else appContext.getString(body),
+                if (bodyArg != null) com.lingxi.code.theme.LocaleWrapper.getString(appContext, body, bodyArg) else com.lingxi.code.theme.LocaleWrapper.getString(appContext, body),
             )
             .apply { if (subText != null) setSubText(subText) }
             .setCategory(NotificationCompat.CATEGORY_STATUS)
@@ -1104,10 +1104,10 @@ class ConversationTurnService : Service() {
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
-                getString(R.string.chat_background_service_channel),
+                com.lingxi.code.theme.LocaleWrapper.getString(this, R.string.chat_background_service_channel),
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = getString(R.string.chat_background_service_channel_description)
+                description = com.lingxi.code.theme.LocaleWrapper.getString(this@ConversationTurnService, R.string.chat_background_service_channel_description)
                 setShowBadge(false)
             },
         )
@@ -1178,8 +1178,8 @@ class ConversationTurnService : Service() {
 
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.mipmap.ic_launcher_foreground)
-        .setContentTitle(getString(R.string.chat_background_service_title))
-        .setContentText(latestSnapshot?.statusText ?: getString(R.string.chat_background_service_text))
+        .setContentTitle(com.lingxi.code.theme.LocaleWrapper.getString(this, R.string.chat_background_service_title))
+        .setContentText(latestSnapshot?.statusText ?: com.lingxi.code.theme.LocaleWrapper.getString(this, R.string.chat_background_service_text))
         .setCategory(NotificationCompat.CATEGORY_SERVICE)
         .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
         .setOngoing(true)
@@ -1188,7 +1188,7 @@ class ConversationTurnService : Service() {
         .setContentIntent(contentIntent())
         .addAction(
             0,
-            getString(R.string.common_cancel),
+            com.lingxi.code.theme.LocaleWrapper.getString(this, R.string.common_cancel),
             PendingIntent.getService(
                 this,
                 1,

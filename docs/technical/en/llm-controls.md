@@ -16,6 +16,41 @@ ThinkingConfig contains optional mode (Disabled/Enabled/Adaptive), budget (Token
 
 InferenceFeatures overlays normalize mode-incompatible defaults. A request-local observed fast_capability affects the selected primary model only, not shared configuration or fallback accounts. InferenceReport retains provider-reported execution facts.
 
+<a id="output-contract-choice"></a>
+
+## Choose the smallest output contract
+
+Use JsonPayload::parse for an exact JSON schema source, or from_generated_value for a small schema built by your own configuration UI. Provider JSON and partial tool arguments should remain source-carrying data until a completed, validated application boundary.
+
+| Contract | Use | What to validate |
+| --- | --- | --- |
+| OutputFormat::Text | Human-readable prose | Stop reason and application-specific content requirements |
+| OutputFormat::JsonObject | A JSON object whose fields the application checks | Object root, required application fields and valid value types |
+| OutputFormat::JsonSchema | A typed object/array contract admitted by the route | Original schema, final response, schema match and target-type deserialization |
+| ToolSpec.strict | Constrain function-tool input | Tool arguments separately from the final-answer output contract |
+
+<a id="structured-result-errors"></a>
+
+## Recover from structured result failures
+
+| StructuredOutputErrorKind | Meaning | Action |
+| --- | --- | --- |
+| Incomplete | Not a final completed answer, or response still contains tool use | Handle refusal/truncation/tool flow before parsing application data |
+| NoContract | The request used the text contract | Set the intended JSON output_format explicitly |
+| InvalidJson / SchemaMismatch | Final output is invalid JSON or violates the requested schema | Retain the response and usage; reject it as application data |
+| InvalidSchema / Deserialization | Local schema or target Rust type cannot accept the value | Fix the application contract/type rather than weakening provider constraints silently |
+
+StructuredOutputError retains the response. StructuredStreamError also retains observed events for read failure, missing End, size limits and validation failure. Logging a content error must not discard the associated usage facts.
+
+<a id="schema-design-recipe"></a>
+
+## Make a schema usable by the application
+
+1. Start from the object the application consumes: stable field names, explicit types and only the required fields. Keep any enum values aligned with the application’s actual accepted IDs.
+2. Choose a route with the required strict-schema support before sending. A compatible protocol or a model name alone does not establish support for every schema keyword.
+3. Pass the same OutputFormat to the request and structured_json/structured. For a stream, collect the complete response first; do not parse each text delta as JSON.
+4. Keep validation failure separate from transport failure and retry policy. A complete but invalid business result is not a reason to bypass the contract or automatically switch accounts.
+
 <a id="structured-output"></a>
 
 ## Strict output and local validation
@@ -29,18 +64,17 @@ OutputFormat is Text, JsonObject or JsonSchema { name, schema, strict }. It is s
 
 ```rust
 use lingxi_llm_client::{LlmClient, RequestOptions};
-use lingxi_llm_client::protocol::{ChatRequest, ConversationMessage, OutputFormat};
-use serde_json::{json, Value};
+use lingxi_llm_client::protocol::{ChatRequest, ConversationMessage, JsonPayload, OutputFormat};
 
 pub async fn structured_answer(
     client: &LlmClient,
     options: &RequestOptions,
-) -> Result<Value, Box<dyn std::error::Error>> {
+) -> Result<JsonPayload, Box<dyn std::error::Error>> {
     let mut request = ChatRequest::new("gpt-6-luna");
     request.output_format = OutputFormat::JsonSchema {
         name: "answer".into(), strict: true,
-        schema: json!({"type":"object","properties":{"answer":{"type":"string"}},
-            "required":["answer"],"additionalProperties":false}),
+        schema: JsonPayload::parse(r#"{"type":"object","properties":{"answer":{"type":"string"}},
+            "required":["answer"],"additionalProperties":false}"#)?,
     };
     request.messages.push(ConversationMessage::user_text("Give a short greeting."));
     let response = client.chat().complete_in("openai", &request, options).await?;
@@ -100,21 +134,23 @@ client.embeddings().embed uses an independent configured route with ServiceSetti
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/inference.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/request_controls.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/structured.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/codecs/inference.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/codecs/inference.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/codecs/structured.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/codecs/structured.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/codecs/cache.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/codecs/cache.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/decisions.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/decision.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/decision.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/embeddings/mod.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/token_count/request.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/openrouter/response_cache.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/structured_output.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/decisions.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/embeddings.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- llm-client/src/protocol/inference.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/request_controls.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/structured.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/codecs/inference.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/codecs/structured.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/codecs/cache.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/decisions.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/decision.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/embeddings/mod.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/token_count/request.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/openrouter/response_cache.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/structured_output.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/decisions.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/embeddings.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/json_payload.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/stream.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

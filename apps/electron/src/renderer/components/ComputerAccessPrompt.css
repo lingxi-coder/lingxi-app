@@ -1,0 +1,107 @@
+.inline-interaction-card.computer-access-prompt {
+  border: 1px solid var(--dialog-border);
+  border-radius: 24px;
+  background: var(--dialog-window);
+  box-shadow: none;
+  max-height: min(64vh, 640px);
+}
+.computer-access-content {
+  min-height: 0;
+  overflow: auto;
+  padding: 22px 24px 0;
+}
+.computer-access-risk-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 16px;
+  color: var(--computer-risk);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.computer-access-prompt h2 {
+  margin: 0 0 6px;
+  color: var(--dialog-text);
+  font-size: 17px;
+  font-weight: 550;
+  letter-spacing: -.015em;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.computer-access-copy, .computer-access-reason {
+  margin: 0 0 12px;
+  color: var(--dialog-text-2);
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.computer-access-reason { color: var(--dialog-text); font-size: 13px; }
+.computer-access-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 22px 24px 24px;
+}
+.computer-access-scope { color: var(--dialog-text-2); font-size: 12px; }
+.computer-access-footer .desktop-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-left: auto;
+}
+.computer-access-footer .desktop-dialog-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 14px;
+  border: 1px solid var(--dialog-border);
+  border-radius: 999px;
+  background: var(--dialog-window);
+  color: var(--dialog-text);
+  box-shadow: none;
+  font-size: 14px;
+  font-weight: 450;
+  transition: background-color 120ms ease, scale 100ms ease-out;
+}
+.computer-access-footer .desktop-dialog-action--primary {
+  color: var(--dialog-window);
+  background: var(--dialog-text);
+  border-color: var(--dialog-text);
+}
+.computer-access-footer .desktop-dialog-action:hover { background: var(--dialog-surface-hover); box-shadow: none; }
+.computer-access-footer .desktop-dialog-action--primary:hover { background: var(--dialog-text-2); filter: none; }
+.computer-access-footer .desktop-dialog-action:active { scale: .97; }
+.computer-access-footer .desktop-dialog-action:focus-visible {
+  outline: 2px solid var(--dialog-text);
+  outline-offset: 3px;
+}
+.computer-access-footer kbd {
+  padding: 1px 7px;
+  border-radius: 7px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  font: inherit;
+  line-height: 1.25;
+}
+.computer-access-prompt input[type='checkbox'] { accent-color: var(--dialog-text); }
+.computer-access-prompt input:focus-visible { outline: 2px solid var(--dialog-text); outline-offset: 3px; }
+@media (max-width: 600px) {
+  .inline-interaction-card.computer-access-prompt { border-radius: 20px; }
+  .computer-access-content { padding: 18px 18px 0; }
+  .computer-access-footer { padding: 18px; }
+  .computer-access-footer .desktop-dialog-action { white-space: normal; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .computer-access-footer .desktop-dialog-action { transition: none; }
+  .computer-access-footer .desktop-dialog-action:active { scale: none; }
+}
+@media (prefers-contrast: more) {
+  .inline-interaction-card.computer-access-prompt,
+  .computer-access-footer .desktop-dialog-action { border-color: var(--dialog-text); }
+}

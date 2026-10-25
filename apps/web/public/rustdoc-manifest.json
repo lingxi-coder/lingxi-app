@@ -1,6 +1,6 @@
 {
-  "sourceFingerprint": "d694b5d08dc50ba876ce89d9202fc90a14b8b48420c5877ac8227f1823d7beab",
-  "boundary": "Host Rustdoc compilation; native/device runtime acceptance is separate.",
+  "sourceFingerprint": "abbf20d0f004931464665baf6af12aa2fd4951801dc087071a3e69d46608d3dc",
+  "boundary": "Each profile records its own build snapshot and artifact fingerprint. Host Rustdoc compilation; native/device runtime acceptance is separate.",
   "profiles": [
     {
       "id": "harness-engine",
@@ -20,426 +20,551 @@
         {
           "package": "agent",
           "manifest": "harness-runtime/crates/agent/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "apply-seccomp",
           "manifest": "harness-runtime/crates/apply-seccomp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "audio-runtime",
           "manifest": "harness-runtime/crates/audio-runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "branding",
           "manifest": "harness-runtime/crates/branding/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "bridge",
           "manifest": "harness-runtime/crates/bridge/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "client",
           "manifest": "harness-runtime/crates/client/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "command-api",
           "manifest": "harness-runtime/crates/command-api/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "compaction",
           "manifest": "harness-runtime/crates/compaction/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "configuration-admin",
           "manifest": "harness-runtime/crates/configuration-admin/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "coordinator",
           "manifest": "harness-runtime/crates/coordinator/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "core",
           "manifest": "harness-runtime/crates/core/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "cost",
           "manifest": "harness-runtime/crates/cost/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "cron",
           "manifest": "harness-runtime/crates/cron/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "device-api",
+          "manifest": "harness-runtime/crates/device-api/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "fusion",
           "manifest": "harness-runtime/crates/fusion/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "git2",
           "manifest": "harness-runtime/third_party/git2-rs/git2/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "harness-runtime",
           "manifest": "harness-runtime/crates/runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "hooks",
           "manifest": "harness-runtime/crates/hooks/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "http-client",
           "manifest": "harness-runtime/crates/http-client/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "icu_collator",
+          "manifest": "harness-runtime/third_party/icu_collator/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "json-projection",
+          "manifest": "harness-runtime/crates/json-projection/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "jsonrpc",
           "manifest": "harness-runtime/crates/jsonrpc/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "libgit2-sys",
           "manifest": "harness-runtime/third_party/git2-rs/libgit2-sys/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "libssh2-sys",
           "manifest": "harness-runtime/third_party/libssh2-sys/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "lingxi-hyper",
-          "manifest": "llm-client/vendor/lingxi-hyper/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-hyper",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-hyper-rustls",
-          "manifest": "llm-client/vendor/lingxi-hyper-rustls/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-hyper-rustls",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-hyper-util",
-          "manifest": "llm-client/vendor/lingxi-hyper-util/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-hyper-util",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-llm-client",
-          "manifest": "llm-client/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-llm-client",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-reqwest",
-          "manifest": "llm-client/vendor/lingxi-reqwest/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-reqwest",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "llm-runtime",
           "manifest": "harness-runtime/crates/llm-runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "local-app",
+          "manifest": "harness-runtime/crates/local-app/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "lsp",
           "manifest": "harness-runtime/crates/lsp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "mbedtls-sys",
           "manifest": "harness-runtime/third_party/mbedtls-sys/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "mcp",
           "manifest": "harness-runtime/crates/mcp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "mcp-wire",
+          "manifest": "harness-runtime/crates/mcp-wire/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "memory",
           "manifest": "harness-runtime/crates/memory/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "migrations",
           "manifest": "harness-runtime/crates/migrations/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "mobile-linux-android",
-          "manifest": "mobile-linux-runtime/crates/mobile-linux-android/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/mobile-linux-android",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "mobile-linux-api",
-          "manifest": "mobile-linux-runtime/crates/mobile-linux-api/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/mobile-linux-api",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "mobile-linux-core",
-          "manifest": "mobile-linux-runtime/crates/mobile-linux-core/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/mobile-linux-core",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "mock_stdio_mcp",
           "manifest": "harness-runtime/crates/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "msgqueue",
           "manifest": "harness-runtime/crates/msgqueue/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "orchestrator",
           "manifest": "harness-runtime/crates/orchestrator/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "outputstyles",
           "manifest": "harness-runtime/crates/outputstyles/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "permission",
           "manifest": "harness-runtime/crates/permission/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-android",
           "manifest": "harness-runtime/crates/platforms/android/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-common",
           "manifest": "harness-runtime/crates/platforms/common/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-ios",
           "manifest": "harness-runtime/crates/platforms/ios/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-macos-computer-control",
           "manifest": "harness-runtime/crates/platforms/macos-computer-control/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-posix",
           "manifest": "harness-runtime/crates/platforms/posix/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-posix-minimal",
           "manifest": "harness-runtime/crates/platforms/posix-minimal/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-pty",
-          "manifest": "mobile-linux-runtime/crates/platform-pty/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/platform-pty",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "platform-windows",
           "manifest": "harness-runtime/crates/platforms/windows/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "plugin",
           "manifest": "harness-runtime/crates/plugin/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "provider-config",
           "manifest": "harness-runtime/crates/provider-config/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "rooted-fs",
+          "manifest": "harness-runtime/crates/rooted-fs/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "sandbox",
           "manifest": "harness-runtime/crates/sandbox/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "sandbox-runtime",
           "manifest": "harness-runtime/crates/sandbox-runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "secret",
           "manifest": "harness-runtime/crates/secret/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "session",
           "manifest": "harness-runtime/crates/session/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "sidequery",
           "manifest": "harness-runtime/crates/sidequery/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
-          "package": "skill-api",
-          "manifest": "harness-runtime/crates/skill-api/Cargo.toml",
-          "source": "working-tree"
+          "package": "skill",
+          "manifest": "harness-runtime/crates/skill/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "syntect",
           "manifest": "harness-runtime/third_party/syntect/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "task-store",
           "manifest": "harness-runtime/crates/task-store/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tasks",
           "manifest": "harness-runtime/crates/tasks/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "telemetry",
           "manifest": "harness-runtime/crates/telemetry/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "telemetry-macros",
           "manifest": "harness-runtime/crates/telemetry-macros/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "test-harness",
           "manifest": "harness-runtime/crates/test-harness/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-agent",
           "manifest": "harness-runtime/crates/tools/agent/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-android-use",
           "manifest": "harness-runtime/crates/tools/android-use/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-api",
           "manifest": "harness-runtime/crates/tool-api/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-computer-use",
           "manifest": "harness-runtime/crates/tools/computer-use/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-cron",
           "manifest": "harness-runtime/crates/tools/cron/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-file",
           "manifest": "harness-runtime/crates/tools/file/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-git-mobile",
           "manifest": "harness-runtime/crates/tools/git-mobile/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-lsp",
           "manifest": "harness-runtime/crates/tools/lsp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-mcp",
           "manifest": "harness-runtime/crates/tools/mcp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-meta",
           "manifest": "harness-runtime/crates/tools/meta/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-mobile",
           "manifest": "harness-runtime/crates/tools/mobile/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-plan",
           "manifest": "harness-runtime/crates/tools/plan/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-shell",
           "manifest": "harness-runtime/crates/tools/shell/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-shell-mobile",
           "manifest": "harness-runtime/crates/tools/shell-mobile/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-skill",
           "manifest": "harness-runtime/crates/tools/skill/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-task",
           "manifest": "harness-runtime/crates/tools/task/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-ui",
           "manifest": "harness-runtime/crates/tools/ui/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-web",
           "manifest": "harness-runtime/crates/tools/web/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-workflow",
           "manifest": "harness-runtime/crates/tools/workflow/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-worktree",
           "manifest": "harness-runtime/crates/tools/worktree/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "visualization",
           "manifest": "harness-runtime/crates/visualization/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "workflow",
           "manifest": "harness-runtime/crates/workflow/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         }
       ],
       "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-      "hostTarget": "aarch64-apple-darwin"
+      "hostTarget": "aarch64-apple-darwin",
+      "sourceFingerprint": "abbf20d0f004931464665baf6af12aa2fd4951801dc087071a3e69d46608d3dc",
+      "sourceRevision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6",
+      "sourceMode": "committed",
+      "dependencyMode": "declared",
+      "artifactFingerprint": "sha256:60ffaaba5222f1304154676444a2e73e015be06604da2c53514420f1f5a02595"
     },
     {
       "id": "harness-desktop",
@@ -462,426 +587,551 @@
         {
           "package": "agent",
           "manifest": "harness-runtime/crates/agent/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "apply-seccomp",
           "manifest": "harness-runtime/crates/apply-seccomp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "audio-runtime",
           "manifest": "harness-runtime/crates/audio-runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "branding",
           "manifest": "harness-runtime/crates/branding/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "bridge",
           "manifest": "harness-runtime/crates/bridge/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "client",
           "manifest": "harness-runtime/crates/client/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "command-api",
           "manifest": "harness-runtime/crates/command-api/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "compaction",
           "manifest": "harness-runtime/crates/compaction/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "configuration-admin",
           "manifest": "harness-runtime/crates/configuration-admin/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "coordinator",
           "manifest": "harness-runtime/crates/coordinator/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "core",
           "manifest": "harness-runtime/crates/core/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "cost",
           "manifest": "harness-runtime/crates/cost/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "cron",
           "manifest": "harness-runtime/crates/cron/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "device-api",
+          "manifest": "harness-runtime/crates/device-api/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "fusion",
           "manifest": "harness-runtime/crates/fusion/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "git2",
           "manifest": "harness-runtime/third_party/git2-rs/git2/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "harness-runtime",
           "manifest": "harness-runtime/crates/runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "hooks",
           "manifest": "harness-runtime/crates/hooks/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "http-client",
           "manifest": "harness-runtime/crates/http-client/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "icu_collator",
+          "manifest": "harness-runtime/third_party/icu_collator/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "json-projection",
+          "manifest": "harness-runtime/crates/json-projection/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "jsonrpc",
           "manifest": "harness-runtime/crates/jsonrpc/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "libgit2-sys",
           "manifest": "harness-runtime/third_party/git2-rs/libgit2-sys/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "libssh2-sys",
           "manifest": "harness-runtime/third_party/libssh2-sys/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "lingxi-hyper",
-          "manifest": "llm-client/vendor/lingxi-hyper/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-hyper",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-hyper-rustls",
-          "manifest": "llm-client/vendor/lingxi-hyper-rustls/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-hyper-rustls",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-hyper-util",
-          "manifest": "llm-client/vendor/lingxi-hyper-util/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-hyper-util",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-llm-client",
-          "manifest": "llm-client/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-llm-client",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-reqwest",
-          "manifest": "llm-client/vendor/lingxi-reqwest/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-reqwest",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "llm-runtime",
           "manifest": "harness-runtime/crates/llm-runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "local-app",
+          "manifest": "harness-runtime/crates/local-app/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "lsp",
           "manifest": "harness-runtime/crates/lsp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "mbedtls-sys",
           "manifest": "harness-runtime/third_party/mbedtls-sys/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "mcp",
           "manifest": "harness-runtime/crates/mcp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "mcp-wire",
+          "manifest": "harness-runtime/crates/mcp-wire/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "memory",
           "manifest": "harness-runtime/crates/memory/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "migrations",
           "manifest": "harness-runtime/crates/migrations/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "mobile-linux-android",
-          "manifest": "mobile-linux-runtime/crates/mobile-linux-android/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/mobile-linux-android",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "mobile-linux-api",
-          "manifest": "mobile-linux-runtime/crates/mobile-linux-api/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/mobile-linux-api",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "mobile-linux-core",
-          "manifest": "mobile-linux-runtime/crates/mobile-linux-core/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/mobile-linux-core",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "mock_stdio_mcp",
           "manifest": "harness-runtime/crates/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "msgqueue",
           "manifest": "harness-runtime/crates/msgqueue/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "orchestrator",
           "manifest": "harness-runtime/crates/orchestrator/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "outputstyles",
           "manifest": "harness-runtime/crates/outputstyles/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "permission",
           "manifest": "harness-runtime/crates/permission/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-android",
           "manifest": "harness-runtime/crates/platforms/android/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-common",
           "manifest": "harness-runtime/crates/platforms/common/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-ios",
           "manifest": "harness-runtime/crates/platforms/ios/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-macos-computer-control",
           "manifest": "harness-runtime/crates/platforms/macos-computer-control/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-posix",
           "manifest": "harness-runtime/crates/platforms/posix/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-posix-minimal",
           "manifest": "harness-runtime/crates/platforms/posix-minimal/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-pty",
-          "manifest": "mobile-linux-runtime/crates/platform-pty/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/platform-pty",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "platform-windows",
           "manifest": "harness-runtime/crates/platforms/windows/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "plugin",
           "manifest": "harness-runtime/crates/plugin/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "provider-config",
           "manifest": "harness-runtime/crates/provider-config/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "rooted-fs",
+          "manifest": "harness-runtime/crates/rooted-fs/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "sandbox",
           "manifest": "harness-runtime/crates/sandbox/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "sandbox-runtime",
           "manifest": "harness-runtime/crates/sandbox-runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "secret",
           "manifest": "harness-runtime/crates/secret/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "session",
           "manifest": "harness-runtime/crates/session/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "sidequery",
           "manifest": "harness-runtime/crates/sidequery/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
-          "package": "skill-api",
-          "manifest": "harness-runtime/crates/skill-api/Cargo.toml",
-          "source": "working-tree"
+          "package": "skill",
+          "manifest": "harness-runtime/crates/skill/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "syntect",
           "manifest": "harness-runtime/third_party/syntect/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "task-store",
           "manifest": "harness-runtime/crates/task-store/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tasks",
           "manifest": "harness-runtime/crates/tasks/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "telemetry",
           "manifest": "harness-runtime/crates/telemetry/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "telemetry-macros",
           "manifest": "harness-runtime/crates/telemetry-macros/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "test-harness",
           "manifest": "harness-runtime/crates/test-harness/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-agent",
           "manifest": "harness-runtime/crates/tools/agent/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-android-use",
           "manifest": "harness-runtime/crates/tools/android-use/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-api",
           "manifest": "harness-runtime/crates/tool-api/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-computer-use",
           "manifest": "harness-runtime/crates/tools/computer-use/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-cron",
           "manifest": "harness-runtime/crates/tools/cron/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-file",
           "manifest": "harness-runtime/crates/tools/file/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-git-mobile",
           "manifest": "harness-runtime/crates/tools/git-mobile/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-lsp",
           "manifest": "harness-runtime/crates/tools/lsp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-mcp",
           "manifest": "harness-runtime/crates/tools/mcp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-meta",
           "manifest": "harness-runtime/crates/tools/meta/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-mobile",
           "manifest": "harness-runtime/crates/tools/mobile/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-plan",
           "manifest": "harness-runtime/crates/tools/plan/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-shell",
           "manifest": "harness-runtime/crates/tools/shell/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-shell-mobile",
           "manifest": "harness-runtime/crates/tools/shell-mobile/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-skill",
           "manifest": "harness-runtime/crates/tools/skill/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-task",
           "manifest": "harness-runtime/crates/tools/task/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-ui",
           "manifest": "harness-runtime/crates/tools/ui/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-web",
           "manifest": "harness-runtime/crates/tools/web/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-workflow",
           "manifest": "harness-runtime/crates/tools/workflow/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-worktree",
           "manifest": "harness-runtime/crates/tools/worktree/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "visualization",
           "manifest": "harness-runtime/crates/visualization/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "workflow",
           "manifest": "harness-runtime/crates/workflow/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         }
       ],
       "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-      "hostTarget": "aarch64-apple-darwin"
+      "hostTarget": "aarch64-apple-darwin",
+      "sourceFingerprint": "abbf20d0f004931464665baf6af12aa2fd4951801dc087071a3e69d46608d3dc",
+      "sourceRevision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6",
+      "sourceMode": "committed",
+      "dependencyMode": "declared",
+      "artifactFingerprint": "sha256:92a2cf38c4fcbdd2546e02e6ce10f623a16805a72625522baca9a721c2716111"
     },
     {
       "id": "harness-mobile-uniffi",
@@ -903,426 +1153,551 @@
         {
           "package": "agent",
           "manifest": "harness-runtime/crates/agent/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "apply-seccomp",
           "manifest": "harness-runtime/crates/apply-seccomp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "audio-runtime",
           "manifest": "harness-runtime/crates/audio-runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "branding",
           "manifest": "harness-runtime/crates/branding/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "bridge",
           "manifest": "harness-runtime/crates/bridge/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "client",
           "manifest": "harness-runtime/crates/client/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "command-api",
           "manifest": "harness-runtime/crates/command-api/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "compaction",
           "manifest": "harness-runtime/crates/compaction/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "configuration-admin",
           "manifest": "harness-runtime/crates/configuration-admin/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "coordinator",
           "manifest": "harness-runtime/crates/coordinator/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "core",
           "manifest": "harness-runtime/crates/core/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "cost",
           "manifest": "harness-runtime/crates/cost/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "cron",
           "manifest": "harness-runtime/crates/cron/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "device-api",
+          "manifest": "harness-runtime/crates/device-api/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "fusion",
           "manifest": "harness-runtime/crates/fusion/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "git2",
           "manifest": "harness-runtime/third_party/git2-rs/git2/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "harness-runtime",
           "manifest": "harness-runtime/crates/runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "hooks",
           "manifest": "harness-runtime/crates/hooks/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "http-client",
           "manifest": "harness-runtime/crates/http-client/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "icu_collator",
+          "manifest": "harness-runtime/third_party/icu_collator/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "json-projection",
+          "manifest": "harness-runtime/crates/json-projection/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "jsonrpc",
           "manifest": "harness-runtime/crates/jsonrpc/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "libgit2-sys",
           "manifest": "harness-runtime/third_party/git2-rs/libgit2-sys/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "libssh2-sys",
           "manifest": "harness-runtime/third_party/libssh2-sys/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "lingxi-hyper",
-          "manifest": "llm-client/vendor/lingxi-hyper/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-hyper",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-hyper-rustls",
-          "manifest": "llm-client/vendor/lingxi-hyper-rustls/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-hyper-rustls",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-hyper-util",
-          "manifest": "llm-client/vendor/lingxi-hyper-util/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-hyper-util",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-llm-client",
-          "manifest": "llm-client/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-llm-client",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "lingxi-reqwest",
-          "manifest": "llm-client/vendor/lingxi-reqwest/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "llm-client::package/lingxi-reqwest",
+          "source": "git",
+          "revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8"
         },
         {
           "package": "llm-runtime",
           "manifest": "harness-runtime/crates/llm-runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "local-app",
+          "manifest": "harness-runtime/crates/local-app/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "lsp",
           "manifest": "harness-runtime/crates/lsp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "mbedtls-sys",
           "manifest": "harness-runtime/third_party/mbedtls-sys/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "mcp",
           "manifest": "harness-runtime/crates/mcp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "mcp-wire",
+          "manifest": "harness-runtime/crates/mcp-wire/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "memory",
           "manifest": "harness-runtime/crates/memory/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "migrations",
           "manifest": "harness-runtime/crates/migrations/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "mobile-linux-android",
-          "manifest": "mobile-linux-runtime/crates/mobile-linux-android/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/mobile-linux-android",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "mobile-linux-api",
-          "manifest": "mobile-linux-runtime/crates/mobile-linux-api/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/mobile-linux-api",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "mobile-linux-core",
-          "manifest": "mobile-linux-runtime/crates/mobile-linux-core/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/mobile-linux-core",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "mock_stdio_mcp",
           "manifest": "harness-runtime/crates/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "msgqueue",
           "manifest": "harness-runtime/crates/msgqueue/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "orchestrator",
           "manifest": "harness-runtime/crates/orchestrator/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "outputstyles",
           "manifest": "harness-runtime/crates/outputstyles/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "permission",
           "manifest": "harness-runtime/crates/permission/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-android",
           "manifest": "harness-runtime/crates/platforms/android/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-common",
           "manifest": "harness-runtime/crates/platforms/common/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-ios",
           "manifest": "harness-runtime/crates/platforms/ios/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-macos-computer-control",
           "manifest": "harness-runtime/crates/platforms/macos-computer-control/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-posix",
           "manifest": "harness-runtime/crates/platforms/posix/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-posix-minimal",
           "manifest": "harness-runtime/crates/platforms/posix-minimal/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "platform-pty",
-          "manifest": "mobile-linux-runtime/crates/platform-pty/Cargo.toml",
-          "source": "working-tree"
+          "manifest": "mobile-linux-runtime::package/platform-pty",
+          "source": "git",
+          "revision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
         },
         {
           "package": "platform-windows",
           "manifest": "harness-runtime/crates/platforms/windows/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "plugin",
           "manifest": "harness-runtime/crates/plugin/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "provider-config",
           "manifest": "harness-runtime/crates/provider-config/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
+        },
+        {
+          "package": "rooted-fs",
+          "manifest": "harness-runtime/crates/rooted-fs/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "sandbox",
           "manifest": "harness-runtime/crates/sandbox/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "sandbox-runtime",
           "manifest": "harness-runtime/crates/sandbox-runtime/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "secret",
           "manifest": "harness-runtime/crates/secret/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "session",
           "manifest": "harness-runtime/crates/session/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "sidequery",
           "manifest": "harness-runtime/crates/sidequery/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
-          "package": "skill-api",
-          "manifest": "harness-runtime/crates/skill-api/Cargo.toml",
-          "source": "working-tree"
+          "package": "skill",
+          "manifest": "harness-runtime/crates/skill/Cargo.toml",
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "syntect",
           "manifest": "harness-runtime/third_party/syntect/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "task-store",
           "manifest": "harness-runtime/crates/task-store/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tasks",
           "manifest": "harness-runtime/crates/tasks/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "telemetry",
           "manifest": "harness-runtime/crates/telemetry/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "telemetry-macros",
           "manifest": "harness-runtime/crates/telemetry-macros/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "test-harness",
           "manifest": "harness-runtime/crates/test-harness/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-agent",
           "manifest": "harness-runtime/crates/tools/agent/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-android-use",
           "manifest": "harness-runtime/crates/tools/android-use/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-api",
           "manifest": "harness-runtime/crates/tool-api/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-computer-use",
           "manifest": "harness-runtime/crates/tools/computer-use/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-cron",
           "manifest": "harness-runtime/crates/tools/cron/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-file",
           "manifest": "harness-runtime/crates/tools/file/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-git-mobile",
           "manifest": "harness-runtime/crates/tools/git-mobile/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-lsp",
           "manifest": "harness-runtime/crates/tools/lsp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-mcp",
           "manifest": "harness-runtime/crates/tools/mcp/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-meta",
           "manifest": "harness-runtime/crates/tools/meta/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-mobile",
           "manifest": "harness-runtime/crates/tools/mobile/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-plan",
           "manifest": "harness-runtime/crates/tools/plan/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-shell",
           "manifest": "harness-runtime/crates/tools/shell/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-shell-mobile",
           "manifest": "harness-runtime/crates/tools/shell-mobile/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-skill",
           "manifest": "harness-runtime/crates/tools/skill/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-task",
           "manifest": "harness-runtime/crates/tools/task/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-ui",
           "manifest": "harness-runtime/crates/tools/ui/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-web",
           "manifest": "harness-runtime/crates/tools/web/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-workflow",
           "manifest": "harness-runtime/crates/tools/workflow/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "tool-worktree",
           "manifest": "harness-runtime/crates/tools/worktree/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "visualization",
           "manifest": "harness-runtime/crates/visualization/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         },
         {
           "package": "workflow",
           "manifest": "harness-runtime/crates/workflow/Cargo.toml",
-          "source": "working-tree"
+          "source": "committed",
+          "revision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6"
         }
       ],
       "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-      "hostTarget": "aarch64-apple-darwin"
+      "hostTarget": "aarch64-apple-darwin",
+      "sourceFingerprint": "abbf20d0f004931464665baf6af12aa2fd4951801dc087071a3e69d46608d3dc",
+      "sourceRevision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6",
+      "sourceMode": "committed",
+      "dependencyMode": "declared",
+      "artifactFingerprint": "sha256:502125e0fa5ad1d029bdae0901f77b9433cc9c0b3c42d9bfe289abe9159a031f"
     },
     {
       "id": "llm-core",
@@ -1364,7 +1739,12 @@
         }
       ],
       "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-      "hostTarget": "aarch64-apple-darwin"
+      "hostTarget": "aarch64-apple-darwin",
+      "sourceFingerprint": "b734a45b6ab35a8ed2b8aa04381ebd8b77658989aa0d62d20be72ff5631c493b",
+      "sourceMode": "working-tree",
+      "dependencyMode": "workspace",
+      "sourceRevision": "ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b",
+      "artifactFingerprint": "sha256:964af6b6a622dd37ff64a6ad92821297feafd9be0a79722ce144f812db53b93b"
     },
     {
       "id": "llm-websocket",
@@ -1409,7 +1789,12 @@
         }
       ],
       "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-      "hostTarget": "aarch64-apple-darwin"
+      "hostTarget": "aarch64-apple-darwin",
+      "sourceFingerprint": "b734a45b6ab35a8ed2b8aa04381ebd8b77658989aa0d62d20be72ff5631c493b",
+      "sourceMode": "working-tree",
+      "dependencyMode": "workspace",
+      "sourceRevision": "ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b",
+      "artifactFingerprint": "sha256:425529307e2d9c77027e82f57622a5a82defa2a9547a0c6e26b522547e777eb9"
     },
     {
       "id": "llm-tokenizers",
@@ -1453,7 +1838,12 @@
         }
       ],
       "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-      "hostTarget": "aarch64-apple-darwin"
+      "hostTarget": "aarch64-apple-darwin",
+      "sourceFingerprint": "b734a45b6ab35a8ed2b8aa04381ebd8b77658989aa0d62d20be72ff5631c493b",
+      "sourceMode": "working-tree",
+      "dependencyMode": "workspace",
+      "sourceRevision": "ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b",
+      "artifactFingerprint": "sha256:e2d751e1be19f6978d05598747f6547889cfd47e0bd23d617d4d8baca5b5d6f0"
     },
     {
       "id": "mobile-api",
@@ -1500,7 +1890,12 @@
         }
       ],
       "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-      "hostTarget": "aarch64-apple-darwin"
+      "hostTarget": "aarch64-apple-darwin",
+      "sourceFingerprint": "b734a45b6ab35a8ed2b8aa04381ebd8b77658989aa0d62d20be72ff5631c493b",
+      "sourceMode": "working-tree",
+      "dependencyMode": "workspace",
+      "sourceRevision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9",
+      "artifactFingerprint": "sha256:be33be3b99e79b9c4bd51c965d4f859fd2bbd65fd7726c5e1b79c7690d6b64b7"
     },
     {
       "id": "mobile-core",
@@ -1547,7 +1942,12 @@
         }
       ],
       "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-      "hostTarget": "aarch64-apple-darwin"
+      "hostTarget": "aarch64-apple-darwin",
+      "sourceFingerprint": "b734a45b6ab35a8ed2b8aa04381ebd8b77658989aa0d62d20be72ff5631c493b",
+      "sourceMode": "working-tree",
+      "dependencyMode": "workspace",
+      "sourceRevision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9",
+      "artifactFingerprint": "sha256:8f5f3837758fa5ad045da988d343223b9acf71e7248dfd8cfab7624bbebf0de5"
     },
     {
       "id": "mobile-ffi",
@@ -1594,7 +1994,12 @@
         }
       ],
       "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-      "hostTarget": "aarch64-apple-darwin"
+      "hostTarget": "aarch64-apple-darwin",
+      "sourceFingerprint": "b734a45b6ab35a8ed2b8aa04381ebd8b77658989aa0d62d20be72ff5631c493b",
+      "sourceMode": "working-tree",
+      "dependencyMode": "workspace",
+      "sourceRevision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9",
+      "artifactFingerprint": "sha256:e7fd7d8afd2c2584181c0ebd12f4e192800e5f3f857e493adf861331338b204c"
     },
     {
       "id": "mobile-pty",
@@ -1641,7 +2046,12 @@
         }
       ],
       "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-      "hostTarget": "aarch64-apple-darwin"
+      "hostTarget": "aarch64-apple-darwin",
+      "sourceFingerprint": "b734a45b6ab35a8ed2b8aa04381ebd8b77658989aa0d62d20be72ff5631c493b",
+      "sourceMode": "working-tree",
+      "dependencyMode": "workspace",
+      "sourceRevision": "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9",
+      "artifactFingerprint": "sha256:9b97e7fa042433de6e4b533ef10d74a1e36540af1ce68c69a93fcefa54d00a4d"
     }
   ]
 }

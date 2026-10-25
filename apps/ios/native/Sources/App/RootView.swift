@@ -139,6 +139,7 @@ struct RootView: View {
     @State private var sessionInspectorOpen = false
     @State private var sessionDetailsSheetOpen = false
     @State private var workspacePickerOpen = false
+    @State private var liveWorkspaceState: SessionWorkspaceState?
     @State private var workspacePickerSource: (any ConversationSource)?
     @State private var workspacePickerSessionID = ""
     @State private var openTerminalAfterSessionDetails = false
@@ -174,6 +175,7 @@ struct RootView: View {
     @State private var externalEngineReady = false
     @State private var externalActionApproval: LingxiAppAction?
     @State private var approvedExternalActions: [LingxiAppAction] = []
+    @State private var remoteDestination: RemoteControlDestination?
     @State private var externalImport: CanonicalDeepLink?
     @State private var externalLinkError: String?
     @State private var externalAsyncRouteID = UUID()
@@ -206,6 +208,12 @@ struct RootView: View {
         let activeProject = projects.activeProject
         let initialScope = ConversationScope(projectID: activeProject?.record.id)
         let initialMode: SessionMode = .code
+        let initialProjectMountGrants: [String]
+        if let activeProject {
+            initialProjectMountGrants = (try? MobileUserStorage.projectMountGrantPaths(for: activeProject)) ?? []
+        } else {
+            initialProjectMountGrants = []
+        }
         settings.mcpServers = MCPConfigurationRepository.shared.loadServers(
             projectCwd: activeProject?.workspace.hostURL.path
         )
@@ -223,7 +231,8 @@ struct RootView: View {
             providerRoutingJson: snapshot.routingJSON,
             defaultModelID: snapshot.defaultModelID,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
-            mobileLinux: runtime
+            mobileLinux: runtime,
+            projectMountGrants: initialProjectMountGrants
         )
 
         #if canImport(harness_runtimeFFI)
@@ -343,13 +352,9 @@ struct RootView: View {
     }
 
     private var session: SessionRef {
-        if let row = source.model.engineSessions.first(where: { $0.id == activeSession }) {
-            return row.ref
-        }
-        if let row = projectStore.activeProject?.sessions.first(where: { $0.sessionId == activeSession }) {
-            return SessionRef(id: row.sessionId, title: row.title)
-        }
-        return SessionRef(id: activeSession, title: String(localized: "chat_new_conversation"))
+        let cached = (projectStore.activeProject?.sessions ?? projectStore.globalSessions)
+            .first(where: { $0.sessionId == activeSession })
+        return source.model.sessionReference(for: activeSession, cachedTitle: cached?.title)
     }
 
     var body: some View {
@@ -413,9 +418,11 @@ struct RootView: View {
                             if (UIDevice.current.userInterfaceIdiom == .phone || geometry.size.width < 840) && navigation.path.isEmpty {
                                 ToolbarItem(placement: .topBarLeading) {
                                     Button(action: navigation.showSidebar) {
-                                        Label("drawer_open_sidebar_a11y", systemImage: "sidebar.left")
+                                        Label("drawer_open_sidebar_a11y", systemImage: UIDevice.current.userInterfaceIdiom == .phone
+                                              ? "line.3.horizontal" : "sidebar.left")
                                             .labelStyle(.iconOnly)
                                     }
+                                    .tint(theme.text)
                                     .accessibilityIdentifier("drawer.open")
                                 }
                             }
@@ -441,11 +448,13 @@ struct RootView: View {
             #if canImport(harness_runtimeFFI)
                 // Keep one root-mounted native sheet presenter so permission
                 // requests work over both the chat and any active SwiftUI sheet.
-                EnginePermissionPromptHost(
-                    model: source.model,
-                    onApprove: { source.approvePermission($0, $1) },
-                    onDeny: { source.denyPermission($0) }
-                )
+                if remoteDestination == nil {
+                    EnginePermissionPromptHost(
+                        model: source.model,
+                        onApprove: { source.approvePermission($0, $1) },
+                        onDeny: { source.denyPermission($0) }
+                    )
+                }
             #endif
           }
           .onAppear { workspaceWidth = geometry.size.width }
@@ -659,36 +668,39 @@ struct RootView: View {
 
     private func withPresentations(_ content: some View) -> some View {
         content
+            .fullScreenCover(item: $remoteDestination) { destination in
+                #if canImport(harness_runtimeFFI)
+                RemoteControlView(destination: destination, openAccount: { navigation.showSettings(.account) })
+                    .id(destination.id)
+                #endif
+            }
             .sheet(item: $externalImport, onDismiss: retryDeferredAppActions) { target in
                 DeepLinkImportPreview(target: target)
             }
-            .alert("Open linked destination?", isPresented: Binding(
+            .alert(String(localized: "deep_link_open_title"), isPresented: Binding(
                 get: { externalActionApproval != nil },
                 set: { if !$0 { externalActionApproval = nil } }
             ), presenting: externalActionApproval) { action in
-                Button("Continue") {
+                Button(String(localized: "onboarding_cta_continue")) {
                     externalActionApproval = nil
                     if !approvedExternalActions.contains(action) { approvedExternalActions.append(action) }
                     cronRepository.discardDraft()
                     parkRefusedAppAction(action, applied: applyAppAction(action, approvedDraftChange: true))
                     retryDeferredAppActions()
                 }
-                Button("Keep editing", role: .cancel) { externalActionApproval = nil; retryDeferredAppActions() }
+                Button(String(localized: "deep_link_keep_editing"), role: .cancel) { externalActionApproval = nil; retryDeferredAppActions() }
             } message: { _ in
-                Text("Your conversation text is saved in its workspace. Opening a new conversation can replace its draft and attachments. Unsaved terminal input and scheduled-task edits will be discarded.")
+                Text(String(localized: "deep_link_draft_warning"))
             }
-            .alert("Unable to open link", isPresented: Binding(
+            .alert(String(localized: "deep_link_unable_open"), isPresented: Binding(
                 get: { externalLinkError != nil }, set: { if !$0 { externalLinkError = nil } }
-            )) { Button("OK", role: .cancel) { externalLinkError = nil } }
+            )) { Button(String(localized: "common_ok"), role: .cancel) { externalLinkError = nil } }
             message: { Text(externalLinkError ?? "") }
 
             .fullScreenCover(
                 item: Binding(
                     get: { navigation.runningAppID.map(RunningApp.init) },
-                    set: {
-                        if let previous = navigation.runningAppID, previous != $0?.id { LocalApps.library.browser.deactivate(previous) }
-                        navigation.runningAppID = $0?.id
-                    }
+                    set: { navigation.runningAppID = $0?.id }
                 )
             ) { running in
                 Group {
@@ -696,9 +708,8 @@ struct RootView: View {
                         library: LocalApps.library,
                         info: LocalApps.info,
                         appId: running.id,
-                        onClose: { LocalApps.library.browser.deactivate(running.id); navigation.runningAppID = nil },
+                        onClose: { navigation.runningAppID = nil },
                         onShowDetails: { appID in
-                            LocalApps.library.browser.deactivate(running.id)
                             navigation.runningAppID = nil
                             navigation.openLocalApp(appID)
                         }
@@ -794,6 +805,10 @@ struct RootView: View {
             account: account,
             openSettings: { navigation.showSettings() },
             openAccount: { navigation.showSettings(.account) },
+            openRemoteControl: {
+                navigation.closeSidebar()
+                remoteDestination = RemoteControlDestination()
+            },
             openTerminal: openCurrentWorkspaceTerminal,
             openCron: { scopeID, taskID in navigation.openCron(scopeID: scopeID, taskID: taskID) },
             openProjects: { navigation.openProjects() },
@@ -872,7 +887,8 @@ struct RootView: View {
                 onSessionChanged: adoptEngineSession,
                 onUnavailableSession: clearUnavailableSession,
                 onSessionTransitionFailed: rollbackFailedSession,
-                onRefreshSessions: { source.listSessions() }
+                onRefreshSessions: { source.listSessions() },
+                onWorkspaceChanged: { liveWorkspaceState = $0 }
             )
             .id(sourceGeneration)
 
@@ -916,29 +932,23 @@ struct RootView: View {
             workspacePickerSource = nil
             workspacePickerSessionID = ""
         }) {
-            WorkspacePickerSheet(
-                projects: RecentSessionsBuilder.sortedProjects(
-                    projectStore.projects,
-                    pinnedAt: workspacePinnedAt
-                ),
+            WorkspaceDirectoryPickerSheet(
+                projects: RecentSessionsBuilder.sortedProjects(projectStore.projects, pinnedAt: workspacePinnedAt),
                 activeScope: activeScope,
-                onSelect: { scope in startNewChat(in: scope, mode: activeMode) },
-                directories: activeScope.projectID.flatMap { id in projectStore.projects.first(where: { $0.id == id }) }
-                    .map { [$0.record.directory] + $0.record.additionalDirectories } ?? [],
-                activeDirectory: projectStore.activeProject?.record.activeDirectory,
+                currentDirectory: currentWorkspaceGuestPath,
+                contextDirectories: source.model.workspaceState?.additionalDirectories
+                    ?? projectStore.activeProject?.record.additionalDirectories ?? [],
+                protectedPaths: { workspaceProtectedDirectories },
+                canMutate: { !source.model.requiresBackgroundExecution && !source.model.isCancelling && !source.model.sessionTransitionPending },
+                runtimeStatus: settingsStore.linuxRuntime.rootfsState.label,
+                onSelectScope: { scope in startNewChat(in: scope, mode: activeMode) },
                 onPickDirectory: { path in
                     guard let pickerSource = workspacePickerSource, pickerSource === source else {
-                        source.model.error = ConversationError(kind: .host, message: String(localized: "workspace_session_changed"))
-                        return
+                        throw WorkspaceDirectoryError.sessionChanged
                     }
-                    pickerSource.changeWorkspace(path, expectedSessionID: workspacePickerSessionID)
-                },
-                onAddDirectory: { path in
-                    guard let pickerSource = workspacePickerSource, pickerSource === source else {
-                        source.model.error = ConversationError(kind: .host, message: String(localized: "workspace_session_changed"))
-                        return
-                    }
-                    pickerSource.addWorkspaceDirectory(path, expectedSessionID: workspacePickerSessionID)
+                    try await pickerSource.setWorkspaceDirectory(path, expectedSessionID: workspacePickerSessionID)
+                    guard pickerSource === source else { throw WorkspaceDirectoryError.sessionChanged }
+                    liveWorkspaceState = pickerSource.model.workspaceState
                 }
             )
             .environment(\.theme, theme)
@@ -951,15 +961,22 @@ struct RootView: View {
 
     /// The workspace's display name for the top bar and the new-chat strip.
     private var currentWorkspaceName: String {
-        switch activeScope {
-        case .global:
-            return String(localized: "common_global")
-        case .scheduled:
-            return String(localized: "settings_title_cron")
-        case let .project(id):
-            return projectStore.projects.first { $0.id == id }?.record.name
-                ?? String(localized: "common_global")
-        }
+        if case .remote = activeScope { return String(localized: "remote_title") }
+        let path = currentWorkspaceGuestPath
+        if path == LXISHGuestPaths.home { return "~" }
+        if let project = projectStore.activeProject, path == project.record.directory { return project.record.name }
+        return (path as NSString).lastPathComponent
+    }
+
+    private var workspaceProtectedDirectories: [String] {
+        let state = source.model.workspaceState
+        return [currentWorkspaceGuestPath, state?.projectRoot].compactMap { $0 }
+            + (state?.additionalDirectories ?? [])
+            + projectStore.projects.flatMap { project in
+                [project.record.directory, project.record.activeDirectory, (project.record.directory as NSString).deletingLastPathComponent]
+                    + project.record.additionalDirectories + project.sessions.compactMap(\.workspaceDirectory)
+            }
+            + projectStore.globalSessions.compactMap(\.workspaceDirectory)
     }
 
     /// Start a fresh conversation in `scope` as `mode`, carrying what has been
@@ -1144,6 +1161,9 @@ struct RootView: View {
     }
 
     private var currentWorkspaceGuestPath: String {
+        if let liveWorkspaceState, liveWorkspaceState.sessionId == source.model.activeSessionId {
+            return liveWorkspaceState.cwd
+        }
         return source.model.workspaceState?.cwd ?? projectStore.activeProject?.workspace.guestPath ?? LXISHDefaultWorkspace.guestHome
     }
 
@@ -1168,8 +1188,9 @@ struct RootView: View {
 
     #if canImport(harness_runtimeFFI)
         private func installExternalEventHandler(on conversation: any ConversationSource) {
-            conversation.setExternalEventHandler { event in
+            conversation.setExternalEventHandler { [weak conversation] event in
                 Task { @MainActor in
+                    guard let conversation, source === conversation else { return }
                     clientEventCenter.publish(event)
                     handleExternalEvent(event)
                 }
@@ -1229,12 +1250,24 @@ struct RootView: View {
 
     private func wireCurrentSource(preserveCatalog: Bool = false) {
         let current = source
+        let generation = sourceGeneration
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: current)
+            DesktopSettingsRepository.shared.credentialCommitHandler = { [weak current] ids, configured, encrypted in
+                guard let current, source === current, generation == sourceGeneration else { return }
+                providerRepository.recordExternalCredentialCommit(
+                    providerIDs: ids, configuredProviderIDs: configured, storageEncrypted: encrypted)
+            }
             providerRepository.configure(
-                submitCommand: { command in try await current.submitEngineCommand(command) },
+                submitCommand: { command in
+                    guard source === current, generation == sourceGeneration else { throw CancellationError() }
+                    try await current.submitEngineCommand(command)
+                },
                 testConnection: { profile, secret in
-                    try await current.testProviderConnection(profile: profile, credentialOverride: secret)
+                    guard source === current, generation == sourceGeneration else { throw CancellationError() }
+                    let result = try await current.testProviderConnection(profile: profile, credentialOverride: secret)
+                    guard source === current, generation == sourceGeneration else { throw CancellationError() }
+                    return result
                 },
                 applyReconnect: { snapshot in
                     try await rebuildSource(snapshot: snapshot)
@@ -1265,10 +1298,17 @@ struct RootView: View {
         scope: ConversationScope,
         snapshot: ProviderLaunchSnapshot,
         mode: SessionMode
-    ) -> any ConversationSource {
+    ) throws -> any ConversationSource {
         let projectCwd: String?
         let project: ProjectSnapshot?
         switch scope {
+        case let .remote(hostID, sessionID):
+            #if canImport(harness_runtimeFFI)
+            return RemoteConversationSource(hostID: hostID, sessionID: sessionID,
+                uid: FirebaseAccount.shared.user?.uid ?? "")
+            #else
+            return MockConversationSource()
+            #endif
         case .global, .project:
             project = scope.projectID.flatMap { id in
                 projectStore.projects.first(where: { $0.record.id == id })
@@ -1283,6 +1323,9 @@ struct RootView: View {
             project: project,
             linuxRuntime: settingsStore.linuxRuntime
         ).config
+        let projectMountGrants = try project.map {
+            try MobileUserStorage.projectMountGrantPaths(for: $0)
+        } ?? []
         return ConversationSourceFactory.make(
             projectCwd: projectCwd,
             additionalWorkspaceDirectories: project?.record.additionalDirectories ?? [],
@@ -1292,7 +1335,8 @@ struct RootView: View {
             providerRoutingJson: snapshot.routingJSON,
             defaultModelID: snapshot.defaultModelID,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
-            mobileLinux: runtime
+            mobileLinux: runtime,
+            projectMountGrants: projectMountGrants
         )
     }
 
@@ -1303,7 +1347,7 @@ struct RootView: View {
         persistConversationScope()
         let old = source
         try requireSourceReplacementAllowed(old)
-        let replacement = makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode)
+        let replacement = try makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode)
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: replacement)
         #endif
@@ -1513,7 +1557,7 @@ struct RootView: View {
                     rollback = try await projectStore.persistActiveForSwitch(projectId: scope.projectID)
                 }
                 try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
-                let replacement = makeSource(
+                let replacement = try makeSource(
                     scope: scope,
                     snapshot: providerRepository.makeLaunchSnapshot(),
                     mode: targetMode
@@ -1617,7 +1661,7 @@ struct RootView: View {
         pendingSessionRestoreID = nil
         if pendingLinkedSessionID == sessionID {
             pendingLinkedSessionID = nil; pendingMessageLink = nil
-            externalLinkError = "This conversation is not stored in the requested local workspace."
+            externalLinkError = String(localized: "deep_link_conversation_workspace_missing")
         }
         activeSession = confirmedSession
         scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
@@ -1642,7 +1686,7 @@ struct RootView: View {
         activeSession = rollbackSelection
         if pendingLinkedSessionID == sessionID {
             pendingLinkedSessionID = nil; pendingMessageLink = nil
-            externalLinkError = "The local conversation could not be opened."
+            externalLinkError = String(localized: "deep_link_conversation_open_failed")
         }
         scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
         if let pending = pendingSessionFork,
@@ -1899,7 +1943,6 @@ struct RootView: View {
     }
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
-        if phase != .inactive { LocalApps.library.sceneChanged(background: phase == .background) }
         conversationBackgroundAlerts.setScenePhase(phase)
         switch phase {
         case .background:
@@ -1973,6 +2016,12 @@ struct RootView: View {
     /// (including the cases that never touch session selection).
     @discardableResult
     private func applyAppAction(_ action: LingxiAppAction, approvedDraftChange: Bool = false) -> Bool {
+        // A remote overlay preserves the local source and draft. It also works
+        // when the local engine has not booted or is waiting for an answer.
+        if case let .canonical(target) = action, target.parts.first == "remote" {
+            guard app.setupDone else { return false }
+            return applyCanonicalLink(target)
+        }
         guard app.setupDone, externalEngineReady, !projectSwitching, !source.model.sessionTransitionPending,
               !navigation.settingsOpen, externalImport == nil, externalActionApproval == nil else { return false }
         if !approvedDraftChange && !approvedExternalActions.contains(action) && (!draft.isEmpty || hasUnsavedConversationMedia || (hasUnsavedTerminalInput && navigation.path.contains(where: { if case .terminal = $0 { return true }; return false })) || cronRepository.hasUnsavedChanges) {
@@ -2008,6 +2057,7 @@ struct RootView: View {
                 targetScope = activeScope
             }
             switch targetScope {
+            case .remote: return true
             case .global, .scheduled:
                 break
             case let .project(projectID):
@@ -2044,6 +2094,11 @@ struct RootView: View {
 
     private func applyCanonicalLink(_ target: CanonicalDeepLink) -> Bool {
         let parts = target.parts
+        if parts.count == 3, parts[0] == "remote" {
+            navigation.closeSidebar()
+            remoteDestination = RemoteControlDestination(hostID: parts[1], sessionID: parts[2])
+            return true
+        }
         let id = parts.last ?? ""
         var requestedScope = activeScope
         if let workspace = target.params["workspace"] {
@@ -2061,7 +2116,7 @@ struct RootView: View {
             if target.params["workspace"] == nil || target.params["workspace"] == activeScope.workspaceKey {
                 guard source.model.engineSessionsLoaded else { return false }
                 guard source.model.engineSessions.contains(where: { $0.id == id }) || source.model.activeSessionId == id else {
-                    externalLinkError = "This conversation is not stored in the selected local workspace."; return true
+                    externalLinkError = String(localized: "deep_link_conversation_workspace_missing"); return true
                 }
             }
             let applied = applyAppAction(.openConversation(sessionID: id, turnID: nil, workspaceKey: target.params["workspace"], mode: mode), approvedDraftChange: true)
@@ -2108,16 +2163,38 @@ struct RootView: View {
             Task { @MainActor in
                 await LocalApps.initializeOnce()
                 await LocalApps.library.refresh()
+                let chatID = AppsModel.chatAppID(of: id) ?? id
+                let chatExists = await LocalApps.chat.exists(chatID) == true
                 guard requestID == externalAsyncRouteID else { return }
+                let marketExists = LocalApps.market?.installed.contains(where: { $0.appId == id && !$0.removing }) == true
                 if LocalApps.library.record(id) != nil {
-                    if target.params["review"] == "agent" { LocalApps.library.browserReviewAppID = id }
+                    if target.params["review"] == "agent" {
+                        LocalApps.library.browserReviewAppID = id
+                        if let runID = target.params["runId"],
+                           let revision = target.params["revision"].flatMap(UInt64.init) {
+                            LocalApps.library.queueBrowserAgentWake(
+                                appID: id,
+                                revision: revision,
+                                runID: runID
+                            )
+                        }
+                    }
                     navigation.runApp(id)
+                } else if AppsModel.chatAppID(of: id) != nil, chatExists {
+                    navigation.runApp(id)
+                } else if chatExists && marketExists {
+                    externalLinkError = String(localized: "deep_link_app_ambiguous")
+                } else if chatExists {
+                    navigation.runApp(AppsModel.chatAppKey(chatID))
+                } else if marketExists {
+                    navigation.runApp(id)
+                } else {
+                    _ = missingLinkedResource("installed app")
                 }
-                else { _ = missingLinkedResource("installed app") }
             }
         case "market": navigation.openMarketApp(id)
         case "import":
-            guard target.payloadJSON != nil else { externalLinkError = "This import link has no configuration to review."; return true }
+            guard target.payloadJSON != nil else { externalLinkError = String(localized: "deep_link_import_no_configuration"); return true }
             externalImport = target
         case "runtime":
             if parts[1] == "agent" {
@@ -2132,7 +2209,7 @@ struct RootView: View {
     }
 
     private func missingLinkedResource(_ kind: String) -> Bool {
-        externalLinkError = "The linked \(kind) is not available in local data on this device."
+        externalLinkError = String(localized: "deep_link_target_missing")
         return true
     }
 
@@ -2154,7 +2231,7 @@ struct RootView: View {
             pendingMessageLink = nil
         } else if !projectSwitching && pendingSessionRestoreID == nil {
             pendingMessageLink = nil
-            externalLinkError = "This message is not present in the locally stored conversation."
+            externalLinkError = String(localized: "deep_link_message_missing")
         }
     }
 
@@ -2170,7 +2247,7 @@ struct RootView: View {
         guard let action = LingxiDeepLink.action(from: url) else {
             // Account sign-in callbacks belong to the app delegate's SDK handlers.
             if url.scheme?.lowercased() == "lingxi" || (url.scheme == "https" && url.host == "lingxios.net") {
-                externalLinkError = "This link is invalid or names an unsupported destination."
+                externalLinkError = String(localized: "deep_link_invalid")
             }
             return
         }
@@ -2205,13 +2282,25 @@ struct RootView: View {
     private func continueLocalAppDevelopment(_ app: UnifiedAppRecord) {
         Task { @MainActor in
             do {
-                var sessions: [String: String] = [:]
-                for row in projectStore.globalSessions { if let cwd = row.workspaceDirectory { sessions[row.sessionId] = cwd } }
-                for project in projectStore.projects { for row in project.sessions { if let cwd = row.workspaceDirectory { sessions[row.sessionId] = cwd } } }
+                var sessions: [String: LocalAppAuthoringSessionBinding] = [:]
+                for project in projectStore.projects {
+                    for row in project.sessions {
+                        sessions[canonicalSessionID(row.sessionId)] = .init(
+                            workspaceId: project.record.id,
+                            sourceDirectory: row.workspaceDirectory ?? project.record.activeDirectory,
+                            projectRef: .mobileProject(project.record.id),
+                            mode: row.mode.rawValue
+                        )
+                    }
+                }
                 let result = try await LocalApps.library.prepareAuthoring(app.appId, sessions: sessions)
                 guard result.action != "sourceMissing" else { throw LocalAppServiceFailure("SOURCE_MISSING", "Source folder is missing. Import an editable copy before continuing development.") }
+                var authoring = result.authoring
+                if let sessionID = result.authoringSessionId {
+                    authoring?.authoringSessionId = sessionID
+                }
                 beginLocalAppDevelopment(.init(appId: app.appId, name: app.name, sourceDirectory: result.sourceDirectory,
-                    sourceSessionID: result.action == "resumeSession" ? result.sessionId : nil, prompt: "继续开发这个应用。"))
+                    authoring: authoring, prompt: "继续开发这个应用。"))
             } catch { externalLinkError = error.localizedDescription }
         }
     }
@@ -2221,15 +2310,38 @@ struct RootView: View {
               !projectSwitching, !source.model.streaming, !source.model.sessionTransitionPending else {
             externalLinkError = "Finish or save the current conversation draft before opening app development."; return
         }
-        let match = request.sourceSessionID.flatMap { id in
-            projectStore.projects.first(where: { $0.sessions.contains(where: { $0.sessionId == id }) })
-        }
-        let scope: ConversationScope = match.map { .project($0.id) } ?? .global
-        guard switchScope(to: scope, mode: .code, resumeSessionID: request.sourceSessionID) else {
-            externalLinkError = "The conversation cannot switch right now."; return
-        }
         Task { @MainActor in
             do {
+                let existingBinding = request.authoring
+                let boundProject: ProjectSnapshot? = {
+                    guard let existingBinding,
+                          existingBinding.sourceDirectory == request.sourceDirectory,
+                          let workspaceID = existingBinding.workspaceId,
+                          case .mobileProject(let projectID)? = existingBinding.projectRef,
+                          workspaceID == projectID else { return nil }
+                    return projectStore.projects.first {
+                        $0.record.id == projectID && $0.record.activeDirectory == request.sourceDirectory
+                    }
+                }()
+                let project: ProjectSnapshot
+                if let boundProject { project = boundProject }
+                else {
+                    project = try await projectStore.createLocalAppAuthoringProject(
+                        name: request.name,
+                        sourceDirectory: request.sourceDirectory
+                    )
+                }
+                let existingSession = existingBinding?.authoringSessionId.flatMap { id in
+                    project.sessions.first {
+                        canonicalSessionID($0.sessionId) == canonicalSessionID(id)
+                            && $0.mode == .code
+                            && $0.workspaceDirectory == request.sourceDirectory
+                    }?.sessionId
+                }
+                let scope = ConversationScope.project(project.record.id)
+                guard switchScope(to: scope, mode: .code, resumeSessionID: existingSession) else {
+                    throw LocalAppServiceFailure("CONVERSATION_BUSY", "The conversation cannot switch to the app source project right now.")
+                }
                 for _ in 0..<400 {
                     if !projectSwitching, activeScope == scope, !source.model.sessionTransitionPending { break }
                     try await Task.sleep(for: .milliseconds(50))
@@ -2239,16 +2351,38 @@ struct RootView: View {
                 #if canImport(harness_runtimeFFI)
                 guard let engine = source as? EngineConversationSource else { throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.") }
                 let sessionID: String
-                if let existing = request.sourceSessionID {
+                if let existing = existingSession {
                     guard engine.model.activeSessionId == existing, engine.model.workspaceState?.cwd == request.sourceDirectory else { throw LocalAppServiceFailure("AUTHORING_MOVED", "The source session moved. Refresh the app details before continuing.") }
                     sessionID = existing
                 } else { sessionID = try await engine.startLocalAppAuthoringSession(cwd: request.sourceDirectory) }
                 guard source === engine, engine.model.activeSessionId == sessionID,
-                      engine.model.workspaceState?.cwd == request.sourceDirectory else { throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.") }
-                if let appId = request.appId {
-                    try await LocalApps.library.bindAuthoring(appId, authoring: .init(sourceDirectory: request.sourceDirectory, sourceSessionId: sessionID, projectId: scope.projectID))
+                      engine.model.workspaceState?.cwd == request.sourceDirectory,
+                      activeMode == .code, activeScope == scope else { throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.") }
+                let authoring = LocalAppAuthoring(
+                    sourceDirectory: request.sourceDirectory,
+                    workspaceId: project.record.id,
+                    projectRef: .mobileProject(project.record.id),
+                    authoringSessionId: sessionID,
+                    appId: request.appId
+                )
+                if let workspace = engine.model.workspaceState, workspace.sessionId == sessionID {
+                    try await projectStore.recordWorkspace(projectId: project.record.id, state: workspace)
+                } else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring workspace could not be recorded. No draft was inserted.")
                 }
-                guard source === engine, engine.model.activeSessionId == sessionID else { return }
+                if let appId = request.appId {
+                    try await LocalApps.library.bindAuthoring(appId, authoring: authoring)
+                } else {
+                    try await LocalApps.library.registerPendingAuthoring(authoring)
+                }
+                guard source === engine, engine.model.activeSessionId == sessionID,
+                      engine.model.workspaceState?.cwd == request.sourceDirectory,
+                      !engine.model.sessionTransitionPending, activeMode == .code, activeScope == scope,
+                      !projectSwitching,
+                      draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !hasUnsavedConversationMedia else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
+                }
                 draft = "Use the local-app skill to develop \(request.name) in \(request.sourceDirectory). Use the schema 2 standalone LocalApp service. This ordinary authoring session is \(sessionID). Existing app ID: \(request.appId ?? "new app"). Publish locally only; publishing to the market is a separate user action.\n\n\(request.prompt)"
                 navigation.path.removeAll(); navigation.focusDetail()
                 #else
@@ -2471,6 +2605,7 @@ private struct ConversationProjectBridge: View {
     let onUnavailableSession: (String) -> Bool
     let onSessionTransitionFailed: (String) -> Bool
     let onRefreshSessions: () -> Void
+    var onWorkspaceChanged: (SessionWorkspaceState?) -> Void = { _ in }
     @State private var sessionSyncTask: Task<Void, Never>?
     @State private var workspaceSyncTask: Task<Void, Never>?
 
@@ -2531,6 +2666,7 @@ private struct ConversationProjectBridge: View {
     }
 
     private func synchronizeWorkspace() {
+        onWorkspaceChanged(model.workspaceState)
         guard let projectID, let state = model.workspaceState,
               state.sessionId == model.activeSessionId, !model.sessionTransitionPending else { return }
         workspaceSyncTask?.cancel()
@@ -2572,7 +2708,7 @@ private struct ConversationProjectBridge: View {
                     )
                 } catch {
                     if model.activeSessionId == sessionID {
-                        model.error = ConversationError(kind: .host, message: String(format: String(localized: "session_index_save_new_failed_fmt"), error.localizedDescription))
+                        model.error = ConversationError(kind: .host, message: String(localized: "session_index_save_new_failed \(error.localizedDescription)"))
                     }
                     return
                 }

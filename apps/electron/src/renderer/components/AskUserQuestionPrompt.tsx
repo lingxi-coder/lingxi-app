@@ -1,3 +1,4 @@
+import { useI18n } from '../i18n/useI18n';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { AskQuestionDto, AskUserQuestionRequestDto } from '@lingxi/bridge-client';
 
@@ -37,6 +38,7 @@ function answerText(question: AskQuestionDto, answer: QuestionAnswer): string | 
 }
 
 export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQuestionPromptProps) {
+  const { tr } = useI18n();
   const t = useT();
   const [expandedQuestion, setExpandedQuestion] = useState<number | null>(0);
   const [answers, setAnswers] = useState<QuestionAnswer[]>(() => emptyAnswers(request));
@@ -98,7 +100,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
     if (missingIndex >= 0) {
       setExpandedQuestion(missingIndex);
       questionTriggers.current[missingIndex]?.focus();
-      setError('Answer each question before sending.');
+      setError(tr('desktop_interaction_answer_all'));
       return;
     }
     const result: Record<string, string> = {};
@@ -145,13 +147,13 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
         <span className="inline-interaction-heading-icon" aria-hidden="true">
           <Icon name="question" size={19} stroke={1.7} />
         </span>
-        <h2 id="lingxi-ask-heading">{request.questions.length} {request.questions.length === 1 ? 'question' : 'questions'}</h2>
-        <span className="ask-dialog-progress">{answeredCount} of {request.questions.length} answered</span>
+        <h2 id="lingxi-ask-heading">{request.questions.length === 1 ? tr('desktop_interaction_single_question') : tr('desktop_interaction_question_count', request.questions.length)}</h2>
+        <span className="ask-dialog-progress">{tr('desktop_interaction_answered_count', answeredCount, request.questions.length)}</span>
         <button
           type="button"
           className="inline-interaction-close"
-          aria-label="Skip question request"
-          title="Skip"
+          aria-label={tr('desktop_interaction_skip_request')}
+          title={tr('desktop_interaction_skip')}
           onClick={() => onCancel(request.request_id)}
         >
           <Icon name="x" size={17} stroke={1.8} />
@@ -161,13 +163,13 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
       <div className="inline-interaction-body ask-dialog-body">
         <p id="lingxi-ask-instructions" className="ask-dialog-instructions">
           {request.questions.length === 1
-            ? (request.questions[0]?.multi_select ? 'Choose one or more options, or write your own response.' : 'Choose an option, or write your own response.')
-            : 'Answer each question below. You can reopen a question to change your answer.'}
+            ? (request.questions[0]?.multi_select ? tr('desktop_interaction_choose_multiple') : tr('desktop_interaction_choose_single'))
+            : tr('desktop_interaction_answer_instructions')}
         </p>
         {request.timeout_secs !== undefined && (
           <p className="ask-dialog-timeout">
             <Icon name="clock" size={14} stroke={1.8} />
-            <span>{`Auto-continue in ${request.timeout_secs}s if unanswered`}</span>
+            <span>{tr('desktop_interaction_timeout', request.timeout_secs)}</span>
           </p>
         )}
         {error && <div role="alert" className="ask-dialog-error">{error}</div>}
@@ -199,7 +201,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                     <span className="ask-dialog-question-title">{question.question}</span>
                     {!expanded && (
                       <span className="ask-dialog-answer-summary" data-empty={!currentAnswer}>
-                        {currentAnswer ?? 'Choose an answer'}
+                        {currentAnswer ?? tr('desktop_interaction_choose_answer')}
                       </span>
                     )}
                   </span>
@@ -212,7 +214,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                 {expanded && (
                   <fieldset id={optionListId} className="ask-dialog-options">
                     <legend className="ask-dialog-legend">
-                      {question.multi_select ? 'Select one or more options' : 'Select one option'}
+                      {question.multi_select ? tr('desktop_interaction_select_multiple') : tr('desktop_interaction_select_single')}
                     </legend>
                     {question.options.map((option, optionIndex) => (
                       <label key={option.label} className="ask-dialog-option">
@@ -241,15 +243,15 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                         <span className="ask-dialog-other-icon" aria-hidden="true">
                           <Icon name="compose" size={15} stroke={1.8} />
                         </span>
-                        <span className="ask-dialog-option-title">Other</span>
+                        <span className="ask-dialog-option-title">{tr('chat_ask_other_option')}</span>
                       </label>
                       <input
-                        aria-label={`Your own answer for question ${questionIndex + 1}`}
+                        aria-label={tr('desktop_interaction_own_answer', questionIndex + 1)}
                         value={answer.other}
                         onFocus={() => { if (!answer.useOther) toggleOther(questionIndex); }}
                         onChange={(event) => commitAnswer(questionIndex, { ...answer, other: event.target.value, useOther: true })}
                         className="ask-dialog-other-input"
-                        placeholder="Or write your own response…"
+                        placeholder={tr('desktop_interaction_own_response')}
                       />
                     </div>
                   </fieldset>
@@ -263,11 +265,9 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
       <footer className="inline-interaction-footer ask-dialog-footer">
         <DesktopDialogActions>
           <DesktopDialogButton variant="cancel" onClick={() => onCancel(request.request_id)}>
-            Skip
-          </DesktopDialogButton>
+            {tr('desktop_interaction_skip')}</DesktopDialogButton>
           <DesktopDialogButton ref={submitButton} variant="primary" onClick={submit}>
-            Send
-          </DesktopDialogButton>
+            {tr('composer_send')}</DesktopDialogButton>
         </DesktopDialogActions>
       </footer>
     </section>

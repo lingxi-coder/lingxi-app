@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import UIKit
 
 /// One service for the local Linux user, independent of Firebase and chat engines.
 actor LocalAppServiceClient {
@@ -32,7 +31,10 @@ actor LocalAppServiceClient {
                 LXISHRuntimeResourceBootstrap.prepare()
                 let metadata = LXISHRuntimeBundleMetadata.current()
                 let workspace = try MobileUserStorage.prepareProjectsDirectory()
-                let config = IosMobileLinuxConfigFfi(mode: .mobileLinux, managedRoot: LXISHDefaultWorkspace.managedRootPath(),
+                let directories = MobileUserStorage.directories()
+                let config = IosMobileLinuxConfigFfi(mode: .mobileLinux,
+                    brandId: directories.brandId, linuxUser: directories.linuxUser, configDirName: directories.configDirName,
+                    managedRoot: LXISHDefaultWorkspace.managedRootPath(),
                     workspaceHostPath: workspace.path, stableWorkspaceId: LXISHDefaultWorkspace.stableID(),
                     abi: "arm64", rootfsVersion: metadata.rootfsVersion, archiveSha256: metadata.archiveSha256,
                     authorizationFile: LXISHRuntimeBundleResources.authorizationManifestURL()?.path,
@@ -44,30 +46,32 @@ actor LocalAppServiceClient {
         }
         return try await send(service, fields)
     }
-    func agentPage(appID: String, invocationID: String, method: String, arguments: String) async throws -> LocalAppJSON {
-        try await LocalAppAgentModelHost.shared.ensure()
-        let _: LocalAppJSON = try await request(["op": .string("list")])
-        guard let handle else { throw LocalAppServiceFailure("SERVICE_UNAVAILABLE", "Local apps are unavailable.") }
-        let response = try await handle.agentPageJson(appId: appID, invocationId: invocationID, method: method, arguments: arguments)
-        return try JSONDecoder().decode(LocalAppServiceEnvelope<LocalAppJSON>.self, from: Data(response.utf8)).result()
-    }
-    // Trusted native UI only. No WebKit SDK method forwards to this operation.
+    // Trusted native UI only; page calls use the authenticated external-browser gateway.
     func agentHost(_ request: String) async throws -> LocalAppJSON {
-        try await LocalAppAgentModelHost.shared.ensure()
+        if LocalAppAgentHostPolicy.requiresModelHost(request) {
+            try await LocalAppAgentModelHost.shared.ensure()
+        }
         let _: LocalAppJSON = try await self.request(["op": .string("list")])
         guard let handle else { throw LocalAppServiceFailure("SERVICE_UNAVAILABLE", "Local apps are unavailable.") }
         let response = try await handle.agentHostJson(request: request)
         return try JSONDecoder().decode(LocalAppServiceEnvelope<LocalAppJSON>.self, from: Data(response.utf8)).result()
     }
-    func agentClosed(appID: String, invocationID: String) async throws {
-        guard let handle else { return }
-        let response = try await handle.agentPageClosed(appId: appID, invocationId: invocationID)
-        _ = try JSONDecoder().decode(LocalAppServiceEnvelope<LocalAppJSON>.self, from: Data(response.utf8)).result()
+    func agentHost<T: Decodable & Sendable>(_ fields: [String: LocalAppJSON], as type: T.Type) async throws -> T {
+        let value = try await agentHost(String(decoding: JSONEncoder().encode(fields), as: UTF8.self))
+        return try JSONDecoder().decode(T.self, from: JSONEncoder().encode(value))
     }
     private func send<T: Decodable & Sendable>(_ service: MobileLocalAppServiceHandle, _ fields: [String: LocalAppJSON]) async throws -> T {
         let data = try JSONEncoder().encode(fields)
         let response = try await service.requestJson(request: String(decoding: data, as: UTF8.self))
         return try JSONDecoder().decode(LocalAppServiceEnvelope<T>.self, from: Data(response.utf8)).result()
+    }
+}
+
+enum LocalAppAgentHostPolicy {
+    static func requiresModelHost(_ request: String) -> Bool {
+        guard let data = request.data(using: .utf8),
+              let fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return true }
+        return fields["op"] as? String != "registerAuthoring"
     }
 }
 
@@ -83,29 +87,52 @@ final class UnifiedLocalApps {
     private(set) var initialized = false
     let devicePermissions = LocalAppDevicePermissions()
     @ObservationIgnored let client: LocalAppServiceClient
-    @ObservationIgnored lazy var browser = UnifiedLocalAppBrowser(service: self)
-    @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
-    @ObservationIgnored private var backgroundGeneration = UUID()
-    @ObservationIgnored private var pausedApps = Set<String>()
-    @ObservationIgnored private var sceneIsBackground = false
-    @ObservationIgnored private var browserRuns: [String: LocalAppLaunch] = [:]
+    @ObservationIgnored private let agentBackground = LocalAppAgentBackgroundController()
     var browserReviewAppID: String?
+    private(set) var browserAgentWake: LocalAppAgentWakeRequest?
     func consumeBrowserReview(_ id: String) -> Bool {
         guard browserReviewAppID == id else { return false }
         browserReviewAppID = nil
         return true
     }
+    func queueBrowserAgentWake(appID: String, revision: UInt64, runID: String) {
+        let next = LocalAppAgentWakeRequest(appID: appID, revision: revision, runID: runID)
+        if let previous = browserAgentWake, previous != next {
+            Task { await agentBackground.cancel(previous, client: client) }
+        }
+        browserAgentWake = next
+    }
+    func browserAgentWake(for appID: String) -> LocalAppAgentWakeRequest? {
+        guard browserAgentWake?.appID == appID else { return nil }
+        return browserAgentWake
+    }
+    func clearBrowserAgentWake(_ wake: LocalAppAgentWakeRequest) {
+        guard browserAgentWake == wake else { return }
+        browserAgentWake = nil
+    }
+    func prepareBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest, returnURL: URL, origin: String) async throws -> URL {
+        guard browserAgentWake == wake, let app = record(wake.appID), app.currentRevision == wake.revision else {
+            await agentBackground.cancel(wake, client: client)
+            clearBrowserAgentWake(wake)
+            throw LocalAppServiceFailure("STALE_AGENT_WAKE", "The app version changed before this Agent request could start.")
+        }
+        let release = try await release(wake.appID, revision: wake.revision)
+        guard (release.manifest.capabilities ?? []).contains("agent") else {
+            await agentBackground.cancel(wake, client: client)
+            clearBrowserAgentWake(wake)
+            throw LocalAppServiceFailure("AGENT_NOT_DECLARED", "This app version does not declare Agent support.")
+        }
+        return try await agentBackground.acquireAndReserve(wake, appName: app.name, returnURL: returnURL, origin: origin, client: client)
+    }
+    func cancelBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest) async {
+        await agentBackground.cancel(wake, client: client)
+        clearBrowserAgentWake(wake)
+    }
     func openExternalBrowser(_ id: String) async throws -> LocalAppLaunch {
         guard let app = record(id) else { throw LocalAppServiceFailure("APP_NOT_FOUND", "The local app was not found.") }
         let release = try await release(id, revision: app.currentRevision)
         if (release.manifest.capabilities ?? []).contains("agent") { try await LocalAppAgentModelHost.shared.ensure() }
-        let value = try await launch(id)
-        browserRuns[id] = value
-        // Reserve only the OS-provided finite background budget before Safari
-        // becomes foreground. Expiration suspends the app instead of claiming
-        // the loopback server can run indefinitely.
-        beginBackgroundLease()
-        return value
+        return try await launch(id)
     }
 
     init(client: LocalAppServiceClient = LocalAppServiceClient()) { self.client = client }
@@ -154,14 +181,10 @@ final class UnifiedLocalApps {
         defer { busy.remove(id) }
         let result: LocalAppLaunch = try await client.request(["op": .string("start"), "appId": .string(id)])
         runs[id] = result.run
-        pausedApps.remove(id)
-        if sceneIsBackground { beginBackgroundLease() }
         return result
     }
     func stop(_ id: String) async throws {
-        browserRuns.removeValue(forKey: id)
         let _: LocalAppJSON = try await client.request(["op": .string("stop"), "appId": .string(id)])
-        browser.close(id)
         await refresh()
     }
     func action(_ operation: String, id: String, extra: [String: LocalAppJSON] = [:]) async throws {
@@ -169,7 +192,6 @@ final class UnifiedLocalApps {
         defer { busy.remove(id) }
         var request = extra; request["op"] = .string(operation); request["appId"] = .string(id)
         let _: LocalAppJSON = try await client.request(request)
-        if ["stop", "revoke", "remove", "restart", "repair"].contains(operation) { browserRuns.removeValue(forKey: id); browser.close(id) }
         if operation == "remove" { devicePermissions.revoke(appID: id) }
         await refresh()
     }
@@ -185,21 +207,32 @@ final class UnifiedLocalApps {
     func layout(_ id: String) async throws -> LocalAppLayout {
         try await client.request(["op": .string("layout"), "appId": .string(id)])
     }
-    func prepareAuthoring(_ id: String, sessions: [String: String]) async throws -> LocalAppAuthoringResolution {
+    func prepareAuthoring(_ id: String, sessions: [String: LocalAppAuthoringSessionBinding]) async throws -> LocalAppAuthoringResolution {
         guard let app = record(id), let authoring = app.authoring else {
             throw LocalAppServiceFailure("SOURCE_MISSING", "Choose or import an editable source copy before continuing development.")
         }
         let host = try Self.hostSourceDirectory(authoring.sourceDirectory)
         var directory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: host.path, isDirectory: &directory) && directory.boolValue
-        return try await client.request(["op": .string("prepareAuthoring"), "appId": .string(id), "sourceExists": .bool(exists), "sessionDirectories": .object(sessions.mapValues(LocalAppJSON.string))])
+        return try await client.request([
+            "op": .string("prepareAuthoring"),
+            "appId": .string(id),
+            "sourceExists": .bool(exists),
+            "sessionBindings": .object(try sessions.mapValues { try LocalAppJSON.encode($0) })
+        ])
     }
     func bindAuthoring(_ id: String, authoring: LocalAppAuthoring) async throws {
         try await action("bindAuthoring", id: id, extra: ["authoring": try .encode(authoring)])
     }
+    /// Native-only pending binding for a newly-created app. This uses the
+    /// trusted App Agent host channel; it is not part of the browser API.
+    func registerPendingAuthoring(_ authoring: LocalAppAuthoring) async throws {
+        let request = try LocalAppAuthoringHostRequest.registerPending(authoring)
+        let _: LocalAppJSON = try await client.agentHost(request, as: LocalAppJSON.self)
+    }
     static func hostSourceDirectory(_ source: String) throws -> URL {
         let paths = MobileUserStorage.directories()
-        let guestHome = LXISHGuestPaths.home
+        let guestHome = paths.guestHome
         guard source == guestHome || source.hasPrefix(guestHome + "/") else {
             throw LocalAppServiceFailure("SOURCE_OUTSIDE_USER_HOME", "Select a source folder in the local Linux user home.")
         }
@@ -213,7 +246,7 @@ final class UnifiedLocalApps {
         let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty, clean.count <= 100 else { throw LocalAppServiceFailure("INVALID_NAME", "Enter an app name of 1–100 characters.") }
         let slug = clean.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? String($0) : "-" }.joined()
-        let guest = LXISHGuestPaths.home + "/.lingxi/.apps/" + slug + "-" + UUID().uuidString.prefix(8).lowercased()
+        let guest = MobileUserStorage.directories().appsGuestPath + "/" + slug + "-" + UUID().uuidString.prefix(8).lowercased()
         if create { try FileManager.default.createDirectory(at: hostSourceDirectory(guest), withIntermediateDirectories: true) }
         return guest
     }
@@ -228,48 +261,6 @@ final class UnifiedLocalApps {
         await refresh(); return result
     }
 
-    func sceneChanged(background: Bool) {
-        sceneIsBackground = background
-        if background {
-            beginBackgroundLease()
-            let running = Array(runs.values)
-            Task { for run in running where run.isLive && browserRuns[run.appId] == nil { try? await client.agentClosed(appID: run.appId, invocationID: run.runId) } }
-        }
-        else {
-            endBackgroundLease()
-            Task { await refresh() }
-        }
-    }
-    func isPaused(_ id: String) -> Bool { pausedApps.contains(id) || runs[id]?.phase == "suspended" }
-    private func beginBackgroundLease() {
-        guard backgroundTask == .invalid, runs.values.contains(where: \.isLive) else { return }
-        backgroundGeneration = UUID()
-        let generation = backgroundGeneration
-        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "LocalApps") { [weak self] in
-            guard let self, self.backgroundGeneration == generation else { return }
-            self.expireBackgroundLease()
-        }
-        if backgroundTask == .invalid { expireBackgroundLease() }
-    }
-    private func expireBackgroundLease() {
-        let active = runs.values.filter(\.isLive).map(\.appId)
-        pausedApps.formUnion(active)
-        for id in active { browserRuns.removeValue(forKey: id); browser.close(id) }
-        Task {
-            for id in active {
-                do { let _: LocalAppJSON = try await client.request(["op": .string("suspend"), "appId": .string(id)]) }
-                catch { self.error = error.localizedDescription }
-            }
-            endBackgroundLease()
-            await refresh()
-        }
-    }
-    private func endBackgroundLease() {
-        backgroundGeneration = UUID()
-        guard backgroundTask != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(backgroundTask)
-        backgroundTask = .invalid
-    }
 }
 
 @MainActor

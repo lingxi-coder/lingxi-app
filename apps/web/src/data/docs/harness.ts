@@ -40,6 +40,10 @@ export const harnessPages: DocPage[] = [
         title: t('Use one source identity', '使用唯一源码身份'),
         paragraphs: [
           t(
+            'For application integration, retain the dependency revisions declared by Harness. The multi-repository path overlay below is for developing the SDKs together and requires matching contracts. Replacing its pinned LLM Client with an arbitrary newer checkout can fail in llm-runtime before your application is compiled; a Cargo package version alone does not establish source compatibility.',
+            '应用接入时应保留 Harness 声明的依赖 revision。下面的多仓 path overlay 用于联合开发 SDK，要求各仓契约一致。将固定的 LLM Client 替换成任意更新的工作树，可能在编译应用前就因 llm-runtime 的接口不一致而失败；Cargo 包版本号本身不能证明源码兼容。',
+          ),
+          t(
             'For the current working-tree examples, create sdk-consumer beside harness-runtime, llm-client and mobile-linux-runtime. Use the complete local manifest below. Direct Harness crates and explicit consumer patches select the three SDK working trees; inspect cargo metadata to verify those source identities before compiling the copied examples.',
             '验证当前工作树示例时，在 harness-runtime、llm-client 与 mobile-linux-runtime 旁创建 sdk-consumer，并使用下方完整本地清单。直接 Harness crate 与显式消费者 patch 选择三个 SDK 工作树；编译复制的示例前应通过 cargo metadata 验证这些源码身份。',
           ),
@@ -219,7 +223,7 @@ git2 = { path = "../harness-runtime/third_party/git2-rs/git2" }`,
         apis: [
           {
             name: 'OutputStream::emit_text',
-            signature: 'async fn emit_text(&self, text: &str, utf16_code_units: Option<&[u16]>)',
+            signature: 'async fn emit_text(&self, text: &Utf16JsonProjection)',
             description: t('Deliver assistant text to the host’s output destination.', '将助手文本交给宿主输出目标。'),
           },
         ],
@@ -261,7 +265,7 @@ git2 = { path = "../harness-runtime/third_party/git2-rs/git2" }`,
     ),
     packageName: 'harness-runtime',
     sourceUrl: source('crates/runtime/src/desktop/sdk.rs'),
-    sources: sources('crates/runtime/src/api.rs', 'crates/runtime/src/desktop/sdk.rs', 'crates/runtime/src/desktop/session_state.rs', 'crates/runtime/src/mobile/host.rs', 'crates/runtime/src/mobile/host/assembly.rs', 'crates/runtime/src/headless/mod.rs', 'crates/runtime/src/headless/config.rs', 'crates/runtime/src/headless/host.rs', 'crates/runtime/src/headless/io.rs', 'crates/runtime/src/headless/session.rs', 'crates/permission/src/gate.rs', 'crates/session/src/storage.rs', 'crates/session/src/resumer.rs'),
+    sources: sources('crates/runtime/src/api.rs', 'crates/runtime/src/desktop/sdk.rs', 'crates/runtime/src/desktop/session_state.rs', 'crates/runtime/src/mobile/host.rs', 'crates/runtime/src/mobile/host/assembly.rs', 'crates/runtime/src/headless/mod.rs', 'crates/runtime/src/headless/config.rs', 'crates/runtime/src/headless/host.rs', 'crates/runtime/src/headless/io.rs', 'crates/runtime/src/headless/session.rs', 'crates/runtime/src/desktop/configuration.rs', 'crates/permission/src/gate.rs', 'crates/session/src/storage.rs', 'crates/session/src/resumer.rs'),
     sections: [
       {
         id: 'host-services',
@@ -444,7 +448,7 @@ async fn headless_prompt(
     ),
     packageName: 'tool-api',
     sourceUrl: source('crates/tool-api/src/tool_trait.rs'),
-    sources: sources('crates/tool-api/src/tool_trait.rs', 'crates/tool-api/src/context.rs', 'crates/tool-api/src/registry.rs', 'crates/tool-api/src/progress.rs', 'crates/orchestrator/src/turn_loop/tool_dispatch.rs'),
+    sources: sources('crates/tool-api/src/tool_trait.rs', 'crates/tool-api/src/context.rs', 'crates/tool-api/src/registry.rs', 'crates/tool-api/src/progress.rs', 'crates/orchestrator/src/turn_loop/tool_dispatch.rs', 'crates/core/src/host/permission_gate.rs', 'crates/hooks/src/definition.rs', 'crates/hooks/src/events.rs', 'crates/hooks/src/registry.rs', 'crates/mcp/src/registry.rs'),
     sections: [
       {
         id: 'tool-contract',
@@ -467,22 +471,22 @@ async fn headless_prompt(
           },
           {
             name: 'Tool::input_schema',
-            signature: 'fn input_schema(&self) -> &serde_json::Value',
+            signature: 'fn input_schema(&self) -> &Utf16JsonProjection',
             description: t('Advertise the tool’s input JSON Schema.', '声明工具输入的 JSON Schema。'),
           },
           {
             name: 'Tool::validate_input',
-            signature: 'async fn validate_input(&self, input: &serde_json::Value, ctx: &ToolUseContext) -> Result<(), ValidationError>',
+            signature: 'async fn validate_input(&self, input: &Utf16JsonProjection, ctx: &ToolUseContext) -> Result<(), ValidationError>',
             description: t('Validate tool-specific conditions before side effects; the default implementation succeeds.', '在副作用前校验工具专用条件；默认实现通过校验。'),
           },
           {
             name: 'Tool::check_permissions',
-            signature: 'async fn check_permissions(&self, input: &serde_json::Value, ctx: &ToolUseContext) -> permission::PermissionResult',
+            signature: 'async fn check_permissions(&self, input: &Utf16JsonProjection, ctx: &ToolUseContext) -> permission::PermissionResult',
             description: t('Compute the invocation-specific permission decision before dispatch.', '在调度前计算本次调用的权限决策。'),
           },
           {
             name: 'Tool::call',
-            signature: 'async fn call(&self, input: serde_json::Value, ctx: ToolUseContext, progress_tx: ToolProgressSender) -> Result<ToolCallResult, ToolError>',
+            signature: 'async fn call(&self, input: Utf16JsonProjection, ctx: ToolUseContext, progress_tx: ToolProgressSender) -> Result<ToolCallResult, ToolError>',
             description: t('Execute validated, permission-checked input and return the model-facing result.', '执行已校验并经权限检查的输入，返回模型可见结果。'),
           },
         ],
@@ -545,7 +549,7 @@ async fn headless_prompt(
           },
           {
             name: 'ToolProgress',
-            signature: 'pub struct ToolProgress { pub tool_use_id: lingxi_core::types::ToolUseId, pub data: serde_json::Value }',
+            signature: 'pub struct ToolProgress { pub tool_use_id: lingxi_core::types::ToolUseId, pub data: Utf16JsonProjection }',
             description: t('Correlate one progress payload with its originating tool use.', '将一个进度载荷与来源工具调用关联。'),
           },
         ],
@@ -674,7 +678,7 @@ async fn headless_prompt(
     ),
     packageName: 'client',
     sourceUrl: source('crates/client/src/lib.rs'),
-    sources: sources('crates/client/src/lib.rs', 'crates/client/Cargo.toml', 'crates/client/src/protocol/version.rs', 'crates/client/src/protocol/commands.rs', 'crates/client/src/protocol/events.rs', 'crates/client/src/adapter/output_stream.rs', 'crates/client/src/protocol/message.rs'),
+    sources: sources('crates/client/src/lib.rs', 'crates/client/Cargo.toml', 'crates/client/src/protocol/version.rs', 'crates/client/src/protocol/commands.rs', 'crates/client/src/protocol/events.rs', 'crates/client/src/adapter/output_stream.rs', 'crates/client/src/protocol/message.rs', 'crates/client/src/adapter/turn.rs', 'crates/client/src/adapter/permission_gate.rs', 'crates/client/src/protocol/permission.rs'),
     sections: [
       {
         id: 'modules',
@@ -912,9 +916,249 @@ mod lifecycle_example {
         t('Rust enums are non-exhaustive; hosts handle unknown future variants without inventing successes. Native enum and record layouts require matching generated bindings and the protocol contract gate. A JSON payload that deserializes does not establish a compatible UniFFI binary layout or correct transport handshake.', 'Rust enum 是非穷尽类型；宿主处理未来未知变体时不能伪造成功。原生 enum 与 record 布局需要匹配生成绑定及协议契约检查。JSON 载荷可反序列化不代表 UniFFI 二进制布局兼容或传输握手正确。'),
       ],
       code: [{ label: t('Shared client contracts', '共享客户端契约'), language: 'bash', verification: 'manual', code: 'cargo test --locked -p client --features test-support' }],
-      note: t('The current working-tree protocol constant is 21.0.0. Always read the baseline and the host pin before connecting a separate client. Device callbacks, ordering under disconnect and replay presentation remain target-host checks.', '当前工作树协议常量为 21.0.0。连接独立客户端前，始终查看基线与宿主固定依赖版本。设备回调、断线时顺序及重放展示仍需目标宿主检查。'),
+      note: t('The inspected client protocol constant is 29.0.0. Always read the baseline and the host pin before connecting a separate client. Device callbacks, ordering under disconnect and replay presentation remain target-host checks.', '本次检查的客户端协议常量为 29.0.0。连接独立客户端前，始终查看基线与宿主固定依赖版本。设备回调、断线时顺序及重放展示仍需目标宿主检查。'),
     },
   ],
 };
 
-for (const page of harnessPages) page.sections.push(...(integrationSections[page.id] ?? []));
+// Task-oriented recipes complement the signatures above. Their inputs are
+// host services; none of these recipes claim to create an authenticated host.
+const usageSections: Record<string, DocSection[]> = {
+  harness: [
+    {
+      id: 'choose-entrypoint', title: t('Choose the entry point for your application', '为你的应用选择入口'),
+      paragraphs: [t('Start with the host you are building. A chat window, a batch worker and a mobile application have different input, permission and shutdown requirements, even when they use the same agent loop.', '先确定要构建哪一种宿主。聊天窗口、批处理 worker 与移动应用需要不同的输入、权限和关闭方式，即使它们使用同一个 Agent 循环。')],
+      tables: [{ headers: [t('You want to', '目标'), t('Start with', '使用入口'), t('Supply from the host', '宿主需要提供')], rows: [
+        [t('Embed a Rust chat or desktop UI', '嵌入 Rust 聊天或桌面界面'), t('desktop::build_harness', 'desktop::build_harness'), t('DesktopConfig, OutputStream and PermissionGate', 'DesktopConfig、OutputStream 与 PermissionGate')],
+        [t('Run a noninteractive job', '运行非交互任务'), t('headless::run', 'headless::run'), t('HeadlessHostServices, byte readers/writers, and host signals', 'HeadlessHostServices、字节读写流与宿主信号')],
+        [t('Integrate Android or iOS', '集成 Android 或 iOS'), t('mobile::build_mobile', 'mobile::build_mobile'), t('MobileConfig, Platform, event listener and permission sink', 'MobileConfig、Platform、事件监听器与权限请求 sink')],
+        [t('Wrap an already assembled composition', '包装已组装的运行时'), t('HarnessBuilder::new', 'HarnessBuilder::new'), t('SessionService and LifecycleService from the same composition', '来自同一组合的 SessionService 与 LifecycleService')],
+      ] }],
+      links: [{ label: t('Platform assembly and shutdown', '平台组装与关闭'), href: '/docs/harness-lifecycle#platform-assembly' }],
+    },
+    {
+      id: 'first-agent-workflow', title: t('Wire your first agent workflow', '接通第一个 Agent 工作流'),
+      steps: [
+        t('Prepare an application workspace and model/provider configuration. Choose a composition profile and keep all direct Harness dependencies on the same source revision.', '准备应用工作空间与模型／供应商配置。选择组合配置，让直接依赖的 Harness 包保持相同源码版本。'),
+        t('Create the output destination before assembling the runtime. If your UI consumes ClientEvent DTOs, wrap one shared ClientEventSink with AdapterOutputStream.', '先创建输出目标，再组装运行时。如果界面消费 ClientEvent DTO，用 AdapterOutputStream 包装一个共享 ClientEventSink。'),
+        t('Provide a permission gate that can reach the user or apply an explicit noninteractive policy. Admit a prompt only after the host has a mounted session.', '提供能联系用户、或执行明确非交互策略的权限门。宿主挂载会话后再接收提示词。'),
+        t('Pass RunInput and a host-owned CancellationToken to session().run. Read text and tool activity from the output stream while awaiting its terminal result.', '向 session().run 传入 RunInput 与宿主持有的 CancellationToken。等待终态结果的同时，从输出流接收文本和工具活动。'),
+        t('Keep the returned outcome, session identity and cost snapshot. When closing the application, stop new prompts, drain active turns and then inspect shutdown().complete.', '保留返回结果、会话标识与成本快照。关闭应用时停止新提示词，等待活动轮次排空，再检查 shutdown().complete。'),
+      ],
+      links: [
+        { label: t('Copy the complete service-injection example', '复制完整服务注入示例'), href: '/docs/harness#builder' },
+        { label: t('Run, cancel and inspect a turn', '执行、取消与检查轮次'), href: '/docs/harness-sessions' },
+        { label: t('Connect a client event sink', '连接客户端事件 sink'), href: '/docs/harness-client#output-adapter' },
+      ],
+    },
+    {
+      id: 'startup-troubleshooting', title: t('Troubleshoot startup', '排查启动问题'),
+      tables: [{ headers: [t('Symptom', '现象'), t('Check first', '先检查'), t('Next action', '下一步')], rows: [
+        [t('The builder succeeds but nothing runs', '构建器成功，但没有执行任务'), t('HarnessBuilder retains services; it does not submit a prompt.', 'HarnessBuilder 只保留服务，不会提交提示词。'), t('Call the mounted SessionHandle::run and consume its output destination.', '调用已挂载的 SessionHandle::run，并消费它的输出目标。')],
+        [t('Text never reaches the interface', '界面收不到文本'), t('OutputStream or ClientEventSink ownership and delivery.', 'OutputStream 或 ClientEventSink 的归属与交付。'), t('Verify the same sink is attached before startup; keep transport writes off the execution callback.', '确认启动前接入同一个 sink，避免在执行回调里阻塞传输写入。')],
+        [t('An operation waits on approval', '操作一直等待授权'), t('The host permission request/response route.', '宿主权限请求与响应路由。'), t('Resolve the exact request_id, or supply the intended noninteractive policy before running.', '响应准确的 request_id，或在运行前提供预期的非交互策略。')],
+        [t('Shared Rust types do not match', '共享 Rust 类型不兼容'), t('Duplicate Git/path identities in cargo metadata.', 'cargo metadata 中重复的 Git／path 身份。'), t('Use the complete consumer manifest and one reviewed source identity for companion crates.', '使用完整消费者清单，并让配套 crate 采用同一经审查源码身份。')],
+      ] }],
+    },
+  ],
+  'harness-sessions': [
+    {
+      id: 'run-parameters', title: t('Run input and return values', '运行输入与返回值'),
+      tables: [{ headers: [t('Value', '值'), t('Meaning', '含义'), t('Integration rule', '集成规则')], rows: [
+        [t('RunInput.prompt: String', 'RunInput.prompt: String'), t('User text passed to the mounted execution path.', '传给已挂载执行路径的用户文本。'), t('Supply the actual user request; system instructions belong to host configuration.', '传入真实用户请求；系统指令由宿主配置负责。')],
+        [t('RunInput.images: Vec<PathBuf>', 'RunInput.images: Vec<PathBuf>'), t('Image paths resolved by the workspace/model implementation.', '由工作空间／模型实现解析的图像路径。'), t('Keep the files readable on the execution host while the request is in use.', '请求使用图像期间，保持执行宿主上的文件可读。')],
+        [t('CancellationToken', 'CancellationToken'), t('A shared cancellation signal, not a timeout duration.', '共享取消信号，不是超时时长。'), t('Keep a clone for the stop button or host deadline; await run after cancelling.', '为停止按钮或宿主截止时间保留副本；取消后等待 run。')],
+        [t('Result<TurnOutcome, HandleError>', 'Result<TurnOutcome, HandleError>'), t('A terminal execution result, rather than streamed assistant text.', '执行终态结果，而不是流式助手文本。'), t('Read output from OutputStream and branch separately on outcome versus error.', '从 OutputStream 读取输出，分别处理 outcome 与 error。')],
+      ] }],
+      note: t('Cloning SessionHandle shares the mounted service. It does not create another session, fork history, or grant concurrent turn admission; the composition owns those decisions.', '克隆 SessionHandle 会共享已挂载服务，不会创建新会话、分叉历史或授予并发轮次准入；这些决策由组合负责。'),
+    },
+    {
+      id: 'cancellation-recipe', title: t('Connect a stop button without losing the result', '连接停止按钮并保留结果'),
+      paragraphs: [t('Give the caller a token clone before starting this function. The caller can cancel that clone from its UI or deadline handler. This function waits for cleanup in the existing run path and returns the original outcome, including a normal completion that won a race with cancellation.', '开始以下函数前，给调用方一个令牌副本。调用方可从界面或截止时间处理器取消该副本。函数等待既有 run 路径退出，并返回原始结果，包括在取消竞态中先完成的正常结果。')],
+      code: [{ label: t('Rust · complete function, assembled host required', 'Rust · 完整函数，需要已组装宿主'), language: 'rust', verification: 'manual', exampleId: 'harness-cancellable-turn', code: `use harness_runtime::{CancellationToken, HandleError, Harness, RunInput, TurnOutcome};
+
+async fn submit(
+    harness: &Harness,
+    prompt: String,
+    cancel: CancellationToken,
+) -> Result<TurnOutcome, HandleError> {
+    let session = harness.session();
+    let session_id = session.id().await;
+    let result = session.run(RunInput { prompt, images: vec![] }, cancel).await;
+    let cost = session.cost().await;
+    println!("session={session_id:?}, api_calls={}", cost.api_calls);
+    result
+}
+
+// Before submit: let cancel = CancellationToken::new();
+// Keep cancel.clone() in the host; call cancel.cancel() when the user stops.` }],
+      bullets: [
+        t('EndTurn means the execution path ended naturally; MaxTurns means its turn budget ended; Cancelled is an explicit cancellation outcome.', 'EndTurn 表示执行路径自然结束，MaxTurns 表示轮次预算结束，Cancelled 表示明确取消。'),
+        t('An error or cancellation does not undo a tool’s completed file write, command, or external request. Inspect the operation before retrying it.', '错误或取消不会撤销工具已完成的文件写入、命令或外部请求。重试前检查该操作。'),
+        t('Keep partial text as partial text until the host receives the final message or error boundary. A disconnected UI is not proof that the runtime stopped.', '收到最终消息或错误边界前，将部分文本保留为部分文本。界面断开不代表运行时已停止。'),
+      ],
+    },
+    {
+      id: 'stream-rendering', title: t('Render a stream and reconcile the final message', '渲染流并合并最终消息'),
+      steps: [
+        t('Append text deltas to the active assistant presentation. Preserve source text through the supplied UTF-16 JSON projection instead of round-tripping arbitrary external payloads through lossy strings.', '将文本增量追加到当前助手展示。通过提供的 UTF-16 JSON projection 保留源文本，避免把任意外部载荷经有损字符串往返转换。'),
+        t('Create tool activity rows from the tool call identity. Update the same row when its matching result arrives; multiple calls can use the same tool name.', '根据工具调用标识创建活动行。匹配结果到达时更新同一行；多个调用可能使用相同工具名。'),
+        t('Use final message boundaries or MessageComplete DTOs to settle the assistant row. Do not append a second copy of the same completed message after already rendering its deltas.', '用最终消息边界或 MessageComplete DTO 确定助手行。已经渲染增量后，不要再次追加同一完整消息。'),
+        t('Read cost() when you need cumulative accounting. A transcript snapshot, a text delta and a cost update serve different purposes.', '需要累计统计时读取 cost()。对话快照、文本增量与成本更新承担不同职责。'),
+      ],
+      links: [{ label: t('Event fields and permission response routing', '事件字段与权限响应路由'), href: '/docs/harness-client#event-consumer' }],
+    },
+  ],
+  'harness-lifecycle': [
+    {
+      id: 'headless-options', title: t('Configure a batch or streaming worker', '配置批处理或流式 worker'),
+      paragraphs: [t('headless::run is an embeddable application entry point with injected I/O. Set the input/output contract before handing readers and writers to the runtime; closing an input stream and cancelling a turn are different operations.', 'headless::run 是注入 I/O 的可嵌入应用入口。把读写流交给运行时前先确定输入／输出契约；关闭输入流与取消轮次是不同操作。')],
+      tables: [{ headers: [t('HeadlessOptions field', 'HeadlessOptions 字段'), t('Default', '默认值'), t('Use it for', '用途')], rows: [
+        [t('prompt / prompt_images', 'prompt / prompt_images'), t('None / empty', 'None／空'), t('Initial text and images supplied directly by the host.', '宿主直接提供的初始文本与图像。')],
+        [t('input_format / output_format', 'input_format / output_format'), t('Text / Text', 'Text／Text'), t('Choose plain text or the supported structured stream formats; use the corresponding reader/writer.', '选择纯文本或支持的结构化流格式，配套相应读写器。')],
+        [t('no_stream', 'no_stream'), t('false', 'false'), t('Select the batched provider path for a one-shot prompt.', '为一次性提示词选择供应商批量响应路径。')],
+        [t('include_partial_messages / include_hook_events', 'include_partial_messages / include_hook_events'), t('false / false', 'false／false'), t('Opt into partial assistant frames or hook frames in stream-json output.', '在 stream-json 输出中按需包含助手部分消息或 hook 帧。')],
+        [t('max_budget_usd / json_schema', 'max_budget_usd / json_schema'), t('None / None', 'None／None'), t('Set an invocation budget or a source-preserving structured-output schema.', '设置本次调用预算，或保留源信息的结构化输出 schema。')],
+        [t('permission_prompts_none', 'permission_prompts_none'), t('false', 'false'), t('Disable interactive prompts when the host intentionally has no prompt transport; this is not a blanket permission grant.', '宿主明确没有提示传输时禁用交互提示；它不代表授予全部权限。')],
+      ] }],
+    },
+    {
+      id: 'shutdown-result', title: t('Treat execution, persistence and delivery separately', '分别处理执行、持久化与交付'),
+      tables: [{ headers: [t('Inspect', '检查项'), t('What it establishes', '能说明什么'), t('What to retain on failure', '失败时保留什么')], rows: [
+        [t('HeadlessExit.execution', 'HeadlessExit.execution'), t('Whether model/runtime execution started and how it ended.', '模型／运行时执行是否开始，以及如何结束。'), t('reason, errors and session_id when available.', 'reason、errors 与可用时的 session_id。')],
+        [t('HeadlessExit.shutdown', 'HeadlessExit.shutdown'), t('Whether resource drain and persistence barriers completed.', '资源排空与持久化屏障是否完成。'), t('shutdown_errors and the optional cleanup handle.', 'shutdown_errors 与可选 cleanup 句柄。')],
+        [t('HeadlessExit.delivery', 'HeadlessExit.delivery'), t('Whether final output and writer shutdown completed.', '最终输出与 writer 关闭是否完成。'), t('delivery_errors; do not report missing output as successful delivery.', 'delivery_errors；输出缺失时不要报告交付成功。')],
+        [t('ShutdownReport.complete', 'ShutdownReport.complete'), t('Whether the injected lifecycle service finished every required barrier.', '注入的生命周期服务是否完成全部必要屏障。'), t('errors and durable publications, then retry shutdown sequentially.', 'errors 与持久化 publications，再顺序重试关闭。')],
+      ] }],
+      note: t('A successful model response can coexist with failed output delivery. An incomplete shutdown is also meaningful even when the final text was delivered. Keep those states visible to the embedding application.', '模型响应成功时仍可能发生输出交付失败；最终文本已交付时，关闭未完成也仍有意义。嵌入应用应分别展示这些状态。'),
+    },
+    {
+      id: 'resume-checklist', title: t('Resume a conversation after restarting the host', '宿主重启后恢复对话'),
+      steps: [
+        t('Select the session through the host’s existing resume path, not by changing the value returned from SessionHandle::id.', '通过宿主既有恢复路径选择会话，不要修改 SessionHandle::id 的返回值来模拟恢复。'),
+        t('Restore the durable ordered transcript and its message identities. Reattach the model service, output destination, permission policy and extension owners for this new host lifetime.', '恢复持久化的有序对话及消息标识。为新宿主生命周期重新接入模型服务、输出目标、权限策略与扩展负责人。'),
+        t('Treat historical file reads according to the selected resume implementation. The lower-level SessionResumer documented above starts with an empty cache; do not copy a cache from another workspace to make an edit pass.', '按照所选恢复实现处理历史文件读取。上文的底层 SessionResumer 从空缓存开始；不要复制另一工作空间的缓存来让编辑通过。'),
+        t('Mount the restored session before admitting the next prompt. A new transcript snapshot should come from that mounted runtime.', '接收下一条提示词前，先挂载恢复后的会话。新的对话快照应来自该已挂载运行时。'),
+      ],
+      links: [{ label: t('Session snapshots', '会话快照'), href: '/docs/harness-sessions#snapshots' }],
+    },
+  ],
+  'harness-tools': [
+    {
+      id: 'custom-tool-checklist', title: t('Implement a useful custom tool', '实现可用的自定义工具'),
+      paragraphs: [t('A custom tool needs a complete Tool implementation and a host composition that registers it. Begin with a small operation whose input, result and side effects you can explain to both the model and the user.', '自定义工具需要完整的 Tool 实现，以及负责注册它的宿主组合。从一个能向模型和用户解释清楚输入、结果与副作用的小操作开始。')],
+      tables: [{ headers: [t('Implement', '实现项'), t('Contract', '契约'), t('Common mistake', '常见错误')], rows: [
+        [t('name, input_schema and input_repair_metadata', 'name、input_schema 与 input_repair_metadata'), t('A canonical identity, source-preserving schema and explicit input-repair facts.', '规范标识、保留源信息的 schema，以及明确的输入修复事实。'), t('Registering aliases as separate capabilities or advertising an unknown repair contract.', '把别名注册为独立能力，或声明未知的修复契约。')],
+        [t('is_enabled, is_read_only and is_concurrency_safe', 'is_enabled、is_read_only 与 is_concurrency_safe'), t('Visibility and scheduling facts for this actual invocation.', '本次实际调用的可见性与调度事实。'), t('Marking a mutating operation read-only to avoid approval or serialization.', '为了绕过授权或串行执行，把修改操作标为只读。')],
+        [t('description, prompt and max_result_size_chars', 'description、prompt 与 max_result_size_chars'), t('Model-facing guidance and an explicit result-size policy.', '模型可见说明与明确的结果大小策略。'), t('Returning unbounded raw output without considering the model-facing result.', '返回无界原始输出，不考虑模型最终看到的结果。')],
+        [t('validate_input and check_permissions', 'validate_input 与 check_permissions'), t('Tool-specific validation and a decision before side effects.', '在副作用前执行工具专用校验与权限决策。'), t('Starting network/filesystem work during validation or permission checks.', '在校验或权限检查过程中提前执行网络／文件系统操作。')],
+        [t('call and ToolCallResult', 'call 与 ToolCallResult'), t('Execution under the dispatcher with an explicit model result.', '在调度器控制下执行，并提供明确的模型结果。'), t('Calling the tool body directly from a transport or provider adapter.', '从传输层或供应商适配器直接调用工具主体。')],
+      ] }],
+      note: t('Current tool inputs and schemas use lingxi_core::types::utf16_json::Utf16JsonProjection. JSON is still the data format, but arbitrary external schemas and strings should retain their source projection instead of being treated as ordinary serde_json::Value.', '当前工具输入与 schema 使用 lingxi_core::types::utf16_json::Utf16JsonProjection。数据格式仍然是 JSON，但任意外部 schema 与字符串应保留其源 projection，不能一概按普通 serde_json::Value 处理。'),
+    },
+    {
+      id: 'tool-results-and-errors', title: t('Return results that the model can act on', '返回模型可以继续使用的结果'),
+      paragraphs: [t('ToolCallResult separates data, an optional faithful model-facing string and error state. The dispatcher can derive model text from data, or use model_content when supplied. MCP error results can be returned as accepted results with is_error set; a transport failure remains a failed call.', 'ToolCallResult 区分 data、可选的保真模型字符串与错误状态。调度器可以从 data 推导模型文本，或使用提供的 model_content。MCP 的逻辑错误结果可以作为 is_error 为真的已接收结果返回；传输失败仍是调用失败。')],
+      code: [{ label: t('Rust · result construction excerpt', 'Rust · 构造结果摘录'), language: 'rust', verification: 'excerpt', code: `use tool_api::{source_text_projection, ToolCallResult};
+
+fn completed_summary() -> ToolCallResult {
+    ToolCallResult::from_data(source_text_projection("Saved the report."))
+}` }],
+      tables: [{ headers: [t('Failure', '失败'), t('Meaning', '含义'), t('Handle it by', '处理方式')], rows: [
+        [t('InvalidInput / ValidationError', 'InvalidInput／ValidationError'), t('The request does not satisfy the tool contract.', '请求不符合工具契约。'), t('Return actionable validation detail; ask for corrected input before retrying.', '返回可操作的校验信息，修正输入后再重试。')],
+        [t('PermissionDenied', 'PermissionDenied'), t('Policy or the user refused this invocation.', '策略或用户拒绝本次调用。'), t('Surface the denial and let the agent choose an allowed alternative.', '展示拒绝原因，让 Agent 选择被允许的替代操作。')],
+        [t('InteractionRequired', 'InteractionRequired'), t('This host cannot provide the required live interaction channel.', '当前宿主无法提供所需实时交互通道。'), t('Supply the intended host interaction or choose a suitable noninteractive operation.', '接入预期宿主交互，或选择合适的非交互操作。')],
+        [t('Aborted / Io', 'Aborted／Io'), t('Execution was interrupted or the underlying operation failed.', '执行被中断，或底层操作失败。'), t('Keep partial state and check idempotency before reissuing a side-effecting operation.', '保留部分状态，重新执行副作用操作前检查幂等性。')],
+        [t('EditWithoutRead', 'EditWithoutRead'), t('The session has no accepted read state for the edit target.', '会话没有该编辑目标的有效读取状态。'), t('Read the current target in the mounted session, then construct a fresh edit.', '在已挂载会话中读取当前目标，再构造新的编辑。')],
+      ] }],
+    },
+    {
+      id: 'hooks-and-mcp', title: t('Add hooks and MCP without bypassing dispatch', '通过调度路径接入 hooks 与 MCP'),
+      paragraphs: [t('Use hooks to observe or control lifecycle boundaries, and MCP to add tools owned by an external server connection. These are different extension mechanisms: a hook does not replace the tool registry, and connecting a server does not authorize all its tool calls.', 'hooks 用于观察或控制生命周期边界，MCP 用于增加由外部服务器连接持有的工具。这是两种不同扩展机制：hook 不替代工具注册表，连接服务器也不代表授权其全部工具调用。')],
+      tables: [{ headers: [t('Need', '需求'), t('Source-backed seam', '源码提供的接口'), t('Lifecycle rule', '生命周期规则')], rows: [
+        [t('Validate or annotate a tool invocation', '校验或注解工具调用'), t('HookEventType::PreToolUse / PostToolUse / PostToolUseFailure', 'HookEventType::PreToolUse／PostToolUse／PostToolUseFailure'), t('Choose the correct event and respect its control result; do not run the side effect from an observation hook.', '选择正确事件并遵循其控制结果；不要从观察 hook 直接执行原副作用。')],
+        [t('Update user/project hooks', '更新用户／项目 hooks'), t('HookRegistry::replace_source_hooks', 'HookRegistry::replace_source_hooks'), t('Replace one source bucket after validation; retain plugin and session hook ownership.', '校验后替换单一来源分区，保留插件与会话 hook 的归属。')],
+        [t('Add server tools', '增加服务器工具'), t('McpRegistry::connect and ToolRegistry::register_mcp_tools', 'McpRegistry::connect 与 ToolRegistry::register_mcp_tools'), t('Retain connection identity for refresh/disconnect. Let the production composition coordinate connection and tool registration.', '为更新／断开保留连接标识，由生产组合协调连接与工具注册。')],
+        [t('Remove a server', '移除服务器'), t('ToolRegistry::unregister_mcp_tools', 'ToolRegistry::unregister_mcp_tools'), t('Remove only that connection partition and complete the owned transport teardown.', '只删除该连接分区，并完成其传输清理。')],
+      ] }],
+      note: t('HookDefinition includes blocking, timeout, priority and source. Blocking hooks are awaited; nonblocking hooks use the asynchronous registry. A timeout or failed hook is not a successful policy decision. Configure failure behavior at the supported event boundary.', 'HookDefinition 包含 blocking、timeout、priority 与 source。阻塞 hook 会被等待，非阻塞 hook 使用异步注册表。超时或 hook 失败不能当作成功策略决策；应在支持的事件边界配置失败行为。'),
+      links: [{ label: t('Hook and extension lifecycle', 'Hook 与扩展生命周期'), href: '/docs/extensions-lifecycle' }],
+    },
+  ],
+  'harness-plugins': [
+    {
+      id: 'plugin-directory', title: t('Prepare a local plugin directory', '准备本地插件目录'),
+      paragraphs: [t('For PluginSource::LocalPath, provide an already materialized directory containing .lingxi-plugin/plugin.json. The discovery path can find optional commands/, agents/, skills/, output-styles/ and hooks/hooks.json. Keep those files available while the runtime uses the discovered components.', '使用 PluginSource::LocalPath 时，提供已经落盘、包含 .lingxi-plugin/plugin.json 的目录。发现路径可以识别可选的 commands/、agents/、skills/、output-styles/ 与 hooks/hooks.json。运行时使用发现的组件期间，应保持这些文件可用。')],
+      code: [{ label: t('Local plugin layout', '本地插件目录'), language: 'text', verification: 'excerpt', code: `report-helper/
+  .lingxi-plugin/plugin.json
+  commands/
+  agents/
+  skills/
+  hooks/hooks.json` }],
+      steps: [
+        t('Prepare the directory with a manifest and the component files it declares. Validate the content before activation.', '准备 manifest 以及其声明的组件文件，激活前校验内容。'),
+        t('Pass its path to the host-assembled PluginManager. Record the returned PluginId, then inspect plugin_state for the actual result.', '将路径交给宿主组装的 PluginManager。记录返回的 PluginId，再通过 plugin_state 查看实际状态。'),
+        t('Check the contributed registry entries rather than assuming every optional component became active.', '检查贡献到注册表的项目，不要假定每个可选组件都已激活。'),
+        t('When removing the plugin, call disable on the same manager and retry any retained DisablingFailed teardown.', '移除插件时，对同一个管理器调用 disable，并重试保留为 DisablingFailed 的清理。'),
+      ],
+    },
+    {
+      id: 'plugin-install-paths', title: t('Select the correct install path', '选择正确的安装路径'),
+      tables: [{ headers: [t('Source', '来源'), t('PluginManager::install', 'PluginManager::install'), t('Host action', '宿主操作')], rows: [
+        [t('LocalPath', 'LocalPath'), t('Discovers and enables the prepared directory in place.', '原地发现并启用已准备目录。'), t('Provide a readable manifest and retain the directory lifecycle.', '提供可读 manifest，并管理目录生命周期。')],
+        [t('Git / Marketplace / OfficialMarketplace', 'Git／Marketplace／OfficialMarketplace'), t('Returns a typed unsupported/fetch-path error.', '返回类型化的不支持／获取路径错误。'), t('Use the production installation/materialization pipeline before activation.', '先使用生产安装／落盘流程，再激活。')],
+        [t('Mcpb', 'Mcpb'), t('Does not unpack the bundle through this method.', '此方法不会解包 bundle。'), t('Use the supported host install pipeline for the bundle.', '使用宿主支持的 bundle 安装流程。')],
+        [t('BuiltIn', 'BuiltIn'), t('Is not installed through this method.', '不经此方法安装。'), t('Use the composition’s compiled builtin registration.', '使用组合中已编译的内置注册路径。')],
+      ] }],
+      note: t('A PluginSource variant describes an input source. Its existence does not promise that this particular manager method implements network fetching, authentication or archive materialization.', 'PluginSource 变体用于描述来源输入。变体存在不代表管理器的此方法实现了网络获取、认证或归档落盘。'),
+    },
+    {
+      id: 'plugin-troubleshooting', title: t('Diagnose activation and removal', '诊断激活与移除'),
+      tables: [{ headers: [t('Observation', '现象'), t('Interpretation', '解释'), t('Recovery', '恢复方式')], rows: [
+        [t('No manifest found', '找不到 manifest'), t('A flat LocalPath discovery did not find the expected plugin directory.', 'LocalPath 的平层发现没有找到预期插件目录。'), t('Check the exact directory and .lingxi-plugin/plugin.json; do not pass the top-level versioned cache as a plugin.', '检查准确目录与 .lingxi-plugin/plugin.json，不要把顶层版本缓存当作单个插件。')],
+        [t('Blocked', 'Blocked'), t('Policy rejected the source before activation.', '策略在激活前拒绝来源。'), t('Inspect trust and managed policy; do not register the components manually to bypass it.', '检查信任与受管策略，不要手动注册组件来绕过策略。')],
+        [t('Failed / Validation / Loader', 'Failed／Validation／Loader'), t('Manifest, configuration or loading failed.', 'manifest、配置或加载失败。'), t('Correct the reported cause before enabling the candidate again.', '修正已报告原因后再启用候选插件。')],
+        [t('DisablingFailed remains loaded', 'DisablingFailed 仍然出现在已加载列表'), t('Some owned resources still need teardown.', '仍有所属资源需要清理。'), t('Retain the owner and retry disable; report success only after its components are removed.', '保留负责人并重试 disable，组件移除后再报告成功。')],
+      ] }],
+    },
+  ],
+  'harness-client': [
+    {
+      id: 'event-consumer', title: t('Build a client event consumer', '构建客户端事件消费者'),
+      tables: [{ headers: [t('Event', '事件'), t('Use it for', '用途'), t('Correlation', '关联方式')], rows: [
+        [t('SessionStarted / SessionResumed', 'SessionStarted／SessionResumed'), t('Mount or replace the visible conversation.', '挂载或替换可见对话。'), t('session_id belongs to the connection’s mounted host.', 'session_id 属于该连接挂载的宿主。')],
+        [t('TurnStarted', 'TurnStarted'), t('Mark an admitted prompt active.', '将已准入提示词标记为活动。'), t('Echoed optional turn_id from SendPrompt.', 'SendPrompt 回传的可选 turn_id。')],
+        [t('TextDelta', 'TextDelta'), t('Append assistant text to the active presentation.', '向当前展示追加助手文本。'), t('The ordered event feed; this DTO does not add a per-delta turn_id.', '按顺序的事件流；此 DTO 不额外提供逐增量 turn_id。')],
+        [t('ToolUseStarted / ToolUseResult', 'ToolUseStarted／ToolUseResult'), t('Show progress, input, result and error state.', '展示进度、输入、结果与错误状态。'), t('Match id, not the tool display name.', '通过 id 匹配，不用工具显示名称。')],
+        [t('MessageComplete', 'MessageComplete'), t('Settle the completed assistant message when supplied.', '提供完整助手消息时确定最终展示。'), t('Use the message’s identity and ordered blocks; message can be absent.', '使用消息标识与有序 blocks；message 可以缺省。')],
+        [t('TurnEnded / Error', 'TurnEnded／Error'), t('Settle the host’s terminal execution presentation.', '确定宿主执行终态展示。'), t('Keep outcome, stop reason, costs or structured error kind separately.', '分别保留 outcome、停止原因、成本或结构化错误类别。')],
+      ] }],
+      note: t('Do not assume every event has session_id or turn_id. The protocol deliberately makes session selection a connection attribute. Transports that multiplex connections must retain their own authenticated connection-to-session mapping.', '不要假定每个事件都有 session_id 或 turn_id。协议将会话选择设计为连接属性。复用多个连接的传输应维护自身经过认证的连接到会话映射。'),
+    },
+    {
+      id: 'permission-roundtrip', title: t('Complete the permission request round trip', '完成权限请求与响应闭环'),
+      steps: [
+        t('Receive the permission request from the host-owned PermissionRequestSink and store its connection-scoped request_id with the rendered card.', '从宿主持有的 PermissionRequestSink 接收权限请求，将连接级 request_id 与展示的卡片一起保存。'),
+        t('Display the requested operation and the engine-provided actions. Respect suppress_always_allow_rule and auto_mode_prompt; the client must not infer eligibility for broader permission.', '展示请求操作及引擎提供的动作。遵守 suppress_always_allow_rule 与 auto_mode_prompt，客户端不能自行推导更大权限的资格。'),
+        t('Send ApprovePermission or DenyPermission with that request_id through the connection that owns the parked request.', '通过持有该挂起请求的连接，发送带该 request_id 的 ApprovePermission 或 DenyPermission。'),
+        t('Remove or settle the card when PermissionRequestResolved arrives. Approved, Denied, Cancelled and Expired are terminal states; a stale click can lose a race with cancellation.', '收到 PermissionRequestResolved 后移除或确定卡片状态。Approved、Denied、Cancelled 与 Expired 都是终态；过期点击可能在取消竞态中失效。'),
+      ],
+      code: [{ label: t('ClientCommand JSON · one-time approval', 'ClientCommand JSON · 单次允许'), language: 'json', verification: 'excerpt', code: '{\n  "type": "approve_permission",\n  "request_id": 7,\n  "response": { "type": "allow_once" }\n}' }],
+      apis: [{ name: 'AdapterPermissionGate::resolve', signature: 'pub async fn resolve(&self, request_id: u64, response: PermissionResponseDto, tool_name_hint: &str) -> bool', description: t('Returns false when the parked request is unknown or no longer has a receiver. Route by the stored request identity; the tool-name hint does not replace it.', '请求未知或已没有等待接收方时返回 false。应按保存的请求标识路由，工具名提示不能替代它。') }],
+    },
+    {
+      id: 'client-error-handling', title: t('Handle errors without guessing success', '处理错误而不猜测成功'),
+      tables: [{ headers: [t('Signal', '信号'), t('Client response', '客户端响应'), t('Avoid', '避免')], rows: [
+        [t('Transport error', '传输错误'), t('Keep partial content, report the failure and apply the host’s reconnect policy.', '保留部分内容、报告失败，并使用宿主重连策略。'), t('Automatically resending a side-effecting prompt as if it had never run.', '假定带副作用的提示词从未执行，并自动重发。')],
+        [t('Protocol / Internal error', '协议／内部错误'), t('Retain diagnostics and validate the exact host/client binding versions.', '保留诊断信息，验证准确的宿主／客户端绑定版本。'), t('Converting missing or malformed events into completed messages.', '把缺失或格式错误的事件转换成已完成消息。')],
+        [t('MaxTurns', 'MaxTurns'), t('Explain that the configured execution budget ended and preserve the conversation.', '说明配置的执行预算已结束，并保留对话。'), t('Reporting the user’s task as complete solely because a turn ended.', '仅因轮次结束，就报告用户任务完成。')],
+        [t('Unknown future enum variant', '未来未知 enum 变体'), t('Follow the host’s compatibility contract and provide an explicit unsupported state when needed.', '遵循宿主兼容性契约，必要时展示明确的不支持状态。'), t('Inventing a permission approval or successful operation for an unrecognized payload.', '为无法识别的载荷伪造授权或操作成功。')],
+      ] }],
+      links: [{ label: t('Cancellation, terminal outcomes and partial output', '取消、终态结果与部分输出'), href: '/docs/harness-sessions#cancellation-recipe' }],
+    },
+  ],
+};
+
+for (const page of harnessPages) {
+  page.sections.push(...(integrationSections[page.id] ?? []), ...(usageSections[page.id] ?? []));
+}

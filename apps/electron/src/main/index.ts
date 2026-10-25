@@ -1,10 +1,12 @@
 import { promises as fs } from 'node:fs';
 import { LocalAppCoreClient } from './local-apps/coreClient.js';
-import { resolveServerBin } from './bridgeDiscovery.js';
 import { LocalAppHost } from './local-apps/host.js';
+import { resolveDesktopAuthoringBinding } from './local-apps/authoring.js';
 import { LocalAppAgentBroker } from './local-apps/agentBroker.js';
 import { LocalAppAgentExecutor } from './local-apps/agentExecutor.js';
 import { LocalAppAgentError } from './local-apps/agentPolicy.js';
+import { configureNativeLocale, nativeTr, onNativeLocaleChange } from '../shared/nativeLocale.js';
+import { persistInterfaceLocale, restoreInterfaceLocale } from './localePreferences.js';
 import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
 import { installDeepLinks } from './deepLinks.js';
 import { installCrashReporting } from './crashReporting.js';
@@ -14,7 +16,7 @@ import { brokerAccountSessionStore } from './account-broker-storage.js';
 import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
-import { app, BrowserWindow, dialog, Menu, powerMonitor, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
+import { app, BrowserWindow, dialog, Menu, net, powerMonitor, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
 import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
 import { join } from 'node:path';
@@ -31,6 +33,16 @@ import {
 } from './credential-broker.js';
 import { CodexTokenManager, codexAccessToken } from './codex-tokens.js';
 import { CODEX_PROVIDER_ID } from './codex-auth.js';
+import { createRemoteControl } from './remoteControl/electronBindings.js';
+import { RemotePolicy, managedSettingsDirectory } from './remoteControl/policy.js';
+import { RemoteCommands } from './remoteControl/remoteCommands.js';
+import { nativeImageCodec } from './remoteControl/nativeImageCodec.js';
+import { PushRequester, RemotePush } from './remoteControl/pushRequests.js';
+import { RemoteControlUi } from './remoteControl/rendererIpc.js';
+import { SessionGateway } from './remoteControl/sessionGateway.js';
+import { remoteControlConfig } from './remoteControl/config.js';
+import { systemClock } from '@lingxi/bridge-client/remote';
+import type { RemoteControlService } from './remoteControl/RemoteControlService.js';
 import { ProviderAudioHost } from './audio/providerAudioHost.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguration.js';
@@ -40,6 +52,10 @@ import { HostNotifier } from './notifications.js';
 import { notificationPresentation } from './notificationPresentation.js';
 import { DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
 import { SettingsStore } from './settings.js';
+import { ComputerSettingsStore } from './computerSettings.js';
+import { BrowserIntegration } from './browserIntegration.js';
+import { resolveServerBin } from './bridgeDiscovery.js';
+import { CH_COMPUTER_SETTINGS_CHANGED } from '../shared/computerSettings.js';
 import { requestMicrophoneAccess } from './microphoneAccess.js';
 import { ProjectSessionCatalog } from './session-catalog.js';
 import { ignoreBrokenPipe } from './process-streams.js';
@@ -75,6 +91,7 @@ const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const securedSessions = new WeakSet<Session>();
 let bridge: SessionRuntimeManager | null = null;
 let host: HostController | null = null;
+let browserIntegration: BrowserIntegration | null = null;
 let scheduled: ScheduledTaskService | null = null;
 let git: GitService | null = null;
 let terminals: TerminalManager | null = null;
@@ -82,7 +99,26 @@ let nativeAudio: NativeAudioManager | null = null;
 let notifier: HostNotifier | null = null;
 let quitting = false;
 let localApps: LocalAppHost | null = null;
+let remoteControl: RemoteControlService | null = null;
+let remotePolicy: RemotePolicy | null = null;
+let remoteGateway: SessionGateway | null = null;
+let remotePush: RemotePush | null = null;
+let remoteUi: RemoteControlUi | null = null;
+let remotePolicyTimer: NodeJS.Timeout | undefined;
+/** How often the administrator's `managed-settings.json` is read again. */
+const REMOTE_POLICY_RECHECK_MS = 30_000;
 const mainWindows = new Set<BrowserWindow>();
+// On macOS the app remains alive and the bridge stays available for reopen.
+// Elsewhere it quits with its last window, unless a background app or a
+// connected phone or browser still needs it.
+function quitIfNothingNeedsTheApp(): void {
+  if (process.platform === 'darwin' || quitting) return;
+  void (async () => {
+    const background = await localApps?.hasBackgroundApps();
+    const viewers = (remoteControl?.status().connections.length ?? 0) > 0;
+    if (!background && !viewers && BrowserWindow.getAllWindows().length === 0) app.quit();
+  })().catch(error => console.error('Unable to check background applications', error));
+}
 function getMainWindow(): BrowserWindow | undefined { return [...mainWindows].find(window => !window.isDestroyed()); }
 let deepLinkProjects: () => string[] = () => [];
 let resolveDeepLinkReady: () => void;
@@ -149,6 +185,17 @@ function rendererTarget(): { url: string; load: (window: BrowserWindow) => Promi
   return { url: pathToFileURL(file).toString(), load: (window) => window.loadFile(file) };
 }
 
+/** The hidden page of Remote Control's WebRTC window: the dev server's in development, the built file otherwise. */
+function remoteRtcPage(): (window: BrowserWindow) => Promise<void> {
+  const devUrl = developmentRendererUrl();
+  if (devUrl) {
+    const url = new URL('remote-rtc.html', devUrl).toString();
+    return (window) => window.loadURL(url);
+  }
+  const file = join(moduleDirectory, '../renderer/remote-rtc.html');
+  return (window) => window.loadFile(file);
+}
+
 function isHttpsUrl(raw: string): boolean {
   try {
     const url = new URL(raw);
@@ -159,6 +206,7 @@ function isHttpsUrl(raw: string): boolean {
 function createWindow(): BrowserWindow {
   const target = rendererTarget();
   const mainWindow = new BrowserWindow({
+    icon: join(app.isPackaged ? process.resourcesPath : join(moduleDirectory, '../../assets/icons'), 'icon.png'),
     width: 1320,
     height: 860,
     minWidth: 900,
@@ -245,8 +293,11 @@ function createWindow(): BrowserWindow {
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
+configureNativeLocale(() => app.getPreferredSystemLanguages());
+const interfaceLocalePath = join(app.getPath('userData'), 'interface-language.json');
+restoreInterfaceLocale(interfaceLocalePath);
 if (hasSingleInstanceLock) void app.whenReady().then(async () => {
-  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate(process.platform, (action) => {
+  const refreshApplicationMenu = () => Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate(process.platform, (action) => {
     if (action === 'open-link') { deepLinks.openClipboard(); return; }
     const window = getMainWindow() ?? createWindow();
     const send = () => {
@@ -259,8 +310,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     if (window.webContents.isLoading()) window.webContents.once('did-finish-load', send);
     else send();
   }, !app.isPackaged)));
+  onNativeLocaleChange(refreshApplicationMenu);
+  refreshApplicationMenu();
   const userData = app.getPath('userData');
   const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
+  onNativeLocaleChange(() => {
+    try { persistInterfaceLocale(interfaceLocalePath); }
+    catch (error) { diagnostics.add('warn', 'host', `interface language persistence failed: ${sanitizeDiagnostic(error)}`); }
+  });
   diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
   const bridgeRoot = join(userData, 'bridge-runtime');
   const credentialBroker = createMacCredentialBrokerClient({
@@ -271,6 +328,47 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     ? 'credential store: macOS credential broker'
     : 'credential store: shared engine secure storage');
   const settings = new SettingsStore(userData);
+  let lastComputerRevision = '';
+  const computerSettings = new ComputerSettingsStore(userData, {
+    showExtension: async path => { const error = await shell.openPath(path); if (error) throw new Error(error); },
+    onChanged: () => {
+      const state = computerSettings.snapshot();
+      if (lastComputerRevision && state.revision !== lastComputerRevision) {
+        for (const summary of bridge?.runtimeSummaries ?? []) {
+          try {
+            const runtime = bridge?.get(summary.sessionId);
+            if (state.error) void runtime?.stopForComputerPolicyFailure().catch(error => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
+            else runtime?.revokeComputerAccess();
+          }
+          catch (error) { diagnostics.add('warn', 'host', sanitizeDiagnostic(error)); }
+        }
+      }
+      lastComputerRevision = state.revision;
+      host?.sendToWindows(CH_COMPUTER_SETTINGS_CHANGED, state);
+    },
+  });
+  lastComputerRevision = computerSettings.policy().revision;
+  let browserExecutable = '';
+  try { browserExecutable = resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }); }
+  catch { /* The setup action reports missing bridge resources. */ }
+  const browserDescriptor = join(userData, 'computer-use', 'browser-connection.json');
+  browserIntegration = new BrowserIntegration({
+    policy: () => computerSettings.policy(),
+    descriptorPath: browserDescriptor,
+    nativeHostPath: join(userData, 'computer-use', 'browser-native-host'),
+    bridgeExecutable: browserExecutable,
+    extensionDirectory: app.isPackaged ? join(process.resourcesPath, 'browser-extension') : join(app.getAppPath(), 'browser-extension'),
+    onChanged: () => host?.sendToWindows(CH_COMPUTER_SETTINGS_CHANGED, computerSettings.snapshot()),
+  });
+  computerSettings.attachBrowser(browserIntegration);
+  try { await browserIntegration.start(); }
+  catch (error) {
+    const failedBrowser = browserIntegration;
+    browserIntegration = null;
+    await failedBrowser.close().catch(() => {});
+    computerSettings.browserUnavailable('Browser integration could not start. Restart Desktop to try again.');
+    diagnostics.add('warn', 'host', `browser integration startup failed: ${sanitizeDiagnostic(error)}`);
+  }
   const audioSessionContext = (owner?: import('@lingxi/bridge-client').AudioOwnerDto) => {
     const sessionId = owner?.type === 'session' ? owner.session_id : settings.getPublic().activeSession?.sessionId;
     return sessionId ? bridge?.get(sessionId)?.audioSessionContext : undefined;
@@ -315,7 +413,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     onError: (message) => diagnostics.add('warn', 'host', message),
   });
   codexTokens.start();
-  powerMonitor.on('resume', () => codexTokens.check());
+  powerMonitor.on('resume', () => {
+    codexTokens.check();
+    remoteControl?.reconnect();
+  });
   /**
    * The one place an OS notification is raised. Shared by the scheduled-task
    * service and `HostNotifier` so both get the same click behaviour: restore
@@ -334,6 +435,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   notifier = new HostNotifier({
     show: showNotification,
     isWindowFocused: () => windowFocused,
+    // Remote Control is built after the notifier; both are looked up when used.
+    remote: (kind, sessionId) => remotePush?.notify(kind, sessionId),
+    systemIdleSeconds: () => powerMonitor.getSystemIdleTime(),
   });
   notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
@@ -371,7 +475,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
     codexTokens,
     invalidateLaunchConfigCache: () => launchCache.invalidate(),
-    onFirstPromptSent: (ref) => { settings.setActiveSession(ref); },
+    onFirstPromptSent: (ref) => {
+      settings.setActiveSession(ref);
+      // `remoteControlAtStartup`: a new chat starts shared with the user's other devices.
+      try { remotePolicy?.sessionCreated(ref); } catch (error) { diagnostics.add('warn', 'host', `remote control: ${sanitizeDiagnostic(error)}`); }
+    },
     confirmBypassPermissions: async () => {
       // Shown ONCE per install (persisted), mirroring the oracle's
       // `bypassPermissionsModeAccepted`. Body text is the oracle's Bypass
@@ -379,17 +487,13 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       if (settings.getBypassPermissionsAccepted()) return true;
       const options = {
         type: 'warning' as const,
-        buttons: ['Cancel', 'Yes, I accept'],
+        buttons: [nativeTr('common_cancel'), nativeTr('native_bypass_accept')],
         defaultId: 0,
         cancelId: 0,
         noLink: true,
-        title: 'Bypass Permissions mode',
-        message:
-          'In Bypass Permissions mode, LingXi will not ask for your approval before running potentially dangerous commands.',
-        detail:
-          'This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.\n\n' +
-          'By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.\n\n' +
-          'https://code.claude.com/docs/en/security',
+        title: nativeTr('native_bypass_title'),
+        message: nativeTr('native_bypass_message'),
+        detail: nativeTr('native_bypass_detail') + '\n\nhttps://code.claude.com/docs/en/security',
       };
       const parent = getMainWindow();
       const confirmation = parent
@@ -448,10 +552,16 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       }));
       return {
         workspace,
+        computerUseEnvironment: {
+          LINGXI_DESKTOP_COMPUTER_POLICY: computerSettings.executionPolicyPath,
+          LINGXI_DESKTOP_BROWSER_DESCRIPTOR: browserDescriptor,
+        },
         sessionId: ref.sessionId,
         trusted: settings.isTrustedWorkspace(workspace),
         allowInsights: settings.getInsightsAllowed(),
         allowTeamOnboarding: settings.getTeamOnboardingAllowed(),
+        remoteControlEnabled: (settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1'))
+          && (remotePolicy?.allows() ?? true),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
         ...(openaiOAuth ? { openaiOAuth } : {}),
@@ -471,15 +581,92 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     credentialBroker,
     nativeAudio ?? undefined,
   );
+  host.attachComputerSettings(computerSettings);
   scheduled = new ScheduledTaskService(settings, bridge, sessionCatalog, (title, body, ref) => {
     // Propagate the refusal: `scheduledRun` returns false when the kind is off
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
   }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
-  const accountService = new AccountService(firebaseConfig, credentialBroker
+  const account = new AccountService(firebaseConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker)
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
-  host.attachAccount(accountService);
+  host.attachAccount(account);
+  // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
+  const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
+    diagnostics.add(level, 'host', `remote control: ${message}`);
+  };
+  const policy = new RemotePolicy({
+    settings,
+    managedDirectory: managedSettingsDirectory(process.env, process.platform),
+  });
+  remotePolicy = policy;
+  const runtimes = bridge;
+  const gateway = new SessionGateway({
+    runtimes,
+    policy,
+    commands: new RemoteCommands({
+      allowAlwaysAllow: () => policy.allowAlwaysAllow(),
+      echo: (echo) => remoteUi?.echo(echo),
+      codec: nativeImageCodec,
+      clock: systemClock,
+    }),
+    titleOf: async (ref) => (await sessionCatalog.find(ref.projectPath, ref.sessionId))?.title,
+    modelOf: (ref) => settings.getSessionModel(ref),
+    clock: systemClock,
+    diagnostics: remoteDiagnostics,
+  });
+  remoteGateway = gateway;
+  remoteControl = createRemoteControl({
+    account,
+    settings,
+    gateway,
+    policyAllows: () => policy.allows(),
+    credentialBroker,
+    userData,
+    preload: join(moduleDirectory, '../preload/remoteRtc.cjs'),
+    loadPage: remoteRtcPage(),
+    parentWindow: getMainWindow,
+    diagnostics: remoteDiagnostics,
+  });
+  const service = remoteControl;
+  remotePush = new RemotePush({
+    requester: new PushRequester({
+      baseUrl: remoteControlConfig(process.env, app.isPackaged).pushApiUrl,
+      hostId: () => service.status().host_id,
+      getIdToken: (forceRefresh) => account.getIdToken(forceRefresh),
+      fetch: (url, init) => net.fetch(url, init),
+      diagnostics: remoteDiagnostics,
+    }),
+    presence: gateway,
+    active: () => service.status().state === 'online' && policy.allows(),
+    clock: systemClock,
+  });
+  remoteUi = new RemoteControlUi({
+    service,
+    settings,
+    policy,
+    gateway,
+    runtimeRef: (sessionId) => {
+      const runtime = bridge?.get(sessionId);
+      return runtime ? { projectPath: runtime.projectPath, sessionId } : undefined;
+    },
+    signedIn: () => account.snapshot().user !== null,
+    onAccountChanged: (callback) => account.onChanged(() => callback()),
+    send: (channel, payload) => host?.sendToWindows(channel, payload),
+  });
+  host.attachRemoteControl(remoteUi);
+  // The last viewer leaving a windowless app is the other moment to quit.
+  let hadViewers = false;
+  service.onStatus((status) => {
+    const has = status.connections.length > 0;
+    if (hadViewers && !has && mainWindows.size === 0) quitIfNothingNeedsTheApp();
+    hadViewers = has;
+  });
+  // A change to the administrator's veto or to the shared sessions re-evaluates whether the service runs.
+  policy.onChange(() => service.refresh());
+  remotePolicyTimer = setInterval(() => { policy.recheck(); }, REMOTE_POLICY_RECHECK_MS);
+  remotePolicyTimer.unref();
+  void remoteControl.start();
   host.attachScheduled(scheduled);
   host.attachNotifier(notifier);
   terminals = new TerminalManager({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
@@ -503,7 +690,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     return undefined;
   });
   if (productPaths) {
-    const agentRoot = join(productPaths.configHome, 'local-apps', 'v2', 'desktop-agent');
+    const agentRoot = join(productPaths.configHome, 'local-apps', 'v2');
     const agentExecutor = new LocalAppAgentExecutor({
       configHome: productPaths.configHome,
       root: agentRoot,
@@ -530,33 +717,29 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     });
     localApps = new LocalAppHost({
       configHome: productPaths.configHome,
-      accountToken: () => accountService.getIdToken(),
-      accountId: () => accountService.snapshot().user?.uid ?? undefined,
+      accountToken: () => account.getIdToken(),
+      accountId: () => account.snapshot().user?.uid ?? undefined,
       core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.configHome, message => diagnostics.add('warn', 'host', message)),
-      resolveAuthoring: async row => {
-        if (!row.sourcePath) return { ...row, sourceSession: undefined };
-        try { await fs.stat(row.sourcePath); } catch { return { ...row, sourceSession: undefined, sourceMissing: true }; }
-        if (!row.sourceSession) return row;
-        const source = await sessionCatalog.find(row.sourceSession.projectPath, row.sourceSession.sessionId).catch(() => undefined);
-        const actual = source?.workspace_path;
-        const matches = actual && await Promise.all([fs.realpath(actual), fs.realpath(row.sourcePath)]).then(([a, b]) => a === b).catch(() => false);
-        return source && matches ? row : { ...row, sourceSession: undefined };
+      resolveAuthoringBinding: async (_appId, session) => {
+        const activeSession = settings.getPublic().activeSession ?? undefined;
+        const liveDraft = bridge?.getActiveDraftSession(session, activeSession);
+        return resolveDesktopAuthoringBinding(sessionCatalog, session, liveDraft);
       },
       preload: join(moduleDirectory, '../preload/localApp.cjs'),
       nodeExecutable: process.execPath,
       bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
       mainWindow: () => getMainWindow() ?? createWindow(),
       agentCatalog: () => agentExecutor.catalog(),
-      edit: async row => {
+      edit: async request => {
         const window = getMainWindow() ?? createWindow();
         window.show(); window.focus();
         // The renderer owns navigation and must apply the selected chat's bootstrap
         // before placing an edit request in its session-bound composer draft.
-        window.webContents.send('lingxi:local-app:edit', { id: row.id, name: row.name, sourcePath: row.sourcePath, sourceSession: row.sourceSession, sourceMissing: row.sourceMissing });
+        window.webContents.send('lingxi:local-app:edit', request);
       },
     });
     const agentBroker = new LocalAppAgentBroker({
-      root: join(agentRoot, 'ledger'),
+      root: agentRoot,
       authorize: owner => localApps!.authorizeAgent(owner),
       revalidate: (owner, authorization) => localApps!.revalidateAgent(owner, authorization),
       execute: execution => agentExecutor.execute(execution),
@@ -616,13 +799,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   window.focus();
   });
 
-  app.on('window-all-closed', () => {
-  // On macOS the app remains alive and the bridge stays available for reopen.
-  if (process.platform !== 'darwin') void (async () => {
-    const background = await localApps?.hasBackgroundApps();
-    if (!background && BrowserWindow.getAllWindows().length === 0) app.quit();
-  })().catch(error => console.error('Unable to check background applications', error));
-  });
+  app.on('window-all-closed', quitIfNothingNeedsTheApp);
 
   app.on('before-quit', (event) => {
   if (quitting) return;
@@ -641,12 +818,25 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const currentAudio = nativeAudio;
   nativeAudio = null;
   const currentBridge = bridge;
+  const currentBrowser = browserIntegration;
+  browserIntegration = null;
   bridge = null;
+  const currentRemote = remoteControl;
+  remoteControl = null;
+  clearInterval(remotePolicyTimer);
+  remotePolicyTimer = undefined;
+  remoteGateway?.dispose();
+  remoteGateway = null;
+  remotePush = null;
+  remoteUi = null;
+  remotePolicy = null;
   void Promise.all([
+    currentBrowser?.close() ?? Promise.resolve(),
     currentLocalApps?.dispose() ?? Promise.resolve(),
     currentGit?.dispose() ?? Promise.resolve(),
     currentTerminals?.dispose() ?? Promise.resolve(),
     currentAudio?.dispose() ?? Promise.resolve(),
     currentBridge?.dispose() ?? Promise.resolve(),
+    currentRemote?.dispose() ?? Promise.resolve(),
   ]).finally(() => app.quit());
   });

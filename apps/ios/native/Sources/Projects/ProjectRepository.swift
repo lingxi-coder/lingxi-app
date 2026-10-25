@@ -115,7 +115,7 @@ final class ProjectRepository: @unchecked Sendable {
             globalSessions: readSessions(at: projectsRoot.appendingPathComponent(globalSessionIndexFileName)),
             loading: false,
             errorMessage: corruptCount > 0
-                ? String(format: String(localized: "project_corrupt_projects_message_fmt"), corruptCount)
+                ? String(localized: "project_corrupt_projects_message \(corruptCount)")
                 : nil
         )
     }

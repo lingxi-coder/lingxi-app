@@ -333,6 +333,35 @@ export function appendUserPrompt(state: ConversationState, text: string, images:
   };
 }
 
+/** A prompt a paired device sent through Remote Control, as the window learns of it. */
+export interface RemotePromptRow {
+  readonly turnId: number;
+  readonly text: string;
+  readonly images?: readonly ImageRefDto[];
+  readonly deviceName: string;
+}
+
+/**
+ * Show a prompt sent from a paired device as a user row labelled with where it
+ * came from. The engine's event stream carries no user prompts, so without
+ * this the window would show an answer to a question it never displays.
+ *
+ * The row is never marked pending: the prompt already crossed the host
+ * boundary, and the turn's own events drive `running`. A repeated echo for the
+ * same turn changes nothing.
+ */
+export function appendRemoteUserPrompt(state: ConversationState, prompt: RemotePromptRow, now = Date.now()): ConversationState {
+  const already = state.items.some((item) => item.type === 'narration' && item.role === 'user'
+    && item.origin?.kind === 'device' && item.origin.turnId === prompt.turnId);
+  if (already) return state;
+  const next = appendUserPrompt(state, prompt.text, prompt.images ?? [], now);
+  if (next === state) return state;
+  const items = next.items.slice();
+  const last = items.length - 1;
+  items[last] = { ...items[last]!, origin: { kind: 'device', deviceName: prompt.deviceName, turnId: prompt.turnId } } as RunItem;
+  return { ...next, items };
+}
+
 /** Task controls remain in the timeline; utility commands belong to the panel. */
 function isTaskControl(name: string | null): boolean {
   return name === '/compact' || name === '/goal';

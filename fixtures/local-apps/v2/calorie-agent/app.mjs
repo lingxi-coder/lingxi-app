@@ -4,7 +4,7 @@ if (!globalThis.localApp && location.hostname === '127.0.0.1') {
   catch { /* The UI below explains how to reopen this app from LingXi. */ }
 }
 
-import { MealAgentClient, terminalStates, revisionStorage } from './agent-client.mjs';
+import { MealAgentTask, terminalStates, revisionStorage } from './agui-task.mjs';
 import { nutritionSchema, recognitionPrompt, checkedResult, calorieRange, mealRecord } from './nutrition.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -12,6 +12,7 @@ $('host-open').hidden = !window.localApp?.host?.open;
 $('host-open').addEventListener('click', () => window.localApp?.host?.open());
 let agent = window.localApp?.agent;
 let taskStorage;
+let client = null;
 let hostError = '';
 if (agent) {
   try {
@@ -25,6 +26,7 @@ if (agent) {
 }
 const historyKey = 'meal-notes.records.v1';
 let image = null;
+let photoUrl = null;
 let stream = null;
 let result = null;
 let busy = false;
@@ -39,16 +41,18 @@ function error(message) {
 
 function setBusy(value) {
   busy = value;
-  $('analyze').disabled = busy || !agent || (!image && !client?.pending);
-  $('analyze').textContent = client?.pending ? '重试同一请求' : '识别这一餐';
-  $('cancel').hidden = !busy || Boolean(client?.pending) || !client?.runId;
-  $('pending-review').hidden = busy || !client?.pending;
-  if (!client?.pending) $('discard-confirm').checked = false;
+  const hasPending = Boolean(client?.pendingInput);
+  const activeTask = client?.currentTask && !terminalStates.has(client.currentTask.state);
+  $('analyze').disabled = busy || !agent || (!image && !hasPending);
+  $('analyze').textContent = hasPending ? '重试同一请求' : '识别这一餐';
+  $('cancel').hidden = !activeTask || hasPending || !client?.runId;
+  $('pending-review').hidden = busy || !hasPending;
+  if (!hasPending) $('discard-confirm').checked = false;
   $('discard-pending').disabled = busy || !$('discard-confirm').checked;
-  $('camera-open').disabled = busy || Boolean(client?.pending);
-  $('photo-file').disabled = busy || Boolean(client?.pending);
-  $('photo-choose').disabled = busy || Boolean(client?.pending);
-  $('notes').disabled = busy || Boolean(client?.pending);
+  $('camera-open').disabled = busy || hasPending;
+  $('photo-file').disabled = busy || hasPending;
+  $('photo-choose').disabled = busy || hasPending;
+  $('notes').disabled = busy || hasPending;
 }
 
 function stopCamera() {
@@ -75,18 +79,29 @@ function setPhoto(source) {
   context.fillStyle = '#fff';
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.drawImage(source, 0, 0, canvas.width, canvas.height);
-  const dataUrl = canvas.toDataURL('image/jpeg', .86);
-  client?.forgetCompleted();
-  result = null;
-  completedRunId = null;
-  resultRunId = null;
-  $('result').hidden = true;
-  image = { media_type: 'image/jpeg', base64: dataUrl.split(',')[1] };
-  $('photo').src = dataUrl;
-  stopCamera();
-  $('status').textContent = '照片已准备好，确认后点击识别。';
-  error('');
-  setBusy(false);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) { reject(new Error('照片无法压缩，请换一张照片。')); return; }
+      if (blob.size > 20 * 1024 * 1024) { reject(new Error('照片压缩后仍超过 20 MB。')); return; }
+      try {
+        client?.forgetCompleted();
+        const nextFile = new File([blob], 'meal-photo.jpg', { type: 'image/jpeg', lastModified: Date.now() });
+        if (photoUrl) URL.revokeObjectURL(photoUrl);
+        photoUrl = URL.createObjectURL(nextFile);
+        result = null;
+        completedRunId = null;
+        resultRunId = null;
+        $('result').hidden = true;
+        image = nextFile;
+        $('photo').src = photoUrl;
+        stopCamera();
+        $('status').textContent = '照片已准备好，确认后点击识别。';
+        error('');
+        setBusy(false);
+        resolve();
+      } catch (failure) { reject(failure); }
+    }, 'image/jpeg', .86);
+  });
 }
 
 async function nativePhoto(method) {
@@ -95,10 +110,10 @@ async function nativePhoto(method) {
   if (!['image/jpeg', 'image/png', 'image/webp'].includes(value.mimeType) || typeof value.base64 !== 'string') {
     throw new Error('请选择 JPEG、PNG 或 WebP 照片。');
   }
-  const photo = new Image();
-  photo.src = `data:${value.mimeType};base64,${value.base64}`;
-  await photo.decode();
-  setPhoto(photo);
+  const binary = atob(value.base64);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  const photo = await createImageBitmap(new Blob([bytes], { type: value.mimeType }));
+  try { await setPhoto(photo); } finally { photo.close(); }
 }
 $('camera-open').addEventListener('click', async () => {
   try {
@@ -131,8 +146,8 @@ $('photo-choose').addEventListener('click', async () => {
     else $('photo-file').click();
   } catch (failure) { error(failure.message); }
 });
-$('camera-capture').addEventListener('click', () => {
-  try { setPhoto($('camera')); } catch (failure) { error(failure.message); }
+$('camera-capture').addEventListener('click', async () => {
+  try { await setPhoto($('camera')); } catch (failure) { error(failure.message); }
 });
 $('photo-file').addEventListener('change', async (event) => {
   const file = event.target.files?.[0];
@@ -142,7 +157,7 @@ $('photo-file').addEventListener('change', async (event) => {
       throw new Error('请选择 20 MB 以内的 JPEG、PNG 或 WebP 照片。');
     }
     const bitmap = await createImageBitmap(file);
-    try { setPhoto(bitmap); } finally { bitmap.close(); }
+    try { await setPhoto(bitmap); } finally { bitmap.close(); }
   } catch (failure) { error(failure.message); }
   event.target.value = '';
 });
@@ -213,33 +228,56 @@ function renderResult(value) {
 
 const phases = { starting: '正在连接模型…', thinking: '正在识别餐食…', tool: '正在处理结果…',
   waiting_for_permission: '请在 LingXi 宿主窗口中处理工具授权。', waiting_for_answer: '请在 LingXi 宿主窗口中回答待确认问题。' };
-const client = agent ? new MealAgentClient(agent, taskStorage, (event) => {
-  if (event.type === 'connection') {
-    error(event.error.message);
-    $('status').textContent = '连接已暂停；请返回灵犀恢复应用。不会自动重新提交识别请求。';
-    return;
+function onTask(task) {
+  const active = !terminalStates.has(task.state);
+  setBusy(active);
+  if (active) $('status').textContent = phases[task.phase] || (task.state === 'queued' ? '请求已提交…' : '正在识别餐食…');
+}
+
+function onAgentEvent(event) {
+  if (event.type === 'RUN_STARTED') {
+    $('status').textContent = '请求已提交，正在识别餐食…';
+  } else if (event.type === 'RUN_FINISHED') {
+    $('status').textContent = event.outcome?.type === 'cancelled' ? '识别已取消。'
+      : event.outcome?.type === 'interrupt' ? '任务已中断，请手动重试。' : '正在整理识别结果…';
+  } else if (event.type === 'RUN_ERROR') {
+    $('status').textContent = '识别失败。';
+    error(`${event.message || 'Agent task failed'}${event.code ? ` (${event.code})` : ''}`);
   }
-  if (event.type === 'progress') {
-    $('status').textContent = phases[event.phase] || '正在处理…';
-    return;
+}
+
+function showRunResult(runResult, runId) {
+  if (!runResult || !Array.isArray(runResult.newMessages) || runResult.result === undefined) {
+    throw new Error('AG-UI RunAgentResult 未包含有效的结构化识别结果。');
   }
-  const run = event.run;
-  setBusy(!terminalStates.has(run.state));
-  if (run.state === 'succeeded') {
-    completedRunId = run.runId;
-    if (resultRunId !== run.runId) {
-      try { renderResult(run.result?.output); resultRunId = run.runId; }
-      catch (failure) { error(failure.message); $('status').textContent = '结果未通过应用校验，请重试。'; return; }
+  completedRunId = runId;
+  if (resultRunId !== runId) {
+    renderResult(runResult.result);
+    resultRunId = runId;
+  }
+  $('status').textContent = '识别完成。请确认食物与份量，再保存记录。';
+}
+
+client = agent ? new MealAgentTask(agent, taskStorage, {
+  onEvent: onAgentEvent,
+  onTask,
+  onError: (failure) => {
+    if (failure.event?.type === 'RUN_ERROR') {
+      $('status').textContent = '识别失败。';
+      error(`${failure.event.message || failure.message}${failure.event.code ? ` (${failure.event.code})` : ''}`);
+    } else if (failure.code === 'run_cancelled') {
+      $('status').textContent = '识别已取消。';
+    } else if (failure.code === 'run_interrupted') {
+      $('status').textContent = '任务已中断，请手动重试。';
+    } else {
+      error(failure.message);
+      $('status').textContent = '连接中断；Task 已保留，重新打开应用可重连。不会重新提交识别请求。';
     }
-    $('status').textContent = '识别完成。请确认食物与份量，再保存记录。';
-  } else if (terminalStates.has(run.state)) {
-    $('status').textContent = run.state === 'cancelled' ? '识别已取消。' : run.state === 'interrupted' ? '任务已中断，请手动重试。' : '识别失败。';
-    error(run.error ? `${run.error.message} (${run.error.code})` : '');
-  } else $('status').textContent = phases[run.phase] || (run.state === 'queued' ? '请求已提交…' : '正在识别餐食…');
+  },
 }) : null;
 
 $('analyze').addEventListener('click', async () => {
-  if (busy || !client || (!image && !client.pending)) return;
+  if (busy || !client || (!image && !client.pendingInput)) return;
   error('');
   stopCamera();
   $('result').hidden = true;
@@ -248,10 +286,14 @@ $('analyze').addEventListener('click', async () => {
   resultRunId = null;
   setBusy(true);
   try {
-    const request = client.pending ?? { requestId: crypto.randomUUID(), prompt: recognitionPrompt($('notes').value),
-      images: [image], outputSchema: nutritionSchema, tools: [], maxTurns: 4, timeoutMs: 120000 };
-    await client.submit(request);
-  } catch (failure) { error(`${failure.message}。可重试同一请求；请先在 LingXi 的 Apps 中检查本应用的 Agent 授权和模型。`); setBusy(false); }
+    const request = client.pendingInput ?? await client.createInput(image, recognitionPrompt($('notes').value), nutritionSchema,
+      { maxTurns: 4, timeoutMs: 120000 });
+    const runResult = await client.submit(request);
+    showRunResult(runResult, request.runId);
+  } catch (failure) {
+    error(`${failure.message}。可重试同一请求；请先在 LingXi 的 Apps 中检查本应用的 Agent 授权和模型。`);
+    setBusy(Boolean(client?.currentTask && !terminalStates.has(client.currentTask.state)));
+  }
 });
 $('cancel').addEventListener('click', async () => {
   try { await client.cancel(); } catch (failure) { error(`取消未确认：${failure.message}`); }
@@ -268,6 +310,8 @@ $('discard-pending').addEventListener('click', () => {
     completedRunId = null;
     resultRunId = null;
     $('photo').removeAttribute('src');
+    if (photoUrl) URL.revokeObjectURL(photoUrl);
+    photoUrl = null;
     $('photo').hidden = true;
     $('photo-placeholder').hidden = false;
     $('result').hidden = true;
@@ -311,16 +355,25 @@ $('save').addEventListener('click', () => {
     error('');
   } catch (failure) { error(`未保存：${failure.message}`); }
 });
-window.addEventListener('pagehide', () => { stopCamera(); client?.dispose(); });
+window.addEventListener('pagehide', () => {
+  stopCamera();
+  client?.dispose();
+  if (photoUrl) URL.revokeObjectURL(photoUrl);
+});
 try { renderHistory(); } catch (failure) { error(failure.message); }
 if (!client) {
   $('status').textContent = hostError || '请从支持 Agent 的灵犀应用库中打开，并在应用详情中选择模型与授权。普通浏览器无法调用宿主 Agent。';
 } else {
   setBusy(true);
-  client.resume().then((runId) => {
-    if (!runId) {
+  client.resume().then((runResult) => {
+    if (!runResult) {
       setBusy(false);
-      if (client.pending) $('status').textContent = '保留了一条未确认请求，请选择重试原请求或放弃后重新选图。';
+      if (client.pendingInput) $('status').textContent = '保留了一条未确认请求，请选择重试原请求或放弃后重新选图。';
+    } else {
+      showRunResult(runResult, client.runId);
     }
-  }).catch((failure) => { error(`恢复任务失败：${failure.message}`); setBusy(false); });
+  }).catch((failure) => {
+    error(`恢复任务失败：${failure.message}`);
+    setBusy(Boolean(client?.currentTask && !terminalStates.has(client.currentTask.state)));
+  });
 }

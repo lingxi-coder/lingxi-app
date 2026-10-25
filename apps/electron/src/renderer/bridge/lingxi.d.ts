@@ -3,6 +3,7 @@ import type { ProjectCreationPurpose, ProjectFolderSelection } from '../../share
 import type { AccountApi } from '../../shared/account.js';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type { ScheduledApi } from '../../shared/scheduled';
+import type { RemoteControlApi } from '../../shared/remoteControl';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../../shared/visualization';
 import type { GitApi } from '../../shared/git.js';
 import type { TerminalApi } from '../../shared/terminal.js';
@@ -87,7 +88,7 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true; storageError?: string; codexAccountEmail?: string }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true; environmentOverride?: true; storageError?: string; codexAccountEmail?: string }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface PluginSecretMetadata { pluginId: string; key: string; configured: boolean; maskedValue?: string; storageError?: string; restartRequired?: boolean }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
@@ -151,10 +152,12 @@ export interface VisualizationApi {
 }
 
 export interface LingxiApi {
+  computerSettings: import('../../shared/computerSettings').ComputerSettingsApi;
   applicationIcon: import('../../shared/applicationIcon').ApplicationIconApi;
   localApps?: LocalAppsApi;
   onLocalAppEdit?(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled?: ScheduledApi;
+  remoteControl?: RemoteControlApi;
   git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;
@@ -198,6 +201,7 @@ export interface LingxiApi {
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
   copyText(text: string): Promise<void>;
+  setInterfaceLocale(locale: string, followSystem: boolean): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;

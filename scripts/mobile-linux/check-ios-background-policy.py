@@ -28,7 +28,12 @@ SOURCES = Path("apps/ios/native/Sources")
 
 def reviewed_identifiers():
     prefix = ios_bundle_id()
-    return {prefix + ".cron.reconcile", prefix + ".conversation.continued.*"}
+    return {
+        prefix + ".cron.reconcile",
+        prefix + ".conversation.continued.*",
+        prefix + ".local-app.*",
+        prefix + ".full.local-app.*",
+    }
 
 
 class UniqueKeys(dict):
@@ -125,6 +130,18 @@ def validate_processing_sources(repo_root):
             r'BGContinuedProcessingTaskRequest\(\s*identifier:\s*identifier',
             r'task\.expirationHandler\s*=\s*\{', r'lease\?\.task\.setTaskCompleted\(success:\s*false\)',
             r'lease\?\.task\.setTaskCompleted\(success:\s*success\)'],
+        "Apps/LocalAppAgentBackground.swift": [r'try\s+register\(identifier\)',
+            r'BGTaskScheduler\.shared\.register\(forTaskWithIdentifier:\s*identifier',
+            r'BGContinuedProcessingTaskRequest\(\s*identifier:\s*identifier',
+            r'request\.strategy\s*=\s*\.fail',
+            r'continued\.expirationHandler\s*=\s*\{[\s\S]*?await\s+self\?\.expire\(contextKey\)',
+            r'BGTaskScheduler\.shared\.cancel\(taskRequestWithIdentifier:\s*context\.identifier\)',
+            r'BGTaskScheduler\.shared\.cancel\(taskRequestWithIdentifier:\s*identifier\)',
+            r'private\s+func\s+expire\(_\s+contextKey:\s*String\)\s+async\s*\{[\s\S]*?await\s+cancel\(context\.wake,\s*client:\s*context\.client\)',
+            r'private\s+func\s+clearReservation\(_\s+wake:\s*LocalAppAgentWakeRequest,\s*client:\s*LocalAppServiceClient\)\s+async\s+throws\s*\{[\s\S]*?"op":\s*\.string\("wake\.clear"\),[\s\S]*?"appId":\s*\.string\(wake\.appID\),[\s\S]*?"revision":\s*\.number\(Double\(wake\.revision\)\),[\s\S]*?"runId":\s*\.string\(wake\.runID\)',
+            r'task\.setTaskCompleted\(success:\s*false\)',
+            r'task\.setTaskCompleted\(success:\s*success\)',
+            r'return\s+"\\\(bundleID\)\.local-app\.\\\(digest\)"'],
         "Voice/VoiceAudioSessionCoordinator.swift": [r'func\s+suspendForBackground\(\)\s*\{'],
         "App/RootView.swift": [r'case\s+\.background:[\s\S]*?VoiceAudioSessionCoordinator\.shared\.suspendForBackground\(\)'],
     }

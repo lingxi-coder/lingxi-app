@@ -60,6 +60,24 @@ class GoogleServicesGeneratedResourceTests(unittest.TestCase):
             check_i18n_pairing._verified_google_services_resource_names(self.repo), set()
         )
 
+    def test_catalog_alias_requires_matching_plugin_id_and_application(self):
+        self.gradle_path.write_text(
+            'plugins { alias(libs.plugins.google.services) }\n'
+            'defaultConfig {\n    applicationId = "com.example.app"\n}\n',
+            encoding="utf-8",
+        )
+        catalog = self.repo / check_i18n_pairing.ANDROID_VERSION_CATALOG
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text('[plugins]\ngoogle-services = { id = "com.google.gms.google-services", version = "1" }\n')
+        self.assertEqual(
+            check_i18n_pairing._verified_google_services_resource_names(self.repo),
+            {"default_web_client_id"},
+        )
+        catalog.write_text('[plugins]\ngoogle-services = { id = "com.example.other", version = "1" }\n')
+        self.assertEqual(check_i18n_pairing._verified_google_services_resource_names(self.repo), set())
+        catalog.write_text('[plugins]\nother = { id = "com.google.gms.google-services", version = "1" }\n')
+        self.assertEqual(check_i18n_pairing._verified_google_services_resource_names(self.repo), set())
+
     def test_mismatched_package_or_missing_web_client_does_not_exempt(self):
         config = json.loads(self.config_path.read_text(encoding="utf-8"))
         config["client"][0]["client_info"]["android_client_info"]["package_name"] = (
@@ -83,7 +101,7 @@ class GoogleServicesGeneratedResourceTests(unittest.TestCase):
 
 
 class IntentionalIdenticalTranslationTests(unittest.TestCase):
-    def test_exact_english_ui_terms_are_excluded(self):
+    def test_exact_reviewed_ui_terms_are_excluded(self):
         for (locale, key), value in check_i18n_pairing.INTENTIONAL_IDENTICAL_TO_BASE.items():
             with self.subTest(key=key):
                 self.assertTrue(

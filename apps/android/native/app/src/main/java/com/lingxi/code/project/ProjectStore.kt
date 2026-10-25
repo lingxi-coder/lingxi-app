@@ -36,7 +36,7 @@ class ProjectStore private constructor(
         viewModelScope.launch {
             runOperation(
                 ProjectOperationKind.RefreshSessions,
-                message = appContext.getString(R.string.project_loading_message),
+                message = com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_loading_message),
             ) {
                 repository.load()
             }
@@ -46,7 +46,7 @@ class ProjectStore private constructor(
     suspend fun createInternal(name: String): ProjectSnapshot =
         runSuspendingOperation(
             ProjectOperationKind.Create,
-            message = appContext.getString(R.string.project_creating_message),
+            message = com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_creating_message),
         ) {
             val created = repository.createInternal(name)
             _state.value = repository.load()
@@ -61,7 +61,7 @@ class ProjectStore private constructor(
     suspend fun importSaf(name: String, treeUri: Uri): ProjectSnapshot =
         runSuspendingOperation(
             ProjectOperationKind.Import,
-            message = appContext.getString(R.string.project_importing_message),
+            message = com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_importing_message),
         ) {
             persistTreePermission(treeUri)
             val created = repository.createSafMirror(
@@ -167,7 +167,7 @@ class ProjectStore private constructor(
             runOperation(
                 ProjectOperationKind.Reimport,
                 projectId,
-                appContext.getString(R.string.project_reimporting_message),
+                com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_reimporting_message),
             ) {
                 val result = synchronizer.reimport(projectId)
                 repository.load().copy(conflicts = result.conflicts)
@@ -180,7 +180,7 @@ class ProjectStore private constructor(
             runOperation(
                 ProjectOperationKind.Reimport,
                 projectId,
-                appContext.getString(R.string.project_reauthorizing_message),
+                com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_reauthorizing_message),
             ) {
                 persistTreePermission(treeUri)
                 val current = repository.project(projectId)
@@ -202,7 +202,7 @@ class ProjectStore private constructor(
             runOperation(
                 ProjectOperationKind.Export,
                 projectId,
-                appContext.getString(R.string.project_exporting_message),
+                com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_exporting_message),
             ) {
                 val result = synchronizer.export(projectId)
                 repository.load().copy(conflicts = result.conflicts)
@@ -215,7 +215,7 @@ class ProjectStore private constructor(
             runOperation(
                 ProjectOperationKind.ResolveConflicts,
                 projectId,
-                appContext.getString(R.string.project_resolving_conflicts_message),
+                com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.project_resolving_conflicts_message),
             ) {
                 val result = synchronizer.resolve(projectId, resolution)
                 repository.load().copy(conflicts = result.conflicts)
@@ -305,9 +305,12 @@ class ProjectStore private constructor(
             return object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    val paths = MobileUserStorage.directories(appContext)
                     val repository = ProjectRepository(
-                        MobileUserStorage.projects(appContext),
-                        userHome = File(MobileUserStorage.directories(appContext).home),
+                        File(paths.projects),
+                        userHome = File(paths.home),
+                        projectsGuestRoot = paths.projectsGuestPath,
+                        userHomeGuestPath = paths.guestHome,
                         strings = projectStrings(appContext),
                     )
                     return ProjectStore(

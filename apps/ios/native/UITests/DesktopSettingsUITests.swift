@@ -96,7 +96,30 @@ final class DesktopSettingsUITests: XCTestCase {
             }
             model.tap()
             XCTAssertTrue(app.searchFields.firstMatch.waitForExistence(timeout: 5))
+            let modelVisibility = app.buttons["provider.model.visibility"]
+            for _ in 0..<8 {
+                if modelVisibility.isHittable { break }
+                app.collectionViews.allElementsBoundByIndex.last!.swipeUp()
+            }
+            XCTAssertTrue(modelVisibility.isHittable, app.debugDescription)
+            XCTAssertFalse(app.switches["provider.model.visible"].exists)
+            modelVisibility.tap()
+            let visible = app.switches["provider.model.visible"]
+            XCTAssertTrue(visible.waitForExistence(timeout: 5), app.debugDescription)
+            visible.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            XCTAssertEqual(visible.value as? String, "0")
+            app.navigationBars["显示的模型"].buttons.firstMatch.tap()
+            modelVisibility.tap()
+            XCTAssertEqual(visible.value as? String, "0", "Visibility edits must survive navigation")
+            visible.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            app.navigationBars["显示的模型"].buttons.firstMatch.tap()
+            let disclosure = app.buttons["自定义模型 ID"]
             let custom = app.textFields["provider.model.custom"]
+            for _ in 0..<8 {
+                if disclosure.isHittable || custom.isHittable { break }
+                app.collectionViews.allElementsBoundByIndex.last!.swipeDown()
+            }
+            if disclosure.isHittable { disclosure.tap() }
             for _ in 0..<8 {
                 if custom.exists { break }
                 app.collectionViews.allElementsBoundByIndex.last!.swipeUp()
@@ -206,14 +229,21 @@ final class DesktopSettingsUITests: XCTestCase {
         let input = app.textViews["composer.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 12), app.debugDescription)
         XCTAssertGreaterThanOrEqual(input.frame.height, 40)
-        for id in ["composer.model", "composer.controls", "composer.voice", "composer.flow"] {
+        for id in ["composer.attachment", "composer.model", "composer.controls", "composer.voice", "composer.flow"] {
             let button = app.buttons[id]
             XCTAssertTrue(button.isHittable, id)
+            XCTAssertEqual(button.frame.midY, app.buttons["composer.voice"].frame.midY, accuracy: 1, id)
             XCTAssertGreaterThanOrEqual(button.frame.height, 44, id)
             XCTAssertGreaterThanOrEqual(button.frame.width, 44, id)
+            // Hittability alone also passes for a partially clipped control.
+            XCTAssertGreaterThanOrEqual(button.frame.minX, app.frame.minX, id)
+            XCTAssertLessThanOrEqual(button.frame.maxX, app.frame.maxX, id)
+            XCTAssertLessThanOrEqual(button.frame.maxY, app.frame.maxY, id)
             XCTAssertFalse(button.label.isEmpty, id)
             XCTAssertNotEqual(button.label, id, id)
         }
+        // The complete toolbar stays on one row by using the icon-only model control.
+        XCTAssertEqual(app.buttons["composer.model"].frame.width, 44, accuracy: 1)
         attach("Phone-LargeText-Composer")
         app.buttons["composer.model"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["composer.model.menu"].waitForExistence(timeout: 5), app.debugDescription)

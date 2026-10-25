@@ -1,3 +1,4 @@
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../../src/renderer/global.css';
@@ -14,6 +15,9 @@ import {
   type NativeAudioOperationResponse,
   type NativeAudioResponse,
 } from '../../src/shared/nativeAudio';
+
+// Interaction selectors use English independently of the host machine's locale.
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en');
 
 const projectPath = '/tmp/composer-draft-project';
 const mentionsFixture = new URLSearchParams(location.search).has('mentions');

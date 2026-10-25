@@ -26,7 +26,7 @@ test('complete handbook covers core domains with actual sources and bilingual ri
     assert.equal(resolveDocSources(page).length, page.sources?.length, page.id + ': saved provenance');
     for (const source of resolveDocSources(page)) {
       assert.match(source.revision, /^[0-9a-f]{40}$/u);
-      if (source.sourceState === 'working-tree') assert.equal(source.url, undefined);
+      if (source.sourceState !== 'committed') assert.equal(source.url, undefined);
       else assert.ok(source.url?.includes(`/blob/${source.revision}/${source.path}`));
     }
     for (const section of page.sections) {

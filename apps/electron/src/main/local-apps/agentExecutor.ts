@@ -54,7 +54,8 @@ function bounded(value: unknown, limit = 512): value is string { return typeof v
 function protocolError(): LocalAppAgentError { return new LocalAppAgentError('executor_protocol', 'The Agent host returned an invalid response.'); }
 function executionErrorMessage(code: string): string {
   const messages: Record<string, string> = {
-    invalid_images: 'The image could not be decoded. Select a valid JPEG, PNG, WebP or GIF image.',
+    invalid_attachments: 'The selected file could not be decoded or is not supported.',
+    attachment_type_unsupported: 'This attachment type is not supported. Choose a text, PDF, JPEG, PNG, WebP or GIF file.',
     invalid_schema: 'The output schema is invalid. Use a valid JSON Schema Draft 7 object.',
     model_unavailable: 'The selected Agent model is unavailable. Review this app in LingXi Apps.',
     model_selection_changed: 'The selected model is blocked by host policy. Choose an available model.',
@@ -70,11 +71,19 @@ function executionErrorMessage(code: string): string {
 }
 function credentialEnvelope(value: Credentials): unknown { return JSON.parse(buildCredentialEnvelope(value)); }
 function publicUsage(value: unknown): LocalAppAgentUsage | undefined {
-  if (!record(value)) return undefined;
+  if (value === undefined) return undefined;
+  if (!record(value)) throw protocolError();
   const result: LocalAppAgentUsage = {};
-  for (const [wire, key] of [['inputTokens', 'inputTokens'], ['outputTokens', 'outputTokens'], ['totalUsd', 'costUsd'], ['apiCalls', 'turns']] as const) {
+  for (const [wire, key] of [['inputTokens', 'inputTokens'], ['outputTokens', 'outputTokens'], ['costUsd', 'costUsd'], ['turns', 'turns']] as const) {
     const count = value[wire];
-    if (typeof count === 'number' && Number.isFinite(count) && count >= 0) result[key] = count;
+    if (count !== undefined) {
+      if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) throw protocolError();
+      result[key] = count;
+    }
+  }
+  if (value.costEstimated !== undefined) {
+    if (typeof value.costEstimated !== 'boolean') throw protocolError();
+    result.costEstimated = value.costEstimated;
   }
   return result;
 }
@@ -162,9 +171,9 @@ export class LocalAppAgentExecutor {
       ...(typeof tool.description === 'string' ? { description: tool.description } : {}) })));
     if (new Set(tools.map(tool => tool.id)).size !== tools.length) throw protocolError();
     return { models: wire.models.map(model => ({ providerId: model.provider_id, modelId: model.request_model, label: model.display_model,
-      canSelect: available.has(model.provider_id), supportsImages: model.capabilities.vision === true,
+      canSelect: available.has(model.provider_id), supportsAttachments: true, supportsVision: model.capabilities.vision === true,
       // Harness validates StructuredOutput as a tool, independent of provider response_format support.
-      supportsStructuredOutput: model.capabilities.tools === true })), tools };
+      supportsStructuredOutput: model.capabilities.tools === true })), tools, skills: [] };
   }
   async execute(execution: LocalAppAgentExecution): Promise<LocalAppAgentExecutorResult> {
     const { owner, runId, authorization, input, signal } = execution;
@@ -181,8 +190,13 @@ export class LocalAppAgentExecutor {
     const mcp = authorization.settings.tools.flatMap(grant => grant.kind === 'mcp'
       ? wire.mcpTools.filter(tool => toolId(tool) === grant.id) : []);
     const mcpConfigs = [...new Set(mcp.map(tool => tool.configIndex))].map(index => wire.mcpConfigs[index]);
-    const cwd = join(this.options.root, 'runs', runId);
+    const taskDirectory = join(this.options.root, 'apps', owner.appId, 'agent', 'tasks', execution.taskStorageId);
+    const cwd = execution.chat?.sessionDirectory ?? taskDirectory;
+    await fs.mkdir(taskDirectory, { recursive: true, mode: 0o700 });
     await fs.mkdir(cwd, { recursive: true, mode: 0o700 });
+    await fs.mkdir(join(this.options.root, 'apps', owner.appId, 'agent', 'assets'), { recursive: true, mode: 0o700 });
+    const requestedSkills = new Set(input.skills ?? []);
+    const releaseFiles = authorization.releaseFiles.filter(file => [...requestedSkills].some(id => file.path.startsWith(`skills/${id}/`)));
     let result: LocalAppAgentExecutorResult | undefined, sequence = 0;
     let lastProgress: string | undefined, lastProgressAt = 0;
     const progress = async (phase: Parameters<LocalAppAgentExecution['emit']>[0]['phase']) => {
@@ -191,13 +205,20 @@ export class LocalAppAgentExecutor {
       lastProgress = phase; lastProgressAt = now;
       await execution.emit({ phase });
     };
-    const start = { type: 'start', protocolVersion: 1, runId, appId: owner.appId, versionId: String(owner.revision), invocationId: owner.invocationId,
+    const start = { type: 'start', protocolVersion: 1, runId, appId: owner.appId, versionId: owner.releaseDigest, invocationId: owner.invocationId,
       cwd, configHome: this.options.configHome, model: `${model.providerId}/${model.modelId}`, providerProfiles: wire.providerProfiles, routing: wire.routing,
       credentials: credentialEnvelope(credentials), mcpConfigs, toolPolicy: {
         builtinTools: authorization.settings.tools.flatMap(grant => grant.kind === 'builtin' ? [grant.name] : []),
         mcpTools: mcp.map(({ serverConfigId, configRevision, rawToolName, definitionFingerprint }) => ({ serverConfigId, configRevision, rawToolName, definitionFingerprint })),
-      }, prompt: input.prompt, images: input.images ?? [], outputSchema: input.outputSchema,
+      }, input: { ...input, contentParts: input.contentParts.map(part => part.kind === 'text'
+        ? { kind: 'text', text: part.text }
+        : { kind: 'attachment', name: part.name, mediaType: part.mediaType, base64: part.base64 }) },
+      ...(execution.chat ? { appChat: execution.chat } : {}),
+      skillSourceDirectory: authorization.releaseSourceDirectory, releaseRevision: authorization.releaseRevision,
+      skillSpecs: authorization.skillSpecs, grantedSkills: authorization.settings.skills, releaseFiles,
+      modelCapabilities: { vision: model.supportsVision, structuredOutput: model.supportsStructuredOutput },
       maxTurns: authorization.settings.maxTurns, timeoutMs: authorization.settings.timeoutMs };
+    await execution.assertAuthorized();
     await this.exchange(start, cwd, signal, async (event, send, childSignal) => {
       if (event.runId !== runId || !Number.isSafeInteger(event.sequence) || event.sequence! <= sequence) throw protocolError();
       sequence = event.sequence!;
@@ -209,13 +230,16 @@ export class LocalAppAgentExecutor {
       } else if (event.type === 'tool_started' || event.type === 'tool_finished') {
         await progress('tool');
       } else if (event.type === 'usage') {
-        // The final snapshot includes authoritative usage after runtime shutdown.
         if (!record(event.usage)) throw protocolError();
+        const usage = publicUsage(event.usage);
+        await execution.emit({ phase: 'thinking', usage });
       }
       else if (event.type === 'progress') {
         const phases = ['starting', 'thinking', 'tool', 'waiting_for_permission', 'waiting_for_answer'] as const;
         if (!phases.includes(event.phase as typeof phases[number])) throw protocolError();
-        await progress(event.phase as typeof phases[number]);
+        const completedModelTurns = event.completedModelTurns;
+        if (completedModelTurns !== undefined && (typeof completedModelTurns !== 'number' || !Number.isSafeInteger(completedModelTurns) || completedModelTurns < 0)) throw protocolError();
+        await execution.emit({ phase: event.phase as typeof phases[number], ...(completedModelTurns === undefined ? {} : { completedModelTurns }) });
       } else if (event.type === 'permission') {
         if (!Number.isSafeInteger(event.requestId) || !bounded(event.toolName)) throw protocolError();
         await progress('waiting_for_permission');
@@ -242,8 +266,13 @@ export class LocalAppAgentExecutor {
         }
         if (event.text !== undefined && typeof event.text !== 'string') throw protocolError();
         if (input.outputSchema && event.result === undefined) throw new LocalAppAgentError('invalid_result', 'The Agent did not produce a validated structured result.');
-        result = { result: { ...(typeof event.text === 'string' ? { text: event.text } : {}), ...(event.result === undefined ? {} : { output: event.result }) },
-          ...(record(event.usage) ? { usage: publicUsage(event.usage) } : {}) };
+        if (input.outputSchema && event.result === null) throw new LocalAppAgentError('structured_output_not_representable', 'The structured result cannot be represented as an AG-UI run result.');
+        if (typeof event.messageId !== 'string' || !bounded(event.messageId, 256)
+          || (execution.chat && event.chatId !== execution.chat.chatId)) throw protocolError();
+        const usage = publicUsage(event.usage);
+        result = { result: { text: typeof event.text === 'string' ? event.text : '', attachments: [], messageId: event.messageId,
+          ...(execution.chat ? { chatId: execution.chat.chatId } : {}), ...(event.result === undefined || event.result === null ? {} : { output: event.result }) },
+          ...(usage === undefined ? {} : { usage }) };
         return true;
       } else throw protocolError();
       return false;

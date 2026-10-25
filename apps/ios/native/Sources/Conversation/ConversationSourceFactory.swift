@@ -31,6 +31,7 @@ enum ConversationSourceFactory {
         var defaultModelID: String? = nil
         var visionDelegationEnabled: Bool = true
         var mobileLinux: TerminalRuntimeConfig? = nil
+        var projectMountGrants: [String] = []
     }
 
     static func make(
@@ -42,7 +43,8 @@ enum ConversationSourceFactory {
         providerRoutingJson: String? = nil,
         defaultModelID: String? = nil,
         visionDelegationEnabled: Bool = true,
-        mobileLinux: TerminalRuntimeConfig? = nil
+        mobileLinux: TerminalRuntimeConfig? = nil,
+        projectMountGrants: [String] = []
     ) -> any ConversationSource {
         make(options: LaunchOptions(
             projectCwd: projectCwd,
@@ -53,7 +55,8 @@ enum ConversationSourceFactory {
             providerRoutingJson: providerRoutingJson,
             defaultModelID: defaultModelID,
             visionDelegationEnabled: visionDelegationEnabled,
-            mobileLinux: mobileLinux))
+            mobileLinux: mobileLinux,
+            projectMountGrants: projectMountGrants))
     }
 
     static func make(options: LaunchOptions = .init()) -> any ConversationSource {
@@ -107,7 +110,8 @@ enum ConversationSourceFactory {
                     providerProfilesJson: options.providerProfilesJson,
                     providerRoutingJson: options.providerRoutingJson,
                     visionDelegationEnabled: options.visionDelegationEnabled,
-                    mobileLinux: options.mobileLinux)
+                    mobileLinux: options.mobileLinux,
+                    projectMountGrants: options.projectMountGrants)
                 config.additionalWorkspaceDirectories = options.additionalWorkspaceDirectories
                 let source = EngineConversationSource(config: config)
                 source.model.providerConfigured = options.providerConfigured

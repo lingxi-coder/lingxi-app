@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { constants as fsConstants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -514,10 +514,11 @@ function copyPackagedApp(appPath, tempRoot) {
   mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
   const destination = join(tempRoot, `${APP_NAME}.app`);
   cpSync(appPath, destination, {
+    // APFS can isolate the test copy without allocating another full app bundle.
+    mode: constants.COPYFILE_FICLONE,
     dereference: false,
     errorOnExist: true,
     force: false,
-    mode: fsConstants.COPYFILE_FICLONE,
     preserveTimestamps: true,
     recursive: true,
     verbatimSymlinks: true,
@@ -884,7 +885,7 @@ async function assertDesktopGit(page, workspace, tempRoot) {
     const warning = document.querySelector('.git-branch-warning');
     return current?.textContent.includes('desktop-review-smoke')
       && current?.textContent.includes('Current')
-      && warning?.textContent.includes('1 file has changes');
+      && warning?.textContent.includes('Changed files: 1.');
   })()`), { label: 'current branch and uncommitted change warning' });
   const environmentScreenshot = await page.send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(tmpdir(), 'lingxi-git-environment-packaged.png'), Buffer.from(environmentScreenshot.data, 'base64'));
@@ -1017,18 +1018,162 @@ async function assertCustomProviderRequest(page, probe, sessionId) {
   assert.equal(JSON.stringify(diagnostics).includes(probe.key), false);
 }
 
-async function assertPackagedLocalApps(page, probe, sessionId, cdpPort) {
+export function assertPackagedLocalAppAuthoring(app, sourceSession) {
+  assert(app && typeof app.id === 'string' && app.id.length > 0, 'the published app must have a stable native id');
+  const authoring = app.authoring;
+  assert(authoring && typeof authoring === 'object', 'new Local App publication must persist its host-verified authoring binding');
+  assert.equal(typeof authoring.workspaceId, 'string');
+  assert(authoring.workspaceId.length > 0, 'authoring workspace identity must be stable');
+  assert.equal(authoring.sourceDirectory, sourceSession.projectPath, 'authoring source must be the dedicated app Project cwd');
+  assert.deepEqual(authoring.projectRef, { kind: 'desktopPath', path: sourceSession.projectPath }, 'Desktop project identity must point to the dedicated source Project');
+  assert.equal(authoring.authoringSessionId, sourceSession.sessionId, 'authoring must bind the real Code session that created the app');
+  assert.equal(sourceSession.mode, 'code', 'Local App authoring must use a Code session');
+  if (authoring.appId !== undefined) assert.equal(authoring.appId, app.id, 'authoring binding must be owned by the published app');
+}
+
+export function assertPackagedLocalAppPendingAuthoring(index, sourceSession) {
+  assert(index && typeof index === 'object' && index.version === 1 && Array.isArray(index.entries),
+    'Native Create must persist the host-owned pending authoring index');
+  const matches = index.entries.filter(entry => entry?.authoring?.authoringSessionId === sourceSession.sessionId);
+  assert.equal(matches.length, 1, 'Native Create must persist exactly one pending binding for its Code session');
+  const entry = matches[0];
+  assert.equal(entry.state, 'pending', 'the pending binding must remain unconsumed before first publish');
+  const authoring = entry.authoring;
+  assert.equal(typeof authoring.workspaceId, 'string');
+  assert(authoring.workspaceId.length > 0, 'pending authoring must have a stable workspace identity');
+  assert.equal(authoring.sourceDirectory, sourceSession.projectPath, 'pending sourceDirectory must match the native Project');
+  assert.deepEqual(authoring.projectRef, { kind: 'desktopPath', path: sourceSession.projectPath }, 'pending projectRef must match the native Project');
+  assert.equal(authoring.authoringSessionId, sourceSession.sessionId, 'pending authoring must identify the real Code session');
+  assert.equal(authoring.appId, undefined, 'a new pending binding cannot already belong to a published app');
+  assert.equal(typeof entry.registeredAtMs, 'number');
+  return authoring;
+}
+
+export function assertPackagedLocalAppCatalogSession(catalog, sourceSession) {
+  assert(catalog && Array.isArray(catalog.sessions), 'the published Code session must be present in the persisted catalog');
+  const row = catalog.sessions.find(session => session?.uuid === sourceSession.sessionId);
+  assert(row, 'the first prompt must persist the authoring session before publication is accepted');
+  assert.equal(row.mode, 'code', 'the persisted authoring session must be a Code session');
+  // HostController deliberately removes the private engine cwd from this
+  // renderer DTO. Publication revalidates it in the trusted host; the complete
+  // AuthoringRef is checked separately against this exact source Project.
+  assert.equal('workspace_path' in row, false, 'the public catalog must not expose private engine workspace paths');
+  return row;
+}
+
+export async function enterPackagedProjectName(page, projectName) {
+  const selector = '[aria-label="Project name"]';
+  await waitFor(() => evaluate(page, `(() => {
+    const input = document.querySelector(${JSON.stringify(selector)});
+    return Boolean(input && !input.disabled && !input.readOnly);
+  })()`), { label: 'editable native Local App Project name input' });
+  await evaluate(page, `document.querySelector(${JSON.stringify(selector)}).focus()`);
+  await waitFor(() => evaluate(page, `document.activeElement === document.querySelector(${JSON.stringify(selector)})`),
+    { label: 'focused native Local App Project name input' });
+  await page.send('Input.insertText', { text: projectName });
+  const enteredValue = await waitFor(() => evaluate(page, `(() => {
+    const input = document.querySelector(${JSON.stringify(selector)});
+    return input?.value === ${JSON.stringify(projectName)} && !document.querySelector('.create-project-submit')?.disabled
+      ? input.value : undefined;
+  })()`), { label: 'React Project name input update' });
+  assert.equal(enteredValue, projectName, 'native Project name must be entered through the renderer input');
+}
+
+async function createPackagedLocalAppSourceSession(page, creatorSessionId, configHome) {
+  const creator = await evaluate(page, 'window.lingxi.bootstrap().then(state => state.activeSession)');
+  assert.equal(creator?.sessionId, creatorSessionId, 'the ordinary custom-provider chat must remain the creator chat');
+  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library-header button'))`), { label: 'open Apps before Local App creation' });
+  await evaluate(page, `document.querySelector('.local-app-library-header button').click()`);
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('[aria-label="Project name"]'))`), { label: 'native Local App source Project dialog' });
+  const projectName = `Packaged Local App Source ${process.pid}`;
+  await enterPackagedProjectName(page, projectName);
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.create-project-submit:not(:disabled)'))`), { label: 'native Local App source Project is ready to create' });
+  await evaluate(page, `document.querySelector('.create-project-submit').click()`);
+  const sourceSession = await waitFor(async () => {
+    const state = await evaluate(page, 'window.lingxi.bootstrap()');
+    const active = state.activeSession;
+    if (!active || active.sessionId === creatorSessionId || !active.projectPath || active.projectPath === creator.projectPath
+      || state.connection?.status !== 'connected' || !state.settings.projects.includes(active.projectPath)) return undefined;
+    const prompt = await evaluate(page, `document.querySelector('[aria-label="Prompt"]')?.innerText ?? ''`);
+    if (!prompt.includes('创建一个本地应用')) return undefined;
+    return { projectPath: active.projectPath, sessionId: active.sessionId, mode: 'code',
+      projectRegistered: state.settings.projects.includes(active.projectPath) };
+  }, { label: 'native Local App source Code session, connected runtime and initial composer draft' });
+  assert.notEqual(sourceSession.projectPath, creator.projectPath, 'Local App creation must leave the ordinary creator workspace');
+  assert.equal(sourceSession.projectRegistered, true, 'the dedicated source Project must be registered in Desktop');
+  assert.equal(sourceSession.mode, 'code', 'the source chat must be a real Code session');
+  const pendingPath = join(configHome, 'local-apps', 'v2', 'authoring-pending.v1.json');
+  const pendingIndex = await waitFor(() => {
+    try {
+      const index = JSON.parse(readFileSync(pendingPath, 'utf8'));
+      return index?.entries?.some(entry => entry?.authoring?.authoringSessionId === sourceSession.sessionId) ? index : undefined;
+    } catch { return undefined; }
+  }, { label: 'Native Create host-persisted pending AuthoringRef' });
+  assertPackagedLocalAppPendingAuthoring(pendingIndex, sourceSession);
+  return sourceSession;
+}
+
+async function assertColdSessionOpen(page, sessionId) {
+  const before = await evaluate(page, 'window.lingxi.bootstrap()');
+  assert.equal(before.runtimes.some(runtime => runtime.sessionId === sessionId), false,
+    'the saved session must have no live runtime before its first open');
+  const result = await evaluate(page, `(async () => {
+    const id = ${JSON.stringify(sessionId)};
+    const events = [], commands = [];
+    let connected = false;
+    const offEvent = window.lingxi.onEvent(envelope => {
+      if (envelope.sessionId === id) events.push(envelope.event);
+    });
+    const offState = window.lingxi.onConnectionStateChanged(envelope => {
+      if (connected || envelope.sessionId !== id || envelope.event.status !== 'connected') return;
+      connected = true;
+      for (const type of ['list_models', 'get_conversation_controls', 'task_list', 'list_session_agents']) {
+        commands.push(window.lingxi.command(id, {type}).then(() => ({type}), error => ({type, error: String(error)})));
+      }
+    });
+    try {
+      const opened = await window.lingxi.openSession(${JSON.stringify(before.workspace.path)}, id);
+      return {connected, events, commands: await Promise.all(commands), active: opened.activeSession?.sessionId,
+        remoteStatus: await window.lingxi.remoteControl.status(), remoteSessions: await window.lingxi.remoteControl.sessions()};
+    } finally { offEvent(); offState(); }
+  })()`);
+  assert.equal(result.connected, true, 'the cold runtime must publish connected');
+  assert.equal(result.active, sessionId);
+  assert.equal(result.commands.length, 4, 'metadata must be requested at the handshake, before owned resume completes');
+  assert.deepEqual(result.commands.filter(command => command.error), [], 'connected-time metadata must wait instead of reporting a resume error');
+  assert(result.events.some(event => event.type === 'session_resumed' && event.session_id === sessionId && event.messages.length > 0),
+    'the exact saved session must restore its persisted transcript');
+  assert(result.events.some(event => event.type === 'model_changed'), 'the saved model must be restored');
+  assert.equal(typeof result.remoteStatus.enabled, 'boolean', 'the packaged Remote Control status IPC must remain available');
+  assert(Array.isArray(result.remoteSessions.sessions), 'the packaged Remote Control sessions IPC must remain available');
+  await page.send('Page.reload', { ignoreCache: true });
+  await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open saved transcript rendered' });
+  assert.equal(await evaluate(page, `document.body.innerText.includes('This chat is being resumed')`), false,
+    'the cold-open renderer must not show the original error');
+  log('cold saved session: handshake-time metadata, transcript/model restore, renderer and Remote Control IPC passed');
+}
+
+async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, configHome) {
+  const sourceSession = await createPackagedLocalAppSourceSession(page, creatorSessionId, configHome);
+  const sessionId = sourceSession.sessionId;
   await setupSmokeCollectors(page, sessionId);
+  await evaluate(page, `window.lingxi.command(${JSON.stringify(sessionId)}, {type:'set_model',model:${JSON.stringify(`${probe.providerId}/smoke-model`)}})`);
   await evaluate(page, `window.lingxi.command(${JSON.stringify(sessionId)}, {type:'set_permission_mode',mode:'bypassPermissions'})`);
   await evaluate(page, `window.lingxi.sendPrompt(${JSON.stringify(sessionId)}, 'LOCAL_APP_PACKAGED_SMOKE: Create a simple local app using LocalApp.')`);
   await waitFor(() => evaluate(page, `window.__lingxiSmoke.events.some(e => e.type === 'turn_ended')`), { label: 'packaged LocalApp tool turn' });
+  const sourceCatalog = await waitFor(async () => {
+    const catalog = await evaluate(page, `window.lingxi.listProjectSessions(${JSON.stringify(sourceSession.projectPath)}, 'current')`);
+    return catalog.sessions?.some(row => row.uuid === sessionId) ? catalog : undefined;
+  }, { label: 'post-prompt persisted authoring Code session' });
+  assertPackagedLocalAppCatalogSession(sourceCatalog, sourceSession);
   const apps = await evaluate(page, 'window.lingxi.localApps.list()');
   const created = apps.find(app => app.name === 'Packaged Local App');
   assert(created, 'the real packaged model dispatcher must publish into the Desktop library');
   const preparation = probe.requests.flatMap(request => JSON.parse(request.body).messages ?? []).find(message => message.tool_call_id === 'local-app-preparation');
   assert(preparation, 'a real Bash preparation must precede the publication card');
   assert.match(typeof preparation.content === 'string' ? preparation.content : JSON.stringify(preparation.content), /LocalApp package check/, 'packaged Bash preparation must actually execute successfully');
-  assert.equal(created.sourceSession.sessionId, sessionId);
+  assertPackagedLocalAppAuthoring(created, sourceSession);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-chat-card button'))`), { label: 'LocalApp chat result card' });
   await evaluate(page, `document.querySelector('.local-app-chat-card button').click()`);
   const target = await waitFor(async () => (await fetchJson(`http://127.0.0.1:${cdpPort}/json/list`)).find(target => target.url.startsWith(`lingxi-app://${created.id}/`)), { label: 'independent packaged LocalApp window' });
@@ -1048,16 +1193,18 @@ async function assertPackagedLocalApps(page, probe, sessionId, cdpPort) {
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat')?.click()`);
   const otherSession = await waitFor(async () => {
     const current = await evaluate(page, 'window.lingxi.bootstrap()');
-    return current.activeSession?.sessionId !== sessionId && current.activeSession?.sessionId;
+    return current.activeSession?.projectPath === sourceSession.projectPath
+      && current.activeSession?.sessionId !== sessionId && current.activeSession?.sessionId;
   }, { label: 'second chat for LocalApp modification' });
+  assert.notEqual(otherSession, sessionId, 'the pre-Modify chat must differ from the saved authoring session');
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Apps')?.click()`);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'packaged Apps library' });
   await evaluate(page, `Array.from(document.querySelectorAll('.local-app-tile button')).find(button => button.textContent.trim() === 'Continue developing')?.click()`);
-  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the authoring session, transcript and app draft' });
+  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the dedicated authoring Code session, transcript and app draft' });
   // These fixture sessions are not persisted in the sidebar catalog. Navigate
   // through the real New chat action and verify the composer follows that chat.
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat')?.click()`);
-  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'new unrelated chat has its own transcript and draft' });
+  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'new unrelated source-project chat has its own transcript and draft' });
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Apps')?.click()`);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'return to application library' });
   const screenshot = await page.send('Page.captureScreenshot', { format: 'png' });
@@ -1254,6 +1401,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   let child;
   let output = { stdout: '', stderr: '' };
   let customProbe;
+  let coldSession;
   let scheduledRecords;
   const consoleErrors = [];
   const runtimeExceptions = [];
@@ -1293,7 +1441,16 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
 
     log('checking credential and scheduled-task persistence');
     customProbe = await customProviderProbe();
-    await prepareCustomProvider(page, customProbe);
+    coldSession = await prepareCustomProvider(page, customProbe);
+    // Provider routes are assembled when the sidecar boots. This turn is now
+    // exercised before the full app restart, so first load the saved route.
+    await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(coldSession)})`);
+    await assertCustomProviderRequest(page, customProbe, coldSession);
+    // Commit another foreground session so that only that session is restored
+    // at relaunch. The earlier saved UUID must then take the true cold-open path.
+    const otherSession = await prepareCustomProvider(page, customProbe, true);
+    assert.notEqual(otherSession, coldSession);
+    await assertCustomProviderRequest(page, customProbe, otherSession);
     scheduledRecords = await assertScheduledPersistenceBeforeRestart(page, `${customProbe.providerId}/smoke-model`);
 
     assertNoRendererErrors();
@@ -1316,9 +1473,10 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     await monitorRenderer(page);
     await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'restarted custom provider app' });
     await assertScheduledPersistenceAfterRestart(page, scheduledRecords);
+    await assertColdSessionOpen(page, coldSession);
     const customSession = await prepareCustomProvider(page, customProbe, true);
     await assertCustomProviderRequest(page, customProbe, customSession);
-    await assertPackagedLocalApps(page, customProbe, customSession, cdpPort);
+    await assertPackagedLocalApps(page, customProbe, customSession, cdpPort, join(tempHome, '.lingxi'));
     await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(customProbe.providerId)})`);
     const cleared = await evaluate(page, `window.lingxi.providerCredentials(${JSON.stringify(customProbe.providerId)})`);
     assert.equal(cleared.find((entry) => entry.providerId === customProbe.providerId)?.configured, false);

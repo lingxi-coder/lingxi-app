@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -65,6 +65,17 @@ test('the Flare macOS wrapper pins the iOS team and isolated development identif
   assert.match(help, /--no-register/);
   assert.match(help, /--output-root DIR/);
   assert.match(help, /LINGXI_MAC_AUDIO_PROVISIONING_PROFILE/);
+  assert.match(help, /LINGXI_BRIDGE_SERVER_BIN/);
+});
+
+test('Flare wrapper rejects invalid explicit bridge paths before signing', () => {
+  for (const bridge of ['relative/bridge-server', '/does-not-exist/bridge-server']) {
+    const result = spawnSync('/bin/bash', [join(electronRoot, 'scripts', 'package-macos-flare.sh')], {
+      encoding: 'utf8', env: { ...process.env, LINGXI_BRIDGE_SERVER_BIN: bridge },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /LINGXI_BRIDGE_SERVER_BIN must be/);
+  }
 });
 
 test('Flare wrapper parses and prints an explicit isolated output root', () => {

@@ -1,0 +1,61 @@
+{
+  "status": "passed",
+  "runAtUtc": "2026-10-25T05:50:54.063Z",
+  "chromeVersion": "Google Chrome for Testing 156.0.8078.4",
+  "requestedDeviceScaleFactor": 2,
+  "profile": "new temporary profile; no personal browser profile or account",
+  "nativeRegistration": "inside temporary profile only",
+  "extension": "canonical unpacked source, without instrumentation",
+  "nativeRelaySha256": "83c082f13f2d0bed24ab99d68a461773d583c47ab1602435517f8a1857601ae5",
+  "sourceSha256": {
+    "apps/electron/src/main/browserIntegration.ts": "e1359eaea3d318e10e53ec2ceecfc3cc39e4fb70eb89e805586e5f422d364599",
+    "apps/electron/browser-extension/worker.js": "ecec21ff36c54d2b901321d65c8fab3d30edf73bdb342ecfec6c0a59ce049744",
+    "apps/electron/browser-extension/policy.js": "e12fd415501e605920e6fc9f6d0edcf85b2f849454060654d238a60be8bfc128",
+    "apps/electron/browser-extension/manifest.json": "38562ab4da5530c0aa74562216fab5e73711c541ff384df68c0bd2dc4fd05798",
+    "apps/bridge-server/src/browser_native_host.rs": "5183e4f86769896279bf04ca2f1e789cc6a78ff2101d669b05130f1da869f207",
+    "apps/electron/scripts/browser-real-acceptance.mjs": "e5bb002a3b1135e78912af817457b80c361dfe01919ac1a9a568919de7889683"
+  },
+  "checks": [
+    "real_native_handshake",
+    "ask_before_navigation",
+    "approved_navigation",
+    "actual_page_screenshot_and_css_viewport",
+    "actual_click_and_type_with_image_to_css_mapping",
+    "explicit_site_deny",
+    "cross_origin_redirect_blocked_before_destination",
+    "nested_cross_site_iframe_loaded",
+    "nested_cross_site_iframe_navigation_denied_before_destination",
+    "revocation_blocks_input",
+    "native_connection_removal"
+  ],
+  "signedPackageAcceptance": false,
+  "alignmentScope": "LingXi adapter behavior against the Claude Code 2.1.310 reference; not full Anthropic extension protocol equality",
+  "limitations": [
+    "Downloads requested through LingXi are bounded same-origin downloads; autonomous website blob/data downloads are not controlled browser-wide.",
+    "This acceptance uses a real Chrome extension and native relay, not a signed Desktop package."
+  ],
+  "screenshot": {
+    "bytes": 831,
+    "sha256": "6cc51f7f84792438cf46108a97b5cc12e2952f2f85e5faa57dd08e86d5dda374",
+    "imageWidth": 970,
+    "imageHeight": 112,
+    "viewport": {
+      "width": 485,
+      "height": 56,
+      "offsetX": 0,
+      "offsetY": 0,
+      "pageX": 0,
+      "pageY": 0,
+      "scale": 1
+    }
+  },
+  "finishedAtUtc": "2026-10-25T05:51:04.414Z",
+  "cleanup": {
+    "profileRemoved": true,
+    "nativeManifestRemoved": true
+  },
+  "browserStderr": {
+    "bytes": 1983,
+    "sha256": "2be15d82975376596b8788a8bd0b850822b08574c7978aeaf18467062738605b"
+  }
+}

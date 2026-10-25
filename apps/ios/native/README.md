@@ -10,7 +10,7 @@ mock data (later milestones).
 
 ## Requirements
 
-- macOS with Xcode 16+ (iOS 18.0 SDK or newer)
+- macOS with Xcode 27+ (iOS 27 SDK or newer; the app deployment target is iOS 26.0)
 - Python 3.11+ for staging test fixtures. The test build selects an installed
   interpreter with `tomllib`; set `LINGXI_PYTHON3` to override its path.
 - [XcodeGen](https://github.com/yonyz/XcodeGen): `brew install xcodegen`
@@ -126,7 +126,7 @@ artifacts before changing the typed adapter to match an older API.
 | `Sources/Drawer` | `Drawer` (workspace pills, chats/projects/crons, knowledge/memory, account) |
 | `Sources/Settings` | Settings sheet host + every page (LLM/search/fetch providers, voice, skills, MCP, dream, appearance, language, etc.) |
 | `Sources/Voice` | Unified Voice preferences/capabilities, Flow, Sherpa STT/TTS bridge, model store, and playback |
-| `Sources/Theme/LocalizationManager.swift` | Persisted app-language override (follow-system default) + the `Bundle` swizzle that makes `String(localized:)`/`Text` re-resolve without a relaunch |
+| `Sources/Theme/LocalizationManager.swift` | Persisted app-language override (follow-system default), selected-language `String(localized:)` lookup, and main-bundle swizzle for immediate language changes |
 
 ### Localization
 

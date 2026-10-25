@@ -1,7 +1,9 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { availableRustdocManifest } from './scripts/rustdoc-availability';
 
 function compilerDocumentation(): Plugin {
@@ -26,4 +28,29 @@ function compilerDocumentation(): Plugin {
   };
 }
 
-export default defineConfig({ plugins: [react(), compilerDocumentation()] });
+const webRoot = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(webRoot, '../..');
+const bridgeClient = path.join(repoRoot, 'packages/bridge-client/src');
+const electronSrc = path.join(repoRoot, 'apps/electron/src');
+const { version } = JSON.parse(readFileSync(path.join(webRoot, 'package.json'), 'utf8')) as { version: string };
+
+// Remote Control reuses code that lives next to the other clients; `tsconfig.json` has the same map for the
+// type checker, and `test/remoteImports.test.ts` checks that nothing reached through it needs a package this
+// app does not declare. The bare `@lingxi/bridge-client` is the types-only `protocol.ts` rather than the
+// package root: the root re-exports `client.ts` (`ws`, `node:events`) and `lockfile.ts` (`node:fs`, `node:os`),
+// which a browser bundle can neither resolve nor run.
+const sharedSources = [
+  { find: /^@lingxi\/bridge-client\/remote$/u, replacement: path.join(bridgeClient, 'remote.ts') },
+  { find: /^@lingxi\/bridge-client\/toolview$/u, replacement: path.join(bridgeClient, 'toolview.ts') },
+  { find: /^@lingxi\/bridge-client\/protocol$/u, replacement: path.join(bridgeClient, 'protocol.ts') },
+  { find: /^@lingxi\/bridge-client$/u, replacement: path.join(bridgeClient, 'protocol.ts') },
+  { find: /^@lingxi\/electron\//u, replacement: `${electronSrc}/` },
+];
+
+export default defineConfig({
+  plugins: [react(), compilerDocumentation()],
+  resolve: { alias: sharedSources },
+  define: { __LINGXI_WEB_VERSION__: JSON.stringify(version) },
+  // The dev server only serves files under the app by default; the shared sources are two directories up.
+  server: { fs: { allow: [repoRoot] } },
+});

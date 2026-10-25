@@ -26,7 +26,8 @@ class UnifiedLocalAppRootfsRepairTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val apps = UnifiedLocalApps.get(context)
         val mode = LinuxRuntimeMode.MobileLinux
-        val source = apps.hostFile("/home/lingxi/.lingxi/.apps/repair-acceptance-${UUID.randomUUID()}")
+        val directories = com.lingxi.code.project.MobileUserStorage.directories(context)
+        val source = apps.hostFile(directories.appsGuestPath.trimEnd('/') + "/repair-acceptance-${UUID.randomUUID()}")
         check(File(context.filesDir, "local-app-acceptance-fixtures/python").copyRecursively(source))
         val sourceBytes = File(source, "server.py").readBytes()
         val value = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
@@ -42,7 +43,7 @@ class UnifiedLocalAppRootfsRepairTest {
         val originalManifest = manifest.readBytes()
         val staged = File(managed, "staged/${LinuxRuntimeBridge.configForWorkspace(context, mode).rootfsVersion}")
         check(!staged.exists()) { "Use an activated rootfs without a pending staged repair" }
-        val sentinel = apps.hostFile("/home/lingxi/.local-app-repair-sentinel-${UUID.randomUUID()}")
+        val sentinel = apps.hostFile(directories.guestHome.trimEnd('/') + "/.local-app-repair-sentinel-${UUID.randomUUID()}")
         sentinel.writeText("persistent-home")
         NativeAppActivityHost(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
             try {

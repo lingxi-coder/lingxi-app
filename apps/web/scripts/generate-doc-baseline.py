@@ -33,6 +33,12 @@ def source_revision(repo: Path, paths: list[str]) -> str:
     return revision or head
 
 
+def revision_published(repo: Path, revision: str) -> bool:
+    """Use locally known origin branches without fetching or guessing from HEAD."""
+    refs = git(repo, 'for-each-ref', '--format=%(refname)', '--contains=' + revision, 'refs/remotes/origin/').decode().splitlines()
+    return any(ref != 'refs/remotes/origin/HEAD' for ref in refs)
+
+
 def product_pins(workspace: Path) -> dict[str, str]:
     manifest = tomllib.loads((workspace / 'lingxi-app/Cargo.toml').read_text())
     result = {}
@@ -85,11 +91,15 @@ def build(workspace: Path, pages: list[dict]) -> dict:
         page_sources[page['id']] = refs
     product_root = workspace / REPOSITORIES[0]
     metadata[REPOSITORIES[0]]['revision'] = source_revision(product_root, sorted(inputs[REPOSITORIES[0]]))
+    for repo, record in metadata.items():
+        record['published'] = revision_published(workspace / repo, record['revision'])
     for refs in page_sources.values():
         for ref in refs:
             repo = ref['repo']
             revision = metadata[repo]['revision']
             ref['revision'] = revision
+            if ref['sourceState'] == 'committed' and not metadata[repo]['published']:
+                ref['sourceState'] = 'unpublished'
             if ref['sourceState'] == 'committed':
                 from urllib.parse import quote
                 ref['url'] = f'{metadata[repo]["sourceUrl"]}/blob/{revision}/{quote(ref["path"], safe="/")}'

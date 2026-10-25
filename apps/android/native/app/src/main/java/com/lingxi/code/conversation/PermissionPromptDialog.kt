@@ -1,9 +1,11 @@
 package com.lingxi.code.conversation
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -14,26 +16,23 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -49,7 +48,7 @@ import com.lingxi.code.components.UiTags
  * request mapping and approve/deny callbacks are unchanged; this surface keeps
  * the requested details readable and the one-time approval visually primary.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun PermissionPromptDialog(
     state: PermissionPromptState?,
@@ -73,6 +72,7 @@ fun PermissionPromptDialog(
         !state.suppressAlwaysAllowRule -> stringResource(R.string.permission_prompt_rule_risk)
         else -> stringResource(R.string.permission_prompt_once_risk)
     }
+    val riskColor = if (colors.surface.luminance() < 0.5f) Color(0xFFFF9F66) else Color(0xFFC74300)
     val sheetState = rememberModalBottomSheetState(
         skipPartiallyExpanded = true,
         confirmValueChange = { target -> target != SheetValue.Hidden },
@@ -82,157 +82,150 @@ fun PermissionPromptDialog(
         modifier = modifier.testTag(UiTags.PERMISSION_PROMPT),
         onDismissRequest = {},
         sheetState = sheetState,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = colors.surface,
     ) {
-        Column(
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 24.dp),
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, colors.outlineVariant),
+            color = colors.surface,
+            modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 24.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    modifier = Modifier.size(40.dp),
-                    shape = CircleShape,
-                    color = colors.primaryContainer,
-                ) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+                    .padding(vertical = 22.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Rounded.Security,
                         contentDescription = null,
-                        tint = colors.onPrimaryContainer,
-                        modifier = Modifier.padding(9.dp),
+                        tint = if (isBypass) riskColor else colors.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Text(
+                        text = stringResource(if (isBypass) R.string.permission_elevated_risk else R.string.permission_request_title),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (isBypass) riskColor else colors.onSurfaceVariant,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(start = 10.dp),
                     )
                 }
+
                 Text(
-                    text = stringResource(R.string.permission_request_title),
+                    text = state.title,
                     style = MaterialTheme.typography.titleMedium,
-                    color = colors.onSurface,
                     fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f).padding(start = 12.dp),
+                    color = colors.onSurface,
                 )
-                IconButton(onClick = { onDeny(state.requestId) }) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = stringResource(R.string.permission_deny),
-                        tint = colors.onSurfaceVariant,
-                    )
-                }
-            }
+                Text(
+                    text = summary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant,
+                )
 
-            Text(
-                text = state.title,
-                style = MaterialTheme.typography.headlineSmall,
-                color = colors.onSurface,
-            )
-            Text(
-                text = summary,
-                style = MaterialTheme.typography.bodyMedium,
-                color = colors.onSurfaceVariant,
-            )
-
-            Column(
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
-            ) {
-                state.worker?.let { worker ->
-                    val dot = runCatching { Color(android.graphics.Color.parseColor(worker.color)) }
-                        .getOrDefault(colors.onSurfaceVariant)
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Surface(
-                            modifier = Modifier.size(7.dp),
-                            shape = CircleShape,
-                            color = dot,
-                            content = {},
-                        )
-                        Text(
-                            text = if (worker.team != null) "${worker.name} · ${worker.team}" else worker.name,
-                            color = dot,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                }
-
-                if (state.isPlan && state.detail.isNotBlank()) {
-                    PlanDocumentCard(state.detail, writing = false)
-                } else if (state.detail.isNotEmpty()) {
-                    Surface(
-                        modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp),
-                        shape = RoundedCornerShape(14.dp),
-                        color = colors.surfaceContainerHighest,
-                    ) {
-                        SelectionContainer {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f, fill = false).heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+                ) {
+                    state.worker?.let { worker ->
+                        val dot = runCatching { Color(android.graphics.Color.parseColor(worker.color)) }
+                            .getOrDefault(colors.onSurfaceVariant)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Surface(
+                                modifier = Modifier.size(7.dp),
+                                shape = CircleShape,
+                                color = dot,
+                                content = {},
+                            )
                             Text(
-                                text = state.detail,
-                                color = colors.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontFamily = FontFamily.Monospace,
-                                modifier = Modifier
-                                    .verticalScroll(rememberScrollState())
-                                    .padding(16.dp),
+                                text = if (worker.team != null) "${worker.name} · ${worker.team}" else worker.name,
+                                color = dot,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
                             )
                         }
                     }
+
+                    if (state.isPlan && state.detail.isNotBlank()) {
+                        PlanDocumentCard(state.detail, writing = false)
+                    } else if (state.detail.isNotEmpty()) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            color = colors.surfaceContainerHighest,
+                        ) {
+                            SelectionContainer {
+                                Text(
+                                    text = state.detail,
+                                    color = colors.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier
+                                        .verticalScroll(rememberScrollState())
+                                        .padding(16.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = riskCopy,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurfaceVariant,
+                    )
                 }
 
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (isBypass) colors.errorContainer else colors.surfaceContainerHigh,
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.Top,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.padding(12.dp),
+                if (!state.suppressAlwaysAllowRule && state.autoModePrompt == null) {
+                    OutlinedButton(
+                        onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ALWAYS) },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(UiTags.PERMISSION_ALLOW_ALWAYS),
+                        shape = CircleShape,
+                        border = BorderStroke(1.dp, colors.outlineVariant),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.onSurface),
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Info,
-                            contentDescription = null,
-                            tint = if (isBypass) colors.onErrorContainer else colors.onSurfaceVariant,
-                            modifier = Modifier.size(17.dp),
-                        )
-                        Text(
-                            text = riskCopy,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (isBypass) colors.onErrorContainer else colors.onSurfaceVariant,
-                        )
+                        Text(stringResource(R.string.permission_allow_always))
                     }
                 }
-            }
+                if (!state.suppressAlwaysAllowRule && state.autoModePrompt != null) {
+                    OutlinedButton(
+                        onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_AUTO) },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(UiTags.PERMISSION_ALLOW_AUTO),
+                        shape = CircleShape,
+                        border = BorderStroke(1.dp, colors.outlineVariant),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.onSurface),
+                    ) {
+                        Text(autoModeApprovalLabel(state.autoModePrompt))
+                    }
+                }
 
-            if (!state.suppressAlwaysAllowRule && state.autoModePrompt == null) {
-                OutlinedButton(
-                    onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ALWAYS) },
-                    modifier = Modifier.fillMaxWidth().testTag(UiTags.PERMISSION_ALLOW_ALWAYS),
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text(stringResource(R.string.permission_allow_always))
-                }
-            }
-            if (!state.suppressAlwaysAllowRule && state.autoModePrompt != null) {
-                OutlinedButton(
-                    onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_AUTO) },
-                    modifier = Modifier.fillMaxWidth().testTag(UiTags.PERMISSION_ALLOW_AUTO),
-                ) {
-                    Text(autoModeApprovalLabel(state.autoModePrompt))
-                }
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(
-                    onClick = { onDeny(state.requestId) },
-                    modifier = Modifier.testTag(UiTags.PERMISSION_DENY),
-                    colors = ButtonDefaults.textButtonColors(contentColor = colors.error),
-                ) {
-                    Text(stringResource(R.string.permission_deny))
-                }
-                Spacer(Modifier.weight(1f))
-                Button(
-                    onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ONCE) },
-                    modifier = Modifier.testTag(UiTags.PERMISSION_ALLOW_ONCE),
-                ) {
-                    Text(stringResource(R.string.permission_allow_once))
+                    OutlinedButton(
+                        onClick = { onDeny(state.requestId) },
+                        modifier = Modifier.heightIn(min = 48.dp).testTag(UiTags.PERMISSION_DENY),
+                        shape = CircleShape,
+                        border = BorderStroke(1.dp, colors.outlineVariant),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.onSurface),
+                    ) {
+                        Text(stringResource(R.string.permission_deny))
+                    }
+                    Button(
+                        onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ONCE) },
+                        modifier = Modifier.heightIn(min = 48.dp).testTag(UiTags.PERMISSION_ALLOW_ONCE),
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.onSurface, contentColor = colors.surface),
+                    ) {
+                        Text(stringResource(R.string.permission_allow_once))
+                    }
                 }
             }
         }

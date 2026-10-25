@@ -16,6 +16,31 @@ The built-in wire families include OpenAI Responses, Chat Completions, Anthropic
 
 CapabilitySupport::Unknown is distinct from Unsupported. Catalog metadata, implemented adapters, account permissions, and successful live calls establish different facts.
 
+<a id="route-diagnosis"></a>
+
+## Diagnose a missing model or wrong route
+
+1. Confirm the profile was registered in the builder and build succeeded with the intended Region. A profile name, provider identity and protocol family are different selectors.
+2. Inspect chat().models() for chat choices, images().models() for image choices, or the specific service capability method. Do not reuse the Chat model list as a catalog for every resource.
+3. Resolve the configured model/profile before sending and check alias, wire model, region and visibility. A successful local resolution does not prove that the provider account has live model entitlement.
+4. When the provider rejects the call, retain typed error classification, status and request ID. Repair credentials or the model mapping for that exact connection; do not silently send the same secret to another endpoint.
+
+- [Request-local credential scopes](llm-requests.md#request-option-guide)
+- [Error action reference](llm-execution-accounting.md#error-action-reference)
+
+<a id="capability-selection"></a>
+
+## Select capabilities before composing input
+
+| Need | Inspect | Failure to handle |
+| --- | --- | --- |
+| Text and function tools | Selected model/profile and codec input support | Unsupported tool, reasoning or output control |
+| Image generation or editing | images().capabilities_in(profile, model) | Unsupported mask/reference/task option |
+| Speech / transcription | audio().capabilities(&AudioRoute) | Unavailable common adapter or unsupported voice/format |
+| Provider files or cloud resources | A typed provider client and resource-specific capability/scope | Provider binding, endpoint, account or purpose mismatch |
+
+A compatible JSON chat wire is not a capability grant. Keep the unsupported state visible to callers so they can choose another supported workflow deliberately.
+
 <a id="managed-catalog"></a>
 
 ## Manage persistent configuration
@@ -187,20 +212,23 @@ The checked-in provider TOML and capability matrices describe current implemente
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/store.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/store.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/resolve.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/configuration/model.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/configuration/model.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/configuration/sync.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/configuration/sync.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/provider.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/frozen_pricing.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/token_count/request.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/data/capability-matrix-protocols.json](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/data/capability-matrix-protocols.json) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/data/capability-audit.json](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/data/capability-audit.json) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/data/providers/openai.toml](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/data/providers/openai.toml) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/data/providers/anthropic.toml](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/data/providers/anthropic.toml) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/data/providers/qwen.toml](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/data/providers/qwen.toml) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/regions.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/regions.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- llm-client/src/client/store.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/resolve.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/configuration/model.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/configuration/sync.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/provider.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/frozen_pricing.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/token_count/request.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/data/capability-matrix-protocols.json — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/data/capability-audit.json — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/data/providers/openai.toml — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/data/providers/anthropic.toml — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/data/providers/qwen.toml — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/regions.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/live.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/chat.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/continuation.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

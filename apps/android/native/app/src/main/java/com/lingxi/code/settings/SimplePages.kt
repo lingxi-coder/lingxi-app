@@ -72,7 +72,9 @@ fun LanguagePage(language: String, onSelect: (String) -> Unit) {
             footer = stringResource(R.string.settings_language_footer),
         ) {
             RadioList(
-                options = AppLanguage.SUPPORTED.map { (code, label) -> RadioOption(code, label) },
+                options = AppLanguage.SUPPORTED.map { (code, label) ->
+                    RadioOption(code, if (code.isEmpty()) stringResource(R.string.onboarding_voice_language_system) else label)
+                },
                 selected = current,
                 onSelect = { code ->
                     scope.launch {

@@ -1,3 +1,4 @@
+import { withDesktopLocale } from './support/language';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
@@ -10,7 +11,7 @@ import { tokens } from '../src/renderer/theme/tokens';
 (globalThis as { React?: typeof React }).React = React;
 
 const agent = (id: string, status = 'running'): SessionAgentSummaryDto => ({ agent_id: id, name: id, agent_type: 'explorer', status });
-const render = (agents: SessionAgentSummaryDto[]) => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(TranscriptAgents, { agents, onOpenAgent: () => {} })));
+const render = (agents: SessionAgentSummaryDto[]) => withDesktopLocale('en', () => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(TranscriptAgents, { agents, onOpenAgent: () => {} }))));
 
 test('agent updates preserve row order, deduplicate ids, and render current status', () => {
   const rows = orderedTranscriptAgents(['first', 'second'], [agent('second', 'completed'), agent('third'), agent('first'), agent('third', 'failed')]);

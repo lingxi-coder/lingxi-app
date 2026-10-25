@@ -1,0 +1,5 @@
+dist/** -text
+spec/** -text
+licenses/** -text
+dist/licenses/** -whitespace
+licenses/** -whitespace

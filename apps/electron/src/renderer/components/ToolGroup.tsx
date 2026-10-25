@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import { questionAnswers } from './AskUserQuestionSummary';
 import type { CSSProperties } from 'react';
 import type { TranscriptToolGroup } from './transcriptRows';
@@ -21,6 +23,7 @@ interface ToolGroupProps {
 
 export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen, ungrouped = false }: ToolGroupProps) {
   const t = useT();
+  useI18n();
   if (ungrouped || group.tools.some((tool) => questionAnswers(tool))) {
     return <div className="transcript-tool-group">
       {group.tools.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
@@ -28,7 +31,7 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen, un
   }
   const active = group.tools.filter((tool) => tool.status === 'running');
   if (active.length > 0) {
-    return <div className="transcript-tool-group" aria-label="Running tools">
+    return <div className="transcript-tool-group" aria-label={tr("desktop_ui_running_tools")}>
       {active.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
     </div>;
   }
@@ -43,11 +46,11 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen, un
   if (!lastTool) return null;
   const summary = toolGroupSummary(group.tools);
   const firstTool = group.tools[0]!;
-  const failureSummary = failed ? ` · ${failed} failed` : '';
+  const failureSummary = failed ? ` · ${tr('desktop_ui_failed_count', failed)}` : '';
   return <div className="transcript-tool-group">
     <Disclosure id={group.id} open={open} onToggle={() => onSetOpen(group.id, !open)}
       buttonClassName="tool-group-trigger"
-      label={`${summary}${failureSummary} · ${group.tools.length} tools`}
+      label={`${summary}${failureSummary} · ${tr('chat_tool_batch_count %lld', group.tools.length)}`}
       buttonStyle={{ width: '100%', borderRadius: 6, background: 'var(--tool-group-background, transparent)', '--tool-hover-background': t.surfaceHover, maxWidth: '100%', minWidth: 0, minHeight: 28, fontSize: 13, fontWeight: 400, gap: 8, color: t.text3, '--tool-focus-color': t.text } as CSSProperties}
       summary={<>
         <span aria-hidden="true" style={{ display: 'inline-flex', flexShrink: 0 }}><ComputerApplicationIcon item={groupComputerApplication(group.tools)} fallback={<ToolActivityIcon name={toolIconName(firstTool.view.verb, firstTool.tool, firstTool.view.icon)} />} /></span>

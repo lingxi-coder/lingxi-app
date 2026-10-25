@@ -1,3 +1,4 @@
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
 import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BetaSidebar } from '../../src/renderer/components/BetaDesktop';
@@ -6,6 +7,9 @@ import { ArchiveChatDialog } from '../../src/renderer/components/ArchiveChatDial
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
+
+// Test labels are deterministic across developer system languages.
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en');
 
 // UI-only callbacks: no real chat, cron, preload, or engine is accessed.
 function Fixture() {

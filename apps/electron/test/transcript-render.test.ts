@@ -1,3 +1,5 @@
+import { withDesktopLocale } from './support/language';
+import type { DesktopLocale } from '../src/renderer/i18n/locale';
 /**
  * Rendered-markup tests for the transcript cards.
  *
@@ -61,10 +63,10 @@ import {
   type ToolRunItem,
 } from '../src/renderer/model/runItem';
 
-function render(node: React.ReactElement): string {
-  return renderToStaticMarkup(
+function render(node: React.ReactElement, locale: DesktopLocale = 'en'): string {
+  return withDesktopLocale(locale, () => renderToStaticMarkup(
     React.createElement(Theme.Provider, { value: tokens(true) }, node),
-  );
+  ));
 }
 
 function renderWithModUiHost(node: React.ReactElement): string {
@@ -805,16 +807,27 @@ test('session interaction prompts stay inline where requested and do not install
   const permissionHtml = render(React.createElement(PermissionPrompt, { request: permission, onApprove: () => {}, onDeny: () => {} }));
   const computerHtml = render(React.createElement(ComputerAccessPrompt, { request: computer, onSubmit: () => {}, onDeny: () => {}, onOpenSystemSettings: () => {} }));
   const questionHtml = render(React.createElement(AskUserQuestionPrompt, { request: question, onSubmit: () => {}, onCancel: () => {} }));
-  for (const html of [permissionHtml, questionHtml]) {
+  for (const html of [permissionHtml, computerHtml, questionHtml]) {
     assert.match(html, /role="region"/);
     assert.match(html, /class="inline-interaction-card/);
     assert.doesNotMatch(html, /class="desktop-dialog-overlay"/);
     assert.match(html, /class="desktop-dialog-actions"/);
   }
-  assert.match(computerHtml, /role="dialog"/);
-  assert.match(computerHtml, /class="desktop-dialog-overlay"/);
-  assert.match(computerHtml, /class="desktop-dialog-panel desktop-dialog-panel--/);
-  assert.doesNotMatch(computerHtml, /aria-modal=/);
+  assert.match(computerHtml, /Allow LingXi to use Preview/);
+  assert.match(computerHtml, /Elevated Risk/);
+  assert.match(computerHtml, /prompt injection attacks/);
+  assert.match(computerHtml, /Allow for this session/);
+  assert.match(computerHtml, /<kbd aria-hidden="true">Esc<\/kbd>/);
+  assert.doesNotMatch(computerHtml, /Always allow/);
+  const tccHtml = render(React.createElement(ComputerAccessPrompt, {
+    request: { ...computer, tcc_state: { accessibility: true, screen_recording: false } },
+    onSubmit: () => {}, onDeny: () => {}, onOpenSystemSettings: () => {},
+  }));
+  assert.match(tccHtml, /role="dialog"/);
+  assert.match(tccHtml, /class="desktop-dialog-overlay"/);
+  assert.match(tccHtml, /Open System Settings → Screen Recording/);
+  assert.match(tccHtml, /Try again/);
+  assert.doesNotMatch(tccHtml, /Elevated Risk/);
 
   for (const filename of ['PermissionPrompt.tsx', 'ComputerAccessPrompt.tsx', 'AskUserQuestionPrompt.tsx']) {
     const source = readFileSync(new URL(`../src/renderer/components/${filename}`, import.meta.url), 'utf8');
@@ -1077,8 +1090,8 @@ test('the error mark is a ringed icon, not the old bare dot', () => {
   // The inline dot must not double up with the ringed mark. It covers the error
   // state only where that mark is suppressed — the pinned section, whose row
   // keeps the pin/archive actions in the same trailing slot.
-  assert.match(sidebar, /attention && \(pinnedSection \|\| attention\.label !== 'Session error'\) \? <span/, 'the inline dot skips the error state outside the pinned section');
-  assert.match(sidebar, /!pinnedSection && attention\?\.label === 'Session error' && \(/, 'and the ringed mark is suppressed exactly there');
+  assert.match(sidebar, /attention && \(pinnedSection \|\| attention\.kind !== 'error'\) \? <span/, 'the inline dot skips the error state outside the pinned section');
+  assert.match(sidebar, /!pinnedSection && attention\?\.kind === 'error' && \(/, 'and the ringed mark is suppressed exactly there');
 });
 
 test('a cold-restored user message renders its original clock under the bubble', () => {

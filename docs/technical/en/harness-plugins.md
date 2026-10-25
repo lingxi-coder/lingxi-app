@@ -109,15 +109,63 @@ Verification method: Environment validation
 
 Existing tests exercise component cleanup, failure retention and verified-plugin-only LSP registration. Installing an actual third-party package additionally requires host trust, transport and process cleanup acceptance.
 
+<a id="plugin-directory"></a>
+
+## Prepare a local plugin directory
+
+For PluginSource::LocalPath, provide an already materialized directory containing .lingxi-plugin/plugin.json. The discovery path can find optional commands/, agents/, skills/, output-styles/ and hooks/hooks.json. Keep those files available while the runtime uses the discovered components.
+
+1. Prepare the directory with a manifest and the component files it declares. Validate the content before activation.
+2. Pass its path to the host-assembled PluginManager. Record the returned PluginId, then inspect plugin_state for the actual result.
+3. Check the contributed registry entries rather than assuming every optional component became active.
+4. When removing the plugin, call disable on the same manager and retry any retained DisablingFailed teardown.
+
+### Local plugin layout
+
+```text
+report-helper/
+  .lingxi-plugin/plugin.json
+  commands/
+  agents/
+  skills/
+  hooks/hooks.json
+```
+
+Verification method: API excerpt
+
+<a id="plugin-install-paths"></a>
+
+## Select the correct install path
+
+| Source | PluginManager::install | Host action |
+| --- | --- | --- |
+| LocalPath | Discovers and enables the prepared directory in place. | Provide a readable manifest and retain the directory lifecycle. |
+| Git / Marketplace / OfficialMarketplace | Returns a typed unsupported/fetch-path error. | Use the production installation/materialization pipeline before activation. |
+| Mcpb | Does not unpack the bundle through this method. | Use the supported host install pipeline for the bundle. |
+| BuiltIn | Is not installed through this method. | Use the composition’s compiled builtin registration. |
+
+A PluginSource variant describes an input source. Its existence does not promise that this particular manager method implements network fetching, authentication or archive materialization.
+
+<a id="plugin-troubleshooting"></a>
+
+## Diagnose activation and removal
+
+| Observation | Interpretation | Recovery |
+| --- | --- | --- |
+| No manifest found | A flat LocalPath discovery did not find the expected plugin directory. | Check the exact directory and .lingxi-plugin/plugin.json; do not pass the top-level versioned cache as a plugin. |
+| Blocked | Policy rejected the source before activation. | Inspect trust and managed policy; do not register the components manually to bypass it. |
+| Failed / Validation / Loader | Manifest, configuration or loading failed. | Correct the reported cause before enabling the candidate again. |
+| DisablingFailed remains loaded | Some owned resources still need teardown. | Retain the owner and retry disable; report success only after its components are removed. |
+
 ## Sources and documentation baseline
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/plugin/src/manager.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/plugin/src/manager.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/plugin/src/lifecycle.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/plugin/src/lifecycle.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/plugin/src/manifest.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/plugin/src/manifest.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/plugin/src/discovery.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/plugin/src/discovery.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
+- [harness-runtime/crates/plugin/src/manager.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/plugin/src/manager.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/plugin/src/lifecycle.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/plugin/src/lifecycle.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/plugin/src/manifest.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/plugin/src/manifest.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/plugin/src/discovery.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/plugin/src/discovery.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
 
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; Referenced input fingerprint sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; Product pin 6548b9d5e702f8e9d42772412cd65b72881e24b4
+- harness-runtime: HEAD a39da75f0985d61d90fffa255f7b4d90901b0e27; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin a39da75f0985d61d90fffa255f7b4d90901b0e27
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

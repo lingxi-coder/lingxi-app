@@ -260,6 +260,7 @@ async function main() {
   const binDir = join(resources, 'bin');
   mkdirSync(binDir, { recursive: true });
   const packagedSidecar = join(binDir, 'bridge-server');
+  cpSync(join(packageRoot, 'browser-extension'), join(resources, 'browser-extension'), { recursive: true });
   copyFileSync(sidecar, packagedSidecar);
   chmodSync(packagedSidecar, 0o755);
   stageModBun(resources, modCompiler);
@@ -289,6 +290,7 @@ async function main() {
   ensureAudioHelperResourceLayout(resources);
 
   copyFileSync(join(packageRoot, 'assets', 'icons', 'icon.icns'), join(resources, 'icon.icns'));
+  copyFileSync(join(packageRoot, 'assets', 'icons', 'icon.png'), join(resources, 'icon.png'));
   copyFileSync(join(packageRoot, 'INTERNAL_BETA.md'), join(resources, 'INTERNAL_BETA.md'));
   const mainExecutable = renameElectronExecutable(paths.appPath);
   rewriteInfoPlist(join(contents, 'Info.plist'), metadata.version, identifiers.desktopBundleId);

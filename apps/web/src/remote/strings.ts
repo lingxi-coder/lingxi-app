@@ -1,0 +1,200 @@
+import { pickLocaleText, type Locale, type LocalizedText } from '../utils/locale';
+
+/**
+ * Every string of the Remote Control pages, in both languages. A string is a
+ * `LocalizedText` looked up through the app's locale (`pickLocaleText`);
+ * `{name}` placeholders are filled by `t`. `test/remoteStrings.test.ts` checks
+ * that both languages are filled and use the same placeholders.
+ */
+const text = (zh: string, en: string): LocalizedText => ({ zh, en });
+
+export const strings = {
+  // shell
+  title: text('远程控制', 'Remote Control'),
+  loading: text('正在加载…', 'Loading…'),
+  signOut: text('退出登录', 'Sign out'),
+  language: text('EN', '中文'),
+  theme: text('切换主题', 'Toggle theme'),
+  signedInAs: text('当前账号：{email}', 'Signed in as {email}'),
+  backToSite: text('返回灵犀官网', 'Back to LingXi'),
+  unsupportedBrowser: text(
+    '这个浏览器不支持远程控制所需的加密功能（Ed25519 / X25519）。请使用较新版本的 Chrome、Edge、Safari 或 Firefox。',
+    'This browser lacks the cryptography Remote Control needs (Ed25519 / X25519). Use a recent Chrome, Edge, Safari or Firefox.',
+  ),
+  storageUnavailable: text(
+    '这个浏览器无法保存配对信息（可能处于无痕模式）。关闭此标签页后需要重新配对。',
+    'This browser cannot keep the pairing (private mode?). You will need to pair again after closing this tab.',
+  ),
+
+  // sign-in
+  signedOutTitle: text('请先登录', 'Sign in first'),
+  signedOutBody: text('登录与桌面版灵犀相同的账号，才能看到你的电脑。', 'Sign in with the same account as LingXi on your computer to see it here.'),
+  signIn: text('登录', 'Sign in'),
+  signInGoogle: text('使用 Google 登录', 'Continue with Google'),
+  signInOr: text('或使用邮箱', 'or with email'),
+  email: text('邮箱', 'Email'),
+  password: text('密码', 'Password'),
+  signInFailed: text('登录失败，请检查账号后重试。', 'Sign-in failed. Check the account and try again.'),
+  signInPopupBlocked: text('登录窗口被浏览器拦截，请允许弹出窗口后重试。', 'The browser blocked the sign-in window. Allow pop-ups and try again.'),
+  signInCancelled: text('已取消登录。', 'Sign-in was cancelled.'),
+  signInDoneHint: text('登录后会回到远程控制。', 'You will return to Remote Control after signing in.'),
+  signInDone: text('已登录，正在返回…', 'Signed in. Returning…'),
+
+  // computers
+  computers: text('我的电脑', 'My computers'),
+  computersIntro: text('选择要连接的电脑。连接前需要在这台电脑上确认一次。', 'Choose a computer to connect to. The first time, you confirm on that computer.'),
+  noComputers: text('还没有可用的电脑', 'No computers yet'),
+  noComputersHelp: text(
+    '在电脑上打开灵犀桌面版，登录同一个账号，并在设置中开启“远程控制”。开启后，它会出现在这里。',
+    'Open LingXi on your computer, sign in with the same account, and turn on “Remote control” in settings. It will appear here.',
+  ),
+  hostsError: text('无法读取电脑列表，请检查网络后刷新。', 'Could not read the list of computers. Check the network and reload.'),
+  online: text('在线', 'Online'),
+  offline: text('离线', 'Offline'),
+  paired: text('已配对', 'Paired'),
+  notPaired: text('未配对', 'Not paired'),
+  offlineHelp: text(
+    '这台电脑当前不在线。请确认它已开机、联网，并且灵犀桌面版正在运行且已开启“远程控制”。',
+    'This computer is offline. Make sure it is on, connected, and that LingXi is running with “Remote control” turned on.',
+  ),
+  connect: text('连接', 'Connect'),
+  tryAnyway: text('仍然尝试连接', 'Try to connect anyway'),
+  forget: text('忘记此电脑', 'Forget this computer'),
+  forgetHelp: text('只会在此浏览器中移除配对；电脑上的设备列表需要在桌面版设置中移除。', 'This only removes the pairing from this browser. Remove the device on the computer in LingXi settings.'),
+  switchComputer: text('换一台电脑', 'Switch computer'),
+
+  // connection
+  connectingTo: text('正在连接 {name}…', 'Connecting to {name}…'),
+  reconnecting: text('连接已断开，正在重新连接…', 'Connection lost. Reconnecting…'),
+  retryIn: text('{seconds} 秒后重试', 'Retrying in {seconds} s'),
+  directBadge: text('直连', 'Direct'),
+  tunnelBadge: text('隧道', 'Tunnel'),
+  directHelp: text('浏览器与电脑直接通信', 'This browser talks to the computer directly'),
+  tunnelHelp: text('通过云端中转（加密），速度较慢', 'Relayed through the cloud (encrypted); slower'),
+  pairingTitle: text('请在电脑上确认', 'Confirm on your computer'),
+  pairingBody: text('在 {name} 上点击“允许”之前，请确认它显示的配对码与下面的一致。', 'Before you click “Allow” on {name}, check that the pairing code it shows matches this one.'),
+  pairingCode: text('配对码', 'Pairing code'),
+  pairingWaiting: text('等待电脑上的确认…', 'Waiting for confirmation on the computer…'),
+  cancel: text('取消', 'Cancel'),
+  retry: text('重试', 'Try again'),
+  pairAgain: text('重新配对', 'Pair again'),
+  pairAgainNote: text('重新配对会为此浏览器生成新的身份，其他电脑也会要求你重新确认。', 'Pairing again gives this browser a new identity, so your other computers will ask you to confirm it again.'),
+  back: text('返回', 'Back'),
+
+  failUnsupported: text('此浏览器不支持远程控制所需的加密功能。', 'This browser does not support the cryptography Remote Control needs.'),
+  failUnknownHost: text('找不到这台电脑的信息。请确认桌面版已开启远程控制。', 'This computer’s details could not be found. Make sure Remote control is on in the desktop app.'),
+  failNetwork: text('无法连接到云端服务，请检查网络。', 'Could not reach the cloud service. Check the network.'),
+  failNetworkDenied: text('账号没有权限访问远程控制数据。请重新登录。', 'This account may not use Remote Control data. Sign in again.'),
+  failNoAnswer: text('电脑没有响应。请确认它在线且灵犀桌面版正在运行。', 'The computer did not respond. Make sure it is online and LingXi is running.'),
+  failClosed: text('连接已关闭。', 'The connection closed.'),
+  failCapacity: text('这台电脑的远程连接已满，请稍后再试。', 'This computer has too many remote connections. Try again later.'),
+  failBusy: text('电脑正忙，请稍后再试。', 'The computer is busy. Try again in a moment.'),
+  failRevoked: text('这台电脑已不再信任此浏览器。', 'This computer no longer trusts this browser.'),
+  failDisabled: text('这台电脑已关闭远程控制。', 'Remote control is turned off on this computer.'),
+  failUpgrade: text('版本不兼容。请更新灵犀桌面版，并刷新此页面。', 'Versions are incompatible. Update LingXi on the computer and reload this page.'),
+  failDenied: text('电脑上拒绝了这次连接。', 'The connection was declined on the computer.'),
+  failDeniedRateLimited: text('配对请求太频繁，请稍后再试。', 'Too many pairing requests. Try again later.'),
+  failDeniedBusy: text('电脑正在处理另一个配对请求，请稍后再试。', 'The computer is handling another pairing request. Try again shortly.'),
+  failDeniedTimeout: text('电脑上两分钟内没有响应。', 'Nobody answered on the computer within two minutes.'),
+  failExpired: text('电脑认为此设备的时间有误。请校准系统时间后重试。', 'The computer thinks this device’s clock is wrong. Set the clock correctly and try again.'),
+  failRejected: text('电脑拒绝了这次连接。', 'The computer refused the connection.'),
+  failVerification: text('无法验证这台电脑的身份，已中止连接。', 'This computer’s identity could not be verified, so the connection was stopped.'),
+  failPairingMismatch: text('配对码与电脑上的不一致，已中止连接。可能有人在中间干扰。', 'The pairing code does not match the computer’s, so the connection was stopped. Someone may be interfering.'),
+  failProtocol: text('电脑返回了无法理解的数据，已中止连接。', 'The computer sent something that could not be understood, so the connection was stopped.'),
+
+  // sessions
+  sessions: text('会话', 'Sessions'),
+  noSessions: text('没有已共享的会话', 'No shared sessions'),
+  noSessionsHelp: text('在电脑上的灵犀里打开一个会话，并开启它的远程访问后，会显示在这里。', 'Open a session in LingXi on the computer and allow remote access for it; it will show up here.'),
+  statusRunning: text('运行中', 'Running'),
+  statusRequiresAction: text('等待你', 'Needs you'),
+  statusIdle: text('空闲', 'Idle'),
+  statusDormant: text('未打开', 'Not open'),
+  needsPermission: text('等待授权', 'Waiting for permission'),
+  needsQuestion: text('等待回答', 'Waiting for an answer'),
+  needsComputerAccess: text('等待电脑上的授权', 'Waiting on the computer'),
+  untitled: text('未命名会话', 'Untitled session'),
+
+  // session
+  sessionLoading: text('正在加载会话…', 'Loading the session…'),
+  sessionOffline: text('已离线，显示的是最后收到的内容。', 'Offline. Showing what was received last.'),
+  sessionClosed: text('这个会话已不再共享。', 'This session is no longer shared.'),
+  errUnknownSession: text('找不到这个会话。', 'That session could not be found.'),
+  errNotRemoteEnabled: text('这个会话没有开启远程访问。', 'Remote access is not on for this session.'),
+  errCapacity: text('电脑上同时打开的远程会话已达上限。', 'The computer has reached its limit of remotely opened sessions.'),
+  errForbidden: text('这个操作不被允许。', 'That is not allowed.'),
+  errGeneric: text('出错了，请重试。', 'Something went wrong. Try again.'),
+  loadOlder: text('加载更早的消息', 'Load earlier messages'),
+  loadingOlder: text('正在加载…', 'Loading…'),
+  fromDesktop: text('来自桌面', 'From the desktop'),
+  fromDevice: text('来自 {name}', 'From {name}'),
+  fromThisDevice: text('来自此浏览器', 'From this browser'),
+  fromScheduled: text('定时任务', 'Scheduled task'),
+  omittedNote: text('此处有一条内容过大，未同步到远程。', 'An item here was too large to send.'),
+  omittedKind: text('此处的“{kind}”内容过大，未同步到远程。', 'A “{kind}” item here was too large to send.'),
+  computerAccessNote: text('电脑正在请求访问：{apps}。请在电脑上处理。', 'The computer is asking for access to: {apps}. Handle it on the computer.'),
+  computerAccessNoteNoApps: text('电脑正在请求额外的访问权限。请在电脑上处理。', 'The computer is asking for more access. Handle it on the computer.'),
+  truncatedTool: text('输出已被截断', 'Output was trimmed'),
+  showOutput: text('展开输出', 'Show output'),
+  hideOutput: text('收起输出', 'Hide output'),
+  toolRunning: text('运行中', 'Running'),
+  toolFailed: text('失败', 'Failed'),
+  thinking: text('思考中…', 'Thinking…'),
+  imageLoad: text('点击加载图片', 'Tap to load the image'),
+  imageLoading: text('正在加载图片…', 'Loading the image…'),
+  imageFailed: text('图片加载失败，点击重试', 'The image failed to load. Tap to retry'),
+  imageAlt: text('图片', 'Image'),
+
+  // composer
+  composerPlaceholder: text('发消息…', 'Message…'),
+  composerPlaceholderRunning: text('正在运行，可以补充一句文字…', 'Running — you can add a text message…'),
+  send: text('发送', 'Send'),
+  stop: text('停止', 'Stop'),
+  attachImage: text('添加图片', 'Add image'),
+  removeImage: text('移除图片', 'Remove image'),
+  imagesOnlyWhenIdle: text('运行中只能发送文字。', 'Only text can be sent while a turn is running.'),
+  imageLimit: text('最多添加 {count} 张图片。', 'You can add up to {count} images.'),
+  imageTypeError: text('不支持这种图片格式（支持 PNG、JPEG、GIF、WebP）。', 'That image type is not supported (PNG, JPEG, GIF, WebP).'),
+  imageDecodeError: text('无法读取这张图片。', 'That image could not be read.'),
+  imageSizeError: text('这张图片太大，无法压缩到 2 MB 以内。', 'That image is too large to shrink under 2 MB.'),
+  sending: text('发送中…', 'Sending…'),
+  sendFailed: text('发送失败', 'Not sent'),
+  sendRetry: text('重发', 'Resend'),
+  dismiss: text('放弃', 'Dismiss'),
+
+  // prompts from the engine
+  permissionTitle: text('需要你的授权', 'Permission needed'),
+  permissionTool: text('要使用工具 {tool}', 'Wants to use {tool}'),
+  permissionPlan: text('要退出规划模式并开始执行以下计划', 'Wants to leave plan mode and start on this plan'),
+  permissionBypass: text('要切换到“绕过权限”模式。出于安全，只能在电脑上批准。', 'Wants to switch to “bypass permissions” mode. For safety this can only be approved on the computer.'),
+  allowOnce: text('允许一次', 'Allow once'),
+  deny: text('拒绝', 'Deny'),
+  answeredElsewhere: text('这个请求已在别处处理。', 'This was already answered elsewhere.'),
+  questionTitle: text('需要你回答', 'A question for you'),
+  questionOther: text('其他…', 'Other…'),
+  questionSubmit: text('提交', 'Submit'),
+  questionSkip: text('跳过', 'Skip'),
+  computerAccessPending: text('电脑正在请求访问权限，只能在电脑上批准。', 'The computer is asking for access; this can only be approved on the computer.'),
+
+  // controls
+  model: text('模型', 'Model'),
+  effort: text('推理强度', 'Effort'),
+  permissionMode: text('权限模式', 'Permissions'),
+  modeDefault: text('默认', 'Default'),
+  modeAcceptEdits: text('自动接受编辑', 'Accept edits'),
+  modePlan: text('规划', 'Plan'),
+  modeAuto: text('自动', 'Auto'),
+  modeDontAsk: text('不再询问', 'Don’t ask'),
+  effortAutomatic: text('自动', 'Automatic'),
+  effortDisabled: text('关闭', 'Off'),
+  effortEnabled: text('开启', 'On'),
+  effortTokens: text('{tokens} 词元', '{tokens} tokens'),
+  controlsFailed: text('设置未能生效。', 'That setting could not be changed.'),
+} satisfies Record<string, LocalizedText>;
+
+export type StringKey = keyof typeof strings;
+
+/** The text for `key` in `locale`, with `{name}` placeholders filled from `values`. */
+export function t(locale: Locale, key: StringKey, values: Record<string, string | number> = {}): string {
+  return pickLocaleText(locale, strings[key]).replace(/\{(\w+)\}/gu, (match, name: string) => (name in values ? String(values[name]) : match));
+}

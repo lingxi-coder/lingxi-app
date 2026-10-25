@@ -75,6 +75,14 @@
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
+        <!-- Check actual installed HTTP browser handlers before acquiring a
+             background Local App lease. The launched ACTION_VIEW remains
+             implicit so Android resolves the user's selected browser. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="http" />
+        </intent>
     </queries>
 
     <application
@@ -137,6 +145,7 @@
                 <data android:scheme="lingxi" android:host="market" />
                 <data android:scheme="lingxi" android:host="runtime" />
                 <data android:scheme="lingxi" android:host="import" />
+                <data android:scheme="lingxi" android:host="remote" />
             </intent-filter>
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />

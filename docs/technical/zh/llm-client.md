@@ -2,6 +2,68 @@
 
 独立的 Rust 模型客户端，统一供应商协议、类型化请求、流式响应、图像、嵌入向量与模型目录。
 
+<a id="choose-call-pattern"></a>
+
+## 先选择调用方式
+
+需要一次完整答案时先用 complete_in；需要向用户显示生成进度时用 stream_in。只有宿主需要准入检查点或逐次调用账本时才使用 prepared call。三种方式共享 ChatRequest 与请求级凭据模型。
+
+| 入口 | 返回什么 | 宿主接下来做什么 |
+| --- | --- | --- |
+| chat().complete_in | ChatResponse 或 LlmError | 检查 stop_reason，保存完整助手消息与用量 |
+| chat().stream_in | ModelStream，随后异步接收事件 | 显示增量，保留原生块，区分 End、EOF 与读取错误 |
+| snapshot().prepare_on | 精确连接上的 PreparedCall | 准入后发送一次，解码前记录结算事实，最后清理 |
+| provider::<T>(profile) | 供应商特定资源句柄 | 遵守该资源独立的账户作用域与生命周期 |
+
+- [请求参数与工具闭环](llm-requests.md)
+- [显示流式响应](llm-streaming.md)
+
+<a id="bounded-first-call"></a>
+
+## 为应用写一个有时限的调用
+
+此函数由调用者提供已配置连接、模型与凭据，设置输出上限和 45 秒总时限，不改变共享客户端。调用者仍需选择该连接中的模型，并处理返回的终止原因。
+
+### 应用辅助函数 · 已核对源码，未代表真实账户验收
+
+```rust
+use std::time::Duration;
+use lingxi_llm_client::{LlmClient, RequestOptions};
+use lingxi_llm_client::protocol::{ChatRequest, ChatResponse, ConversationMessage, LlmError, Secret};
+
+pub async fn ask_once(
+    client: &LlmClient,
+    profile: &str,
+    model: &str,
+    credential: Secret<String>,
+    prompt: &str,
+) -> Result<ChatResponse, LlmError> {
+    let mut request = ChatRequest::new(model);
+    request.messages.push(ConversationMessage::user_text(prompt));
+    request.max_tokens = Some(512);
+    let options = RequestOptions {
+        credential: Some(credential),
+        total_timeout: Some(Duration::from_secs(45)),
+        ..Default::default()
+    };
+    client.chat().complete_in(profile, &request, &options).await
+}
+```
+
+验证方式: 编译检查 (llm-bounded-first-call)
+
+complete_in 遵循已配置的高层路由策略。宿主若要求最多发送一次生成请求，应使用 prepare_on 与 dispatch_once，而不是外套重试循环。
+
+<a id="first-answer-checks"></a>
+
+## 读取结果，而不仅是文本
+
+1. 先读取 response.stop_reason 再显示成功状态。达到 token 上限表示输出不完整；ToolUse 要求宿主继续处理；Refusal 是明确的结果。
+2. 显示时可用 response.message.text()，重放对话时保存 response.message 本身。文本辅助方法不会保留 thinking 和工具块。
+3. 将 executed_profile、model、response_id 与 usage 和宿主请求 ID 一起记录。用量缺失表示未知，不能当作免费。
+
+- [处理失败与用量状态](llm-execution-accounting.md)
+
 <a id="install"></a>
 
 ## 使用本文工作树
@@ -226,15 +288,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/Cargo.toml) — 已提交源码 (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [llm-client/Cargo.toml](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/Cargo.toml) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/lib.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/builder.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/builder.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/live.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/live.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/llm.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/presets.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/presets.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/abad4d9603ce6a0c032ddf089f69f88e927b76c4/Cargo.toml) — 已提交源码 (abad4d9603ce6a0c032ddf089f69f88e927b76c4)
+- llm-client/Cargo.toml — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/lib.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/builder.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/live.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/llm.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/presets.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/chat.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/options.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/usage_report.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- lingxi-app: HEAD 04b1b6ea095a3e35e6ab76e12d1d78966339d9dd; 所据文件指纹 sha256:e1c71b86dc9ad57148b7dad737d7ec053c7d8ce74d3e216a6b104e01638ba03f
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; 所据文件指纹 sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; 产品固定版本 a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- lingxi-app: HEAD abad4d9603ce6a0c032ddf089f69f88e927b76c4; 所据文件指纹 sha256:bbb3c48b6b5761f33d3d66eb68ccaf089f9fd5ffc104138cbe084fb24e3b4f5b
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; 所据文件指纹 sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; 产品固定版本 ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

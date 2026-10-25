@@ -1,6 +1,5 @@
 package com.lingxi.code.project
 
-import io.lingxi.mobilelinux.MobileLinuxGuestPaths
 import com.lingxi.code.model.SessionMode
 import java.io.File
 
@@ -41,7 +40,7 @@ data class ProjectRecord(
         } else {
             ProjectSyncState.ChangesPending
         },
-    val directory: String = "${MobileLinuxGuestPaths.workspace("projects")}/$id/workspace",
+    val directory: String = "",
     val activeDirectory: String = directory,
     val additionalDirectories: List<String> = emptyList(),
 )
@@ -57,7 +56,7 @@ data class SessionWorkspaceState(
 data class ProjectWorkspace(
     val projectId: String,
     val hostPath: String,
-    val guestPath: String = "${MobileLinuxGuestPaths.workspace("projects")}/$projectId/workspace",
+    val guestPath: String = "",
     val additionalDirectories: List<String> = emptyList(),
 ) {
     val hostDirectory: File get() = File(hostPath)

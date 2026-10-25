@@ -25,6 +25,7 @@ import {
 } from './bridgeIpc.js';
 import type {
   BridgeManagerOptions,
+  RuntimeSessionMode,
   SequencedRuntimeEventEnvelope,
   SessionRef,
   SessionRuntimeManagerOptions,
@@ -46,6 +47,49 @@ const DEFAULT_MAX_CACHED_RUNTIMES = 6;
 
 const MAX_CONFIGURED_CACHED_RUNTIMES = 32;
 
+export interface LiveDraftSession {
+  sessionId: string;
+  projectPath: string;
+  mode: RuntimeSessionMode;
+  engineCwd: string;
+}
+
+/** Accept only a live, active, host-created draft with explicit runtime mode and cwd. */
+export function resolveActiveDraftSession(
+  requested: SessionRef,
+  activeRef: SessionRef | undefined,
+  draftRef: SessionRef | undefined,
+  runtime: Pick<SessionRuntime, 'sessionId' | 'projectPath' | 'sessionMode' | 'engineWorkspacePath' | 'connectionState'> | undefined,
+  activeRuntimeSessionId: string | null,
+): LiveDraftSession | undefined {
+  try { assertSessionRef(requested); } catch { return undefined; }
+  if (!activeRef || activeRef.projectPath !== requested.projectPath || activeRef.sessionId !== requested.sessionId
+    || !draftRef || draftRef.projectPath !== requested.projectPath || draftRef.sessionId !== requested.sessionId
+    || !runtime || activeRuntimeSessionId !== requested.sessionId
+    || runtime.projectPath !== requested.projectPath || runtime.sessionId !== requested.sessionId
+    || runtime.sessionMode !== 'code' || runtime.connectionState.status !== 'connected'
+    || typeof runtime.engineWorkspacePath !== 'string' || !runtime.engineWorkspacePath) return undefined;
+  return { projectPath: runtime.projectPath, sessionId: runtime.sessionId, mode: runtime.sessionMode,
+    engineCwd: runtime.engineWorkspacePath };
+}
+
+/** Runtimes that exist only because a remote viewer opened them; more than this is refused. */
+export const MAX_REMOTE_OPENED_RUNTIMES = 3;
+
+/** Remote viewers hold this many runtimes open already (`capacity` on the wire). */
+export class RemoteCapacityError extends Error {
+  constructor() {
+    super('too many sessions are open for remote viewers');
+    this.name = 'RemoteCapacityError';
+  }
+}
+
+/** A runtime kept open for a remote viewer. Releasing it lets the cache trim the runtime again. */
+export interface RemoteLease {
+  readonly runtime: SessionRuntime;
+  release(): void;
+}
+
 
 
 /**
@@ -56,6 +100,7 @@ const MAX_CONFIGURED_CACHED_RUNTIMES = 32;
  */
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
+  private readonly mutatedProviderCredentials = new Set<string>();
   private readonly openingSessions = new Map<string, { projectPath: string; transcriptPath?: string; promise: Promise<SessionRuntime>; activate: boolean }>();
   private readonly restartingSessions = new Map<string, Set<Promise<void>>>();
   private readonly backgroundSessionLeases = new Map<string, number>();
@@ -74,6 +119,9 @@ export class SessionRuntimeManager {
   private readonly sessionConfigOwners = new Map<string, { configHome: string; globalConfigPath?: string }>();
   private readonly pendingEvictions = new Set<Promise<void>>();
   private readonly maxCachedRuntimes: number;
+  private readonly runtimeCreatedListeners = new Set<(runtime: SessionRuntime) => void>();
+  /** Sessions whose runtime was opened for a remote viewer and is still leased by one. */
+  private readonly remoteOpened = new Set<string>();
   private activeSessionId: string | null = null;
   private accessSequence = 0;
   private cacheTrimScheduled = false;
@@ -119,6 +167,26 @@ export class SessionRuntimeManager {
     return this.runtimes.get(sessionId);
   }
 
+  getActiveDraftSession(ref: SessionRef, activeRef: SessionRef | undefined): LiveDraftSession | undefined {
+    return resolveActiveDraftSession(ref, activeRef, this.draftSessions.get(ref.projectPath), this.runtimes.get(ref.sessionId), this.activeSessionId);
+  }
+
+  /**
+   * Be told about every runtime, now and whenever one is created (before it is
+   * started). Remote Control uses this to watch sessions it did not open.
+   */
+  onRuntimeCreated(listener: (runtime: SessionRuntime) => void): () => void {
+    this.runtimeCreatedListeners.add(listener);
+    for (const runtime of [...this.runtimes.values()]) this.announceRuntime(listener, runtime);
+    return () => { this.runtimeCreatedListeners.delete(listener); };
+  }
+
+  private announceRuntime(listener: (runtime: SessionRuntime) => void, runtime: SessionRuntime): void {
+    try { listener(runtime); } catch (error) {
+      this.opts.diagnostics?.add('warn', 'host', `runtime listener failed: ${sanitizeDiagnostic(error)}`);
+    }
+  }
+
   setSessionDirectoryGrants(sessionId: string, directories: readonly string[]): void {
     this.sessionDirectoryGrants.set(sessionId, [...directories]);
   }
@@ -150,6 +218,7 @@ export class SessionRuntimeManager {
       || status === 'restarting'
       || status === 'connecting'
       || this.openingSessions.has(runtime.sessionId)
+      || this.restartingSessions.has(runtime.sessionId)
       || this.backgroundSessionLeases.has(runtime.sessionId);
   }
 
@@ -212,12 +281,13 @@ export class SessionRuntimeManager {
   }
 
   /** Create, validate, and optionally start one session-owned runtime. */
-  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string): Promise<SessionRuntime> {
+  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string, sessionMode?: RuntimeSessionMode): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
     if (existing) {
       if (existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+      if (sessionMode !== undefined && existing.sessionMode !== sessionMode) throw new Error('session runtime mode does not match the requested session');
       if (start) await existing.start();
       this.touch(existing.sessionId);
       return existing;
@@ -225,9 +295,16 @@ export class SessionRuntimeManager {
 
     if (resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     const runtimeOptions = this.runtimeOptions(ref);
-    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls });
+    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, sessionMode);
+    // A newly opened session can adopt an engine that was absent from the
+    // credential-write fanout. Mark only keys changed during this host's
+    // lifetime; the idle runtime resolves their latest values before readiness.
+    for (const providerId of this.mutatedProviderCredentials) {
+      void runtime.refreshCachedProviderCredential(providerId);
+    }
     this.runtimes.set(ref.sessionId, runtime);
     this.touch(ref.sessionId);
+    for (const listener of [...this.runtimeCreatedListeners]) this.announceRuntime(listener, runtime);
     for (const [webContents, origins] of this.targets) {
       if (webContents.isDestroyed()) {
         this.detachWindow(webContents);
@@ -264,13 +341,15 @@ export class SessionRuntimeManager {
     }
     const restarting = this.restartingSessions.get(ref.sessionId);
     if (restarting?.size) {
-      // Restart owns the complete handshake and transcript restoration. Opening
-      // the same UUID must not return early or issue a competing resume. A
-      // refused restart can leave a healthy engine, so reassess after settling.
+      // A restart owns both the handshake and transcript restoration. Reassess
+      // after it settles rather than opening a second resume on the same UUID.
+      // Retain the pending opener until it can activate its runtime: releasing
+      // the restart pin can otherwise evict this still-background session.
+      const release = this.retainBackgroundSession(ref);
       return Promise.all([...restarting].map(operation => operation.catch(() => undefined))).then(() => {
         if (this.runtimes.get(ref.sessionId) !== existing) throw new Error('session runtime was replaced while opening');
         return this.openSession(ref, empty, resumeModel, activate, transcriptPath, remountControls);
-      });
+      }).finally(release);
     }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     if (existing?.connectionState.status === 'connected' && !existing.isStarting && !existing.needsSessionResume) {
@@ -344,6 +423,39 @@ export class SessionRuntimeManager {
     };
   }
 
+  /**
+   * Open a session for a remote viewer, and keep it open until the lease is
+   * released. Nothing is shown on the desktop: the session is not activated.
+   * Resolves once the engine has resumed it. A session that has no runtime yet
+   * counts against {@link MAX_REMOTE_OPENED_RUNTIMES} for as long as the lease
+   * lasts (`RemoteCapacityError` beyond that); one that is already open is only
+   * kept. Take one lease per session, not one per viewer.
+   */
+  async openForRemote(ref: SessionRef, limit = MAX_REMOTE_OPENED_RUNTIMES): Promise<RemoteLease> {
+    assertSessionRef(ref);
+    this.assertProjectNotClosing(ref.projectPath);
+    const existing = this.runtimes.get(ref.sessionId);
+    if (existing && existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+    const counted = !existing && !this.openingSessions.has(ref.sessionId);
+    if (counted && this.remoteOpened.size >= limit) throw new RemoteCapacityError();
+    if (counted) this.remoteOpened.add(ref.sessionId);
+    const releaseBackground = this.retainBackgroundSession(ref);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      if (counted) this.remoteOpened.delete(ref.sessionId);
+      releaseBackground();
+    };
+    try {
+      const runtime = await this.openSession(ref, false, undefined, false);
+      return { runtime, release };
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
+
   /** Keep an inactive runtime alive for the whole host operation, then enforce the cache bound. */
   async withBackgroundSession<T>(
     ref: SessionRef,
@@ -371,7 +483,7 @@ export class SessionRuntimeManager {
     if (pendingDraft) return pendingDraft;
     const draft = this.draftSessions.get(projectPath);
     if (draft) {
-      const runtime = await this.ensure(draft, true, model);
+      const runtime = await this.ensure(draft, true, model, undefined, 'code');
       this.activate(runtime);
       return { ...draft };
     }
@@ -401,7 +513,7 @@ export class SessionRuntimeManager {
     if (!ref) throw new Error('could not allocate a new session id');
     this.draftSessions.set(projectPath, ref);
     try {
-      const runtime = await this.ensure(ref, true, model);
+      const runtime = await this.ensure(ref, true, model, undefined, 'code');
       this.activate(runtime);
     } catch (error) {
       this.clearDraftSession(ref);
@@ -419,6 +531,7 @@ export class SessionRuntimeManager {
     const completion = operation.finally(() => {
       pending.delete(completion);
       if (pending.size === 0 && this.restartingSessions.get(ref.sessionId) === pending) this.restartingSessions.delete(ref.sessionId);
+      this.scheduleCacheTrim();
     });
     pending.add(completion);
     this.restartingSessions.set(ref.sessionId, pending);
@@ -515,31 +628,34 @@ export class SessionRuntimeManager {
   }
 
   async refreshCachedProviderCredential(providerId: string, credential: string): Promise<void> {
-    const runtimes = [...this.runtimes.values()]
-      .filter((runtime) => (
-        runtime.connectionState.status === 'connected'
-        && runtime.hasCachedProviderCredential(providerId)
-      ));
-    await Promise.all(runtimes.map((runtime) => runtime.cacheProviderCredential(providerId, credential)));
+    await this.updateCachedProviderCredential(providerId, credential);
   }
 
   async clearCachedProviderCredential(providerId: string): Promise<void> {
-    const runtimes = [...this.runtimes.values()]
-      .filter((runtime) => (
-        runtime.connectionState.status === 'connected'
-        && runtime.hasCachedProviderCredential(providerId)
-      ));
-    await Promise.all(runtimes.map((runtime) => runtime.clearCachedProviderCredential(providerId)));
+    await this.updateCachedProviderCredential(providerId);
+  }
+
+  private async updateCachedProviderCredential(providerId: string, credential?: string): Promise<void> {
+    this.mutatedProviderCredentials.add(providerId);
+    // Invalidate every runtime, including a pending load or a disconnected
+    // sidecar that may later be recovered without restarting its process.
+    const results = await Promise.allSettled([...this.runtimes.values()]
+      .map((runtime) => runtime.refreshCachedProviderCredential(providerId, credential)));
+    const failed = results.find((result) => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   }
 
   async dispose(): Promise<void> {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
+    this.mutatedProviderCredentials.clear();
     this.lastUsed.clear();
     this.sessionModelHints.clear();
     this.activeSessionId = null;
     this.openingSessions.clear();
     this.restartingSessions.clear();
+    this.remoteOpened.clear();
+    this.runtimeCreatedListeners.clear();
     this.draftSessions.clear();
     this.openingDraftSessions.clear();
     await Promise.all(runtimes.map((runtime) => runtime.dispose().catch(() => undefined)));
@@ -615,9 +731,9 @@ export class SessionRuntimeManager {
     ipcMain.handle(CH_COMMAND, async (event: IpcMainInvokeEvent, sessionId: unknown, command: unknown) => {
       this.assertSender(event);
       const runtime = this.requireById(sessionId);
-      // The transport handshake precedes owned transcript/control recovery.
-      // Normal commands wait for that transaction; permission/cancel IPCs
-      // remain independent so recovery can finish its pending interactions.
+      // Connectivity precedes owned transcript/control recovery. Only ordinary
+      // commands wait here; approvals, questions and cancellation must remain
+      // available while the recovery transaction waits for those interactions.
       do {
         const opening = this.openingSessions.get(runtime.sessionId)?.promise;
         const restarting = this.restartingSessions.get(runtime.sessionId) ?? [];

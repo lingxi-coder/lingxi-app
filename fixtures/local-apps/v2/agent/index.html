@@ -1,1 +1,674 @@
-<!doctype html><html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script src="/__local_app_sdk.js"></script><title>Agent acceptance</title><body><h1>Agent device acceptance</h1><output id="result">Ready</output></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent device acceptance</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.45 system-ui, sans-serif; }
+    body { max-width: 900px; margin: 0 auto; padding: 1rem; }
+    h1 { font-size: 1.45rem; margin: 0 0 .35rem; }
+    h2 { font-size: 1.05rem; margin: 0 0 .55rem; }
+    p { margin: .4rem 0 .8rem; }
+    section { border: 1px solid color-mix(in srgb, currentColor 24%, transparent); border-radius: .7rem; padding: .85rem; margin: .8rem 0; }
+    .row { display: flex; flex-wrap: wrap; gap: .55rem; align-items: center; }
+    button, textarea { font: inherit; }
+    button { min-height: 2.65rem; padding: .45rem .75rem; border-radius: .5rem; }
+    button:disabled { opacity: .55; }
+    textarea { width: 100%; min-height: 5rem; box-sizing: border-box; padding: .55rem; margin: .35rem 0; }
+    output, .note { display: block; overflow-wrap: anywhere; }
+    #status { padding: .55rem .7rem; border-radius: .45rem; background: color-mix(in srgb, currentColor 8%, transparent); }
+    #error { color: #d64242; white-space: pre-wrap; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; padding: .65rem; border-radius: .45rem; background: color-mix(in srgb, currentColor 7%, transparent); }
+    .muted { opacity: .76; font-size: .9rem; }
+    @media (max-width: 520px) { body { padding: .75rem; } button { flex: 1 1 100%; } }
+  </style>
+</head>
+<body>
+  <h1>Agent device acceptance</h1>
+  <p class="muted">Runs use the model and permissions selected in the trusted LingXi Apps settings. This page does not configure providers or grants.</p>
+  <output id="status" role="status" aria-live="polite">Loading the host Agent…</output>
+  <output id="error" role="alert" hidden></output>
+  <p id="recovery" class="muted">No model request is started automatically when this page opens.</p>
+
+  <section aria-labelledby="single-title">
+    <h2 id="single-title">Single runs</h2>
+    <div class="row">
+      <button id="run-image" type="button" data-testid="run-image" disabled>Run public image</button>
+      <button id="run-text-file" type="button" data-testid="run-text-file" disabled>Run text file</button>
+      <button id="retry-pending" type="button" data-testid="retry-pending" hidden>Retry the same pending request</button>
+      <button id="cancel-run" type="button" data-testid="cancel-run" disabled>Cancel active run</button>
+    </div>
+  </section>
+
+  <section aria-labelledby="chat-title">
+    <h2 id="chat-title">Persistent Chat</h2>
+    <div class="row">
+      <button id="create-chat" type="button" data-testid="create-chat" disabled>Create Chat</button>
+      <button id="open-chat" type="button" data-testid="open-chat" disabled>Open saved or discovered Chat</button>
+      <button id="refresh-history" type="button" data-testid="refresh-history" disabled>Refresh Chat history</button>
+    </div>
+    <p id="chat-handle" class="muted">No Chat opened.</p>
+    <label for="chat-prompt">Message to send in this Chat</label>
+    <textarea id="chat-prompt" data-testid="chat-prompt" placeholder="Send a first turn, then ask a follow-up to verify persistent context."></textarea>
+    <div class="row">
+      <button id="send-chat" type="button" data-testid="send-chat" disabled>Send Chat turn</button>
+      <button id="reconnect-last" type="button" data-testid="reconnect-last" disabled>Read-only reconnect to last run</button>
+      <button id="host-open" type="button" hidden>Open trusted host settings</button>
+    </div>
+    <h3>Canonical Chat history</h3>
+    <pre id="chat-history" aria-label="Canonical Chat history">No history loaded.</pre>
+  </section>
+
+  <section aria-labelledby="evidence-title">
+    <h2 id="evidence-title">AG-UI acceptance evidence</h2>
+    <p class="muted">File data is redacted in this display. Run and thread IDs are public protocol identifiers.</p>
+    <p>Task state: <strong id="task-state">none</strong></p>
+    <h3>RunAgentInput and RunAgentResult</h3>
+    <pre id="result">Ready</pre>
+    <h3>Standard BaseEvents</h3>
+    <pre id="events">No run events yet.</pre>
+  </section>
+
+  <script type="module">
+    const $ = (id) => document.getElementById(id);
+    const STORAGE_KEY = 'lingxi.localApp.agent-device-acceptance.v1';
+    const EXTENSION_KEY = 'com.lingxi.localApp';
+    const MAX_PAGES = 128;
+    const MAX_EVENTS = 20000;
+    const imageSchema = {
+      type: 'object', additionalProperties: false, required: ['food', 'description', 'visibleCount'],
+      properties: {
+        food: {type: 'string', minLength: 1},
+        description: {type: 'string', minLength: 1},
+        visibleCount: {type: 'integer', minimum: 0},
+      },
+    };
+    const documentSchema = {
+      type: 'object', additionalProperties: false, required: ['item', 'count'],
+      properties: {item: {type: 'string', minLength: 1}, count: {type: 'integer', minimum: 0}},
+    };
+    const chatSchema = {
+      type: 'object', additionalProperties: false, required: ['answer'],
+      properties: {answer: {type: 'string', minLength: 1}},
+    };
+
+    let agent;
+    let chat;
+    let busy = false;
+    let activeRunId = null;
+    let activeTask = false;
+    let storageReady = true;
+    let storageFailure = '';
+    let state = {version: 1, chatId: null, pending: null, lastRun: null};
+
+    function setStatus(message) { $('status').textContent = message; }
+    function setError(message = '') {
+      $('error').textContent = message;
+      $('error').hidden = !message;
+    }
+    function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+    function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+    function newId() { return crypto.randomUUID(); }
+
+    function loadState() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw === null) return;
+        const parsed = JSON.parse(raw);
+        if (!isRecord(parsed) || parsed.version !== 1
+            || (parsed.chatId !== null && typeof parsed.chatId !== 'string')
+            || (parsed.pending !== null && !isRecord(parsed.pending))
+            || (parsed.lastRun !== null && !isRecord(parsed.lastRun))) {
+          throw new Error('Saved acceptance state has an unsupported shape.');
+        }
+        state = {version: 1, chatId: parsed.chatId ?? null, pending: parsed.pending ?? null, lastRun: parsed.lastRun ?? null};
+      } catch (failure) {
+        storageReady = false;
+        storageFailure = failure.message || 'Browser storage is unavailable.';
+      }
+    }
+
+    function saveState() {
+      if (!storageReady) throw new Error('Cannot safely persist this request: ' + storageFailure);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          version: 1,
+          chatId: state.chatId,
+          pending: state.pending,
+          lastRun: state.lastRun,
+        }));
+      } catch (failure) {
+        storageReady = false;
+        storageFailure = failure.message || 'Browser storage is unavailable.';
+        throw new Error('Cannot safely persist this request: ' + storageFailure);
+      }
+    }
+
+    function byteLengthFromBase64(value) {
+      if (typeof value !== 'string' || value.length === 0 || value.length % 4 !== 0) return null;
+      const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+      return Math.max(0, (value.length / 4) * 3 - padding);
+    }
+
+    function redactProtocol(value) {
+      if (Array.isArray(value)) return value.map(redactProtocol);
+      if (!isRecord(value)) return value;
+      const copy = {};
+      for (const [key, item] of Object.entries(value)) {
+        if (key === 'source' && isRecord(item) && item.type === 'data' && typeof item.value === 'string') {
+          const size = byteLengthFromBase64(item.value);
+          copy[key] = {...redactProtocol(item), value: `[base64 omitted${size === null ? '' : `; ${size} bytes`}]`};
+        } else copy[key] = redactProtocol(item);
+      }
+      return copy;
+    }
+
+    function showInput(input) {
+      $('result').textContent = JSON.stringify({RunAgentInput: redactProtocol(input)}, null, 2);
+    }
+
+    function showTask(task) {
+      $('task-state').textContent = task
+        ? `${task.state} · thread ${task.threadId} · run ${task.runId}`
+        : 'none';
+    }
+
+    function showEvents(events) {
+      $('events').textContent = events.length
+        ? JSON.stringify(events.map(redactProtocol), null, 2)
+        : 'No standard BaseEvents were returned.';
+    }
+
+    function updateControls() {
+      const usable = Boolean(agent && storageReady && !busy);
+      const canStart = usable && !state.pending;
+      $('run-image').disabled = !canStart;
+      $('run-text-file').disabled = !canStart;
+      $('create-chat').disabled = !canStart;
+      $('open-chat').disabled = !usable || !state.chatId;
+      $('refresh-history').disabled = !agent || !chat || busy;
+      $('send-chat').disabled = !canStart || !chat || !$('chat-prompt').value.trim();
+      $('retry-pending').hidden = !state.pending;
+      $('retry-pending').disabled = !usable || !state.pending;
+      $('reconnect-last').disabled = !agent || !state.lastRun || busy;
+      $('cancel-run').disabled = !agent || !activeRunId || !activeTask;
+      if (!storageReady) $('recovery').textContent = `Browser-origin storage is unavailable: ${storageFailure}`;
+    }
+
+    function makeInput(threadId, messages, outputSchema) {
+      const input = {
+        protocolVersion: '1.0',
+        threadId,
+        runId: newId(),
+        messages,
+        forwardedProps: {
+          [EXTENSION_KEY]: {
+            version: 1,
+            tools: [],
+            skills: [],
+            outputSchema,
+            maxTurns: 8,
+            timeoutMs: 180000,
+          },
+        },
+      };
+      const validate = window.LingxiLocalAppAGUI?.validateRunAgentInput;
+      // The host LocalApp Agent facade validates through the official schema too;
+      // use the public bundle validator here when the mobile host exposes it.
+      return typeof validate === 'function' ? validate(input) : input;
+    }
+
+    function createSingleInput(threadId, content, outputSchema) {
+      return makeInput(threadId, [{id: newId(), role: 'user', content}], outputSchema);
+    }
+
+    function validateResult(kind, runResult) {
+      if (!isRecord(runResult) || !Array.isArray(runResult.newMessages) || !isRecord(runResult.result)) {
+        throw new Error('The official RunAgentResult did not contain the expected structured object and messages.');
+      }
+      if (!runResult.newMessages.some(message => message?.role === 'assistant')) {
+        throw new Error('The RunAgentResult did not contain an assistant Message.');
+      }
+      const value = runResult.result;
+      if (typeof window.LingxiLocalAppAGUI?.validateMessage === 'function') {
+        runResult.newMessages.forEach(message => window.LingxiLocalAppAGUI.validateMessage(message));
+      }
+      if (kind === 'image' && (typeof value.food !== 'string' || typeof value.description !== 'string'
+          || !Number.isInteger(value.visibleCount))) throw new Error('Image result did not match its declared outputSchema.');
+      if (kind === 'document' && (typeof value.item !== 'string' || !Number.isInteger(value.count))) {
+        throw new Error('Document result did not match its declared outputSchema.');
+      }
+      if (kind === 'chat' && typeof value.answer !== 'string') throw new Error('Chat result did not match its declared outputSchema.');
+    }
+
+    async function readTask(runId, threadId) {
+      const task = await agent.tasks.get(runId);
+      if (!isRecord(task) || task.runId !== runId || task.threadId !== threadId) {
+        throw new Error('Host task identity did not match the public AG-UI run and thread IDs.');
+      }
+      return task;
+    }
+
+    async function drainTaskEvents(runId) {
+      const all = [];
+      let afterSequence = 0;
+      for (let pageNumber = 0; pageNumber < MAX_PAGES; pageNumber += 1) {
+        const page = await agent.tasks.events({runId, afterSequence});
+        if (!isRecord(page) || !Array.isArray(page.events) || !Number.isSafeInteger(page.sequence)
+            || page.sequence < afterSequence) throw new Error('Host returned an invalid standard task-event page.');
+        const events = typeof window.LingxiLocalAppAGUI?.validateEvent === 'function'
+          ? page.events.map(event => window.LingxiLocalAppAGUI.validateEvent(event))
+          : page.events;
+        all.push(...events);
+        if (all.length > MAX_EVENTS) throw new Error('Task event history exceeded the acceptance display limit.');
+        if (page.sequence === afterSequence) {
+          if (page.events.length) throw new Error('Task event pagination returned events without advancing its sequence.');
+          return all;
+        }
+        afterSequence = page.sequence;
+      }
+      throw new Error(`Task events were not fully drained after ${MAX_PAGES} pages.`);
+    }
+
+    function terminalEvent(events, task) {
+      const terminals = events.filter(event => event?.type === 'RUN_FINISHED' || event?.type === 'RUN_ERROR');
+      if (terminals.length !== 1 || events.at(-1) !== terminals[0]) {
+        throw new Error(`Expected exactly one final RUN_FINISHED or RUN_ERROR; received ${terminals.length}.`);
+      }
+      const terminal = terminals[0];
+      const unsuccessfulOutcome = terminal.outcome !== undefined
+        && (!isRecord(terminal.outcome) || terminal.outcome.type !== 'success');
+      if (task.state !== 'succeeded' || terminal.type !== 'RUN_FINISHED' || unsuccessfulOutcome) {
+        const reason = terminal.type === 'RUN_ERROR' ? (terminal.message || terminal.code || 'RUN_ERROR')
+          : `task=${task.state}, outcome=${terminal.outcome?.type ?? 'missing'}`;
+        const failure = new Error(`Run did not finish successfully: ${reason}`);
+        failure.terminal = true;
+        throw failure;
+      }
+      return terminal;
+    }
+
+    async function taskEvidence(runId, threadId) {
+      const task = await readTask(runId, threadId);
+      const events = await drainTaskEvents(runId);
+      terminalEvent(events, task);
+      return {task, events};
+    }
+
+    async function allChatMessages(handle) {
+      const messages = [];
+      const seenCursors = new Set();
+      let cursor;
+      for (let pageNumber = 0; pageNumber < MAX_PAGES; pageNumber += 1) {
+        const page = await handle.history({limit: 50, ...(cursor === undefined ? {} : {cursor})});
+        if (!isRecord(page) || !Array.isArray(page.messages)
+            || (page.nextCursor !== undefined && typeof page.nextCursor !== 'string')) {
+          throw new Error('Chat history returned an invalid page.');
+        }
+        const pageMessages = typeof window.LingxiLocalAppAGUI?.validateMessage === 'function'
+          ? page.messages.map(message => window.LingxiLocalAppAGUI.validateMessage(message))
+          : page.messages;
+        messages.push(...pageMessages);
+        if (page.nextCursor === undefined) return messages;
+        if (!page.nextCursor || seenCursors.has(page.nextCursor)) throw new Error('Chat history cursor repeated.');
+        seenCursors.add(page.nextCursor);
+        cursor = page.nextCursor;
+      }
+      throw new Error(`Chat history was not fully read after ${MAX_PAGES} pages.`);
+    }
+
+    async function refreshChatHistory() {
+      if (!chat) return;
+      const messages = await allChatMessages(chat);
+      $('chat-history').textContent = JSON.stringify(redactProtocol(messages), null, 2);
+      $('chat-handle').textContent = `Open host Chat · threadId ${chat.id} · ${messages.length} canonical Messages`;
+    }
+
+    async function latestFromHost(listPage) {
+      const all = [];
+      const seenCursors = new Set();
+      let cursor;
+      for (let pageNumber = 0; pageNumber < MAX_PAGES; pageNumber += 1) {
+        const page = await listPage(cursor);
+        if (!isRecord(page) || !Array.isArray(page.items)
+            || (page.nextCursor !== undefined && typeof page.nextCursor !== 'string')) {
+          throw new Error('Host inventory returned an invalid page.');
+        }
+        all.push(...page.items);
+        if (page.nextCursor === undefined) return all;
+        if (!page.nextCursor || seenCursors.has(page.nextCursor)) throw new Error('Host inventory cursor repeated.');
+        seenCursors.add(page.nextCursor);
+        cursor = page.nextCursor;
+      }
+      throw new Error(`Host inventory was not fully read after ${MAX_PAGES} pages.`);
+    }
+
+    async function latestTaskInventory() {
+      const tasks = await latestFromHost(cursor => agent.tasks.list({limit: 50, ...(cursor === undefined ? {} : {cursor})})
+        .then(page => ({items: page.tasks, nextCursor: page.nextCursor})));
+      return tasks.filter(task => typeof task?.runId === 'string' && typeof task?.threadId === 'string')
+        .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0] ?? null;
+    }
+
+    async function latestChatInventory() {
+      const chats = await latestFromHost(cursor => agent.chats.list({limit: 50, ...(cursor === undefined ? {} : {cursor})})
+        .then(page => ({items: page.chats, nextCursor: page.nextCursor})));
+      return chats.filter(item => typeof item?.chatId === 'string')
+        .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0] ?? null;
+    }
+
+    async function showTaskSnapshot(reference, recoveryLabel) {
+      if (!reference) return null;
+      try {
+        const task = await readTask(reference.runId, reference.threadId);
+        state.lastRun = {runId: task.runId, threadId: task.threadId, kind: reference.kind ?? 'recovered', ...(reference.chatId ? {chatId: reference.chatId} : {})};
+        showTask(task);
+        $('recovery').textContent = recoveryLabel;
+        if (storageReady) saveState();
+        return task;
+      } catch (failure) {
+        if (!state.pending && state.lastRun?.runId === reference.runId) state.lastRun = null;
+        $('recovery').textContent = `${recoveryLabel} · task lookup: ${failure.message}`;
+        return null;
+      }
+    }
+
+    async function restoreReadOnly() {
+      let taskReference = state.lastRun;
+      let taskSource = taskReference ? 'Saved run ID restored from this browser origin; host task lookup was read-only.' : '';
+      let task = taskReference ? await showTaskSnapshot(taskReference, taskSource) : null;
+      if (!task && !state.pending) {
+        try {
+          const inventoryTask = await latestTaskInventory();
+          taskReference = inventoryTask ? {runId: inventoryTask.runId, threadId: inventoryTask.threadId, kind: 'host-inventory', ...(inventoryTask.chatId ? {chatId: inventoryTask.chatId} : {})} : null;
+          if (taskReference) {
+            taskSource = 'Recovered the latest App-scoped task from host tasks.list; no model call was made.';
+            task = await showTaskSnapshot(taskReference, taskSource);
+          }
+        } catch (failure) {
+          taskSource = `Host tasks.list recovery unavailable: ${failure.message}`;
+        }
+      } else if (!task && state.pending) {
+        taskReference = {runId: state.pending.input.runId, threadId: state.pending.input.threadId,
+          kind: state.pending.kind, ...(state.pending.chatId ? {chatId: state.pending.chatId} : {})};
+        state.lastRun = taskReference;
+        taskSource = 'Pending RunAgentInput restored from this browser origin; host task lookup was read-only and no run was started.';
+        $('task-state').textContent = `pending · thread ${taskReference.threadId} · run ${taskReference.runId}`;
+      }
+
+      let chatSource = state.chatId ? 'Saved Chat handle restored from this browser origin; history read was read-only.' : '';
+      if (state.chatId) {
+        try {
+          chat = await agent.chats.open(state.chatId);
+          await refreshChatHistory();
+        } catch (failure) {
+          $('chat-history').textContent = `Saved Chat could not be opened: ${failure.message}`;
+          chat = null;
+          chatSource = '';
+        }
+      }
+      if (!chat) {
+        try {
+          const inventoryChat = await latestChatInventory();
+          if (inventoryChat) {
+            chat = await agent.chats.open(inventoryChat.chatId);
+            state.chatId = chat.id;
+            await refreshChatHistory();
+            if (storageReady) saveState();
+            chatSource = 'Recovered the latest App-scoped Chat from host chats.list; history read was read-only.';
+          }
+        } catch (failure) {
+          chatSource = `Host chats.list recovery unavailable: ${failure.message}`;
+        }
+      }
+      if (!state.lastRun && !taskReference && !chat) {
+        $('recovery').textContent = 'No saved or host-listed task or Chat was found. Page startup made no model call.';
+      } else {
+        const sources = [taskSource, chatSource].filter(Boolean);
+        if (sources.length) $('recovery').textContent = sources.join(' ');
+      }
+      if (state.pending) showInput(state.pending.input);
+      updateControls();
+    }
+
+    async function observeAfterFailure(input) {
+      try {
+        const task = await readTask(input.runId, input.threadId);
+        const events = await drainTaskEvents(input.runId);
+        showTask(task);
+        showEvents(events);
+        const terminal = events.find(event => event?.type === 'RUN_FINISHED' || event?.type === 'RUN_ERROR');
+        if (terminal) {
+          state.pending = null;
+          saveState();
+        }
+        return true;
+      } catch { return false; }
+    }
+
+    async function submitInput(input, kind, chatId = null) {
+      if (busy) return;
+      state.pending = {input, kind, ...(chatId ? {chatId} : {})};
+      state.lastRun = {runId: input.runId, threadId: input.threadId, kind, ...(chatId ? {chatId} : {})};
+      saveState();
+      showInput(input);
+      showTask(null);
+      showEvents([]);
+      busy = true;
+      activeRunId = input.runId;
+      activeTask = false;
+      let monitor = true;
+      const monitorPromise = monitorActiveTask(input, () => monitor);
+      setError('');
+      setStatus(`Submitting standard AG-UI input for ${kind}; no provider details are exposed to the page.`);
+      updateControls();
+      try {
+        const runResult = kind === 'chat'
+          ? await (chat && chat.id === chatId ? chat : await agent.chats.open(chatId)).send(input)
+          : await agent.run(input);
+        validateResult(kind, runResult);
+        const {task, events} = await taskEvidence(input.runId, input.threadId);
+        state.pending = null;
+        saveState();
+        showTask(task);
+        showEvents(events);
+        $('result').textContent = JSON.stringify({
+          RunAgentInput: redactProtocol(input),
+          RunAgentResult: redactProtocol(runResult),
+        }, null, 2);
+        setStatus(`${kind} run succeeded · thread ${input.threadId} · run ${input.runId}`);
+        if (kind === 'chat') {
+          chat = await agent.chats.open(chatId);
+          await refreshChatHistory();
+        }
+      } catch (failure) {
+        await observeAfterFailure(input);
+        setError(failure?.message || String(failure));
+        setStatus(`Run failed or was interrupted · thread ${input.threadId} · run ${input.runId}. A pending request, if shown, can only be retried with the same AG-UI IDs.`);
+      } finally {
+        monitor = false;
+        await monitorPromise;
+        activeRunId = null;
+        activeTask = false;
+        busy = false;
+        updateControls();
+      }
+    }
+
+    async function monitorActiveTask(input, shouldContinue) {
+      while (shouldContinue()) {
+        await delay(400);
+        if (!shouldContinue()) return;
+        try {
+          const task = await readTask(input.runId, input.threadId);
+          if (!shouldContinue()) return;
+          showTask(task);
+          activeTask = task.state === 'queued' || task.state === 'running';
+          updateControls();
+          if (!activeTask) return;
+        } catch { /* A task may not exist until the SDK completes the native handoff. */ }
+      }
+    }
+
+    async function cancelActiveRun() {
+      if (!activeRunId || !activeTask) return;
+      try {
+        await agent.tasks.cancel(activeRunId);
+        setStatus(`Cancellation requested for public run ${activeRunId}; waiting for its terminal event.`);
+      } catch (failure) {
+        setError(failure?.message || String(failure));
+      }
+    }
+
+    async function runImage() {
+      setError('');
+      try {
+        const response = await fetch(new URL('./public-apple.jpg', location.href), {cache: 'no-store'});
+        if (!response.ok) throw new Error(`Public image fetch failed with HTTP ${response.status}.`);
+        const blob = await response.blob();
+        const file = new File([blob], 'public-apple.jpg', {type: blob.type || 'image/jpeg'});
+        const part = await agent.file(file);
+        const input = createSingleInput(newId(), [
+          {type: 'text', text: 'Describe the main food visible in this public image and estimate how many pieces are visible.'},
+          part,
+        ], imageSchema);
+        $('recovery').textContent = `New image input: ${file.type}, ${file.name}, ${file.size} bytes. The data source is redacted below.`;
+        await submitInput(input, 'image');
+      } catch (failure) { setError(failure?.message || String(failure)); }
+    }
+
+    async function runTextFile() {
+      setError('');
+      try {
+        const file = new File(['Item: stationery\nCount: 3\n'], 'acceptance-stationery.txt', {type: 'text/plain;charset=utf-8'});
+        const part = await agent.file(file);
+        const input = createSingleInput(newId(), [
+          {type: 'text', text: 'Read the attached text file and return its item and count.'},
+          part,
+        ], documentSchema);
+        $('recovery').textContent = `New text-file input: ${file.type}, ${file.name}, ${file.size} bytes. The data source is redacted below.`;
+        await submitInput(input, 'document');
+      } catch (failure) { setError(failure?.message || String(failure)); }
+    }
+
+    async function createChat() {
+      setError('');
+      try {
+        chat = await agent.chats.create({title: 'Agent device acceptance'});
+        state.chatId = chat.id;
+        saveState();
+        await refreshChatHistory();
+        $('recovery').textContent = `Created host-owned persistent Chat; threadId is ${chat.id}.`;
+        setStatus('Chat created. Send a first turn, then a follow-up to verify persistent context.');
+        updateControls();
+      } catch (failure) { setError(failure?.message || String(failure)); }
+    }
+
+    async function openChat() {
+      setError('');
+      try {
+        if (!state.chatId) throw new Error('No saved Chat ID is available.');
+        chat = await agent.chats.open(state.chatId);
+        await refreshChatHistory();
+        $('recovery').textContent = `Opened host Chat ${chat.id}; only canonical history was read.`;
+        setStatus('Saved persistent Chat opened.');
+        updateControls();
+      } catch (failure) { setError(failure?.message || String(failure)); }
+    }
+
+    async function sendChatTurn() {
+      setError('');
+      try {
+        if (!chat) throw new Error('Create or open a persistent Chat first.');
+        const text = $('chat-prompt').value.trim();
+        if (!text) throw new Error('Enter a Chat message first.');
+        const history = await allChatMessages(chat);
+        const input = makeInput(chat.id, [...history, {id: newId(), role: 'user', content: [{type: 'text', text}]}], chatSchema);
+        await submitInput(input, 'chat', chat.id);
+        $('chat-prompt').value = '';
+      } catch (failure) { setError(failure?.message || String(failure)); }
+    }
+
+    async function reconnectLastRun() {
+      setError('');
+      if (!state.lastRun) return;
+      busy = true;
+      updateControls();
+      setStatus(`Read-only reconnect to ${state.lastRun.runId}; this does not submit a new model request.`);
+      try {
+        const reference = state.lastRun;
+        const client = agent.createClient({threadId: reference.threadId});
+        const callbackEvents = [];
+        const runResult = await client.connectAgent({runId: reference.runId}, {
+          onEvent: ({event}) => callbackEvents.push(
+            typeof window.LingxiLocalAppAGUI?.validateEvent === 'function'
+              ? window.LingxiLocalAppAGUI.validateEvent(event) : event,
+          ),
+        });
+        const {task, events} = await taskEvidence(reference.runId, reference.threadId);
+        const terminal = terminalEvent(callbackEvents, task);
+        if (terminal.type !== 'RUN_FINISHED'
+            || (terminal.outcome !== undefined && terminal.outcome?.type !== 'success')) {
+          throw new Error('Read-only reconnect did not receive a successful standard terminal event.');
+        }
+        validateResult(reference.kind, runResult);
+        showTask(task);
+        showEvents(events);
+        $('result').textContent = JSON.stringify({
+          reconnect: {mode: 'read-only', threadId: reference.threadId, runId: reference.runId},
+          RunAgentResult: redactProtocol(runResult),
+          callbackEventTypes: callbackEvents.map(event => event.type),
+        }, null, 2);
+        setStatus(`Read-only reconnect succeeded · ${callbackEvents.length} callback events · no new run started.`);
+      } catch (failure) {
+        setError(failure?.message || String(failure));
+        setStatus('Read-only reconnect failed; no replacement run was started.');
+      } finally {
+        busy = false;
+        updateControls();
+      }
+    }
+
+    async function retryPending() {
+      if (!state.pending) return;
+      const pending = state.pending;
+      await submitInput(pending.input, pending.kind, pending.chatId ?? null);
+    }
+
+    $('run-image').addEventListener('click', runImage);
+    $('run-text-file').addEventListener('click', runTextFile);
+    $('create-chat').addEventListener('click', createChat);
+    $('open-chat').addEventListener('click', openChat);
+    $('refresh-history').addEventListener('click', async () => {
+      try { await refreshChatHistory(); } catch (failure) { setError(failure?.message || String(failure)); }
+    });
+    $('send-chat').addEventListener('click', sendChatTurn);
+    $('chat-prompt').addEventListener('input', updateControls);
+    $('reconnect-last').addEventListener('click', reconnectLastRun);
+    $('retry-pending').addEventListener('click', retryPending);
+    $('cancel-run').addEventListener('click', cancelActiveRun);
+    $('host-open').addEventListener('click', () => window.localApp?.host?.open?.());
+
+    async function bootstrap() {
+      loadState();
+      try {
+        if (!globalThis.localApp) await import('/__local_app_sdk.js');
+        const deadline = Date.now() + 15000;
+        while (!window.localApp?.agent && Date.now() < deadline) await delay(100);
+        if (!window.localApp?.agent) throw new Error('The host did not provide localApp.agent.');
+        agent = window.localApp.agent;
+        if (typeof window.localApp.host?.open === 'function') $('host-open').hidden = false;
+        setStatus('Host Agent ready. Model selection and approvals remain in trusted native settings.');
+        if (!storageReady) setError(`Saved acceptance state was not changed: ${storageFailure}`);
+        await restoreReadOnly();
+      } catch (failure) {
+        setStatus('Host Agent unavailable. Reopen this page from the native Apps library.');
+        setError(failure?.message || String(failure));
+      } finally { updateControls(); }
+    }
+
+    void bootstrap();
+  </script>
+</body>
+</html>

@@ -32,7 +32,7 @@ class UnifiedLocalAppProcessDeathTest {
         NativeAppActivityHost(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
             if (phase == "prepare") {
                 check(!receipt.exists()) { "A previous acceptance receipt must be recovered first" }
-                val source = apps.hostFile("/home/lingxi/.lingxi/.apps/owner-death-${UUID.randomUUID()}")
+                val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/owner-death-${UUID.randomUUID()}")
                 check(File(context.filesDir, "local-app-acceptance-fixtures/python").copyRecursively(source))
                 val value = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
                 val record = value.getJSONObject("record").appRecord()

@@ -1,0 +1,16 @@
+{
+  "images": [],
+  "errors": [],
+  "network": [],
+  "mobile": {
+    "width": 390,
+    "body": 390,
+    "overflow": []
+  },
+  "control": "LingXi Control",
+  "sdk": "products/sdk/lockup-dark.svg",
+  "download": "products/chat/icon.svg",
+  "svg_assets": 51,
+  "app_master_validation": "8 opaque 1024x1024 PNGs",
+  "status": "Design preview only; no client integration or packaging performed."
+}

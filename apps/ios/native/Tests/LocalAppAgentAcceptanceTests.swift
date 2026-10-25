@@ -282,12 +282,19 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
         #else
         let client = LocalAppServiceClient()
         let app = try await publishAgentApp(client)
+        let apps = UnifiedLocalApps(client: client)
         var stage = "configure"
         do {
             _ = try await configureAgentForWakeGate(client, appId: app.result.record.appId)
-            stage = "open-browser"
+            stage = "refresh-app-library"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
-            let launch = try await UnifiedLocalApps(client: client).openExternalBrowser(app.result.record.appId)
+            await apps.initialize()
+            guard apps.record(app.result.record.appId) != nil else {
+                throw LocalAppServiceFailure("APP_NOT_FOUND", "The refreshed native Apps library did not contain the app that was just published.")
+            }
+            stage = "prepare-browser-run"
+            print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
+            let launch = try await apps.openExternalBrowser(app.result.record.appId)
             XCTAssertTrue(LocalAppExternalBrowserURL.matches(launch.url, origin: launch.origin))
 
             let runID = "ios opaque run + \(UUID().uuidString)"
@@ -334,13 +341,9 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             print("IOS_AGENT_WAKE_GATE PASS source Project and Code session; JSON RunAgentInput ContentPart-data; no native lease")
         } catch {
             print("IOS_AGENT_WAKE_FAILURE stage=\(stage) type=\(String(reflecting: type(of: error))) error=\(String(describing: error))")
-            try? await UnifiedLocalApps(client: client).action("remove", id: app.result.record.appId)
-            try? FileManager.default.removeItem(at: app.source)
-            _ = try? ProjectRepository(projectsRoot: URL(fileURLWithPath: MobileUserStorage.directories().projects, isDirectory: true))
-                .deleteProject(projectId: app.projectID)
             throw error
         }
-        try? await UnifiedLocalApps(client: client).action("remove", id: app.result.record.appId)
+        try? await apps.action("remove", id: app.result.record.appId)
         try? FileManager.default.removeItem(at: app.source)
         _ = try? ProjectRepository(projectsRoot: URL(fileURLWithPath: MobileUserStorage.directories().projects, isDirectory: true))
             .deleteProject(projectId: app.projectID)
@@ -381,17 +384,24 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             projectName: "AG-UI browser acceptance",
             verifyProjectShell: false
         )
+        let apps = UnifiedLocalApps(client: client)
+        var stage = "configure-agent"
         do {
             let model = try await configureAgentForWakeGate(client, appId: app.result.record.appId)
-            let launch = try await UnifiedLocalApps(client: client).openExternalBrowser(app.result.record.appId)
-            XCTAssertTrue(LocalAppExternalBrowserURL.matches(launch.url, origin: launch.origin))
             try attachBrowserAcceptanceReceipt(app, fixtureName: "agent", model: model)
-            print("IOS_AGUI_EXTERNAL_BROWSER_OPEN appId=\(app.result.record.appId) projectId=\(app.projectID) route=system-selected-external-browser")
+            stage = "refresh-app-library"
+            print("IOS_AGUI_STAGE_CHECKPOINT \(stage)")
+            await apps.initialize()
+            guard apps.record(app.result.record.appId) != nil else {
+                throw LocalAppServiceFailure("APP_NOT_FOUND", "The refreshed native Apps library did not contain the staged AG-UI app.")
+            }
+            stage = "prepare-browser-run"
+            print("IOS_AGUI_STAGE_CHECKPOINT \(stage)")
+            let launch = try await apps.openExternalBrowser(app.result.record.appId)
+            XCTAssertTrue(LocalAppExternalBrowserURL.matches(launch.url, origin: launch.origin))
+            print("IOS_AGUI_EXTERNAL_BROWSER_URL_READY appId=\(app.result.record.appId) projectId=\(app.projectID) route=system-selected-external-browser-url-prepared")
         } catch {
-            try? await UnifiedLocalApps(client: client).action("remove", id: app.result.record.appId)
-            try? FileManager.default.removeItem(at: app.source)
-            _ = try? ProjectRepository(projectsRoot: URL(fileURLWithPath: MobileUserStorage.directories().projects, isDirectory: true))
-                .deleteProject(projectId: app.projectID)
+            print("IOS_AGUI_STAGE_FAILURE stage=\(stage) type=\(String(reflecting: type(of: error))) error=\(String(describing: error))")
             throw error
         }
 #else

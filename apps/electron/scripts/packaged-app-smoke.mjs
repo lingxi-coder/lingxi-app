@@ -1391,6 +1391,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   const cdpPort = await reserveLoopbackPort();
   const env = sanitizePackagedAppEnvironment(process.env, {
     HOME: tempHome,
+    CFFIXED_USER_HOME: tempHome,
     TMPDIR: tempTmp,
     LINGXI_CONFIG_DIR: join(tempHome, ".lingxi"),
   });

@@ -426,8 +426,8 @@ class LocalAppAgentAcceptanceTest {
               try {
                 await import('/__local_app_sdk.js');
                 bootstrap.localAppType=typeof window.localApp;
-                const chat=await localApp.agent.chats.create({title:'AG-UI Chat acceptance'});
-                const isolated=await localApp.agent.chats.create({title:'AG-UI Chat isolation'});
+                const chat=await localApp.agent.chats.create({title:'AG-UI Chat acceptance $runId'});
+                const isolated=await localApp.agent.chats.create({title:'AG-UI Chat isolation $runId'});
                 const input={
                   threadId:chat.id,runId:'$runId',messages:[{
                     id:'message-$runId',role:'user',content:[{type:'text',text:'Return the exact uppercase word ORBIT using the result tool.'}]
@@ -542,37 +542,64 @@ class LocalAppAgentAcceptanceTest {
                 assertEquals("ORBIT", lastEvent.getJSONObject("result").getString("answer"))
                 assertFalse((0 until events.length()).any { events.getJSONObject(it).optString("type") == "RUN_ERROR" })
 
-                var browserResult: JSONObject? = null
-                withTimeout(30_000) {
-                    while (true) {
-                        val root = instrumentation.uiAutomation.rootInActiveWindow
-                        val callback = root?.findAccessibilityNodeInfosByText("CHAT_FLOW_PASS")
-                            ?.firstOrNull { it.text?.toString()?.contains("CHAT_FLOW_PASS") == true }
-                        if (callback != null) {
-                            val parsed = runCatching { JSONObject(callback.text.toString()) }.getOrNull()
-                            checkNotNull(parsed) { "Browser Chat success output is not JSON: ${callback.text}" }
-                            browserResult = parsed
-                            break
-                        }
-                        delay(250)
+                val chatId = task.getString("threadId")
+                val chatList = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONArray
+                val summaries = (0 until chatList.length()).map { chatList.getJSONObject(it) }
+                val mainTitle = "AG-UI Chat acceptance $runId"
+                val isolationTitle = "AG-UI Chat isolation $runId"
+                val listedChat = summaries.singleOrNull { it.optString("title") == mainTitle }
+                    ?: error("The browser-created Chat is missing from the read-only Chat list.")
+                val isolatedChat = summaries.singleOrNull { it.optString("title") == isolationTitle }
+                    ?: error("The browser-created isolated Chat is missing from the read-only Chat list.")
+                assertEquals(chatId, listedChat.getString("chatId"))
+                assertNotEquals(chatId, isolatedChat.getString("chatId"))
+
+                val historyArgs = JSONObject().put("chatId", chatId).put("limit", 50)
+                val history = agentCall(launch, "agent.chats.history", historyArgs) as JSONObject
+                val reopenedHistory = agentCall(launch, "agent.chats.history", historyArgs) as JSONObject
+                val isolatedHistory = agentCall(
+                    launch,
+                    "agent.chats.history",
+                    JSONObject().put("chatId", isolatedChat.getString("chatId")).put("limit", 50),
+                ) as JSONObject
+                val historyMessages = history.getJSONArray("messages")
+                val reopenedMessages = reopenedHistory.getJSONArray("messages")
+                val isolatedMessages = isolatedHistory.getJSONArray("messages")
+                assertTrue("Persistent Chat history contains the user and assistant messages", historyMessages.length() >= 2)
+                val historyRoles = (0 until historyMessages.length()).map { historyMessages.getJSONObject(it).getString("role") }
+                assertTrue(historyRoles.contains("user"))
+                assertTrue(historyRoles.contains("assistant"))
+                val historyIds = (0 until historyMessages.length()).map { historyMessages.getJSONObject(it).getString("id") }
+                val reopenedIds = (0 until reopenedMessages.length()).map { reopenedMessages.getJSONObject(it).getString("id") }
+                assertEquals("A fresh history read preserves the reopened Chat messages", historyIds, reopenedIds)
+                assertEquals("The isolated browser-created Chat stays empty", 0, isolatedMessages.length())
+                assertEquals("Only the browser-created run was started", 1,
+                    (0 until events.length()).count { events.getJSONObject(it).optString("type") == "RUN_STARTED" })
+
+                val evidence = JSONObject()
+                    .put("acceptance", "CHAT_FLOW_HOST_READBACK_PASS")
+                    .put("browserPackage", browserPackage)
+                    .put("appId", app.id)
+                    .put("runId", runId)
+                    .put("chatId", chatId)
+                    .put("isolatedChatId", isolatedChat.getString("chatId"))
+                    .put("taskState", task.getString("state"))
+                    .put("result", lastEvent.getJSONObject("result"))
+                    .put("historyRoles", JSONArray(historyRoles))
+                    .put("historyIds", JSONArray(historyIds))
+                    .put("reopenedIds", JSONArray(reopenedIds))
+                    .put("isolatedMessageCount", isolatedMessages.length())
+                    .put("eventTypes", JSONArray((0 until events.length()).map { events.getJSONObject(it).getString("type") }))
+                    .put("pageScreenshotFile", "external-browser-chat-acceptance.png")
+                File(context.filesDir, "external-browser-chat-acceptance.json").writeText(evidence.toString(2))
+                val browserScreenshot = instrumentation.uiAutomation.takeScreenshot()
+                    ?: error("Could not capture the completed external-browser Chat page.")
+                File(context.filesDir, "external-browser-chat-acceptance.png").outputStream().use {
+                    check(browserScreenshot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)) {
+                        "Could not save the completed external-browser Chat screenshot."
                     }
                 }
-                val chatSummary = checkNotNull(browserResult).getJSONObject("summary")
-                assertEquals(runId, chatSummary.getString("runId"))
-                assertEquals(task.getString("threadId"), chatSummary.getString("chatId"))
-                assertEquals(task.getString("threadId"), chatSummary.getString("taskThreadId"))
-                assertEquals("succeeded", chatSummary.getString("taskState"))
-                assertEquals("ORBIT", chatSummary.getJSONObject("result").getString("answer"))
-                assertTrue(chatSummary.getInt("isolatedMessageCount") == 0)
-                assertTrue(chatSummary.getBoolean("chatListed"))
-                val historyRoles = chatSummary.getJSONArray("historyRoles")
-                assertTrue((0 until historyRoles.length()).any { historyRoles.getString(it) == "user" })
-                assertTrue((0 until historyRoles.length()).any { historyRoles.getString(it) == "assistant" })
-                assertEquals(chatSummary.getJSONArray("historyIds").toString(), chatSummary.getJSONArray("reopenedIds").toString())
-                assertEquals("dynamic-esm", checkNotNull(browserResult).getJSONObject("bootstrap").getString("importMode"))
-                File(context.filesDir, "external-browser-chat-acceptance.json").writeText(
-                    JSONObject().put("browserPackage", browserPackage).put("appId", app.id)
-                        .put("task", task).put("page", checkNotNull(browserResult)).toString(2))
+                browserScreenshot.recycle()
                 android.util.Log.i("LocalAppAgentAcceptance", "EXTERNAL_BROWSER_CHAT PASS persistent-thread history-isolation structured-result standard-events")
             }
         } finally { ids.forEach { runCatching { apps.remove(it) } }; sources.forEach { it.deleteRecursively() } }

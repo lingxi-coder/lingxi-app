@@ -11,6 +11,7 @@ import {
 } from '../src/renderer/components/settings/pages/Voice';
 import { audioConfigurationDefaults, type AudioConfigurationV4 } from '../src/shared/generatedAudioConfiguration';
 import { defaultNativeAudioSnapshot, type NativeAudioSnapshot } from '../src/shared/nativeAudio';
+import { tr } from '../src/renderer/i18n/locale';
 
 function prefs(overrides: Partial<AudioConfigurationV4> = {}): AudioConfigurationV4 {
   return { ...audioConfigurationDefaults(), ...overrides };
@@ -43,7 +44,19 @@ test('automatic recognition preview resolves the available system backend and lo
   }));
   assert.equal(model.recognitionRoute.effective?.source, 'system');
   assert.equal(model.recognitionRoute.effective?.modelId, null);
-  assert.match(model.actualRecognition, /macOS 系统识别/);
+  assert.ok(model.actualRecognition.includes(tr('desktop_voice_system_recognition')));
+});
+
+test('voice preview speaks the selected audio language even when the interface differs', () => {
+  const examples = [
+    ['zh-CN', /语音试听/], ['zh-TW', /語音試聽/], ['en-US', /voice preview/],
+    ['ja-JP', /音声プレビュー/], ['ko-KR', /음성 미리듣기/],
+  ] as const;
+  for (const [language, expected] of examples) {
+    const request = voicePreviewRequest(prefs({ language }));
+    assert.equal(request.operation.language, language);
+    assert.match(request.operation.text, expected);
+  }
 });
 
 test('independent explicit offline sources report missing models without falling back to system', () => {
@@ -55,8 +68,8 @@ test('independent explicit offline sources report missing models without falling
   assert.equal(model.recognitionRoute.effective, null);
   assert.equal(model.speechRoute.status, 'unavailable');
   assert.equal(model.speechRoute.effective, null);
-  assert.ok(model.notices.some((notice) => /识别偏好不可用/.test(notice)));
-  assert.ok(model.notices.some((notice) => /朗读偏好不可用/.test(notice)));
+  assert.ok(model.notices.includes(tr('desktop_voice_recognition_unavailable', model.recognitionRoute.reason)));
+  assert.ok(model.notices.includes(tr('desktop_voice_speech_unavailable', model.speechRoute.reason)));
 });
 
 test('voice page shows requested, preview, and actual speech independently', () => {
@@ -187,8 +200,8 @@ test('the page saves explicit v4 preferences and executes model/audio work throu
   assert.match(source, /voiceRevision/);
   assert.match(source, /catch \(cause\)/);
   assert.match(source, /bridge\.setVoicePreferences\(configuration,/);
-  assert.match(source, /保存设置/);
-  assert.match(source, /实际使用/);
+  assert.match(source, /desktop_voice_save/);
+  assert.match(source, /desktop_voice_actual/);
   assert.doesNotMatch(source, /speechSynthesis|navigator\.mediaDevices/);
 });
 

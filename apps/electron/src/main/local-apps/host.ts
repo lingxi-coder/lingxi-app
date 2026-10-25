@@ -1,3 +1,4 @@
+import { nativeTr } from '../../shared/nativeLocale.js';
 import { BrowserWindow, dialog, session, net, shell, clipboard, Notification, ipcMain, systemPreferences, type IpcMainInvokeEvent } from 'electron';
 import { createServer, type Server } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -125,7 +126,7 @@ export class LocalAppHost {
       await this.runtime.exclusive(id, async () => { const row = await this.store.get(id); row.grants = []; await this.store.save(row); await fs.rm(join(this.store.directory(id), 'file-grants.json'), { force: true }); });
     } else if (action === 'remove') {
       const parent = this.options.mainWindow();
-      const options = { type: 'question' as const, message: `Delete ${(await this.store.get(id)).name}?`, detail: 'This removes the application and its saved data.', buttons: ['Cancel', 'Delete'], defaultId: 0, cancelId: 0 };
+      const options = { type: 'question' as const, message: nativeTr('native_delete_app', (await this.store.get(id)).name), detail: nativeTr('native_delete_app_detail'), buttons: [nativeTr('common_cancel'), nativeTr('common_delete')], defaultId: 0, cancelId: 0 };
       const choice = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
       if (choice.response !== 1) return;
       const opening = this.cancelOpening(id);
@@ -149,9 +150,9 @@ export class LocalAppHost {
     const row = await this.store.get(id);
     const missing = (row.manifest.capabilities ?? []).filter(c => !row.grants.includes(c));
     if (!missing.length) return;
-    const labels: Record<LocalAppCapability, string> = { process: 'Run local programs and installation commands as your user', files: 'Choose files and folders to read or write', clipboard: 'Read and write the clipboard', notifications: 'Show notifications', camera: 'Use the camera', microphone: 'Use the microphone' };
-    const options = { type: 'question' as const, signal, title: row.name, message: `Allow ${row.name} to use these capabilities?`,
-      detail: missing.map(c => labels[c]).join('\n') + '\n\nYou can revoke access in Apps.', buttons: ['Cancel', 'Allow'], defaultId: 0, cancelId: 0 };
+    const labels: Record<LocalAppCapability, string> = { process: nativeTr('native_capability_process'), files: nativeTr('native_capability_files'), clipboard: nativeTr('native_capability_clipboard'), notifications: nativeTr('native_capability_notifications'), camera: nativeTr('native_capability_camera'), microphone: nativeTr('native_capability_microphone') };
+    const options = { type: 'question' as const, signal, title: row.name, message: nativeTr('native_allow_capabilities', row.name),
+      detail: missing.map(c => labels[c]).join('\n') + '\n\n' + nativeTr('native_revoke_hint'), buttons: [nativeTr('common_cancel'), nativeTr('permission_allow')], defaultId: 0, cancelId: 0 };
     const parent = this.options.mainWindow();
     signal.throwIfAborted();
     const result = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);

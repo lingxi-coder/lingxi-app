@@ -1,3 +1,4 @@
+import { tr } from '../../i18n/locale';
 export interface NavPage {
   id: string;
   label: string;
@@ -61,6 +62,22 @@ export function searchNav(query: string): NavPage[] {
   if (!needle) return [];
   return SETTINGS_NAV.filter((page) =>
     page.label.toLowerCase().includes(needle) ||
+    navPageLabel(page).toLowerCase().includes(needle) ||
     page.id.includes(needle) ||
     page.searchKeys.some((key) => key.toLowerCase().includes(needle)));
+}
+
+const NAV_LABEL_KEYS: Record<string, string> = {
+  general: 'settings_group_general', account: 'settings_title_account', appearance: 'settings_appearance',
+  notifications: 'settings_notifications', voice: 'settings_group_voice',
+  'archived-chats': 'settings_parity_archived', projects: 'desktop_project_trust', 'remote-control': 'remote_title',
+  'provider-credentials': 'desktop_provider_credentials', 'custom-providers': 'desktop_custom_providers', fusion: 'desktop_fusion',
+  'computer-use': 'settings_title_computer_use', permissions: 'settings_parity_permissions', 'tools-agent': 'desktop_tools_agent',
+  skills: 'settings_title_skills', mcp: 'settings_mcp_servers', plugins: 'desktop_plugins', diagnostics: 'desktop_diagnostics', about: 'settings_group_about',
+};
+export function navPageLabel(page: NavPage): string {
+  return NAV_LABEL_KEYS[page.id] ? tr(NAV_LABEL_KEYS[page.id]!) : page.label;
+}
+export function navGroupLabel(group: NavPage['group']): string {
+  return tr(({ '个人': 'desktop_personal', '模型与服务': 'desktop_models_services', '编码': 'desktop_coding', '高级': 'desktop_advanced' })[group]);
 }

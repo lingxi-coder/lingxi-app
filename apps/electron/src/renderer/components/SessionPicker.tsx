@@ -1,3 +1,5 @@
+import { useI18n } from '../i18n/useI18n';
+import { currentLocale, tr } from '../i18n/locale';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { SessionCatalogRow, SessionCatalogScope } from '../../shared/sessionWorkspace';
 import type { UseBridge } from '../bridge/bridgeTypes';
@@ -8,9 +10,9 @@ import { Icon } from './Icon';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SCOPES: readonly { value: SessionCatalogScope; label: string }[] = [
-  { value: 'current', label: 'Current' },
-  { value: 'repository', label: 'Repository' },
-  { value: 'all', label: 'All' },
+  { value: 'current', label: 'desktop_picker_current' },
+  { value: 'repository', label: 'desktop_picker_repository' },
+  { value: 'all', label: 'desktop_picker_all' },
 ];
 
 /** Resolve UUIDs against picker metadata before using the host's slash fallback. */
@@ -29,9 +31,9 @@ export function resumeArgumentSessionId(query: string, sessions: readonly Sessio
 }
 
 export function sessionPickerRows(sessions: readonly SessionCatalogRow[], query: string): SessionCatalogRow[] {
-  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const terms = query.trim().toLocaleLowerCase(currentLocale()).split(/\s+/).filter(Boolean);
   return sessions.filter((session) => {
-    const text = `${session.title}\n${session.resume_title ?? ''}\n${session.uuid}\n${session.path}`.toLocaleLowerCase();
+    const text = `${session.title}\n${session.resume_title ?? ''}\n${session.uuid}\n${session.path}`.toLocaleLowerCase(currentLocale());
     return terms.every((term) => text.includes(term));
   }).sort((left, right) => (Date.parse(right.modified_rfc3339) || 0) - (Date.parse(left.modified_rfc3339) || 0));
 }
@@ -62,6 +64,7 @@ export interface SessionPickerProps {
 }
 
 export function SessionPicker({ projectPath, initialQuery = '', activeSessionId, suspended = false, listProjectSessions, openSession, onOpened, onClose }: SessionPickerProps) {
+  const { locale } = useI18n();
   const dialog = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const mounted = useRef(false);
@@ -81,7 +84,7 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
   const listId = useId();
   const titleId = useId();
   const descriptionId = useId();
-  const rows = useMemo(() => sessionPickerRows(sessions, query), [sessions, query]);
+  const rows = useMemo(() => sessionPickerRows(sessions, query), [sessions, query, locale]);
   const selectedIndex = Math.max(0, rows.findIndex((session) => session.path === selectedPath));
   const selected = rows[selectedIndex];
   const selectedOptionId = selected ? `${listId}-${selectedIndex}` : undefined;
@@ -97,7 +100,7 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
 
   const openChat = useCallback(async (sessionId: string, row?: SessionCatalogRow) => {
     if (!mounted.current || opening.current) return;
-    if (!projectPath) { setError('Select a project before resuming a chat.'); return; }
+    if (!projectPath) { setError(tr('desktop_picker_select_project')); return; }
     opening.current = true;
     setOpeningUuid(sessionId);
     setError('');
@@ -106,7 +109,7 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
         ? { scope, transcriptPath: row.path }
         : { scope: 'repository' });
       if (!mounted.current) return;
-      if (!opened) throw new Error('Unable to open this chat. Retry or choose another chat.');
+      if (!opened) throw new Error(tr('desktop_picker_open_error'));
       onOpened();
       onClose();
     } catch (cause) {
@@ -123,7 +126,7 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
     const isCurrent = () => mounted.current && generation === requestGeneration.current;
     const automatic = firstRequest.current;
     setError('');
-    if (!projectPath) { setLoading(false); setError('Select a project before resuming a chat.'); return; }
+    if (!projectPath) { setLoading(false); setError(tr('desktop_picker_select_project')); return; }
     setLoading(true);
     setLoaded(false);
     setSessions([]);
@@ -134,7 +137,7 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
       // rather than presenting a canceled response as an empty catalog.
       if (!catalog) catalog = await listProjectSessions(projectPath, scope);
       if (!isCurrent()) return;
-      if (!catalog) throw new Error('The chat list changed while loading. Refresh to try again.');
+      if (!catalog) throw new Error(tr('desktop_picker_list_changed'));
       const autoResume = automatic && firstRequest.current;
       firstRequest.current = false;
       setSessions(catalog.sessions);
@@ -206,39 +209,39 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
     }
   };
 
-  const description = scope === 'all' ? 'Saved chats from every directory.'
-    : scope === 'repository' ? 'This repository and its linked worktrees.'
-    : projectPath ?? 'No project selected';
+  const description = scope === 'all' ? tr('desktop_picker_all_desc')
+    : scope === 'repository' ? tr('desktop_picker_repository_desc')
+    : projectPath ?? tr('desktop_picker_no_project');
 
   if (suspended) return null;
 
-  return <DesktopDialog ref={dialog} tabIndex={-1} title="Resume chat" titleId={titleId} summary={description} summaryId={descriptionId}
+  return <DesktopDialog ref={dialog} tabIndex={-1} title={tr('desktop_picker_resume_chat')} titleId={titleId} summary={description} summaryId={descriptionId}
     ariaLabelledBy={titleId} ariaDescribedBy={descriptionId} icon="chat" size="wide" className="session-picker" zIndex={100}
     onEscape={() => { if (!opening.current) onClose(); }} onKeyDown={handleKeyDown}
     footer={<div className="session-picker-footer">
-      <span className="session-picker-shortcuts"><span><kbd>↑</kbd><kbd>↓</kbd> Select</span><span><kbd>Ctrl A</kbd> All</span></span>
+      <span className="session-picker-shortcuts"><span><kbd>↑</kbd><kbd>↓</kbd> {tr('desktop_picker_select')}</span><span><kbd>Ctrl A</kbd> {tr('desktop_picker_all')}</span></span>
       <DesktopDialogButton variant="primary" disabled={loading || Boolean(openingUuid) || !resumeId} onClick={() => { if (resumeId) void openChat(resumeId, selected); }}>
-        {openingUuid ? 'Opening…' : 'Resume'}
+        {openingUuid ? tr('desktop_opening') : tr('desktop_picker_resume')}
       </DesktopDialogButton>
     </div>}>
-    <button type="button" className="session-picker-close" aria-label="Close chat picker" disabled={Boolean(openingUuid)} onClick={onClose}><Icon name="x" size={18} /></button>
+    <button type="button" className="session-picker-close" aria-label={tr('desktop_picker_close')} disabled={Boolean(openingUuid)} onClick={onClose}><Icon name="x" size={18} /></button>
     <div className="session-picker-controls">
-      <div className="session-picker-scopes" role="group" aria-label="Chat directory scope">
+      <div className="session-picker-scopes" role="group" aria-label={tr('desktop_picker_scope')}>
         {SCOPES.map(({ value, label }) => <button key={value} type="button" aria-pressed={scope === value} disabled={Boolean(openingUuid)}
           aria-keyshortcuts={value === 'all' ? 'Control+A' : undefined}
-          onClick={() => changeScope(value)}>{label}</button>)}
+          onClick={() => changeScope(value)}>{tr(label)}</button>)}
       </div>
       <div className="session-picker-search">
         <Icon name="search" size={17} />
-        <input ref={input} type="search" role="combobox" aria-label="Search chats" aria-expanded="true" aria-controls={listId}
+        <input ref={input} type="search" role="combobox" aria-label={tr('desktop_search_chats')} aria-expanded="true" aria-controls={listId}
           aria-autocomplete="list" aria-activedescendant={selectedOptionId} value={query} disabled={Boolean(openingUuid)}
-          placeholder="Search chats by name or session ID" spellCheck={false}
+          placeholder={tr('desktop_picker_search')} spellCheck={false}
           onChange={(event) => { firstRequest.current = false; setQuery(event.target.value); setSelectedPath(undefined); setError(''); }} />
       </div>
     </div>
-    {error && <div className="session-picker-error" role="alert"><span>{error}</span><button type="button" disabled={Boolean(openingUuid)} onClick={() => { void loadSessions(); }}>Refresh</button></div>}
-    <div id={listId} role="listbox" aria-label="Saved chats" aria-busy={loading || Boolean(openingUuid)} className="session-picker-list">
-      {loading ? <p role="status" className="session-picker-empty">Loading chats…</p>
+    {error && <div className="session-picker-error" role="alert"><span>{error}</span><button type="button" disabled={Boolean(openingUuid)} onClick={() => { void loadSessions(); }}>{tr('settings_linux_refresh_button')}</button></div>}
+    <div id={listId} role="listbox" aria-label={tr('desktop_picker_saved')} aria-busy={loading || Boolean(openingUuid)} className="session-picker-list">
+      {loading ? <p role="status" className="session-picker-empty">{tr('desktop_picker_loading')}</p>
         : rows.length ? rows.map((session, index) => <div key={session.path} id={`${listId}-${index}`} role="option" aria-selected={selected?.path === session.path}
           aria-disabled={Boolean(openingUuid)} className="session-picker-row" title={session.path}
           onPointerMove={() => { if (!opening.current) setSelectedPath(session.path); }}
@@ -247,10 +250,10 @@ export function SessionPicker({ projectPath, initialQuery = '', activeSessionId,
           <span className="session-picker-row-copy"><strong>{session.title || 'Untitled chat'}</strong>
             <span>{formatSessionMetadata(session.modified_rfc3339, session.message_count)}<code>{session.uuid.slice(0, 8)}</code></span>
           </span>
-          {activeSessionId === session.uuid && <span className="session-picker-current">Current</span>}
+          {activeSessionId === session.uuid && <span className="session-picker-current">{tr('desktop_picker_current')}</span>}
         </div>)
-          : <p role="status" className="session-picker-empty">{loaded ? query.trim() ? 'No chats match this search.' : 'No saved chats in this scope.' : error ? 'Change the search or refresh to browse chats.' : 'Choose a chat to resume.'}</p>}
+          : <p role="status" className="session-picker-empty">{loaded ? query.trim() ? tr('desktop_picker_no_match') : tr('desktop_picker_empty_scope') : error ? tr('desktop_picker_refresh_hint') : tr('desktop_picker_choose')}</p>}
     </div>
-    <div className="session-picker-count" aria-live="polite">{!loading && loaded ? `${rows.length} ${rows.length === 1 ? 'chat' : 'chats'}` : openingUuid ? 'Opening saved chat…' : ''}</div>
+    <div className="session-picker-count" aria-live="polite">{!loading && loaded ? tr(rows.length === 1 ? 'desktop_picker_count_one' : 'desktop_picker_count', rows.length) : openingUuid ? tr('desktop_picker_opening') : ''}</div>
   </DesktopDialog>;
 }

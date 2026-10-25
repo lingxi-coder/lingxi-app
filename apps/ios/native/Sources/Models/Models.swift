@@ -127,23 +127,23 @@ struct ModelRuntimeDetails: Identifiable, Equatable {
         if capabilities.reasoning {
             let labels = reasoning.options.map { ModelDetailFormat.reasoningSelectionLabel($0.selection) }
             if !labels.isEmpty {
-                summary.append("Thinking " + labels.joined(separator: "/"))
+                summary.append(String(localized: "model_detail_reasoning_summary \(labels.joined(separator: "/"))"))
             }
         }
         let modalityBits = [
-            capabilities.vision ? "图片" : nil,
-            capabilities.documents ? "文档" : nil,
-            capabilities.tools ? "工具" : nil,
-            capabilities.structuredOutput ? "结构化输出" : nil,
+            capabilities.vision ? String(localized: "model_detail_images") : nil,
+            capabilities.documents ? String(localized: "model_detail_document_summary") : nil,
+            capabilities.tools ? String(localized: "apps_category_tools") : nil,
+            capabilities.structuredOutput ? String(localized: "model_detail_structured_summary") : nil,
         ].compactMap { $0 }
         if !modalityBits.isEmpty {
             summary.append(modalityBits.joined(separator: " · "))
         }
         if let contextWindowTokens {
-            summary.append("\(ModelDetailFormat.tokenCount(contextWindowTokens)) 上下文")
+            summary.append(String(localized: "model_detail_context_summary \(ModelDetailFormat.tokenCount(contextWindowTokens))"))
         }
         if let maxOutputTokens {
-            summary.append("\(ModelDetailFormat.tokenCount(maxOutputTokens)) 输出")
+            summary.append(String(localized: "model_detail_output_summary \(ModelDetailFormat.tokenCount(maxOutputTokens))"))
         }
         summary.append(ModelDetailFormat.pricingSummary(pricing))
         if let status, !status.isEmpty {
@@ -196,10 +196,10 @@ enum ModelDetailFormat {
 
     static func billingModeLabel(_ mode: ModelBillingModeDto) -> String {
         switch mode {
-        case .perToken: return "按量计费"
-        case .subscription: return "套餐/订阅内"
-        case .free: return "免费"
-        case .unknown: return "价格未提供"
+        case .perToken: return String(localized: "model_detail_per_token")
+        case .subscription: return String(localized: "model_detail_subscription")
+        case .free: return String(localized: "model_detail_free")
+        case .unknown: return String(localized: "model_detail_no_price")
         }
     }
 
@@ -210,26 +210,58 @@ enum ModelDetailFormat {
             return billingModeLabel(pricing.billingMode)
         case .perToken:
             let parts = [
-                pricing.inputPerMillion.map { "$\(price($0)) in" },
-                pricing.outputPerMillion.map { "$\(price($0)) out" },
+                pricing.inputPerMillion.map { String(localized: "model_detail_price_input \(price($0))") },
+                pricing.outputPerMillion.map { String(localized: "model_detail_price_output \(price($0))") },
             ].compactMap { $0 }
-            return parts.isEmpty ? "价格未提供" : parts.joined(separator: " · ")
+            return parts.isEmpty ? String(localized: "model_detail_no_price") : parts.joined(separator: " · ")
         }
     }
 
     static func reasoningSelectionLabel(_ selection: ReasoningSelectionDto) -> String {
         switch selection {
-        case .automatic: return "自动"
-        case .disabled: return "关闭"
-        case .enabled: return "开启"
-        case let .level(id): return id
-        case let .tokenBudget(tokens): return "\(tokenCount(tokens)) 预算"
+        case .automatic: return String(localized: "settings_typescript_lsp_auto")
+        case .disabled: return String(localized: "settings_typescript_lsp_off")
+        case .enabled: return String(localized: "settings_typescript_lsp_on")
+        case let .level(id): return reasoningIdentifierLabel(id)
+        case let .tokenBudget(tokens): return String(localized: "model_detail_reasoning_budget \(tokenCount(tokens))")
+        }
+    }
+
+    static func reasoningIdentifierLabel(_ id: String, fallback: String? = nil) -> String {
+        switch id {
+        case "automatic", "auto": return String(localized: "composer_effort_auto")
+        case "disabled", "off": return String(localized: "composer_effort_off")
+        case "enabled", "on": return String(localized: "composer_effort_on")
+        case "minimal": return String(localized: "composer_effort_minimal")
+        case "low": return String(localized: "composer_effort_low")
+        case "medium": return String(localized: "composer_effort_medium")
+        case "high": return String(localized: "composer_effort_high")
+        case "xhigh": return String(localized: "composer_effort_xhigh")
+        case "max": return String(localized: "composer_effort_max")
+        default:
+            if id.hasPrefix("budget:") {
+                let tokens = String(id.dropFirst("budget:".count))
+                return String(localized: "composer_effort_budget \(tokens)")
+            }
+            return fallback ?? id
+        }
+    }
+
+    static func permissionModeLabel(_ id: String) -> String {
+        switch id {
+        case "default": return String(localized: "settings_permission_mode_default")
+        case "acceptEdits": return String(localized: "settings_permission_mode_accept_edits")
+        case "plan": return String(localized: "settings_permission_mode_plan")
+        case "auto": return String(localized: "settings_permission_mode_auto")
+        case "dontAsk": return String(localized: "settings_permission_mode_dont_ask")
+        case "bypassPermissions": return String(localized: "composer_full_access")
+        default: return id
         }
     }
 
     static func yesNo(_ value: Bool?) -> String? {
         guard let value else { return nil }
-        return value ? "是" : "否"
+        return value ? String(localized: "common_yes") : String(localized: "common_no")
     }
 
     private static func trimDecimal(_ value: Double) -> String {
@@ -368,7 +400,7 @@ enum ModelDisplay {
         case "zai": return "Z.AI"
         case "glm-coding": return "GLM Coding Plan"
         case "openrouter": return "OpenRouter"
-        case unqualifiedProviderId: return "其他"
+        case unqualifiedProviderId: return String(localized: "apps_category_other")
         default:
             return providerId
                 .split(separator: "-", omittingEmptySubsequences: true)
@@ -434,7 +466,7 @@ enum ModelDisplay {
         if l.hasPrefix("deepseek-") { return modelName(for: displayId).replacingOccurrences(of: "DeepSeek ", with: "") }
         if l.hasPrefix("kimi-") { return modelName(for: displayId).replacingOccurrences(of: "Kimi ", with: "") }
         if l.hasPrefix("glm-") { return modelName(for: displayId) }
-        return displayId.isEmpty ? "默认" : displayId
+        return displayId.isEmpty ? String(localized: "settings_badge_default") : displayId
     }
 
     /// A deterministic Provider color (Swift's `hashValue` is process-randomized,
@@ -571,8 +603,8 @@ struct EngineSession: Identifiable, Equatable {
 
 }
 
-/// Formats an RFC 3339 timestamp into a short, relative Chinese "time ago"
-/// string (e.g. "刚刚", "2 小时前", "昨天") for the drawer's session rows. A
+/// Formats an RFC 3339 timestamp into a localized relative label for the
+/// drawer's session rows. A
 /// parse failure falls back to the raw string so a row is never blank.
 enum RelativeTime {
     private static let parser: ISO8601DateFormatter = {
@@ -588,21 +620,23 @@ enum RelativeTime {
 
     /// `rfc3339` → a short relative label. Unparseable input returns the raw
     /// string (trimmed) so the row degrades gracefully rather than going blank.
-    static func format(_ rfc3339: String, now: Date = Date()) -> String {
+    static func format(_ rfc3339: String, now: Date = Date(), locale: Locale = .autoupdatingCurrent) -> String {
         let date = parse(rfc3339)
         guard let date else {
             return rfc3339.isEmpty ? "—" : rfc3339
         }
         let secs = now.timeIntervalSince(date)
-        if secs < 60 { return "刚刚" }
-        if secs < 3600 { return "\(Int(secs / 60)) 分钟前" }
-        if secs < 86_400 { return "\(Int(secs / 3600)) 小时前" }
-        let days = Int(secs / 86_400)
-        if days == 1 { return "昨天" }
-        if days < 7 { return "\(days) 天前" }
+        if secs < 60 { return String(localized: "project_relative_time_just_now") }
+        if secs < 7 * 86_400 {
+            let formatter = RelativeDateTimeFormatter()
+            formatter.locale = locale
+            formatter.dateTimeStyle = .named
+            formatter.unitsStyle = .full
+            return formatter.localizedString(for: date, relativeTo: now)
+        }
         let fmt = DateFormatter()
-        fmt.locale = Locale(identifier: "zh_CN")
-        fmt.dateFormat = "M月d日"
+        fmt.locale = locale
+        fmt.setLocalizedDateFormatFromTemplate("MMMd")
         return fmt.string(from: date)
     }
 

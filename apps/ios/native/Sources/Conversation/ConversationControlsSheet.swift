@@ -26,7 +26,7 @@ struct ConversationControlsSheet: View {
                         .foregroundStyle(.red)
                         .accessibilityIdentifier("composer.controls.error")
                 }
-                Section("Permission") {
+                Section(String(localized: "settings_parity_permissions")) {
                     ForEach(permissionOptions) { option in
                         Button {
                             guard option.id != permissionMode else { return }
@@ -42,11 +42,11 @@ struct ConversationControlsSheet: View {
                             }
                         } label: {
                             HStack {
-                                Text(option.id)
+                                Text(ModelDetailFormat.permissionModeLabel(option.id))
                                 Spacer()
                                 if option.id == permissionMode { Image(systemName: "checkmark") }
                                 if option.id == effectivePermissionMode && option.id != permissionMode {
-                                    Text("effective").font(.caption).foregroundStyle(.secondary)
+                                    Text(String(localized: "composer_permission_effective")).font(.caption).foregroundStyle(.secondary)
                                 }
                                 if !option.available {
                                     Image(systemName: "lock").foregroundStyle(.secondary)
@@ -59,7 +59,7 @@ struct ConversationControlsSheet: View {
                     }
                 }
             }
-            .navigationTitle("Permission Mode")
+            .navigationTitle(String(localized: "settings_permission_mode_title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -70,31 +70,31 @@ struct ConversationControlsSheet: View {
         }
         .accessibilityIdentifier("composer.permission.sheet")
         .presentationDetents([.medium, .large])
-        .alert("Confirm permission mode", isPresented: Binding(
+        .alert(String(localized: "settings_permission_mode_confirm_title"), isPresented: Binding(
             get: { pendingRiskMode != nil },
             set: { if !$0 { pendingRiskMode = nil } }
         )) {
-            Button("Cancel", role: .cancel) { pendingRiskMode = nil }
+            Button(String(localized: "common_cancel"), role: .cancel) { pendingRiskMode = nil }
             if pendingRiskMode == "bypassPermissions" {
-                Button("Enter Full Access", role: .destructive) {
+                Button(String(localized: "composer_enter_full_access"), role: .destructive) {
                     onConfirmBypassPermissions(false)
                     pendingRiskMode = nil
                 }
-                Button("Don't warn again", role: .destructive) {
+                Button(String(localized: "composer_dont_warn_again"), role: .destructive) {
                     onConfirmBypassPermissions(true)
                     pendingRiskMode = nil
                 }
             } else {
-                Button("Confirm", role: .destructive) {
+                Button(String(localized: "settings_permission_mode_confirm"), role: .destructive) {
                     if let mode = pendingRiskMode { onSelectPermission(mode) }
                     pendingRiskMode = nil
                 }
             }
         } message: {
             if pendingRiskMode == "bypassPermissions" {
-                Text("Full access stops all permission prompts. LingXi may run commands that modify or delete local files, or send data to external services. Use it only in a disposable environment you trust.")
+                Text(String(localized: "composer_full_access_warning"))
             } else {
-                Text("This mode can allow higher-risk operations without a prompt.")
+                Text(String(localized: "settings_permission_mode_confirm_detail"))
             }
         }
     }
@@ -148,9 +148,8 @@ struct ConversationEffortControl: View {
     }
 
     private var currentTitle: String {
-        if let previewIndex { return discreteOptions[previewIndex].title }
-        if selection.hasPrefix("budget:") { return "\(selection.dropFirst("budget:".count)) tokens" }
-        return selection.isEmpty || selection == "auto" ? "Automatic" : selection.capitalized
+        if let previewIndex { return ModelDetailFormat.reasoningIdentifierLabel(discreteOptions[previewIndex].id, fallback: discreteOptions[previewIndex].title) }
+        return ModelDetailFormat.reasoningIdentifierLabel(selection.isEmpty ? "automatic" : selection, fallback: selection.capitalized)
     }
 
     private var isDisabled: Bool { pending || disabledReason != nil }
@@ -168,7 +167,7 @@ struct ConversationEffortControl: View {
             if !discreteOptions.isEmpty {
                 effortTrack
             } else if budgetRange == nil {
-                Text("Automatic (provider default)")
+                Text(String(localized: "composer_reasoning_default"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -253,7 +252,7 @@ struct ConversationEffortControl: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("composer_effort"))
         .accessibilityValue(currentTitle)
-        .accessibilityHint(disabledReason ?? "Adjust the reasoning effort for the selected model")
+        .accessibilityHint(disabledReason ?? String(localized: "composer_reasoning_adjust_hint"))
         .accessibilityIdentifier("composer.reasoning.slider")
         .accessibilityAdjustableAction { direction in
             guard !isDisabled, !discreteOptions.isEmpty else { return }
@@ -277,21 +276,21 @@ struct ConversationEffortControl: View {
 
     private func budgetEditor(range: ClosedRange<UInt64>) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Token budget")
-            Text("\(range.lowerBound)–\(range.upperBound) tokens")
+            Text(String(localized: "composer_reasoning_token_budget"))
+            Text(String(localized: "composer_reasoning_budget_range \(String(range.lowerBound)) \(String(range.upperBound))"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
                 TextField("tokens", text: $budgetText)
                     .keyboardType(.numberPad)
-                    .accessibilityLabel("Token budget")
+                    .accessibilityLabel(String(localized: "composer_reasoning_token_budget"))
                 Button {
                     guard let tokens = UInt64(budgetText), range.contains(tokens) else { return }
                     onSelect("budget:\(tokens)")
                 } label: {
                     Image(systemName: "checkmark.circle")
                 }
-                .accessibilityLabel("Apply token budget")
+                .accessibilityLabel(String(localized: "composer_reasoning_apply_budget"))
                 .disabled(UInt64(budgetText).map { !range.contains($0) } ?? true)
             }
         }

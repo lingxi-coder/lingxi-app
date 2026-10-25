@@ -1,3 +1,4 @@
+import { tr } from '../../i18n/locale';
 import type { ReactNode } from 'react';
 import { useT } from '../../theme/ThemeContext';
 import { rowState, type SettingsSnapshot } from './useEngineSettings';
@@ -19,16 +20,16 @@ import type { EditableLayer } from './SettingsScreen';
 export type Provenance = 'device' | 'user' | 'project' | 'local' | 'managed';
 
 const PROVENANCE_LABELS: Record<Provenance, string> = {
-  device: '设备',
-  user: '用户',
-  project: '项目',
-  local: '本地',
-  managed: '策略',
+  device: 'desktop_shell_device',
+  user: 'settings_parity_user_layer',
+  project: 'settings_parity_project_layer',
+  local: 'settings_parity_local_layer',
+  managed: 'desktop_shell_policy',
 };
 
 /** Total over `Provenance` — every value has a badge label, so callers can never get `undefined`. */
 export function provenanceLabel(d: Provenance): string {
-  return PROVENANCE_LABELS[d];
+  return tr(PROVENANCE_LABELS[d]);
 }
 
 /**
@@ -43,16 +44,16 @@ export function provenanceLabel(d: Provenance): string {
  * 于是这张表不会因为引擎换了配置目录而变成谎话。
  */
 const PROVENANCE_DESCRIPTIONS: Record<Provenance, string> = {
-  device: '存在这台设备的应用里，不经引擎合并，与项目无关。',
-  user: '写进你的用户设置文件，本机所有项目都生效。',
-  project: '写进项目内的设置文件，只对这个项目生效；该文件会随仓库提交，团队成员都会拿到。',
-  local: '写进项目内的本地设置文件，只对这个项目、只在本机生效；该文件不会提交。',
-  managed: '管理员托管的策略，只读，优先级高于以上所有层。',
+  device: 'desktop_shell_device_desc',
+  user: 'settings_parity_user_layer_desc',
+  project: 'settings_parity_project_layer_desc',
+  local: 'settings_parity_local_layer_desc',
+  managed: 'settings_parity_managed_layer_desc',
 };
 
 /** Total over `Provenance`, for the same reason {@link provenanceLabel} is. */
 export function provenanceDescription(d: Provenance): string {
-  return PROVENANCE_DESCRIPTIONS[d];
+  return tr(PROVENANCE_DESCRIPTIONS[d]);
 }
 
 /** A group of settings rows: a rounded card whose rows are separated by hairlines inside it. */
@@ -134,13 +135,13 @@ export function MergedBadge() {
   const t = useT();
   return (
     <span
-      title="这个值由多个设置层合并而成，不属于任何单独一层"
+      title={tr('desktop_shell_merged_title')}
       style={{
         fontSize: 10.5, padding: '2px 7px', borderRadius: 5,
         background: t.surfaceHover, color: t.text3, fontWeight: 600,
       }}
     >
-      多层合并
+      {tr('settings_parity_merged_layers')}
     </span>
   );
 }
@@ -155,8 +156,7 @@ export function MergedNotice({ editingLayer }: { editingLayer: Provenance }) {
   const t = useT();
   return (
     <div style={{ marginTop: 6, fontSize: 12, color: t.text3 }}>
-      当前生效值由多个设置层合并而成，不属于任何单独一层；
-      在{provenanceLabel(editingLayer)}层的编辑只改动这一层自己的条目。
+      {tr('desktop_shell_merged_notice', provenanceLabel(editingLayer))}
     </div>
   );
 }
@@ -172,7 +172,7 @@ export function OverriddenNotice({
   const t = useT();
   return (
     <div style={{ marginTop: 6, fontSize: 12, color: t.warn }}>
-      已写入{provenanceLabel(editingLayer)}层；当前生效值来自{provenanceLabel(effectiveLayer)}层。
+      {tr('desktop_shell_overridden_notice', provenanceLabel(editingLayer), provenanceLabel(effectiveLayer))}
       <button
         type="button"
         onClick={onJump}
@@ -181,7 +181,7 @@ export function OverriddenNotice({
           color: t.link ?? t.accent, cursor: 'pointer', font: 'inherit', textDecoration: 'underline',
         }}
       >
-        前往该层
+        {tr('desktop_shell_jump_layer')}
       </button>
     </div>
   );
@@ -209,7 +209,7 @@ export function isEditableLayer(layer: Provenance): layer is EditableLayer {
  * caller disabling its own control, not by this notice.
  */
 export function FieldProvenanceNotice({
-  snapshot, fieldKey, editingLayer, onJumpToLayer, label = '生效层',
+  snapshot, fieldKey, editingLayer, onJumpToLayer, label = tr('desktop_shell_effective_layer'),
 }: {
   snapshot: SettingsSnapshot | null;
   fieldKey: string;

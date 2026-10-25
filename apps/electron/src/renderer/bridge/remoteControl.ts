@@ -1,3 +1,4 @@
+import { tr } from '../i18n/locale';
 /**
  * What the renderer shows of Remote Control: the pure rules for the settings
  * page, the session toggle, the top-bar indicator and `/remote-control`, and
@@ -13,7 +14,7 @@ import type {
   RemoteSessionsUi,
 } from '../../shared/remoteControl';
 
-export const REMOTE_INDICATOR_LABEL = '📱 远程中';
+function remoteIndicatorLabel(): string { return tr('desktop_shell_remote_indicator'); }
 
 /** Whether Remote Control can be turned on from this window, and if not, why (visible copy). */
 export interface RemoteAvailability {
@@ -26,9 +27,9 @@ export interface RemoteAvailability {
  * administrator has not forbidden it. Turning something off is always allowed.
  */
 export function remoteAvailability(status: RemoteControlUiStatus | null): RemoteAvailability {
-  if (!status) return { available: false, reason: '正在读取远程控制状态…' };
-  if (status.managedDisabled) return { available: false, reason: '管理员已禁用远程控制。' };
-  if (!status.signedIn) return { available: false, reason: '请先登录灵犀账号，再开启远程控制。' };
+  if (!status) return { available: false, reason: tr('desktop_shell_remote_loading') };
+  if (status.managedDisabled) return { available: false, reason: tr('desktop_shell_remote_disabled') };
+  if (!status.signedIn) return { available: false, reason: tr('desktop_shell_remote_signin') };
   return { available: true };
 }
 
@@ -37,24 +38,24 @@ export type RemoteStateTone = 'ok' | 'warn' | 'danger' | 'muted';
 /** The state line of the settings page. */
 export function remoteStateSummary(status: RemoteControlUiStatus): { label: string; tone: RemoteStateTone; detail?: string } {
   switch (status.state) {
-    case 'online': return { label: '在线', tone: 'ok' };
-    case 'starting': return { label: '连接中', tone: 'warn' };
-    case 'error': return { label: '错误', tone: 'danger', ...(status.error ? { detail: status.error } : {}) };
-    default: return { label: '未开启', tone: 'muted' };
+    case 'online': return { label: tr('desktop_shell_remote_online'), tone: 'ok' };
+    case 'starting': return { label: tr('desktop_shell_remote_connecting'), tone: 'warn' };
+    case 'error': return { label: tr('cron_error_section'), tone: 'danger', ...(status.error ? { detail: status.error } : {}) };
+    default: return { label: tr('desktop_shell_remote_off'), tone: 'muted' };
   }
 }
 
 /** 直连 for a peer-to-peer link, 中转 when the bytes go through the relay or the encrypted tunnel. */
-export function connectionTransportLabel(connection: Pick<RemoteConnectionUi, 'transport' | 'candidateType'>): '直连' | '中转' {
-  if (connection.transport === 'tunnel') return '中转';
-  return connection.candidateType === 'relay' ? '中转' : '直连';
+export function connectionTransportLabel(connection: Pick<RemoteConnectionUi, 'transport' | 'candidateType'>): string {
+  if (connection.transport === 'tunnel') return tr('desktop_shell_remote_relay');
+  return connection.candidateType === 'relay' ? tr('desktop_shell_remote_relay') : tr('desktop_shell_remote_direct');
 }
 
 export function platformLabel(platform: RemoteConnectionUi['platform']): string {
   switch (platform) {
     case 'android': return 'Android';
     case 'ios': return 'iOS';
-    default: return '网页';
+    default: return tr('desktop_shell_remote_web');
   }
 }
 
@@ -62,10 +63,10 @@ export function platformLabel(platform: RemoteConnectionUi['platform']): string 
 export function connectionRows(status: RemoteControlUiStatus): Array<{ connId: string; title: string; detail: string; approved: boolean }> {
   return status.connections.map((connection) => ({
     connId: connection.connId,
-    title: connection.deviceName || '未命名设备',
+    title: connection.deviceName || tr('desktop_shell_unnamed_device'),
     detail: connection.approved
       ? `${platformLabel(connection.platform)} · ${connectionTransportLabel(connection)}`
-      : `${platformLabel(connection.platform)} · 等待批准`,
+      : `${platformLabel(connection.platform)} · ${tr('desktop_shell_remote_approval_pending')}`,
     approved: connection.approved,
   }));
 }
@@ -84,19 +85,19 @@ export function remoteIndicator(
   if (!entry) return null;
   const viewers = Math.max(0, Math.floor(entry.viewers));
   return {
-    label: REMOTE_INDICATOR_LABEL,
+    label: remoteIndicatorLabel(),
     viewers,
-    text: viewers > 0 ? `${REMOTE_INDICATOR_LABEL} · ${viewers}` : REMOTE_INDICATOR_LABEL,
+    text: viewers > 0 ? `${remoteIndicatorLabel()} · ${viewers}` : remoteIndicatorLabel(),
   };
 }
 
 /** The label of the session-menu entry. */
 export function remoteMenuLabel(enabled: boolean, availability: RemoteAvailability): string {
-  if (enabled) return '关闭远程控制';
-  return availability.available ? '开启远程控制' : `开启远程控制（${availability.reason ?? '暂不可用'}）`;
+  if (enabled) return tr('desktop_shell_remote_turnoff');
+  return availability.available ? tr('desktop_shell_remote_on') : tr('desktop_shell_remote_unavailable', availability.reason ?? tr('settings_linux_task_unavailable'));
 }
 
-export const REMOTE_CONNECT_HINT = '在手机的灵犀应用里，或用同一账号登录网页 /remote 即可连接；新设备需要在这台电脑上核对 6 位配对码，再点击“允许”。';
+function remoteConnectHint(): string { return tr('desktop_shell_remote_connect_hint'); }
 
 export interface RemoteToggleOutcome {
   readonly message: string;
@@ -122,24 +123,24 @@ export async function toggleRemoteForSession(
   sessionId: string | null | undefined,
   wanted: boolean | undefined,
 ): Promise<RemoteToggleOutcome> {
-  if (!api) return { message: '这个版本的灵犀不支持远程控制。', isError: true };
-  if (!sessionId) return { message: '请先打开一个会话，再开启远程控制。', isError: true };
+  if (!api) return { message: tr('desktop_shell_remote_unsupported'), isError: true };
+  if (!sessionId) return { message: tr('desktop_shell_remote_open_session'), isError: true };
   try {
     const [status, sessions] = await Promise.all([api.status(), api.sessions()]);
     const current = isSessionRemote(sessions, sessionId);
     const enable = wanted ?? !current;
     if (enable) {
       const availability = remoteAvailability(status);
-      if (!availability.available) return { message: `无法开启远程控制：${availability.reason}`, isError: true };
-      if (current) return { message: `这个会话的远程控制已经开启。${REMOTE_CONNECT_HINT}`, isError: false };
+      if (!availability.available) return { message: tr('desktop_shell_remote_enable_failed', availability.reason ?? ''), isError: true };
+      if (current) return { message: tr('desktop_shell_remote_already_on', remoteConnectHint()), isError: false };
       await api.setSession(sessionId, true);
-      return { message: `已为这个会话开启远程控制。${REMOTE_CONNECT_HINT}`, isError: false };
+      return { message: tr('desktop_shell_remote_enabled', remoteConnectHint()), isError: false };
     }
-    if (!current) return { message: '这个会话的远程控制本来就是关闭的。', isError: false };
+    if (!current) return { message: tr('desktop_shell_remote_already_off'), isError: false };
     await api.setSession(sessionId, false);
-    return { message: '已关闭这个会话的远程控制，其他设备不再看得到它。', isError: false };
+    return { message: tr('desktop_shell_remote_turned_off'), isError: false };
   } catch (cause) {
-    return { message: `远程控制操作失败：${cause instanceof Error ? cause.message : String(cause)}`, isError: true };
+    return { message: tr('desktop_shell_remote_failed', cause instanceof Error ? cause.message : String(cause)), isError: true };
   }
 }
 

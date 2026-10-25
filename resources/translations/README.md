@@ -1,8 +1,9 @@
 # resources/translations
 
-Canonical i18n source for the iOS and Android clients. One flat JSON file per
+Canonical i18n source shared by iOS, Android, and Desktop. One flat JSON file per
 locale; a generator emits the platform-native formats both clients actually
-build against. Nothing under `apps/ios/native/Resources/Localizable.xcstrings` or
+build against. Nothing under `apps/ios/native/Resources/Localizable.xcstrings`,
+`apps/ios/native/Resources/InfoPlist.xcstrings`, or
 `apps/android/native/app/src/main/res/values*/strings.xml` is hand-edited — those
 are generated output, committed for a readable diff, and overwritten on every
 `generate.py` run.
@@ -27,6 +28,19 @@ the same value shape, in every other non-empty locale file. An **empty**
 locale file (`{}`) is exempt from that check — that's the state a locale sits
 in before anyone has translated it, not an error.
 
+Desktop imports these JSON catalogs directly through
+`apps/electron/src/renderer/i18n/locale.ts`. Desktop-only UI copy lives in the
+catalog modules beside it; register each new module in the locale resolver and
+`apps/electron/test/localization.test.ts` so all five translations and format
+arguments are checked. React components subscribe through `useI18n()` for
+immediate language updates, including memoized views.
+
+Native Desktop menus and dialogs use `apps/electron/src/shared/nativeCatalog.ts`.
+Keep this catalog limited to native copy; its common labels are checked against
+the canonical JSON in `native-localization.test.ts`. The main process persists
+the explicit language (or `null` for system) before the next cold launch so native
+dialogs and renderer UI agree.
+
 ## Key format
 
 Flat, snake_case, prefixed by feature area: `chat_`, `composer_`,
@@ -49,9 +63,11 @@ Android call sites). Grep before inventing a new key.
 }
 ```
 
-- `__info_plist__` is iOS-only — the generator maps it into the String
-  Catalog's InfoPlist string entries (camera/microphone/photo-library/speech
-  permission descriptions + the display name). Android has no equivalent
+- `__info_plist__` is iOS-only — the generator maps it into
+  `InfoPlist.xcstrings`, which Xcode compiles into each locale's
+  `InfoPlist.strings` for system permission descriptions and the display name.
+  These system strings must be in the InfoPlist table; putting them only in
+  `Localizable.xcstrings` does not localize system dialogs. Android has no equivalent
   block; its `app_name` comes from the top-level key.
 - `app_name`: zh-Hans/zh-Hant/ja/ko = "灵犀" (kept as the Chinese name
   across every locale by design — this is not a translation gap), en =
@@ -82,9 +98,10 @@ different grammar without matching the source language's argument order:
 
 Whichever convention applies, every locale's value for that key must contain
 the exact same *set* of placeholder tokens the source does — same count, same
-types — reordering is fine, dropping or duplicating one is not. `generate.py`
-does not currently validate this automatically; check it by hand (or with a
-short script) whenever you add or translate a key with a placeholder.
+types — reordering with positional arguments is fine, dropping or duplicating
+one is not. `generate.py` validates the argument positions, types, and counts
+for each translation, including each plural variation. An escaped `%%` is
+preserved once in generated Android format strings.
 
 A source value may also contain a **real embedded newline** (not the two-char
 `\n` escape — an actual line break inside the JSON string). The generator's
@@ -118,7 +135,7 @@ plurals are not generated: they live in the hand-written
    language slot). `--check` runs the same validation without writing files,
    useful in CI or before a commit.
 4. Rebuild both clients so the new locale's generated resources
-   (`Localizable.xcstrings` / `values-<locale>/strings.xml`) are picked up.
+   (`Localizable.xcstrings`, `InfoPlist.xcstrings` / `values-<locale>/strings.xml`) are picked up.
 
 ## Adding a key (extraction workflow)
 

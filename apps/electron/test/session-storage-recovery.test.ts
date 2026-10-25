@@ -1,3 +1,4 @@
+import { withDesktopLocale } from './support/language';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
@@ -19,7 +20,7 @@ test('disk-full failures take priority over paths and connection details in erro
     'cost durability preflight failed: cost persistence is frozen: io error: No space left on device (os error 28)',
     'Session paused because disk space is insufficient (ENOSPC)',
   ]) {
-    const result = classifyDesktopError(error);
+    const result = withDesktopLocale('zh-Hans', () => classifyDesktopError(error));
     assert.equal(result.title, '磁盘空间不足，任务已暂停');
     assert.match(result.detail, /当前会话/);
     assert.match(result.detail, /历史记录会保留/);
@@ -52,8 +53,8 @@ test('storage state is validated and included in renderer replay', () => {
 
 test('storage pause presents a persistent actionable notice in both themes', () => {
   for (const dark of [false, true]) {
-    const html = renderToStaticMarkup(createElement(Theme.Provider, { value: tokens(dark) },
-      createElement(SessionStorageNotice, { disabled: true, onRetry: async () => {} })));
+    const html = withDesktopLocale('zh-Hans', () => renderToStaticMarkup(createElement(Theme.Provider, { value: tokens(dark) },
+      createElement(SessionStorageNotice, { disabled: true, onRetry: async () => {} }))));
     assert.match(html, /role="alert"/);
     assert.match(html, /磁盘空间不足，任务已暂停/);
     assert.match(html, /重试并继续/);

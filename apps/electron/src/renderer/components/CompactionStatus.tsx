@@ -1,3 +1,4 @@
+import { useI18n } from '../i18n/useI18n';
 import { memo, useEffect, useState, type CSSProperties } from 'react';
 
 import { compactProgressPercent, type CompactionRunItem } from '../model/runItem';
@@ -23,14 +24,15 @@ function useClock(item: CompactionRunItem): number {
 }
 
 const PHASE_TITLES = {
-  queued: 'Waiting for engine',
-  preparing: 'Preparing compaction',
-  summarizing: 'Summarizing conversation',
-  restoring: 'Restoring context',
+  queued: "desktop_ui_compact_waiting",
+  preparing: "chat_compaction_preparing",
+  summarizing: "chat_compaction_summarizing",
+  restoring: "chat_compaction_restoring",
 } as const;
 
 export const CompactionStatus = memo(function CompactionStatus({ item }: { item: CompactionRunItem }) {
   const t = useT();
+  const { tr } = useI18n();
   const running = item.status === 'running';
   const now = useClock(item);
   const elapsed = Math.floor(Math.max(0, now - (item.startedAt ?? now)) / 1_000);
@@ -38,11 +40,12 @@ export const CompactionStatus = memo(function CompactionStatus({ item }: { item:
   const estimating = running && percent !== null;
   const hasMetrics = item.messagesBefore !== undefined && item.messagesAfter !== undefined && item.bytesSaved !== undefined;
   const color = item.status === 'error' ? t.danger : t.text2;
-  const title = running ? (PHASE_TITLES[item.phase as keyof typeof PHASE_TITLES] ?? 'Compacting context')
-    : item.status === 'complete' ? (hasMetrics ? 'Context compacted' : 'Compaction finished')
-      : item.status === 'skipped' ? 'No compaction needed' : item.status === 'cancelled' ? 'Compaction cancelled' : 'Compaction failed';
+  const phaseTitle = PHASE_TITLES[item.phase as keyof typeof PHASE_TITLES];
+  const title = running ? tr(typeof phaseTitle === 'string' ? phaseTitle : 'chat_compacting_context')
+    : item.status === 'complete' ? (hasMetrics ? tr("desktop_ui_compact_done") : tr("desktop_ui_compact_finished"))
+      : item.status === 'skipped' ? tr("chat_compaction_skipped") : item.status === 'cancelled' ? tr("desktop_ui_compact_cancelled") : tr("desktop_ui_compact_failed");
   const detail = item.status === 'complete' && hasMetrics
-    ? `${item.messagesBefore} → ${item.messagesAfter} messages · ${formatBytes(item.bytesSaved!)} saved`
+    ? tr('desktop_ui_compact_metrics', item.messagesBefore!, item.messagesAfter!, formatBytes(item.bytesSaved!))
     : item.detail;
   const style = {
     '--compact-color': color,
@@ -74,7 +77,7 @@ export const CompactionStatus = memo(function CompactionStatus({ item }: { item:
           <div
             className="compact-progress-track"
             role="progressbar"
-            aria-label="Estimated progress"
+            aria-label={tr("desktop_ui_estimated")}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={percent ?? undefined}
@@ -85,8 +88,8 @@ export const CompactionStatus = memo(function CompactionStatus({ item }: { item:
         )}
       </div>
       {(estimating || item.status === 'complete') && (
-        <span className="compact-status-elapsed" aria-label={`${elapsed} seconds elapsed`}>
-          {estimating ? 'Estimated progress: ' : ''}{percent}% · {elapsed}s
+        <span className="compact-status-elapsed" aria-label={tr('desktop_ui_elapsed', elapsed)}>
+          {estimating ? tr("desktop_ui_estimated_prefix") : ''}{tr('desktop_ui_percent_elapsed', percent!, elapsed)}
         </span>
       )}
     </div>

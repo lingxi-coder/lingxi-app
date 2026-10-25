@@ -14,7 +14,6 @@ private const val TAG = "NotificationController"
 
 /** Channel the engine-driven notifications are posted on. */
 private const val CHANNEL_ID = "lingxi_agent"
-private const val CHANNEL_NAME = "Agent notifications"
 
 /** Why a notify() failed; mapped onto `NotificationFfiException` by the adapter. */
 sealed interface NotifyFailure {
@@ -52,9 +51,9 @@ object NotificationController {
     @Volatile
     private var context: Context? = null
 
-    /** Whether the notification channel has been created this process. */
+    /** Last localized channel name registered this process. */
     @Volatile
-    private var channelReady = false
+    private var channelName: String? = null
 
     /** Register the host Activity's (application) context. */
     fun attach(context: Context) {
@@ -114,16 +113,17 @@ object NotificationController {
 
     /** Create the notification channel on first use (Android 8+/O). */
     private fun ensureChannel(ctx: Context) {
-        if (channelReady) return
+        val name = com.lingxi.code.theme.LocaleWrapper.getString(ctx, com.lingxi.code.R.string.settings_notifications)
+        if (channelName == name) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                CHANNEL_NAME,
+                name,
                 NotificationManager.IMPORTANCE_DEFAULT,
             )
             val manager = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(channel)
         }
-        channelReady = true
+        channelName = name
     }
 }

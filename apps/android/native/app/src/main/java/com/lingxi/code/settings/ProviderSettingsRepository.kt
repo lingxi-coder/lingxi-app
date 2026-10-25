@@ -145,12 +145,12 @@ class EngineProviderCredentialClient(
                 usedStoredCredential = result.usedStoredCredential,
             )
         } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
-            unavailableConnectionResult(appContext.getString(R.string.settings_provider_test_timeout))
+            unavailableConnectionResult(com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.settings_provider_test_timeout))
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
         } catch (_: Throwable) {
             unavailableConnectionResult(
-                appContext.getString(R.string.settings_provider_test_unavailable),
+                com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.settings_provider_test_unavailable),
             )
         }
     }
@@ -365,7 +365,7 @@ class ProviderSettingsRepository(
                 modelAvailable = false,
                 httpStatus = null,
                 latencyMs = 0,
-                message = appContext.getString(R.string.settings_provider_test_not_supported),
+                message = com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.settings_provider_test_not_supported),
                 usedStoredCredential = credentialOverride.isNullOrBlank(),
             )
         return credentialClient.test(

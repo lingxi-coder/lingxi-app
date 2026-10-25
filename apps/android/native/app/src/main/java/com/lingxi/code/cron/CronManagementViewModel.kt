@@ -74,7 +74,7 @@ class CronManagementViewModel(app: Application) : AndroidViewModel(app) {
                     ?: if (result.getOrDefault(false)) {
                         null
                     } else {
-                        getApplication<Application>().getString(R.string.cron_task_delete_failed_message)
+                        com.lingxi.code.theme.LocaleWrapper.getString(getApplication<Application>(), R.string.cron_task_delete_failed_message)
                     },
             )
         }

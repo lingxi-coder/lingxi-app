@@ -1,3 +1,5 @@
+import { useI18n } from '../../../i18n/useI18n';
+import { tr } from '../../../i18n/locale';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '../../Icon';
@@ -10,9 +12,14 @@ import { ExtensionHubLayout, useExtensionHubNavigation } from './ExtensionHub';
 import { ExtensionGlyph } from './ExtensionHubIcons';
 import { adminRecordCommand, nextConfigurationOperationId, noteStyle } from './configurationAdmin';
 import {
-  FUSION_SCOPES, FUSION_SCOPE_LABELS, copiedFusionStrategy, fusionNameError, fusionStrategyKey, parseFusionCatalog,
+  FUSION_SCOPES, copiedFusionStrategy, fusionNameError, fusionStrategyKey, parseFusionCatalog,
   type FusionCatalogScope, type FusionGlobals, type FusionScope, type FusionStrategyEntry,
 } from './FusionCatalog';
+
+
+function fusionScopeLabel(scope: FusionScope): string {
+  return tr({ user: 'settings_parity_user_layer', project: 'settings_parity_project_layer', local: 'settings_parity_local_layer' }[scope]);
+}
 
 /** 一个 `(profile, model)` 对，与引擎 `fusion.panelModels[]` 条目同形。 */
 export interface FusionModelChoice {
@@ -51,8 +58,8 @@ export function rolesFromFusionObject(fusion: Record<string, unknown>): {
 /** 还缺哪些角色。顺序与引擎 `FusionModelRole::ALL` 一致。 */
 export function missingRoles(roles: ReturnType<typeof rolesFromFusionObject>): string[] {
   const missing: string[] = [];
-  if (roles.panels.length < FUSION_MIN_PANEL) missing.push('panel 模型');
-  if (!roles.analyst) missing.push('analyst 模型');
+  if (roles.panels.length < FUSION_MIN_PANEL) missing.push(tr('settings_parity_panel_models'));
+  if (!roles.analyst) missing.push(tr('settings_parity_analyst'));
   return missing;
 }
 
@@ -163,7 +170,7 @@ export function ChoiceSelect({
       onKeyDown={(event) => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); open(); } }}
       style={{ ...inputStyle(t), width: 280, maxWidth: '100%', display: 'flex', alignItems: 'center', gap: 8, textAlign: 'left' }}>
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {selected ? `${selected.label} · ${selected.providerLabel}` : current ? `${current} （当前不可达）` : placeholder}
+        {selected ? `${selected.label} · ${selected.providerLabel}` : current ? tr('desktop_settings_58a5411e7d', current) : placeholder}
       </span><Icon name="chevron" size={13} />
     </button>
     {position && createPortal(<div ref={list} id={`${id}-popup`} className="settings-model-popup" role="dialog" aria-label={placeholder}
@@ -182,13 +189,13 @@ export function ChoiceSelect({
         padding: 4, borderRadius: 9, border: `1px solid ${t.border}`, background: t.surface, color: t.text,
         colorScheme: t.dark ? 'dark' : 'light', '--settings-accent': t.accent,
         boxShadow: '0 8px 28px rgba(0,0,0,.18)' } as CSSProperties}>
-      <input ref={search} value={query} placeholder="搜索模型或 Provider…" aria-label="搜索模型"
+      <input ref={search} value={query} placeholder={tr('desktop_settings_daab6f95a0')} aria-label={tr('composer_search_models_description')}
         role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls={id}
         aria-activedescendant={options.length ? `${id}-${Math.min(active, options.length - 1)}` : undefined}
         onChange={(event) => { setQuery(event.target.value); setActive(0); }}
         style={{ ...inputStyle(t), flexShrink: 0, marginBottom: 4, minWidth: 0 }} />
       <div id={id} role="listbox" aria-label={placeholder} style={{ overflowY: 'auto', minHeight: 0, overscrollBehavior: 'contain' }}>
-      {!options.length && <div role="status" style={{ padding: 12, color: t.text3, fontSize: 13 }}>没有匹配的模型</div>}
+      {!options.length && <div role="status" style={{ padding: 12, color: t.text3, fontSize: 13 }}>{tr('composer_no_matching_models')}</div>}
       {options.map((option, index) => <div key={option.key} id={`${id}-${index}`} role="option"
         aria-selected={option.key === current} data-option-index={index}
         onMouseDown={(event) => event.preventDefault()} onClick={() => pick(index)}
@@ -219,34 +226,34 @@ type GlobalsDraft = { kind: 'globals'; scope: FusionScope; path: string; revisio
 type Draft = StrategyDraft | GlobalsDraft;
 type PendingWrite = { id: number; closeDraft: boolean; scope: FusionScope; path: string; sessionId?: string };
 const SCOPE_DESCRIPTION: Record<FusionScope, string> = {
-  user: '保存在用户设置中，供所有项目使用。',
-  project: '保存在项目共享设置中，可随仓库提交。',
-  local: '保存在当前项目的本地设置中，不共享给其他人。',
+  user: "desktop_settings_c50e66c0b8",
+  project: "desktop_settings_537a20ad62",
+  local: "desktop_settings_0b7609f8a5",
 };
 const NUMBER_FIELDS = [
-  ['qualityPanelCount', 'Quality 模型数', 2, 8], ['fastPanelCount', 'Fast 模型数', 2, 8],
-  ['maxPanel', '模型数量上限', 2, 8], ['minSuccessfulPanels', '最少成功模型数', 2, 8],
-  ['panelMaxTurns', '每个模型最多执行轮数', 1, 12], ['panelMaxOutputTokensPerTurn', '每轮输出 Token 上限', 1],
-  ['panelReservedInputTokensPerTurn', '每轮预留输入 Token', 1], ['maxReservedNanoUsd', '预留费用上限（nano USD）', 0],
-  ['analystMaxOutputTokens', 'Analyst 输出 Token 上限', 1], ['analystMaxTurns', 'Analyst 最多执行轮数', 1, 12],
-  ['panelIdleTimeoutMs', '模型空闲超时（毫秒）', 1], ['panelTotalTimeoutMs', '模型总超时（毫秒）', 1],
-  ['analystTimeoutMs', 'Analyst 超时（毫秒）', 1], ['totalTimeoutMs', '整体超时（毫秒）', 1],
-  ['analysisProtocolRetries', 'Analyst 格式重试次数', 0, 1],
+  ['qualityPanelCount', "desktop_settings_be39534eb7", 2, 8], ['fastPanelCount', "desktop_settings_ce6f24edb5", 2, 8],
+  ['maxPanel', "desktop_settings_6c89c6cb02", 2, 8], ['minSuccessfulPanels', "desktop_settings_ad6bf997b2", 2, 8],
+  ['panelMaxTurns', "desktop_settings_8325722688", 1, 12], ['panelMaxOutputTokensPerTurn', "desktop_settings_cfdb84d14b", 1],
+  ['panelReservedInputTokensPerTurn', "desktop_settings_87ebdd7356", 1], ['maxReservedNanoUsd', "desktop_settings_3697bce124", 0],
+  ['analystMaxOutputTokens', "desktop_settings_61a6255398", 1], ['analystMaxTurns', "desktop_settings_343de4a428", 1, 12],
+  ['panelIdleTimeoutMs', "desktop_settings_41ae3496ef", 1], ['panelTotalTimeoutMs', "desktop_settings_16855f3a35", 1],
+  ['analystTimeoutMs', "desktop_settings_65601afd75", 1], ['totalTimeoutMs', "desktop_settings_68dd88f1ba", 1],
+  ['analysisProtocolRetries', "desktop_settings_0db7a8a85f", 0, 1],
 ] as const;
 const IMPLEMENT_FIELDS = [
-  ['maxTurns', '实现阶段轮数上限', 1, 200], ['panelTimeoutMs', '模型实现超时（毫秒）', 1],
-  ['totalTimeoutMs', '实现阶段总超时（毫秒）', 1], ['verifyTimeoutMs', '单条验证命令超时（毫秒）', 1],
-  ['verifyConcurrency', '并行验证数量', 1, 8], ['retainHours', '工作树保留时间（小时）', 0],
-  ['minFreeDiskBytes', '最低磁盘可用空间（字节）', 0],
+  ['maxTurns', "desktop_settings_835c5e2cf2", 1, 200], ['panelTimeoutMs', "desktop_settings_a716668b1e", 1],
+  ['totalTimeoutMs', "desktop_settings_79b7dc9233", 1], ['verifyTimeoutMs', "desktop_settings_07cd7b7b86", 1],
+  ['verifyConcurrency', "desktop_settings_ae7fa2d864", 1, 8], ['retainHours', "desktop_settings_d4da7d2338", 0],
+  ['minFreeDiskBytes', "desktop_settings_cd4a9349c6", 0],
 ] as const;
 function ObjectNumberFields({ fields, value, disabled, onChange }: {
   fields: readonly (readonly [string, string, number, number?])[];
   value: Record<string, unknown>; disabled: boolean; onChange(key: string, value: unknown): void;
 }) {
   const t = useT();
-  return <>{fields.map(([key, label, min, max]) => <Row key={key} title={label} align="center">
-    <input type="number" aria-label={label} min={min} max={max} step={1}
-      placeholder="引擎默认" value={typeof value[key] === 'number' ? value[key] as number : ''} disabled={disabled}
+  return <>{fields.map(([key, label, min, max]) => <Row key={key} title={tr(label)} align="center">
+    <input type="number" aria-label={tr(label)} min={min} max={max} step={1}
+      placeholder={tr('desktop_settings_9c69cf014b')} value={typeof value[key] === 'number' ? value[key] as number : ''} disabled={disabled}
       onChange={(event) => onChange(key, event.target.value === '' ? undefined : Number(event.target.value))}
       style={{ ...inputStyle(t), width: 160, maxWidth: '100%' }} />
   </Row>)}</>;
@@ -258,7 +265,7 @@ function OptionalBoolean({ value, label, disabled, onChange }: {
   return <select aria-label={label} disabled={disabled} value={value === true ? 'true' : value === false ? 'false' : ''}
     onChange={(event) => onChange(event.target.value === '' ? undefined : event.target.value === 'true')}
     style={{ ...inputStyle(t), width: 160 }}>
-    <option value="">未指定</option><option value="true">开启</option><option value="false">关闭</option>
+    <option value="">{tr('desktop_settings_7409a60806')}</option><option value="true">{tr('settings_status_on')}</option><option value="false">{tr('settings_status_off')}</option>
   </select>;
 }
 function withField<T extends object>(value: T, key: string, next: unknown): T {
@@ -268,6 +275,7 @@ function withField<T extends object>(value: T, key: string, next: unknown): T {
 }
 
 export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegisterCloseRequest, onClose }: PageContentProps) {
+  useI18n();
   const t = useT();
   const catalog = useMemo(() => parseFusionCatalog(bridge.fusionCatalogEvent?.catalog_json), [bridge.fusionCatalogEvent?.catalog_json]);
   const [filter, setFilter] = useState<FusionScope | 'all'>('all');
@@ -300,20 +308,20 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
       && context.catalog.scopes.some((scope) => scope.scope === pending.scope && scope.path === pending.path);
     setConfirmDelete(false);
     if (sameContext) {
-      setNotice('Fusion 配置已保存。');
+      setNotice(tr('desktop_settings_7574a6af27'));
       if (pending.closeDraft) setDraft(null);
     } else {
-      setNotice('原会话的 Fusion 配置已保存。');
-      setError('当前会话或项目已切换。请返回策略列表重新打开配置。');
+      setNotice(tr('desktop_settings_7779ab0f7a'));
+      setError(tr('desktop_settings_e0b426f69c'));
     }
   }, []);
 
   useEffect(() => {
-    void bridge.fusionAdmin(adminRecordCommand('get_catalog')).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : '无法读取 Fusion 策略。'));
+    void bridge.fusionAdmin(adminRecordCommand('get_catalog')).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : tr('desktop_settings_1285a14ec7')));
   }, [bridge.fusionAdmin, bridge.activeSession?.sessionId]);
   useEffect(() => {
     if (!pendingWrite || operation?.operation_id !== pendingWrite.id) return;
-    if (operation.status === 'failed') finishWrite(pendingWrite.id, operation.message ?? '保存失败，请刷新后重试。');
+    if (operation.status === 'failed') finishWrite(pendingWrite.id, operation.message ?? tr('desktop_settings_ccb17b5c6c'));
     else if (operation.status === 'succeeded') finishWrite(pendingWrite.id);
   }, [operation, pendingWrite, finishWrite]);
   const requestAction = (action: () => void) => {
@@ -349,7 +357,7 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
   const write = (action: string, scope: FusionScope, revision: string, target?: string, payload?: object, closeDraft = false) => {
     if (busy) return;
     if (draft && draft.scope === scope && draft.path !== scopeFor(scope)?.path) {
-      setError('当前项目已切换。请返回策略列表重新打开配置；草稿尚未写入。');
+      setError(tr('desktop_settings_1ed0e4f978'));
       return;
     }
     const id = nextConfigurationOperationId();
@@ -362,9 +370,9 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
         // The RPC belongs to the initiating session. Its completion still
         // arrives when that session's receipt is no longer shown by useBridge.
         if (receipt?.status === 'succeeded') finishWrite(id);
-        else if (receipt?.status === 'failed') finishWrite(id, receipt.message ?? '保存失败，请刷新后重试。');
+        else if (receipt?.status === 'failed') finishWrite(id, receipt.message ?? tr('desktop_settings_ccb17b5c6c'));
       })
-      .catch((cause: unknown) => finishWrite(id, cause instanceof Error ? cause.message : '无法保存 Fusion 配置。'));
+      .catch((cause: unknown) => finishWrite(id, cause instanceof Error ? cause.message : tr('desktop_settings_2c8675ec00')));
   };
   const updateConfig = (key: string, value: unknown) => setDraft((current) => current?.kind === 'strategy'
     ? { ...current, value: { ...current.value, config: withField(current.value.config, key, value) } } : current);
@@ -389,104 +397,103 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
   const readiness = (value: FusionStrategyEntry): string => {
     const valueRoles = rolesFromFusionObject(value.config);
     const missing = missingRoles(valueRoles);
-    if (missing.length) return `待配置 · 缺少 ${missing.join('、')}`;
-    if (valueRoles.panels.some((choice) => !candidates.some((row) => routeOf(row.choice) === routeOf(choice)))) return '不可运行 · Panel 模型未连接';
-    if (!analystCandidates.some((row) => routeOf(row.choice) === routeOf(valueRoles.analyst!))) return '不可运行 · Analyst 不可用';
-    return '已配置';
+    if (missing.length) return tr('desktop_settings_1de3c779e4', missing.join('、'));
+    if (valueRoles.panels.some((choice) => !candidates.some((row) => routeOf(row.choice) === routeOf(choice)))) return tr('desktop_settings_14ed1a3298');
+    if (!analystCandidates.some((row) => routeOf(row.choice) === routeOf(valueRoles.analyst!))) return tr('desktop_settings_cb94209780');
+    return tr('settings_provider_status_configured');
   };
   const entries = catalog.scopes.flatMap((entry) => entry.strategies.map((strategy) => ({ scope: entry, strategy })));
   const needle = search.trim().toLocaleLowerCase();
   const filtered = entries.filter(({ scope: entryScope, strategy }) => (filter === 'all' || entryScope.scope === filter)
-    && (!needle || `${strategy.name} ${FUSION_SCOPE_LABELS[entryScope.scope]} ${rolesFromFusionObject(strategy.config).panels.map(routeOf).join(' ')}`.toLocaleLowerCase().includes(needle)));
+    && (!needle || `${strategy.name} ${fusionScopeLabel(entryScope.scope)} ${rolesFromFusionObject(strategy.config).panels.map(routeOf).join(' ')}`.toLocaleLowerCase().includes(needle)));
   const globals = scope?.globals ?? catalog.effective_globals;
   const effectiveDefault = entries.find(({ scope: entryScope, strategy }) => catalog.default_strategy?.scope === entryScope.scope && catalog.default_strategy.id === strategy.id);
   const implement = config.implement && typeof config.implement === 'object' && !Array.isArray(config.implement) ? config.implement as Record<string, unknown> : {};
 
   return <ExtensionHubLayout>
     <header className="extension-hub-header">
-      <div className="extension-hub-heading"><p>为不同任务配置多模型合议策略。最终回答由当前会话模型完成。</p></div>
+      <div className="extension-hub-heading"><p>{tr('desktop_settings_d7d136ebec')}</p></div>
       {!draft && <div className="extension-hub-toolbar">
-        <label className="extension-search-field"><ExtensionGlyph name="search" size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索策略或模型" aria-label="搜索 Fusion 策略" /></label>
+        <label className="extension-search-field"><ExtensionGlyph name="search" size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={tr('desktop_settings_f1fc1084fa')} aria-label={tr('desktop_settings_c2214803ee')} /></label>
         <div className="extension-hub-toolbar-actions">
-          <button type="button" className="extension-hub-icon-button" aria-label="刷新 Fusion 策略" disabled={busy} onClick={() => void bridge.fusionAdmin(adminRecordCommand('get_catalog')).catch((cause: unknown) => setError(String(cause)))}><ExtensionGlyph name="refresh" size={16} /></button>
-          <button type="button" className="extension-hub-primary" disabled={busy || !catalog.scopes.length} onClick={create}>新建策略 <ExtensionGlyph name="plus" size={14} /></button>
+          <button type="button" className="extension-hub-icon-button" aria-label={tr('desktop_settings_32cc563514')} disabled={busy} onClick={() => void bridge.fusionAdmin(adminRecordCommand('get_catalog')).catch((cause: unknown) => setError(String(cause)))}><ExtensionGlyph name="refresh" size={16} /></button>
+          <button type="button" className="extension-hub-primary" disabled={busy || !catalog.scopes.length} onClick={create}>{tr('desktop_settings_bb090baf35')}<ExtensionGlyph name="plus" size={14} /></button>
         </div>
       </div>}
     </header>
     {pendingAction && <div role="alert" style={noteStyle(t, 'warn')}>
-      当前修改尚未保存。离开将丢弃这些修改。
-      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}><button type="button" style={ghostButtonStyle(t)} onClick={() => { const action = pendingAction; setPendingAction(null); setDraft(null); setError(null); action(); }}>丢弃并继续</button><button type="button" style={ghostButtonStyle(t)} onClick={() => setPendingAction(null)}>继续编辑</button></div>
+      {tr('desktop_settings_a225fc0a75')}<div style={{ display: 'flex', gap: 8, marginTop: 8 }}><button type="button" style={ghostButtonStyle(t)} onClick={() => { const action = pendingAction; setPendingAction(null); setDraft(null); setError(null); action(); }}>{tr('desktop_settings_5b19cb5d3c')}</button><button type="button" style={ghostButtonStyle(t)} onClick={() => setPendingAction(null)}>{tr('cron_keep_editing')}</button></div>
     </div>}
     {error && <div role="alert" style={noteStyle(t, 'danger')}>{error}</div>}
     {notice && <div role="status" style={{ ...noteStyle(t), marginBottom: 16 }}>{notice}</div>}
     {catalog.diagnostics.map((message, index) => <div key={index} role="alert" style={noteStyle(t, 'warn')}>{message}</div>)}
     {!draft ? <div className="configuration-list" style={{ display: 'grid', gap: 20 }}>
-      <div role="group" aria-label="Fusion 作用域筛选" style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+      <div role="group" aria-label={tr('desktop_settings_53bc997d63')} style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {(['all', ...FUSION_SCOPES] as const).map((value) => <button key={value} type="button" aria-pressed={filter === value}
-          onClick={() => { setFilter(value); setError(null); }} style={{ ...ghostButtonStyle(t), background: filter === value ? t.surfaceActive : 'transparent' }}>{value === 'all' ? '全部' : FUSION_SCOPE_LABELS[value]}</button>)}
+          onClick={() => { setFilter(value); setError(null); }} style={{ ...ghostButtonStyle(t), background: filter === value ? t.surfaceActive : 'transparent' }}>{value === 'all' ? tr('drawer_filter_all') : fusionScopeLabel(value)}</button>)}
       </div>
       <div style={{ ...noteStyle(t), margin: 0 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span>{filter === 'all' ? '最终生效设置' : `${FUSION_SCOPE_LABELS[filter]}范围的全局设置`} · Agent 合议 {globals.enabled === undefined ? '未指定' : globals.enabled ? '开启' : '关闭'} · 主动合议 {globals.proactive === undefined ? '未指定' : globals.proactive ? '开启' : '关闭'}</span>
-          {scope && <button type="button" disabled={busy} style={ghostButtonStyle(t, busy)} onClick={() => setDraft({ kind: 'globals', scope: scope.scope, path: scope.path, revision: scope.revision, value: structuredClone(scope.globals), original: JSON.stringify(scope.globals) })}>编辑全局设置</button>}
+          <span>{filter === 'all' ? tr('desktop_settings_58725d177f') : tr('desktop_settings_58ce30666f', fusionScopeLabel(filter))} {tr('desktop_settings_dd92f506a5')}{globals.enabled === undefined ? tr('desktop_settings_7409a60806') : globals.enabled ? tr('settings_status_on') : tr('settings_status_off')} {tr('desktop_settings_e7c9286a37')}{globals.proactive === undefined ? tr('desktop_settings_7409a60806') : globals.proactive ? tr('settings_status_on') : tr('settings_status_off')}</span>
+          {scope && <button type="button" disabled={busy} style={ghostButtonStyle(t, busy)} onClick={() => setDraft({ kind: 'globals', scope: scope.scope, path: scope.path, revision: scope.revision, value: structuredClone(scope.globals), original: JSON.stringify(scope.globals) })}>{tr('desktop_settings_d22d9f369f')}</button>}
         </div>
-        <div style={{ marginTop: 6 }}>{filter === 'all' ? '全局限制适用于每个策略；选择具体作用域后可以编辑。' : SCOPE_DESCRIPTION[filter]}</div>
-        <div style={{ marginTop: 6 }}>当前默认：{effectiveDefault ? `${effectiveDefault.strategy.name} · ${FUSION_SCOPE_LABELS[effectiveDefault.scope.scope]}` : '未设置，运行前需要选择策略'}。默认优先级：本地 → 项目 → 用户。</div>
-        {scope?.default_strategy_id && <button type="button" disabled={busy} style={{ ...ghostButtonStyle(t), marginTop: 8 }} onClick={() => write('set_default', scope.scope, scope.revision)}>清除此作用域默认</button>}
+        <div style={{ marginTop: 6 }}>{filter === 'all' ? tr('desktop_settings_f2451010f4') : tr(SCOPE_DESCRIPTION[filter])}</div>
+        <div style={{ marginTop: 6 }}>{tr('desktop_settings_a6ae5dd15c')}{effectiveDefault ? `${effectiveDefault.strategy.name} · ${fusionScopeLabel(effectiveDefault.scope.scope)}` : tr('desktop_settings_e421f058b8')}{tr('desktop_settings_de38f52aa8')}</div>
+        {scope?.default_strategy_id && <button type="button" disabled={busy} style={{ ...ghostButtonStyle(t), marginTop: 8 }} onClick={() => write('set_default', scope.scope, scope.revision)}>{tr('desktop_settings_cdc7068287')}</button>}
       </div>
-      <div className="extension-hub-list" aria-label="Fusion 策略列表" style={{ gridTemplateColumns: 'minmax(0, 1fr)' }}>
+      <div className="extension-hub-list" aria-label={tr('desktop_settings_bb3ef33253')} style={{ gridTemplateColumns: 'minmax(0, 1fr)' }}>
         {filtered.map(({ scope: entryScope, strategy }) => <div key={fusionStrategyKey(entryScope.scope, strategy.id)} className="extension-hub-row configuration-entry">
           <span className="extension-hub-icon" aria-hidden="true"><Icon name="sparkle" size={22} /></span>
           <button type="button" className="extension-hub-row-copy extension-hub-row-open" disabled={busy} onClick={() => openStrategy(entryScope, strategy, true)}>
-            <span className="extension-hub-row-title">{strategy.name}{entryScope.default_strategy_id === strategy.id && <span style={{ fontSize: 11, color: t.text3, marginLeft: 9 }}>该层默认</span>}</span>
-            <span className="extension-hub-row-description">{rolesFromFusionObject(strategy.config).panels.map(routeOf).join(' · ') || '尚未添加 Panel 模型'}</span>
-            <span style={{ color: t.text3, fontSize: 12, marginTop: 3 }}>{entryScope.admitted ? readiness(strategy) : '当前会话未启用此作用域'}</span>
+            <span className="extension-hub-row-title">{strategy.name}{entryScope.default_strategy_id === strategy.id && <span style={{ fontSize: 11, color: t.text3, marginLeft: 9 }}>{tr('desktop_settings_c19889c484')}</span>}</span>
+            <span className="extension-hub-row-description">{rolesFromFusionObject(strategy.config).panels.map(routeOf).join(' · ') || tr('desktop_settings_b8cf8fa1e8')}</span>
+            <span style={{ color: t.text3, fontSize: 12, marginTop: 3 }}>{entryScope.admitted ? readiness(strategy) : tr('desktop_settings_b115bc8f90')}</span>
           </button>
           <div className="extension-hub-row-side" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            <span className="extension-hub-row-scope" style={{ display: 'inline', whiteSpace: 'nowrap' }}>{FUSION_SCOPE_LABELS[entryScope.scope]}</span>
-            <button type="button" disabled={busy || entryScope.default_strategy_id === strategy.id} aria-label={`设为默认 ${strategy.name} ${FUSION_SCOPE_LABELS[entryScope.scope]}`} style={ghostButtonStyle(t, busy || entryScope.default_strategy_id === strategy.id)} onClick={() => write('set_default', entryScope.scope, entryScope.revision, strategy.id)}>{entryScope.default_strategy_id === strategy.id ? '默认' : '设为默认'}</button>
+            <span className="extension-hub-row-scope" style={{ display: 'inline', whiteSpace: 'nowrap' }}>{fusionScopeLabel(entryScope.scope)}</span>
+            <button type="button" disabled={busy || entryScope.default_strategy_id === strategy.id} aria-label={tr('desktop_settings_f24a9bdce0', strategy.name, fusionScopeLabel(entryScope.scope))} style={ghostButtonStyle(t, busy || entryScope.default_strategy_id === strategy.id)} onClick={() => write('set_default', entryScope.scope, entryScope.revision, strategy.id)}>{entryScope.default_strategy_id === strategy.id ? tr('settings_badge_default') : tr('settings_provider_set_default')}</button>
           </div>
         </div>)}
-        {!filtered.length && <div role="status" style={{ padding: '32px 18px', color: t.text3, fontSize: 13 }}>{bridge.fusionCatalogEvent ? search ? '没有匹配的策略。' : '还没有策略。新建一个策略，选择 Panel 与 Analyst 模型。' : '正在读取 Fusion 策略…'}</div>}
+        {!filtered.length && <div role="status" style={{ padding: '32px 18px', color: t.text3, fontSize: 13 }}>{bridge.fusionCatalogEvent ? search ? tr('desktop_settings_1ec5382fdc') : tr('desktop_settings_1137ab8f24') : tr('desktop_settings_59fbc25018')}</div>}
       </div>
     </div> : <div className="configuration-detail" style={{ display: 'grid', gap: 20, minWidth: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-        <button type="button" style={ghostButtonStyle(t, busy)} disabled={busy} onClick={() => requestAction(() => setDraft(null))}>← 返回策略列表</button>
-        <span style={{ fontSize: 12, color: t.text3 }}>{busy ? '正在保存…' : dirty ? '有未保存的修改' : '修改后点击保存'}</span>
+        <button type="button" style={ghostButtonStyle(t, busy)} disabled={busy} onClick={() => requestAction(() => setDraft(null))}>{tr('desktop_settings_2cace37f4e')}</button>
+        <span style={{ fontSize: 12, color: t.text3 }}>{busy ? tr('audio_settings_saving') : dirty ? tr('desktop_settings_c2277872cd') : tr('desktop_settings_d66ee6681a')}</span>
       </div>
-      <div><h3 style={{ margin: 0, fontSize: 20, color: t.text }}>{draft.kind === 'globals' ? `${FUSION_SCOPE_LABELS[draft.scope]}全局设置` : draft.existing ? draft.value.name : '新建策略'}</h3><p style={{ margin: '8px 0 0', color: t.text3, fontSize: 12.5 }}>{SCOPE_DESCRIPTION[draft.scope]}</p>{scope?.path && <p className="mono" style={{ margin: '6px 0 0', color: t.text4, fontSize: 11, overflowWrap: 'anywhere' }}>{scope.path}</p>}</div>
-      {draft.kind === 'globals' ? <Card title="适用于所有 Fusion 策略">
-        {([['enabled', '允许 Agent 和工作流使用 Fusion'], ['proactive', '主动使用 Fusion'], ['slash_cross_provider_default', '手动调用默认允许跨 Provider'], ['allow_cross_provider_for_agent', '允许 Agent 跨 Provider']] as const).map(([key, label]) => <Row key={key} title={label} align="center"><OptionalBoolean label={label} value={draft.value[key]} disabled={busy} onChange={(value) => setDraft({ ...draft, value: withField(draft.value, key, value) })} /></Row>)}
-        <Row title="允许的 Provider" desc="每行一个 Profile ID；留空表示不增加限制。托管策略的限制仍然生效。" align="start"><textarea aria-label="允许的 Provider" value={(draft.value.allowed_profiles ?? []).join('\n')} disabled={busy} rows={4} onChange={(event) => setDraft({ ...draft, value: withField(draft.value, 'allowed_profiles', event.target.value.split('\n')) })} style={{ ...inputStyle(t), width: 280, resize: 'vertical' }} /></Row>
+      <div><h3 style={{ margin: 0, fontSize: 20, color: t.text }}>{draft.kind === 'globals' ? tr('desktop_settings_5c7a092907', fusionScopeLabel(draft.scope)) : draft.existing ? draft.value.name : tr('desktop_settings_bb090baf35')}</h3><p style={{ margin: '8px 0 0', color: t.text3, fontSize: 12.5 }}>{tr(SCOPE_DESCRIPTION[draft.scope])}</p>{scope?.path && <p className="mono" style={{ margin: '6px 0 0', color: t.text4, fontSize: 11, overflowWrap: 'anywhere' }}>{scope.path}</p>}</div>
+      {draft.kind === 'globals' ? <Card title={tr('desktop_settings_4dde14c665')}>
+        {([['enabled', tr('desktop_settings_3e0c173617')], ['proactive', tr('desktop_settings_436ae7193f')], ['slash_cross_provider_default', tr('desktop_settings_7c1663b465')], ['allow_cross_provider_for_agent', tr('desktop_settings_cfac4e0240')]] as const).map(([key, label]) => <Row key={key} title={label} align="center"><OptionalBoolean label={label} value={draft.value[key]} disabled={busy} onChange={(value) => setDraft({ ...draft, value: withField(draft.value, key, value) })} /></Row>)}
+        <Row title={tr('desktop_settings_c77395d9bf')} desc={tr('desktop_settings_2758dd1855')} align="start"><textarea aria-label={tr('desktop_settings_c77395d9bf')} value={(draft.value.allowed_profiles ?? []).join('\n')} disabled={busy} rows={4} onChange={(event) => setDraft({ ...draft, value: withField(draft.value, 'allowed_profiles', event.target.value.split('\n')) })} style={{ ...inputStyle(t), width: 280, resize: 'vertical' }} /></Row>
       </Card> : <>
-        <Card title="策略信息">
-          <Row title="名称" align="center"><input aria-label="策略名称" value={draft.value.name} placeholder="例如：代码审查" maxLength={120} disabled={busy} onChange={(event) => setDraft({ ...draft, value: { ...draft.value, name: event.target.value } })} style={{ ...inputStyle(t), width: 280, maxWidth: '100%' }} /></Row>
-          <Row title="作用域" desc={draft.existing ? '已保存策略的作用域固定。使用下方复制功能创建独立策略。' : SCOPE_DESCRIPTION[draft.scope]} align="center"><select aria-label="策略作用域" disabled={busy || draft.existing} value={draft.scope} onChange={(event) => { const next = scopeFor(event.target.value as FusionScope); if (next) setDraft({ ...draft, scope: next.scope, path: next.path, revision: next.revision }); }} style={{ ...inputStyle(t), width: 160 }}>{catalog.scopes.map((entry) => <option key={entry.scope} value={entry.scope}>{FUSION_SCOPE_LABELS[entry.scope]}</option>)}</select></Row>
-          <Row title="默认预设" desc="Quality 侧重质量，Fast 侧重速度；均按 Panel 列表顺序选择模型。" align="center"><select aria-label="默认预设" disabled={busy} value={typeof config.preset === 'string' ? config.preset : ''} onChange={(event) => updateConfig('preset', event.target.value || undefined)} style={{ ...inputStyle(t), width: 160 }}><option value="">引擎默认</option><option value="quality">Quality</option><option value="fast">Fast</option></select></Row>
+        <Card title={tr('desktop_settings_c747a9ade3')}>
+          <Row title={tr('desktop_settings_d44e9b3d3b')} align="center"><input aria-label={tr('desktop_settings_a903683f81')} value={draft.value.name} placeholder={tr('desktop_settings_c85d4e91ed')} maxLength={120} disabled={busy} onChange={(event) => setDraft({ ...draft, value: { ...draft.value, name: event.target.value } })} style={{ ...inputStyle(t), width: 280, maxWidth: '100%' }} /></Row>
+          <Row title={tr('cron_scope_label')} desc={draft.existing ? tr('desktop_settings_dc602a32c6') : tr(SCOPE_DESCRIPTION[draft.scope])} align="center"><select aria-label={tr('desktop_settings_d63c88c543')} disabled={busy || draft.existing} value={draft.scope} onChange={(event) => { const next = scopeFor(event.target.value as FusionScope); if (next) setDraft({ ...draft, scope: next.scope, path: next.path, revision: next.revision }); }} style={{ ...inputStyle(t), width: 160 }}>{catalog.scopes.map((entry) => <option key={entry.scope} value={entry.scope}>{fusionScopeLabel(entry.scope)}</option>)}</select></Row>
+          <Row title={tr('desktop_settings_328b71b18b')} desc={tr('desktop_settings_a820647e83')} align="center"><select aria-label={tr('desktop_settings_328b71b18b')} disabled={busy} value={typeof config.preset === 'string' ? config.preset : ''} onChange={(event) => updateConfig('preset', event.target.value || undefined)} style={{ ...inputStyle(t), width: 160 }}><option value="">{tr('desktop_settings_9c69cf014b')}</option><option value="quality">{tr('desktop_shell_quality')}</option><option value="fast">{tr('desktop_chat_fast')}</option></select></Row>
         </Card>
         {scope?.diagnostic && <div role="alert" style={noteStyle(t, 'warn')}>{scope.diagnostic}</div>}
-        <div role="status" style={noteStyle(t)}>{draft.existing && !scope?.admitted ? '当前会话未启用此作用域；可以编辑，启用该作用域后才能运行' : readiness(draft.value)}。最终回答继续使用当前会话模型，无需另设合成模型。</div>
-        <Card title="Panel 模型">
-          <Row title="顺序即优先级" desc={`至少 ${FUSION_MIN_PANEL} 个，最多 ${maxPanel} 个模型。预设取列表中的前 N 项。`} align="start">{null}</Row>
-          {roles.panels.map((choice, index) => <Row key={`${index}:${routeOf(choice)}`} title={<span className="mono" style={{ fontSize: 12.5, overflowWrap: 'anywhere' }}>{index + 1}. {routeOf(choice)}</span>} align="center"><div style={{ display: 'flex', gap: 6 }}><button type="button" disabled={busy || index === 0} aria-label={`上移 ${routeOf(choice)}`} style={ghostButtonStyle(t, busy || index === 0)} onClick={() => movePanel(index, -1)}>↑</button><button type="button" disabled={busy || index === roles.panels.length - 1} aria-label={`下移 ${routeOf(choice)}`} style={ghostButtonStyle(t, busy || index === roles.panels.length - 1)} onClick={() => movePanel(index, 1)}>↓</button><button type="button" disabled={busy} aria-label={`移除 ${routeOf(choice)}`} style={ghostButtonStyle(t)} onClick={() => updateConfig('panelModels', roles.panels.filter((_, i) => i !== index))}>移除</button></div></Row>)}
-          <Row title="添加 Panel 模型" align="center"><div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', maxWidth: '100%' }}><ChoiceSelect value={pendingPanel} rows={panelCandidates} placeholder="选择模型…" onPick={setPendingPanel} disabled={busy || roles.panels.length >= maxPanel} /><button type="button" disabled={busy || !pendingPanel || !panelCandidates.some((row) => routeOf(row.choice) === routeOf(pendingPanel)) || roles.panels.length >= maxPanel} style={ghostButtonStyle(t, busy || !pendingPanel)} onClick={() => { if (!pendingPanel || !panelCandidates.some((row) => routeOf(row.choice) === routeOf(pendingPanel))) return; updateConfig('panelModels', [...roles.panels, pendingPanel]); setPendingPanel(null); }}>添加</button></div></Row>
+        <div role="status" style={noteStyle(t)}>{draft.existing && !scope?.admitted ? tr('desktop_settings_f0ad50b69b') : readiness(draft.value)}{tr('desktop_settings_29e31c06b5')}</div>
+        <Card title={tr('settings_parity_panel_models')}>
+          <Row title={tr('desktop_settings_5dc5594248')} desc={tr('desktop_settings_e3006c04c4', FUSION_MIN_PANEL, maxPanel)} align="start">{null}</Row>
+          {roles.panels.map((choice, index) => <Row key={`${index}:${routeOf(choice)}`} title={<span className="mono" style={{ fontSize: 12.5, overflowWrap: 'anywhere' }}>{index + 1}. {routeOf(choice)}</span>} align="center"><div style={{ display: 'flex', gap: 6 }}><button type="button" disabled={busy || index === 0} aria-label={tr('desktop_settings_f8c7e50aab', routeOf(choice))} style={ghostButtonStyle(t, busy || index === 0)} onClick={() => movePanel(index, -1)}>↑</button><button type="button" disabled={busy || index === roles.panels.length - 1} aria-label={tr('desktop_settings_31e7b4cdbd', routeOf(choice))} style={ghostButtonStyle(t, busy || index === roles.panels.length - 1)} onClick={() => movePanel(index, 1)}>↓</button><button type="button" disabled={busy} aria-label={tr('desktop_settings_fc8c501995', routeOf(choice))} style={ghostButtonStyle(t)} onClick={() => updateConfig('panelModels', roles.panels.filter((_, i) => i !== index))}>{tr('settings_parity_remove')}</button></div></Row>)}
+          <Row title={tr('settings_parity_add_panel')} align="center"><div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', maxWidth: '100%' }}><ChoiceSelect value={pendingPanel} rows={panelCandidates} placeholder={tr('settings_parity_choose_model')} onPick={setPendingPanel} disabled={busy || roles.panels.length >= maxPanel} /><button type="button" disabled={busy || !pendingPanel || !panelCandidates.some((row) => routeOf(row.choice) === routeOf(pendingPanel)) || roles.panels.length >= maxPanel} style={ghostButtonStyle(t, busy || !pendingPanel)} onClick={() => { if (!pendingPanel || !panelCandidates.some((row) => routeOf(row.choice) === routeOf(pendingPanel))) return; updateConfig('panelModels', [...roles.panels, pendingPanel]); setPendingPanel(null); }}>{tr('workspace_confirm_add')}</button></div></Row>
         </Card>
-        <Card title="Analyst 模型"><Row title="评审 Panel 输出" desc="仅显示已连接且支持 Fusion 结构化评审的模型。" align="center"><ChoiceSelect value={roles.analyst} rows={analystCandidates} placeholder="选择 analyst…" onPick={(value) => updateConfig('analystModel', value ?? undefined)} disabled={busy} /></Row></Card>
-        <details style={{ border: `1px solid ${t.border}`, borderRadius: 12, minWidth: 0 }}><summary style={{ padding: 16, fontSize: 13, color: t.text2, cursor: 'pointer' }}>高级执行参数</summary><p style={{ padding: '0 18px', color: t.text3, fontSize: 12 }}>留空使用引擎默认值。每个策略独立保存，不继承其他策略的参数。</p>
+        <Card title={tr('settings_parity_analyst')}><Row title={tr('desktop_settings_2ecd1c0f5e')} desc={tr('desktop_settings_9c866d1162')} align="center"><ChoiceSelect value={roles.analyst} rows={analystCandidates} placeholder={tr('desktop_settings_94ab09f1a2')} onPick={(value) => updateConfig('analystModel', value ?? undefined)} disabled={busy} /></Row></Card>
+        <details style={{ border: `1px solid ${t.border}`, borderRadius: 12, minWidth: 0 }}><summary style={{ padding: 16, fontSize: 13, color: t.text2, cursor: 'pointer' }}>{tr('desktop_settings_972a97281c')}</summary><p style={{ padding: '0 18px', color: t.text3, fontSize: 12 }}>{tr('desktop_settings_70f762cf88')}</p>
           <ObjectNumberFields fields={NUMBER_FIELDS} value={config} disabled={busy} onChange={updateConfig} />
-          <Row title="允许部分模型失败" align="center"><OptionalBoolean label="允许部分模型失败" value={config.partialOk} disabled={busy} onChange={(value) => updateConfig('partialOk', value)} /></Row>
-          <Row title="Analyst 只读工具" align="center"><OptionalBoolean label="Analyst 只读工具" value={config.analystTools} disabled={busy} onChange={(value) => updateConfig('analystTools', value)} /></Row>
-          <Row title="完成条件" align="center"><select aria-label="完成条件" value={typeof config.completionPolicy === 'string' ? config.completionPolicy : ''} disabled={busy} onChange={(event) => updateConfig('completionPolicy', event.target.value || undefined)} style={{ ...inputStyle(t), width: 200 }}><option value="">引擎默认</option><option value="wait_all">等待全部</option><option value="quorum_after_grace">达到成功数量后提前完成</option></select></Row>
-          <details style={{ margin: 16 }}><summary style={{ padding: '8px 0', color: t.text2, fontSize: 13, cursor: 'pointer' }}>实现模式</summary>
+          <Row title={tr('desktop_settings_cb0c4fe64e')} align="center"><OptionalBoolean label={tr('desktop_settings_cb0c4fe64e')} value={config.partialOk} disabled={busy} onChange={(value) => updateConfig('partialOk', value)} /></Row>
+          <Row title={tr('desktop_settings_0887d9f435')} align="center"><OptionalBoolean label={tr('desktop_settings_0887d9f435')} value={config.analystTools} disabled={busy} onChange={(value) => updateConfig('analystTools', value)} /></Row>
+          <Row title={tr('desktop_settings_a15ac5fba8')} align="center"><select aria-label={tr('desktop_settings_a15ac5fba8')} value={typeof config.completionPolicy === 'string' ? config.completionPolicy : ''} disabled={busy} onChange={(event) => updateConfig('completionPolicy', event.target.value || undefined)} style={{ ...inputStyle(t), width: 200 }}><option value="">{tr('desktop_settings_9c69cf014b')}</option><option value="wait_all">{tr('desktop_settings_4329a53710')}</option><option value="quorum_after_grace">{tr('desktop_settings_5f10072d24')}</option></select></Row>
+          <details style={{ margin: 16 }}><summary style={{ padding: '8px 0', color: t.text2, fontSize: 13, cursor: 'pointer' }}>{tr('desktop_settings_6dcd625041')}</summary>
             <ObjectNumberFields fields={IMPLEMENT_FIELDS} value={implement} disabled={busy} onChange={(key, value) => updateConfig('implement', withField(implement, key, value))} />
-            <Row title="验证命令" desc="每行一条命令，依次在各 Panel 工作树中执行。" align="start"><textarea aria-label="验证命令" rows={4} value={Array.isArray(implement.verifyCommands) ? implement.verifyCommands.join('\n') : ''} disabled={busy} onChange={(event) => updateConfig('implement', withField(implement, 'verifyCommands', event.target.value ? event.target.value.split('\n') : undefined))} style={{ ...inputStyle(t), width: 280, resize: 'vertical' }} /></Row>
+            <Row title={tr('desktop_settings_5c705e7de8')} desc={tr('desktop_settings_9e4388f364')} align="start"><textarea aria-label={tr('desktop_settings_5c705e7de8')} rows={4} value={Array.isArray(implement.verifyCommands) ? implement.verifyCommands.join('\n') : ''} disabled={busy} onChange={(event) => updateConfig('implement', withField(implement, 'verifyCommands', event.target.value ? event.target.value.split('\n') : undefined))} style={{ ...inputStyle(t), width: 280, resize: 'vertical' }} /></Row>
           </details>
         </details>
-        {draft.existing && <Card title="管理策略"><Row title="复制到其他作用域" desc="创建一个新 ID，原策略保持独立。" align="center"><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><select aria-label="复制目标作用域" value={copyScope} disabled={busy} onChange={(event) => setCopyScope(event.target.value as FusionScope)} style={inputStyle(t)}>{catalog.scopes.filter((entry) => entry.scope !== draft.scope).map((entry) => <option key={entry.scope} value={entry.scope}>{FUSION_SCOPE_LABELS[entry.scope]}</option>)}</select><button type="button" disabled={busy || !scopeFor(copyScope)} style={ghostButtonStyle(t)} onClick={() => { const target = scopeFor(copyScope); if (target) requestAction(() => openStrategy(target, copiedFusionStrategy(scope?.strategies.find((entry) => entry.id === draft.value.id) ?? draft.value, crypto.randomUUID()), false)); }}>复制策略</button></div></Row><Row title="删除策略" desc="若它是该层默认策略，删除时会同时清除默认引用。" align="center"><button type="button" disabled={busy} style={ghostButtonStyle(t, busy, true)} onClick={() => setConfirmDelete(true)}>删除策略</button></Row>{confirmDelete && <div role="alert" style={{ ...noteStyle(t, 'warn'), margin: 16 }}>确认删除“{draft.value.name}”？<div style={{ display: 'flex', gap: 8, marginTop: 8 }}><button type="button" disabled={busy} style={ghostButtonStyle(t, busy, true)} onClick={() => write('delete', draft.scope, draft.revision, draft.value.id, undefined, true)}>确认删除</button><button type="button" style={ghostButtonStyle(t)} onClick={() => setConfirmDelete(false)}>保留策略</button></div></div>}</Card>}
+        {draft.existing && <Card title={tr('desktop_settings_b08b84ac3d')}><Row title={tr('desktop_settings_102f86f930')} desc={tr('desktop_settings_07f0680049')} align="center"><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><select aria-label={tr('desktop_settings_3ad4931e0b')} value={copyScope} disabled={busy} onChange={(event) => setCopyScope(event.target.value as FusionScope)} style={inputStyle(t)}>{catalog.scopes.filter((entry) => entry.scope !== draft.scope).map((entry) => <option key={entry.scope} value={entry.scope}>{fusionScopeLabel(entry.scope)}</option>)}</select><button type="button" disabled={busy || !scopeFor(copyScope)} style={ghostButtonStyle(t)} onClick={() => { const target = scopeFor(copyScope); if (target) requestAction(() => openStrategy(target, copiedFusionStrategy(scope?.strategies.find((entry) => entry.id === draft.value.id) ?? draft.value, crypto.randomUUID()), false)); }}>{tr('desktop_settings_6fe471d852')}</button></div></Row><Row title={tr('desktop_settings_1190565c3d')} desc={tr('desktop_settings_111605194c')} align="center"><button type="button" disabled={busy} style={ghostButtonStyle(t, busy, true)} onClick={() => setConfirmDelete(true)}>{tr('desktop_settings_1190565c3d')}</button></Row>{confirmDelete && <div role="alert" style={{ ...noteStyle(t, 'warn'), margin: 16 }}>{tr('desktop_settings_delete_strategy_confirm', draft.value.name)}<div style={{ display: 'flex', gap: 8, marginTop: 8 }}><button type="button" disabled={busy} style={ghostButtonStyle(t, busy, true)} onClick={() => write('delete', draft.scope, draft.revision, draft.value.id, undefined, true)}>{tr('desktop_settings_a3ea3c17b4')}</button><button type="button" style={ghostButtonStyle(t)} onClick={() => setConfirmDelete(false)}>{tr('desktop_settings_00213c7f27')}</button></div></div>}</Card>}
       </>}
       <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8, padding: '4px 0 20px' }}>
-        <button type="button" disabled={busy} style={ghostButtonStyle(t, busy)} onClick={() => requestAction(() => setDraft(null))}>取消</button>
-        <button type="button" className="extension-hub-primary" disabled={busy || (!dirty && (draft.kind === 'globals' || draft.existing)) || (draft.kind === 'strategy' && !draft.value.name.trim())} onClick={save}>{busy ? '正在保存…' : '保存'}</button>
+        <button type="button" disabled={busy} style={ghostButtonStyle(t, busy)} onClick={() => requestAction(() => setDraft(null))}>{tr('common_cancel')}</button>
+        <button type="button" className="extension-hub-primary" disabled={busy || (!dirty && (draft.kind === 'globals' || draft.existing)) || (draft.kind === 'strategy' && !draft.value.name.trim())} onClick={save}>{busy ? tr('audio_settings_saving') : tr('settings_save')}</button>
       </div>
     </div>}
   </ExtensionHubLayout>;

@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import * as React from 'react';
 import { Component, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
 import type { CSSProperties, FormEvent, KeyboardEvent, ReactElement, ChangeEvent } from 'react';
@@ -485,7 +487,7 @@ class ClientSurfaceErrorBoundary extends Component<{
 
   render(): ReactNode {
     if (this.state.failed) {
-      return <div className="mod-ui-client-fallback" role="status">This Mod surface is unavailable.</div>;
+      return <div className="mod-ui-client-fallback" role="status">{tr("desktop_ui_mod_unavailable")}</div>;
     }
     return this.props.children;
   }
@@ -493,6 +495,7 @@ class ClientSurfaceErrorBoundary extends Component<{
 
 /** React renderer for the bounded JSON tree returned by the Harness Node VM. It never imports or evaluates Mod source. */
 export const ModUiClientTree = memo(function ModUiClientTree({ tree, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true }: ModUiClientTreeProps) {
+  useI18n();
   const body = React.createElement(ModUiClientTreeBody, { tree, site, client, onPress, onRunFault, interactionsEnabled });
   return React.createElement(ClientSurfaceErrorBoundary, {
     key: modUiClientSurfaceIdentityKey(site, client),
@@ -545,6 +548,7 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
   interactionsEnabled: boolean;
 }): ReactElement {
   const t = useT();
+  useI18n();
   const children = node.children?.map((child, index) => typeof child === 'string'
     ? child
     : <SurfaceNode key={childKey(child, index)} node={child} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />);
@@ -599,6 +603,7 @@ const SurfaceInput = memo(function SurfaceInput({ node, dispatch, disabled }: {
   disabled: boolean;
 }) {
   const t = useT();
+  useI18n();
   const { key, label, placeholder, value, submitLabel, autoFocus } = node.props;
   const [draft, setDraft] = useState(value ?? '');
   const valueRef = useRef(value);
@@ -656,6 +661,7 @@ const SurfaceSelect = memo(function SurfaceSelect({ node, dispatch, disabled }: 
   disabled: boolean;
 }) {
   const t = useT();
+  useI18n();
   const { key, options, value, label, autoFocus } = node.props;
   const defaultValue = value ?? options[0]?.value ?? '';
   const [selected, setSelected] = useState(defaultValue);

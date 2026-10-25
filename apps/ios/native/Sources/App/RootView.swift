@@ -669,24 +669,24 @@ struct RootView: View {
             .sheet(item: $externalImport, onDismiss: retryDeferredAppActions) { target in
                 DeepLinkImportPreview(target: target)
             }
-            .alert("Open linked destination?", isPresented: Binding(
+            .alert(String(localized: "deep_link_open_title"), isPresented: Binding(
                 get: { externalActionApproval != nil },
                 set: { if !$0 { externalActionApproval = nil } }
             ), presenting: externalActionApproval) { action in
-                Button("Continue") {
+                Button(String(localized: "onboarding_cta_continue")) {
                     externalActionApproval = nil
                     if !approvedExternalActions.contains(action) { approvedExternalActions.append(action) }
                     cronRepository.discardDraft()
                     parkRefusedAppAction(action, applied: applyAppAction(action, approvedDraftChange: true))
                     retryDeferredAppActions()
                 }
-                Button("Keep editing", role: .cancel) { externalActionApproval = nil; retryDeferredAppActions() }
+                Button(String(localized: "deep_link_keep_editing"), role: .cancel) { externalActionApproval = nil; retryDeferredAppActions() }
             } message: { _ in
-                Text("Your conversation text is saved in its workspace. Opening a new conversation can replace its draft and attachments. Unsaved terminal input and scheduled-task edits will be discarded.")
+                Text(String(localized: "deep_link_draft_warning"))
             }
-            .alert("Unable to open link", isPresented: Binding(
+            .alert(String(localized: "deep_link_unable_open"), isPresented: Binding(
                 get: { externalLinkError != nil }, set: { if !$0 { externalLinkError = nil } }
-            )) { Button("OK", role: .cancel) { externalLinkError = nil } }
+            )) { Button(String(localized: "common_ok"), role: .cancel) { externalLinkError = nil } }
             message: { Text(externalLinkError ?? "") }
 
             .fullScreenCover(
@@ -1655,7 +1655,7 @@ struct RootView: View {
         pendingSessionRestoreID = nil
         if pendingLinkedSessionID == sessionID {
             pendingLinkedSessionID = nil; pendingMessageLink = nil
-            externalLinkError = "This conversation is not stored in the requested local workspace."
+            externalLinkError = String(localized: "deep_link_conversation_workspace_missing")
         }
         activeSession = confirmedSession
         scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
@@ -1680,7 +1680,7 @@ struct RootView: View {
         activeSession = rollbackSelection
         if pendingLinkedSessionID == sessionID {
             pendingLinkedSessionID = nil; pendingMessageLink = nil
-            externalLinkError = "The local conversation could not be opened."
+            externalLinkError = String(localized: "deep_link_conversation_open_failed")
         }
         scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
         if let pending = pendingSessionFork,
@@ -2110,7 +2110,7 @@ struct RootView: View {
             if target.params["workspace"] == nil || target.params["workspace"] == activeScope.workspaceKey {
                 guard source.model.engineSessionsLoaded else { return false }
                 guard source.model.engineSessions.contains(where: { $0.id == id }) || source.model.activeSessionId == id else {
-                    externalLinkError = "This conversation is not stored in the selected local workspace."; return true
+                    externalLinkError = String(localized: "deep_link_conversation_workspace_missing"); return true
                 }
             }
             let applied = applyAppAction(.openConversation(sessionID: id, turnID: nil, workspaceKey: target.params["workspace"], mode: mode), approvedDraftChange: true)
@@ -2161,14 +2161,14 @@ struct RootView: View {
                 guard requestID == externalAsyncRouteID else { return }
                 let marketExists = LocalApps.market?.installed.contains(where: { $0.appId == id && !$0.removing }) == true
                 if AppsModel.chatAppID(of: id) != nil, chatExists { navigation.runApp(id) }
-                else if chatExists && marketExists { externalLinkError = "Several local apps match this ID. Open a link with its app source." }
+                else if chatExists && marketExists { externalLinkError = String(localized: "deep_link_app_ambiguous") }
                 else if chatExists { navigation.runApp(AppsModel.chatAppKey(chatID)) }
                 else if marketExists { navigation.runApp(id) }
                 else { _ = missingLinkedResource("installed app") }
             }
         case "market": navigation.openMarketApp(id)
         case "import":
-            guard target.payloadJSON != nil else { externalLinkError = "This import link has no configuration to review."; return true }
+            guard target.payloadJSON != nil else { externalLinkError = String(localized: "deep_link_import_no_configuration"); return true }
             externalImport = target
         case "runtime":
             if parts[1] == "agent" {
@@ -2183,7 +2183,7 @@ struct RootView: View {
     }
 
     private func missingLinkedResource(_ kind: String) -> Bool {
-        externalLinkError = "The linked \(kind) is not available in local data on this device."
+        externalLinkError = String(localized: "deep_link_target_missing")
         return true
     }
 
@@ -2205,7 +2205,7 @@ struct RootView: View {
             pendingMessageLink = nil
         } else if !projectSwitching && pendingSessionRestoreID == nil {
             pendingMessageLink = nil
-            externalLinkError = "This message is not present in the locally stored conversation."
+            externalLinkError = String(localized: "deep_link_message_missing")
         }
     }
 
@@ -2221,7 +2221,7 @@ struct RootView: View {
         guard let action = LingxiDeepLink.action(from: url) else {
             // Account sign-in callbacks belong to the app delegate's SDK handlers.
             if url.scheme?.lowercased() == "lingxi" || (url.scheme == "https" && url.host == "lingxios.net") {
-                externalLinkError = "This link is invalid or names an unsupported destination."
+                externalLinkError = String(localized: "deep_link_invalid")
             }
             return
         }
@@ -2567,7 +2567,7 @@ private struct ConversationProjectBridge: View {
                     )
                 } catch {
                     if model.activeSessionId == sessionID {
-                        model.error = ConversationError(kind: .host, message: String(format: String(localized: "session_index_save_new_failed_fmt"), error.localizedDescription))
+                        model.error = ConversationError(kind: .host, message: String(localized: "session_index_save_new_failed \(error.localizedDescription)"))
                     }
                     return
                 }

@@ -1,3 +1,4 @@
+import { withDesktopLocale } from './support/language';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
@@ -9,8 +10,8 @@ import type { RunItem } from '../src/renderer/model/runItem';
 (globalThis as { React?: typeof React }).React = React;
 
 function render(item: RunItem) {
-  return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) },
-    React.createElement(Stage, { liveItems: [item], sessionKey: 'origin-test' })));
+  return withDesktopLocale('zh-Hans', () => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) },
+    React.createElement(Stage, { liveItems: [item], sessionKey: 'origin-test' }))));
 }
 test('peer origin is outside and before a collapsed user bubble', () => {
   const html = render({ id: 'peer', type: 'narration', role: 'user',

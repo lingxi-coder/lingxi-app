@@ -1,3 +1,4 @@
+import { nativeTr } from '../shared/nativeLocale.js';
 import { app, BrowserWindow, ipcMain, dialog, clipboard } from 'electron';
 import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
@@ -12,9 +13,9 @@ export function installDeepLinks(projects: () => string[], show: () => void, rea
   const queue = new DeepLinkQueue();
   const startupErrors: string[] = [];
   const notify = () => BrowserWindow.getAllWindows().forEach(w => w.webContents.send('lingxi:deep-link:available'));
-  const report = (message: string) => {
-    if (app.isReady()) void dialog.showMessageBox({ type: 'error', message });
-    else if (startupErrors.length < 4) startupErrors.push(message);
+  const report = (key: string) => {
+    if (app.isReady()) void dialog.showMessageBox({ type: 'error', message: nativeTr(key) });
+    else if (startupErrors.length < 4) startupErrors.push(key);
   };
   const enqueue = (raw: string) => {
     try {
@@ -22,11 +23,11 @@ export function installDeepLinks(projects: () => string[], show: () => void, rea
       if (app.isReady()) show();
       notify();
     } catch (error) {
-      let message = 'Too many pending LingXi links. Open or dismiss the queued links, then try again.';
+      let message = 'native_link_queue_full';
       if (error instanceof DeepLinkError) {
         message = error.code === 'unsupported'
-          ? 'This LingXi link destination is not supported.'
-          : 'This LingXi link is invalid. Copy the complete link and try again.';
+          ? 'native_link_unsupported'
+          : 'native_link_invalid';
       }
       report(message);
     }
@@ -58,7 +59,7 @@ export function installDeepLinks(projects: () => string[], show: () => void, rea
       const projectPath = key ? projects().find(path => { try { return workspaceLinkKey(path) === key; } catch { return false; } }) : undefined;
       if (key && !projectPath) {
         queue.acknowledge(next.id);
-        void dialog.showMessageBox({ type: 'info', message: 'Unable to open this LingXi link', detail: 'The workspace referenced by this link is not available on this device. Open the workspace locally, then try the link again.' });
+        void dialog.showMessageBox({ type: 'info', message: nativeTr('native_link_unavailable'), detail: nativeTr('native_link_workspace_missing') });
         notify();
         continue;
       }
@@ -68,7 +69,7 @@ export function installDeepLinks(projects: () => string[], show: () => void, rea
   ipcMain.handle('lingxi:deep-link:ack', (event, id: string, error?: string) => {
     assertSender(event);
     if (typeof id !== 'string' || !queue.acknowledge(id)) return;
-    if (typeof error === 'string' && error) void dialog.showMessageBox({ type: 'info', message: 'Unable to open this LingXi link', detail: error.slice(0, 256) });
+    if (typeof error === 'string' && error) void dialog.showMessageBox({ type: 'info', message: nativeTr('native_link_unavailable'), detail: error.slice(0, 256) });
     notify();
   });
   const copySessionLink = (projectPath: string, sessionId: string, messageUuid?: string) => {

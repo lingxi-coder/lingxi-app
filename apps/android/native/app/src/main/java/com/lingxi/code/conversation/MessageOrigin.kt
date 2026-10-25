@@ -7,7 +7,7 @@ private val crossSessionEnvelope = Regex(
 )
 
 /** Display-only: history and model input retain the complete envelope. */
-internal fun crossSessionMessage(text: String): CrossSessionMessage? {
+internal fun crossSessionMessage(text: String, strings: ConversationStrings = DefaultConversationStrings): CrossSessionMessage? {
     val envelope = crossSessionEnvelope.matchEntire(text) ?: return null
     fun attribute(name: String): String? = Regex("""(?:^|\s)$name="([^"]*)"""")
         .find(envelope.groupValues[1])?.groupValues?.get(1)
@@ -22,5 +22,6 @@ internal fun crossSessionMessage(text: String): CrossSessionMessage? {
         }?.trim()?.takeIf { it.isNotEmpty() }
     val sender = attribute("from-name") ?: attribute("from") ?: attribute("from-session")
     return CrossSessionMessage(envelope.groupValues[2].trim(),
-        if (sender == null) "来自其他会话" else "来自其他会话 · $sender")
+        if (sender == null) strings.resolve(com.lingxi.code.R.string.chat_cross_session_origin, "来自其他会话")
+        else strings.resolve(com.lingxi.code.R.string.chat_cross_session_origin_fmt, "来自其他会话 · %1\$s", sender))
 }

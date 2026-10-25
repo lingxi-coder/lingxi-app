@@ -1,5 +1,7 @@
 import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
 import { CH_APPLICATION_ICON } from '../shared/applicationIcon.js';
+import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
+import { nativeTr, setNativeLocale } from '../shared/nativeLocale.js';
 import { applicationIcon } from './applicationIcon.js';
 import type { AccountService } from './account.js';
 import { RealtimeAudioController } from './audio/realtimeAudioController.js';
@@ -335,10 +337,10 @@ const workspaceDialogs: WorkspaceDialogs = {
     return result.canceled ? undefined : result.filePaths[0];
   },
   async trustDirectory(directory) {
-    const result = await dialog.showMessageBox({ type: 'question', title: 'Trust directory',
-      message: `Do you trust the files in ${directory}?`,
-      detail: 'This chat will use this directory’s settings, hooks, MCP servers, skills and memory.',
-      buttons: ['Cancel', 'Trust and continue'], defaultId: 0, cancelId: 0, noLink: true });
+    const result = await dialog.showMessageBox({ type: 'question', title: nativeTr('native_trust_title'),
+      message: nativeTr('native_trust_message', directory),
+      detail: nativeTr('native_trust_detail'),
+      buttons: [nativeTr('common_cancel'), nativeTr('native_trust_continue')], defaultId: 0, cancelId: 0, noLink: true });
     return result.response === 1;
   },
 };
@@ -1230,10 +1232,15 @@ export class HostController {
       this.assertSender(event);
       clipboard.writeText(validateClipboardText(text));
     });
+    this.ipc.handle(CH_INTERFACE_LOCALE, (event: IpcMainInvokeEvent, locale: unknown, followSystem: unknown) => {
+      this.assertSender(event);
+      if (typeof followSystem !== 'boolean') throw new TypeError('Invalid interface language preference');
+      setNativeLocale(locale, followSystem);
+    });
     this.ipc.handle(CH_DIAGNOSTICS_EXPORT, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       const result = await dialog.showSaveDialog({
-        title: 'Export sanitized LingXi diagnostics',
+        title: nativeTr('native_export_diagnostics'),
         defaultPath: `LingXi-Code-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
         filters: [{ name: 'JSON', extensions: ['json'] }],
       });
@@ -2242,7 +2249,7 @@ export class HostController {
       CH_PROVIDER_CONNECTION_TEST, CH_CODEX_LOGIN, CH_CODEX_CANCEL,
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
-      CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,
+      CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_INTERFACE_LOCALE, CH_OPEN_SYSTEM_SETTINGS,
       CH_REALTIME_AUDIO_COMMAND, CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_OPERATION, CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_FINISH_LISTEN,
     ]) this.ipc.removeHandler(channel);
     this.offNativeAudio?.();

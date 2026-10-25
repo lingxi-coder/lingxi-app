@@ -1,3 +1,4 @@
+import { tr } from '../i18n/locale';
 import { useEffect, useRef } from 'react';
 import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
 import { scheduledTaskFromJob, type ScheduledCronJob } from '../bridge/scheduledTaskDraft';
@@ -15,8 +16,8 @@ export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, 
     return () => opener?.focus();
   }, []);
   useEffect(() => { if (busy) dialog.current?.focus(); }, [busy]);
-  return <DesktopDialog ref={dialog} tabIndex={-1} title={jobs.length ? 'Archive chat and pause scheduled tasks?' : 'Archive chat?'}
-    ariaLabel="Archive chat" icon="archive" tone={jobs.length ? 'danger' : 'default'}
+  return <DesktopDialog ref={dialog} tabIndex={-1} title={jobs.length ? tr('desktop_archive_pause_title') : tr('desktop_archive_title')}
+    ariaLabel={tr('desktop_archive_chat')} icon="archive" tone={jobs.length ? 'danger' : 'default'}
     onEscape={() => { if (!busy) onClose(); }} onKeyDown={(event) => {
       if (event.key !== 'Tab') return;
       const controls = dialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
@@ -26,17 +27,16 @@ export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, 
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     }}>
-    <button type="button" aria-label="Close archive dialog" disabled={busy} onClick={onClose}
+    <button type="button" aria-label={tr('desktop_archive_close')} disabled={busy} onClick={onClose}
       style={{ position: 'absolute', right: 16, top: 16, border: 0, background: 'transparent', color: 'var(--dialog-text-2)', cursor: 'pointer' }}><Icon name="x" size={18} /></button>
-    {loading ? <p role="status">Checking scheduled tasks…</p> : jobs.length ? <p style={{ color: 'var(--dialog-text-2)', lineHeight: 1.7 }}>
-      This chat has scheduled tasks: <strong>{jobs.map((job) => scheduledTaskFromJob(job).title).join(', ')}</strong>.
-      Archiving “{title}” will pause these tasks and stop future runs. Tasks and chat history will be kept.
-    </p> : <p style={{ color: 'var(--dialog-text-2)', lineHeight: 1.7 }}>“{title}” will move to Archived chats. You can restore it later.</p>}
-    {busy && <p role="status">Archiving chat and updating the sidebar…</p>}
+    {loading ? <p role="status">{tr('desktop_archive_checking')}</p> : jobs.length ? <p style={{ color: 'var(--dialog-text-2)', lineHeight: 1.7 }}>
+      {tr('desktop_archive_detail', jobs.map((job) => scheduledTaskFromJob(job).title).join(', '), title)}
+    </p> : <p style={{ color: 'var(--dialog-text-2)', lineHeight: 1.7 }}>{tr('desktop_archive_move_detail', title)}</p>}
+    {busy && <p role="status">{tr('desktop_archive_updating')}</p>}
     {error && <p role="alert" style={{ color: 'var(--dialog-danger)', lineHeight: 1.6 }}>{error}</p>}
     <DesktopDialogActions>
-      <DesktopDialogButton variant="cancel" disabled={busy} onClick={onClose}>Cancel</DesktopDialogButton>
-      <DesktopDialogButton variant="primary" disabled={busy || loading || (!!error && !onRetry)} onClick={error ? onRetry : onConfirm}>{error && !busy ? 'Try again' : busy ? 'Archiving…' : jobs.length ? 'Archive and pause' : 'Archive chat'}</DesktopDialogButton>
+      <DesktopDialogButton variant="cancel" disabled={busy} onClick={onClose}>{tr('common_cancel')}</DesktopDialogButton>
+      <DesktopDialogButton variant="primary" disabled={busy || loading || (!!error && !onRetry)} onClick={error ? onRetry : onConfirm}>{error && !busy ? 'Try again' : busy ? tr('desktop_archive_busy') : jobs.length ? tr('desktop_archive_pause') : tr('desktop_archive_chat')}</DesktopDialogButton>
     </DesktopDialogActions>
   </DesktopDialog>;
 }

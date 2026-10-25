@@ -27,6 +27,7 @@ import {
   type RuntimeResource,
 } from '../bridge/runtimeCenterState';
 import { statusLabel } from '../bridge/agentStatus';
+import { tr } from '../i18n/locale';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { AgentAvatar } from './AgentAvatar';
@@ -34,13 +35,13 @@ import { Stage } from './Stage';
 import { TurnFileReview } from './TurnFileSummary';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
 
-const SECTION_LABELS: Record<RuntimeCenterSection, string> = {
-  tasks: 'Tasks',
-  agents: 'Subagents',
-  todos: 'Todos',
-  resources: 'Resources',
-  plan: 'Plan',
-  review: 'Review',
+const SECTION_KEYS: Record<RuntimeCenterSection, string> = {
+  tasks: 'session_details_tasks',
+  agents: 'plugins_detail_agents',
+  todos: 'desktop_runtime_todos',
+  resources: 'chat_summary_resources',
+  plan: 'chat_plan_document_title',
+  review: 'desktop_runtime_review',
 };
 
 const statusRank: Record<string, number> = {
@@ -152,7 +153,7 @@ function shorten(value: string, max = 90): string {
 }
 
 function taskLabel(task: TaskRowDto): string {
-  return task.description.trim() || `Background task ${task.task_id}`;
+  return task.description.trim() || tr('desktop_runtime_task_default', task.task_id);
 }
 
 function taskAvatarId(task: TaskRowDto): string | undefined {
@@ -210,14 +211,14 @@ function OverviewRow({
         <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 14, fontWeight: 400 }}>{title}</span>
         {subtitle && <span style={{ display: 'block', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.dark ? t.text2 : t.text3, fontSize: 12 }}>{subtitle}</span>}
       </span>
-      {status && <span className={status === 'running' ? 'running-sweep' : undefined} style={{ flexShrink: 0, color: statusColor(t, status), fontSize: 10 }}>{statusText ?? status}</span>}
+      {status && <span className={status === 'running' ? 'running-sweep' : undefined} style={{ flexShrink: 0, color: statusColor(t, status), fontSize: 10 }}>{statusText ?? runtimeStatusLabel(status)}</span>}
     </button>
   );
 }
 
 function SummarySection({ section, children }: { section: RuntimeCenterSection; children: ReactNode }) {
-  return <section className="runtime-summary-section" aria-label={SECTION_LABELS[section]}>
-    <h2>{SECTION_LABELS[section]}</h2>{children}
+  return <section className="runtime-summary-section" aria-label={sectionLabel(section)}>
+    <h2>{sectionLabel(section)}</h2>{children}
   </section>;
 }
 
@@ -241,10 +242,10 @@ function taskSummaryStatus(task: TaskRowDto): string {
  * listing and nothing rendered it.
  */
 function taskDisplayStatus(task: TaskRowDto): string {
-  if ((task as { awaiting_plan_approval?: boolean }).awaiting_plan_approval) return 'awaiting approval';
+  if ((task as { awaiting_plan_approval?: boolean }).awaiting_plan_approval) return tr('desktop_runtime_status_awaiting');
   const kind = task.task_type === 'local_bash' ? 'shell' : 'agent';
-  const label = statusLabel(task.status.type, kind);
-  return (task as { unread?: boolean }).unread ? `${label}, unread` : label;
+  const label = runtimeStatusLabel(task.status.type, kind);
+  return (task as { unread?: boolean }).unread ? tr('desktop_runtime_unread', label) : label;
 }
 
 function agentStatusSummary(statuses: readonly string[]): string {
@@ -252,13 +253,13 @@ function agentStatusSummary(statuses: readonly string[]): string {
   const awaiting = statuses.filter((status) => status === 'awaiting approval').length;
   const done = statuses.filter((status) => status === 'completed').length;
   const failed = statuses.filter((status) => ['failed', 'killed', 'cancelled'].includes(status)).length;
-  return [running > 0 ? `${running} running` : '', awaiting > 0 ? `${awaiting} awaiting approval` : '', done > 0 ? `${done} done` : '', failed > 0 ? `${failed} failed` : ''].filter(Boolean).join(' · ') || `${statuses.length} idle`;
+  return [running > 0 ? tr('desktop_runtime_count_running', running) : '', awaiting > 0 ? tr('desktop_runtime_count_awaiting', awaiting) : '', done > 0 ? tr('desktop_runtime_count_done', done) : '', failed > 0 ? tr('desktop_runtime_count_failed', failed) : ''].filter(Boolean).join(' · ') || tr('desktop_runtime_count_idle', statuses.length);
 }
 
-const PLAN_STATUS_LABELS = { submitted: 'Submitted', pending: 'Pending approval', approved: 'Approved', rejected: 'Rejected', failed: 'Failed' };
+const PLAN_STATUS_KEYS = { submitted: 'desktop_runtime_plan_submitted', pending: 'desktop_runtime_plan_pending', approved: 'desktop_runtime_plan_approved', rejected: 'desktop_runtime_plan_rejected', failed: 'chat_status_failed' };
 
 function planHeading(content: string): string {
-  return shorten(content.split('\n').find((line) => line.trim())?.replace(/^#+\s*/, '') ?? 'Submitted plan', 70);
+  return shorten(content.split('\n').find((line) => line.trim())?.replace(/^#+\s*/, '') ?? tr('desktop_runtime_submitted_plan'), 70);
 }
 
 export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
@@ -359,42 +360,42 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
     });
   };
   return (
-    <div ref={ref} id="runtime-center-overview" className="runtime-summary" data-inspector-open={center.inspectorOpen ? 'true' : undefined} role="region" aria-label="Pinned summary"
+    <div ref={ref} id="runtime-center-overview" className="runtime-summary" data-inspector-open={center.inspectorOpen ? 'true' : undefined} role="region" aria-label={tr('desktop_runtime_pinned_summary')}
       onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeOverview(true); } }}
       style={{ '--runtime-border': t.border, '--runtime-muted': t.dark ? t.text2 : t.text3, background: t.surface, color: t.text } as CSSProperties}>
       <GitEnvironment onNavigate={() => bridge.setRuntimeCenterOverviewOpen(false)} />
       <SummaryContextActions key={bridge.conversation.sessionKey} bridge={bridge} />
       {(agents.length > 0 || tasks.length > 0) && <SummarySection section="agents">
         {agents.length > 0 && <OverviewRow icon="subagent" title={agentStatusSummary(agents.map((agent) => agent.status))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
-        {tasks.length > 0 && <OverviewRow icon="activity" title={`${tasks.length} background ${tasks.length === 1 ? 'task' : 'tasks'}`} subtitle={agentStatusSummary(tasks.map(taskSummaryStatus))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
+        {tasks.length > 0 && <OverviewRow icon="activity" title={tr(tasks.length === 1 ? 'desktop_runtime_background_task_count' : 'desktop_runtime_background_tasks_count', tasks.length)} subtitle={agentStatusSummary(tasks.map(taskSummaryStatus))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
       </SummarySection>}
       {center.resources.length > 0 && <SummarySection section="resources">
         {center.resources.slice(0, 3).map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : resource.kind === 'file' ? 'file' : 'resources'} title={resource.name} thumbnail={resource.kind === 'image' ? resource.url : undefined} onClick={() => open({ kind: 'resource', id: resource.id })} />)}
-        <OverviewRow icon="resources" title="View all" onClick={() => open({ kind: 'section', id: 'resources' })} />
+        <OverviewRow icon="resources" title={tr('desktop_runtime_view_all')} onClick={() => open({ kind: 'section', id: 'resources' })} />
       </SummarySection>}
       {center.submittedPlan && <SummarySection section="plan">
-        <OverviewRow icon="file" title={planHeading(center.submittedPlan.content)} subtitle={PLAN_STATUS_LABELS[center.submittedPlan.status]} onClick={() => open({ kind: 'plan-document', id: center.submittedPlan!.id })} />
+        <OverviewRow icon="file" title={planHeading(center.submittedPlan.content)} subtitle={planStatusLabel(center.submittedPlan.status)} onClick={() => open({ kind: 'plan-document', id: center.submittedPlan!.id })} />
       </SummarySection>}
     </div>
   );
 }
 
 function tabLabel(item: RuntimeCenterItemRef, bridge: UseBridge): string {
-  if (item.kind === 'turn-review') return item.path?.split(/[\\/]/).at(-1) || 'Edited files';
-  if (item.kind === 'section') return SECTION_LABELS[item.id];
+  if (item.kind === 'turn-review') return item.path?.split(/[\\/]/).at(-1) || tr('desktop_runtime_edited_files');
+  if (item.kind === 'section') return sectionLabel(item.id);
   if (item.kind === 'plan-document') {
     const plan = bridge.runtimeCenter.submittedPlanState.calls.find((call) => call.id === item.id);
-    return plan ? planHeading(plan.content) : 'Plan';
+    return plan ? planHeading(plan.content) : tr('chat_plan_document_title');
   }
   if (item.kind === 'task') {
     const task = bridge.desktop.tasks[item.id];
-    return task ? taskLabel(task) : 'Task';
+    return task ? taskLabel(task) : tr('chat_tool_verb_task');
   }
   if (item.kind === 'agent') return bridge.runtimeCenter.agents[item.id]?.name ?? item.id.slice(0, 13);
-  if (item.kind === 'resource') return bridge.runtimeCenter.resources.find((resource) => resource.id === item.id)?.name ?? 'Resource';
+  if (item.kind === 'resource') return bridge.runtimeCenter.resources.find((resource) => resource.id === item.id)?.name ?? tr('desktop_runtime_resource');
   const plan = bridge.runtimeCenter.plan.length > 0 ? bridge.runtimeCenter.plan : bridge.conversation.plan;
   const index = plan.findIndex((task, i) => planRuntimeItemId(task, i, plan) === item.id);
-  return index >= 0 ? plan[index]?.subject ?? 'Plan item' : 'Plan';
+  return index >= 0 ? plan[index]?.subject ?? tr('desktop_runtime_plan_item') : tr('chat_plan_document_title');
 }
 
 function tabIcon(item: RuntimeCenterItemRef): string {
@@ -430,15 +431,15 @@ function InspectorTabs({ bridge, toolsOpen, onTools, onSelect }: { bridge: UseBr
   };
   return (
     <>
-    <div className="runtime-inspector-tabs" role="tablist" aria-label="Runtime inspector items">
-      {toolsOpen && <div className="runtime-inspector-tab runtime-inspector-tools-tab" data-active="true"><button type="button" role="tab" aria-selected="true" aria-controls="runtime-inspector-panel" className="no-drag runtime-inspector-tab-select" onClick={onTools} onKeyDown={(event) => { if (event.key === 'ArrowRight' && center.tabs[0]) { event.preventDefault(); onSelect(); bridge.openRuntimeItem(center.tabs[0]); focusTab(center.tabs[0]); } }}><Icon name="box" size={16} />Tools</button></div>}
+    <div className="runtime-inspector-tabs" role="tablist" aria-label={tr('desktop_runtime_inspector_items')}>
+      {toolsOpen && <div className="runtime-inspector-tab runtime-inspector-tools-tab" data-active="true"><button type="button" role="tab" aria-selected="true" aria-controls="runtime-inspector-panel" className="no-drag runtime-inspector-tab-select" onClick={onTools} onKeyDown={(event) => { if (event.key === 'ArrowRight' && center.tabs[0]) { event.preventDefault(); onSelect(); bridge.openRuntimeItem(center.tabs[0]); focusTab(center.tabs[0]); } }}><Icon name="box" size={16} />{tr('apps_category_tools')}</button></div>}
       {center.tabs.map((item, index) => {
         const active = !toolsOpen && sameRuntimeCenterItem(item, center.activeItem);
         const key = runtimeCenterItemKey(item);
         return (
           <div key={`${item.kind}:${item.id}`} role="presentation" className="runtime-inspector-tab" data-active={active || undefined}>
             <button type="button" role="tab" id={`runtime-inspector-tab-${encodeURIComponent(key)}`} aria-controls="runtime-inspector-panel" aria-selected={active} tabIndex={active ? 0 : -1} data-runtime-inspector-tab={key} data-runtime-inspector-active={active ? 'true' : undefined} onClick={() => { onSelect(); bridge.openRuntimeItem(item); }} onKeyDown={(event) => selectFromKeyboard(event, index)} className="no-drag runtime-inspector-tab-select">{item.kind === 'agent' ? <AgentAvatar agentId={item.id} size={16} /> : <Icon name={tabIcon(item)} size={16} />}<span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tabLabel(item, bridge)}</span></button>
-            <button type="button" className="no-drag" aria-label={`Close ${tabLabel(item, bridge)}`} onClick={() => { bridge.closeRuntimeItem(item); window.requestAnimationFrame(() => (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]') ?? document.querySelector<HTMLElement>('.runtime-inspector-landing button') ?? document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]'))?.focus()); }} style={{ display: 'grid', placeItems: 'center', width: 22, height: 22, marginRight: 2, border: 0, borderRadius: 5, background: 'transparent', color: 'inherit', cursor: 'pointer' }}><Icon name="x" size={11} /></button>
+            <button type="button" className="no-drag" aria-label={tr('desktop_runtime_close_item', tabLabel(item, bridge))} onClick={() => { bridge.closeRuntimeItem(item); window.requestAnimationFrame(() => (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]') ?? document.querySelector<HTMLElement>('.runtime-inspector-landing button') ?? document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]'))?.focus()); }} style={{ display: 'grid', placeItems: 'center', width: 22, height: 22, marginRight: 2, border: 0, borderRadius: 5, background: 'transparent', color: 'inherit', cursor: 'pointer' }}><Icon name="x" size={11} /></button>
           </div>
         );
       })}
@@ -450,14 +451,14 @@ function InspectorTabs({ bridge, toolsOpen, onTools, onSelect }: { bridge: UseBr
 export function TaskDetail({ task, bridge }: { task: TaskRowDto | undefined; bridge: UseBridge }) {
   const t = useT();
   const output = task ? bridge.desktop.taskOutput[task.task_id] : undefined;
-  if (!task) return <EmptyRow>Task is no longer available.</EmptyRow>;
+  if (!task) return <EmptyRow>{tr('desktop_runtime_task_missing')}</EmptyRow>;
   return (
     <div style={{ padding: 15, overflowY: 'auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: statusColor(t, taskSummaryStatus(task)), fontSize: 11 }}><Icon name="activity" size={14} /><span>{taskDisplayStatus(task)}</span></div>
       {task.stage && <div style={{ marginTop: 6, color: t.text3, fontSize: 11 }}>{task.stage}</div>}
-      {task.agent_id && <button type="button" onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: task.agent_id! })}>View agent conversation</button>}
+      {task.agent_id && <button type="button" onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: task.agent_id! })}>{tr('desktop_runtime_agent_conversation')}</button>}
       <p style={{ margin: '12px 0', color: t.text, fontSize: 13, lineHeight: 1.55 }}>{task.description}</p>
-      {output ? <pre className="mono" style={{ margin: 0, padding: 11, borderRadius: 9, background: t.windowBg, border: `0.5px solid ${t.border}`, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.55 }}>{output.content || '(No output yet)'}{output.truncated ? `\n\n…${output.totalLines} lines total` : ''}</pre> : <EmptyRow>Loading task output…</EmptyRow>}
+      {output ? <pre className="mono" style={{ margin: 0, padding: 11, borderRadius: 9, background: t.windowBg, border: `0.5px solid ${t.border}`, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.55 }}>{output.content || tr('desktop_runtime_no_output')}{output.truncated ? `\n\n${tr('desktop_runtime_lines_total', output.totalLines)}` : ''}</pre> : <EmptyRow>{tr('desktop_runtime_loading_output')}</EmptyRow>}
     </div>
   );
 }
@@ -470,16 +471,16 @@ function AgentDetail({ agent, bridge }: { agent: SessionAgentSummaryDto | undefi
   // agent anchors, and that anchor map is a dependency of its transcript `rows`
   // memo — so rebuilding the conversation inline on every render defeated both.
   const conversation = useMemo(() => conversationFromMessages(messages ?? []), [messages]);
-  if (!agent) return <EmptyRow>Agent is no longer available.</EmptyRow>;
+  if (!agent) return <EmptyRow>{tr('desktop_runtime_agent_missing')}</EmptyRow>;
   const latestActivity = agent.latest_activity?.trim();
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ padding: '10px 13px', borderBottom: `0.5px solid ${t.border}`, color: t.text3, fontSize: 10.5 }}>
-        <span style={{ color: statusColor(t, agent.status), fontWeight: 650 }}>{statusLabel(agent.status, 'agent')}</span>
+        <span style={{ color: statusColor(t, agent.status), fontWeight: 650 }}>{runtimeStatusLabel(agent.status, 'agent')}</span>
         {agent.model && <span> · {agent.model}</span>}
         {latestActivity && <span role="status" style={{ display: 'block', marginTop: 4, color: t.dark ? t.text2 : t.text3 }}>{shorten(latestActivity, 150)}</span>}
       </div>
-      <Stage onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id: `agent:${agent.agent_id}:${id}`, files, path })} liveItems={conversation.items} running={agent.status === 'running'} pendingActivity={latestActivity} sessionKey={`agent:${agent.agent_id}`} emptyMessage="Waiting for the agent to emit its first message."
+      <Stage onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id: `agent:${agent.agent_id}:${id}`, files, path })} liveItems={conversation.items} running={agent.status === 'running'} pendingActivity={latestActivity} sessionKey={`agent:${agent.agent_id}`} emptyMessage={tr('desktop_runtime_agent_waiting')}
         visualizationSessionId={bridge.activeSession?.sessionId.startsWith('pending-new:') ? undefined : bridge.activeSession?.sessionId}
         onVisualizationFollowup={bridge.offerVisualizationFollowup} />
     </div>
@@ -498,30 +499,30 @@ function ResourceDetail({ resource, bridge }: { resource: RuntimeResource | unde
     void bridge.previewWorkspaceFile(resource.path).then((value) => {
       if (!cancelled) setPreview(value);
     }).catch((cause: unknown) => {
-      if (!cancelled) setError(cause instanceof Error ? cause.message : 'Unable to preview file.');
+      if (!cancelled) setError(cause instanceof Error ? cause.message : 'desktop_runtime_preview_failed');
     });
     return () => { cancelled = true; };
   }, [bridge.previewWorkspaceFile, resource?.id, resource?.path]);
-  if (!resource) return <EmptyRow>Resource is no longer available.</EmptyRow>;
+  if (!resource) return <EmptyRow>{tr('desktop_runtime_resource_missing')}</EmptyRow>;
   if (resource.kind === 'image' && resource.url) {
     return <div style={{ padding: 15 }}><img src={resource.url} alt={resource.name} style={{ display: 'block', maxWidth: '100%', maxHeight: 500, margin: '0 auto', objectFit: 'contain', borderRadius: 10, background: t.windowBg }} /><div style={{ marginTop: 10, color: t.text3, fontSize: 11 }}>{resource.name}</div></div>;
   }
   if (resource.kind === 'file') {
-    if (error) return <div role="alert" style={{ padding: 15, color: t.danger, fontSize: 11 }}>{error}</div>;
-    if (!preview) return <EmptyRow>Loading file preview…</EmptyRow>;
-    if (preview.kind === 'binary') return <div style={{ padding: 15, color: t.text3, fontSize: 11 }}>Binary attachment · {(preview.size / 1024).toFixed(1)} KiB</div>;
-    return <div style={{ minHeight: 0, flex: 1, overflow: 'auto', padding: 15 }}><pre className="mono" style={{ margin: 0, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.6 }}>{preview.content}{preview.truncated ? '\n\n…preview truncated at 512 KiB' : ''}</pre></div>;
+    if (error) return <div role="alert" style={{ padding: 15, color: t.danger, fontSize: 11 }}>{error === 'desktop_runtime_preview_failed' ? tr(error) : error}</div>;
+    if (!preview) return <EmptyRow>{tr('desktop_runtime_loading_preview')}</EmptyRow>;
+    if (preview.kind === 'binary') return <div style={{ padding: 15, color: t.text3, fontSize: 11 }}>{tr('desktop_runtime_binary_size', (preview.size / 1024).toFixed(1))}</div>;
+    return <div style={{ minHeight: 0, flex: 1, overflow: 'auto', padding: 15 }}><pre className="mono" style={{ margin: 0, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.6 }}>{preview.content}{preview.truncated ? `\n\n${tr('desktop_runtime_preview_truncated')}` : ''}</pre></div>;
   }
-  return <div style={{ padding: 15, color: t.text3, fontSize: 11 }}>{resource.detail ?? 'Engine attachment metadata.'}</div>;
+  return <div style={{ padding: 15, color: t.text3, fontSize: 11 }}>{resource.detail ?? tr('desktop_runtime_attachment_metadata')}</div>;
 }
 
 function PlanDetail({ selected, plan }: { selected: PlanTaskDto | undefined; plan: readonly PlanTaskDto[] }) {
   const t = useT();
   return (
     <div style={{ minHeight: 0, overflow: 'auto', padding: 15 }}>
-      {selected && <div style={{ marginBottom: 16, padding: 12, borderRadius: 10, background: t.accentBg, color: t.text, fontSize: 13, lineHeight: 1.5 }}><div style={{ color: t.accent, fontSize: 10, fontWeight: 700, letterSpacing: .7, textTransform: 'uppercase', marginBottom: 5 }}>{selected.state.replace('_', ' ')}</div>{selected.subject}</div>}
-      <div style={{ color: t.dark ? t.text2 : t.text3, fontSize: 10, fontWeight: 700, letterSpacing: .7, textTransform: 'uppercase', marginBottom: 7 }}>Todos</div>
-      {plan.length === 0 ? <EmptyRow>No todos yet.</EmptyRow> : plan.map((task, index) => <div key={planRuntimeItemId(task, index, plan)} style={{ display: 'flex', gap: 8, padding: '6px 0', color: task.state === 'completed' ? t.text4 : t.text2, fontSize: 12, textDecoration: task.state === 'completed' ? 'line-through' : undefined }}><span style={{ color: task.state === 'completed' ? t.ok : task.state === 'in_progress' ? t.accent : t.text4 }}>●</span><span>{task.subject}</span></div>)}
+      {selected && <div style={{ marginBottom: 16, padding: 12, borderRadius: 10, background: t.accentBg, color: t.text, fontSize: 13, lineHeight: 1.5 }}><div style={{ color: t.accent, fontSize: 10, fontWeight: 700, letterSpacing: .7, textTransform: 'uppercase', marginBottom: 5 }}>{runtimeStatusLabel(selected.state)}</div>{selected.subject}</div>}
+      <div style={{ color: t.dark ? t.text2 : t.text3, fontSize: 10, fontWeight: 700, letterSpacing: .7, textTransform: 'uppercase', marginBottom: 7 }}>{tr('desktop_runtime_todos')}</div>
+      {plan.length === 0 ? <EmptyRow>{tr('desktop_runtime_no_todos')}</EmptyRow> : plan.map((task, index) => <div key={planRuntimeItemId(task, index, plan)} style={{ display: 'flex', gap: 8, padding: '6px 0', color: task.state === 'completed' ? t.text4 : t.text2, fontSize: 12, textDecoration: task.state === 'completed' ? 'line-through' : undefined }}><span style={{ color: task.state === 'completed' ? t.ok : task.state === 'in_progress' ? t.accent : t.text4 }}>●</span><span>{task.subject}</span></div>)}
     </div>
   );
 }
@@ -609,17 +610,17 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
   return (
     <>
       {center.inspectorOpen && topbarControls && createPortal(<>
-        <button type="button" className="no-drag desktop-topbar-action" aria-label="Open tools" title="Open tools" onClick={() => setToolsOpen(true)}><Icon name="plus" size={18} /></button>
-        <button type="button" aria-label={expanded ? 'Restore panel size' : 'Expand right panel'} className="no-drag desktop-topbar-action" onClick={() => setExpanded(!expanded)} title={expanded ? 'Restore panel size' : 'Expand right panel'} aria-pressed={expanded}><Icon name={expanded ? 'collapse' : 'expand'} size={17} /></button>
-        <button type="button" aria-label="Hide right panel" className="no-drag desktop-topbar-action" onClick={() => { bridge.setRuntimeInspectorOpen(false); window.requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-runtime-inspector-trigger="true"]')?.focus()); }} title="Hide right panel" aria-expanded="true" aria-controls="runtime-inspector"><Icon name="panel-right" size={18} /></button>
+        <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('desktop_runtime_open_tools')} title={tr('desktop_runtime_open_tools')} onClick={() => setToolsOpen(true)}><Icon name="plus" size={18} /></button>
+        <button type="button" aria-label={expanded ? tr('desktop_runtime_restore_panel') : tr('desktop_runtime_expand_panel')} className="no-drag desktop-topbar-action" onClick={() => setExpanded(!expanded)} title={expanded ? tr('desktop_runtime_restore_panel') : tr('desktop_runtime_expand_panel')} aria-pressed={expanded}><Icon name={expanded ? 'collapse' : 'expand'} size={17} /></button>
+        <button type="button" aria-label={tr('desktop_runtime_hide_panel')} className="no-drag desktop-topbar-action" onClick={() => { bridge.setRuntimeInspectorOpen(false); window.requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-runtime-inspector-trigger="true"]')?.focus()); }} title={tr('desktop_runtime_hide_panel')} aria-expanded="true" aria-controls="runtime-inspector"><Icon name="panel-right" size={18} /></button>
       </>, topbarControls)}
-    <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label="Runtime inspector" style={{ position: expanded ? 'absolute' : undefined, inset: expanded ? '0 0 0 0' : undefined, zIndex: expanded ? 46 : undefined, width: expanded ? '100%' : panelWidth, minWidth: expanded ? 0 : Math.min(panelWidth, 320), '--inspector-bg': t.dark ? t.windowBg : t.sidebarPanelBg, '--inspector-surface': t.surface, '--inspector-active': t.surfaceActive, '--inspector-text': t.text, '--inspector-muted': t.text3, '--inspector-border': t.border, background: t.sidebarBg, borderLeft: `0.5px solid ${t.border}` } as CSSProperties}>
-      {!expanded && <div className="no-drag runtime-inspector-resize" role="separator" aria-label="Resize right panel" aria-orientation="vertical" aria-valuenow={panelWidth} aria-valuemin={320} aria-valuemax={960} tabIndex={0} onKeyDown={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); resize(panelWidth + (e.key === 'ArrowLeft' ? 24 : -24)); } }} onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(window.innerWidth - e.clientX); }} onPointerUp={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); }} />}
+    <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label={tr('desktop_runtime_inspector')} style={{ position: expanded ? 'absolute' : undefined, inset: expanded ? '0 0 0 0' : undefined, zIndex: expanded ? 46 : undefined, width: expanded ? '100%' : panelWidth, minWidth: expanded ? 0 : Math.min(panelWidth, 320), '--inspector-bg': t.dark ? t.windowBg : t.sidebarPanelBg, '--inspector-surface': t.surface, '--inspector-active': t.surfaceActive, '--inspector-text': t.text, '--inspector-muted': t.text3, '--inspector-border': t.border, background: t.sidebarBg, borderLeft: `0.5px solid ${t.border}` } as CSSProperties}>
+      {!expanded && <div className="no-drag runtime-inspector-resize" role="separator" aria-label={tr('desktop_runtime_resize_panel')} aria-orientation="vertical" aria-valuenow={panelWidth} aria-valuemin={320} aria-valuemax={960} tabIndex={0} onKeyDown={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); resize(panelWidth + (e.key === 'ArrowLeft' ? 24 : -24)); } }} onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(window.innerWidth - e.clientX); }} onPointerUp={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); }} />}
       <header className="no-drag runtime-inspector-header" style={{ borderBottom: `0.5px solid ${t.border}` }}>
         <InspectorTabs bridge={bridge} toolsOpen={!active} onTools={() => setToolsOpen(true)} onSelect={() => setToolsOpen(false)} />
 
       </header>
-      <div id="runtime-inspector-panel" className="runtime-inspector-content" role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : 'Details'} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+      <div id="runtime-inspector-panel" className="runtime-inspector-content" role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : tr('session_details_button')} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
         {!active && <InspectorTools bridge={bridge} onSelect={() => setToolsOpen(false)} /> }
         {active?.kind === 'turn-review' && <TurnFileReview key={`${active.id}:${active.path ?? ''}`} files={active.files} path={active.path} />}
         {active?.kind === 'section' && <SectionDetail section={active.id} bridge={bridge} />}
@@ -636,32 +637,32 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
 
 function InspectorTools({ bridge, onSelect }: { bridge: UseBridge; onSelect: () => void }) {
   const tools = [
-    { id: 'review', icon: 'file', detail: 'Changes and file diffs' },
-    { id: 'agents', icon: 'subagent', detail: 'Agents and background tasks' },
-    { id: 'todos', icon: 'check', detail: 'Track work in progress' },
-    { id: 'resources', icon: 'resources', detail: 'Files and attachments' },
-    { id: 'plan', icon: 'file', detail: 'Read the proposed approach' },
+    { id: 'review', icon: 'file', detail: tr('desktop_runtime_tool_review_description') },
+    { id: 'agents', icon: 'subagent', detail: tr('desktop_runtime_tool_agents_description') },
+    { id: 'todos', icon: 'check', detail: tr('desktop_runtime_tool_todos_description') },
+    { id: 'resources', icon: 'resources', detail: tr('desktop_runtime_tool_resources_description') },
+    { id: 'plan', icon: 'file', detail: tr('desktop_runtime_tool_plan_description') },
   ] as const;
   const open = (item: RuntimeCenterItemRef) => { onSelect(); bridge.openRuntimeItem(item); };
   return <div className="runtime-inspector-landing">
     <section aria-labelledby="inspector-tools-heading">
-      <h2 id="inspector-tools-heading">Tools</h2>
+      <h2 id="inspector-tools-heading">{tr('apps_category_tools')}</h2>
       <div className="runtime-inspector-tool-grid">
         {tools.map(({ id, icon, detail }) => <button key={id} type="button" className="runtime-inspector-tool" onClick={() => open({ kind: 'section', id })}>
-          <Icon name={icon} size={20} /><span><strong>{SECTION_LABELS[id]}</strong><small>{detail}</small></span>
+          <Icon name={icon} size={20} /><span><strong>{sectionLabel(id)}</strong><small>{detail}</small></span>
         </button>)}
-        <button type="button" className="runtime-inspector-tool" aria-label="Open pinned summary" onClick={() => bridge.setRuntimeCenterOverviewOpen(true)}><Icon name="summary-list" size={20} /><span><strong>Summary</strong><small>Session context at a glance</small></span></button>
+        <button type="button" className="runtime-inspector-tool" aria-label={tr('desktop_runtime_open_summary')} onClick={() => bridge.setRuntimeCenterOverviewOpen(true)}><Icon name="summary-list" size={20} /><span><strong>{tr('desktop_runtime_summary')}</strong><small>{tr('desktop_runtime_summary_description')}</small></span></button>
       </div>
     </section>
     <section aria-labelledby="inspector-resources-heading">
-      <h2 id="inspector-resources-heading">Session resources</h2>
-      {bridge.runtimeCenter.resources.length ? <div className="runtime-inspector-resource-grid">{bridge.runtimeCenter.resources.slice(0, 6).map(resource => <button type="button" key={resource.id} title={resource.path ?? resource.name} onClick={() => open({ kind: 'resource', id: resource.id })}><Icon name={resource.kind === 'image' ? 'image' : 'file'} size={24} /><span>{resource.name}</span></button>)}</div> : <p className="runtime-inspector-resource-empty">Files and attachments from this session appear here.</p>}
+      <h2 id="inspector-resources-heading">{tr('desktop_runtime_session_resources')}</h2>
+      {bridge.runtimeCenter.resources.length ? <div className="runtime-inspector-resource-grid">{bridge.runtimeCenter.resources.slice(0, 6).map(resource => <button type="button" key={resource.id} title={resource.path ?? resource.name} onClick={() => open({ kind: 'resource', id: resource.id })}><Icon name={resource.kind === 'image' ? 'image' : 'file'} size={24} /><span>{resource.name}</span></button>)}</div> : <p className="runtime-inspector-resource-empty">{tr('desktop_runtime_resources_empty')}</p>}
     </section>
   </div>;
 }
 
 function SubmittedPlanDetail({ plan }: { plan: SubmittedPlan | null | undefined }) {
-  return plan ? <PlanDocument key={plan.id} content={plan.content} status={PLAN_STATUS_LABELS[plan.status]}/> : <div className="runtime-section-detail"><EmptyRow>No submitted plan yet.</EmptyRow></div>;
+  return plan ? <PlanDocument key={plan.id} content={plan.content} status={planStatusLabel(plan.status)}/> : <div className="runtime-section-detail"><EmptyRow>{tr('desktop_runtime_no_plan')}</EmptyRow></div>;
 }
 
 function SubagentGroups({ agents, bridge }: { agents: SessionAgentSummaryDto[]; bridge: UseBridge }) {
@@ -669,16 +670,16 @@ function SubagentGroups({ agents, bridge }: { agents: SessionAgentSummaryDto[]; 
   const doneStatuses = new Set(['completed', 'failed', 'killed', 'cancelled', 'idle']);
   const sorted = [...agents].sort((a, b) => (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0));
   const groups = [
-    { label: 'Active', agents: sorted.filter((agent) => !doneStatuses.has(agent.status)), empty: 'No active subagents' },
-    { label: 'Done', agents: sorted.filter((agent) => doneStatuses.has(agent.status)), empty: 'No completed subagents' },
+    { label: tr('cron_task_status_active'), agents: sorted.filter((agent) => !doneStatuses.has(agent.status)), empty: tr('desktop_runtime_active_subagents_empty') },
+    { label: tr('chat_tool_status_completed'), agents: sorted.filter((agent) => doneStatuses.has(agent.status)), empty: tr('desktop_runtime_done_subagents_empty') },
   ];
   return <div style={{ display: 'grid', gap: 22 }}>
-    {groups.map((group) => <section key={group.label} aria-label={`${group.label} subagents`}>
+    {groups.map((group) => <section key={group.label} aria-label={tr('desktop_runtime_subagent_group', group.label)}>
       <h3 style={{ margin: '0 9px 8px', color: t.text3, fontSize: 13, fontWeight: 400, fontVariantNumeric: 'tabular-nums' }}>{group.label} · {group.agents.length}</h3>
       {group.agents.length === 0 ? <EmptyRow>{group.empty}</EmptyRow> : group.agents.map((agent) => <OverviewRow
         key={agent.agent_id} icon="subagent" agentId={agent.agent_id} title={agent.name || agent.agent_type}
         subtitle={agent.latest_activity}
-        status={agent.status} statusText={statusLabel(agent.status, 'agent')}
+        status={agent.status} statusText={runtimeStatusLabel(agent.status, 'agent')}
         onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: agent.agent_id })}
       />)}
     </section>)}
@@ -693,18 +694,18 @@ function SectionDetail({ section, bridge }: { section: RuntimeCenterSection; bri
   if (section === 'review') return <GitReview />;
   if (section === 'plan') return <SubmittedPlanDetail plan={center.submittedPlan} />;
   return <div className="runtime-section-detail">
-    <h2>{SECTION_LABELS[section]}</h2>
-    {section === 'todos' && (todos.length === 0 ? <EmptyRow>No todos yet.</EmptyRow> : todos.map((todo, index) => <OverviewRow key={planRuntimeItemId(todo, index, todos)} icon={todo.state === 'completed' ? 'check' : 'goal'} title={todo.subject} status={todo.state} onClick={() => bridge.openRuntimeItem({ kind: 'todo', id: planRuntimeItemId(todo, index, todos) })} />))}
+    <h2>{sectionLabel(section)}</h2>
+    {section === 'todos' && (todos.length === 0 ? <EmptyRow>{tr('desktop_runtime_no_todos')}</EmptyRow> : todos.map((todo, index) => <OverviewRow key={planRuntimeItemId(todo, index, todos)} icon={todo.state === 'completed' ? 'check' : 'goal'} title={todo.subject} status={todo.state} onClick={() => bridge.openRuntimeItem({ kind: 'todo', id: planRuntimeItemId(todo, index, todos) })} />))}
     {section === 'agents' && <>
       <SubagentGroups agents={agents} bridge={bridge} />
       {tasks.map((task) => {
         const agent = task.agent_id ? center.agents[task.agent_id] : undefined;
-        const typeLabel = task.task_type === 'local_bash' ? 'Background shell' : taskAvatarId(task) ? 'Background agent' : 'Background task';
+        const typeLabel = task.task_type === 'local_bash' ? tr('desktop_runtime_background_shell') : taskAvatarId(task) ? tr('desktop_runtime_background_agent') : tr('desktop_runtime_background_task');
         const subtitle = [typeLabel, agent?.name || agent?.agent_type, task.status.type === 'running' ? task.stage : undefined].filter(Boolean).join(' · ');
         return <OverviewRow key={task.task_id} icon={task.task_type === 'local_bash' ? 'terminal' : 'activity'} agentId={taskAvatarId(task)} title={taskLabel(task)} subtitle={subtitle} status={taskSummaryStatus(task)} statusText={taskDisplayStatus(task)} onClick={() => bridge.openRuntimeItem({ kind: 'task', id: task.task_id })} />;
       })}
     </>}
-    {section === 'resources' && (center.resources.length === 0 ? <EmptyRow>No input resources in this session.</EmptyRow> : center.resources.map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : 'file'} title={resource.name} subtitle={resource.path ?? resource.detail} onClick={() => bridge.openRuntimeItem({ kind: 'resource', id: resource.id })} />))}
+    {section === 'resources' && (center.resources.length === 0 ? <EmptyRow>{tr('desktop_runtime_input_resources_empty')}</EmptyRow> : center.resources.map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : 'file'} title={resource.name} subtitle={resource.path ?? resource.detail} onClick={() => bridge.openRuntimeItem({ kind: 'resource', id: resource.id })} />))}
   </div>;
 }
 
@@ -714,4 +715,17 @@ export function RuntimeCenter({ bridge }: { bridge: UseBridge }) {
 
 export function runtimeCenterButtonStyle(t: ReturnType<typeof useT>, active: boolean): CSSProperties {
   return { width: 32, height: 32, flexShrink: 0, display: 'grid', placeItems: 'center', borderRadius: 10, border: 0, background: active ? t.surfaceActive : 'transparent', color: active ? t.text : t.text3, cursor: 'pointer' };
+}
+
+function sectionLabel(section: RuntimeCenterSection): string { return tr(SECTION_KEYS[section]); }
+function planStatusLabel(status: keyof typeof PLAN_STATUS_KEYS): string { return tr(PLAN_STATUS_KEYS[status]); }
+function runtimeStatusLabel(status: string, kind: 'agent' | 'shell' = 'agent'): string {
+  const label = statusLabel(status, kind);
+  const keys: Record<string, string> = {
+    pending: 'desktop_runtime_status_pending', running: 'desktop_runtime_status_running', idle: 'desktop_runtime_status_idle',
+    done: 'desktop_runtime_status_done', error: 'desktop_runtime_status_error', stopped: 'desktop_runtime_status_stopped',
+    failed: 'desktop_runtime_status_failed', killed: 'desktop_runtime_status_killed', cancelled: 'desktop_runtime_status_cancelled',
+    in_progress: 'desktop_runtime_status_in_progress', paused: 'desktop_runtime_status_paused', 'awaiting approval': 'desktop_runtime_status_awaiting',
+  };
+  return keys[label] ? tr(keys[label]!) : label;
 }

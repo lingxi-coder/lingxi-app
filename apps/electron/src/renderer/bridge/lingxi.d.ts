@@ -200,6 +200,7 @@ export interface LingxiApi {
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
   copyText(text: string): Promise<void>;
+  setInterfaceLocale(locale: string, followSystem: boolean): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;

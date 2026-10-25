@@ -1467,8 +1467,8 @@ fun RootScreen(
         restoredModeSessionKey = restoreKey
     }
     val drawerProductionData = DrawerProductionData(
-        workspaces = listOf(LocalProjectWorkspace),
-        projects = projectState.projects.map { it.toDrawerProject() },
+        workspaces = listOf(LocalProjectWorkspace.copy(name = stringResource(R.string.project_storage_local))),
+        projects = projectState.projects.map { it.toDrawerProject(com.lingxi.code.conversation.conversationStrings(context)) },
         crons = cronState.tasks.map { cron ->
             val automation = com.lingxi.code.cron.CronAutomation.from(cron.task)
             val status = cron.activeRun?.status ?: cron.lastRun?.status
@@ -1625,17 +1625,17 @@ fun RootScreen(
                     }
                     if (parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal", "runtime", "import") && link.params["workspace"] != null) {
                         val targetScope = resolveLinkedScope(link.params["workspace"])
-                            ?: error("Workspace does not exist on this device.")
+                            ?: error(resources.getString(R.string.deep_link_workspace_missing))
                         if (sourceScope != targetScope) {
                             scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
-                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true)) { "Workspace is busy." }
+                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true)) { resources.getString(R.string.deep_link_busy) }
                             return@launch
                         }
                     }
                     when (parts.first()) {
                         "settings", "provider", "extensions", "cron", "terminal" -> onDeepLinkNativeReady(link)
                         "session" -> {
-                            val targetScope = resolveScope() ?: error("Conversation is missing or its workspace is ambiguous on this device.")
+                            val targetScope = resolveScope() ?: error(resources.getString(R.string.deep_link_conversation_ambiguous))
                             val rows = when (targetScope) {
                                 is ConversationScope.Project -> projectSnapshotForScope(targetScope)?.sessions.orEmpty()
                                 ConversationScope.Global -> projectState.globalSessions
@@ -1643,12 +1643,12 @@ fun RootScreen(
                             }
                             val row = rows.firstOrNull { it.sessionId.removePrefix("sess:") == id.removePrefix("sess:") }
                             val scheduled = if (targetScope == ConversationScope.Scheduled) cronState.generatedSessions.firstOrNull { it.projectId == null && it.sessionId?.removePrefix("sess:") == id.removePrefix("sess:") } else null
-                            check(row != null || scheduled != null) { "Conversation does not exist in this workspace." }
+                            check(row != null || scheduled != null) { resources.getString(R.string.deep_link_conversation_workspace_missing) }
                             val storedMode = row?.mode ?: SessionMode.Code
                             val mode = link.params["mode"]?.let { com.lingxi.code.model.sessionModeFromWireValue(it) } ?: storedMode
-                            check(mode == storedMode) { "Conversation mode does not match this link." }
+                            check(mode == storedMode) { resources.getString(R.string.deep_link_mode_mismatch) }
                             scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
-                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), SessionRef(id, row?.title ?: scheduled?.prompt.orEmpty().take(120)), false, sessionModeOverride = mode)) { "Conversation is busy. Try the link again." }
+                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), SessionRef(id, row?.title ?: scheduled?.prompt.orEmpty().take(120)), false, sessionModeOverride = mode)) { resources.getString(R.string.deep_link_busy) }
                             setConversationMode(mode)
                             linkedSessionId = id.removePrefix("sess:")
                             linkedScopeModeKey = targetScope.sessionStateKey(mode)
@@ -1658,7 +1658,7 @@ fun RootScreen(
                             if (linkedMessageUuid != null) onDeepLinkBlockingChanged(true)
                         }
                         "new" -> {
-                            val targetScope = resolveScope() ?: error("Workspace does not exist on this device.")
+                            val targetScope = resolveScope() ?: error(resources.getString(R.string.deep_link_workspace_missing))
                             val mode = link.params["mode"]?.let { com.lingxi.code.model.sessionModeFromWireValue(it) } ?: activeSessionMode
                             val destinationDraft = if (targetScope == sourceScope && mode == activeSessionMode) draft else scopeStore.read(targetScope.sessionStateKey(mode))?.draft.orEmpty()
                             if (destinationDraft.isNotBlank() && approvedDraftLink != link) {
@@ -1667,7 +1667,7 @@ fun RootScreen(
                             }
                             scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
                             val prompt = link.payload["prompt"] as? String ?: ""
-                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true, sessionModeOverride = mode)) { "Conversation is busy. Try the link again." }
+                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true, sessionModeOverride = mode)) { resources.getString(R.string.deep_link_busy) }
                             setConversationMode(mode)
                             scopeStore.persistDraft(targetScope.sessionStateKey(mode), prompt)
                             draft = prompt
@@ -1679,22 +1679,22 @@ fun RootScreen(
                         "project" -> {
                             val project = (resolveLinkedScope(id) as? ConversationScope.Project)?.projectId
                                 ?: projectState.projects.firstOrNull { it.record.id == id }?.record?.id
-                                ?: error("Project does not exist on this device.")
+                                ?: error(resources.getString(R.string.deep_link_workspace_missing))
                             projectPageId = project
                         }
                         "market" -> { marketAppId = id }
                         "apps" -> {
-                            check(installedApps.any { it.appId == id } || localApps.chat.exists(id) == true) { "App is not installed on this device." }
+                            check(installedApps.any { it.appId == id } || localApps.chat.exists(id) == true) { resources.getString(R.string.deep_link_app_not_installed) }
                             runtimeAppId = if (localApps.chat.exists(id) == true) chatAppKey(id) else id
                         }
                         "runtime" -> {
                             when (parts[1]) {
-                                "activity" -> { check(id.removePrefix("sess:") == state.session.id.removePrefix("sess:")) { "Activity does not belong to the current conversation." }; sessionPanelOpen = true }
-                                "agent" -> { check(state.sessionAgents.any { it.agentId == id }) { "Agent is no longer available in this conversation." }; linkedDetailKey = "agent:$id" }
-                                "task" -> { check(state.backgroundTasks.containsKey(id)) { "Task is no longer available in this conversation." }; linkedDetailKey = "task:$id" }
+                                "activity" -> { check(id.removePrefix("sess:") == state.session.id.removePrefix("sess:")) { resources.getString(R.string.deep_link_runtime_missing) }; sessionPanelOpen = true }
+                                "agent" -> { check(state.sessionAgents.any { it.agentId == id }) { resources.getString(R.string.deep_link_runtime_missing) }; linkedDetailKey = "agent:$id" }
+                                "task" -> { check(state.backgroundTasks.containsKey(id)) { resources.getString(R.string.deep_link_runtime_missing) }; linkedDetailKey = "task:$id" }
                                 "plan", "review" -> {
                                     val tools = state.messages.flatMap { it.blocks }.filterIsInstance<com.lingxi.code.conversation.MessageContent.Tool>().map { it.call } + state.agentRun?.tools.orEmpty().map { it.toToolCall() }
-                                    check(tools.any { it.id == id && (if (parts[1] == "plan") it.planMarkdown != null else it.tool.contains("review", ignoreCase = true)) }) { "This document is no longer available in this conversation." }
+                                    check(tools.any { it.id == id && (if (parts[1] == "plan") it.planMarkdown != null else it.tool.contains("review", ignoreCase = true)) }) { resources.getString(R.string.deep_link_runtime_missing) }
                                     linkedDetailKey = "tool:$id"
                                 }
                             }
@@ -1703,7 +1703,7 @@ fun RootScreen(
                 } catch (error: Exception) {
                     if (error is kotlinx.coroutines.CancellationException) throw error
                     if (latestRequestedDeepLink == link && chatViewModel.engineSource.value === routingSource) {
-                        val message = error.message ?: "Unable to open this link."
+                        val message = error.message ?: resources.getString(R.string.deep_link_unable_open)
                         linkedTargetError = message
                         onDeepLinkBlockingChanged(true)
                         chatViewModel.reportHostError(message)
@@ -1718,18 +1718,18 @@ fun RootScreen(
     linkedTargetError?.let { message ->
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { linkedTargetError = null },
-            title = { androidx.compose.material3.Text("Unable to open link") },
+            title = { androidx.compose.material3.Text(stringResource(R.string.deep_link_unable_open)) },
             text = { androidx.compose.material3.Text(message) },
-            confirmButton = { androidx.compose.material3.TextButton(onClick = { linkedTargetError = null }) { androidx.compose.material3.Text("OK") } },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { linkedTargetError = null }) { androidx.compose.material3.Text(stringResource(R.string.common_ok)) } },
         )
     }
     if (draftLinkReview != null) {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { val reviewed = draftLinkReview; draftLinkReview = null; reviewed?.let(onDeepLinkHandled) },
-            title = { androidx.compose.material3.Text("Replace the existing draft?") },
-            text = { androidx.compose.material3.Text("This workspace and mode already contain a draft. Review the linked prompt before replacing it:\n\n" + (draftLinkReview?.payload?.get("prompt") as? String).orEmpty()) },
-            confirmButton = { androidx.compose.material3.TextButton(onClick = { approvedDraftLink = draftLinkReview; draftLinkReview = null }) { androidx.compose.material3.Text("Replace draft") } },
-            dismissButton = { androidx.compose.material3.TextButton(onClick = { val reviewed = draftLinkReview; draftLinkReview = null; reviewed?.let(onDeepLinkHandled) }) { androidx.compose.material3.Text("Keep existing draft") } },
+            title = { androidx.compose.material3.Text(stringResource(R.string.deep_link_replace_draft_title)) },
+            text = { androidx.compose.material3.Text(stringResource(R.string.deep_link_replace_draft_body) + "\n\n" + (draftLinkReview?.payload?.get("prompt") as? String).orEmpty()) },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { approvedDraftLink = draftLinkReview; draftLinkReview = null }) { androidx.compose.material3.Text(stringResource(R.string.deep_link_replace_draft)) } },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { val reviewed = draftLinkReview; draftLinkReview = null; reviewed?.let(onDeepLinkHandled) }) { androidx.compose.material3.Text(stringResource(R.string.deep_link_keep_draft)) } },
         )
     }
     val localAppCardLinks = remember(localApps, chatApps) {
@@ -2044,7 +2044,7 @@ fun RootScreen(
                     onMessageLinkHandled = messageHandled@ { found ->
                         if (requestedMessageUuid == null || linkedMessageUuid != requestedMessageUuid || messageRequest != linkedMessageRequest || linkedSessionId != latestSessionId || linkedScopeModeKey != latestScopeModeKey || linkedMessageSource !== chatViewModel.engineSource.value) return@messageHandled
                         if (!found) {
-                            val message = "This message is no longer available in the local conversation."
+                            val message = resources.getString(R.string.deep_link_message_missing)
                             linkedTargetError = message
                             onDeepLinkBlockingChanged(true)
                             chatViewModel.reportHostError(message)

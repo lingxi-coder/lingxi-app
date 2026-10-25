@@ -1,3 +1,4 @@
+import { tr } from '../../../i18n/locale';
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { WritableScopeDto } from '@lingxi/bridge-client';
 import { ExtensionGlyph } from './ExtensionHubIcons';
@@ -38,9 +39,9 @@ export { parseJsonObjectInput };
  * `path` 上回传，页面已经在标题下方显示它。
  */
 const MCP_SCOPE_DESCRIPTIONS: Record<WritableScopeDto, string> = {
-  user: '存在主目录的配置文件里，本机所有项目共用。',
-  local: '也存在主目录的配置文件里，但只对这个项目生效——文件不在项目内，不会提交。',
-  project: '存在项目内的配置文件里，随仓库提交、团队共享。',
+  user: 'mcp_scope_user_desc',
+  local: 'mcp_scope_local_desc',
+  project: 'mcp_scope_project_desc',
 };
 
 /**
@@ -49,9 +50,7 @@ const MCP_SCOPE_DESCRIPTIONS: Record<WritableScopeDto, string> = {
  * 在**主目录里**。一个刚在设置页学会「本地 = 项目内、不提交」的人，到这一页会把
  * 同一个词读成同一个意思，然后猜错文件在哪。
  */
-const MCP_SCOPE_VS_LAYERS_NOTE =
-  'MCP 的作用域与设置页的层是两套独立存储，同名不同义：MCP 的「本地」在主目录，'
-  + '设置的「本地」在项目内。在这里选的作用域不受设置页顶部层切换器影响。';
+const MCP_SCOPE_VS_LAYERS_NOTE = 'mcp_scope_vs_layers_note';
 
 interface ScopeSnapshot {
   scope: WritableScopeDto;
@@ -162,7 +161,7 @@ function JsonPropertyEditor({
             onCommit(JSON.parse(text) as unknown);
             setError(null);
           } catch (cause) {
-            setError(cause instanceof Error ? cause.message : 'JSON 无效');
+            setError(cause instanceof Error ? cause.message : tr('desktop_extension_invalid_json'));
           }
         }}
         rows={5}
@@ -237,7 +236,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
       appliedLink.current = linkRequest.requestId;
       const matches = entries.filter(entry => (entry.id === linkRequest.id || entry.name === linkRequest.id) && (!linkRequest.scope || entry.scope === linkRequest.scope));
       if (matches.length === 1) setSelection({ kind: 'server', id: matches[0]!.id });
-      else setPageError(matches.length ? 'This MCP server name exists in multiple scopes. Include a scope in its link.' : 'This MCP server is unavailable on this device.');
+      else setPageError(matches.length ? tr('desktop_extension_mcp_ambiguous') : tr('desktop_extension_mcp_unavailable'));
     }
   }, [linkRequest, entries, scopes.length]);
   useEffect(() => {
@@ -270,10 +269,9 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   };
   const navigationPrompt = pendingHubPage && (
     <div role="alert" style={noteStyle(t, 'warn')}>
-      Unsaved MCP changes. Discard them before switching tabs?
-      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-        <button type="button" onClick={discardAndNavigate} style={ghostButtonStyle(t)}>Discard and switch</button>
-        <button type="button" onClick={() => setPendingHubPage(null)} style={ghostButtonStyle(t, false, true)}>Continue editing</button>
+      {tr('desktop_extension_unsaved_mcp')} <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+        <button type="button" onClick={discardAndNavigate} style={ghostButtonStyle(t)}>{tr('desktop_extension_discard_switch')}</button>
+        <button type="button" onClick={() => setPendingHubPage(null)} style={ghostButtonStyle(t, false, true)}>{tr('desktop_extension_continue_editing')}</button>
       </div>
     </div>
   );
@@ -287,7 +285,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   }, [draftConfigText]);
   const updateConfig = (key: string, value: unknown) => {
     if (!draftConfig) {
-      setPageError('请先修复高级配置 JSON，才能使用结构化编辑器。');
+      setPageError(tr('desktop_extension_fix_json'));
       return;
     }
     const next = { ...draftConfig };
@@ -364,18 +362,18 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
     : entries;
 
   const save = () => {
-    const parsed = parseJsonObjectInput(draftConfigText, '服务器配置');
+    const parsed = parseJsonObjectInput(draftConfigText, tr('mcp_section_configuration'));
     if ('error' in parsed) {
       setPageError(parsed.error);
       return;
     }
     const scopeSnapshot = scopes.find((scope) => scope.scope === draftScope);
     if (!scopeSnapshot) {
-      setPageError('当前没有该作用域的配置快照。');
+      setPageError(tr('desktop_extension_no_scope_snapshot'));
       return;
     }
     if (!draftName.trim()) {
-      setPageError('需要一个服务器名称。');
+      setPageError(tr('desktop_extension_server_name_required'));
       return;
     }
     setPageError(null);
@@ -384,7 +382,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
       scope: draftScope,
       revision: scopeSnapshot.revision_sha256,
       payload_json: JSON.stringify({ scope: draftScope, name: draftName.trim(), config: parsed.config }),
-    })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存 MCP 服务器。'));
+    })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_mcp_save_failed')));
   };
 
   const remove = () => {
@@ -395,7 +393,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
       scope: selected.scope,
       revision: selected.revision_sha256,
       payload_json: JSON.stringify({ scope: selected.scope, name: selected.name }),
-    })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法移除 MCP 服务器。'));
+    })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_mcp_remove_failed')));
   };
 
   const setApproval = (name: string, decision: 'approve' | 'reject' | 'clear' | 'approve_all') => {
@@ -406,24 +404,24 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
       scope: 'local',
       revision: approval.revision_sha256,
       payload_json: JSON.stringify({ name, decision }),
-    })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法更新审批。'));
+    })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_approval_failed')));
   };
 
   return (
     <ExtensionHubLayout>
       {closePrompt}
       {pageError && selection.kind === 'list' && <div role="alert">{pageError}</div>}
-      {linkRequest?.payload && selection.kind === 'create' && <p role="status">Review this imported MCP configuration. The server is saved only when you confirm below.</p>}
-        <ExtensionHubHeader title="MCP 服务器" description="Connect MCP servers to bring your tools into LingXi" search={search} onSearch={setSearch} actions={<>
-          <button type="button" aria-label="Refresh MCP servers" onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : 'Unable to refresh tools.'))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
-          <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} className="extension-hub-primary">Add <ExtensionGlyph name="plus" size={14} /></button>
+      {linkRequest?.payload && selection.kind === 'create' && <p role="status">{tr('desktop_extension_mcp_import')}</p>}
+        <ExtensionHubHeader title={tr('settings_mcp_servers')} description={tr('desktop_extension_mcp_description')} search={search} onSearch={setSearch} actions={<>
+          <button type="button" aria-label={tr('desktop_extension_refresh_mcp')} onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_tools_failed')))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
+          <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} className="extension-hub-primary">{tr('workspace_confirm_add')} <ExtensionGlyph name="plus" size={14} /></button>
         </>} />
         {/* 同名不同义的提醒放在页首，而不是藏在作用域下拉旁边：读到下拉的时候，
             人已经在拿设置页的「本地」去理解这里的「本地」了。 */}
         <details className="extension-hub-scope-note" data-testid="mcp-scope-vs-layers">
-          <summary>MCP storage scopes</summary>
+          <summary>{tr('desktop_extension_mcp_storage')}</summary>
           <div style={{ ...noteStyle(t), marginTop: 8 }}>
-          {MCP_SCOPE_VS_LAYERS_NOTE}
+          {tr(MCP_SCOPE_VS_LAYERS_NOTE)}
           </div>
         </details>
         <div className="configuration-page">
@@ -431,7 +429,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
             <DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />
             {navigationPrompt}
             {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
-            <div className="extension-hub-group-title">Servers</div>
+            <div className="extension-hub-group-title">{tr('desktop_extension_servers')}</div>
             <div className="extension-hub-list">
               {filtered.map((entry) => {
                 const rejected = asStringArray(approval.disabled_servers).includes(entry.name);
@@ -445,23 +443,22 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
                     <span className="extension-hub-row-description">{inferTransport(entry.config)} · {runtime ? asString(runtime.status, 'available') : entry.path}</span>
                   </button>
                   <div className="extension-hub-row-side">
-                    <span className="extension-hub-row-scope">{entry.scope === 'user' ? 'Personal' : entry.scope === 'project' ? 'Project' : 'Local'}</span>
-                    <button type="button" className="extension-hub-icon-button" aria-label={`Configure ${entry.name}`} onClick={() => requestSelection({ kind: 'server', id: entry.id })}><ExtensionGlyph name="cog" size={16} /></button>
-                    {entry.scope === 'project' && <button type="button" className="extension-hub-toggle" role="switch" aria-checked={allowed} aria-label={`${allowed ? 'Disable' : 'Approve'} ${entry.name}`} disabled={!approval.revision_sha256} onClick={() => setApproval(entry.name, allowed ? 'reject' : 'approve')} />}
+                    <span className="extension-hub-row-scope">{entry.scope === 'user' ? tr('desktop_personal') : entry.scope === 'project' ? tr('cron_run_project_label') : tr('settings_parity_local_layer')}</span>
+                    <button type="button" className="extension-hub-icon-button" aria-label={tr('desktop_extension_configure_named', entry.name)} onClick={() => requestSelection({ kind: 'server', id: entry.id })}><ExtensionGlyph name="cog" size={16} /></button>
+                    {entry.scope === 'project' && <button type="button" className="extension-hub-toggle" role="switch" aria-checked={allowed} aria-label={tr(allowed ? 'desktop_extension_disable_named' : 'desktop_extension_approve_named', entry.name)} disabled={!approval.revision_sha256} onClick={() => setApproval(entry.name, allowed ? 'reject' : 'approve')} />}
                   </div>
                 </div>;
               })}
-              {filtered.length === 0 && <div style={{ padding: '24px 18px', color: t.text3, fontSize: 13 }}>没有匹配的 MCP 服务器。</div>}
+              {filtered.length === 0 && <div style={{ padding: '24px 18px', color: t.text3, fontSize: 13 }}>{tr('desktop_extension_no_servers')}</div>}
             </div>
           </div> : <div className="configuration-detail mcp-editor" style={{ ...managerDetailStyle(), '--mcp-border': t.border, '--mcp-muted': t.text3, '--mcp-text': t.text, '--mcp-surface': t.surface, '--mcp-hover': t.surfaceHover } as CSSProperties}>
-            <button type="button" className="configuration-back" onClick={() => requestSelection({ kind: 'list' })} style={ghostButtonStyle(t)}>← Back to servers</button>
+            <button type="button" className="configuration-back" onClick={() => requestSelection({ kind: 'list' })} style={ghostButtonStyle(t)}>{tr('desktop_extension_back_servers')}</button>
             <DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />
             {pendingSelection && (
               <div style={noteStyle(t, 'warn')}>
-                当前草稿未保存。
-                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button type="button" onClick={() => { setPendingSelection(null); setSelection(pendingSelection); setPageError(null); }} style={ghostButtonStyle(t)}>丢弃并切换</button>
-                  <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>继续编辑</button>
+                {tr('desktop_extension_unsaved_draft')} <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button type="button" onClick={() => { setPendingSelection(null); setSelection(pendingSelection); setPageError(null); }} style={ghostButtonStyle(t)}>{tr('desktop_extension_discard_switch')}</button>
+                  <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>{tr('desktop_extension_continue_editing')}</button>
                 </div>
               </div>
             )}
@@ -469,33 +466,33 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
             {navigationPrompt}
             <div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
-                <div style={{ fontSize: 18, fontWeight: 650, color: t.text }}>{selected?.name || 'Connect to a custom MCP'}</div>
+                <div style={{ fontSize: 18, fontWeight: 650, color: t.text }}>{selected?.name || tr('desktop_extension_custom_mcp')}</div>
                 <SourcePill t={t} label={currentScope} />
                 {selected && <SourcePill t={t} label={inferTransport(selected.config)} />}
               </div>
               {selected && <div className="mono" style={secondaryMetaStyle(t)}>{selected.path}</div>}
             </div>
             <section className="mcp-connection mcp-identity-card">
-              <Field t={t} label="Name">
-                <input value={draftName} onChange={(event) => setDraftName(event.target.value)} disabled={Boolean(selected)} style={{ ...inputStyle(t), opacity: selected ? 0.65 : 1 }} aria-label="mcp-name" placeholder="MCP server name" />
+              <Field t={t} label={tr('onboarding_done_row_name')}>
+                <input value={draftName} onChange={(event) => setDraftName(event.target.value)} disabled={Boolean(selected)} style={{ ...inputStyle(t), opacity: selected ? 0.65 : 1 }} aria-label={tr('desktop_extension_mcp_name')} placeholder={tr('desktop_extension_mcp_name')} />
               </Field>
               <div className="mcp-type-row">
-                <span>Type</span>
-                <div className="mcp-type-selector" role="group" aria-label="MCP transport type">
+                <span>{tr('desktop_extension_type')}</span>
+                <div className="mcp-type-selector" role="group" aria-label={tr('desktop_extension_transport_type')}>
                   <button type="button" aria-pressed={transport === 'stdio'} onClick={() => setTransport('stdio')} disabled={!draftConfig}>STDIO</button>
                   <button type="button" aria-pressed={transport !== 'stdio'} onClick={() => setTransport('streamable-http')} disabled={!draftConfig}>Streamable HTTP</button>
                 </div>
               </div>
               <details className="mcp-options">
-                <summary>Scope and storage <span>{currentScope}</span></summary>
-                <Field t={t} label="Scope">
-                  <select value={draftScope} onChange={(event) => { const next = event.target.value as WritableScopeDto; setDraftScope(next); setSelection({ kind: 'create', scope: next }); }} style={inputStyle(t)} aria-label="mcp-scope" disabled={Boolean(selected)}>
-                    <option value="user">User</option>
-                    <option value="local">Local</option>
-                    <option value="project">Project</option>
+                <summary>{tr('desktop_extension_scope_storage')} <span>{currentScope}</span></summary>
+                <Field t={t} label={tr('cron_scope_label')}>
+                  <select value={draftScope} onChange={(event) => { const next = event.target.value as WritableScopeDto; setDraftScope(next); setSelection({ kind: 'create', scope: next }); }} style={inputStyle(t)} aria-label={tr('cron_scope_label')} disabled={Boolean(selected)}>
+                    <option value="user">{tr('settings_parity_user_layer')}</option>
+                    <option value="local">{tr('settings_parity_local_layer')}</option>
+                    <option value="project">{tr('cron_run_project_label')}</option>
                   </select>
                   <div data-testid="mcp-scope-description" style={{ marginTop: 6, fontSize: 11.5, color: t.text3, lineHeight: 1.6 }}>
-                    {MCP_SCOPE_DESCRIPTIONS[draftScope]}
+                    {tr(MCP_SCOPE_DESCRIPTIONS[draftScope])}
                   </div>
                 </Field>
               </details>
@@ -503,29 +500,29 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
             <section className="mcp-connection">
               {transport === 'stdio' ? (
                 <>
-                  <Field t={t} label="Command to launch">
-                    <input value={asString(draftConfig?.command)} onChange={(event) => updateConfig('command', event.target.value)} style={inputStyle(t)} aria-label="mcp-command" />
+                  <Field t={t} label={tr('mcp_command')}>
+                    <input value={asString(draftConfig?.command)} onChange={(event) => updateConfig('command', event.target.value)} style={inputStyle(t)} aria-label={tr('mcp_command')} />
                   </Field>
                   <div className="mcp-repeater">
-                    <div className="mcp-repeater-label">Arguments</div>
+                    <div className="mcp-repeater-label">{tr('mcp_arguments')}</div>
                     {argumentRows.map((argument, index) => (
                       <div className="mcp-repeater-row" key={`arg-${index}`}>
                         <input value={argument} onChange={(event) => updateArgument(index, event.target.value)} style={inputStyle(t)} aria-label={`mcp-argument-${index}`} />
-                        <button type="button" className="extension-hub-icon-button" aria-label={`Remove argument ${index + 1}`} onClick={() => removeArgument(index)}><ExtensionGlyph name="trash" size={15} /></button>
+                        <button type="button" className="extension-hub-icon-button" aria-label={tr('desktop_extension_remove_argument', index + 1)} onClick={() => removeArgument(index)}><ExtensionGlyph name="trash" size={15} /></button>
                       </div>
                     ))}
-                    <button type="button" className="mcp-add-row" onClick={addArgument}><ExtensionGlyph name="plus" size={14} /> Add argument</button>
+                    <button type="button" className="mcp-add-row" onClick={addArgument}><ExtensionGlyph name="plus" size={14} /> {tr('desktop_extension_add_argument')}</button>
                   </div>
                   <div className="mcp-repeater">
-                    <div className="mcp-repeater-label">Environment variables</div>
+                    <div className="mcp-repeater-label">{tr('desktop_extension_environment')}</div>
                     {environmentRows.map((row, index) => (
                       <div className="mcp-repeater-row mcp-env-row" key={`env-${index}`}>
-                        <input value={row.key} onChange={(event) => updateEnvironment(index, 'key', event.target.value)} style={inputStyle(t)} aria-label={`mcp-env-key-${index}`} placeholder="Key" />
-                        <input value={row.value} onChange={(event) => updateEnvironment(index, 'value', event.target.value)} style={inputStyle(t)} aria-label={`mcp-env-value-${index}`} placeholder="Value" />
-                        <button type="button" className="extension-hub-icon-button" aria-label={`Remove environment variable ${index + 1}`} onClick={() => removeEnvironment(index)}><ExtensionGlyph name="trash" size={15} /></button>
+                        <input value={row.key} onChange={(event) => updateEnvironment(index, 'key', event.target.value)} style={inputStyle(t)} aria-label={`mcp-env-key-${index}`} placeholder={tr('desktop_extension_key')} />
+                        <input value={row.value} onChange={(event) => updateEnvironment(index, 'value', event.target.value)} style={inputStyle(t)} aria-label={`mcp-env-value-${index}`} placeholder={tr('desktop_extension_value')} />
+                        <button type="button" className="extension-hub-icon-button" aria-label={tr('desktop_extension_remove_environment', index + 1)} onClick={() => removeEnvironment(index)}><ExtensionGlyph name="trash" size={15} /></button>
                       </div>
                     ))}
-                    <button type="button" className="mcp-add-row" onClick={addEnvironment}><ExtensionGlyph name="plus" size={14} /> Add environment variable</button>
+                    <button type="button" className="mcp-add-row" onClick={addEnvironment}><ExtensionGlyph name="plus" size={14} /> {tr('desktop_extension_add_environment')}</button>
                   </div>
                 </>
               ) : transport !== 'custom' ? (
@@ -533,41 +530,41 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
                   <Field t={t} label="URL">
                     <input value={asString(draftConfig?.url)} onChange={(event) => updateConfig('url', event.target.value)} style={inputStyle(t)} aria-label="mcp-url" />
                   </Field>
-                  <JsonPropertyEditor t={t} label="headers JSON" value={draftConfig?.headers ?? {}} onCommit={(value) => updateConfig('headers', value)} />
-                  <Field t={t} label="Headers helper">
-                    <input value={asString(draftConfig?.headersHelper)} onChange={(event) => updateConfig('headersHelper', event.target.value || undefined)} style={inputStyle(t)} aria-label="mcp-headers-helper" />
+                  <JsonPropertyEditor t={t} label={tr('desktop_extension_headers_json')} value={draftConfig?.headers ?? {}} onCommit={(value) => updateConfig('headers', value)} />
+                  <Field t={t} label={tr('desktop_extension_headers_helper')}>
+                    <input value={asString(draftConfig?.headersHelper)} onChange={(event) => updateConfig('headersHelper', event.target.value || undefined)} style={inputStyle(t)} aria-label={tr('desktop_extension_headers_helper')} />
                   </Field>
                   <JsonPropertyEditor t={t} label="OAuth JSON" value={draftConfig?.oauth ?? {}} onCommit={(value) => updateConfig('oauth', value)} />
                 </>
               ) : null}
-              <details className="mcp-options"><summary>Advanced connection options</summary>
+              <details className="mcp-options"><summary>{tr('desktop_extension_advanced_connection')}</summary>
                 <div className="mcp-editor-grid">
-                  <Field t={t} label="Transport">
-                    <select value={transport} onChange={(event) => setTransport(event.target.value)} disabled={!draftConfig} style={inputStyle(t)} aria-label="mcp-transport">
+                  <Field t={t} label={tr('mcp_transport_mode')}>
+                    <select value={transport} onChange={(event) => setTransport(event.target.value)} disabled={!draftConfig} style={inputStyle(t)} aria-label={tr('mcp_transport_mode')}>
                       <option value="stdio">stdio</option>
                       <option value="http">http</option>
                       <option value="streamable-http">streamable-http</option>
                       <option value="sse">sse</option>
                       <option value="ws">ws</option>
-                      {transport === 'custom' && <option value="custom">Internal / custom</option>}
+                      {transport === 'custom' && <option value="custom">{tr('desktop_extension_internal_custom')}</option>}
                     </select>
                   </Field>
-                  <Field t={t} label="Timeout (ms)">
-                    <input type="number" min={1} value={typeof draftConfig?.timeout === 'number' ? draftConfig.timeout : ''} onChange={(event) => updateConfig('timeout', event.target.value ? Number(event.target.value) : undefined)} style={inputStyle(t)} aria-label="mcp-timeout" />
+                  <Field t={t} label={tr('desktop_extension_timeout')}>
+                    <input type="number" min={1} value={typeof draftConfig?.timeout === 'number' ? draftConfig.timeout : ''} onChange={(event) => updateConfig('timeout', event.target.value ? Number(event.target.value) : undefined)} style={inputStyle(t)} aria-label={tr('desktop_extension_timeout')} />
                   </Field>
                 </div>
               </details>
-              <details className="mcp-options"><summary>工具与加载选项 <span>按需配置</span></summary>
+              <details className="mcp-options"><summary>{tr('desktop_extension_loading_options')} <span>{tr('desktop_extension_optional')}</span></summary>
               <div className="mcp-editor-grid">
-                <Field t={t} label="Always load">
-                  <select value={draftConfig?.alwaysLoad === undefined ? '' : draftConfig.alwaysLoad ? 'true' : 'false'} onChange={(event) => updateConfig('alwaysLoad', event.target.value === '' ? undefined : event.target.value === 'true')} style={inputStyle(t)} aria-label="mcp-always-load">
-                    <option value="">默认</option><option value="true">开启</option><option value="false">关闭</option>
+                <Field t={t} label={tr('desktop_extension_always_load')}>
+                  <select value={draftConfig?.alwaysLoad === undefined ? '' : draftConfig.alwaysLoad ? 'true' : 'false'} onChange={(event) => updateConfig('alwaysLoad', event.target.value === '' ? undefined : event.target.value === 'true')} style={inputStyle(t)} aria-label={tr('desktop_extension_always_load')}>
+                    <option value="">{tr('settings_badge_default')}</option><option value="true">{tr('settings_status_on')}</option><option value="false">{tr('settings_status_off')}</option>
                   </select>
                 </Field>
                 {['http', 'streamable-http', 'sse'].includes(transport) && (
-                  <Field t={t} label="Discovery cache">
-                    <select value={draftConfig?.discoveryCache === undefined ? '' : draftConfig.discoveryCache ? 'true' : 'false'} onChange={(event) => updateConfig('discoveryCache', event.target.value === '' ? undefined : event.target.value === 'true')} style={inputStyle(t)} aria-label="mcp-discovery-cache">
-                      <option value="">默认</option><option value="true">开启</option><option value="false">关闭</option>
+                  <Field t={t} label={tr('desktop_extension_discovery_cache')}>
+                    <select value={draftConfig?.discoveryCache === undefined ? '' : draftConfig.discoveryCache ? 'true' : 'false'} onChange={(event) => updateConfig('discoveryCache', event.target.value === '' ? undefined : event.target.value === 'true')} style={inputStyle(t)} aria-label={tr('desktop_extension_discovery_cache')}>
+                      <option value="">{tr('settings_badge_default')}</option><option value="true">{tr('settings_status_on')}</option><option value="false">{tr('settings_status_off')}</option>
                     </select>
                   </Field>
                 )}
@@ -577,34 +574,34 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
               </details>
             </section>
             <details className="mcp-options mcp-raw-config">
-              <summary style={{ cursor: 'pointer', color: t.text3, fontSize: 12.5, fontWeight: 700 }}>高级配置 JSON</summary>
-              <Field t={t} label="完整服务器配置">
-                <textarea value={draftConfigText} onChange={(event) => setDraftConfigText(event.target.value)} rows={16} style={textareaStyle(t, 16)} aria-label="mcp-config-json" />
+              <summary style={{ cursor: 'pointer', color: t.text3, fontSize: 12.5, fontWeight: 700 }}>{tr('desktop_extension_advanced_json')}</summary>
+              <Field t={t} label={tr('desktop_extension_full_server_configuration')}>
+                <textarea value={draftConfigText} onChange={(event) => setDraftConfigText(event.target.value)} rows={16} style={textareaStyle(t, 16)} aria-label={tr('desktop_extension_full_server_configuration')} />
               </Field>
             </details>
             {selected?.scope === 'project' && (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                <button type="button" onClick={() => setApproval(selected.name, 'approve')} style={ghostButtonStyle(t)}>批准</button>
-                <button type="button" onClick={() => setApproval(selected.name, 'reject')} style={ghostButtonStyle(t, false, true)}>拒绝</button>
-                <button type="button" onClick={() => setApproval(selected.name, 'clear')} style={ghostButtonStyle(t)}>撤销</button>
-                <button type="button" onClick={() => setApproval(selected.name, 'approve_all')} style={ghostButtonStyle(t)}>批准全部</button>
+                <button type="button" onClick={() => setApproval(selected.name, 'approve')} style={ghostButtonStyle(t)}>{tr('desktop_extension_approve')}</button>
+                <button type="button" onClick={() => setApproval(selected.name, 'reject')} style={ghostButtonStyle(t, false, true)}>{tr('permission_deny')}</button>
+                <button type="button" onClick={() => setApproval(selected.name, 'clear')} style={ghostButtonStyle(t)}>{tr('desktop_extension_revoke')}</button>
+                <button type="button" onClick={() => setApproval(selected.name, 'approve_all')} style={ghostButtonStyle(t)}>{tr('desktop_extension_approve_all')}</button>
               </div>
             )}
             <div className="mcp-editor-actions">
-              <button type="button" onClick={save} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>{linkRequest?.payload && selection.kind === 'create' ? 'Confirm import MCP server' : '保存'}</button>
-              {selected && <button type="button" onClick={remove} style={ghostButtonStyle(t, false, true)}>移除</button>}
+              <button type="button" onClick={save} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>{linkRequest?.payload && selection.kind === 'create' ? tr('desktop_extension_confirm_mcp_import') : tr('settings_save')}</button>
+              {selected && <button type="button" onClick={remove} style={ghostButtonStyle(t, false, true)}>{tr('desktop_extension_remove')}</button>}
             </div>
             <div style={noteStyle(t)}>
-              <div style={{ fontWeight: 700, marginBottom: 6 }}>项目审批摘要</div>
-              <div style={secondaryMetaStyle(t)}>批准：{asStringArray(approval.enabled_servers).join(', ') || '无'}</div>
-              <div style={secondaryMetaStyle(t)}>拒绝：{asStringArray(approval.disabled_servers).join(', ') || '无'}</div>
-              <div style={secondaryMetaStyle(t)}>批准全部：{approval.enable_all_project_servers ? '开启' : '关闭'}</div>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>{tr('desktop_extension_project_approvals')}</div>
+              <div style={secondaryMetaStyle(t)}>{tr('desktop_extension_approved')}{asStringArray(approval.enabled_servers).join(', ') || tr('desktop_extension_none')}</div>
+              <div style={secondaryMetaStyle(t)}>{tr('desktop_extension_rejected')}{asStringArray(approval.disabled_servers).join(', ') || tr('desktop_extension_none')}</div>
+              <div style={secondaryMetaStyle(t)}>{tr('desktop_extension_approved_all')}{approval.enable_all_project_servers ? tr('settings_status_on') : tr('settings_status_off')}</div>
             </div>
           </div>}
         </div>
         {selection.kind === 'list' && <details className="extension-hub-runtime">
-          <summary>Connection status · {(snapshot.runtime_servers ?? []).length}</summary>
-          {(snapshot.runtime_servers ?? []).length === 0 && <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>暂无运行中的 MCP 服务器。</div>}
+          <summary>{tr('desktop_extension_connection_status')} · {(snapshot.runtime_servers ?? []).length}</summary>
+          {(snapshot.runtime_servers ?? []).length === 0 && <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>{tr('desktop_extension_no_running_servers')}</div>}
           {(snapshot.runtime_servers ?? []).map((server) => (
             <Row
               key={`${server.source ?? 'runtime'}:${server.name}`}

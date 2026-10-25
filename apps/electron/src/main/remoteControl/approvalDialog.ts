@@ -1,7 +1,8 @@
+import { nativeTr } from '../../shared/nativeLocale.js';
+
 /**
  * The native dialog on which the user approves a new device, after comparing
- * the pairing code with the one the device shows. Strings are literal Chinese,
- * like the rest of the main process (it has no i18n layer).
+ * the pairing code with the one the device shows. Copy follows the current UI language; device names and pairing codes stay unchanged.
  *
  * Limits keep a stream of connection attempts from becoming a stream of
  * dialogs: one dialog at a time (a couple of further requests may wait their
@@ -66,7 +67,7 @@ const DENIAL_MEMORY_MS = 10 * 60_000;
 const MAX_WAITING = 2;
 const NAME_SHOWN_CHARS = 64;
 
-const PLATFORM_LABELS: Record<DevicePlatform, string> = { web: '网页浏览器', android: 'Android', ios: 'iOS' };
+const PLATFORM_LABELS: Record<DevicePlatform, string> = { web: 'Web', android: 'Android', ios: 'iOS' };
 
 const denial = (reason: ApprovalDenial): ApprovalOutcome => ({ allowed: false, reason });
 
@@ -183,15 +184,15 @@ export class ApprovalDialog {
     const name = shownName(request.deviceName);
     return {
       type: 'question',
-      title: '灵犀 · 远程控制',
-      message: `允许“${name}”远程控制灵犀？`,
+      title: nativeTr('native_remote_title'),
+      message: nativeTr('native_remote_allow', name),
       detail: [
-        `设备：${name}（${PLATFORM_LABELS[request.platform]}）`,
-        `配对码：${formatPairingCode(request.pairingCode)}`,
+        nativeTr('native_remote_device', name, request.platform === 'web' ? nativeTr('native_remote_browser') : PLATFORM_LABELS[request.platform]),
+        nativeTr('native_remote_code', formatPairingCode(request.pairingCode)),
         '',
-        '请确认这台设备上显示的配对码与此处一致。允许后，该设备可以查看并操作你已开启远程的对话，包括批准权限请求。如果这不是你的设备，请选择“拒绝”。',
+        nativeTr('native_remote_detail'),
       ].join('\n'),
-      buttons: ['允许', '拒绝'],
+      buttons: [nativeTr('permission_allow'), nativeTr('permission_deny')],
       defaultId: DENY,
       cancelId: DENY,
       noLink: true,

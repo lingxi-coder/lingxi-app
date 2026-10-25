@@ -1,3 +1,4 @@
+import { withDesktopLocale } from './support/language';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
@@ -16,13 +17,13 @@ import { tokens } from '../src/renderer/theme/tokens';
 
 (globalThis as { React?: typeof React }).React = React;
 
-const renderMarkdownContent = (text: string, trustedHtml = false): string => renderToStaticMarkup(
+const renderMarkdownContent = (text: string, trustedHtml = false): string => withDesktopLocale('en', () => renderToStaticMarkup(
   React.createElement(
     Theme.Provider,
     { value: tokens(true) },
     React.createElement(MarkdownContent, { text, trustedHtml }),
   ),
-);
+));
 
 function countMatches(value: string, pattern: string): number {
   return (value.match(new RegExp(pattern, 'g')) ?? []).length;

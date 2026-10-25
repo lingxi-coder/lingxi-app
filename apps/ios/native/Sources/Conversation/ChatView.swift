@@ -579,12 +579,12 @@ struct ChatView: View {
                 .accessibilityIdentifier("conversation.summary.category.\(category.rawValue)")
             }
         } label: {
-            toolbarIcon("ellipsis", label: "Open conversation summary")
+            toolbarIcon("ellipsis", label: String(localized: "chat_open_summary"))
         }
         .menuStyle(.automatic)
         .buttonStyle(.automatic)
         .tint(t.text)
-        .accessibilityLabel("Open conversation summary")
+        .accessibilityLabel(String(localized: "chat_open_summary"))
         .accessibilityIdentifier("conversation.summary-menu")
     }
 
@@ -1192,7 +1192,7 @@ private struct CompactionRuntimeFooter: View {
                     title: unknownPhase ? String(localized: "chat_compacting_context") : phase == "preparing" ? String(localized: "chat_compaction_preparing")
                         : phase == "summarizing" ? String(localized: "chat_compaction_summarizing")
                         : String(localized: "chat_compaction_restoring"),
-                    detail: percent.map { String(format: String(localized: "chat_compaction_progress"), $0, Int(elapsed)) },
+                    detail: percent.map { String(localized: "chat_compaction_progress \($0) \(Int(elapsed))") },
                     icon: .book,
                     color: t.accent,
                     progress: percent,

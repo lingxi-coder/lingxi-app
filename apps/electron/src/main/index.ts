@@ -1,4 +1,6 @@
 import { LocalAppHost } from './local-apps/host.js';
+import { configureNativeLocale, nativeTr, onNativeLocaleChange } from '../shared/nativeLocale.js';
+import { persistInterfaceLocale, restoreInterfaceLocale } from './localePreferences.js';
 import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
 import { installDeepLinks } from './deepLinks.js';
 import { installCrashReporting } from './crashReporting.js';
@@ -277,8 +279,11 @@ function createWindow(): BrowserWindow {
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
+configureNativeLocale(() => app.getPreferredSystemLanguages());
+const interfaceLocalePath = join(app.getPath('userData'), 'interface-language.json');
+restoreInterfaceLocale(interfaceLocalePath);
 if (hasSingleInstanceLock) void app.whenReady().then(async () => {
-  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate(process.platform, (action) => {
+  const refreshApplicationMenu = () => Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate(process.platform, (action) => {
     if (action === 'open-link') { deepLinks.openClipboard(); return; }
     const window = getMainWindow() ?? createWindow();
     const send = () => {
@@ -291,8 +296,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     if (window.webContents.isLoading()) window.webContents.once('did-finish-load', send);
     else send();
   }, !app.isPackaged)));
+  onNativeLocaleChange(refreshApplicationMenu);
+  refreshApplicationMenu();
   const userData = app.getPath('userData');
   const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
+  onNativeLocaleChange(() => {
+    try { persistInterfaceLocale(interfaceLocalePath); }
+    catch (error) { diagnostics.add('warn', 'host', `interface language persistence failed: ${sanitizeDiagnostic(error)}`); }
+  });
   diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
   const bridgeRoot = join(userData, 'bridge-runtime');
   const credentialBroker = createMacCredentialBrokerClient({
@@ -421,17 +432,13 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       if (settings.getBypassPermissionsAccepted()) return true;
       const options = {
         type: 'warning' as const,
-        buttons: ['Cancel', 'Yes, I accept'],
+        buttons: [nativeTr('common_cancel'), nativeTr('native_bypass_accept')],
         defaultId: 0,
         cancelId: 0,
         noLink: true,
-        title: 'Bypass Permissions mode',
-        message:
-          'In Bypass Permissions mode, LingXi will not ask for your approval before running potentially dangerous commands.',
-        detail:
-          'This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.\n\n' +
-          'By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.\n\n' +
-          'https://code.claude.com/docs/en/security',
+        title: nativeTr('native_bypass_title'),
+        message: nativeTr('native_bypass_message'),
+        detail: nativeTr('native_bypass_detail') + '\n\nhttps://code.claude.com/docs/en/security',
       };
       const parent = getMainWindow();
       const confirmation = parent

@@ -1,3 +1,4 @@
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
 import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SettingsScreen } from '../../src/renderer/components/settings/SettingsScreen';
@@ -5,6 +6,9 @@ import type { UseBridge } from '../../src/renderer/bridge/bridgeTypes.js';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
+
+// Test labels are deterministic across developer system languages.
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'zh-Hans');
 
 // Isolated UI state only: never connects to a real project, engine, or preload.
 const records = Array.from({ length: 27 }, (_, index) => ({

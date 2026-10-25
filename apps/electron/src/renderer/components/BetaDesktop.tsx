@@ -1,3 +1,5 @@
+import { reasoningSelectionLabel } from '../model/reasoningLabel';
+import { tr } from '../i18n/locale';
 import { AppsGlyph } from './LocalApps';
 import { localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
 import { NeedsInputBadge, sessionNeedsInput } from './NeedsInputBadge';
@@ -49,7 +51,6 @@ import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
 import { runningSubagentIds } from '../bridge/runtimeCenterState';
 import { useT } from '../theme/ThemeContext';
-import { settingsLabel } from '../settingsLabel';
 import {
   activeFileMention,
   promptWithFileMentions,
@@ -130,7 +131,7 @@ import {
   type ModelPickerSubmenuBounds,
   type ModelPickerSubmenuPlacement,
 } from './modelPickerPlacement';
-import { PERMISSION_MODE_OPTIONS } from '../model/permissionModes';
+import { permissionModeOptions } from '../model/permissionModes';
 import type { RunItem, VisualizationContextChip } from '../model/runItem';
 import { VisualizationContextBadge } from './VisualizationCard';
 import type { SidebarPreferences } from '../../shared/settings';
@@ -170,7 +171,7 @@ export function clampSidebarWidth(width: number): number {
 }
 
 function basename(path?: string): string {
-  if (!path) return 'No project';
+  if (!path) return tr('desktop_chat_no_project');
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
@@ -245,7 +246,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerGesture = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const suppressClick = useRef(false);
-  const title = session.title || 'Untitled session';
+  const title = session.title || tr('remote_untitled');
   const sessionMetadata = metadata ?? formatSessionMetadata(session.modified_rfc3339, session.message_count);
   const sortable = useSortable({
     id: sidebarSessionSortId(reorderable ? 'sortable' : pinnedSection ? 'pinned' : 'static', projectPath, session.uuid),
@@ -263,13 +264,13 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   const needsInput = sessionNeedsInput(status);
   const highlighted = active || opening;
   const attention = opening
-    ? { label: 'Opening session', color: t.accent }
+    ? { kind: 'opening', label: tr('desktop_chat_opening_session'), color: t.accent }
     : status?.connection.status === 'error' || status?.error
-    ? { label: 'Session error', color: t.danger }
+    ? { kind: 'error', label: tr('desktop_chat_session_error'), color: t.danger }
     : needsInput
-      ? { label: 'Waiting for input', color: t.warn }
+      ? { kind: 'input', label: tr('desktop_chat_waiting_input'), color: t.warn }
       : (status?.turnActive || status?.backgroundAgentsRunning)
-        ? { label: 'Running', color: t.ok }
+        ? { kind: 'running', label: tr('chat_agent_group_running'), color: t.ok }
         : undefined;
   const clearLongPress = useCallback(() => {
     if (longPressTimer.current) clearTimeout(longPressTimer.current);
@@ -359,7 +360,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
         data-session-id={session.uuid}
         aria-current={active ? 'page' : undefined}
         title={pinnedSection ? `${title}\n${projectPath}` : title}
-        aria-label={`${title}, ${sessionMetadata}${needsInput ? ", Needs input" : ""}`}
+        aria-label={`${title}, ${sessionMetadata}${needsInput ? `, ${tr('desktop_chat_needs_input')}` : ''}`}
         data-session-project-path={projectPath}
         style={{
           width: '100%', minHeight: 34, display: 'flex', alignItems: 'center', gap: pinnedSection ? 5 : 10,
@@ -375,27 +376,27 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
           {needsInput && <NeedsInputBadge />}
           {opening
-            ? <SidebarSessionProgress label="Opening session" />
+            ? <SidebarSessionProgress label={tr('desktop_chat_opening_session')} />
             // A session ERROR shows as a ringed mark at this row's trailing edge
             // instead (below), so it is not repeated inline here.
-            : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" />
-            : !needsInput && attention && (pinnedSection || attention.label !== 'Session error') ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
+            : attention?.kind === 'running' ? <SidebarSessionProgress label={tr('desktop_apps_running')} />
+            : !needsInput && attention && (pinnedSection || attention.kind !== 'error') ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
         </span>
         <span className="sidebar-session-metadata" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
           {sessionMetadata}
         </span>
       </button>
-      <button type="button" className="sidebar-row-action" aria-label={`${pinned ? 'Unpin' : 'Pin'} ${session.title || 'Untitled session'}`}
-        title={pinned ? 'Unpin session' : 'Pin session'} onClick={onPin} disabled={opening}
+      <button type="button" className="sidebar-row-action" aria-label={tr(pinned ? 'desktop_chat_unpin_named' : 'desktop_chat_pin_named', session.title || tr('remote_untitled'))}
+        title={pinned ? tr('desktop_chat_unpin_session') : tr('desktop_chat_pin_session')} onClick={onPin} disabled={opening}
         style={{ position: 'absolute', right: 32, top: '50%', transform: 'translateY(-50%)', width: 26, height: 26, padding: 0, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: pinned ? t.accent : t.text3, cursor: 'pointer' }}>
         <Icon name="pin" size={16} />
       </button>
-      <button type="button" className="sidebar-row-action" aria-label={`Archive ${session.title || 'Untitled session'}`}
-        title="Archive chat" onClick={onArchive} disabled={opening}
+      <button type="button" className="sidebar-row-action" aria-label={tr('desktop_chat_archive_named', session.title || tr('remote_untitled'))}
+        title={tr('desktop_chat_archive_chat')} onClick={onArchive} disabled={opening}
         style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)', width: 26, height: 26, padding: 0, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
         <Icon name="archive" size={16} />
       </button>
-      {!pinnedSection && attention?.label === 'Session error' && (
+      {!pinnedSection && attention?.kind === 'error' && (
         // Sits where the pin/archive actions sit, and yields to them: the row
         // reveals those on hover/focus, and two marks in one slot would collide.
         <span
@@ -409,11 +410,11 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
         </span>
       )}
       {actionsPosition && createPortal(
-        <div ref={actionsMenuRef} className="session-actions-menu" role="menu" aria-label={`Actions for ${session.title || 'Untitled session'}`}
+        <div ref={actionsMenuRef} className="session-actions-menu" role="menu" aria-label={tr('desktop_chat_session_actions', session.title || tr('remote_untitled'))}
           style={{ left: Math.max(12, Math.min(actionsPosition.left, window.innerWidth - 220)), top: Math.max(12, Math.min(actionsPosition.top, window.innerHeight - 190)) }}>
-          <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onRename(); }}><Icon name="pencil" size={16} /> Rename</button>
-          <button type="button" role="menuitem" onClick={() => { closeActions(); onPin(); }}><Icon name="pin" size={16} /> {pinned ? 'Unpin' : 'Pin'}</button>
-          <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onArchive(); }}><Icon name="archive" size={16} /> Archive</button>
+          <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onRename(); }}><Icon name="pencil" size={16} /> {tr('desktop_chat_rename')}</button>
+          <button type="button" role="menuitem" onClick={() => { closeActions(); onPin(); }}><Icon name="pin" size={16} /> {pinned ? tr('drawer_session_unpin') : tr('drawer_session_pin')}</button>
+          <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onArchive(); }}><Icon name="archive" size={16} /> {tr('settings_parity_archive')}</button>
           {remoteApi && (
             <button type="button" role="menuitem" data-remote-control-toggle={remoteOn ? 'on' : 'off'}
               disabled={opening || (!remoteOn && !remoteAvail.available)}
@@ -710,11 +711,11 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     return sidebarSessionTimestamp(right.session) - sidebarSessionTimestamp(left.session);
   }), [bridge.bootstrap?.projectCatalogs, chatSort, projects, sortedSessions, visibleSession]);
   const searchedProjectSessions = normalizedSearch
-    ? allProjectSessions.filter(({ projectPath, session }) => matchesSearch(basename(projectPath)) || matchesSearch(session.title || 'Untitled session'))
+    ? allProjectSessions.filter(({ projectPath, session }) => matchesSearch(basename(projectPath)) || matchesSearch(session.title || tr('remote_untitled')))
     : allProjectSessions;
   const visibleProjects = normalizedSearch
     ? projects.filter((path) => matchesSearch(basename(path)) ||
-      bridge.bootstrap?.projectCatalogs?.[path]?.sessions.some((session) => matchesSearch(session.title || 'Untitled session')))
+      bridge.bootstrap?.projectCatalogs?.[path]?.sessions.some((session) => matchesSearch(session.title || tr('remote_untitled'))))
     : projects;
   const projectSessionIndices = useMemo(() => {
     const nextIndexByProject = new Map<string, number>();
@@ -798,23 +799,23 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} data-workspace={children ? 'true' : undefined} style={{ '--rail-material': t.sidebarBg, '--sidebar-material': t.sidebarPanelBg, '--desktop-surface': t.stageBg, '--desktop-sidebar-width': `${sidebarWidth}px`, '--sidebar-button-surface': t.surface, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
       <div ref={toolbarRef} className="drag-region desktop-window-toolbar" aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
         <div className="desktop-sidebar-brand">
-          <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick={() => setSidebarCollapsed((value) => !value)}><Icon name="sidebar" size={19} stroke={1.65} /></button>
+          <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? tr('desktop_show_sidebar') : tr('desktop_hide_sidebar')} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? tr('desktop_show_sidebar') : tr('desktop_hide_sidebar')} onClick={() => setSidebarCollapsed((value) => !value)}><Icon name="sidebar" size={19} stroke={1.65} /></button>
           <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>LingXi</strong>
-          <button type="button" className="sidebar-header-icon" aria-label={activityView ? "Turn off activity view" : "Turn on activity view"} title={`${activityView ? "Turn off" : "Turn on"} activity view (⌥⌘U)`} aria-pressed={activityView} onClick={onToggleActivityView ?? (() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); })} style={{ color: activityView ? t.accent : t.text3, background: activityView ? t.accentBg : undefined }}><Icon name="bell" size={18} stroke={1.65} /></button>
-          <button type="button" className="sidebar-header-icon" aria-label="Search chats" title="Search chats" aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><Icon name="search" size={18} stroke={1.65} /></button>
+          <button type="button" className="sidebar-header-icon" aria-label={activityView ? tr('desktop_chat_activity_off') : tr('desktop_chat_activity_on')} title={`${tr(activityView ? 'desktop_chat_activity_off' : 'desktop_chat_activity_on')} (⌥⌘U)`} aria-pressed={activityView} onClick={onToggleActivityView ?? (() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); })} style={{ color: activityView ? t.accent : t.text3, background: activityView ? t.accentBg : undefined }}><Icon name="bell" size={18} stroke={1.65} /></button>
+          <button type="button" className="sidebar-header-icon" aria-label={tr('desktop_search_chats')} title={tr('desktop_search_chats')} aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><Icon name="search" size={18} stroke={1.65} /></button>
         </div>
         {topbar}
       </div>
       <div className="desktop-body">
-      <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label="Main navigation" aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
-        <button type="button" className="desktop-rail-button" data-active={!scheduled && !apps || undefined} aria-label="Home" title="Home" onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
-        <button type="button" className="desktop-rail-button" aria-label="Projects" title="Projects" onClick={() => { setSidebarCollapsed(false); window.requestAnimationFrame(() => projectsHeadingRef.current?.scrollIntoView({ block: 'start' })); }}><Icon name="copy" size={20} stroke={1.7} /></button>
-        <button type="button" className="desktop-rail-button" data-active={apps || undefined} aria-label="Apps" title="Apps" onClick={onOpenApps}><AppsGlyph size={21}/></button>
-        <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label="Scheduled tasks" title="Scheduled tasks" onClick={onOpenScheduled}><Icon name="clock" size={21} stroke={1.7} /></button>
-        <button type="button" className="desktop-rail-button" aria-label="Activity" title="Activity" onClick={() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); }}><Icon name="goal" size={21} stroke={1.7} /></button>
+      <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
+        <button type="button" className="desktop-rail-button" data-active={!scheduled && !apps || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
+        <button type="button" className="desktop-rail-button" aria-label={tr('drawer_entry_projects')} title={tr('drawer_entry_projects')} onClick={() => { setSidebarCollapsed(false); window.requestAnimationFrame(() => projectsHeadingRef.current?.scrollIntoView({ block: 'start' })); }}><Icon name="copy" size={20} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button" data-active={apps || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={onOpenApps}><AppsGlyph size={21}/></button>
+        <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><Icon name="clock" size={21} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button" aria-label={tr('desktop_activity')} title={tr('desktop_activity')} onClick={() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); }}><Icon name="goal" size={21} stroke={1.7} /></button>
         <span className="desktop-rail-divider" aria-hidden="true" />
-        <button type="button" className="desktop-rail-button" aria-label="Review changes" title="Review changes" onClick={() => { onOpenChat?.(); bridge.openRuntimeItem({ kind: 'section', id: 'review' }); }}><Icon name="branch" size={21} stroke={1.7} /></button>
-        <button type="button" className="desktop-rail-button desktop-rail-settings" aria-label={settingsLabel()} title={settingsLabel()} onClick={onOpenSettings}><Icon name="cog" size={20} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button" aria-label={tr('desktop_review_changes')} title={tr('desktop_review_changes')} onClick={() => { onOpenChat?.(); bridge.openRuntimeItem({ kind: 'section', id: 'review' }); }}><Icon name="branch" size={21} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button desktop-rail-settings" aria-label={tr('settings_title_main')} title={tr('settings_title_main')} onClick={onOpenSettings}><Icon name="cog" size={20} stroke={1.7} /></button>
       </nav>
     <div className="desktop-surface">
     <aside
@@ -827,7 +828,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       data-resizing={resizingSidebar || undefined}
       style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', '--desktop-accent': t.accent } as CSSProperties}
     >
-      {searchOpen && <div className="sidebar-search"><Icon name="search" size={15} stroke={1.7} /><input ref={searchInputRef} type="search" aria-label="Search chats and projects" placeholder="Search chats and projects" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label="Close search" onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
+      {searchOpen && <div className="sidebar-search"><Icon name="search" size={15} stroke={1.7} /><input ref={searchInputRef} type="search" aria-label={tr('desktop_search_chats_projects')} placeholder={tr('desktop_search_chats_projects')} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label={tr('desktop_close_search')} onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
 
       <div style={{ padding: '16px 12px 14px' }}>
         <button
@@ -843,9 +844,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           }}
         >
           {editingProject
-            ? <span className="beta-spinner" role="status" aria-label="Opening project draft" />
+            ? <span className="beta-spinner" role="status" aria-label={tr('desktop_chat_opening_draft')} />
             : <Icon name="compose" size={18} color={t.accent} stroke={1.8} />}
-          <span>{editingProject ? 'Opening draft…' : 'New chat'}</span>
+          <span>{editingProject ? tr('desktop_chat_draft_loading') : tr('desktop_new_chat')}</span>
         </button>
         <button
           type="button"
@@ -857,11 +858,11 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
             color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}
         >
           <Icon name="clock" size={18} stroke={1.8} />
-          <span>Scheduled</span>
+          <span>{tr('desktop_scheduled')}</span>
         </button>
         <button type="button" className="sidebar-primary-action" aria-current={apps ? 'page' : undefined} onClick={onOpenApps}
           style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 10, border: 0, background: apps ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}>
-          <AppsGlyph size={18}/><span>Apps</span>
+          <AppsGlyph size={18}/><span>{tr('apps_title')}</span>
         </button>
       </div>
 
@@ -871,22 +872,22 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         sensors={(defaults) => defaults.map((sensor) => sensor === PointerSensor ? SESSION_POINTER_SENSOR : sensor)}
         onDragEnd={handleSessionDragEnd}
       >
-      <nav className="no-drag desktop-sidebar-list" aria-label="Projects and sessions" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 10px 12px' }}>
+      <nav className="no-drag desktop-sidebar-list" aria-label={tr('desktop_projects_sessions')} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 10px 12px' }}>
         {pinnedSessions.length > 0 ? (
           <section aria-labelledby="pinned-sessions-heading" style={{ marginBottom: 24 }}>
-            <h2 id="pinned-sessions-heading" className="sidebar-section-heading"><button type="button" aria-expanded={pinnedExpanded} onClick={() => setPinnedExpanded((value) => !value)} style={{ color: t.text4 }}>Pinned <Icon name="chevron" size={13} stroke={1.7} style={{ transform: pinnedExpanded ? 'none' : 'rotate(-90deg)' }} /></button></h2>
+            <h2 id="pinned-sessions-heading" className="sidebar-section-heading"><button type="button" aria-expanded={pinnedExpanded} onClick={() => setPinnedExpanded((value) => !value)} style={{ color: t.text4 }}>{tr('drawer_recents_pinned')} <Icon name="chevron" size={13} stroke={1.7} style={{ transform: pinnedExpanded ? 'none' : 'rotate(-90deg)' }} /></button></h2>
             {pinnedExpanded && pinnedSessions.filter((pinned) => {
               const current = bridge.bootstrap?.projectCatalogs?.[pinned.projectPath]?.sessions.find((session) => session.uuid === pinned.sessionId);
-              return matchesSearch(current?.title || pinned.title || 'Untitled session') || matchesSearch(basename(pinned.projectPath));
+              return matchesSearch(current?.title || pinned.title || tr('remote_untitled')) || matchesSearch(basename(pinned.projectPath));
             }).map((pinned) => {
               const pinnedCatalog = bridge.bootstrap?.projectCatalogs?.[pinned.projectPath];
               const current = pinnedCatalog?.sessions.find((session) => session.uuid === pinned.sessionId);
-              const title = current?.title || pinned.title || 'Untitled session';
+              const title = current?.title || pinned.title || tr('remote_untitled');
               const metadata = !pinnedCatalog
-                ? 'Loading…'
+                ? tr('remote_loading')
                 : current
                   ? formatSessionMetadata(current.modified_rfc3339, current.message_count)
-                  : 'Unavailable';
+                  : tr('settings_linux_task_unavailable');
               const active = !scheduled && visibleSession?.projectPath === pinned.projectPath && visibleSession.sessionId === pinned.sessionId;
               const opening = openingSessionKey === `${pinned.projectPath}\0${pinned.sessionId}`;
               return (
@@ -904,20 +905,20 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         ) : null}
 
         {scheduledWorkspace && generalCatalog && generalCatalog.sessions.length > 0 && <section aria-labelledby="general-chats-heading">
-          <h2 id="general-chats-heading" style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>Chats</h2>
-          {(normalizedSearch ? generalCatalog.sessions.filter((session) => matchesSearch(session.title || 'Untitled session')) : showAllSessions[scheduledWorkspace] ? generalCatalog.sessions : generalCatalog.sessions.slice(0, 5)).map((session) => {
+          <h2 id="general-chats-heading" style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>{tr('drawer_search_section_sessions')}</h2>
+          {(normalizedSearch ? generalCatalog.sessions.filter((session) => matchesSearch(session.title || tr('remote_untitled'))) : showAllSessions[scheduledWorkspace] ? generalCatalog.sessions : generalCatalog.sessions.slice(0, 5)).map((session) => {
             const pinned = pinnedKeys.has(`${scheduledWorkspace}\0${session.uuid}`);
             return <SessionRow key={session.uuid} projectPath={scheduledWorkspace} session={session}
               active={!scheduled && visibleSession?.projectPath === scheduledWorkspace && visibleSession?.sessionId === session.uuid}
               pinned={pinned} opening={openingSessionKey === `${scheduledWorkspace}\0${session.uuid}`}
               status={bridge.sessionRuntimeStatus(session.uuid)}
               onClick={() => openSidebarSession(scheduledWorkspace, session.uuid)}
-              onArchive={() => void prepareArchive(scheduledWorkspace, session.uuid, session.title || 'Untitled chat')}
-              onRename={() => prepareRename(scheduledWorkspace, session.uuid, session.title || 'Untitled chat')}
-              onPin={() => invoke(() => bridge.setSessionPinned(pinInput(scheduledWorkspace, session.uuid, session.title || 'Untitled session'), !pinned))} />;
+              onArchive={() => void prepareArchive(scheduledWorkspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+              onRename={() => prepareRename(scheduledWorkspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+              onPin={() => invoke(() => bridge.setSessionPinned(pinInput(scheduledWorkspace, session.uuid, session.title || tr('remote_untitled')), !pinned))} />;
           })}
           {!normalizedSearch && generalCatalog.sessions.length > 5 && <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, [scheduledWorkspace]: !current[scheduledWorkspace] }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
-            {showAllSessions[scheduledWorkspace] ? 'Show less' : `Show more (${generalCatalog.sessions.length - 5})`}
+            {showAllSessions[scheduledWorkspace] ? tr('chat_tool_show_less') : tr('desktop_chat_show_more', generalCatalog.sessions.length - 5)}
           </button>}
         </section>}
 
@@ -938,17 +939,17 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           }}
         >
           <div className="projects-sidebar-heading" style={{ minHeight: 35, padding: '3px 4px 5px 8px', display: 'flex', alignItems: 'center' }}>
-            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 12.5, fontWeight: 500, letterSpacing: '.01em' }}>Projects</h2>
+            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 12.5, fontWeight: 500, letterSpacing: '.01em' }}>{tr('drawer_entry_projects')}</h2>
             <div className="projects-sidebar-actions">
               <button
                 ref={projectsMenuTriggerRef}
                 type="button"
                 className="sidebar-header-action projects-sidebar-action"
                 tabIndex={projectActionsVisible || projectsMenu !== null ? 0 : -1}
-                aria-label="Project sidebar options"
+                aria-label={tr('desktop_project_options')}
                 aria-haspopup="menu"
                 aria-expanded={projectsMenu !== null}
-                title="Project sidebar options"
+                title={tr('desktop_project_options')}
                 onClick={(event) => openProjectsMenu(event.currentTarget)}
                 style={{ width: 28, height: 28, display: 'grid', placeItems: 'center', border: 0, borderRadius: 7, background: 'transparent', color: t.text3, cursor: 'pointer' }}
               >
@@ -958,8 +959,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
               type="button"
               className="sidebar-header-action projects-sidebar-action"
               tabIndex={projectActionsVisible || projectsMenu !== null ? 0 : -1}
-              aria-label="Add project"
-              title="Add project"
+              aria-label={tr('desktop_chat_add_project')}
+              title={tr('desktop_chat_add_project')}
               onClick={() => invoke(bridge.addProject)}
               style={{ width: 28, height: 28, display: 'grid', placeItems: 'center', border: 0, borderRadius: 7, background: 'transparent', color: t.text3, cursor: 'pointer' }}
             >
@@ -975,27 +976,27 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
               style={{ left: projectsMenuPosition.left, top: projectsMenuPosition.top }}
               onPointerEnter={revealProjectActions}
             >
-              <div className="projects-sidebar-menu" role="menu" aria-label="Project sidebar options">
+              <div className="projects-sidebar-menu" role="menu" aria-label={tr('desktop_project_options')}>
                 <button type="button" role="menuitem" className="projects-sidebar-menu-item" data-active={projectsMenu === 'organize' || undefined} onPointerEnter={() => setProjectsMenu('organize')} onClick={() => setProjectsMenu('organize')}>
-                  <span>Organize sidebar</span><Icon name="chevronR" size={16} stroke={2.1} />
+                  <span>{tr('desktop_organize_sidebar')}</span><Icon name="chevronR" size={16} stroke={2.1} />
                 </button>
                 <button type="button" role="menuitem" className="projects-sidebar-menu-item" data-active={projectsMenu === 'sort' || undefined} onPointerEnter={() => setProjectsMenu('sort')} onClick={() => setProjectsMenu('sort')}>
-                  <span>Sort chats by</span><Icon name="chevronR" size={16} stroke={2.1} />
+                  <span>{tr('desktop_sort_chats')}</span><Icon name="chevronR" size={16} stroke={2.1} />
                 </button>
               </div>
               {projectsMenu === 'organize' ? (
-                <div className="projects-sidebar-menu projects-sidebar-submenu" role="menu" aria-label="Organize sidebar">
+                <div className="projects-sidebar-menu projects-sidebar-submenu" role="menu" aria-label={tr('desktop_organize_sidebar')}>
                   <button type="button" role="menuitemradio" aria-checked={sidebarOrganization === 'project'} className="projects-sidebar-menu-item" onClick={() => chooseSidebarOrganization('project')}>
-                    <span className="projects-sidebar-menu-check">{sidebarOrganization === 'project' ? <Icon name="check" size={17} stroke={2.5} /> : null}</span><span>By project</span>
+                    <span className="projects-sidebar-menu-check">{sidebarOrganization === 'project' ? <Icon name="check" size={17} stroke={2.5} /> : null}</span><span>{tr('desktop_by_project')}</span>
                   </button>
                   <button type="button" role="menuitemradio" aria-checked={sidebarOrganization === 'list'} className="projects-sidebar-menu-item" onClick={() => chooseSidebarOrganization('list')}>
-                    <span className="projects-sidebar-menu-check">{sidebarOrganization === 'list' ? <Icon name="check" size={17} stroke={2.5} /> : null}</span><span>In one list</span>
+                    <span className="projects-sidebar-menu-check">{sidebarOrganization === 'list' ? <Icon name="check" size={17} stroke={2.5} /> : null}</span><span>{tr('desktop_one_list')}</span>
                   </button>
                 </div>
               ) : null}
               {projectsMenu === 'sort' ? (
-                <div className="projects-sidebar-menu projects-sidebar-submenu" role="menu" aria-label="Sort chats by">
-                  {([['priority', 'Priority'], ['updated', 'Last updated'], ['manual', 'Manual order']] as const).map(([value, label]) => (
+                <div className="projects-sidebar-menu projects-sidebar-submenu" role="menu" aria-label={tr('desktop_sort_chats')}>
+                  {([['priority', 'Priority'], ['updated', tr('model_detail_updated')], ['manual', tr('desktop_chat_manual_order')]] as const).map(([value, label]) => (
                     <button key={value} type="button" role="menuitemradio" aria-checked={chatSort === value} className="projects-sidebar-menu-item" onClick={() => chooseChatSort(value)}>
                       <span className="projects-sidebar-menu-check">{chatSort === value ? <Icon name="check" size={17} stroke={2.5} /> : null}</span><span>{label}</span>
                     </button>
@@ -1008,12 +1009,11 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
 
           {projects.length === 0 ? (
             <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>
-              Add a project folder to start a session.
-            </div>
+              {tr('desktop_chat_add_project_description')}</div>
           ) : sidebarOrganization === 'list' ? (
-            <div className="projects-one-list" aria-label="All project chats">
+            <div className="projects-one-list" aria-label={tr('desktop_chat_all_chats')}>
               {searchedProjectSessions.length === 0 ? (
-                <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>{normalizedSearch ? 'No matching chats.' : 'Loading project chats…'}</div>
+                <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>{normalizedSearch ? tr('desktop_chat_no_chats') : tr('desktop_chat_loading_chats')}</div>
               ) : searchedProjectSessions.map(({ projectPath, session }) => {
                 const pinned = pinnedKeys.has(`${projectPath}\0${session.uuid}`);
                 const opening = openingSessionKey === `${projectPath}\0${session.uuid}`;
@@ -1021,22 +1021,22 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                 active={!scheduled && visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
                 pinned={pinned} opening={opening} status={bridge.sessionRuntimeStatus(session.uuid)}
                   onClick={() => openSidebarSession(projectPath, session.uuid)}
-                onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || 'Untitled chat')}
-                onRename={() => prepareRename(projectPath, session.uuid, session.title || 'Untitled chat')}
-                onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
+                onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+                onRename={() => prepareRename(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+                onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || tr('remote_untitled')), !pinned))}
                 reorderable={!opening}
                 sortableIndex={projectSessionIndices.get(`${projectPath}\0${session.uuid}`) ?? 0} />;
               })}
             </div>
           ) : visibleProjects.length === 0 ? (
-            <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>No matching projects or chats.</div>
+            <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>{tr('desktop_chat_no_results')}</div>
           ) : visibleProjects.map((projectPath) => {
             const active = projectPath === selectedProject;
             const open = Boolean(normalizedSearch) || expandedProjects.has(projectPath);
             const catalog = bridge.bootstrap?.projectCatalogs?.[projectPath];
             const allSessions = sortedSessions(projectPath, catalog?.sessions ?? []);
             const visibleSessions = normalizedSearch
-              ? allSessions.filter((session) => matchesSearch(basename(projectPath)) || matchesSearch(session.title || 'Untitled session'))
+              ? allSessions.filter((session) => matchesSearch(basename(projectPath)) || matchesSearch(session.title || tr('remote_untitled')))
               : showAllSessions[projectPath] ? allSessions : allSessions.slice(0, 5);
             const projectHasActiveWork = (bridge.bootstrap?.runtimes ?? []).some((runtime) => {
               if (runtime.projectPath !== projectPath) return false;
@@ -1076,9 +1076,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                     className="sidebar-row-action"
                     data-visible={editingProject === projectPath ? 'true' : undefined}
                     disabled={editingProject !== null}
-                    aria-label={`Edit ${basename(projectPath)}`}
+                    aria-label={tr('desktop_chat_edit_project', basename(projectPath))}
                     aria-busy={editingProject === projectPath || undefined}
-                    title="Open project draft"
+                    title={tr('desktop_chat_open_draft')}
                     onClick={() => editProject(projectPath)}
                     style={{ position: 'absolute', right: 32, top: 5, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: editingProject !== null ? 'wait' : 'pointer' }}
                   >
@@ -1089,7 +1089,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                     className="sidebar-row-action"
                     data-visible={menuProject === projectPath ? 'true' : undefined}
                     disabled={projectHasActiveWork}
-                    aria-label={`Project actions for ${basename(projectPath)}`}
+                    aria-label={tr('desktop_chat_project_actions', basename(projectPath))}
                     aria-expanded={menuProject === projectPath}
                     onClick={() => setMenuProject((current) => current === projectPath ? null : projectPath)}
                     style={{ position: 'absolute', right: 4, top: 5, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: projectHasActiveWork ? 'not-allowed' : 'pointer' }}
@@ -1101,8 +1101,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                 {menuProject === projectPath ? (
                   <div className="sidebar-project-menu" role="menu" style={{ margin: '2px 4px 5px 24px', padding: 4, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.windowBg, boxShadow: '0 8px 24px rgba(0,0,0,.18)' }}>
                     <button type="button" role="menuitem" disabled={projectHasActiveWork} onClick={() => { setMenuProject(null); invoke(() => bridge.removeProject(projectPath)); }} style={{ width: '100%', minHeight: 30, display: 'flex', alignItems: 'center', gap: 8, padding: '5px 7px', border: 0, borderRadius: 6, background: 'transparent', color: t.danger, cursor: projectHasActiveWork ? 'not-allowed' : 'pointer', textAlign: 'left', fontSize: 11.5 }}>
-                      <Icon name="x" size={13} /> Remove from sidebar
-                    </button>
+                      <Icon name="x" size={13} /> {tr('desktop_chat_remove_sidebar')}</button>
                   </div>
                 ) : null}
 
@@ -1111,9 +1110,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                     {catalog?.error && allSessions.length === 0 ? (
                       <div style={{ padding: '8px 10px 8px 30px', color: t.danger, fontSize: 10.5 }}>{catalog.error}</div>
                     ) : !catalog ? (
-                      <div style={{ padding: '8px 10px 8px 30px', color: t.text4, fontSize: 10.5 }}>Loading sessions…</div>
+                      <div style={{ padding: '8px 10px 8px 30px', color: t.text4, fontSize: 10.5 }}>{tr('drawer_sessions_loading')}</div>
                     ) : allSessions.length === 0 ? (
-                      <div style={{ padding: '8px 10px 8px 30px', color: t.text4, fontSize: 10.5 }}>No saved sessions yet.</div>
+                      <div style={{ padding: '8px 10px 8px 30px', color: t.text4, fontSize: 10.5 }}>{tr('desktop_chat_no_saved_sessions')}</div>
                     ) : visibleSessions.map((session, sortableIndex) => {
                       const pinned = pinnedKeys.has(`${projectPath}\0${session.uuid}`);
                       const opening = openingSessionKey === `${projectPath}\0${session.uuid}`;
@@ -1127,9 +1126,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                           opening={opening}
                           status={bridge.sessionRuntimeStatus(session.uuid)}
                           onClick={() => openSidebarSession(projectPath, session.uuid)}
-                          onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || 'Untitled chat')}
-                          onRename={() => prepareRename(projectPath, session.uuid, session.title || 'Untitled chat')}
-                          onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
+                          onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+                          onRename={() => prepareRename(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+                          onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || tr('remote_untitled')), !pinned))}
                           reorderable={!opening}
                           sortableIndex={sortableIndex}
                         />
@@ -1137,7 +1136,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                     })}
                     {!normalizedSearch && allSessions.length > 5 ? (
                       <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, [projectPath]: !current[projectPath] }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
-                        {showAllSessions[projectPath] ? 'Show less' : `Show more (${allSessions.length - 5})`}
+                        {showAllSessions[projectPath] ? tr('chat_tool_show_less') : tr('desktop_chat_show_more', allSessions.length - 5)}
                       </button>
                     ) : null}
                   </div>
@@ -1147,10 +1146,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           })}
         </section>
         {!!settings?.archivedSessions?.length && <details style={{ marginTop: 16, padding: '0 8px', color: t.text3 }}>
-          <summary style={{ cursor: 'pointer', fontSize: 12 }}>Archived chats ({settings.archivedSessions.length})</summary>
-          {settings.archivedSessions.map((session) => <button key={`${session.projectPath}-${session.sessionId}`} type="button" title="Restore and open chat" onClick={() => openSidebarSession(session.projectPath, session.sessionId)}
+          <summary style={{ cursor: 'pointer', fontSize: 12 }}>{tr('desktop_chat_archived_count', settings.archivedSessions.length)}</summary>
+          {settings.archivedSessions.map((session) => <button key={`${session.projectPath}-${session.sessionId}`} type="button" title={tr('desktop_chat_restore_open')} onClick={() => openSidebarSession(session.projectPath, session.sessionId)}
             style={{ display: 'flex', width: '100%', gap: 8, padding: '10px 0', border: 0, background: 'transparent', color: t.text2, textAlign: 'left', cursor: 'pointer' }}>
-            <Icon name="archive" size={14} /><span>{session.title || 'Archived chat'}</span>
+            <Icon name="archive" size={14} /><span>{session.title || tr('desktop_chat_archived_chat')}</span>
           </button>)}
         </details>}
       </nav>
@@ -1173,7 +1172,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                 fontSize: 13, fontWeight: 600, boxSizing: 'border-box',
               }}
             >
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{data.sessionTitle || 'Untitled session'}</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{data.sessionTitle || tr('remote_untitled')}</span>
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5, fontWeight: 400 }}>{data.sessionMetadata}</span>
             </div>
           );
@@ -1184,7 +1183,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       <div
         className="sidebar-resize-handle no-drag"
         role="separator"
-        aria-label="Resize sidebar"
+        aria-label={tr('desktop_chat_resize_sidebar')}
         aria-orientation="vertical"
         aria-valuenow={Math.round(sidebarWidth)}
         aria-valuemin={SIDEBAR_MIN_WIDTH}
@@ -1218,23 +1217,23 @@ function contextSummaryPreview(content: string): string {
     .split('\n')
     .map((part) => part.trim().replace(/^#{1,6}\s+/, '').replace(/^summary\s*:\s*/i, ''))
     .find(Boolean);
-  if (!line) return 'Context preserved by compaction';
+  if (!line) return tr('desktop_chat_context_preserved');
   return line.length > 76 ? `${line.slice(0, 73).trimEnd()}…` : line;
 }
 
 function contextSummaryStats(summary: ContextSummarySnapshot): string {
   const messages = summary.messagesBefore > 0
     ? summary.messagesAfter > 0
-      ? `${summary.messagesBefore} → ${summary.messagesAfter} messages`
-      : `${summary.messagesBefore} messages summarized`
-    : 'Compacted context';
+      ? tr('desktop_chat_messages_changed', summary.messagesBefore, summary.messagesAfter)
+      : tr('desktop_chat_messages_summarized', summary.messagesBefore)
+    : tr('desktop_chat_compacted_context');
   if (!summary.bytesSaved) return messages;
   const bytes = summary.bytesSaved < 1024
     ? `${summary.bytesSaved} B`
     : summary.bytesSaved < 1024 * 1024
       ? `${Math.round(summary.bytesSaved / 1024)} KB`
       : `${(summary.bytesSaved / (1024 * 1024)).toFixed(1)} MB`;
-  return `${messages} · ${bytes} freed`;
+  return tr('desktop_chat_space_freed', messages, bytes);
 }
 
 export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }: {
@@ -1252,7 +1251,7 @@ export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }
       id="context-summary-panel"
       className="no-drag context-summary-panel"
       role="dialog"
-      aria-label="Context summaries"
+      aria-label={tr('desktop_chat_context_summaries')}
       style={{
         '--summary-panel-bg': t.surface,
         '--summary-panel-subtle': t.surfaceHover,
@@ -1268,11 +1267,11 @@ export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }
       <div className="context-summary-sidebar">
         <div className="context-summary-heading">
           <div>
-            <strong>Context summaries</strong>
-            <span>{summaries.length ? `${summaries.length} saved` : 'No saved summary'}</span>
+            <strong>{tr('desktop_chat_context_summaries')}</strong>
+            <span>{summaries.length ? tr('desktop_chat_saved_count', summaries.length) : tr('desktop_chat_no_saved_summary')}</span>
           </div>
         </div>
-        <div className="context-summary-list" role="listbox" aria-label="Saved context summaries">
+        <div className="context-summary-list" role="listbox" aria-label={tr('desktop_chat_saved_summaries')}>
           {[...summaries].reverse().map((summary, reverseIndex) => {
             const originalIndex = summaries.length - reverseIndex - 1;
             const current = selected?.id === summary.id;
@@ -1289,8 +1288,8 @@ export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }
                 <span className="context-summary-item-icon" aria-hidden="true"><Icon name="summary" size={15} stroke={1.75} /></span>
                 <span className="context-summary-item-copy">
                   <span className="context-summary-item-title">
-                    Summary {originalIndex + 1}
-                    {reverseIndex === 0 ? <em>Current</em> : null}
+                    {tr('desktop_chat_summary_number', originalIndex + 1)}
+                    {reverseIndex === 0 ? <em>{tr('chat_agent_group_current')}</em> : null}
                   </span>
                   <span className="context-summary-item-preview">{contextSummaryPreview(summary.content)}</span>
                   <span className="context-summary-item-meta">{contextSummaryStats(summary)}</span>
@@ -1302,7 +1301,7 @@ export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }
           {summaries.length === 0 ? (
             <div className="context-summary-empty-list">
               <span aria-hidden="true"><Icon name="summary" size={19} stroke={1.6} /></span>
-              <p>Summaries appear after the conversation is compacted.</p>
+              <p>{tr('desktop_chat_summary_after_compaction')}</p>
             </div>
           ) : null}
         </div>
@@ -1311,10 +1310,10 @@ export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }
       <article className="context-summary-detail">
         <div className="context-summary-detail-heading">
           <div>
-            <span>Context summary</span>
-            <strong>{selected ? `Summary ${selectedIndex + 1}` : 'No summary yet'}</strong>
+            <span>{tr('desktop_chat_context_summary')}</span>
+            <strong>{selected ? tr('desktop_chat_summary_number', selectedIndex + 1) : tr('desktop_chat_no_summary')}</strong>
           </div>
-          <button type="button" className="context-summary-close" aria-label="Close context summaries" onClick={onClose}>
+          <button type="button" className="context-summary-close" aria-label={tr('desktop_chat_close_summaries')} onClick={onClose}>
             <Icon name="x" size={14} stroke={1.8} />
           </button>
         </div>
@@ -1326,8 +1325,8 @@ export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }
         ) : (
           <div className="context-summary-empty-detail">
             <span aria-hidden="true"><Icon name="summary" size={24} stroke={1.45} /></span>
-            <strong>No compacted context</strong>
-            <p>When LingXi compacts this session, the preserved context will be available here.</p>
+            <strong>{tr('desktop_chat_no_compacted_context')}</strong>
+            <p>{tr('desktop_chat_compacted_context_description')}</p>
           </div>
         )}
       </article>
@@ -1361,17 +1360,17 @@ export function SummaryContextActions({ bridge }: { bridge: UseBridge }) {
     return () => document.removeEventListener('pointerdown', outside, true);
   }, [summaryOpen]);
 
-  return <section className="runtime-summary-section runtime-context-actions" aria-label="Context"
+  return <section className="runtime-summary-section runtime-context-actions" aria-label={tr('desktop_chat_context')}
     style={{ '--context-action-hover': t.surfaceHover, '--context-action-ring': t.borderStrong } as CSSProperties}>
-    <h2>Context</h2>
-    <button ref={triggerRef} type="button" aria-label="Open context summaries" aria-expanded={summaryOpen} aria-controls="context-summary-panel"
+    <h2>{tr('desktop_chat_context')}</h2>
+    <button ref={triggerRef} type="button" aria-label={tr('desktop_chat_open_summaries')} aria-expanded={summaryOpen} aria-controls="context-summary-panel"
       onClick={() => { setSelectedId(summaries.at(-1)?.id ?? null); setSummaryOpen(true); }}>
-      <Icon name="summary" size={16} /><span>Context summaries</span>
+      <Icon name="summary" size={16} /><span>{tr('desktop_chat_context_summaries')}</span>
       <span className="runtime-context-count">{summaries.length}</span>
     </button>
-    <button type="button" aria-label="Compact conversation" disabled={!bridge.activeSession || bridge.sessionLoading || compacting}
+    <button type="button" aria-label={tr('desktop_chat_compact_conversation')} disabled={!bridge.activeSession || bridge.sessionLoading || compacting}
       onClick={() => { invoke(() => bridge.forceCompact()); }}>
-      <Icon name="summary-list" size={16} /><span>{compacting ? 'Compacting…' : 'Compact'}</span>
+      <Icon name="summary-list" size={16} /><span>{compacting ? tr('desktop_chat_compacting') : tr('desktop_chat_compact')}</span>
     </button>
     {summaryOpen && createPortal(<div ref={panelRef} className="runtime-context-detail" data-runtime-summary-owned="true"
       onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); } }}>
@@ -1411,12 +1410,12 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
         <span className="desktop-topbar-project-icon" aria-hidden="true"><Icon name="folder" size={17} stroke={1.65} /></span>
         <div style={{ minWidth: 0 }}>
           <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(projectPath)}</div>
-          <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{projectPath ?? 'Add a project to begin'}</div>
+          <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{projectPath ?? tr('desktop_chat_add_project_begin')}</div>
         </div>
       </div>
       {remote && (
         <span className="no-drag desktop-topbar-remote" role="status" data-remote-viewers={remote.viewers}
-          aria-label={remote.viewers > 0 ? `远程控制已开启，${remote.viewers} 个设备正在查看` : '远程控制已开启'}
+          aria-label={remote.viewers > 0 ? tr('desktop_chat_remote_viewers', remote.viewers) : tr('desktop_chat_remote_enabled')}
           style={{ flexShrink: 0, padding: '2px 9px', borderRadius: 99, fontSize: 12, fontWeight: 500, color: t.ok, background: t.surfaceHover, whiteSpace: 'nowrap' }}>
           {remote.text}
         </span>
@@ -1425,8 +1424,8 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
         className="no-drag desktop-topbar-action"
         type="button"
         data-runtime-center-trigger="true"
-        aria-label="Toggle pinned summary"
-        title="Toggle pinned summary"
+        aria-label={tr('desktop_chat_toggle_summary')}
+        title={tr('desktop_chat_toggle_summary')}
         aria-controls="runtime-center-overview"
         aria-expanded={runtimeCenterOpen}
         aria-pressed={runtimeCenterOpen}
@@ -1434,15 +1433,15 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
         onClick={onToggleRuntimeCenter}
         style={topbarActionTokens}
       ><Icon name="topbar-summary" size={20} stroke={1.75} /></button>
-      <button type="button" className="no-drag desktop-topbar-action" aria-label="Toggle terminal" title="Toggle terminal (Ctrl+`)" aria-controls="desktop-terminal" aria-expanded={terminalOpen} aria-pressed={terminalOpen} disabled={!terminalAvailable} data-active={terminalOpen ? 'true' : undefined} onClick={onToggleTerminal} style={topbarActionTokens}><Icon name="topbar-terminal" size={20} stroke={1.75} /></button>
-      {sideChatAvailable ? <button className="no-drag desktop-topbar-action" type="button" title="Reopen Side Chat" aria-label="Reopen Side Chat" aria-expanded={sideChatOpen} aria-pressed={sideChatOpen} onClick={onToggleSideChat} style={topbarActionTokens}><Icon name="chat" size={19} /></button> : null}
+      <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('desktop_toggle_terminal')} title={`${tr('desktop_toggle_terminal')} (Ctrl+\`)`} aria-controls="desktop-terminal" aria-expanded={terminalOpen} aria-pressed={terminalOpen} disabled={!terminalAvailable} data-active={terminalOpen ? 'true' : undefined} onClick={onToggleTerminal} style={topbarActionTokens}><Icon name="topbar-terminal" size={20} stroke={1.75} /></button>
+      {sideChatAvailable ? <button className="no-drag desktop-topbar-action" type="button" title={tr('desktop_chat_reopen_side_chat')} aria-label={tr('desktop_chat_reopen_side_chat')} aria-expanded={sideChatOpen} aria-pressed={sideChatOpen} onClick={onToggleSideChat} style={topbarActionTokens}><Icon name="chat" size={19} /></button> : null}
       <div id="runtime-inspector-topbar-controls" className="no-drag runtime-inspector-topbar-controls" style={topbarActionTokens} />
       <button
         className="no-drag desktop-topbar-action desktop-inspector-trigger"
         type="button"
         data-runtime-inspector-trigger="true"
-        aria-label="Toggle right panel"
-        title="Toggle right panel"
+        aria-label={tr('desktop_toggle_right_panel')}
+        title={tr('desktop_toggle_right_panel')}
         aria-controls="runtime-inspector"
         aria-expanded={inspectorOpen}
         aria-pressed={inspectorOpen}
@@ -1564,19 +1563,19 @@ export function DictationRecorderBar({ audio, onCancel, onFinish, turnAction }: 
   };
 
   return (
-    <div role="group" aria-label="Audio dictation controls" style={{ display: 'flex', alignItems: 'center', gap: 12, minHeight: 48, padding: '0 8px 8px' }}>
-      <button className="dictation-recorder-action" type="button" aria-label="Cancel dictation" title="Cancel dictation" onClick={onCancel} style={actionStyle}>
+    <div role="group" aria-label={tr('desktop_chat_dictation_controls')} style={{ display: 'flex', alignItems: 'center', gap: 12, minHeight: 48, padding: '0 8px 8px' }}>
+      <button className="dictation-recorder-action" type="button" aria-label={tr('desktop_chat_cancel_dictation')} title={tr('desktop_chat_cancel_dictation')} onClick={onCancel} style={actionStyle}>
         <Icon name="x" size={16} color="currentColor" stroke={1.8} />
       </button>
       <canvas
         ref={canvasRef}
         role="img"
-        aria-label="Live microphone amplitude"
+        aria-label={tr('desktop_chat_microphone_amplitude')}
         width={640}
         height={36}
         style={{ display: 'block', flex: '1 1 auto', width: '100%', minWidth: 0, height: 36 }}
       />
-      <button className="dictation-recorder-action" type="button" aria-label="Stop dictation" title="Stop dictation" onClick={onFinish} style={actionStyle}>
+      <button className="dictation-recorder-action" type="button" aria-label={tr('desktop_chat_stop_dictation')} title={tr('desktop_chat_stop_dictation')} onClick={onFinish} style={actionStyle}>
         <span aria-hidden="true" style={{ width: 14, height: 14, borderRadius: 2, background: 'currentColor' }} />
       </button>
       {turnAction}
@@ -1585,7 +1584,7 @@ export function DictationRecorderBar({ audio, onCancel, onFinish, turnAction }: 
 }
 
 function modelLabel(model?: string | null): string {
-  if (!model) return 'Select model';
+  if (!model) return tr('composer_select_model');
   return modelReference(model).label;
 }
 
@@ -1595,21 +1594,6 @@ function activeModelLabel(model?: string | null, source?: string | null): string
 
 function reasoningSelectionKey(selection: ReasoningSelectionDto): string {
   return JSON.stringify(selection);
-}
-
-function reasoningSelectionLabel(selection?: ReasoningSelectionDto): string {
-  if (!selection) return 'Auto';
-  switch (selection.type) {
-    case 'automatic': return 'Auto';
-    case 'disabled': return 'Off';
-    case 'enabled': return 'On';
-    case 'level': {
-      const levelLabels: Record<string, string> = { xhigh: 'Extra High', extra_high: 'Extra High' };
-      return levelLabels[selection.id] ?? selection.id.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-    }
-    case 'token_budget': return `${selection.tokens.toLocaleString()} tokens`;
-    default: return 'Auto';
-  }
 }
 
 function modelSupportsFastMode(detail?: ModelDetailsDto): boolean {
@@ -1706,7 +1690,7 @@ function createFileMention(path: string, color: string): HTMLElement {
   token.dataset.fileMention = path;
   token.contentEditable = 'false';
   token.title = path;
-  token.setAttribute('aria-label', `${path.endsWith('/') ? 'Folder' : 'File'} mention: ${path}`);
+  token.setAttribute('aria-label', tr(path.endsWith('/') ? 'desktop_chat_folder_mention' : 'desktop_chat_file_mention', path));
   token.style.color = color;
 
   const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1904,7 +1888,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     openSettings: onOpenSettings,
     openSettingsPage: onOpenSettingsPage,
     updateSessionWorkspace: async (operation) => {
-      if (!activeSessionId) throw new Error(`/${operation.action} requires an active session.`);
+      if (!activeSessionId) throw new Error(tr('desktop_navigation_requires_session', operation.action));
       await bridge.updateSessionWorkspace(activeSessionId, operation);
     },
     resumeSession: (query) => window.dispatchEvent(new CustomEvent(SESSION_PICKER_EVENT, { detail: { query: query ?? '' } })),
@@ -2433,7 +2417,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
 
   const startStandardListening = async () => {
     if (!inputAudioGate.ready && inputAudioGate.reason) {
-      setAudioGuidance(audioSetupGuidance('unavailable', inputAudioGate.reason));
+      setAudioGuidance(audioSetupGuidance('unavailable', inputAudioGate.reasonCode ?? inputAudioGate.reason));
       return;
     }
     if (!audio || typeof bridge.audioExecute !== 'function') {
@@ -2505,7 +2489,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       setFlowState({
         ...DEFAULT_VOICE_FLOW_STATE,
         phase: 'configurationRequired',
-        detail: 'Native audio is unavailable in this environment.',
+        detail: tr('desktop_chat_native_audio_unavailable'),
       });
       return;
     }
@@ -2630,7 +2614,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       return;
     }
     if (!conversationAudioGate.ready) {
-      setAudioGuidance(audioSetupGuidance('unavailable', conversationAudioGate.reason));
+      setAudioGuidance(audioSetupGuidance('unavailable', conversationAudioGate.reasonCode ?? conversationAudioGate.reason));
       return;
     }
     setAudioGuidance(null);
@@ -2645,7 +2629,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       && ownerGeneration === imageDraftGeneration.current;
     const remaining = MAX_IMAGE_ATTACHMENTS - imageAttachments.length;
     if (remaining <= 0) {
-      setImageNotice(`最多添加 ${MAX_IMAGE_ATTACHMENTS} 张图片。`);
+      setImageNotice(tr('desktop_chat_image_limit', MAX_IMAGE_ATTACHMENTS));
       return;
     }
     const candidates = files.slice(0, remaining);
@@ -2654,7 +2638,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       try {
         return { attachment: await imageFileToAttachment(file) };
       } catch (error) {
-        return { error: error instanceof Error ? error.message : '无法读取图片。' };
+        return { error: error instanceof Error ? error.message : tr('desktop_chat_image_read_failed') };
       }
     }));
     const attachments = results.flatMap((result) => result.attachment ? [result.attachment] : []);
@@ -2664,7 +2648,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     }
     const firstError = results.find((result) => result.error)?.error;
     if (files.length > candidates.length) {
-      setImageNotice(`最多添加 ${MAX_IMAGE_ATTACHMENTS} 张图片。`);
+      setImageNotice(tr('desktop_chat_image_limit', MAX_IMAGE_ATTACHMENTS));
     } else if (firstError) {
       setImageNotice(firstError);
     } else if (attachments.length > 0) {
@@ -2696,10 +2680,10 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       }
       try {
         const path = window.lingxi?.getPathForFile(file);
-        if (!path) throw new Error(`无法获取“${file.name}”的本地路径，请先保存文件后再添加。`);
+        if (!path) throw new Error(tr('desktop_chat_file_path_failed', file.name));
         chooseFile(path, true);
       } catch (error) {
-        notice = error instanceof Error ? error.message : `无法添加“${file.name}”。`;
+        notice = error instanceof Error ? error.message : tr('desktop_chat_file_add_failed', file.name);
       }
     }
     if (images.length) await addImageFiles(images);
@@ -2758,7 +2742,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     const sideInput = sideCreationInput(snapshot.text, snapshot.files);
     if (onCreateSide && sideInput !== null) {
       if (sideCreationPending.current) return;
-      if (imageAttachments.length) { setImageNotice('Send images from the Side Chat after opening it.'); return; }
+      if (imageAttachments.length) { setImageNotice(tr('desktop_chat_side_chat_images')); return; }
       sideCreationPending.current = true;
       const originalHtml = input.current?.innerHTML;
       const submittedSessionId = draftSessionId.current;
@@ -2772,11 +2756,11 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     }
     const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
     if (bridge.running && isSlashCommand && !isSideQuestionCommand(slashCommand, bridge.desktop.slashCommands)) {
-      setImageNotice('当前任务完成后才能运行 / 命令。');
+      setImageNotice(tr('desktop_chat_slash_wait'));
       return;
     }
     if (bridge.running && imageAttachments.length && !isSlashCommand) {
-      setImageNotice('Pending message 暂不支持图片，请等待当前任务完成后发送。');
+      setImageNotice(tr('desktop_chat_pending_images'));
       return;
     }
     if (isSlashCommand) {
@@ -2785,12 +2769,12 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         if (invocation && !invocation.strategy) {
           if (selectedFusion) slashCommand = chooseFusionStrategy(slashCommand, selectedFusion);
           else if (!parseFusionCatalog(bridge.fusionCatalogEvent?.catalog_json).default_strategy) {
-            setImageNotice('请选择一个 Fusion 策略，或在设置中指定默认策略。');
+            setImageNotice(tr('desktop_chat_select_fusion'));
             return;
           }
         }
       } catch (cause) {
-        setImageNotice(cause instanceof Error ? cause.message : '无法读取 Fusion 策略。');
+        setImageNotice(cause instanceof Error ? cause.message : tr('desktop_chat_fusion_read_failed'));
         return;
       }
     }
@@ -3110,7 +3094,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         delete token.dataset.fileMention;
         token.dataset.contextMention = href;
         token.setAttribute('href', href);
-        token.setAttribute('aria-label', `${entry.mention.kind}: ${entry.mention.name}`);
+        token.setAttribute('aria-label', tr('desktop_navigation_mention_named', tr(({ skill: 'chat_tool_verb_skill', plugin: 'skills_source_plugin', file: 'desktop_navigation_file', folder: 'desktop_navigation_folder' } as const)[entry.mention.kind]), entry.mention.name));
         token.querySelector('svg')?.replaceWith(document.createTextNode('@'));
         token.querySelector('span')!.textContent = entry.mention.name;
         const spacer = document.createTextNode(ZERO_WIDTH_SPACE);
@@ -3132,7 +3116,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       caret.collapse(false);
       slashDismissed.current = true;
     } else if (entry.action === 'plan') {
-      void bridge.setPermissionMode('plan').catch(() => setImageNotice('Could not enable Plan mode.'));
+      void bridge.setPermissionMode('plan').catch(() => setImageNotice(tr('desktop_chat_plan_enable_failed')));
     } else if (entry.action === 'attach') {
       imageFileInput.current?.click();
     }
@@ -3289,7 +3273,8 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     syncPromptState();
     updateActiveCompletions();
   };
-  const permissionMode = PERMISSION_MODE_OPTIONS.find((mode) => mode.id === bridge.desktop.permissionMode) ?? PERMISSION_MODE_OPTIONS[0]!;
+  const permissionModes = permissionModeOptions();
+  const permissionMode = permissionModes.find((mode) => mode.id === bridge.desktop.permissionMode) ?? permissionModes[0]!;
   const proactivity = bridge.desktop.conversationControls?.proactivity;
   const workspace = bridge.bootstrap?.workspace;
   const providerConfigured = bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured) ?? false;
@@ -3297,15 +3282,15 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const goalActive = goal.active;
   const promptPlaceholder = !ready
     ? !workspace?.path || workspace.recovery
-      ? 'Add or select an available project to start coding…'
+      ? tr('desktop_prompt_project')
       : !providerConfigured
-        ? 'Connect a provider in Settings to start coding…'
-        : 'Waiting for the local engine…'
+        ? tr('desktop_prompt_provider')
+        : tr('desktop_prompt_engine')
     : goalActive
-        ? 'Add guidance for this goal…'
+        ? tr('desktop_prompt_goal')
         : bridge.running
-          ? 'LingXi is working — draft your next message…'
-          : 'Do anything';
+          ? tr('desktop_prompt_working')
+          : tr('desktop_prompt_anything');
   const hasPrompt = Boolean(text.trim() || selectedFiles.length);
   const promptSuggestion = bridge.conversation.promptSuggestion?.uuid !== rejectedSuggestionUuid && ready && !bridge.running && !promptComposing && !text.length
     && !bridge.isCancelling && !bridge.pendingPermission && !bridge.pendingAskUserQuestion
@@ -3401,8 +3386,8 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       disabled={!canStop || hasPrompt || bridge.isCancelling}
       tabIndex={canStop && !hasPrompt ? 0 : -1}
       onClick={() => invoke(() => bridge.cancel())}
-      aria-label={bridge.isCancelling ? (bridge.running ? 'Stopping current turn' : 'Stopping background agents') : (bridge.running ? 'Stop current turn' : 'Stop background agents')}
-      title={bridge.isCancelling ? 'Stopping…' : 'Stop'}
+      aria-label={bridge.isCancelling ? (bridge.running ? tr('desktop_chat_stopping_turn') : tr('desktop_chat_stopping_agents')) : (bridge.running ? tr('desktop_chat_stop_turn') : tr('desktop_chat_stop_agents'))}
+      title={bridge.isCancelling ? tr('chat_stopping') : tr('desktop_stop')}
       style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
     ><Icon name="stop" size={15} color="#fff" /></button>
   );
@@ -3449,11 +3434,11 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         style={{ position: 'relative', maxWidth: 'var(--conversation-width)', margin: '0 auto', borderRadius: 20, border: `1px solid ${imageDragActive ? t.accent : t.borderStrong}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: '0 4px 20px rgba(0,0,0,.05), 0 1px 3px rgba(0,0,0,.03)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
       >
         {imageAttachments.length > 0 && (
-          <div aria-label="Image attachments" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
+          <div aria-label={tr('desktop_chat_image_attachments')} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
             {imageAttachments.map((attachment) => (
               <div key={attachment.id} title={attachment.name} style={{ position: 'relative', width: 74, height: 62, overflow: 'hidden', borderRadius: 10, background: t.surfaceHover, outline: `1px solid color-mix(in oklab, ${t.borderStrong} 55%, transparent)` }}>
                 <img src={attachment.previewUrl} alt={attachment.name} style={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', outline: `1px solid color-mix(in oklab, ${t.text} 10%, transparent)`, outlineOffset: -1 }} />
-                <button type="button" aria-label={`Remove ${attachment.name}`} title="Remove image" onClick={() => removeImage(attachment.id)} style={{ position: 'absolute', top: 3, right: 3, width: 24, height: 24, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 99, background: 'rgba(0,0,0,.62)', color: '#fff', cursor: 'pointer' }}><Icon name="x" size={11} stroke={2} /></button>
+                <button type="button" aria-label={tr('desktop_chat_remove_named', attachment.name)} title={tr('desktop_chat_remove_image')} onClick={() => removeImage(attachment.id)} style={{ position: 'absolute', top: 3, right: 3, width: 24, height: 24, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 99, background: 'rgba(0,0,0,.62)', color: '#fff', cursor: 'pointer' }}><Icon name="x" size={11} stroke={2} /></button>
               </div>
             ))}
           </div>
@@ -3507,7 +3492,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               commandMirror.current.scrollTop = event.currentTarget.scrollTop;
               commandMirror.current.scrollLeft = event.currentTarget.scrollLeft;
             }}
-            aria-label="Prompt"
+            aria-label={tr('desktop_chat_prompt')}
             aria-multiline="true"
             aria-disabled={false}
             aria-autocomplete="list"
@@ -3527,7 +3512,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           {promptSuggestion && (
             <button type="button" className="composer-prompt-suggestion" onClick={acceptPromptSuggestion}
               onMouseDown={(event) => event.preventDefault()} style={{ color: t.text4 }}
-              aria-label={`Use suggestion: ${promptSuggestion}`} title="Tab or → to accept">
+              aria-label={tr('desktop_chat_use_suggestion', promptSuggestion)} title={tr('desktop_chat_accept_suggestion')}>
               <span>{promptSuggestion}</span><kbd aria-hidden="true">Tab</kbd>
             </button>
           )}
@@ -3549,15 +3534,14 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           <div ref={slashControl} className="slash-command-menu" style={commandMenuStyle(t)}>
             <div className="slash-command-header">
               <span className="slash-command-header-mark" aria-hidden="true">/</span>
-              <strong>Commands</strong>
+              <strong>{tr('plugins_detail_commands')}</strong>
               {slashQuery && <span className="slash-command-query mono">/{slashQuery}</span>}
-              <span className="slash-command-count">{slashCommands.length} match{slashCommands.length === 1 ? '' : 'es'}</span>
+              <span className="slash-command-count">{tr('desktop_chat_matches', slashCommands.length)}</span>
             </div>
-            <div id="slash-command-results" className="slash-command-list" role="listbox" aria-label="Slash commands">
+            <div id="slash-command-results" className="slash-command-list" role="listbox" aria-label={tr('slash_commands_title')}>
               {slashCommands.length === 0 && (
                 <div className="slash-command-empty" role="status">
-                  No matching commands. Press Esc to keep the text as a prompt.
-                </div>
+                  {tr('desktop_chat_no_commands')}</div>
               )}
               {slashCommands.map((entry, index) => {
                 const selected = index === slashResultIndex;
@@ -3591,9 +3575,9 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               })}
             </div>
             <div id="slash-command-hint" className="slash-command-footer">
-              <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
-              <span><kbd>↵</kbd><kbd>Tab</kbd> Complete</span>
-              <span><kbd>esc</kbd> Close</span>
+              <span><kbd>↑</kbd><kbd>↓</kbd> {tr('desktop_chat_navigate')}</span>
+              <span><kbd>↵</kbd><kbd>Tab</kbd> {tr('desktop_chat_complete')}</span>
+              <span><kbd>esc</kbd> {tr('common_close')}</span>
             </div>
           </div>
         )}
@@ -3617,8 +3601,8 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         ) : (
         <div className="composer-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 4, minHeight: 48, padding: '0 8px 8px' }}>
           <input ref={imageFileInput} type="file" multiple onChange={(event) => { void addFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
-          <button type="button" disabled={!ready} className="composer-icon-action" aria-label="Attach files" title="Attach files or images" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
-          <button ref={fileButton} type="button" disabled={!ready} className="composer-icon-action" aria-label="Add context" aria-expanded={fileMenuOpen} title="Add context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
+          <button type="button" disabled={!ready} className="composer-icon-action" aria-label={tr('desktop_attach_files')} title={tr('desktop_attach_files_images')} onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
+          <button ref={fileButton} type="button" disabled={!ready} className="composer-icon-action" aria-label={tr('desktop_add_context')} aria-expanded={fileMenuOpen} title={tr('desktop_add_context_shortcut')} onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
           <div ref={permissionControl} style={{ position: 'relative' }}>
             <button
               ref={permissionButton}
@@ -3626,8 +3610,8 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               disabled={!ready}
               aria-haspopup="menu"
               aria-expanded={permissionOpen}
-              aria-label={`Permission mode: ${permissionMode.label}`}
-              title="Change permission mode"
+              aria-label={tr('desktop_chat_permission_label', permissionMode.label)}
+              title={tr('desktop_change_permissions')}
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
               onClick={() => { setPermissionOpen((open) => !open); setModelOpen(false); setModelSubmenu(null); }}
               style={{
@@ -3644,13 +3628,13 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               <div
                 style={{ ...composerMenuStyle(t, 'left'), width: 480, maxWidth: 'min(480px, calc(100vw - 44px))', maxHeight: 'min(470px, calc(100vh - 150px))', overflowY: 'auto', padding: 9 }}
                 role="menu"
-                aria-label="Permission modes"
+                aria-label={tr('desktop_permission_modes')}
               >
                 <div style={{ padding: '4px 9px 8px', display: 'flex', alignItems: 'baseline', gap: 9 }}>
-                  <strong style={{ color: t.text, fontSize: 12.5, fontWeight: 650 }}>How should LingXi actions be approved?</strong>
-                  <span style={{ marginLeft: 'auto', color: t.text4, fontSize: 10.5 }}>Current session</span>
+                  <strong style={{ color: t.text, fontSize: 12.5, fontWeight: 650 }}>{tr('desktop_chat_approval_question')}</strong>
+                  <span style={{ marginLeft: 'auto', color: t.text4, fontSize: 10.5 }}>{tr('chat_agent_primary_status')}</span>
                 </div>
-                {PERMISSION_MODE_OPTIONS.map((mode) => {
+                {permissionModes.map((mode) => {
                   const selected = mode.id === bridge.desktop.permissionMode;
                   const color = mode.danger ? t.danger : selected ? t.accent : t.text2;
                   return (
@@ -3682,10 +3666,10 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                   );
                 })}
                 {proactivity && (proactivity.opt_in_available || proactivity.opted_in) && (
-                  <div role="group" aria-label="Proactivity" style={{ marginTop: 7, paddingTop: 8, borderTop: `1px solid ${t.border}` }}>
+                  <div role="group" aria-label={tr('desktop_chat_proactivity')} style={{ marginTop: 7, paddingTop: 8, borderTop: `1px solid ${t.border}` }}>
                     <div style={{ padding: '2px 9px 6px', display: 'flex', alignItems: 'baseline', gap: 9 }}>
-                      <strong style={{ color: t.text, fontSize: 12.5, fontWeight: 650 }}>Proactivity</strong>
-                      <span style={{ marginLeft: 'auto', color: t.text4, fontSize: 10.5 }}>Current session</span>
+                      <strong style={{ color: t.text, fontSize: 12.5, fontWeight: 650 }}>{tr('desktop_chat_proactivity')}</strong>
+                      <span style={{ marginLeft: 'auto', color: t.text4, fontSize: 10.5 }}>{tr('chat_agent_primary_status')}</span>
                     </div>
                     {!proactivity.opted_in && proactivity.opt_in_available ? (
                       <button
@@ -3693,14 +3677,14 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                         role="menuitem"
                         onClick={() => invoke(() => bridge.initializeProactivity(true))}
                         style={{ width: '100%', padding: '8px 9px', border: 0, borderRadius: 8, background: 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit', fontSize: 12.5 }}
-                      >Enable proactivity</button>
+                      >{tr('desktop_chat_proactivity_enable')}</button>
                     ) : proactivity.opted_in ? (
                       <>
                         {proactivity.selector_gate ? (
                           <div style={{ display: 'flex', gap: 4, padding: '0 7px 5px' }}>
                             {(['ask', 'default', 'proactive'] as const).map((level) => {
                               const selected = proactivity.level === level;
-                              const label = level === 'ask' ? 'Ask' : level === 'default' ? 'Default' : 'Proactive';
+                              const label = level === 'ask' ? tr('desktop_chat_permission_ask_short') : level === 'default' ? tr('settings_badge_default') : tr('desktop_chat_proactive');
                               return (
                                 <button
                                   key={level}
@@ -3714,17 +3698,17 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                             })}
                           </div>
                         ) : (
-                          <div style={{ padding: '4px 9px 7px', color: t.text3, fontSize: 11.5 }}>Proactivity is unavailable under the current session gates.</div>
+                          <div style={{ padding: '4px 9px 7px', color: t.text3, fontSize: 11.5 }}>{tr('desktop_chat_proactivity_unavailable')}</div>
                         )}
                         <button
                           type="button"
                           role="menuitem"
                           onClick={() => invoke(() => bridge.initializeProactivity(false))}
                           style={{ width: '100%', padding: '6px 9px', border: 0, borderRadius: 8, background: 'transparent', color: t.text3, textAlign: 'left', cursor: 'pointer', font: 'inherit', fontSize: 11.5 }}
-                        >Turn off proactivity</button>
+                        >{tr('desktop_chat_proactivity_off')}</button>
                       </>
                     ) : (
-                      <div style={{ padding: '4px 9px 7px', color: t.text3, fontSize: 11.5 }}>Proactivity is unavailable under the current session gates.</div>
+                      <div style={{ padding: '4px 9px 7px', color: t.text3, fontSize: 11.5 }}>{tr('desktop_chat_proactivity_unavailable')}</div>
                     )}
                   </div>
                 )}
@@ -3754,13 +3738,13 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               disabled={!modelControlReady}
               aria-haspopup="menu"
               aria-expanded={modelOpen}
-              aria-label={`${fastModeAvailable && bridge.desktop.fastMode ? 'Fast mode, ' : ''}Model: ${activeModelLabel(bridge.desktop.currentModel, bridge.desktop.currentModelSource)}, reasoning ${reasoningSelectionLabel(selectedReasoning)}`}
+              aria-label={tr(fastModeAvailable && bridge.desktop.fastMode ? 'desktop_chat_fast_model_label' : 'desktop_chat_model_label', activeModelLabel(bridge.desktop.currentModel, bridge.desktop.currentModelSource), reasoningSelectionLabel(selectedReasoning))}
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
               onClick={() => { setModelOpen((open) => !open); setModelSubmenu(null); setPermissionOpen(false); }}
               style={{ ...composerPillStyle(t, modelOpen), maxWidth: '100%', width: '100%', color: t.text }}
             >
               {fastModeAvailable && <Icon name="bolt" size={18} color={t.text} stroke={2.1} />}
-              {fastModeAvailable && bridge.desktop.fastMode && <span style={{ color: t.accent, fontSize: 11.5, fontWeight: 700 }}>Fast</span>}
+              {fastModeAvailable && bridge.desktop.fastMode && <span style={{ color: t.accent, fontSize: 11.5, fontWeight: 700 }}>{tr('desktop_chat_fast')}</span>}
               {fastModeAvailable && bridge.desktop.fastMode && <span style={{ color: t.text4 }}>·</span>}
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{activeModelLabel(bridge.desktop.currentModel, bridge.desktop.currentModelSource)}</span>
               <span style={{ color: t.text4 }}>·</span>
@@ -3777,14 +3761,14 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                   padding: 8,
                 }}
                 role="menu"
-                aria-label="Model settings"
+                aria-label={tr('desktop_chat_model_settings')}
               >
                 {pickerSubmenus.map((submenu) => {
-                  const labels = { model: 'Model', effort: 'Effort', speed: 'Speed' };
+                  const labels = { model: tr('session_details_model'), effort: tr('composer_effort'), speed: tr('desktop_chat_speed') };
                   const values = {
                     model: activeModelLabel(bridge.desktop.currentModel, bridge.desktop.currentModelSource),
                     effort: reasoningSelectionLabel(selectedReasoning),
-                    speed: fastModeAvailable && bridge.desktop.fastMode ? 'Fast' : 'Standard',
+                    speed: fastModeAvailable && bridge.desktop.fastMode ? tr('desktop_chat_fast') : tr('desktop_chat_standard'),
                   };
                   const disabled = submenu === 'effort' && !reasoningControls;
                   return (
@@ -3813,8 +3797,8 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               </div>
 
               {modelSubmenu === 'model' && (
-                <div style={{ ...modelPickerSubmenuStyle(t, modelListPlacement), maxHeight: 'min(500px, calc(100vh - 140px))', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} role="menu" aria-label="Available models">
-                  {modelPickerSubmenuHeading(t, 'Model', '5px 10px 7px', modelListPlacement, () => setModelSubmenu(null))}
+                <div style={{ ...modelPickerSubmenuStyle(t, modelListPlacement), maxHeight: 'min(500px, calc(100vh - 140px))', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} role="menu" aria-label={tr('desktop_available_models')}>
+                  {modelPickerSubmenuHeading(t, tr('session_details_model'), '5px 10px 7px', modelListPlacement, () => setModelSubmenu(null))}
                   <div style={{ position: 'relative', flexShrink: 0, margin: '0 3px 7px' }}>
                     <span aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', display: 'grid', placeItems: 'center', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
                       <Icon name="search" size={14} color={t.text4} stroke={1.8} />
@@ -3823,8 +3807,8 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                       ref={modelSearchInput}
                       type="text"
                       value={modelQuery}
-                      aria-label="Search models"
-                      placeholder="Search models"
+                      aria-label={tr('composer_search_models_description')}
+                      placeholder={tr('composer_search_models_description')}
                       autoComplete="off"
                       spellCheck={false}
                       onChange={(event) => setModelQuery(event.currentTarget.value)}
@@ -3840,7 +3824,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                       onBlur={(event) => { event.currentTarget.style.borderColor = t.borderStrong; }}
                     />
                     {modelQuery && (
-                      <button type="button" aria-label="Clear model search" onClick={() => { setModelQuery(''); modelSearchInput.current?.focus(); }} style={{ position: 'absolute', right: 5, top: '50%', display: 'grid', width: 24, height: 24, padding: 0, placeItems: 'center', transform: 'translateY(-50%)', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
+                      <button type="button" aria-label={tr('desktop_chat_clear_model_search')} onClick={() => { setModelQuery(''); modelSearchInput.current?.focus(); }} style={{ position: 'absolute', right: 5, top: '50%', display: 'grid', width: 24, height: 24, padding: 0, placeItems: 'center', transform: 'translateY(-50%)', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
                         <Icon name="x" size={12} color={t.text3} stroke={1.9} />
                       </button>
                     )}
@@ -3854,15 +3838,15 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                       const knownProvider = Boolean(statusProviderId && providerById(statusProviderId));
                       const connectionLabel = knownProvider
                         ? providerCredentials
-                          ? metadata?.configured ? 'Connected' : 'Not connected'
-                          : 'Checking…'
+                          ? metadata?.configured ? tr('mcp_stat_connected') : tr('desktop_chat_not_connected')
+                          : tr('cron_reconciling_progress')
                         : undefined;
                       const connected = metadata?.configured === true;
                       return (
                         <section key={group.providerId ?? 'unqualified'} aria-labelledby={`desktop-model-provider-${group.providerId ?? 'other'}`} style={groupIndex === 0 ? undefined : { marginTop: 5, paddingTop: 5, borderTop: `0.5px solid ${t.border}` }}>
                           <div id={`desktop-model-provider-${group.providerId ?? 'other'}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px 5px', color: t.text3, fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
                             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{group.providerLabel}</span>
-                            {connectionLabel && <span title={`${group.providerLabel}: ${connectionLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, color: connected ? t.ok : connectionLabel === 'Checking…' ? t.text4 : t.warn, fontSize: 9.5, fontWeight: 600, letterSpacing: 0, textTransform: 'none' }}><span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 99, background: 'currentColor' }} />{connectionLabel}</span>}
+                            {connectionLabel && <span title={`${group.providerLabel}: ${connectionLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, color: connected ? t.ok : connectionLabel === tr('cron_reconciling_progress') ? t.text4 : t.warn, fontSize: 9.5, fontWeight: 600, letterSpacing: 0, textTransform: 'none' }}><span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 99, background: 'currentColor' }} />{connectionLabel}</span>}
                           </div>
                           {modelBillingGroups(group, bridge.desktop.modelDetails).map((billingGroup, billingIndex) => (
                             <div key={billingGroup.label ?? 'all'} style={billingIndex === 0 ? undefined : { marginTop: 4, paddingTop: 4, borderTop: `0.5px solid ${t.border}` }}>
@@ -3876,7 +3860,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                                 const unavailable = selection.kind === 'loading';
                                 const requiresConnection = selection.kind === 'connect';
                                 return (
-                                  <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} disabled={unavailable} aria-disabled={unavailable} title={unavailable ? 'Checking provider connection…' : requiresConnection ? `Connect ${providerById(selection.providerId)?.label ?? selection.providerId} in Settings to use this model` : entry.requestModel} onClick={() => {
+                                  <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} disabled={unavailable} aria-disabled={unavailable} title={unavailable ? tr('desktop_chat_checking_provider') : requiresConnection ? tr('desktop_chat_connect_provider', providerById(selection.providerId)?.label ?? selection.providerId) : entry.requestModel} onClick={() => {
                                     if (selection.kind === 'loading') return;
                                     setModelOpen(false);
                                     setModelSubmenu(null);
@@ -3885,7 +3869,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                                   }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: unavailable ? t.text4 : requiresConnection ? t.text2 : t.text, textAlign: 'left', cursor: unavailable ? 'wait' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: unavailable ? .68 : 1 }} onMouseEnter={(event) => { if (!active && !unavailable) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !unavailable) event.currentTarget.style.background = 'transparent'; }}>
                                     {unavailable ? <span className="beta-spinner" aria-hidden="true" style={{ width: 11, height: 11, borderWidth: 1.5, color: t.text4 }} /> : requiresConnection ? <Icon name="lock" size={14} color={t.warn} /> : entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
                                     <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{modelDisplayLabel(entry, bridge.desktop.modelDetails)}</span>
-                                    {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>Connect in Settings</span>}
+                                    {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>{tr('desktop_chat_connect_settings')}</span>}
                                     {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
                                   </button>
                                 );
@@ -3898,10 +3882,10 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                     {filteredModelGroups.length === 0 && (
                       <div role="status" style={{ padding: '28px 16px 30px', color: t.text4, fontSize: 12, textAlign: 'center' }}>
                         {modelQuery.trim()
-                          ? `No models match “${modelQuery.trim()}”`
+                          ? tr('desktop_chat_no_models_query', modelQuery.trim())
                           : visibleModelReferences.length === 0
-                            ? 'No models are visible in this picker'
-                            : 'No models match your current filters'}
+                            ? tr('desktop_chat_no_visible_models')
+                            : tr('desktop_chat_no_filtered_models')}
                       </div>
                     )}
                   </div>
@@ -3909,8 +3893,8 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               )}
 
               {modelSubmenu === 'effort' && (
-                <div style={{ ...modelPickerSubmenuStyle(t, optionListPlacement), maxHeight: 'min(430px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Reasoning effort">
-                  {modelPickerSubmenuHeading(t, 'Effort', '5px 10px 8px', optionListPlacement, () => setModelSubmenu(null))}
+                <div style={{ ...modelPickerSubmenuStyle(t, optionListPlacement), maxHeight: 'min(430px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label={tr('desktop_reasoning_effort')}>
+                  {modelPickerSubmenuHeading(t, tr('composer_effort'), '5px 10px 8px', optionListPlacement, () => setModelSubmenu(null))}
                   {reasoningOptions.length > 0 ? reasoningOptions.map((option) => {
                     const active = reasoningSelectionKey(option.selection) === reasoningSelectionKey(selectedReasoning ?? { type: 'automatic' });
                     const disabled = reasoningControls?.spec.editable === false;
@@ -3920,19 +3904,19 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                         {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
                       </button>
                     );
-                  }) : <div style={{ padding: '5px 10px 10px', color: t.text4, fontSize: 11.5 }}>Effort is not configurable for this model.</div>}
+                  }) : <div style={{ padding: '5px 10px 10px', color: t.text4, fontSize: 11.5 }}>{tr('desktop_chat_effort_unavailable')}</div>}
                 </div>
               )}
 
               {modelSubmenu === 'speed' && fastModeAvailable && (
-                <div style={{ ...modelPickerSubmenuStyle(t, optionListPlacement), maxHeight: 'min(300px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Speed">
-                  {modelPickerSubmenuHeading(t, 'Speed', '5px 10px 8px', optionListPlacement, () => setModelSubmenu(null))}
+                <div style={{ ...modelPickerSubmenuStyle(t, optionListPlacement), maxHeight: 'min(300px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label={tr('desktop_speed')}>
+                  {modelPickerSubmenuHeading(t, tr('desktop_chat_speed'), '5px 10px 8px', optionListPlacement, () => setModelSubmenu(null))}
                   <button type="button" role="menuitemradio" aria-checked={!bridge.desktop.fastMode || !fastModeAvailable} disabled={!modelControlReady} onClick={() => invoke(() => bridge.setFastMode(false))} style={speedOptionStyle(t, !bridge.desktop.fastMode || !fastModeAvailable, !modelControlReady)}>
-                    <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Standard</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>Default speed</span></span>
+                    <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>{tr('desktop_chat_standard')}</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>{tr('desktop_chat_default_speed')}</span></span>
                     {(!bridge.desktop.fastMode || !fastModeAvailable) && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
                   </button>
                   {fastModeAvailable && <button type="button" role="menuitemradio" aria-checked={bridge.desktop.fastMode} disabled={!modelControlReady} onClick={() => invoke(() => bridge.setFastMode(true))} style={speedOptionStyle(t, bridge.desktop.fastMode, !modelControlReady)}>
-                    <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Fast</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>1.5x speed, more usage</span></span>
+                    <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>{tr('desktop_chat_fast')}</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>{tr('desktop_chat_fast_description')}</span></span>
                     {bridge.desktop.fastMode && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
                   </button>}
                 </div>
@@ -3941,15 +3925,15 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
             )}
           </div>
           {(inputAudioGate.visible || (voicePrefs.recognition.source === 'provider' && bridge.audioSnapshot?.capabilities?.supported_operations.includes('record'))) && (
-          <button type="button" disabled={!ready || flowMode} className="composer-icon-action" aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
+          <button type="button" disabled={!ready || flowMode} className="composer-icon-action" aria-label={voiceState === 'listening' && !flowMode ? tr('desktop_chat_stop_recording') : tr('desktop_chat_start_recording')} title={voiceState === 'unsupported' ? tr('desktop_chat_voice_unavailable') : voiceState === 'denied' ? tr('desktop_chat_microphone_denied') : tr('composer_record')} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
           )}
           {(conversationAudioGate.visible || bridge.audioSnapshot?.capabilities?.supported_operations.includes('record')) && !canStop && !hasPrompt && <button
             type="button"
             disabled={!ready}
             className="composer-icon-action"
-            aria-label={flowMode ? '关闭心流模式' : '开启心流模式'}
+            aria-label={flowMode ? tr('voice_close_flow_mode_a11y') : tr('composer_flow_mode')}
             aria-pressed={flowMode}
-            title={flowMode ? '关闭心流模式' : '开启心流模式'}
+            title={flowMode ? tr('voice_close_flow_mode_a11y') : tr('composer_flow_mode')}
             onClick={toggleFlowMode}
             style={{ ...composerPrimaryActionStyle(t, ready), color: flowMode ? t.accent : t.text }}
           >
@@ -3966,8 +3950,8 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                 disabled={!ready || !hasPrompt || flowMode}
                 tabIndex={hasPrompt ? 0 : -1}
                 onClick={() => { void submit(); }}
-                aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
-                title={bridge.running ? 'Send as pending message' : 'Send prompt'}
+                aria-label={bridge.running ? tr('desktop_send_pending') : tr('desktop_send_prompt')}
+                title={bridge.running ? tr('desktop_send_as_pending') : tr('desktop_send_prompt')}
                 style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
               ><Icon name="arrowU" size={18} color="currentColor" /></button>
             </span>
@@ -4023,7 +4007,7 @@ function modelPickerSubmenuHeading(
     <button
       type="button"
       onClick={onBack}
-      aria-label={`Back to model settings from ${label}`}
+      aria-label={tr('desktop_chat_back_model_settings', label)}
       style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, width: '100%', padding, border: 0, background: 'transparent', color: t.text3, font: 'inherit', fontSize: 12, fontWeight: 600, textAlign: 'left', cursor: 'pointer' }}
     >
       <Icon name="chevronL" size={13} color="currentColor" stroke={2} />
@@ -4061,12 +4045,12 @@ export function BetaTasks({ bridge, onClose }: { bridge: UseBridge; onClose(): v
   return (
     <aside style={{ width: 330, flexShrink: 0, borderLeft: `0.5px solid ${t.border}`, background: t.sidebarBg, display: 'flex', flexDirection: 'column' }}>
       <div style={{ height: 52, display: 'flex', alignItems: 'center', padding: '0 12px 0 15px', borderBottom: `0.5px solid ${t.border}` }}>
-        <span style={{ flex: 1, fontSize: 12.5, fontWeight: 650, color: t.text }}>Background tasks</span>
-        <Button onClick={() => invoke(bridge.refreshTasks)} title="Refresh tasks"><Icon name="git" size={13} /></Button>
-        <button type="button" onClick={onClose} aria-label="Close tasks" style={{ marginLeft: 6, border: 0, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="x" size={14} /></button>
+        <span style={{ flex: 1, fontSize: 12.5, fontWeight: 650, color: t.text }}>{tr('desktop_chat_background_tasks')}</span>
+        <Button onClick={() => invoke(bridge.refreshTasks)} title={tr('desktop_chat_refresh_tasks')}><Icon name="git" size={13} /></Button>
+        <button type="button" onClick={onClose} aria-label={tr('desktop_chat_close_tasks')} style={{ marginLeft: 6, border: 0, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="x" size={14} /></button>
       </div>
       <div style={{ flex: 1, overflow: 'auto', padding: 9 }}>
-        {tasks.length === 0 ? <div style={{ padding: 18, color: t.text4, fontSize: 11.5 }}>No background tasks reported.</div> : tasks.map((task) => {
+        {tasks.length === 0 ? <div style={{ padding: 18, color: t.text4, fontSize: 11.5 }}>{tr('desktop_chat_no_tasks')}</div> : tasks.map((task) => {
           const running = task.status.type === 'running';
           const selectedTask = selected === task.task_id;
           const color = task.status.type === 'completed'
@@ -4092,15 +4076,15 @@ export function BetaTasks({ bridge, onClose }: { bridge: UseBridge; onClose(): v
                 <span className="background-task-row-heading">
                   <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 99, background: color, flexShrink: 0 }} />
                   <strong style={{ fontSize: 11.5 }}>{task.task_type}</strong>
-                  <span className={running ? 'running-sweep' : undefined} style={{ marginLeft: 'auto', color, fontSize: 10 }}>{task.status.type}</span>
+                  <span className={running ? 'running-sweep' : undefined} style={{ marginLeft: 'auto', color, fontSize: 10 }}>{tr(({ pending: 'chat_plan_state_pending', running: 'chat_status_running', completed: 'chat_status_completed', failed: 'chat_status_failed', cancelled: 'chat_status_cancelled', killed: 'chat_run_status_cancelled' } as Record<string, string>)[task.status.type] ?? task.status.type)}</span>
                 </span>
                 <span className={running ? 'background-task-row-description running-sweep' : 'background-task-row-description'}>{task.description}</span>
               </button>
-              {running && <button type="button" className="background-task-stop" onClick={() => invoke(() => bridge.stopTask(task.task_id))}>Stop task</button>}
+              {running && <button type="button" className="background-task-stop" onClick={() => invoke(() => bridge.stopTask(task.task_id))}>{tr('desktop_chat_stop_task')}</button>}
             </div>
           );
         })}
-        {output && <pre className="mono" style={{ marginTop: 10, padding: 10, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.windowBg, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.55 }}>{output.content || '(No output yet)'}{output.truncated ? `\n\n…output truncated (${output.totalLines} total lines)` : ''}</pre>}
+        {output && <pre className="mono" style={{ marginTop: 10, padding: 10, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.windowBg, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.55 }}>{output.content || tr('desktop_chat_no_output')}{output.truncated ? `\n\n${tr('desktop_chat_output_truncated', output.totalLines)}` : ''}</pre>}
       </div>
     </aside>
   );

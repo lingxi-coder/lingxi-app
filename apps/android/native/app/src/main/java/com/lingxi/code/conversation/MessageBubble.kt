@@ -91,7 +91,8 @@ fun MessageBubble(
         // A subagent's dispatch prompt arrives as the first USER bubble of its
         // child transcript and runs to thousands of characters. Same policy and
         // the same two strings as the assistant branch below.
-        val peer = remember(message.text) { crossSessionMessage(message.text) }
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val peer = remember(message.text, context) { crossSessionMessage(message.text, conversationStrings(context)) }
         val displayText = peer?.text ?: message.text
         val isCollapsible = remember(displayText) {
             AssistantMessageCollapsePolicy.shouldCollapse(displayText, isUser = true)
@@ -262,7 +263,7 @@ private fun AttachedImages(images: List<ImageRefDto>) {
             if (bitmap != null) {
                 Image(
                     bitmap = bitmap,
-                    contentDescription = "Attached image ${index + 1}",
+                    contentDescription = stringResource(R.string.chat_attached_image_fmt, index + 1),
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                     modifier = Modifier
                         .size(116.dp)
@@ -540,9 +541,8 @@ private fun UserMessageActions(message: Message) {
             copied = false
         }
     }
-    val clock = message.sentAtMs?.let {
-        java.text.SimpleDateFormat("h:mm a", java.util.Locale.US).format(java.util.Date(it))
-    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val clock = message.sentAtMs?.let { android.text.format.DateFormat.getTimeFormat(context).format(java.util.Date(it)) }
     Row(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,

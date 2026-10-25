@@ -1,3 +1,4 @@
+import { withDesktopLocale } from './support/language';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -33,13 +34,13 @@ const client = { plugin: 'status-plugin', key: 'status', module: 'surface/status
 const noOp = () => undefined;
 
 function render(tree: unknown, interactionsEnabled = true): string {
-  return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, React.createElement(ModUiClientTree, {
+  return withDesktopLocale('en', () => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, React.createElement(ModUiClientTree, {
     tree,
     site,
     client,
     onPress: noOp,
     interactionsEnabled,
-  })));
+  }))));
 }
 
 test('renders the eight Native Client surface node kinds as inert JSON-backed React nodes', () => {

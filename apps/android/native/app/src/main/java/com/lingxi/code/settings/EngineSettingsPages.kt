@@ -5,8 +5,10 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.BuildConfig
+import com.lingxi.code.R
 import com.lingxi.code.theme.LingXiTheme
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -93,11 +95,12 @@ internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onR
                     .put("files", JSONArray(snapshot.filesJson ?: "[]")).put("locked", JSONArray(snapshot.locked.orEmpty()))
                     .put("mergedKeys", JSONArray(snapshot.mergedKeys.orEmpty()))
                 clipboard.setText(androidx.compose.ui.text.AnnotatedString(report.toString(2)))
-            }) { Text("Copy diagnostics") }
+            }) { Text(stringResource(R.string.settings_diagnostics_copy)) }
             Text(settingsLabel("Configuration files"))
             SelectionContainer { Text(prettyJson(snapshot.filesJson ?: "[]")) }
-            Text("Managed keys: ${snapshot.locked.orEmpty().joinToString().ifBlank { "None" }}")
-            Text("Merged keys: ${snapshot.mergedKeys.orEmpty().joinToString().ifBlank { "None" }}")
+            val none = stringResource(R.string.common_none)
+            Text(stringResource(R.string.settings_diagnostics_managed_keys_fmt, snapshot.locked.orEmpty().joinToString().ifBlank { none }))
+            Text(stringResource(R.string.settings_diagnostics_merged_keys_fmt, snapshot.mergedKeys.orEmpty().joinToString().ifBlank { none }))
             return@Column
         }
         SingleChoiceRow(listOf("user", "project", "local", "managed"), layer, { layer = it })
@@ -141,15 +144,15 @@ internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onR
             var error by remember(layer, key) { mutableStateOf<String?>(null) }
             SettingsSection(label = key) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(if (key in snapshot.mergedKeys.orEmpty()) "Effective: merged across layers" else "Source: ${provenance.optString(key, "defaults")}")
-                    SelectionContainer { Text(settingsLabel("Effective value: ${prettyJsonValue(effective.opt(key))}"), color = LingXiTheme.palette.text4) }
-                    if (readOnly) Text(if (raw == null) "Layer data unavailable" else "Managed policy: read-only")
+                    Text(if (key in snapshot.mergedKeys.orEmpty()) stringResource(R.string.settings_effective_merged) else stringResource(R.string.settings_source_fmt, settingsLabel(provenance.optString(key, "defaults"))))
+                    SelectionContainer { Text("${settingsLabel("Effective value")}: ${prettyJsonValue(effective.opt(key))}", color = LingXiTheme.palette.text4) }
+                    if (readOnly) Text(settingsLabel(if (raw == null) "Layer data unavailable" else "Managed policy: read-only"))
                     androidx.compose.runtime.key(state.generation, route, layer, key) {
                         TypedSettingField(key, draft.value, { draft.edit(it); error = null }, readOnly, state.models)
                     }
                     if (draft.externalChange) Text(settingsLabel("This layer changed while you were editing. Review your draft before saving."))
                     if (draft.dirty) TextButton(onClick = { draft.reset(rawValue) }) { Text(settingsLabel("Discard draft and reload")) }
-                    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    error?.let { Text(settingsLabel(it), color = MaterialTheme.colorScheme.error) }
                     Button(enabled = !readOnly, onClick = {
                         scope.launch {
                             runCatching {
@@ -171,7 +174,7 @@ internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onR
                                 } else bridge.update(layer, patch)
                             }.onFailure { error = it.message }
                         }
-                    }) { Text(settingsLabel("Save to $layer")) }
+                    }) { Text(stringResource(R.string.settings_save_to_layer_fmt, settingsLabel(layer))) }
                 }
             }
         }
@@ -208,7 +211,7 @@ internal fun prettyJsonValue(value: Any?): String = when (value) {
 internal fun NativeAboutPage(onLicenses: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(settingsLabel("LingXi"))
-        Text(settingsLabel("Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"))
+        Text(stringResource(R.string.settings_about_version_fmt, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toString()))
         Text(settingsLabel("Android · ${BuildConfig.DISTRIBUTION_CHANNEL}"))
         TextButton(onClick = onLicenses) { Text(settingsLabel("Open-source licenses")) }
     }

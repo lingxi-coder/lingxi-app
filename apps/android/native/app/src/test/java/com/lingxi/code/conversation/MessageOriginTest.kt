@@ -17,4 +17,10 @@ class MessageOriginTest {
         assertNull(crossSessionMessage("<cross-session-message>hi"))
         assertNull(crossSessionMessage("<cross-session-messages>hi</cross-session-message>"))
     }
+
+    @Test fun resolvesOriginInTheSelectedLanguage() {
+        val strings = ConversationStrings { _, _, args -> if (args.isEmpty()) "From another session" else "From another session · ${args[0]}" }
+        assertEquals("From another session", crossSessionMessage("<cross-session-message>hello</cross-session-message>", strings)?.label)
+        assertEquals("From another session · Alice", crossSessionMessage("<cross-session-message from-name=\"Alice\">hello</cross-session-message>", strings)?.label)
+    }
 }

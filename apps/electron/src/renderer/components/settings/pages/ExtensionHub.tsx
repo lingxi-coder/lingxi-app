@@ -1,3 +1,4 @@
+import { tr } from '../../../i18n/locale';
 import { useEffect, useRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { useT } from '../../../theme/ThemeContext';
@@ -131,6 +132,6 @@ export function ExtensionHubHeader({ title, description, search, onSearch, actio
 }) {
   return <header className="extension-hub-header">
     <div className="extension-hub-heading"><p>{description}</p></div>
-    <div className="extension-hub-toolbar"><label className="extension-search-field"><ExtensionGlyph name="search" size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={`Search ${title.toLowerCase()}`} aria-label={`Search ${title.toLowerCase()}`} /></label><div className="extension-hub-toolbar-actions">{actions}</div></div>
+    <div className="extension-hub-toolbar"><label className="extension-search-field"><ExtensionGlyph name="search" size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={tr('desktop_shell_search_named', title)} aria-label={tr('desktop_shell_search_named', title)} /></label><div className="extension-hub-toolbar-actions">{actions}</div></div>
   </header>;
 }

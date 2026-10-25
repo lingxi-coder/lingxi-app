@@ -1,3 +1,5 @@
+import { withDesktopLocale } from './support/language';
+import type { DesktopLocale } from '../src/renderer/i18n/locale';
 /**
  * Rendered-markup tests for the transcript cards.
  *
@@ -61,10 +63,10 @@ import {
   type ToolRunItem,
 } from '../src/renderer/model/runItem';
 
-function render(node: React.ReactElement): string {
-  return renderToStaticMarkup(
+function render(node: React.ReactElement, locale: DesktopLocale = 'en'): string {
+  return withDesktopLocale(locale, () => renderToStaticMarkup(
     React.createElement(Theme.Provider, { value: tokens(true) }, node),
-  );
+  ));
 }
 
 function renderWithModUiHost(node: React.ReactElement): string {
@@ -1088,8 +1090,8 @@ test('the error mark is a ringed icon, not the old bare dot', () => {
   // The inline dot must not double up with the ringed mark. It covers the error
   // state only where that mark is suppressed — the pinned section, whose row
   // keeps the pin/archive actions in the same trailing slot.
-  assert.match(sidebar, /attention && \(pinnedSection \|\| attention\.label !== 'Session error'\) \? <span/, 'the inline dot skips the error state outside the pinned section');
-  assert.match(sidebar, /!pinnedSection && attention\?\.label === 'Session error' && \(/, 'and the ringed mark is suppressed exactly there');
+  assert.match(sidebar, /attention && \(pinnedSection \|\| attention\.kind !== 'error'\) \? <span/, 'the inline dot skips the error state outside the pinned section');
+  assert.match(sidebar, /!pinnedSection && attention\?\.kind === 'error' && \(/, 'and the ringed mark is suppressed exactly there');
 });
 
 test('a cold-restored user message renders its original clock under the bubble', () => {

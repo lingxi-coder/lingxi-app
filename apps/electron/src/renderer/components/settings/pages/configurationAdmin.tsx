@@ -1,3 +1,4 @@
+import { tr } from '../../../i18n/locale';
 import { useMemo } from 'react';
 import type { ReactNode } from 'react';
 import type { useT } from '../../../theme/ThemeContext';
@@ -124,9 +125,9 @@ export function domainOperation(operations: Partial<Record<ConfigurationDomainDt
 }
 
 export function operationTone(effect: ConfigurationEffectDto): { color: string; label: string } {
-  if (effect === 'applied') return { color: '#0f9d58', label: '已应用' };
-  if (effect === 'restart_required') return { color: '#ff9800', label: '需重启' };
-  return { color: '#757575', label: '仅校验' };
+  if (effect === 'applied') return { color: '#0f9d58', label: tr('settings_provider_applied') };
+  if (effect === 'restart_required') return { color: '#ff9800', label: tr('desktop_shell_restart_required') };
+  return { color: '#757575', label: tr('desktop_shell_validated_only') };
 }
 
 export function managerShellStyle(t: Tokens) {
@@ -275,13 +276,13 @@ export function DomainOperationBanner({
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 4 }}>
         <span style={{ fontWeight: 700 }}>{fallbackDomainLabel}</span>
         <span style={pillStyle(t, operation.status === 'failed' ? 'danger' : operation.status === 'succeeded' ? 'success' : 'neutral')}>
-          {operation.status}
+          {operation.status === 'failed' ? tr('desktop_shell_operation_failed') : operation.status === 'succeeded' ? tr('desktop_shell_operation_succeeded') : operation.status}
         </span>
         <span style={{ ...pillStyle(t, operation.effect === 'restart_required' ? 'warn' : operation.effect === 'applied' ? 'success' : 'neutral'), color: effect.color }}>
           {effect.label}
         </span>
       </div>
-      <div>{operation.message ?? '配置操作已更新。'}</div>
+      <div>{operation.message ?? tr('desktop_shell_operation_updated')}</div>
     </div>
   );
 }

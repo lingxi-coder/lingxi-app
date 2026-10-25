@@ -1,3 +1,7 @@
+import { nativeTr, setNativeLocale } from '../src/shared/nativeLocale';
+
+setNativeLocale('zh-Hans');
+
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ManualClock, randomId } from '@lingxi/bridge-client/remote';
@@ -54,6 +58,26 @@ function request(overrides: Partial<ApprovalRequest> = {}): { request: ApprovalR
 }
 
 const denied = (reason: string): ApprovalOutcome => ({ allowed: false, reason } as ApprovalOutcome);
+
+test('five-language pairing copy keeps device data and deny defaults unchanged', async () => {
+  try {
+    for (const locale of ['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko'] as const) {
+      setNativeLocale(locale);
+      const { fake, dialog } = setup();
+      const pending = dialog.request(request({ deviceName: 'Device %2$s 日本語', platform: 'web', pairingCode: '042713' }).request);
+      const box = fake.boxes[0]!;
+      assert.ok(box.message.includes('Device %2$s 日本語'));
+      assert.ok(box.detail.includes('042 713'));
+      assert.ok(box.detail.includes(nativeTr('native_remote_browser')));
+      assert.deepEqual(box.buttons, [nativeTr('permission_allow'), nativeTr('permission_deny')]);
+      assert.equal(box.defaultId, 1);
+      assert.equal(box.cancelId, 1);
+      fake.answer(1);
+      assert.deepEqual(await pending, denied('denied'));
+      dialog.dispose();
+    }
+  } finally { setNativeLocale('zh-Hans'); }
+});
 
 test('the dialog names the device, shows the pairing code and defaults to Deny', async () => {
   const { fake, dialog } = setup();

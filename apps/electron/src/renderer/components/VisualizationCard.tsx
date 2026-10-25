@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 /**
  * One inline visualization in the transcript.
  *
@@ -101,6 +103,7 @@ type Phase = 'idle' | 'loading' | 'ready' | 'unavailable' | 'crashed';
 
 export const VisualizationCard = memo(function VisualizationCard({ sessionId, reference, onFollowup, startExpanded = false, onClose }: CardProps) {
   const t = useT();
+  useI18n();
   const theme = useMemo(() => visualizationTheme(t), [t]);
   const container = useRef<HTMLDivElement | null>(null);
   const panel = useRef<HTMLDialogElement | null>(null);
@@ -325,7 +328,7 @@ export const VisualizationCard = memo(function VisualizationCard({ sessionId, re
 
   const unavailable = phase === 'unavailable';
   const pending = phase !== 'ready';
-  const label = title || 'Visualization';
+  const label = title || tr("visualization_label");
   const variables = {
     '--viz-background': t.transcriptBg,
     '--viz-muted-background': t.surfaceHover,
@@ -352,8 +355,8 @@ export const VisualizationCard = memo(function VisualizationCard({ sessionId, re
           <span className="visualization-title" title={label}>{label}</span>
           <button ref={expandButton} type="button" className="visualization-action"
             onClick={() => setExpandedState(!expanded)}
-            aria-label={expanded ? 'Close expanded visualization' : 'Expand visualization'}
-            title={expanded ? 'Close' : 'Expand'}>
+            aria-label={expanded ? tr("desktop_ui_close_visualization") : tr("visualization_expand")}
+            title={expanded ? tr("visualization_close") : tr("chat_run_expand")}>
             <Icon name={expanded ? 'x' : 'expand'} size={16} />
           </button>
         </header>
@@ -368,11 +371,11 @@ export const VisualizationCard = memo(function VisualizationCard({ sessionId, re
           />}
           {(pending || !active) && <div className="visualization-state" role="status">
             <Icon name={unavailable ? 'info' : 'visualization'} size={20} />
-            <span>{unavailable ? 'Visualization unavailable in this conversation.'
-              : phase === 'crashed' ? 'Reloading visualization…' : 'Loading visualization…'}</span>
+            <span>{unavailable ? tr("desktop_ui_visualization_missing")
+              : phase === 'crashed' ? tr("desktop_ui_visualization_reloading") : tr("visualization_loading")}</span>
             {unavailable && <button type="button" className="visualization-retry" onClick={() => {
               retire(); setPhase('loading'); setActive(true); setAttempt((value) => value + 1);
-            }}>Try again</button>}
+            }}>{tr("desktop_ui_retry")}</button>}
           </div>}
         </div>
       </dialog>
@@ -383,11 +386,12 @@ export const VisualizationCard = memo(function VisualizationCard({ sessionId, re
 /** A slot whose reference line is still streaming. */
 export function VisualizationPlaceholder() {
   const t = useT();
+  useI18n();
   return (
     <div className="visualization-card visualization-pending" aria-busy="true"
       style={{ borderColor: t.border, color: t.text3 }}>
       <Icon name="visualization" size={18} />
-      <span>Preparing visualization…</span>
+      <span>{tr("visualization_preparing")}</span>
     </div>
   );
 }
@@ -395,11 +399,12 @@ export function VisualizationPlaceholder() {
 /** A widget whose revision could not be published or was removed. */
 export function VisualizationUnavailable() {
   const t = useT();
+  useI18n();
   return (
     <div className="visualization-card visualization-unavailable" role="note"
       style={{ borderColor: t.border, color: t.text3 }}>
       <Icon name="info" size={18} />
-      <span>This visualization is no longer available.</span>
+      <span>{tr("visualization_unavailable")}</span>
     </div>
   );
 }
@@ -407,13 +412,14 @@ export function VisualizationUnavailable() {
 /** The widget a user message followed up on, shown above its bubble. */
 export function VisualizationContextBadge({ chip, onDismiss }: { chip: VisualizationContextChip; onDismiss?: () => void }) {
   const t = useT();
+  useI18n();
   return (
-    <span className="visualization-context-chip" title={`About visualization: ${chip.title}`}
+    <span className="visualization-context-chip" title={tr('desktop_ui_visualization_about', chip.title)}
       style={{ display: 'inline-flex', alignItems: 'center', gap: 6, maxWidth: 320, borderRadius: 999, border: `1px solid ${t.border}`,
         background: t.surface, color: t.text2, fontSize: 12, padding: '2px 8px' }}>
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{chip.title || 'Visualization'}</span>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{chip.title || tr("visualization_label")}</span>
       {onDismiss && (
-        <button type="button" onClick={onDismiss} aria-label="Remove visualization context"
+        <button type="button" onClick={onDismiss} aria-label={tr("visualization_remove_context")}
           style={{ border: 0, background: 'transparent', color: t.text3, cursor: 'pointer', padding: 0, fontSize: 12 }}>×</button>
       )}
     </span>

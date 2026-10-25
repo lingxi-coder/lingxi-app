@@ -4,8 +4,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.lingxi.code.R
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -28,7 +30,7 @@ internal fun EngineCredentialsPage(bridge: SettingsEngineBridge, onMobileProfile
         TextButton(enabled = !busy, onClick = onMobileProfiles) { Text(settingsLabel("Manage provider credentials")) }
         if (!state.connected) { Text(settingsLabel("Connect an engine to view and edit its configuration. Device settings remain available.")); return@Column }
         state.credentialStorageEncrypted?.let { encrypted ->
-            Text(if (encrypted) "Encrypted credential storage" else "Secure credential storage unavailable")
+            Text(stringResource(if (encrypted) R.string.settings_credential_storage_encrypted else R.string.settings_credential_storage_unavailable))
         }
         state.credentialStatusError?.let { Text(it,color=MaterialTheme.colorScheme.error) }
         ids.forEach { id ->
@@ -39,8 +41,8 @@ internal fun EngineCredentialsPage(bridge: SettingsEngineBridge, onMobileProfile
             })
             TextButton(enabled = !busy, onClick = { provider=id; secret="" }) { Text("$id · $statusLabel") }
         }
-        OutlinedTextField(provider,{provider=it},enabled=!busy,label={Text("Provider / profile ID")},singleLine=true,modifier=Modifier.fillMaxWidth())
-        OutlinedTextField(secret,{secret=it},enabled=!busy,label={Text("API key")},singleLine=true,visualTransformation=PasswordVisualTransformation(),modifier=Modifier.fillMaxWidth())
+        OutlinedTextField(provider,{provider=it},enabled=!busy,label={Text(stringResource(R.string.settings_credential_profile_id))},singleLine=true,modifier=Modifier.fillMaxWidth())
+        OutlinedTextField(secret,{secret=it},enabled=!busy,label={Text(stringResource(R.string.settings_provider_api_key))},singleLine=true,visualTransformation=PasswordVisualTransformation(),modifier=Modifier.fillMaxWidth())
         Button(enabled=!busy && provider.isNotBlank() && secret.isNotBlank(),onClick={
             if (!submitting && !bridge.state.value.credentialSaving) {
                 val submittedProvider = provider
@@ -67,7 +69,7 @@ internal fun EngineCredentialsPage(bridge: SettingsEngineBridge, onMobileProfile
         state.notice?.let { Text(it) }
     }
     deletionProvider?.let { target ->
-        AlertDialog(onDismissRequest={deletionProvider=null},title={Text("Remove credential for $target?")},
+        AlertDialog(onDismissRequest={deletionProvider=null},title={Text(stringResource(R.string.settings_credential_remove_fmt, target))},
             confirmButton={TextButton(enabled=!busy,onClick={
                 if (!submitting && !bridge.state.value.credentialSaving) {
                     val generation = state.generation

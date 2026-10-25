@@ -8,10 +8,10 @@ import { test } from 'node:test';
 
 import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
+import electronBinary from 'electron';
 
 const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
-const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'settings-screen-electron.mjs');
 
 async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_SCREEN_THEME === 'dark' ? 'dark' : 'light') {
@@ -35,7 +35,7 @@ async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_
     const address = vite.httpServer?.address();
     assert.ok(address && typeof address === 'object' && address.port, 'Vite fixture server did not bind a port');
     const fixtureUrl = `http://127.0.0.1:${address.port}/settings-screen-fixture.html?theme=${fixtureTheme}`;
-    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
+    child = spawn(electronBinary, [electronDriver, fixtureUrl], {
       cwd: electronRoot,
       env: {
         ...process.env,
@@ -52,7 +52,7 @@ async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_
     return await new Promise((resolveResult, rejectResult) => {
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
-        rejectResult(new Error(`Electron SettingsScreen "${scenario}" fixture timed out\n${childError.join('')}`));
+        rejectResult(new Error(`Electron SettingsScreen "${scenario}" fixture timed out\n${childOutput.join('')}\n${childError.join('')}`));
       }, 20_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
@@ -251,9 +251,9 @@ test('settings excludes background window dragging and Back responds to mouse in
 
 test('the settings-focus behavior starts at Back, traverses search, and restores the opener on return', async () => {
   const { onMount, afterForwardTab, afterBackwardTab, afterClose } = await runScenario('focus-trap');
-  assert.equal(onMount.activeElementAriaLabel, 'Back to app', 'mounting an aria-modal dialog must move focus INTO it, not leave it in the background');
+  assert.equal(onMount.activeElementAriaLabel, '返回应用', 'mounting an aria-modal dialog must move focus INTO it, not leave it in the background');
   assert.equal(afterForwardTab.activeElementAriaLabel, '搜索设置', 'Tab from Back moves to search');
-  assert.equal(afterBackwardTab.activeElementAriaLabel, 'Back to app', 'Shift+Tab from search returns to Back');
+  assert.equal(afterBackwardTab.activeElementAriaLabel, '返回应用', 'Shift+Tab from search returns to Back');
   assert.equal(afterClose.activeElementId, 'opener', 'closing must restore focus to whatever had it before the dialog mounted');
 });
 
@@ -435,4 +435,17 @@ test('Plugins, MCP and Skills share settings chrome while preserving catalogs, d
     assert.equal(applied.command.revision, 'a'.repeat(64));
     assert.deepEqual(JSON.parse(applied.command.payload_json), { action: 'install', plugin: 'review@acme', scope: 'user', confirmed: true });
   }
+});
+
+
+test('language selection updates mounted settings, persists across reloads, and follows system/cross-window changes', async () => {
+  const { rows, localizedSearch, restored, system, synced } = await runScenario('localization');
+  assert.deepEqual(rows.map(row => row.locale), ['en', 'ja', 'ko', 'zh-Hant', 'zh-Hans']);
+  assert.deepEqual(rows.map(row => row.navigation), ['General', '一般', '일반', '一般', '通用']);
+  assert.deepEqual(rows.map(row => row.search), ['Search settings', '設定を検索', '설정 검색', '搜尋設定', '搜索设置']);
+  for (const row of rows) { assert.equal(row.sameSelect, true); assert.equal(row.selected, row.locale); assert.equal(row.overflow, false, row.locale); }
+  assert.deepEqual(localizedSearch, { before: false, after: true, query: '音声' });
+  assert.equal(restored, 'en');
+  assert.deepEqual(system, { lang: 'ja', preference: '' });
+  assert.equal(synced, 'ko');
 });

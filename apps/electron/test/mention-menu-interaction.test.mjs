@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import electronBinary from 'electron';
 import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
 
@@ -18,7 +19,7 @@ test('real Electron @ menu shares slash geometry and preserves complete referenc
     await server.listen();
     const address = server.httpServer.address();
     assert(address && typeof address !== 'string');
-    child = spawn(process.execPath, [join(root, 'node_modules/electron/cli.js'), join(fixture, 'mention-menu-electron.mjs'), `http://127.0.0.1:${address.port}/composer-draft-fixture.html?mentions`], {
+    child = spawn(electronBinary, [join(fixture, 'mention-menu-electron.mjs'), `http://127.0.0.1:${address.port}/composer-draft-fixture.html?mentions`], {
       cwd: root, env: { ...process.env, LINGXI_TEST_USER_DATA: userData }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let output = '';

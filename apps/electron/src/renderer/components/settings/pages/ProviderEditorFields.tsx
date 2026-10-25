@@ -1,3 +1,5 @@
+import { useI18n } from '../../../i18n/useI18n';
+import { tr } from '../../../i18n/locale';
 import { useRef, useState } from 'react';
 import { useT } from '../../../theme/ThemeContext';
 import { SUPPORTED_PROVIDER_TYPES, type CustomProviderDraft, type CustomProviderModelDraft } from './customProviderImport';
@@ -10,6 +12,7 @@ export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft,
   draft: CustomProviderDraft; onDraft(value: CustomProviderDraft): void;
   apiKey: string; onApiKey(value: string): void; credentialConfigured?: boolean; envOnly?: boolean; hostManagedCredentials?: boolean;
 }) {
+  useI18n();
   const t = useT();
   const pricingIds = useRef(draft.models.map((model) => typeof model.id === 'string' ? model.id.trim() : ''));
   const [authMode, setAuthMode] = useState(envOnly ? 'env' : apiKey.trim() ? 'key' : draft.apiKeyEnv ? 'env' : 'key');
@@ -18,68 +21,66 @@ export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft,
   const field = { display: 'grid', gap: 7, minWidth: 0, fontSize: 12.5, color: t.text3 };
   return <div style={{ display: 'grid', gap: 16, maxWidth: 860 }}>
     <div style={{ display: 'grid', gap: 14 }}>
-      <strong style={{ fontSize: 13 }}>基本信息</strong>
+      <strong style={{ fontSize: 13 }}>{tr('model_detail_basic')}</strong>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14 }}>
-        <label style={field}>Profile 名称<input aria-label="Profile 名称" readOnly={nameLocked} value={name} onChange={(event) => onName(event.target.value)} placeholder="例如 my-provider" style={input} /></label>
-        <label style={field}>协议<select aria-label="Provider 类型" value={draft.type} onChange={(event) => onDraft({ ...draft, type: event.target.value })} style={input}>
-          {!SUPPORTED_PROVIDER_TYPES.includes(draft.type as typeof SUPPORTED_PROVIDER_TYPES[number]) && <option value="">请选择协议</option>}
+        <label style={field}>{tr('desktop_settings_bfecf6eb84')}<input aria-label={tr('desktop_settings_bfecf6eb84')} readOnly={nameLocked} value={name} onChange={(event) => onName(event.target.value)} placeholder={tr('desktop_settings_9510b434c0')} style={input} /></label>
+        <label style={field}>{tr('settings_provider_protocol')}<select aria-label={tr('desktop_settings_95e1edbd5f')} value={draft.type} onChange={(event) => onDraft({ ...draft, type: event.target.value })} style={input}>
+          {!SUPPORTED_PROVIDER_TYPES.includes(draft.type as typeof SUPPORTED_PROVIDER_TYPES[number]) && <option value="">{tr('settings_provider_choose_protocol')}</option>}
           {SUPPORTED_PROVIDER_TYPES.map((type) => <option value={type} key={type}>{type}</option>)}
         </select></label>
       </div>
-      <label style={field}>{connections.length ? '服务地址 · Base URL（默认值，可被下方各连接覆盖）' : '服务地址 · Base URL'}<input aria-label="baseUrl" value={typeof draft.baseUrl === 'string' ? draft.baseUrl : ''} onChange={(event) => onDraft({ ...draft, baseUrl: event.target.value || undefined })} placeholder="https://api.example.com/v1" spellCheck={false} style={input} /></label>
-      {draft.type === 'azure-openai' && <label style={field}>API 版本<input aria-label="apiVersion" value={typeof draft.apiVersion === 'string' ? draft.apiVersion : ''} onChange={(event) => onDraft({ ...draft, apiVersion: event.target.value })} placeholder="2024-10-21" style={input} /></label>}
-      {draft.type === 'bedrock-claude' && <label style={field}>AWS Region<input aria-label="region" value={typeof draft.region === 'string' ? draft.region : ''} onChange={(event) => onDraft({ ...draft, region: event.target.value })} placeholder="us-east-1" style={input} /></label>}
+      <label style={field}>{connections.length ? tr('desktop_settings_be416cc922') : tr('desktop_settings_cc1781cdb6')}<input aria-label="baseUrl" value={typeof draft.baseUrl === 'string' ? draft.baseUrl : ''} onChange={(event) => onDraft({ ...draft, baseUrl: event.target.value || undefined })} placeholder="https://api.example.com/v1" spellCheck={false} style={input} /></label>
+      {draft.type === 'azure-openai' && <label style={field}>{tr('settings_provider_api_version')}<input aria-label="apiVersion" value={typeof draft.apiVersion === 'string' ? draft.apiVersion : ''} onChange={(event) => onDraft({ ...draft, apiVersion: event.target.value })} placeholder="2024-10-21" style={input} /></label>}
+      {draft.type === 'bedrock-claude' && <label style={field}>{tr('desktop_settings_aws_region')}<input aria-label="region" value={typeof draft.region === 'string' ? draft.region : ''} onChange={(event) => onDraft({ ...draft, region: event.target.value })} placeholder="us-east-1" style={input} /></label>}
     </div>
     <div style={{ display: 'grid', gap: 12 }}>
-      <strong style={{ fontSize: 13 }}>认证</strong>
-      <label style={field}>认证方式<select aria-label="认证方式" value={authMode} onChange={(event) => {
+      <strong style={{ fontSize: 13 }}>{tr('desktop_settings_d2d648bd1c')}</strong>
+      <label style={field}>{tr('desktop_settings_d1ff8f98bc')}<select aria-label={tr('desktop_settings_d1ff8f98bc')} value={authMode} onChange={(event) => {
         setAuthMode(event.target.value);
         if (event.target.value === 'key') onDraft({ ...draft, apiKeyEnv: undefined }); else onApiKey('');
-      }} style={input}>{!envOnly && <option value="key">直接填写 API Key</option>}<option value="env" disabled={hostManagedCredentials}>环境变量</option></select></label>
+      }} style={input}>{!envOnly && <option value="key">{tr('desktop_settings_af92b1c90b')}</option>}<option value="env" disabled={hostManagedCredentials}>{tr('desktop_settings_ae27b474ea')}</option></select></label>
       {envOnly && <span style={{ color: t.text3, fontSize: 12 }}>{hostManagedCredentials
-        ? '此 Profile 的环境变量认证不适用于本应用；请用新 Profile 保存 API Key。'
-        : '此旧版 Profile ID 仅支持环境变量认证，名称保持不变。'}</span>}
-      {authMode === 'key' ? <label style={field}>API Key<input aria-label="API Key" type="password" autoComplete="new-password" value={apiKey} onChange={(event) => onApiKey(event.target.value)} placeholder={credentialConfigured ? '•••••••• 已保存，留空保持不变' : '输入 API Key'} style={input} /></label>
-        : <label style={field}>环境变量名称<input aria-label="apiKeyEnv" disabled={hostManagedCredentials} value={typeof draft.apiKeyEnv === 'string' ? draft.apiKeyEnv : ''} onChange={(event) => onDraft({ ...draft, apiKeyEnv: event.target.value || undefined })} placeholder="MY_PROVIDER_API_KEY" spellCheck={false} style={input} /></label>}
-      {!hostManagedCredentials && authMode === 'key' && draft.apiKeyEnv && <span style={{ color: t.text3, fontSize: 12 }}>API Key 将优先使用，环境变量 {typeof draft.apiKeyEnv === 'string' ? draft.apiKeyEnv : ''} 保留为回退。</span>}
+        ? tr('desktop_settings_6c4934e558')
+        : tr('desktop_settings_63ab6c6735')}</span>}
+      {authMode === 'key' ? <label style={field}>{tr('settings_provider_api_key')}<input aria-label={tr('settings_provider_api_key')} type="password" autoComplete="new-password" value={apiKey} onChange={(event) => onApiKey(event.target.value)} placeholder={credentialConfigured ? tr('desktop_settings_9aca67d120') : tr('settings_provider_api_key_placeholder')} style={input} /></label>
+        : <label style={field}>{tr('desktop_settings_856fddd137')}<input aria-label="apiKeyEnv" disabled={hostManagedCredentials} value={typeof draft.apiKeyEnv === 'string' ? draft.apiKeyEnv : ''} onChange={(event) => onDraft({ ...draft, apiKeyEnv: event.target.value || undefined })} placeholder="MY_PROVIDER_API_KEY" spellCheck={false} style={input} /></label>}
+      {!hostManagedCredentials && authMode === 'key' && draft.apiKeyEnv && <span style={{ color: t.text3, fontSize: 12 }}>{tr('desktop_settings_environment_fallback', typeof draft.apiKeyEnv === 'string' ? draft.apiKeyEnv : '')}</span>}
       <span style={{ color: t.text4, fontSize: 12 }}>{hostManagedCredentials
-        ? '此应用不读取自定义环境变量。请保存 API Key，或用 credentialIds 引用已保存凭据。'
-        : '凭据按 Profile 名称保存在当前设备，跨配置层共享。已保存凭据优先于环境变量。'}</span>
+        ? tr('desktop_settings_f65e758fce')
+        : tr('desktop_settings_938cc1197f')}</span>
     </div>
     <div style={{ display: 'grid', gap: 12 }}>
-      <strong style={{ fontSize: 13 }}>连接方式</strong>
+      <strong style={{ fontSize: 13 }}>{tr('settings_provider_connections')}</strong>
       <span style={{ color: t.text4, fontSize: 12 }}>
-        同一个服务商可以有多种连接方式（国内 / 国外地址，或多把 Key）。每个连接可以单独设置地址、协议和认证，未填写的字段沿用上方设置。
-        请求会按顺序使用，前一个失败时自动切换到下一个。
-      </span>
+        {tr('desktop_settings_9e7c47bc4c')}</span>
       {connections.length === 0
-        ? <span style={{ color: t.text3, fontSize: 12 }}>当前只有一种连接方式，使用上方填写的地址与认证。</span>
+        ? <span style={{ color: t.text3, fontSize: 12 }}>{tr('settings_provider_connections_single')}</span>
         : connections.map((connection, index) => <div key={index} style={{ display: 'grid', gap: 10, padding: 12, borderRadius: 8, border: `1px solid ${t.border}` }}>
           <div style={{ display: 'flex', alignItems: 'end', gap: 8 }}>
-            <label style={{ ...field, flex: 1 }}>连接 ID {index + 1}<input aria-label={`连接 ID ${index + 1}`} value={typeof connection.id === 'string' ? connection.id : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { id: event.target.value }))} placeholder="例如 cn 或 intl" spellCheck={false} style={input} /></label>
-            <button type="button" aria-label={`移除连接 ${index + 1}`} style={ghostButtonStyle(t, false, true)} onClick={() => onDraft(removeProviderConnection(draft, index))}>移除</button>
+            <label style={{ ...field, flex: 1 }}>{tr('settings_provider_connection_id')} {index + 1}<input aria-label={tr('desktop_settings_d98b428a96', index + 1)} value={typeof connection.id === 'string' ? connection.id : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { id: event.target.value }))} placeholder={tr('desktop_settings_f80cc8f73e')} spellCheck={false} style={input} /></label>
+            <button type="button" aria-label={tr('desktop_settings_a5d30b277a', index + 1)} style={ghostButtonStyle(t, false, true)} onClick={() => onDraft(removeProviderConnection(draft, index))}>{tr('settings_parity_remove')}</button>
           </div>
-          <label style={field}>服务地址 · Base URL<input aria-label={`连接 ${index + 1} baseUrl`} value={typeof connection.baseUrl === 'string' ? connection.baseUrl : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { baseUrl: event.target.value || undefined }))} placeholder="https://api.example.cn/v1" spellCheck={false} style={input} /></label>
+          <label style={field}>{tr('desktop_settings_cc1781cdb6')}<input aria-label={tr('desktop_settings_b36cc73c68', index + 1)} value={typeof connection.baseUrl === 'string' ? connection.baseUrl : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { baseUrl: event.target.value || undefined }))} placeholder="https://api.example.cn/v1" spellCheck={false} style={input} /></label>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 12 }}>
-            <label style={field}>协议（留空沿用上方）<select aria-label={`连接 ${index + 1} 协议`} value={typeof connection.type === 'string' ? connection.type : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { type: event.target.value || undefined }))} style={input}>
-              <option value="">沿用 {draft.type}</option>
+            <label style={field}>{tr('desktop_settings_1a627ed944')}<select aria-label={tr('desktop_settings_358ef11dee', index + 1)} value={typeof connection.type === 'string' ? connection.type : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { type: event.target.value || undefined }))} style={input}>
+              <option value="">{tr('desktop_settings_ab95d61e3b')}{draft.type}</option>
               {SUPPORTED_PROVIDER_TYPES.map((type) => <option value={type} key={type}>{type}</option>)}
             </select></label>
-            <label style={field}>环境变量名称<input aria-label={`连接 ${index + 1} apiKeyEnv`} disabled={hostManagedCredentials} value={typeof connection.apiKeyEnv === 'string' ? connection.apiKeyEnv : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { apiKeyEnv: event.target.value || undefined }))} placeholder="MY_PROVIDER_CN_API_KEY" spellCheck={false} style={input} /></label>
+            <label style={field}>{tr('desktop_settings_856fddd137')}<input aria-label={tr('desktop_settings_6b988b728f', index + 1)} disabled={hostManagedCredentials} value={typeof connection.apiKeyEnv === 'string' ? connection.apiKeyEnv : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { apiKeyEnv: event.target.value || undefined }))} placeholder="MY_PROVIDER_CN_API_KEY" spellCheck={false} style={input} /></label>
           </div>
-          <span style={{ color: t.text4, fontSize: 11.5 }}>默认使用「{name || 'provider'}」上保存的凭据；需要不同的 Key 时在该连接上填写 credentialIds。</span>
+          <span style={{ color: t.text4, fontSize: 11.5 }}>{tr('desktop_settings_connection_credential_default', name || 'provider')}</span>
         </div>)}
-      <button type="button" style={{ ...ghostButtonStyle(t), justifySelf: 'start' }} onClick={() => onDraft(addProviderConnection(draft))}>＋ 添加连接方式</button>
+      <button type="button" style={{ ...ghostButtonStyle(t), justifySelf: 'start' }} onClick={() => onDraft(addProviderConnection(draft))}>{tr('settings_provider_connection_add')}</button>
     </div>
     <div style={{ display: 'grid', gap: 10 }}>
-      <strong style={{ fontSize: 13 }}>模型</strong>
+      <strong style={{ fontSize: 13 }}>{tr('session_details_model')}</strong>
       {draft.models.map((model, index) => <div key={index} style={{ display: 'flex', alignItems: 'end', gap: 8 }}>
-        <label style={{ ...field, flex: 1 }}>模型 ID {index + 1}<input aria-label={`模型 ID ${index + 1}`} value={typeof model.id === 'string' ? model.id : ''} onChange={(event) => { const next = renameProviderModel(draft, index, event.target.value, pricingIds.current[index]); pricingIds.current[index] = next.pricingId; onDraft(next.draft); }} placeholder="例如 gpt-4.1" style={input} />{Array.isArray(model.aliases) && model.aliases.length ? <span style={{ fontSize: 11 }}>别名：{model.aliases.filter((alias) => typeof alias === 'string').join('、')}</span> : null}</label>
+        <label style={{ ...field, flex: 1 }}>{tr('settings_provider_model_id')} {index + 1}<input aria-label={tr('desktop_settings_684fd6b4e8', index + 1)} value={typeof model.id === 'string' ? model.id : ''} onChange={(event) => { const next = renameProviderModel(draft, index, event.target.value, pricingIds.current[index]); pricingIds.current[index] = next.pricingId; onDraft(next.draft); }} placeholder={tr('desktop_settings_9265913c97')} style={input} />{Array.isArray(model.aliases) && model.aliases.length ? <span style={{ fontSize: 11 }}>{tr('desktop_settings_cf95352aaf')}{model.aliases.filter((alias) => typeof alias === 'string').join('、')}</span> : null}</label>
         <ContextPolicyField model={model} onChange={next => onDraft({ ...draft, models: draft.models.map((m, i) => i === index ? next : m) })} />
-        <button type="button" aria-label={`移除模型 ${index + 1}`} aria-describedby={canRemoveProviderModel(draft, index, pricingIds.current) ? undefined : 'provider-duplicate-model-hint'} disabled={!canRemoveProviderModel(draft, index, pricingIds.current)} style={ghostButtonStyle(t, false, true)} onClick={() => { const next = removeProviderModel(draft, index, pricingIds.current[index], pricingIds.current); pricingIds.current.splice(index, 1); onDraft(next); }}>移除</button>
+        <button type="button" aria-label={tr('desktop_settings_1b591af7e1', index + 1)} aria-describedby={canRemoveProviderModel(draft, index, pricingIds.current) ? undefined : 'provider-duplicate-model-hint'} disabled={!canRemoveProviderModel(draft, index, pricingIds.current)} style={ghostButtonStyle(t, false, true)} onClick={() => { const next = removeProviderModel(draft, index, pricingIds.current[index], pricingIds.current); pricingIds.current.splice(index, 1); onDraft(next); }}>{tr('settings_parity_remove')}</button>
       </div>)}
-      {draft.models.some((_, index) => !canRemoveProviderModel(draft, index, pricingIds.current)) && <span id="provider-duplicate-model-hint" style={{ color: t.warn, fontSize: 12 }}>请先修正重复模型 ID，再移除被引用的模型；也可以直接移除正在编辑的重复项。</span>}
-      <button type="button" style={{ ...ghostButtonStyle(t), justifySelf: 'start' }} onClick={() => { pricingIds.current.push(''); onDraft({ ...draft, models: [...draft.models, { id: '' }] }); }}>＋ 添加模型</button>
+      {draft.models.some((_, index) => !canRemoveProviderModel(draft, index, pricingIds.current)) && <span id="provider-duplicate-model-hint" style={{ color: t.warn, fontSize: 12 }}>{tr('desktop_settings_b19f57238b')}</span>}
+      <button type="button" style={{ ...ghostButtonStyle(t), justifySelf: 'start' }} onClick={() => { pricingIds.current.push(''); onDraft({ ...draft, models: [...draft.models, { id: '' }] }); }}>{tr('settings_parity_add_model')}</button>
     </div>
   </div>;
 }
@@ -90,10 +91,9 @@ function ContextPolicyField({ model, onChange }: { model: CustomProviderModelDra
   const application = context.application && typeof context.application === 'object' ? context.application as Record<string, unknown> : {};
   const mode = typeof application.mode === 'string' ? application.mode : 'auto';
   const update = (application: Record<string, unknown>) => onChange({ ...model, metadata: { ...metadata, context: { ...context, application } } });
-  return <label style={{ display: 'grid', gap: 7, fontSize: 12.5 }}>上下文策略
-    <select aria-label={`上下文策略 ${String(model.id)}`} value={mode} onChange={e => update(e.target.value === 'custom' ? { mode: 'custom', input_tokens: '' } : { mode: e.target.value })}>
-      <option value="auto">自动（优先标准价格）</option><option value="long">长上下文</option><option value="custom">自定义输入预算</option>
+  return <label style={{ display: 'grid', gap: 7, fontSize: 12.5 }}>{tr('model_detail_context_policy')}<select aria-label={tr('desktop_settings_e85920d46b', String(model.id))} value={mode} onChange={e => update(e.target.value === 'custom' ? { mode: 'custom', input_tokens: '' } : { mode: e.target.value })}>
+      <option value="auto">{tr('desktop_settings_5298ba6e24')}</option><option value="long">{tr('composer_context_policy_long')}</option><option value="custom">{tr('desktop_settings_11659082d5')}</option>
     </select>
-    {mode === 'custom' && <input aria-label={`输入 token 预算 ${String(model.id)}`} type="number" min="1" step="1" value={typeof application.input_tokens === 'number' ? application.input_tokens : ''} onChange={e => update({ mode: 'custom', input_tokens: e.target.value === '' ? '' : Number(e.target.value) })} />}
+    {mode === 'custom' && <input aria-label={tr('desktop_settings_2d4cb78cb0', String(model.id))} type="number" min="1" step="1" value={typeof application.input_tokens === 'number' ? application.input_tokens : ''} onChange={e => update({ mode: 'custom', input_tokens: e.target.value === '' ? '' : Number(e.target.value) })} />}
   </label>;
 }

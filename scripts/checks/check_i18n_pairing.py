@@ -78,8 +78,8 @@ from pathlib import Path
 LOCALES = ["zh-Hans", "zh-Hant", "en", "ja", "ko"]
 BASE_LOCALE = "zh-Hans"
 
-# These six English UI labels intentionally match their English zh-Hans source
-# copy. Keep the exception exact: locale, key, and both values must all match.
+# Reviewed labels and format-only strings can legitimately match zh-Hans.
+# Keep each exception exact: locale, key, and both values must all match.
 INTENTIONAL_IDENTICAL_TO_BASE = {
     ("en", "drawer_tab_chats"): "Chat",
     ("en", "drawer_tab_crons"): "Cron",
@@ -87,6 +87,42 @@ INTENTIONAL_IDENTICAL_TO_BASE = {
     ("en", "drawer_workspace_global"): "Global",
     ("en", "session_mode_chat"): "Chat",
     ("en", "session_mode_code"): "Code",
+    ("zh-Hant", "composer_effort_low"): "低",
+    ("zh-Hant", "composer_effort_medium"): "中",
+    ("zh-Hant", "composer_effort_high"): "高",
+    ("zh-Hant", "composer_effort_xhigh"): "超高",
+    ("zh-Hant", "composer_context_accessibility_fmt"): "%1$s：%2$s。%3$s",
+    ("zh-Hant", "composer_context_accessibility %@ %@ %@"): "%@：%@。%@",
+    ("zh-Hant", "model_detail_route"): "路由",
+    ("zh-Hant", "model_detail_family"): "模型系列",
+    ("zh-Hant", "model_detail_updated"): "最近更新",
+    ("zh-Hant", "model_detail_reasoning"): "推理",
+    ("zh-Hant", "model_detail_attachments"): "附件",
+    ("zh-Hant", "model_detail_limits"): "限制",
+    ("zh-Hant", "model_detail_max_context"): "模型最大上下文",
+    ("zh-Hant", "model_detail_context_policy"): "上下文策略",
+    ("zh-Hant", "model_detail_price_reasoning %@"): "推理 $%@",
+    ("zh-Hant", "model_detail_reasoning_summary %@"): "推理 %@",
+    ("zh-Hant", "model_detail_context_summary %@"): "%@ 上下文",
+    ("zh-Hant", "model_detail_price_reasoning_fmt"): "推理 $%1$s",
+    ("zh-Hant", "model_detail_reasoning_summary_fmt"): "推理 %1$s",
+    ("zh-Hant", "model_detail_context_summary_fmt"): "%1$s 上下文",
+    ("ja", "composer_context_accessibility_fmt"): "%1$s：%2$s。%3$s",
+    ("ja", "composer_context_accessibility %@ %@ %@"): "%@：%@。%@",
+    ("zh-Hant", "settings_link_import_cancel"): "取消",
+    ("zh-Hant", "chat_compaction_progress %lld %lld"): "正在整理上下文：%lld%%（%lld 秒）",
+    ("zh-Hant", "chat_compaction_progress_fmt"): "正在整理上下文：%1$d%%（%2$d 秒）",
+    ("zh-Hant", "settings_provider_api_version"): "API 版本",
+    ("zh-Hant", "plugins_action_disable"): "停用",
+    ("zh-Hant", "composer_dont_warn_again"): "不再提醒",
+    ("zh-Hant", "composer_reasoning_budget_range %@ %@"): "%@–%@ tokens",
+    ("zh-Hant", "composer_effort_budget %@"): "%@ tokens",
+    ("zh-Hant", "cron_error_detail %@ %@"): "%@：%@",
+    ("zh-Hant", "composer_effort_budget_fmt"): "%1$s tokens",
+    ("zh-Hant", "composer_reasoning_budget_range_fmt"): "%1$s–%2$s tokens",
+    ("zh-Hant", "cron_error_detail_fmt"): "%1$s：%2$s",
+    ("ja", "cron_error_detail %@ %@"): "%@：%@",
+    ("ja", "cron_error_detail_fmt"): "%1$s：%2$s",
 }
 
 
@@ -163,6 +199,7 @@ ANDROID_RES_ROOT = "apps/android/native/app/src/main/res"
 # exemption. The generation rule is documented at
 # https://developers.google.com/android/guides/google-services-plugin.
 ANDROID_GOOGLE_SERVICES_GRADLE = "apps/android/native/app/build.gradle.kts"
+ANDROID_VERSION_CATALOG = "apps/android/native/gradle/libs.versions.toml"
 ANDROID_GOOGLE_SERVICES_JSON = "apps/android/native/app/google-services.json"
 ANDROID_GOOGLE_SERVICES_PLUGIN_ID = "com.google.gms.google-services"
 ANDROID_GOOGLE_SERVICES_APP_ID = re.compile(
@@ -173,6 +210,27 @@ ANDROID_GOOGLE_SERVICES_PLUGIN_APPLY = re.compile(
     + re.escape(ANDROID_GOOGLE_SERVICES_PLUGIN_ID)
     + r'["\']\s*\)'
 )
+
+
+def _applies_google_services_plugin(gradle, repo_root):
+    if ANDROID_GOOGLE_SERVICES_PLUGIN_APPLY.search(gradle):
+        return True
+    # Gradle maps catalog aliases such as google-services to
+    # libs.plugins.google.services. Verify the referenced alias's actual ID.
+    try:
+        catalog = (Path(repo_root) / ANDROID_VERSION_CATALOG).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    section = re.search(r"(?ms)^\[plugins\]\s*\n(.*?)(?=^\[|\Z)", catalog)
+    if not section:
+        return False
+    aliases = set(re.findall(r"\balias\s*\(\s*libs\.plugins\.([\w.]+)\s*\)", gradle))
+    for match in re.finditer(r'(?m)^\s*([\w.-]+)\s*=\s*\{([^}\n]+)\}', section.group(1)):
+        alias = re.sub(r"[-_.]+", ".", match.group(1))
+        plugin_id = re.search(r'\bid\s*=\s*["\']([^"\']+)["\']', match.group(2))
+        if alias in aliases and plugin_id and plugin_id.group(1) == ANDROID_GOOGLE_SERVICES_PLUGIN_ID:
+            return True
+    return False
 
 # 只匹配字面量 key（无 `\(...)` 插值）。插值调用会被 Swift 编译成复合 key
 # （`"foo %lld"` 等），那一半已经由上面的 `_fmt` 配对逻辑覆盖，这里再匹配
@@ -311,7 +369,7 @@ def _verified_google_services_resource_names(repo_root):
     try:
         gradle = app_gradle.read_text(encoding="utf-8")
         match = ANDROID_GOOGLE_SERVICES_APP_ID.search(gradle)
-        if not match or not ANDROID_GOOGLE_SERVICES_PLUGIN_APPLY.search(gradle):
+        if not match or not _applies_google_services_plugin(gradle, repo_root):
             return set()
         config = json.loads(services_json.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):

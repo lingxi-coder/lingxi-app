@@ -1,3 +1,4 @@
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
 import '../../src/renderer/components/TerminalPanel.css';
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -5,6 +6,9 @@ import { TerminalPanel, useTerminalPanel } from '../../src/renderer/components/T
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import type { TerminalEvent, TerminalSnapshot } from '../../src/shared/terminal';
+// Interaction selectors use English independently of the host machine's locale.
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en');
+
 const records = new Map<string, TerminalSnapshot>();
 const listeners = new Set<(event: TerminalEvent) => void>();
 const acks: unknown[] = []; const inputs: unknown[] = []; const sizes: unknown[] = []; const closed: string[] = [];

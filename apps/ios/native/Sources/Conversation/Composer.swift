@@ -318,7 +318,7 @@ struct Composer: View {
                             }
                             .buttonStyle(.plain)
                             .padding(.horizontal, 4).padding(.vertical, 2)
-                            .accessibilityLabel("Use suggestion: \(visibleSuggestion)")
+                            .accessibilityLabel(String(localized: "composer_use_suggestion \(visibleSuggestion)"))
                             .accessibilityIdentifier("composer.prompt-suggestion")
                             .onAppear {
                                 if shownSuggestionKey != suggestionTurnKey {
@@ -669,8 +669,8 @@ struct Composer: View {
             }
         }
         .buttonStyle(ComposerActionButtonStyle())
-        .accessibilityLabel("Model and effort")
-        .accessibilityValue("\(chipLabel), \(reasoningLabel)" + (fastModeEnabled && supportsFastMode ? ", Fast Mode On" : ""))
+        .accessibilityLabel(String(localized: "composer_model_and_effort"))
+        .accessibilityValue("\(chipLabel), \(reasoningLabel)" + (fastModeEnabled && supportsFastMode ? ", " + String(localized: "composer_fast_mode_on") : ""))
         .accessibilityIdentifier("composer.model")
     }
 
@@ -692,7 +692,7 @@ struct Composer: View {
         }
         .buttonStyle(ComposerActionButtonStyle())
         .disabled(controlsPending)
-        .accessibilityLabel("Permission mode")
+        .accessibilityLabel(String(localized: "settings_permission_mode_title"))
         .accessibilityValue(permissionLabel)
         .accessibilityIdentifier("composer.controls")
     }
@@ -715,19 +715,11 @@ struct Composer: View {
     }
 
     private var reasoningLabel: String {
-        reasoningSelection == "automatic" ? "Auto" : reasoningSelection.capitalized
+        ModelDetailFormat.reasoningIdentifierLabel(reasoningSelection, fallback: reasoningSelection.capitalized)
     }
 
     private var permissionLabel: String {
-        switch effectivePermissionMode {
-        case "bypassPermissions": return "Full access"
-        case "auto": return "Auto"
-        case "default": return "Default"
-        case "acceptEdits": return "Accept edits"
-        case "plan": return "Plan"
-        case "dontAsk": return "Don't ask"
-        default: return effectivePermissionMode
-        }
+        ModelDetailFormat.permissionModeLabel(effectivePermissionMode)
     }
 
     private var slashSuggestions: [SlashCommandSuggestion] {
@@ -986,10 +978,18 @@ private struct ComposerContextWindow: View {
     @State private var showsDetails = false
 
     private var summary: String {
-        "\(snapshot.percent)% used (\(100 - snapshot.percent)% left)"
+        String(localized: "composer_context_summary \(snapshot.percent) \(100 - snapshot.percent)")
     }
     private var tokens: String {
-        "\(ModelDetailFormat.tokenCount(snapshot.used)) / \(ModelDetailFormat.tokenCount(snapshot.capacity)) tokens used"
+        String(localized: "composer_context_tokens \(ModelDetailFormat.tokenCount(snapshot.used)) \(ModelDetailFormat.tokenCount(snapshot.capacity))")
+    }
+
+    private func contextPolicyLabel(_ policy: String) -> String {
+        switch policy {
+        case "long": return String(localized: "composer_context_policy_long")
+        case "custom": return String(localized: "composer_context_policy_custom")
+        default: return String(localized: "composer_context_policy_auto")
+        }
     }
 
     var body: some View {
@@ -1007,23 +1007,23 @@ private struct ComposerContextWindow: View {
             .contentShape(.rect)
         }
         .buttonStyle(ComposerActionButtonStyle())
-        .accessibilityLabel("Context window (estimated)")
+        .accessibilityLabel(String(localized: "composer_context_title"))
         .accessibilityValue("\(summary). \(tokens)")
         .accessibilityIdentifier("composer.context-window")
         .popover(isPresented: $showsDetails) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Context window:").fontWeight(.semibold)
+                Text("composer_context_title").fontWeight(.semibold)
                 Text(summary)
                 Text(tokens)
-                Text("最近一次请求的输入用量 / 应用输入预算")
+                Text("composer_context_budget_note")
                 if let policy = details?.contextBudget?.policy {
-                    Text("应用策略：\(policy == "long" ? "长上下文" : policy == "custom" ? "自定义" : "自动")")
+                    Text(String(localized: "composer_context_policy \(contextPolicyLabel(policy))"))
                 }
                 if let maximum = details?.contextWindowTokens {
-                    Text("模型最大上下文：\(ModelDetailFormat.tokenCount(maximum))")
+                    Text(String(localized: "composer_context_model_max \(ModelDetailFormat.tokenCount(maximum))"))
                 }
                 if let boundary = details?.contextBudget?.standardPriceInputTokens {
-                    Text("输入超过 \(boundary.formatted()) tokens 后，整次请求适用长上下文价格。")
+                    Text(String(localized: "composer_context_long_price \(boundary.formatted())"))
                 }
             }
             .font(.callout)

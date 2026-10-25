@@ -809,7 +809,7 @@ class SettingsStore(
                         voiceRepo = AudioConfigurationRepository(appContext),
                         notifRepo = NotificationPrefsStore(appContext),
                         permissionModeRepo = PermissionModeSettingsRepository(appContext),
-                        resolveString = appContext::getString,
+                        resolveString = { id -> com.lingxi.code.theme.LocaleWrapper.getString(appContext, id) },
                     ) as T
                 }
             }

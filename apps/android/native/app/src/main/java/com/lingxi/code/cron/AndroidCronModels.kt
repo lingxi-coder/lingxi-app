@@ -22,7 +22,7 @@ data class CronScope(
         fun global(context: Context): CronScope = CronScope(
             scopeId = GLOBAL_CRON_SCOPE_ID,
             projectId = null,
-            projectName = context.applicationContext.getString(R.string.common_none),
+            projectName = com.lingxi.code.theme.LocaleWrapper.getString(context.applicationContext, R.string.common_none),
             workspacePath = com.lingxi.code.project.MobileUserStorage.directories(context).scheduledCwd,
             guestPath = com.lingxi.code.project.MobileUserStorage.directories(context).scheduledGuestCwd,
         )

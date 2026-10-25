@@ -39,7 +39,7 @@ extension DesktopSettingsRepository {
     func applyPluginOperation(_ payload: [String: Any]) async throws {
         guard connected else { throw PluginOperationError(String(localized: "settings_parity_disconnected")) }
         guard let revision = pluginCatalog.revisions["user"] else {
-            throw PluginOperationError("Refresh the plugin catalog before changing it.")
+            throw PluginOperationError(String(localized: "plugins_catalog_refresh_first"))
         }
         var body = payload
         body["scope"] = "user"
@@ -346,7 +346,7 @@ struct PluginDetailPage: View {
             } else if repository.connected && repository.catalogs["plugin"] == nil {
                 ProgressView().frame(maxWidth: .infinity).padding(24)
             } else {
-                ContentUnavailableView("Plugin unavailable", systemImage: "link", description: Text("The linked plugin is not installed in local data on this device."))
+                ContentUnavailableView(String(localized: "plugins_unavailable"), systemImage: "link", description: Text(String(localized: "plugins_local_missing")))
             }
         }
         .task(id: repository.sourceGeneration) {

@@ -1,5 +1,6 @@
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { CH_APPLICATION_ICON, type ApplicationIconApi } from '../shared/applicationIcon.js';
+import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
 import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
 import type { AccountApi, AccountState } from '../shared/account.js';
 import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/applicationMenu.js';
@@ -270,6 +271,7 @@ export interface LingxiApi {
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
   copyText(text: string): Promise<void>;
+  setInterfaceLocale(locale: string, followSystem: boolean): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
@@ -422,6 +424,7 @@ const api: LingxiApi = {
   diagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_GET) as Promise<DiagnosticEntry[]>,
   copyDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_COPY) as Promise<void>,
   copyText: (text) => ipcRenderer.invoke(CH_CLIPBOARD_WRITE_TEXT, text) as Promise<void>,
+  setInterfaceLocale: (locale, followSystem) => ipcRenderer.invoke(CH_INTERFACE_LOCALE, locale, followSystem) as Promise<void>,
   exportDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_EXPORT) as Promise<string | null>,
   listProjectSessions: (projectPath, scope) => ipcRenderer.invoke(CH_PROJECT_SESSIONS_LIST, projectPath, scope) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
   updateSessionWorkspace: (sessionId, operation) => ipcRenderer.invoke(CH_SESSION_WORKSPACE, sessionId, operation) as Promise<BootstrapState | null>,

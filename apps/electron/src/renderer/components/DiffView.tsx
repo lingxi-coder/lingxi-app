@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 /**
  * Renders a {@link StructuredDiffDto} — the engine's pre-derived diff.
  *
@@ -238,6 +240,7 @@ export interface DiffViewProps {
 
 export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
   const t = useT();
+  useI18n();
 
   // Every theme-dependent color is written ONCE here; the frozen child styles
   // above reference these variables and therefore never need re-creating.
@@ -294,7 +297,7 @@ export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
         })}
         {diff.truncated_rows > 0 && (
           <div style={TRUNCATED_STYLE}>
-            … {diff.truncated_rows} more {diff.truncated_rows === 1 ? 'line' : 'lines'}
+            {tr(diff.truncated_rows === 1 ? 'desktop_ui_diff_more_line' : 'desktop_ui_diff_more_lines', diff.truncated_rows)}
           </div>
         )}
       </div>

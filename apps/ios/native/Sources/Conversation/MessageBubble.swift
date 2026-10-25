@@ -12,7 +12,7 @@ private struct MessageImages: View {
                 ForEach(images) { image in
                     Button { selectedImage = image } label: { imageView(image) }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("Preview attached image")
+                        .accessibilityLabel(String(localized: "chat_preview_attached_image"))
                 }
             }
         }
@@ -50,7 +50,7 @@ private struct MessageImages: View {
                 .background(t.surfaceActive)
                 .clipShape(RoundedRectangle(cornerRadius: 11))
                 .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
-                .accessibilityLabel("Attached image")
+                .accessibilityLabel(String(localized: "chat_attached_image"))
         } else if let url = URL(string: image.url) {
             AsyncImage(url: url) { phase in
                 switch phase {
@@ -65,14 +65,14 @@ private struct MessageImages: View {
             .background(t.surfaceActive)
             .clipShape(RoundedRectangle(cornerRadius: 11))
             .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
-            .accessibilityLabel("Attached image")
+            .accessibilityLabel(String(localized: "chat_attached_image"))
         } else {
             placeholder
         }
     }
 
     private var placeholder: some View {
-        Text("Image")
+        Text(String(localized: "chat_image_placeholder"))
             .font(.caption)
             .foregroundStyle(t.text3)
             .frame(width: 116, height: 116)
@@ -592,19 +592,19 @@ private struct MDBlockView: View, Equatable {
     private func codeBlock(_ code: String, language: String?) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(language.flatMap { $0.isEmpty ? nil : $0 } ?? "Code")
+                Text(language.flatMap { $0.isEmpty ? nil : $0 } ?? String(localized: "drawer_tab_code"))
                     .font(.system(size: 11.5, weight: .medium, design: .monospaced))
                     .foregroundStyle(t.text3)
                 Spacer()
                 Button {
                     UIPasteboard.general.string = code
                 } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
+                    Label(String(localized: "chat_message_copy"), systemImage: "doc.on.doc")
                         .font(.system(size: 11.5))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(t.text3)
-                .accessibilityLabel("Copy code")
+                .accessibilityLabel(String(localized: "chat_copy_code"))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)

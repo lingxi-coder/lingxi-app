@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
@@ -35,21 +36,21 @@ fun LingxiAccountSection(model: AccountViewModel = viewModel()) {
     LaunchedEffect(state.user?.uid) { password = "" }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { model.reload() }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("LingXi 账户", style = MaterialTheme.typography.titleLarge)
+        Text(stringResource(R.string.account_title), style = MaterialTheme.typography.titleLarge)
         val user = state.user
         if (user != null) {
-            Text(user.name ?: user.email ?: "已登录", modifier = Modifier.testTag("account.profile"))
+            Text(user.name ?: user.email ?: stringResource(R.string.account_signed_in), modifier = Modifier.testTag("account.profile"))
             user.email?.let { Text(it) }
-            Text(if (user.verified) "邮箱已验证" else "邮箱尚未验证", style = MaterialTheme.typography.bodySmall)
-            if (!user.verified && user.email != null) TextButton(onClick = model::verifyEmail, enabled = !state.busy) { Text("发送验证邮件") }
-            TextButton(onClick = model::reload, enabled = !state.busy) { Text("刷新账户") }
-            TextButton(onClick = { activity?.let(model::signOut) }, enabled = !state.busy && activity != null, modifier = Modifier.testTag("account.signout")) { Text("退出登录") }
+            Text(stringResource(if (user.verified) R.string.account_email_verified else R.string.account_email_unverified), style = MaterialTheme.typography.bodySmall)
+            if (!user.verified && user.email != null) TextButton(onClick = model::verifyEmail, enabled = !state.busy) { Text(stringResource(R.string.account_send_verification)) }
+            TextButton(onClick = model::reload, enabled = !state.busy) { Text(stringResource(R.string.account_refresh)) }
+            TextButton(onClick = { activity?.let(model::signOut) }, enabled = !state.busy && activity != null, modifier = Modifier.testTag("account.signout")) { Text(stringResource(R.string.account_sign_out)) }
         } else {
-            OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text("邮箱") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email), singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth().testTag("account.email"))
-            OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("密码") }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth().testTag("account.password"))
-            Button(onClick = { model.emailSignIn(email, password, register) }, enabled = !state.busy && email.isNotBlank() && password.isNotEmpty(), modifier = Modifier.testTag("account.submit")) { Text(if (register) "创建账户" else "登录") }
-            TextButton(onClick = { register = !register; password = "" }, enabled = !state.busy, modifier = Modifier.testTag("account.mode")) { Text(if (register) "已有账户，登录" else "注册新账户") }
-            TextButton(onClick = { model.resetPassword(email) }, enabled = !state.busy && email.isNotBlank()) { Text("忘记密码") }
+            OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text(stringResource(R.string.account_email)) }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email), singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth().testTag("account.email"))
+            OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text(stringResource(R.string.account_password)) }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth().testTag("account.password"))
+            Button(onClick = { model.emailSignIn(email, password, register) }, enabled = !state.busy && email.isNotBlank() && password.isNotEmpty(), modifier = Modifier.testTag("account.submit")) { Text(stringResource(if (register) R.string.account_create else R.string.account_sign_in)) }
+            TextButton(onClick = { register = !register; password = "" }, enabled = !state.busy, modifier = Modifier.testTag("account.mode")) { Text(stringResource(if (register) R.string.account_existing else R.string.account_register)) }
+            TextButton(onClick = { model.resetPassword(email) }, enabled = !state.busy && email.isNotBlank()) { Text(stringResource(R.string.account_forgot_password)) }
             OutlinedButton(
                 onClick = { activity?.let { model.google(it, context.getString(R.string.default_web_client_id)) } },
                 enabled = !state.busy && activity != null,
@@ -59,12 +60,12 @@ fun LingxiAccountSection(model: AccountViewModel = viewModel()) {
             ) {
                 Image(painterResource(R.drawable.google_g), contentDescription = null, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(10.dp))
-                Text("通过 Google 登录")
+                Text(stringResource(R.string.account_google))
             }
-            OutlinedButton(onClick = { activity?.let(model::apple) }, enabled = !state.busy && activity != null, modifier = Modifier.fillMaxWidth()) { Text("通过 Apple 登录") }
+            OutlinedButton(onClick = { activity?.let(model::apple) }, enabled = !state.busy && activity != null, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.account_apple)) }
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        state.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("account.message")) }
+        state.messageRes?.let { Text(stringResource(it), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("account.message")) }
         val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
         TextButton(onClick = { uriHandler.openUri("https://lingxios.net/privacy") }) {
             Text(androidx.compose.ui.res.stringResource(R.string.privacy_policy_link))

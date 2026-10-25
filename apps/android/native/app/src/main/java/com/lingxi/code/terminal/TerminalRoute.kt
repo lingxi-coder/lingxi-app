@@ -5,6 +5,8 @@
  */
 package com.lingxi.code.terminal
 
+import com.lingxi.code.R
+
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -56,6 +58,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -137,10 +140,10 @@ fun TerminalScreen(
     state.commandDraft?.let { draft ->
         AlertDialog(
             onDismissRequest = { onAction(TerminalAction.DismissCommand) },
-            title = { Text("Review command") },
-            text = { OutlinedTextField(value = draft, onValueChange = { onAction(TerminalAction.EditCommand(it)) }, label = { Text("Command") }) },
-            confirmButton = { TextButton(enabled = state.connectionState == TerminalConnectionState.CONNECTED && draft.isNotBlank(), onClick = { onAction(TerminalAction.ConfirmCommand) }) { Text("Run") } },
-            dismissButton = { TextButton(onClick = { onAction(TerminalAction.DismissCommand) }) { Text("Cancel") } },
+            title = { Text(stringResource(R.string.terminal_review_command)) },
+            text = { OutlinedTextField(value = draft, onValueChange = { onAction(TerminalAction.EditCommand(it)) }, label = { Text(stringResource(R.string.terminal_command)) }) },
+            confirmButton = { TextButton(enabled = state.connectionState == TerminalConnectionState.CONNECTED && draft.isNotBlank(), onClick = { onAction(TerminalAction.ConfirmCommand) }) { Text(stringResource(R.string.terminal_run)) } },
+            dismissButton = { TextButton(onClick = { onAction(TerminalAction.DismissCommand) }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
     val input = rememberTerminalInputController()
@@ -226,19 +229,25 @@ private fun TerminalTopBar(
         modifier.fillMaxWidth().height(52.dp).background(TerminalBackground).padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RoundIcon(Icons.Default.Close, "Close terminal", onClose)
+        RoundIcon(Icons.Default.Close, stringResource(R.string.terminal_close), onClose)
         Spacer(Modifier.weight(1f))
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(title, color = TerminalForeground, fontFamily = FontFamily.Monospace, fontSize = 15.sp, maxLines = 1)
             Text(
-                connection.name.lowercase(),
+                stringResource(when (connection) {
+                    TerminalConnectionState.IDLE -> R.string.terminal_status_idle
+                    TerminalConnectionState.CONNECTING -> R.string.terminal_status_connecting
+                    TerminalConnectionState.CONNECTED -> R.string.terminal_status_connected
+                    TerminalConnectionState.FAILED -> R.string.terminal_status_failed
+                    TerminalConnectionState.CLOSED -> R.string.terminal_status_closed
+                }),
                 color = if (connection == TerminalConnectionState.CONNECTED) TerminalAccent else Color.Gray,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
             )
         }
         Spacer(Modifier.weight(1f))
-        RoundIcon(Icons.Default.CleaningServices, "Clear terminal", onClear, TerminalAccent)
+        RoundIcon(Icons.Default.CleaningServices, stringResource(R.string.terminal_clear), onClear, TerminalAccent)
     }
 }
 
@@ -275,7 +284,7 @@ private fun TerminalAccessoryBar(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TerminalKey(if (keyboardVisible) "Hide" else "Keys", if (keyboardVisible) Icons.Default.KeyboardHide else Icons.Default.Keyboard) {
+        TerminalKey(stringResource(if (keyboardVisible) R.string.terminal_dismiss_keyboard else R.string.terminal_show_keyboard), if (keyboardVisible) Icons.Default.KeyboardHide else Icons.Default.Keyboard) {
             onAction(TerminalAction.ToggleKeyboard)
         }
         TerminalKey("Esc") { send(byteArrayOf(0x1b)) }

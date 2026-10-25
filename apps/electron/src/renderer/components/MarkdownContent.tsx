@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import { createContext, memo, useContext, useId, useMemo, type CSSProperties, type ReactNode } from 'react';
 import type { Element } from 'hast';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
@@ -119,15 +121,15 @@ const components = {
     },
     img: function MarkdownImage({ src, alt, id }: MarkdownComponentProps) {
       const insideLink = useContext(InsideMarkdownLink);
-      const label = alt || src || 'Image unavailable';
-      if (insideLink) return <span id={id}>Image: {label}</span>;
+      const label = alt || src || tr("desktop_ui_image_unavailable");
+      if (insideLink) return <span id={id}>{tr("desktop_ui_image_prefix")}{label}</span>;
       try {
         const url = new URL(src?.startsWith('//') ? 'https:' + src : src ?? '');
         if (url.protocol === 'https:' && !url.username && !url.password) {
-          return <a id={id} href={url.href} target="_blank" rel="noreferrer" className="markdown-image-link">Image: {label}</a>;
+          return <a id={id} href={url.href} target="_blank" rel="noreferrer" className="markdown-image-link">{tr("desktop_ui_image_prefix")}{label}</a>;
         }
       } catch { /* Unresolvable image sources remain visible as text. */ }
-      return <span id={id} className="markdown-image-unavailable">Image unavailable: {label}</span>;
+      return <span id={id} className="markdown-image-unavailable">{tr("desktop_ui_image_unavailable_prefix")}{label}</span>;
     },
     input: ({ checked, disabled, node: _node, ...props }: MarkdownComponentProps) => (
       <input
@@ -161,6 +163,7 @@ const compactComponents: Components = {
 
 export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml = false, variant }: MarkdownContentProps) {
   const t = useT();
+  const { locale } = useI18n();
   const instanceId = useId();
   const rehypePlugins = useMemo<PluggableList>(() => [
     ...(trustedHtml ? trustedPlugins : safePlugins),
@@ -175,7 +178,7 @@ export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml
       components={variant === 'compact' ? compactComponents : variant === 'plan' ? planComponents : components}
       urlTransform={(url) => parseContextMentionHref(url) ? url : defaultUrlTransform(url)}
     />
-  ), [parsed.source, rehypePlugins, variant]);
+  ), [parsed.source, rehypePlugins, variant, locale]);
   const variables = {
     display: 'grid', gap: 10, minWidth: 0,
     '--text': variant === 'compact' ? t.text2 : t.text,

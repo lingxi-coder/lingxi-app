@@ -1,3 +1,7 @@
+import { LANGUAGE_STORAGE_KEY } from '../src/renderer/i18n/locale';
+
+// These behavior assertions pin Chinese copy; locale matching has separate coverage.
+Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: (key: string) => key === LANGUAGE_STORAGE_KEY ? 'zh-Hans' : null } });
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -84,8 +88,8 @@ test('last-seen is human readable', () => {
   const now = 1_000_000_000;
   assert.equal(lastSeenLabel(0, now), '从未连接');
   assert.equal(lastSeenLabel(now - 5_000, now), '刚刚');
-  assert.equal(lastSeenLabel(now - 5 * 60_000, now), '5 分钟前');
-  assert.equal(lastSeenLabel(now - 3 * 3_600_000, now), '3 小时前');
+  assert.equal(lastSeenLabel(now - 5 * 60_000, now), '5分钟前');
+  assert.equal(lastSeenLabel(now - 3 * 3_600_000, now), '3小时前');
 });
 
 test('the settings nav lists Remote Control and finds it by remote, 远程, rc and 设备', () => {
@@ -208,7 +212,7 @@ test('explicit on/off is idempotent and never flips the other way', async () => 
   const again = await toggleRemoteForSession(fake.api, 's1', true);
   assert.match(again.message, /已经开启/);
   const already = await toggleRemoteForSession(fake.api, 's2', false);
-  assert.match(already.message, /本来就是关闭/);
+  assert.match(already.message, /已经关闭/);
   assert.deepEqual(fake.calls, []);
 });
 

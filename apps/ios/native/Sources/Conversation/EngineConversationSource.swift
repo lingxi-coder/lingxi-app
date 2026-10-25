@@ -4152,7 +4152,7 @@ final class EngineConversationSource: ConversationSource {
                               mode: SessionMode(dto: $0.mode),
                               messageCount: Int($0.messageCount),
                               modifiedAt: RelativeTime.parse($0.modifiedRfc3339),
-                              relativeTime: RelativeTime.format($0.modifiedRfc3339),
+                              relativeTime: RelativeTime.format($0.modifiedRfc3339, locale: LocalizationManager.shared.effectiveLocale()),
                               transcriptPath: $0.path, workspaceDirectory: $0.workspacePath)
             }
             // Publish the authoritative rows before flipping the loaded

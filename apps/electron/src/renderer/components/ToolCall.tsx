@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import { LocalAppCard } from './LocalApps';
 import { localAppReference } from '../model/localAppReference';
 import { toolRowPresentation } from './toolPresentation';
@@ -136,6 +138,7 @@ function ToolGlyph({ item, permissionRequest }: { item: ToolRunItem; permissionR
 
 export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onSetOpen }: ToolCallProps) {
   const t = useT();
+  useI18n();
   const { result } = item;
   const view = toolDisplayHeader(item);
   const permissionRequest = /permission/i.test(`${item.tool} ${view.label} ${view.title}`);
@@ -173,19 +176,24 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
   // Keep truncation visible in the compact response line and repeat the
   // detailed notice under the body once it is opened.
   const truncationNotice = toolTruncationNotice(item);
+  const shownLines = truncationNotice && body !== undefined ? body.replace(/\n$/, '').split('\n').length : 0;
+  const translatedTruncation = !truncationNotice ? null
+    : result && body !== undefined && result.body_lines > shownLines
+      ? tr('desktop_ui_truncated_lines', shownLines, result.body_lines)
+      : tr('desktop_ui_output_truncated');
 
-  const response = [headline, truncationNotice ? '(truncated)' : undefined]
+  const response = [headline, truncationNotice ? tr('desktop_ui_truncated_suffix') : undefined]
     .filter(Boolean)
     .join(' ');
   const permissionStatusText = headline ?? '';
   const permissionStatusInBody = permissionRequest && expandable && Boolean(permissionStatusText);
   const compactError = item.status === 'error' && expandable && !permissionRequest;
   const summaryResponse = compactError
-    ? 'Failed'
+    ? tr("voice_model_state_failed")
     : item.tool === 'WebSearch' && item.status === 'done' && expandable
-    ? `Search completed${truncationNotice ? ' (truncated)' : ''}`
+    ? `${tr('desktop_ui_search_completed')}${truncationNotice ? ` ${tr('desktop_ui_truncated_suffix')}` : ''}`
     : permissionStatusInBody
-    ? (truncationNotice ? '(truncated)' : '')
+    ? (truncationNotice ? tr('desktop_ui_truncated_suffix') : '')
     : response;
   const permissionStatusTone = /denied|rejected|failed|cancel/i.test(permissionStatusText)
     ? 'danger'
@@ -220,9 +228,9 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
           </span>
         )}
       </span>
-      {diffStats && <span className="tool-row-diff-stats" aria-label={`${diffStats.additions} added, ${diffStats.removals} removed`}>+{diffStats.additions} −{diffStats.removals}</span>}
+      {diffStats && <span className="tool-row-diff-stats" aria-label={tr('desktop_ui_edit_counts', diffStats.additions, diffStats.removals)}>+{diffStats.additions} −{diffStats.removals}</span>}
       {(item.status === 'running' || (item.status === 'done' && diffStats && diffStats.additions + diffStats.removals > 0)) &&
-        <span className="tool-row-state-dot" role={item.status === 'running' ? 'status' : undefined} aria-label={item.status === 'running' ? 'Running' : 'File changed'} />}
+        <span className="tool-row-state-dot" role={item.status === 'running' ? 'status' : undefined} aria-label={item.status === 'running' ? tr("remote_status_running") : tr("desktop_ui_file_changed")} />}
       {showResponse && !diffStats && summaryResponse && <span className={compactError ? 'tool-row-status' : 'tool-row-response'}>{summaryResponse}</span>}
     </span>
   );
@@ -238,7 +246,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       permissionRequest && jsonBody === undefined ? (
         <div className="permission-tool-message">{body}</div>
       ) : skillInstructions && jsonBody === undefined ? (
-        <div className="tool-skill-instructions" tabIndex={0} role="region" aria-label="Skill instructions"
+        <div className="tool-skill-instructions" tabIndex={0} role="region" aria-label={tr("desktop_ui_skill_instructions")}
           style={{ margin: '4px 0 8px', padding: '4px 0 4px 14px', maxHeight: 320, overflow: 'auto',
             borderLeft: `1px solid ${t.borderStrong}`, fontSize: 13, lineHeight: 1.6 }}>
           <MarkdownContent text={body} variant="compact" />
@@ -271,7 +279,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
     )}
     {truncationNotice && (
       <div style={{ marginTop: 4, fontSize: 11.5, fontStyle: 'italic', color: t.text4 }}>
-        {truncationNotice}
+          {translatedTruncation}
       </div>
     )}
   </>;

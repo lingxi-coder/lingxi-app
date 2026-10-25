@@ -1,3 +1,5 @@
+import { useI18n } from '../../../i18n/useI18n';
+import { tr } from '../../../i18n/locale';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SkillAdminCommandDto, SkillDto } from '@lingxi/bridge-client';
 import { ExtensionGlyph } from './ExtensionHubIcons';
@@ -96,10 +98,10 @@ function skillCatalogFromBridge(bridge: PageContentProps['bridge']): SkillCatalo
       rootDir: skill.source_dir.replace(/\/[^/]+$/, ''),
       directory: skill.source_dir,
       writable: false,
-      readonlyReason: '当前运行时只上报了已发现的 skills 列表，未提供可编辑文档。',
+      readonlyReason: tr('desktop_extension_no_document_description'),
     })),
     trash: [],
-    sync_claude_ai_note: 'Stored only. Claude.ai cloud sync is not wired on desktop.',
+    sync_claude_ai_note: tr('desktop_extension_sync_unavailable'),
   };
 }
 
@@ -133,8 +135,9 @@ function defaultCreateScope(editingLayer: EditableLayer): 'user' | 'project' {
 
 export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, onRegisterNavigationRequest, onRegisterCloseRequest, linkRequest }: PageContentProps) {
   const t = useT();
+  const { locale } = useI18n();
   const model = skillsPageModel({ skills: bridge.skillsEvent?.skills });
-  const catalog = useMemo(() => skillCatalogFromBridge(bridge), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills]);
+  const catalog = useMemo(() => skillCatalogFromBridge(bridge), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills, locale]);
   const document = useMemo(() => skillDocumentFromBridge(bridge), [bridge.skillDocumentEvent?.document_json]);
   const adminAvailable = typeof (bridge as { skillAdmin?: unknown }).skillAdmin === 'function';
   const skillOperation = bridge.configurationOperations?.skill ?? null;
@@ -219,7 +222,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       appliedLink.current = linkRequest.requestId;
       const matches = activeSkills.filter(skill => (skill.id === linkRequest.id || skill.name === linkRequest.id) && (!linkRequest.scope || skill.source === linkRequest.scope));
       if (matches.length === 1) setSelection({ kind: 'skill', id: matches[0]!.id });
-      else setPageError(matches.length ? 'This skill name exists in multiple sources. Include its scope in the link.' : 'This skill is unavailable on this device.');
+      else setPageError(matches.length ? tr('desktop_extension_skill_ambiguous') : tr('desktop_extension_skill_unavailable'));
     }
   }, [linkRequest, activeSkills, bridge.skillCatalogEvent, bridge.skillsEvent]);
   const selectedSkill = selection.kind === 'skill' ? activeSkills.find((entry) => entry.id === selection.id) ?? null : null;
@@ -228,10 +231,10 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const uninstallDisabledReason = selectedDocument?.writable
     ? undefined
     : selectedDocument?.readonlyReason || (loadingDocument
-      ? '正在读取 SKILL.md；完成后才能确认是否可卸载。'
+      ? tr('desktop_extension_skill_reading_uninstall')
       : selectedDocument
-        ? '此 Skill 为只读，无法卸载。'
-        : '无法读取 SKILL.md，因此无法确认是否可卸载。');
+        ? tr('desktop_extension_skill_readonly_uninstall')
+        : tr('desktop_extension_skill_unreadable_uninstall'));
 
   useEffect(() => {
     if (!selectedSkill || !adminAvailable) return;
@@ -239,7 +242,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     setLoadingDocument(true);
     setPageError(null);
     void callSkillAdmin(bridge, { action: 'get_document', target: selectedSkill.id })
-      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法读取 skill 文档。'))
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_read_failed')))
       .finally(() => setLoadingDocument(false));
   }, [adminAvailable, bridge.skillAdmin, document?.id, selectedSkill]);
 
@@ -326,10 +329,9 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   };
   const navigationPrompt = pendingHubPage && (
     <div role="alert" style={noteStyle(t, 'warn')}>
-      Unsaved skill settings. Discard them before switching tabs?
-      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-        <button type="button" onClick={discardAndNavigate} style={ghostButtonStyle(t)}>Discard and switch</button>
-        <button type="button" onClick={() => setPendingHubPage(null)} style={ghostButtonStyle(t, false, true)}>Continue editing</button>
+      {tr('desktop_extension_unsaved_skill')} <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+        <button type="button" onClick={discardAndNavigate} style={ghostButtonStyle(t)}>{tr('desktop_extension_discard_switch')}</button>
+        <button type="button" onClick={() => setPendingHubPage(null)} style={ghostButtonStyle(t, false, true)}>{tr('desktop_extension_continue_editing')}</button>
       </div>
     </div>
   );
@@ -343,7 +345,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
         await bridge.refreshSkills();
         if (adminAvailable) await callSkillAdmin(bridge, { action: 'get_catalog' });
       })
-      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法重新加载 skills。'))
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_reload_failed')))
       .finally(() => setReloading(false));
   };
 
@@ -359,12 +361,12 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       scope,
       revision: selectedDocument.revision,
       payload_json: JSON.stringify({ name: selectedDocument.name, markdown: draftContent }),
-    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存 skill。'));
+    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_save_failed')));
   };
 
   const handleCreateSkill = () => {
     if (!draftCreateName.trim()) {
-      setPageError('需要一个 skill 名称。');
+      setPageError(tr('desktop_extension_skill_name_required'));
       return;
     }
     setPageError(null);
@@ -378,7 +380,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
         name: draftCreateName.trim(),
         markdown: draftCreateContent,
       }),
-    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法创建 skill。'));
+    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_create_failed')));
   };
 
   const handleMoveSkill = () => {
@@ -391,7 +393,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       scope: moveScope,
       revision: selectedDocument.revision,
       payload_json: JSON.stringify({ name: moveName.trim() || selectedDocument.name }),
-    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法移动 skill。'));
+    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_move_failed')));
   };
 
   const handleTrashSkill = () => {
@@ -403,7 +405,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       target: selectedDocument.id,
       revision: selectedDocument.revision,
       payload_json: '{}',
-    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法移到回收区。'));
+    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_trash_failed')));
   };
 
   const handleRestoreSkill = () => {
@@ -416,7 +418,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       scope: restoreScope,
       revision: selectedTrash.revision ?? EMPTY_SHA256,
       payload_json: JSON.stringify({ name: restoreName.trim() || selectedTrash.name }),
-    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法恢复 skill。'));
+    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_restore_failed')));
   };
 
   const handlePurgeSkill = () => {
@@ -434,7 +436,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       payload_json: JSON.stringify({ confirmed: true }),
     })
       .then(() => setPurgeConfirmId(null))
-      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法永久删除 skill。'));
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_purge_failed')));
   };
 
   const detail = selection.kind === 'create'
@@ -442,28 +444,28 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       <div style={{ ...managerDetailStyle(), padding: 0 }}>
         <div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>新建 Skill</div>
-            <SourcePill t={t} label={draftCreateScope === 'project' ? '项目' : '用户'} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{tr('desktop_extension_new_skill')}</div>
+            <SourcePill t={t} label={draftCreateScope === 'project' ? tr('cron_run_project_label') : tr('settings_parity_user_layer')} />
           </div>
-          <div style={secondaryMetaStyle(t)}>会创建目录与 SKILL.md。其它附件文件仍需在文件系统里处理。</div>
+          <div style={secondaryMetaStyle(t)}>{tr('desktop_extension_create_skill_description')}</div>
         </div>
         <div style={detailGridStyle()}>
-          <Field t={t} label="作用域">
-            <select value={draftCreateScope} onChange={(event) => setDraftCreateScope(event.target.value as 'user' | 'project')} style={inputStyle(t)} aria-label="skill-create-scope">
-              <option value="user">用户</option>
-              <option value="project">项目</option>
+          <Field t={t} label={tr('cron_scope_label')}>
+            <select value={draftCreateScope} onChange={(event) => setDraftCreateScope(event.target.value as 'user' | 'project')} style={inputStyle(t)} aria-label={tr('cron_scope_label')}>
+              <option value="user">{tr('settings_parity_user_layer')}</option>
+              <option value="project">{tr('cron_run_project_label')}</option>
             </select>
           </Field>
-          <Field t={t} label="名称">
-            <input value={draftCreateName} onChange={(event) => setDraftCreateName(event.target.value)} style={inputStyle(t)} aria-label="skill-create-name" placeholder="my-skill" />
+          <Field t={t} label={tr('onboarding_done_row_name')}>
+            <input value={draftCreateName} onChange={(event) => setDraftCreateName(event.target.value)} style={inputStyle(t)} aria-label={tr('onboarding_done_row_name')} placeholder="my-skill" />
           </Field>
         </div>
         <Field t={t} label="SKILL.md">
-          <textarea value={draftCreateContent} onChange={(event) => setDraftCreateContent(event.target.value)} rows={14} style={textareaStyle(t, 14)} aria-label="skill-create-content" />
+          <textarea value={draftCreateContent} onChange={(event) => setDraftCreateContent(event.target.value)} rows={14} style={textareaStyle(t, 14)} aria-label="SKILL.md" />
         </Field>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button type="button" onClick={handleCreateSkill} style={ghostButtonStyle(t)}>创建</button>
-          <button type="button" onClick={() => requestSelection({ kind: 'list' })} style={ghostButtonStyle(t, false, true)}>取消</button>
+          <button type="button" onClick={handleCreateSkill} style={ghostButtonStyle(t)}>{tr('common_create')}</button>
+          <button type="button" onClick={() => requestSelection({ kind: 'list' })} style={ghostButtonStyle(t, false, true)}>{tr('common_cancel')}</button>
         </div>
       </div>
     )
@@ -473,34 +475,32 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
           <div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
               <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selectedTrash.name}</div>
-              <SourcePill t={t} label="回收区" tone="warn" />
+              <SourcePill t={t} label={tr('desktop_extension_trash')} tone="warn" />
             </div>
             <div className="mono" style={secondaryMetaStyle(t)}>{selectedTrash.directory}</div>
-            {selectedTrash.trashedAt && <div style={secondaryMetaStyle(t)}>删除批次：{selectedTrash.trashedAt}</div>}
+            {selectedTrash.trashedAt && <div style={secondaryMetaStyle(t)}>{tr('desktop_extension_deleted_batch', selectedTrash.trashedAt)}</div>}
           </div>
           <div style={noteStyle(t, 'warn')}>
-            目录仍保留在 skill 回收区中。恢复会移动回用户或项目作用域；永久删除会直接清除该回收区条目。
-          </div>
+            {tr('desktop_extension_trash_description')}</div>
           {purgeConfirmId === selectedTrash.trashId && (
             <div role="alert" style={noteStyle(t, 'danger')}>
-              此操作不可恢复。请再次点击“确认永久删除”。
-            </div>
+              {tr('desktop_extension_purge_warning')}</div>
           )}
           <div style={detailGridStyle()}>
-            <Field t={t} label="恢复到">
-              <select value={restoreScope} onChange={(event) => setRestoreScope(event.target.value as 'user' | 'project')} style={inputStyle(t)} aria-label="skill-restore-scope">
-                <option value="user">用户</option>
-                <option value="project">项目</option>
+            <Field t={t} label={tr('desktop_extension_restore_to')}>
+              <select value={restoreScope} onChange={(event) => setRestoreScope(event.target.value as 'user' | 'project')} style={inputStyle(t)} aria-label={tr('desktop_extension_restore_to')}>
+                <option value="user">{tr('settings_parity_user_layer')}</option>
+                <option value="project">{tr('cron_run_project_label')}</option>
               </select>
             </Field>
-            <Field t={t} label="恢复名称">
-              <input value={restoreName} onChange={(event) => setRestoreName(event.target.value)} style={inputStyle(t)} aria-label="skill-restore-name" />
+            <Field t={t} label={tr('desktop_extension_restore_name')}>
+              <input value={restoreName} onChange={(event) => setRestoreName(event.target.value)} style={inputStyle(t)} aria-label={tr('desktop_extension_restore_name')} />
             </Field>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button type="button" onClick={handleRestoreSkill} disabled={!selectedTrash.trashId} style={ghostButtonStyle(t, !selectedTrash.trashId)}>恢复</button>
+            <button type="button" onClick={handleRestoreSkill} disabled={!selectedTrash.trashId} style={ghostButtonStyle(t, !selectedTrash.trashId)}>{tr('settings_parity_restore')}</button>
             <button type="button" onClick={handlePurgeSkill} disabled={!selectedTrash.trashId} style={ghostButtonStyle(t, !selectedTrash.trashId, true)}>
-              {purgeConfirmId === selectedTrash.trashId ? '确认永久删除' : '永久删除'}
+              {purgeConfirmId === selectedTrash.trashId ? tr('desktop_extension_confirm_purge') : tr('desktop_extension_purge')}
             </button>
           </div>
         </div>
@@ -513,17 +513,17 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
                 <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selectedSkill.name}</div>
                 <SourcePill t={t} label={selectedSkill.source} />
                 {selectedSkill.pluginOwner && <SourcePill t={t} label={selectedSkill.pluginOwner} />}
-                {!selectedSkill.writable && <SourcePill t={t} label="只读" tone="warn" />}
-                {selectedSkill.parseError && <SourcePill t={t} label="解析错误" tone="danger" />}
+                {!selectedSkill.writable && <SourcePill t={t} label={tr('chat_agent_read_only')} tone="warn" />}
+                {selectedSkill.parseError && <SourcePill t={t} label={tr('desktop_extension_parse_error')} tone="danger" />}
               </div>
               <div className="mono" style={secondaryMetaStyle(t)}>{selectedSkill.directory}</div>
               <div className="mono" style={secondaryMetaStyle(t)}>{selectedSkill.rootDir}</div>
               {selectedSkill.description && <div style={secondaryMetaStyle(t)}>{selectedSkill.description}</div>}
-              {selectedSkill.whenToUse && <div style={secondaryMetaStyle(t)}>When to use: {selectedSkill.whenToUse}</div>}
+              {selectedSkill.whenToUse && <div style={secondaryMetaStyle(t)}>{tr('desktop_extension_when_to_use')} {selectedSkill.whenToUse}</div>}
             </div>
-            {loadingDocument && <div style={noteStyle(t)}>正在读取 SKILL.md…</div>}
+            {loadingDocument && <div style={noteStyle(t)}>{tr('desktop_extension_loading_skill')}</div>}
             {!selectedDocument && !loadingDocument && (
-              <EmptyDetail t={t} title="还没有拿到文档内容" body="如果当前引擎还没接入 skill_admin get_document，这里会退回为目录级清单。" />
+              <EmptyDetail t={t} title={tr('desktop_extension_no_document')} body={tr('desktop_extension_no_document_description')} />
             )}
             {selectedDocument && (
               <>
@@ -535,55 +535,53 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
                     onChange={(event) => setDraftContent(event.target.value)}
                     rows={16}
                     readOnly={!selectedDocument.writable}
-                    aria-label={`${selectedDocument.name} markdown`}
+                    aria-label={tr('desktop_extension_markdown_named', selectedDocument.name)}
                     style={textareaStyle(t, 16)}
                   />
                 </Field>
                 <div style={detailGridStyle()}>
-                  <Field t={t} label="移动到">
-                    <select value={moveScope} onChange={(event) => setMoveScope(event.target.value as 'user' | 'project')} style={inputStyle(t)} aria-label="skill-move-scope" disabled={!selectedDocument.writable}>
-                      <option value="user">用户</option>
-                      <option value="project">项目</option>
+                  <Field t={t} label={tr('desktop_extension_move_to')}>
+                    <select value={moveScope} onChange={(event) => setMoveScope(event.target.value as 'user' | 'project')} style={inputStyle(t)} aria-label={tr('desktop_extension_move_to')} disabled={!selectedDocument.writable}>
+                      <option value="user">{tr('settings_parity_user_layer')}</option>
+                      <option value="project">{tr('cron_run_project_label')}</option>
                     </select>
                   </Field>
-                  <Field t={t} label="新名称">
-                    <input value={moveName} onChange={(event) => setMoveName(event.target.value)} style={inputStyle(t)} aria-label="skill-move-name" disabled={!selectedDocument.writable} />
+                  <Field t={t} label={tr('desktop_extension_new_name')}>
+                    <input value={moveName} onChange={(event) => setMoveName(event.target.value)} style={inputStyle(t)} aria-label={tr('desktop_extension_new_name')} disabled={!selectedDocument.writable} />
                   </Field>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                   <button type="button" onClick={handleSaveSkill} disabled={!selectedDocument.writable || draftContent === selectedDocument.markdown} style={ghostButtonStyle(t, !selectedDocument.writable || draftContent === selectedDocument.markdown)}>
-                    保存
+                    {tr('settings_save')}
                   </button>
                   <button type="button" onClick={discardDrafts} disabled={!selectedDocument.writable || !detailDirty} style={ghostButtonStyle(t, !selectedDocument.writable || !detailDirty, true)}>
-                    取消
+                    {tr('common_cancel')}
                   </button>
                   <button type="button" onClick={handleMoveSkill} disabled={!selectedDocument.writable} style={ghostButtonStyle(t, !selectedDocument.writable)}>
-                    移动
-                  </button>
+                    {tr('desktop_extension_move')}</button>
                   <button type="button" onClick={handleTrashSkill} disabled={!selectedDocument.writable} style={ghostButtonStyle(t, !selectedDocument.writable, true)}>
-                    移到回收区
-                  </button>
+                    {tr('desktop_extension_move_trash')}</button>
                 </div>
               </>
             )}
           </div>
         )
-        : <div style={{ ...managerDetailStyle(), padding: 0 }}><EmptyDetail t={t} title="没有可编辑的 skill" body="可以返回列表，或创建新的用户或项目 skill。" /></div>;
+        : <div style={{ ...managerDetailStyle(), padding: 0 }}><EmptyDetail t={t} title={tr('desktop_extension_no_editable_skill')} body={tr('desktop_extension_no_editable_skill_description')} /></div>;
 
   const detailTitle = selection.kind === 'create'
-    ? 'New Skill'
+    ? tr('desktop_extension_new_skill')
     : selection.kind === 'trash'
-      ? selectedTrash?.name ?? 'Deleted Skill'
-      : selectedSkill?.name ?? 'Skill details';
+      ? selectedTrash?.name ?? tr('desktop_extension_deleted_skill')
+      : selectedSkill?.name ?? tr('desktop_extension_skill_details');
 
-  const sourceLabels: Record<string, string> = { user: 'Personal', project: 'Project', builtin: 'System', system: 'System', plugin: 'Plugins', managed: 'Managed' };
+  const sourceLabels: Record<string, string> = { user: tr('desktop_personal'), project: tr('cron_run_project_label'), builtin: tr('settings_voice_backend_system'), system: tr('settings_voice_backend_system'), plugin: tr('desktop_extension_plugins'), managed: tr('settings_parity_managed_layer') };
   const sources = [...new Set(activeSkills.map((entry) => entry.source))];
   const activeSource = sources.includes(sourceFilter) ? sourceFilter : sources[0];
   const sourceSkills = filteredSkills.filter((entry) => entry.source === activeSource);
   const skillRows = (entries: SkillCatalogItem[]) => <div className="extension-hub-list">{entries.map((entry) => <button className="extension-hub-row extension-hub-row-open" type="button" key={entry.id} onClick={() => requestSelection({ kind: 'skill', id: entry.id })}>
     <ExtensionIcon kind="skill" />
-    <span className="extension-hub-row-copy"><span className="extension-hub-row-title">{entry.name}</span><span className="extension-hub-row-description">{entry.description || entry.whenToUse || 'Custom instructions for your workflow'}</span></span>
-    <span className="extension-skill-installed" aria-label={entry.parseError ? 'Needs attention' : 'Installed'}><ExtensionGlyph name={entry.parseError ? 'circleAlert' : 'check'} size={18} /></span>
+    <span className="extension-hub-row-copy"><span className="extension-hub-row-title">{entry.name}</span><span className="extension-hub-row-description">{entry.description || entry.whenToUse || tr('desktop_extension_skill_fallback')}</span></span>
+    <span className="extension-skill-installed" aria-label={entry.parseError ? tr('desktop_apps_attention') : tr('apps_installed')}><ExtensionGlyph name={entry.parseError ? 'circleAlert' : 'check'} size={18} /></span>
   </button>)}</div>;
   const skillDescription = selectedSkill?.description || selectedSkill?.whenToUse;
   const previewMarkdown = selectedDocument?.markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim() ?? '';
@@ -592,29 +590,29 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     <ExtensionHubLayout>
       {closePrompt}
       {pageError && selection.kind === 'list' && <div role="alert">{pageError}</div>}
-      {linkRequest?.payload && selection.kind === 'create' && <p role="status">Review the imported Skill. Creating it below confirms the import.</p>}
-      <ExtensionHubHeader title="Skills" description="Extend LingXi with task-specific skills" search={search} onSearch={setSearch} actions={<>
-        <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? 'Reloading skills' : 'Reload skills'}><ExtensionGlyph name="refresh" size={16} /></button>
-        <button type="button" onClick={() => setShowSettings(!showSettings)} className="extension-hub-icon-button" aria-label="Skill settings" aria-expanded={showSettings}><ExtensionGlyph name="cog" size={16} /></button>
-        <button type="button" onClick={() => requestSelection({ kind: 'create' })} className="extension-hub-primary">Add <ExtensionGlyph name="plus" size={14} /></button>
+      {linkRequest?.payload && selection.kind === 'create' && <p role="status">{tr('desktop_extension_skill_import')}</p>}
+      <ExtensionHubHeader title={tr('settings_title_skills')} description={tr('desktop_extension_skill_description')} search={search} onSearch={setSearch} actions={<>
+        <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? tr('desktop_extension_reloading_skills') : tr('desktop_extension_reload_skills')}><ExtensionGlyph name="refresh" size={16} /></button>
+        <button type="button" onClick={() => setShowSettings(!showSettings)} className="extension-hub-icon-button" aria-label={tr('desktop_extension_skill_settings')} aria-expanded={showSettings}><ExtensionGlyph name="cog" size={16} /></button>
+        <button type="button" onClick={() => requestSelection({ kind: 'create' })} className="extension-hub-primary">{tr('workspace_confirm_add')} <ExtensionGlyph name="plus" size={14} /></button>
       </>} />
-      <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel="Skills" />
+      <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel={tr('settings_title_skills')} />
       {pageError && selection.kind === 'list' && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
       {selection.kind === 'list' && navigationPrompt}
       <section className="extension-catalog-section extension-skills-installed">
-        <h2 className="extension-hub-group-title">Installed</h2>
+        <h2 className="extension-hub-group-title">{tr('apps_installed')}</h2>
         {skillRows(showAllInstalled || search ? filteredSkills : filteredSkills.slice(0, 6))}
-        {!filteredSkills.length && <div className="extension-hub-empty">{search ? 'No skills match your search.' : 'Add your first skill to give LingXi a new workflow.'}</div>}
-        {filteredSkills.length > 6 && !search && <button type="button" className="extension-see-more" onClick={() => setShowAllInstalled(!showAllInstalled)}>{showAllInstalled ? 'Show less' : `See ${filteredSkills.length - 6} more skills`}</button>}
+        {!filteredSkills.length && <div className="extension-hub-empty">{search ? tr('desktop_extension_no_skill_results') : tr('desktop_extension_first_skill')}</div>}
+        {filteredSkills.length > 6 && !search && <button type="button" className="extension-see-more" onClick={() => setShowAllInstalled(!showAllInstalled)}>{showAllInstalled ? tr('chat_tool_show_less') : tr('desktop_extension_more_skills', filteredSkills.length - 6)}</button>}
       </section>
       {sources.length > 0 && <section className="extension-catalog-section extension-skills-sources">
-        <nav className="extension-catalog-tabs" aria-label="Skill sources">{sources.map((source) => <button key={source} type="button" aria-pressed={activeSource === source} onClick={() => { setSourceFilter(source); setShowAllSource(false); }}>{sourceLabels[source] ?? source}</button>)}</nav>
+        <nav className="extension-catalog-tabs" aria-label={tr('desktop_extension_skill_sources')}>{sources.map((source) => <button key={source} type="button" aria-pressed={activeSource === source} onClick={() => { setSourceFilter(source); setShowAllSource(false); }}>{sourceLabels[source] ?? source}</button>)}</nav>
         {skillRows(showAllSource || search ? sourceSkills : sourceSkills.slice(0, 6))}
-        {!sourceSkills.length && <div className="extension-hub-empty">No matching skills in this source.</div>}
-        {sourceSkills.length > 6 && !search && <button type="button" className="extension-see-more" onClick={() => setShowAllSource(!showAllSource)}>{showAllSource ? 'Show less' : `See ${sourceSkills.length - 6} more skills`}</button>}
+        {!sourceSkills.length && <div className="extension-hub-empty">{tr('desktop_extension_no_source_skills')}</div>}
+        {sourceSkills.length > 6 && !search && <button type="button" className="extension-see-more" onClick={() => setShowAllSource(!showAllSource)}>{showAllSource ? tr('chat_tool_show_less') : tr('desktop_extension_more_skills', sourceSkills.length - 6)}</button>}
       </section>}
       {filteredTrash.length > 0 && <details className="extension-hub-marketplaces">
-        <summary>Trash · {filteredTrash.length}</summary>
+        <summary>{tr('desktop_extension_trash_count', filteredTrash.length)}</summary>
         <div className="extension-hub-list">
           {filteredTrash.map((entry) => (
             <button className="extension-hub-row extension-hub-row-open" key={entry.id} type="button" onClick={() => requestSelection({ kind: 'trash', id: entry.id })}>
@@ -626,55 +624,54 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       </details>}
 
       {selection.kind !== 'list' && <div className="extension-detail-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) requestSelection({ kind: 'list' }); }}>
-        <section ref={dialogRef} tabIndex={-1} className="extension-detail-dialog extension-skill-dialog" role="dialog" aria-modal="true" aria-label={`${detailTitle} details`} style={extensionHubStyle(t)}>
+        <section ref={dialogRef} tabIndex={-1} className="extension-detail-dialog extension-skill-dialog" role="dialog" aria-modal="true" aria-label={tr('desktop_extension_details_named', detailTitle)} style={extensionHubStyle(t)}>
           <header className="extension-detail-head extension-skill-head">
             <div className="extension-skill-topline"><ExtensionIcon kind="skill" /><div className="extension-hub-toolbar-actions">
-              {selectedSkill && <details className="extension-hub-menu"><summary className="extension-hub-icon-button" aria-label="Skill actions"><ExtensionGlyph name="more" size={16} /></summary><div className="extension-hub-menu-popover"><button type="button" disabled={!selectedDocument} onClick={(event) => { setEditingDocument(true); event.currentTarget.closest('details')?.removeAttribute('open'); }}>{selectedDocument?.writable ? 'Edit skill' : 'View source'}</button></div></details>}
-              <button type="button" className="extension-hub-icon-button" data-dialog-initial-focus aria-label="Close details" onClick={() => requestSelection({ kind: 'list' })}><ExtensionGlyph name="x" size={16} /></button>
+              {selectedSkill && <details className="extension-hub-menu"><summary className="extension-hub-icon-button" aria-label={tr('desktop_extension_skill_actions')}><ExtensionGlyph name="more" size={16} /></summary><div className="extension-hub-menu-popover"><button type="button" disabled={!selectedDocument} onClick={(event) => { setEditingDocument(true); event.currentTarget.closest('details')?.removeAttribute('open'); }}>{selectedDocument?.writable ? tr('desktop_extension_edit_skill') : tr('desktop_extension_view_source')}</button></div></details>}
+              <button type="button" className="extension-hub-icon-button" data-dialog-initial-focus aria-label={tr('desktop_extension_close_details')} onClick={() => requestSelection({ kind: 'list' })}><ExtensionGlyph name="x" size={16} /></button>
             </div></div>
-            <div className="extension-detail-title-line"><h2 className="extension-detail-title">{detailTitle}</h2><span className="extension-detail-kind">Skill</span></div>
+            <div className="extension-detail-title-line"><h2 className="extension-detail-title">{detailTitle}</h2><span className="extension-detail-kind">{tr('chat_tool_verb_skill')}</span></div>
             {skillDescription && <p className="extension-skill-description">{skillDescription}</p>}
           </header>
           <div className="extension-detail-content">
             {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
-            <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel="Skills" />
+            <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel={tr('settings_title_skills')} />
             {navigationPrompt}
             {pendingSelection && (
               <div style={noteStyle(t, 'warn')}>
-                当前修改尚未保存。离开前请保存，或丢弃草稿。
-                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button type="button" onClick={() => { discardDrafts(); setSelection(pendingSelection); }} style={ghostButtonStyle(t)}>丢弃并切换</button>
-                  <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>继续编辑</button>
+                {tr('desktop_extension_unsaved_changes')} <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button type="button" onClick={() => { discardDrafts(); setSelection(pendingSelection); }} style={ghostButtonStyle(t)}>{tr('desktop_extension_discard_switch')}</button>
+                  <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>{tr('desktop_extension_continue_editing')}</button>
                 </div>
               </div>
             )}
             {selection.kind === 'skill' && !editingDocument ? <>
               {selectedDocument?.parseError && <div role="alert" style={noteStyle(t, 'danger')}>{selectedDocument.parseError}</div>}
-              <div className="extension-skill-preview">{loadingDocument ? <div role="status">Loading SKILL.md…</div> : selectedDocument ? <MarkdownContent text={previewMarkdown || 'This skill has no instructions yet.'} /> : <div className="extension-hub-empty">The skill document is not available.</div>}</div>
+              <div className="extension-skill-preview">{loadingDocument ? <div role="status">{tr('desktop_extension_loading_skill')}</div> : selectedDocument ? <MarkdownContent text={previewMarkdown || tr('desktop_extension_no_instructions')} /> : <div className="extension-hub-empty">{tr('desktop_extension_skill_doc_unavailable')}</div>}</div>
               {uninstallDisabledReason && <div id="skill-uninstall-readonly-reason" style={noteStyle(t, 'warn')}>
                 {uninstallDisabledReason}
               </div>}
             </> : detail}
           </div>
           {selection.kind === 'skill' && !editingDocument && <footer className="extension-detail-footer">
-            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable} aria-describedby={uninstallDisabledReason ? 'skill-uninstall-readonly-reason' : undefined} onClick={handleTrashSkill}>Uninstall</button>
+            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable} aria-describedby={uninstallDisabledReason ? 'skill-uninstall-readonly-reason' : undefined} onClick={handleTrashSkill}>{tr('apps_action_uninstall')}</button>
             <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
               if (!selectedSkill) return;
               setTryingSkill(true);
-              void bridge.runSlashCommand(`/${selectedSkill.name}`, []).then((accepted) => { if (accepted) onClose(); }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : 'Unable to start this skill.')).finally(() => setTryingSkill(false));
-            }}><ExtensionGlyph name="chat" size={16} />Try now</button>
+              void bridge.runSlashCommand(`/${selectedSkill.name}`, []).then((accepted) => { if (accepted) onClose(); }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_start_failed'))).finally(() => setTryingSkill(false));
+            }}><ExtensionGlyph name="chat" size={16} />{tr('desktop_extension_try_now')}</button>
           </footer>}
         </section>
       </div>}
 
       {showSettings && selection.kind === 'list' && <details open className="extension-hub-secondary-settings">
-        <summary>Claude.ai sync</summary>
+        <summary>{tr('desktop_extension_claude_sync')}</summary>
         <Card>
           <FieldProvenanceNotice snapshot={snapshot} fieldKey="syncClaudeAiSkills" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-          <Row title="syncClaudeAiSkills" desc={(catalog.sync_claude_ai_note ?? 'Stored only. Claude.ai cloud sync is not wired on desktop.').replace('Stored only.', '仅保存。').replace('Claude.ai cloud sync is not wired on desktop.', '当前还没有接入 Claude.ai 云端同步。')} align="center">
-            <Toggle value={syncDraft} onChange={setSyncDraft} label="syncClaudeAiSkills" disabled={savingSync} />
+          <Row title={tr('desktop_extension_claude_sync')} desc={catalog.sync_claude_ai_note && catalog.sync_claude_ai_note !== 'Stored only. Claude.ai cloud sync is not wired on desktop.' ? catalog.sync_claude_ai_note : tr('desktop_extension_sync_unavailable')} align="center">
+            <Toggle value={syncDraft} onChange={setSyncDraft} label={tr('desktop_extension_claude_sync')} disabled={savingSync} />
           </Row>
-          <Row title="Save" desc="这是本页唯一按层写入的普通设置项。" align="center">
+          <Row title={tr('settings_save')} desc={tr('desktop_extension_layered_sync')} align="center">
             <div style={{ display: 'flex', gap: 8 }}>
               <button
                 type="button"
@@ -683,15 +680,15 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
                   setSavingSync(true);
                   setPageError(null);
                   void bridge.updateEngineSettings(editingLayer, { syncClaudeAiSkills: syncDraft })
-                    .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存 syncClaudeAiSkills。'))
+                    .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_sync_save_failed')))
                     .finally(() => setSavingSync(false));
                 }}
                 style={ghostButtonStyle(t, savingSync || !syncHasChanges)}
               >
-                保存
+                {tr('settings_save')}
               </button>
               <button type="button" disabled={savingSync || !syncHasChanges} onClick={() => setSyncDraft(syncEnabled)} style={ghostButtonStyle(t, savingSync || !syncHasChanges, true)}>
-                取消
+                {tr('common_cancel')}
               </button>
             </div>
           </Row>
@@ -699,11 +696,10 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       </details>}
 
       {!adminAvailable && selection.kind === 'list' && <details className="extension-hub-secondary-settings">
-        <summary>Compatibility view</summary>
+        <summary>{tr('desktop_extension_compatibility_view')}</summary>
         <Card>
           <div style={{ padding: '12px 18px', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
-            当前运行时仅支持查看已发现的 skills。升级运行时后可编辑和管理。
-          </div>
+            {tr('desktop_extension_readonly_skills')}</div>
           {model.skills.slice(0, 3).map((skill) => (
             <Row key={skill.source_dir} align="center" title={skill.name} desc={<span className="mono" style={{ fontSize: 11.5 }}>{skill.source_dir}</span>}>{null}</Row>
           ))}

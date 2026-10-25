@@ -155,8 +155,10 @@ val DefaultVoiceStrings = VoiceStrings { _, fallback, args ->
 }
 
 /** Production resolver: real localized text via the app's (locale-wrapped) [Context]. */
-fun voiceStrings(context: Context): VoiceStrings =
-    VoiceStrings { id, _, args -> context.getString(id, *args) }
+fun voiceStrings(context: Context): VoiceStrings {
+    val appContext = context.applicationContext
+    return VoiceStrings { id, _, args -> com.lingxi.code.theme.LocaleWrapper.getString(appContext, id, *args) }
+}
 
 /**
  * T3.3 — wire the device-audio path into the engine + the Compose hold-to-talk

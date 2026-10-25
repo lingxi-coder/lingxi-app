@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -26,6 +26,18 @@ import { tokens } from '../src/renderer/theme/tokens';
 import { ProviderEditorFields } from '../src/renderer/components/settings/pages/ProviderEditorFields';
 
 (globalThis as { React?: typeof React }).React = React;
+
+// These behavior assertions intentionally exercise the Simplified Chinese UI.
+// The language matrix is covered separately by advanced-settings-localization.
+const originalLanguageStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+before(() => Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true, value: { getItem: () => 'zh-Hans' },
+}));
+after(() => {
+  if (originalLanguageStorage) Object.defineProperty(globalThis, 'localStorage', originalLanguageStorage);
+  else delete (globalThis as { localStorage?: unknown }).localStorage;
+});
+
 
 /**
  * A fully-typed `SettingsSnapshot`, the same helper every other new settings
@@ -334,7 +346,7 @@ test('broker-owned custom provider editing exposes saved keys and disables unsup
   ));
   assert.match(markup, /<option value="env" disabled="">环境变量/);
   assert.match(markup, /此应用不读取自定义环境变量/);
-  const keyInput = markup.match(/<input[^>]*aria-label="API Key"[^>]*>/)?.[0];
+  const keyInput = markup.match(/<input[^>]*aria-label="API 密钥"[^>]*>/)?.[0];
   assert.ok(keyInput);
   assert.doesNotMatch(keyInput, /\bdisabled\b/);
   assert.match(markup.match(/<input[^>]*aria-label="连接 1 apiKeyEnv"[^>]*>/)?.[0] ?? '', /\bdisabled\b/);

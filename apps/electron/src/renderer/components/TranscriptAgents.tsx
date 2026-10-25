@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import { useState, type CSSProperties } from 'react';
 import type { SessionAgentSummaryDto } from '@lingxi/bridge-client';
 import { useT } from '../theme/ThemeContext';
@@ -20,10 +22,26 @@ export function orderedTranscriptAgents(previousIds: readonly string[], agents: 
   return [...ids].flatMap((id) => byId.has(id) ? [byId.get(id)!] : []);
 }
 
+function agentStatusText(status: string): string {
+  const shown = statusLabel(status);
+  switch (shown) {
+    case 'done': return tr('common_done');
+    case 'failed': return tr('chat_status_failed');
+    case 'error': return tr('desktop_ui_agent_error');
+    case 'waiting_for_input': return tr('desktop_ui_agent_waiting');
+    case 'pending': return tr('chat_plan_state_pending');
+    case 'cancelled': return tr('chat_status_cancelled');
+    case 'killed': return tr('desktop_ui_agent_killed');
+    case 'idle': return tr('remote_status_idle');
+    default: return shown ? shown[0].toUpperCase() + shown.slice(1).replace(/_/g, ' ') : tr('voice_permission_unknown_label');
+  }
+}
+
 const EMPTY_AGENTS: readonly SessionAgentSummaryDto[] = [];
 
 export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent, activeAgentId }: TranscriptAgentsProps) {
   const t = useT();
+  useI18n();
   const [snapshot, setSnapshot] = useState(() => ({ source: agents, rows: orderedTranscriptAgents([], agents) }));
   let rows = snapshot.rows;
   if (snapshot.source !== agents) {
@@ -32,7 +50,7 @@ export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent, activeAge
   }
   if (rows.length === 0) return null;
 
-  return <div className="transcript-agents" role="group" aria-label="Session agents" style={{
+  return <div className="transcript-agents" role="group" aria-label={tr("desktop_ui_session_agents")} style={{
     color: t.text2,
     '--agent-hover': t.surfaceHover,
     '--agent-focus': t.accent,
@@ -44,8 +62,7 @@ export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent, activeAge
       // claude-code's word, then sentence case for this chip: a finished
       // background agent reads `Done`, never `Completed` and never the port's
       // old invented `Idle`.
-      const shown = agent.status ? statusLabel(agent.status) : '';
-      const status = running ? 'Running' : shown ? shown[0].toUpperCase() + shown.slice(1).replace(/_/g, ' ') : 'Unknown';
+      const status = running ? tr('remote_status_running') : agentStatusText(agent.status);
       return <button
         key={agent.agent_id}
         type="button"
@@ -54,7 +71,7 @@ export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent, activeAge
         data-agent-id={agent.agent_id}
         data-agent-running={running ? 'true' : undefined}
         disabled={!onOpenAgent}
-        aria-label={`${name} · ${status}${onOpenAgent ? ' · Open agent details' : ''}`}
+        aria-label={`${name} · ${status}${onOpenAgent ? ` · ${tr('desktop_ui_agent_open_details')}` : ''}`}
         onClick={() => onOpenAgent?.(agent.agent_id)}
       >
         <span className="transcript-agent-icon"><AgentAvatar agentId={agent.agent_id} size={18} /></span>

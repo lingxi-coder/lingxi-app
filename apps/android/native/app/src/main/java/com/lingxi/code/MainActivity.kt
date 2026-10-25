@@ -80,8 +80,8 @@ class MainActivity : ComponentActivity() {
         val raw = intent.dataString
         if (raw == null) return
         val notice = when {
-            com.lingxi.code.navigation.DeepLink.parse(raw) == null -> "Invalid or unsafe LingXi link."
-            !linkInbox.deliver(raw, restoringActivity) -> "Too many pending links. Open the link again after reviewing the current destination."
+            com.lingxi.code.navigation.DeepLink.parse(raw) == null -> getString(R.string.deep_link_invalid)
+            !linkInbox.deliver(raw, restoringActivity) -> getString(R.string.deep_link_queue_full)
             else -> null
         }
         notice?.let { android.widget.Toast.makeText(this, it, android.widget.Toast.LENGTH_LONG).show() }

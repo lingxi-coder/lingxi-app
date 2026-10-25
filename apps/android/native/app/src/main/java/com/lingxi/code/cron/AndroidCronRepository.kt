@@ -157,7 +157,7 @@ class AndroidCronRepository private constructor(
                 _state.value.copy(
                     loading = false,
                     errorMessage = error.message
-                        ?: appContext.getString(R.string.cron_load_failed_default),
+                        ?: com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.cron_load_failed_default),
                     exactAlarmAllowed = CronAlarmScheduler.canScheduleExact(appContext),
                     networkAvailable = hasConnectedNetwork(),
                     workManagerStateCounts = _state.value.workManagerStateCounts,
@@ -186,9 +186,9 @@ class AndroidCronRepository private constructor(
             val delivered = CronNotifications.postResult(
                 context = appContext,
                 title = record.prompt.lineSequence().firstOrNull()?.take(40)?.ifBlank { null }
-                    ?: appContext.getString(R.string.cron_result_title_default),
+                    ?: com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.cron_result_title_default),
                 body = record.resultText ?: record.errorMessage
-                    ?: appContext.getString(R.string.chat_status_completed),
+                    ?: com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.chat_status_completed),
                 tag = "cron-${record.runId}",
                 runId = record.runId,
             )
@@ -229,7 +229,7 @@ class AndroidCronRepository private constructor(
         scopeId = scopeId,
     ) { scope ->
         require(gateway.list(scope).any { it.id == taskId }) {
-            appContext.getString(R.string.cron_task_not_in_project)
+            com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.cron_task_not_in_project)
         }
         gateway.update(scope, taskId, cron.trim(), prompt.trim(), recurring, automation).also {
             if (!it.isActive()) historyStore.cancelQueued(scope.scopeId, taskId)
@@ -266,7 +266,7 @@ class AndroidCronRepository private constructor(
                     historyStore.cancelUnfinished(
                         scope.scopeId,
                         taskId,
-                        appContext.getString(R.string.cron_task_deleted_message),
+                        com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.cron_task_deleted_message),
                     )
                 }
             }
@@ -278,9 +278,9 @@ class AndroidCronRepository private constructor(
                 val scope = requireScope(scopeId)
                 val task = gateway.list(scope).firstOrNull { it.id == taskId }
                     ?: throw IllegalArgumentException(
-                        appContext.getString(R.string.cron_task_not_in_project),
+                        com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.cron_task_not_in_project),
                     )
-                require(task.isActive()) { "Resume this task before running it" }
+                require(task.isActive()) { com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.cron_resume_before_running) }
                 val now = System.currentTimeMillis()
                 val record = historyStore.enqueue(
                     scope = scope,
@@ -290,7 +290,7 @@ class AndroidCronRepository private constructor(
                     triggeredAtMs = now,
                     manual = true,
                 ) ?: throw IllegalStateException(
-                    appContext.getString(R.string.cron_task_already_running),
+                    com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.cron_task_already_running),
                 )
                 CronWorkScheduler.enqueueExecutionChain(appContext, listOf(record))
                 CronCoordinator(appContext, this@AndroidCronRepository).reconcile("run-now")
@@ -345,7 +345,7 @@ class AndroidCronRepository private constructor(
 
     private fun requireScope(scopeId: String): CronScope =
         scope(scopeId) ?: throw IllegalArgumentException(
-            appContext.getString(R.string.cron_workspace_unavailable),
+            com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.cron_workspace_unavailable),
         )
 
     private fun hasConnectedNetwork(): Boolean {

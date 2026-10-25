@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent } from 'react';
 import type { Terminal as XTerminal } from '@xterm/xterm';
 import type { TerminalScope, TerminalSnapshot } from '../../shared/terminal';
@@ -86,11 +88,11 @@ export function useTerminalPanel(scope: TerminalScope | null, enabled: boolean) 
     return () => window.removeEventListener('keydown', keydown);
   });
   const openLink = async (owner: TerminalScope, terminalId: string, command?: string) => {
-    if (!window.lingxi?.terminal) throw new Error('Terminal is unavailable.');
+    if (!window.lingxi?.terminal) throw new Error(tr('desktop_interaction_terminal_unavailable'));
     const records = await window.lingxi.terminal.list(owner);
     merge(records);
     const existing = terminalId === 'interactive' ? undefined : records.find(tab => tab.id === terminalId);
-    if (terminalId !== 'interactive' && !existing) throw new Error('This terminal is no longer available on this device.');
+    if (terminalId !== 'interactive' && !existing) throw new Error(tr('desktop_interaction_terminal_gone'));
     const ownerKey = terminalScopeKey(owner);
     setStates(previous => ({ ...previous, [ownerKey]: { open: true, selected: existing?.id } }));
     if (command !== undefined) {
@@ -111,7 +113,7 @@ export function useTerminalPanel(scope: TerminalScope | null, enabled: boolean) 
       const tab = commandReview.terminalId
         ? (await window.lingxi!.terminal.list(commandReview.scope)).find(tab => tab.id === commandReview.terminalId)
         : await window.lingxi!.terminal.create(commandReview.scope);
-      if (!tab || tab.status !== 'running') throw new Error('This shell is no longer running. Open a new terminal to run the command.');
+      if (!tab || tab.status !== 'running') throw new Error(tr('desktop_interaction_shell_not_running'));
       merge([tab]);
       await window.lingxi!.terminal.input(tab.id, input);
       const ownerKey = terminalScopeKey(tab.scope);
@@ -132,6 +134,7 @@ export function useTerminalPanel(scope: TerminalScope | null, enabled: boolean) 
 }
 
 export function TerminalPanel({ controller }: { controller: ReturnType<typeof useTerminalPanel> }) {
+  const { tr } = useI18n();
   const t = useT();
   const ref = useRef<HTMLElement>(null);
   const [height, setHeight] = useState(() => { try { return Number(localStorage.getItem(HEIGHT_KEY)) || 240; } catch { return 240; } });
@@ -160,26 +163,26 @@ export function TerminalPanel({ controller }: { controller: ReturnType<typeof us
     target.addEventListener('pointermove', move); target.addEventListener('pointerup', end); target.addEventListener('lostpointercapture', end);
     target.addEventListener('pointercancel', end);
   };
-  return <section ref={ref} id="desktop-terminal" aria-label="Terminal" aria-hidden={!controller.open} {...(!controller.open ? { inert: '' } : {})} data-open={controller.open ? 'true' : 'false'} className="desktop-terminal" style={{ height: controller.open ? clampTerminalHeight(height, available) : 0, '--terminal-bg': t.windowBg, '--terminal-text': t.text, '--terminal-muted': t.text3, '--terminal-border': t.border, '--terminal-hover': t.surfaceHover } as CSSProperties}>
-    <div role="separator" aria-label="Terminal height" aria-orientation="horizontal" aria-valuemin={100} aria-valuemax={Math.max(100, available - 240)} aria-valuenow={clampTerminalHeight(height, available)} tabIndex={0} className="terminal-resizer" onPointerDown={resize} onKeyDown={event => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); saveHeight(clampTerminalHeight(height + (event.key === 'ArrowUp' ? 24 : -24), available)); } }} />
+  return <section ref={ref} id="desktop-terminal" aria-label={tr('settings_linux_section_terminal')} aria-hidden={!controller.open} {...(!controller.open ? { inert: '' } : {})} data-open={controller.open ? 'true' : 'false'} className="desktop-terminal" style={{ height: controller.open ? clampTerminalHeight(height, available) : 0, '--terminal-bg': t.windowBg, '--terminal-text': t.text, '--terminal-muted': t.text3, '--terminal-border': t.border, '--terminal-hover': t.surfaceHover } as CSSProperties}>
+    <div role="separator" aria-label={tr('desktop_interaction_terminal_height')} aria-orientation="horizontal" aria-valuemin={100} aria-valuemax={Math.max(100, available - 240)} aria-valuenow={clampTerminalHeight(height, available)} tabIndex={0} className="terminal-resizer" onPointerDown={resize} onKeyDown={event => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); saveHeight(clampTerminalHeight(height + (event.key === 'ArrowUp' ? 24 : -24), available)); } }} />
     <div className="terminal-toolbar">
-      <div role="tablist" aria-label="Shell terminals" className="terminal-tabs">{controller.visibleTabs.map((tab, index) => <div className="terminal-tab" data-active={tab.id === controller.selected?.id} key={tab.id}>
-        <button type="button" role="tab" aria-selected={tab.id === controller.selected?.id} aria-controls={`terminal-${tab.id}`} onClick={() => controller.select(tab.id)}><ShellIcon /><span>{tab.title}{index ? ` ${index + 1}` : ''}</span>{tab.status === 'exited' && <span className="terminal-exited-dot" aria-label="Exited">·</span>}</button>
-        <button type="button" className="terminal-icon-button" aria-label={`Close ${tab.title} terminal`} title="Close terminal" onClick={() => void controller.close(tab.id)}><Icon name="x" size={18} /></button>
+      <div role="tablist" aria-label={tr('desktop_interaction_shell_terminals')} className="terminal-tabs">{controller.visibleTabs.map((tab, index) => <div className="terminal-tab" data-active={tab.id === controller.selected?.id} key={tab.id}>
+        <button type="button" role="tab" aria-selected={tab.id === controller.selected?.id} aria-controls={`terminal-${tab.id}`} onClick={() => controller.select(tab.id)}><ShellIcon /><span>{tab.title}{index ? ` ${index + 1}` : ''}</span>{tab.status === 'exited' && <span className="terminal-exited-dot" aria-label={tr('desktop_interaction_exited')}>·</span>}</button>
+        <button type="button" className="terminal-icon-button" aria-label={tr('desktop_interaction_close_terminal_named', tab.title)} title={tr('terminal_close')} onClick={() => void controller.close(tab.id)}><Icon name="x" size={18} /></button>
       </div>)}</div>
-      <button type="button" className="terminal-icon-button" disabled={controller.busy} aria-label="New terminal" title="New terminal" onClick={() => void controller.create()}><Icon name="plus" size={18} /></button>
+      <button type="button" className="terminal-icon-button" disabled={controller.busy} aria-label={tr('desktop_interaction_new_terminal')} title={tr('desktop_interaction_new_terminal')} onClick={() => void controller.create()}><Icon name="plus" size={18} /></button>
       <div className="terminal-toolbar-spacer" />
-      <button type="button" className="terminal-icon-button" aria-label="Hide terminal panel" title="Hide terminal panel (Ctrl+`)" onClick={controller.hide}><Icon name="x" size={18} /></button>
+      <button type="button" className="terminal-icon-button" aria-label={tr('desktop_interaction_hide_terminal')} title={`${tr('desktop_interaction_hide_terminal')} (Ctrl+\`)`} onClick={controller.hide}><Icon name="x" size={18} /></button>
     </div>
-    {controller.commandReview && <div role="region" aria-label="Review linked terminal command" style={{ padding: 12, display: 'grid', gap: 8 }}>
-      <p style={{ margin: 0 }}>Run in {controller.commandReview.scope.projectPath} · {controller.commandReview.scope.sessionId === '__draft__' ? 'project terminal' : controller.commandReview.scope.sessionId}</p>
-      <label>Review command before running<textarea aria-label="Linked terminal command" value={controller.commandReview.command} disabled={controller.busy} onChange={event => controller.editCommand(event.target.value)} rows={3} style={{ width: '100%', fontFamily: 'monospace', resize: 'vertical' }} /></label>
-      <div style={{ display: 'flex', gap: 8 }}><button type="button" disabled={controller.busy || !controller.commandReview.command.trim()} onClick={() => void controller.confirmCommand()}>Confirm and run</button><button type="button" disabled={controller.busy} onClick={controller.cancelCommand}>Cancel</button></div>
+    {controller.commandReview && <div role="region" aria-label={tr('desktop_interaction_review_terminal')} style={{ padding: 12, display: 'grid', gap: 8 }}>
+      <p style={{ margin: 0 }}>{tr('desktop_interaction_run_in', controller.commandReview.scope.projectPath, controller.commandReview.scope.sessionId === '__draft__' ? tr('desktop_interaction_project_terminal') : controller.commandReview.scope.sessionId)}</p>
+      <label>{tr('desktop_interaction_review_before_run')}<textarea aria-label={tr('desktop_interaction_linked_command')} value={controller.commandReview.command} disabled={controller.busy} onChange={event => controller.editCommand(event.target.value)} rows={3} style={{ width: '100%', fontFamily: 'monospace', resize: 'vertical' }} /></label>
+      <div style={{ display: 'flex', gap: 8 }}><button type="button" disabled={controller.busy || !controller.commandReview.command.trim()} onClick={() => void controller.confirmCommand()}>{tr('desktop_interaction_confirm_run')}</button><button type="button" disabled={controller.busy} onClick={controller.cancelCommand}>{tr('common_cancel')}</button></div>
     </div>}
     {controller.error && <div role="alert" className="terminal-error">{controller.error}</div>}
-    {!controller.visibleTabs.length && !controller.commandReview && <div className="terminal-empty">{controller.busy ? 'Starting shell…' : <button type="button" onClick={() => void controller.create()}>Open a terminal</button>}</div>}
+    {!controller.visibleTabs.length && !controller.commandReview && <div className="terminal-empty">{controller.busy ? tr('desktop_interaction_starting_shell') : <button type="button" onClick={() => void controller.create()}>{tr('desktop_interaction_open_terminal')}</button>}</div>}
     <div className="terminal-surfaces">{controller.tabs.map(tab => <TerminalSurface key={tab.id} tab={tab} active={controller.open && tab.id === controller.selected?.id} focusRequest={controller.focusRequest} dark={t.dark} background={t.windowBg} />)}</div>
-    {controller.selected?.status === 'exited' && <div className="terminal-exit-status">Shell exited{controller.selected.exitCode !== null ? ` (${controller.selected.exitCode})` : ''}. <button type="button" onClick={() => { const id = controller.selected!.id; void controller.close(id).then(closed => { if (closed) return controller.create(); }); }}>Restart shell</button></div>}
+    {controller.selected?.status === 'exited' && <div className="terminal-exit-status">{tr('desktop_interaction_shell_exited')}{controller.selected.exitCode !== null ? ` (${controller.selected.exitCode})` : ''}. <button type="button" onClick={() => { const id = controller.selected!.id; void controller.close(id).then(closed => { if (closed) return controller.create(); }); }}>{tr('desktop_interaction_restart_shell')}</button></div>}
   </section>;
 }
 

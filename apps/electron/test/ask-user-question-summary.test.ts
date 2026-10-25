@@ -1,3 +1,4 @@
+import { withDesktopLocale } from './support/language';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
@@ -14,7 +15,7 @@ const item: ToolRunItem = {
   view: { verb: 'generic', label: 'AskUserQuestion', title: 'AskUserQuestion' },
   nativeOutput: { questions: [{ question: '支持语音？' }, { question: 'Other?' }], answers: { '支持语音？': '原生实时对话\n含打断' } },
 };
-const render = (node: React.ReactElement) => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, node));
+const render = (node: React.ReactElement) => withDesktopLocale('en', () => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, node)));
 test('completed questions preserve order, multiline answers and unanswered entries', () => {
   assert.deepEqual(questionAnswers(item), [{ question: '支持语音？', answer: '原生实时对话\n含打断' }, { question: 'Other?', answer: null }]);
   const html = render(React.createElement(ToolCall, { item, onSetOpen() {} }));

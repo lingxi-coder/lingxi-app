@@ -1,3 +1,5 @@
+import { useI18n } from '../../../i18n/useI18n';
+import { tr } from '../../../i18n/locale';
 import { useEffect, useRef, useState } from 'react';
 import type { PageContentProps } from '../SettingsScreen';
 import { Card, isEditableLayer, OverriddenNotice, Row } from '../rows';
@@ -9,9 +11,10 @@ export function normalizedProviderRegion(value: unknown): 'international' | 'chi
   return value === 'china_mainland' ? 'china_mainland' : 'international';
 }
 
-const label = (region: string) => region === 'china_mainland' ? '中国大陆' : '国际';
+const label = (region: string) => region === 'china_mainland' ? tr('settings_provider_region_china') : tr('settings_provider_region_international');
 
 export function ProviderRegion({ bridge, snapshot, editingLayer, onJumpToLayer, onLayerLockChange }: Pick<PageContentProps, 'bridge' | 'snapshot' | 'editingLayer' | 'onJumpToLayer' | 'onLayerLockChange'>) {
+  useI18n();
   const t = useT();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,36 +39,36 @@ export function ProviderRegion({ bridge, snapshot, editingLayer, onJumpToLayer, 
     try {
       await bridge.updateProviderSettings(editingLayer, { providerRegion: value || null });
     } catch (cause) {
-      if (token === generation.current) setError(cause instanceof Error ? cause.message : '无法保存模型区域。');
+      if (token === generation.current) setError(cause instanceof Error ? cause.message : tr('desktop_settings_4c91dcc54b'));
     } finally {
       if (token === generation.current) setSaving(false);
       onLayerLockChange?.(false);
     }
   };
 
-  return <Card title="模型区域">
-    <Row title="使用区域" desc="模型列表和请求按区域筛选。未设置时使用国际区域；其他区域的配置与凭据会保留。" align="center">
-      <select aria-label="模型使用区域" value={typeof own === 'string' ? own : ''} disabled={disabled}
+  return <Card title={tr('settings_provider_region')}>
+    <Row title={tr('desktop_settings_d50e29c2a9')} desc={tr('desktop_settings_d3bed56ee7')} align="center">
+      <select aria-label={tr('settings_provider_region')} value={typeof own === 'string' ? own : ''} disabled={disabled}
         onChange={(event) => { void write(event.target.value); }}
         style={{ background: t.surface, color: t.text, border: `1px solid ${t.border}`, borderRadius: 7, padding: '6px 10px' }}>
-        <option value="">继承（当前：{label(desired)}）</option>
-        <option value="international">国际</option>
-        <option value="china_mainland">中国大陆</option>
+        <option value="">{tr('desktop_settings_inherit_current', label(desired))}</option>
+        <option value="international">{tr('settings_provider_region_international')}</option>
+        <option value="china_mainland">{tr('settings_provider_region_china')}</option>
       </select>
     </Row>
-    {state?.kind === 'overridden' && <Row title="生效层">
+    {state?.kind === 'overridden' && <Row title={tr('desktop_settings_ad25986d5b')}>
       <OverriddenNotice editingLayer={editingLayer} effectiveLayer={state.by}
         onJump={() => { if (isEditableLayer(state.by)) onJumpToLayer(state.by); }} />
     </Row>}
-    {active !== null && <Row title={`当前运行：${label(active)}`} desc={pending ? '区域已保存。任务空闲后重新连接以应用；当前请求不会被切换。' : undefined} align="center">
+    {active !== null && <Row title={tr('desktop_settings_09fef6487f', label(active))} desc={pending ? tr('desktop_settings_d1f2d32000') : undefined} align="center">
       {pending && <button type="button" disabled={saving} style={ghostButtonStyle(t)} onClick={() => {
         const token = generation.current;
         setError(null); setSaving(true);
         void bridge.restartBridge().catch((cause: unknown) => {
-          if (token === generation.current) setError(cause instanceof Error ? cause.message : '暂时无法重新连接。');
+          if (token === generation.current) setError(cause instanceof Error ? cause.message : tr('desktop_settings_4f7295ff1a'));
         }).finally(() => { if (token === generation.current) setSaving(false); });
-      }}>应用并重新连接</button>}
+      }}>{tr('settings_provider_apply_reconnect')}</button>}
     </Row>}
-    {error && <Row title="保存或应用失败"><span role="alert">{error}</span></Row>}
+    {error && <Row title={tr('desktop_settings_f48af7b362')}><span role="alert">{error}</span></Row>}
   </Card>;
 }

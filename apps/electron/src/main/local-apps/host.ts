@@ -23,10 +23,164 @@ import { LocalAppRuntime, type RuntimeOptions } from './runtime.js';
 import { relativePath } from './manifest.js';
 import { isAppUrl, permissionCapabilities } from './permissions.js';
 import { LOCAL_APP_SDK } from '../../preload/localAppSdk.js';
+import { webmcpPolyfillSource } from '../../../vendor/local-app-webmcp/dist/webmcp-polyfill.source.js';
 
 function appEntryUrl(id: string, entry: DesktopAppManifest['entry']): string {
   const path = entry.type === 'server' && entry.path ? entry.path.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/') : '';
   return new URL(`${LOCAL_APP_SCHEME}://${id}/${path}`).href;
+}
+
+function htmlTagEnd(html: string, start: number): number | undefined {
+  let quote = '';
+  for (let index = start; index < html.length; index++) {
+    const character = html[index]!;
+    if (quote) {
+      if (character === quote) quote = '';
+    } else if (character === '"' || character === "'") quote = character;
+    else if (character === '>') return index + 1;
+  }
+}
+
+interface LocalAppHtmlTag {
+  nameStart: number;
+  nameEnd: number;
+  end: number;
+  closing: boolean;
+  declaration: boolean;
+}
+
+function nextHtmlTag(html: string, from: number): LocalAppHtmlTag | undefined {
+  let cursor = from;
+  while (cursor < html.length) {
+    const start = html.indexOf('<', cursor);
+    if (start < 0) return;
+    if (html.startsWith('<!--', start)) {
+      const commentEnd = html.indexOf('-->', start + 4);
+      if (commentEnd < 0) return;
+      cursor = commentEnd + 3;
+      continue;
+    }
+    const declaration = html[start + 1] === '!' || html[start + 1] === '?';
+    const closing = !declaration && html[start + 1] === '/';
+    const nameStart = start + 1 + Number(declaration || closing);
+    if (!declaration && !/[a-z]/i.test(html[nameStart] ?? '')) {
+      cursor = start + 1;
+      continue;
+    }
+    let nameEnd = nameStart;
+    while (/[a-z0-9:-]/i.test(html[nameEnd] ?? '')) nameEnd++;
+    const boundary = html[nameEnd];
+    if (!declaration && boundary !== undefined && boundary !== '>' && boundary !== '/' && !/\s/.test(boundary)) {
+      // Consume malformed tag-like text as a unit, so a pseudo-tag in one of
+      // its quoted attributes cannot be mistaken for an insertion point.
+      cursor = htmlTagEnd(html, start) ?? start + 1;
+      continue;
+    }
+    const end = htmlTagEnd(html, start);
+    if (end === undefined) return;
+    return { nameStart, nameEnd, end, closing, declaration };
+  }
+}
+
+function skipRawTextElement(html: string, afterOpeningTag: number, name: string): number {
+  const closingTag = new RegExp(`</${name}(?=[\\s/>])`, 'ig');
+  closingTag.lastIndex = afterOpeningTag;
+  const match = closingTag.exec(html);
+  return match ? htmlTagEnd(html, match.index) ?? html.length : html.length;
+}
+
+function nextHtmlTagCursor(html: string, tag: LocalAppHtmlTag): number {
+  if (!tag.closing && !tag.declaration) {
+    const name = html.slice(tag.nameStart, tag.nameEnd).toLowerCase();
+    if (name === 'script' || name === 'style' || name === 'textarea' || name === 'title') {
+      return skipRawTextElement(html, tag.end, name);
+    }
+  }
+  return tag.end;
+}
+
+function openingHtmlTagEnd(html: string, name: 'head' | 'html'): number | undefined {
+  let cursor = 0;
+  while (true) {
+    const tag = nextHtmlTag(html, cursor);
+    if (!tag) return;
+    if (
+      !tag.closing
+      && !tag.declaration
+      && html.slice(tag.nameStart, tag.nameEnd).toLowerCase() === name
+    ) {
+      return tag.end;
+    }
+    cursor = nextHtmlTagCursor(html, tag);
+  }
+}
+
+function scriptTagHasLocalAppSource(html: string, tag: LocalAppHtmlTag, appId: string, path: string): boolean {
+  const attributes = html.slice(tag.nameEnd, tag.end - 1);
+  let cursor = 0;
+  while (cursor < attributes.length) {
+    while (/\s|\//.test(attributes[cursor] ?? '')) cursor++;
+    const nameStart = cursor;
+    while (cursor < attributes.length && !/[\s=/>]/.test(attributes[cursor]!)) cursor++;
+    if (cursor === nameStart) { cursor++; continue; }
+    const name = attributes.slice(nameStart, cursor);
+    while (/\s/.test(attributes[cursor] ?? '')) cursor++;
+    if (attributes[cursor] !== '=') continue;
+    cursor++;
+    while (/\s/.test(attributes[cursor] ?? '')) cursor++;
+    const quote = attributes[cursor] === '"' || attributes[cursor] === "'" ? attributes[cursor++] : undefined;
+    const valueStart = cursor;
+    if (quote) {
+      while (cursor < attributes.length && attributes[cursor] !== quote) cursor++;
+    } else {
+      while (cursor < attributes.length && !/[\s>]/.test(attributes[cursor]!)) cursor++;
+    }
+    const value = attributes.slice(valueStart, cursor);
+    if (quote && cursor < attributes.length) cursor++;
+    if (name.toLowerCase() !== 'src') continue;
+    try {
+      const source = new URL(value, `${LOCAL_APP_SCHEME}://${appId}/`);
+      if (source.protocol === `${LOCAL_APP_SCHEME}:` && source.hostname === appId && source.pathname === path) return true;
+    } catch { /* An invalid URL does not satisfy the host resource binding. */ }
+  }
+  return false;
+}
+
+function htmlHasLocalAppScript(html: string, appId: string, path: string): boolean {
+  let cursor = 0;
+  while (true) {
+    const tag = nextHtmlTag(html, cursor);
+    if (!tag) return false;
+    const name = html.slice(tag.nameStart, tag.nameEnd).toLowerCase();
+    if (!tag.closing && !tag.declaration && name === 'script' && scriptTagHasLocalAppSource(html, tag, appId, path)) return true;
+    cursor = nextHtmlTagCursor(html, tag);
+  }
+}
+
+function injectLocalAppScripts(html: string, appId: string): string {
+  const webmcpAlreadyLoaded = htmlHasLocalAppScript(html, appId, '/__lingxi_webmcp.js');
+  const localAppAlreadyLoaded = htmlHasLocalAppScript(html, appId, '/__lingxi_local_app_sdk.js');
+  const scripts = [
+    ...(webmcpAlreadyLoaded ? [] : ['<script src="/__lingxi_webmcp.js" data-lingxi-webmcp></script>']),
+    ...(localAppAlreadyLoaded ? [] : ['<script src="/__lingxi_local_app_sdk.js"></script>']),
+  ].join('');
+  if (!scripts) return html;
+  const doctype = findDoctypeEnd(html);
+  const insertionIndex = openingHtmlTagEnd(html, 'head')
+    ?? openingHtmlTagEnd(html, 'html')
+    ?? doctype
+    ?? 0;
+  return html.slice(0, insertionIndex) + scripts + html.slice(insertionIndex);
+}
+
+function findDoctypeEnd(html: string): number | undefined {
+  let cursor = 0;
+  while (true) {
+    const tag = nextHtmlTag(html, cursor);
+    if (!tag) return;
+    if (tag.declaration && html.slice(tag.nameStart, tag.nameEnd).toLowerCase() === 'doctype') return tag.end;
+    cursor = nextHtmlTagCursor(html, tag);
+  }
 }
 
 const FILE_TYPES: Record<string, { extensions: string[]; mediaType: string }> = {
@@ -851,6 +1005,9 @@ export class LocalAppHost {
         const window = this.windows.get(id);
         if (!window || window.isDestroyed() || this.windowRuns.get(window) !== this.runtime.invocationId(id) || !workspace || !revision || this.runtime.phase(id) !== 'running') return new Response('Application run is unavailable', { status: 410 });
         const manifest = this.runtime.manifest(id)!;
+        if (url.pathname === '/__lingxi_webmcp.js') {
+          return new Response(webmcpPolyfillSource, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+        }
         if (url.pathname === '/__lingxi_local_app_sdk.js') {
           return new Response(LOCAL_APP_SDK, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
         }
@@ -893,11 +1050,7 @@ export class LocalAppHost {
         if (serviceResponse) headers.delete('set-cookie');
         if (headers.get('content-type')?.toLowerCase().includes('text/html')) {
           const html = await response.text();
-          const script = '<script src="/__lingxi_local_app_sdk.js"></script>';
-          let injected = html.replace(/<head(?:\s[^>]*)?>/i, opening => opening + script);
-          if (injected === html) injected = html.replace(/<html(?:\s[^>]*)?>/i, opening => opening + script);
-          if (injected === html) injected = html.replace(/<!doctype[^>]*>/i, opening => opening + script);
-          body = injected === html ? script + html : injected;
+          body = injectLocalAppScripts(html, id);
           headers.delete('Content-Length');
           headers.delete('Content-Encoding');
           headers.set('Content-Type', headers.get('content-type') ?? 'text/html; charset=utf-8');

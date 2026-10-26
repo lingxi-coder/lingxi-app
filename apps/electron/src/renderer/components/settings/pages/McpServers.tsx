@@ -1,14 +1,15 @@
-import { tr } from '../../../i18n/locale';
+import { currentLocale, tr } from '../../../i18n/locale';
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import type { WritableScopeDto } from '@lingxi/bridge-client';
+import type { McpStatusDto, WritableScopeDto } from '@lingxi/bridge-client';
 import { ExtensionGlyph } from './ExtensionHubIcons';
 import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
 import { parseJsonObjectInput } from '../jsonInput';
+import { publicExtensionItems, publicExtensionText, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionHubLayout, ExtensionHubHeader, useExtensionHubNavigation } from './ExtensionHub';
+import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, useExtensionHubNavigation } from './ExtensionHub';
 import {
   adminRecordCommand,
   asRecord,
@@ -52,6 +53,92 @@ const MCP_SCOPE_DESCRIPTIONS: Record<WritableScopeDto, string> = {
  */
 const MCP_SCOPE_VS_LAYERS_NOTE = 'mcp_scope_vs_layers_note';
 
+const DESKTOP_PLATFORMS = new Set(['macos', 'windows', 'linux']);
+const PUBLIC_MCP_CATEGORIES = ['browser', 'development', 'productivity'] as const;
+const DEFAULT_MCP_CONFIG = { command: 'npx', args: ['-y', 'package-name'] };
+type PublicDirectoryText = (typeof publicExtensionItems)[number]['description'];
+type McpRuntimeStatusDto = McpStatusDto | 'connected' | 'disconnected';
+
+function localizedDirectoryText(value?: PublicDirectoryText): string {
+  return value ? publicExtensionText(value, currentLocale()) : '';
+}
+
+function publicMcpCategoryLabel(category: string): string {
+  const key = {
+    browser: 'desktop_extension_category_browser',
+    development: 'desktop_extension_category_development',
+    productivity: 'desktop_extension_category_productivity',
+  }[category];
+  return key ? tr(key) : category;
+}
+
+function mcpScopeLabel(scope: WritableScopeDto): string {
+  return tr(scope === 'user' ? 'settings_parity_user_layer' : scope === 'project' ? 'cron_run_project_label' : 'settings_parity_local_layer');
+}
+
+function directorySearchText(item: (typeof publicExtensionItems)[number]): string {
+  return [
+    item.name,
+    item.publisher,
+    publicMcpCategoryLabel(item.category),
+    localizedDirectoryText(item.description),
+    localizedDirectoryText(item.requirements),
+    item.sourceUrl,
+    item.documentationUrl,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+export function matchesPublicMcpDirectoryEntry(
+  entry: Pick<McpEntry, 'name' | 'config'>,
+  item: PublicExtensionItem,
+): boolean {
+  if (!item.mcp || entry.name !== item.mcp.name) return false;
+  return mcpConnectionIdentityMatches(entry.config, item.mcp.config);
+}
+
+function mcpConnectionIdentityMatches(left: Record<string, unknown>, right: Readonly<Record<string, unknown>>): boolean {
+  const identityFields = ['command', 'args', 'url', 'type', 'transport'] as const;
+  const fields = identityFields.filter((field) => (
+    Object.prototype.hasOwnProperty.call(left, field) || Object.prototype.hasOwnProperty.call(right, field)
+  ));
+  return fields.length > 0 && fields.every((field) => (
+    Object.prototype.hasOwnProperty.call(left, field)
+    && Object.prototype.hasOwnProperty.call(right, field)
+    && JSON.stringify(left[field]) === JSON.stringify(right[field])
+  ));
+}
+
+export type PublicMcpDirectoryAction =
+  | { kind: 'configured'; entry: McpEntry }
+  | { kind: 'configure'; conflicts: McpEntry[] }
+  | { kind: 'documentation' };
+
+export function decidePublicMcpDirectoryAction(
+  item: PublicExtensionItem,
+  entries: readonly McpEntry[],
+  preferredScope: WritableScopeDto,
+): PublicMcpDirectoryAction {
+  if (!item.mcp) return { kind: 'documentation' };
+  const matching = entries.filter((entry) => matchesPublicMcpDirectoryEntry(entry, item));
+  if (matching.length > 0) {
+    return { kind: 'configured', entry: matching.find((entry) => entry.scope === preferredScope) ?? matching[0]! };
+  }
+  return { kind: 'configure', conflicts: entries.filter((entry) => entry.name === item.mcp!.name) };
+}
+
+export function mcpRuntimeStatusLabel(status: unknown): string | null {
+  if (status === 'connected') return tr('desktop_extension_mcp_status_connected');
+  if (status === 'disconnected') return tr('desktop_extension_mcp_status_disconnected');
+  const statusRecord = asRecord(status);
+  if (statusRecord.type === 'connected') return tr('desktop_extension_mcp_status_connected');
+  if (statusRecord.type === 'disconnected') return tr('desktop_extension_mcp_status_disconnected');
+  if (statusRecord.type === 'error') {
+    const reason = asString(statusRecord.reason);
+    return reason ? tr('desktop_extension_mcp_status_error', reason) : tr('desktop_extension_mcp_status_error_unknown');
+  }
+  return null;
+}
+
 interface ScopeSnapshot {
   scope: WritableScopeDto;
   path: string;
@@ -61,7 +148,7 @@ interface ScopeSnapshot {
 
 interface McpRuntimeServer {
   name: string;
-  status: unknown;
+  status: McpRuntimeStatusDto;
   transport?: string;
   source?: string;
   writable?: boolean;
@@ -88,7 +175,7 @@ interface McpEntry {
   revision_sha256: string;
 }
 
-type Selection = { kind: 'list' } | { kind: 'server'; id: string } | { kind: 'create'; scope: WritableScopeDto };
+type Selection = { kind: 'list' } | { kind: 'server'; id: string } | { kind: 'create'; scope: WritableScopeDto; directoryItemId?: string };
 
 function callMcpAdmin(bridge: PageContentProps['bridge'], command: unknown) {
   const admin = (bridge as { mcpAdmin?: (payload: unknown) => Promise<unknown> }).mcpAdmin;
@@ -183,10 +270,11 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   const approval = snapshot.approval ?? {};
   const appliedLink = useRef<string>();
   const [selection, setSelection] = useState<Selection>({ kind: 'list' });
+  const [catalogTab, setCatalogTab] = useState<'public' | 'personal'>('public');
   const [search, setSearch] = useState('');
   const [draftScope, setDraftScope] = useState<WritableScopeDto>('user');
   const [draftName, setDraftName] = useState('');
-  const [draftConfigText, setDraftConfigText] = useState('{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
+  const [draftConfigText, setDraftConfigText] = useState(prettyJson(DEFAULT_MCP_CONFIG));
   const [argumentRows, setArgumentRows] = useState<string[]>(['-y', 'package-name']);
   const [environmentRows, setEnvironmentRows] = useState<Array<{ key: string; value: string }>>([{ key: '', value: '' }]);
   const [pageError, setPageError] = useState<string | null>(null);
@@ -205,27 +293,38 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   }, [entries, selection]);
 
   const selected = selection.kind === 'server' ? entries.find((entry) => entry.id === selection.id) ?? null : null;
+  const publicMcpItems = useMemo(() => publicExtensionItems.filter((item) => (
+    item.kind === 'mcp' && item.platforms.some((platform) => DESKTOP_PLATFORMS.has(platform))
+  )), []);
+  const selectedDirectoryItem = selection.kind === 'create' && selection.directoryItemId
+    ? publicMcpItems.find((item) => item.id === selection.directoryItemId) ?? null
+    : null;
+  const initialCreateName = selectedDirectoryItem?.mcp?.name ?? '';
+  const initialCreateConfigText = prettyJson(selectedDirectoryItem?.mcp?.config ?? DEFAULT_MCP_CONFIG);
   const currentScope = selected?.scope ?? (selection.kind === 'create' ? selection.scope : draftScope);
 
   useEffect(() => {
-    const config = selected?.config ?? (selection.kind === 'create' ? { args: ['-y', 'package-name'] } : {});
+    const config: Record<string, unknown> = selected?.config ?? selectedDirectoryItem?.mcp?.config ?? (selection.kind === 'create' ? DEFAULT_MCP_CONFIG : {});
     const args = Array.isArray(config.args) ? config.args.map(String) : [];
     setArgumentRows(args.length > 0 ? args : ['']);
     const env = Object.entries(asRecord(config.env)).map(([key, value]) => ({ key, value: asString(value) }));
     setEnvironmentRows(env.length > 0 ? env : [{ key: '', value: '' }]);
-  }, [selected, selection.kind]);
+  }, [selected, selection.kind, selectedDirectoryItem]);
 
   useEffect(() => {
     if (selected) {
-      setDraftScope(selected.scope);
       setDraftName(selected.name);
       setDraftConfigText(prettyJson(selected.config));
     } else if (selection.kind === 'create') {
-      setDraftScope(selection.scope);
-      setDraftName('');
-      setDraftConfigText('{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
+      setDraftName(selectedDirectoryItem?.mcp?.name ?? '');
+      setDraftConfigText(prettyJson(selectedDirectoryItem?.mcp?.config ?? DEFAULT_MCP_CONFIG));
     }
-  }, [selected, selection]);
+  }, [selected, selection.kind, selectedDirectoryItem]);
+
+  useEffect(() => {
+    if (selected) setDraftScope(selected.scope);
+    else if (selection.kind === 'create') setDraftScope(selection.scope);
+  }, [selected?.scope, selection.kind, selection.kind === 'create' ? selection.scope : undefined]);
 
   useEffect(() => {
     if (linkRequest?.kind !== 'mcp' || appliedLink.current === linkRequest.requestId) return;
@@ -247,7 +346,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   }, [selection, linkRequest]);
   const dirty = selection.kind !== 'list' && (selected
     ? draftConfigText !== prettyJson(selected.config)
-    : draftName.trim().length > 0 || draftConfigText !== '{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
+    : draftName.trim() !== initialCreateName || draftConfigText !== initialCreateConfigText);
   const closePrompt = useSettingsDraftGuard({ onClose, onNavigate, onRegisterCloseRequest }, dirty);
   const requestHubNavigation = (pageId: string, pluginId?: string) => {
     if (dirty) {
@@ -263,7 +362,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
     setSelection({ kind: 'list' });
     setDraftScope('user');
     setDraftName('');
-    setDraftConfigText('{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
+    setDraftConfigText(prettyJson(DEFAULT_MCP_CONFIG));
     onNavigate(pendingHubPage.pageId, pendingHubPage.pluginId);
     setPendingHubPage(null);
   };
@@ -283,6 +382,11 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
       return null;
     }
   }, [draftConfigText]);
+  const publicMcpConflicts = selectedDirectoryItem?.mcp && draftConfig
+    ? entries.filter((entry) => entry.name === draftName.trim() && !mcpConnectionIdentityMatches(entry.config, draftConfig))
+    : [];
+  const sameScopePublicMcpConflict = publicMcpConflicts.find((entry) => entry.scope === draftScope);
+  const otherScopeConflictLabels = [...new Set(publicMcpConflicts.filter((entry) => entry.scope !== draftScope).map((entry) => mcpScopeLabel(entry.scope)))];
   const updateConfig = (key: string, value: unknown) => {
     if (!draftConfig) {
       setPageError(tr('desktop_extension_fix_json'));
@@ -360,6 +464,12 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   const filtered = search.trim()
     ? entries.filter((entry) => `${entry.scope} ${entry.name} ${entry.path}`.toLowerCase().includes(search.trim().toLowerCase()))
     : entries;
+  const filteredPublicMcpItems = search.trim()
+    ? publicMcpItems.filter((item) => directorySearchText(item).includes(search.trim().toLowerCase()))
+    : publicMcpItems;
+  const publicMcpGroups = PUBLIC_MCP_CATEGORIES
+    .map((category) => ({ category, items: filteredPublicMcpItems.filter((item) => item.category === category) }))
+    .filter((group) => group.items.length > 0);
 
   const save = () => {
     const parsed = parseJsonObjectInput(draftConfigText, tr('mcp_section_configuration'));
@@ -416,6 +526,10 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
           <button type="button" aria-label={tr('desktop_extension_refresh_mcp')} onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_tools_failed')))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
           <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} className="extension-hub-primary">{tr('workspace_confirm_add')} <ExtensionGlyph name="plus" size={14} /></button>
         </>} />
+        {selection.kind === 'list' && <nav className="extension-catalog-tabs" aria-label={tr('desktop_extension_mcp_catalog')}>
+          <button type="button" aria-pressed={catalogTab === 'public'} onClick={() => setCatalogTab('public')}>{tr('desktop_extension_public')}</button>
+          <button type="button" aria-pressed={catalogTab === 'personal'} onClick={() => setCatalogTab('personal')}>{tr('desktop_personal')}</button>
+        </nav>}
         {/* 同名不同义的提醒放在页首，而不是藏在作用域下拉旁边：读到下拉的时候，
             人已经在拿设置页的「本地」去理解这里的「本地」了。 */}
         <details className="extension-hub-scope-note" data-testid="mcp-scope-vs-layers">
@@ -429,28 +543,65 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
             <DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />
             {navigationPrompt}
             {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
-            <div className="extension-hub-group-title">{tr('desktop_extension_servers')}</div>
-            <div className="extension-hub-list">
-              {filtered.map((entry) => {
-                const rejected = asStringArray(approval.disabled_servers).includes(entry.name);
-                const approved = approval.enable_all_project_servers || asStringArray(approval.enabled_servers).includes(entry.name);
-                const allowed = approved && !rejected;
-                const runtime = (snapshot.runtime_servers ?? []).find((server) => server.name === entry.name);
-                return <div key={entry.id} className="extension-hub-row configuration-entry">
-                  <span className="extension-hub-icon"><ExtensionGlyph name="mcp" size={18} color={t.text3} /></span>
-                  <button type="button" className="extension-hub-row-copy extension-hub-row-open" onClick={() => requestSelection({ kind: 'server', id: entry.id })}>
-                    <span className="extension-hub-row-title">{entry.name}</span>
-                    <span className="extension-hub-row-description">{inferTransport(entry.config)} · {runtime ? asString(runtime.status, 'available') : entry.path}</span>
-                  </button>
-                  <div className="extension-hub-row-side">
-                    <span className="extension-hub-row-scope">{entry.scope === 'user' ? tr('desktop_personal') : entry.scope === 'project' ? tr('cron_run_project_label') : tr('settings_parity_local_layer')}</span>
-                    <button type="button" className="extension-hub-icon-button" aria-label={tr('desktop_extension_configure_named', entry.name)} onClick={() => requestSelection({ kind: 'server', id: entry.id })}><ExtensionGlyph name="cog" size={16} /></button>
-                    {entry.scope === 'project' && <button type="button" className="extension-hub-toggle" role="switch" aria-checked={allowed} aria-label={tr(allowed ? 'desktop_extension_disable_named' : 'desktop_extension_approve_named', entry.name)} disabled={!approval.revision_sha256} onClick={() => setApproval(entry.name, allowed ? 'reject' : 'approve')} />}
-                  </div>
-                </div>;
-              })}
-              {filtered.length === 0 && <div style={{ padding: '24px 18px', color: t.text3, fontSize: 13 }}>{tr('desktop_extension_no_servers')}</div>}
-            </div>
+            {catalogTab === 'public' ? <>
+              {publicMcpGroups.map((group) => <section className="extension-catalog-section" key={group.category}>
+                <h2 className="extension-hub-group-title">{publicMcpCategoryLabel(group.category)}</h2>
+                <div className="extension-hub-list">
+                  {group.items.map((item) => {
+                    const action = decidePublicMcpDirectoryAction(item, entries, draftScope);
+                    const configured = action.kind === 'configured' ? action.entry : undefined;
+                    const runtime = configured ? snapshot.runtime_servers?.find((server) => server.name === configured.name) : undefined;
+                    return <div key={item.id} className="extension-hub-row">
+                      <ExtensionIcon kind="mcp" />
+                      <button
+                        type="button"
+                        className="extension-hub-row-copy extension-hub-row-open"
+                        onClick={() => {
+                          if (configured) requestSelection({ kind: 'server', id: configured.id });
+                          else if (action.kind === 'configure') requestSelection({ kind: 'create', scope: draftScope, directoryItemId: item.id });
+                        }}
+                        disabled={action.kind === 'documentation'}
+                      >
+                        <span className="extension-hub-row-title">{item.name}</span>
+                        <span className="extension-hub-row-description">{localizedDirectoryText(item.description)}</span>
+                        <span className="extension-hub-row-description">{item.publisher}{item.version ? ` · ${item.version}` : ''}</span>
+                      </button>
+                      <div className="extension-hub-row-side">
+                        {configured ? <>
+                          <span className="extension-hub-row-scope">{tr('desktop_extension_configured')}</span>
+                          {runtime && <span className="extension-hub-row-scope">{mcpRuntimeStatusLabel(runtime.status) ?? tr('desktop_extension_mcp_status_unknown')}</span>}
+                          <button type="button" className="extension-hub-icon-button" aria-label={tr('desktop_extension_configure_named', item.name)} onClick={() => requestSelection({ kind: 'server', id: configured.id })}><ExtensionGlyph name="more" size={16} /></button>
+                        </> : action.kind === 'configure' ? <button type="button" className="extension-hub-icon-button" aria-label={tr('desktop_extension_configure_named', item.name)} onClick={() => requestSelection({ kind: 'create', scope: draftScope, directoryItemId: item.id })}><ExtensionGlyph name="plus" size={20} /></button> : <a className="extension-hub-icon-button" href={item.documentationUrl} target="_blank" rel="noopener noreferrer" aria-label={tr('desktop_extension_open_documentation_named', item.name)} title={tr('desktop_extension_open_documentation')}><ExtensionGlyph name="chevronR" size={16} /></a>}
+                      </div>
+                    </div>;
+                  })}
+                </div>
+              </section>)}
+              {!filteredPublicMcpItems.length && <div className="extension-hub-empty">{tr(search ? 'desktop_extension_no_public_mcp_search' : 'desktop_extension_no_public_mcp')}</div>}
+            </> : <>
+              <div className="extension-hub-group-title">{tr('desktop_extension_servers')}</div>
+              <div className="extension-hub-list">
+                {filtered.map((entry) => {
+                  const rejected = asStringArray(approval.disabled_servers).includes(entry.name);
+                  const approved = approval.enable_all_project_servers || asStringArray(approval.enabled_servers).includes(entry.name);
+                  const allowed = approved && !rejected;
+                  const runtime = (snapshot.runtime_servers ?? []).find((server) => server.name === entry.name);
+                  return <div key={entry.id} className="extension-hub-row configuration-entry">
+                    <span className="extension-hub-icon"><ExtensionGlyph name="mcp" size={18} color={t.text3} /></span>
+                    <button type="button" className="extension-hub-row-copy extension-hub-row-open" onClick={() => requestSelection({ kind: 'server', id: entry.id })}>
+                      <span className="extension-hub-row-title">{entry.name}</span>
+                      <span className="extension-hub-row-description">{inferTransport(entry.config)} · {runtime ? mcpRuntimeStatusLabel(runtime.status) ?? tr('desktop_extension_mcp_status_unknown') : entry.path}</span>
+                    </button>
+                    <div className="extension-hub-row-side">
+                      <span className="extension-hub-row-scope">{entry.scope === 'user' ? tr('desktop_personal') : entry.scope === 'project' ? tr('cron_run_project_label') : tr('settings_parity_local_layer')}</span>
+                      <button type="button" className="extension-hub-icon-button" aria-label={tr('desktop_extension_configure_named', entry.name)} onClick={() => requestSelection({ kind: 'server', id: entry.id })}><ExtensionGlyph name="cog" size={16} /></button>
+                      {entry.scope === 'project' && <button type="button" className="extension-hub-toggle" role="switch" aria-checked={allowed} aria-label={tr(allowed ? 'desktop_extension_disable_named' : 'desktop_extension_approve_named', entry.name)} disabled={!approval.revision_sha256} onClick={() => setApproval(entry.name, allowed ? 'reject' : 'approve')} />}
+                    </div>
+                  </div>;
+                })}
+                {filtered.length === 0 && <div className="extension-hub-empty">{tr('desktop_extension_no_servers')}</div>}
+              </div>
+            </>}
           </div> : <div className="configuration-detail mcp-editor" style={{ ...managerDetailStyle(), '--mcp-border': t.border, '--mcp-muted': t.text3, '--mcp-text': t.text, '--mcp-surface': t.surface, '--mcp-hover': t.surfaceHover } as CSSProperties}>
             <button type="button" className="configuration-back" onClick={() => requestSelection({ kind: 'list' })} style={ghostButtonStyle(t)}>{tr('desktop_extension_back_servers')}</button>
             <DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />
@@ -466,12 +617,26 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
             {navigationPrompt}
             <div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
-                <div style={{ fontSize: 18, fontWeight: 650, color: t.text }}>{selected?.name || tr('desktop_extension_custom_mcp')}</div>
+                <div style={{ fontSize: 18, fontWeight: 650, color: t.text }}>{selected?.name || selectedDirectoryItem?.mcp?.name || tr('desktop_extension_custom_mcp')}</div>
                 <SourcePill t={t} label={currentScope} />
                 {selected && <SourcePill t={t} label={inferTransport(selected.config)} />}
               </div>
               {selected && <div className="mono" style={secondaryMetaStyle(t)}>{selected.path}</div>}
             </div>
+            {selectedDirectoryItem && <div style={noteStyle(t)}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>{selectedDirectoryItem.name} · {selectedDirectoryItem.publisher}</div>
+              <div style={secondaryMetaStyle(t)}>{localizedDirectoryText(selectedDirectoryItem.description)}</div>
+              {selectedDirectoryItem.requirements && <div style={{ ...secondaryMetaStyle(t), marginTop: 6 }}>{tr('desktop_extension_requirements')}: {localizedDirectoryText(selectedDirectoryItem.requirements)}</div>}
+              <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+                <a href={selectedDirectoryItem.documentationUrl} target="_blank" rel="noopener noreferrer" style={{ color: t.accent, fontSize: 12 }}>{tr('desktop_extension_open_documentation')}</a>
+                <a href={selectedDirectoryItem.sourceUrl} target="_blank" rel="noopener noreferrer" style={{ color: t.accent, fontSize: 12 }}>{tr('desktop_extension_open_source')}</a>
+              </div>
+            </div>}
+            {publicMcpConflicts.length > 0 && <div role="alert" style={noteStyle(t, 'warn')}>
+              {sameScopePublicMcpConflict
+                ? tr('desktop_extension_mcp_replace_conflict', draftName.trim(), mcpScopeLabel(draftScope))
+                : tr('desktop_extension_mcp_other_scope_conflict', draftName.trim(), otherScopeConflictLabels.join(', '), mcpScopeLabel(draftScope))}
+            </div>}
             <section className="mcp-connection mcp-identity-card">
               <Field t={t} label={tr('onboarding_done_row_name')}>
                 <input value={draftName} onChange={(event) => setDraftName(event.target.value)} disabled={Boolean(selected)} style={{ ...inputStyle(t), opacity: selected ? 0.65 : 1 }} aria-label={tr('desktop_extension_mcp_name')} placeholder={tr('desktop_extension_mcp_name')} />
@@ -486,7 +651,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
               <details className="mcp-options">
                 <summary>{tr('desktop_extension_scope_storage')} <span>{currentScope}</span></summary>
                 <Field t={t} label={tr('cron_scope_label')}>
-                  <select value={draftScope} onChange={(event) => { const next = event.target.value as WritableScopeDto; setDraftScope(next); setSelection({ kind: 'create', scope: next }); }} style={inputStyle(t)} aria-label={tr('cron_scope_label')} disabled={Boolean(selected)}>
+                  <select value={draftScope} onChange={(event) => { const next = event.target.value as WritableScopeDto; setDraftScope(next); setSelection((current) => ({ kind: 'create', scope: next, ...(current.kind === 'create' && current.directoryItemId ? { directoryItemId: current.directoryItemId } : {}) })); }} style={inputStyle(t)} aria-label={tr('cron_scope_label')} disabled={Boolean(selected)}>
                     <option value="user">{tr('settings_parity_user_layer')}</option>
                     <option value="local">{tr('settings_parity_local_layer')}</option>
                     <option value="project">{tr('cron_run_project_label')}</option>
@@ -588,7 +753,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
               </div>
             )}
             <div className="mcp-editor-actions">
-              <button type="button" onClick={save} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>{linkRequest?.payload && selection.kind === 'create' ? tr('desktop_extension_confirm_mcp_import') : tr('settings_save')}</button>
+              <button type="button" onClick={save} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>{linkRequest?.payload && selection.kind === 'create' ? tr('desktop_extension_confirm_mcp_import') : sameScopePublicMcpConflict ? tr('desktop_extension_mcp_replace_configuration') : tr('settings_save')}</button>
               {selected && <button type="button" onClick={remove} style={ghostButtonStyle(t, false, true)}>{tr('desktop_extension_remove')}</button>}
             </div>
             <div style={noteStyle(t)}>
@@ -606,7 +771,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
             <Row
               key={`${server.source ?? 'runtime'}:${server.name}`}
               title={server.name}
-              desc={`${asString(server.transport, 'transport?')} · ${typeof server.status === 'string' ? server.status : JSON.stringify(server.status)}${server.read_only_reason ? ` · ${server.read_only_reason}` : ''}`}
+              desc={`${asString(server.transport, 'transport?')} · ${mcpRuntimeStatusLabel(server.status) ?? tr('desktop_extension_mcp_status_unknown')}${server.read_only_reason ? ` · ${server.read_only_reason}` : ''}`}
               align="center"
             >
               <SourcePill t={t} label={server.source ?? (server.writable ? 'config' : 'runtime')} />

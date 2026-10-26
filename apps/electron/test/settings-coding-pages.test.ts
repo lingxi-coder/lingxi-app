@@ -18,7 +18,9 @@ import {
   stringMapFromLayer,
 } from '../src/renderer/components/settings/pages/ToolsAgent';
 import { skillsPageModel } from '../src/renderer/components/settings/pages/Skills';
-import { pluginDependencyCaveat } from '../src/renderer/components/settings/pages/Plugins';
+import { decidePublicMarketplaceSourceAction, findConflictingPublicMarketplace, findRegisteredPublicMarketplace, pluginDependencyCaveat } from '../src/renderer/components/settings/pages/Plugins';
+import { decidePublicMcpDirectoryAction, matchesPublicMcpDirectoryEntry, mcpRuntimeStatusLabel } from '../src/renderer/components/settings/pages/McpServers';
+import { publicExtensionItems } from '../src/shared/publicExtensionDirectory';
 import { adminRecordCommand } from '../src/renderer/components/settings/pages/configurationAdmin';
 import { parseJsonObjectInput } from '../src/renderer/components/settings/jsonInput';
 import { hooksPageModel } from '../src/renderer/components/settings/pages/Hooks';
@@ -203,6 +205,60 @@ test('parseJsonObjectInput names what kind of config failed, when a caller says 
 
   const plugin = parseJsonObjectInput('[1,2,3]', '插件配置');
   assert.match((plugin as { error: string }).error, /^插件配置 must be a JSON object/);
+});
+
+test('public MCP configured state matches both the catalog name and endpoint identity', () => {
+  const devtools = publicExtensionItems.find((item) => item.id === 'chrome-devtools');
+  const context7 = publicExtensionItems.find((item) => item.id === 'context7');
+  assert.ok(devtools?.mcp);
+  assert.ok(context7?.mcp);
+  assert.equal(matchesPublicMcpDirectoryEntry({ name: 'chrome-devtools', config: devtools.mcp.config }, devtools), true);
+  assert.equal(matchesPublicMcpDirectoryEntry({ name: 'chrome-devtools', config: { command: 'other-command', args: devtools.mcp.config.args } }, devtools), false);
+  assert.equal(matchesPublicMcpDirectoryEntry({ name: 'chrome-devtools', config: { ...devtools.mcp.config, url: 'https://different.example/mcp' } }, devtools), false);
+  assert.equal(matchesPublicMcpDirectoryEntry({ name: 'context7', config: { ...context7.mcp.config, url: 'https://other.example/mcp' } }, context7), false);
+  assert.equal(matchesPublicMcpDirectoryEntry({ name: 'renamed', config: devtools.mcp.config }, devtools), false);
+
+  const sameNameDifferentEndpoint = { id: 'custom-devtools', scope: 'user' as const, name: 'chrome-devtools', config: { command: 'other-command' }, path: '/user', revision_sha256: 'r' };
+  assert.equal(decidePublicMcpDirectoryAction(devtools, [sameNameDifferentEndpoint], 'user').kind, 'configure');
+  const matchingPreset = { ...sameNameDifferentEndpoint, config: devtools.mcp.config };
+  assert.equal(decidePublicMcpDirectoryAction(devtools, [matchingPreset], 'user').kind, 'configured');
+});
+
+test('MCP runtime status labels preserve disconnected and error DTOs without an available fallback', () => {
+  assert.equal(mcpRuntimeStatusLabel('connected'), 'Connected');
+  assert.equal(mcpRuntimeStatusLabel({ type: 'connected' }), 'Connected');
+  assert.equal(mcpRuntimeStatusLabel({ type: 'disconnected' }), 'Disconnected');
+  assert.equal(mcpRuntimeStatusLabel({ type: 'error', reason: 'connection refused' }), 'Connection error: connection refused');
+  assert.equal(mcpRuntimeStatusLabel({ type: 'unrecognized', reason: 'future status' }), null);
+});
+
+test('a curated marketplace is considered registered only when both its name and source match', () => {
+  const curated = publicExtensionItems.find((item) => item.id === 'ora-webmcp');
+  assert.ok(curated?.marketplace);
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'github', repo: 'ora/webmcp' }) },
+  ])?.name, 'ora');
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'git', url: 'https://github.com/ora/webmcp.git' }) },
+  ])?.name, 'ora');
+  const wrongSourceRegistry = [
+    { name: 'ora', source_json: JSON.stringify({ source: 'github', repo: 'another/webmcp' }) },
+  ];
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, wrongSourceRegistry), undefined);
+  assert.equal(findConflictingPublicMarketplace(curated.marketplace, wrongSourceRegistry)?.name, 'ora');
+  assert.equal(decidePublicMarketplaceSourceAction(curated.marketplace, wrongSourceRegistry).kind, 'source-conflict');
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'url', url: 'https://github.com/ora/webmcp/custom/marketplace.json' }) },
+  ]), undefined);
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'directory', path: 'ora/webmcp' }) },
+  ]), undefined);
+  assert.equal(decidePublicMarketplaceSourceAction(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'directory', path: 'ora/webmcp' }) },
+  ]).kind, 'source-conflict');
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'github', repo: 'ora/webmcp', ref: 'stable' }) },
+  ]), undefined);
 });
 
 // ---------------------------------------------------------------------------

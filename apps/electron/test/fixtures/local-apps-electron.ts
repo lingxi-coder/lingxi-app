@@ -14,11 +14,12 @@ process.on('uncaughtException', error => { process.stderr.write(`Uncaught: ${err
 process.on('unhandledRejection', error => { process.stderr.write(`Unhandled: ${String(error)}\n`); app.exit(1); });
 app.setPath('userData', join(root, 'profile'));
 protocol.registerSchemesAsPrivileged([{ scheme: 'lingxi-app', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true, allowServiceWorkers: true } }]);
+app.commandLine.appendSwitch('disable-features', 'WebMCP');
 app.on('window-all-closed', () => undefined);
 const originalDialog = dialog.showMessageBox;
 for (const event of ['before-quit', 'will-quit', 'quit'] as const) app.on(event, () => process.stderr.write(`App lifecycle: ${event}\n`));
 async function until(check: () => Promise<unknown>) { for (let i = 0; i < 200; i++) { if (await check()) return; await delay(30); } throw new Error('Timed out waiting for fixture'); }
-const html = (version: number) => `<!doctype html><meta charset="utf-8"><title>识字花园</title><style>body{font-family:system-ui;background:#fbf9f3;padding:48px;color:#284337}h1{font-size:32px}.chars{display:flex;gap:20px}button{font-size:56px;border:0;border-radius:20px;padding:30px;background:#dff0df;cursor:pointer}</style><h1>识字花园 · v${version}</h1><p>每天认识几个新朋友</p><div class="chars"><button onclick="localStorage.count=String(Number(localStorage.count||0)+1)">山</button><button>水</button><button>花</button></div>`;
+const html = (version: number) => `<!doctype html><!-- <head><script src="/__lingxi_webmcp.js"></script><script src="/__lingxi_local_app_sdk.js"></script></head> --><div data-fake-head="<head>" data-fake-resources="/__lingxi_webmcp.js __lingxi_local_app_sdk.js"></div><script>window.__fakeHead='<head>';window.__fakeResources='/__lingxi_webmcp.js /__lingxi_local_app_sdk.js'</script><style>.fake::after{content:"<head>"}body{font-family:system-ui;background:#fbf9f3;padding:48px;color:#284337}h1{font-size:32px}.chars{display:flex;gap:20px}button{font-size:56px;border:0;border-radius:20px;padding:30px;background:#dff0df;cursor:pointer}</style><meta charset="utf-8"><title>识字花园</title><script id="app-start">window.__webmcpAtAppStart=Boolean(document.modelContext);window.__localAppSdkAtAppStart=Boolean(window.localApp)</script><h1>识字花园 · v${version}</h1><p>每天认识几个新朋友</p><div class="chars"><button onclick="localStorage.count=String(Number(localStorage.count||0)+1)">山</button><button>水</button><button>花</button></div>`;
 let host: LocalAppHost;
 const trace = (message: string) => process.stderr.write(`LocalApp fixture: ${message}\n`);
 async function main() {
@@ -130,6 +131,28 @@ async function main() {
   const guest = () => BrowserWindow.getAllWindows().find(w => w.webContents.getURL().startsWith(`lingxi-app://${first.id}/`));
   await until(async () => guest() && await guest()!.webContents.executeJavaScript(`Boolean(window.localApp && document.querySelector('.chars'))`));
   let window = guest()!;
+  assert.equal(await window.webContents.executeJavaScript('window.__webmcpAtAppStart'), true, 'WebMCP loads before the app script');
+  assert.equal(await window.webContents.executeJavaScript('window.__localAppSdkAtAppStart'), true, 'the Local App SDK loads before the app script');
+  assert.equal(await window.webContents.executeJavaScript('Array.from(document.scripts).filter(script=>script.getAttribute("src")==="/__lingxi_webmcp.js").length'), 1, 'a WebMCP-looking comment, attribute, or inline string does not suppress the real host script');
+  assert.equal(await window.webContents.executeJavaScript('Array.from(document.scripts).filter(script=>script.getAttribute("src")==="/__lingxi_local_app_sdk.js").length'), 1, 'a Local App SDK-looking comment, attribute, or inline string does not suppress the real host script');
+  const webmcpResult = await window.webContents.executeJavaScript(`(async()=> {
+    const context=document.modelContext;
+    const registration=new AbortController();
+    await context.registerTool({
+      name:'local-app.echo',
+      description:'Echo a value from the Local App page',
+      inputSchema:{type:'object',properties:{value:{type:'string'}}},
+      execute(input){return {echo:input.value};}
+    }, {signal:registration.signal});
+    const tool=(await context.getTools()).find(item=>item.name==='local-app.echo');
+    if(!tool) throw new Error('registered Local App tool was not discovered');
+    const result=await context.executeTool(tool,{value:'page input'});
+    registration.abort();
+    const remains=(await context.getTools()).some(item=>item.name==='local-app.echo');
+    const resource=await fetch('/__lingxi_webmcp.js');
+    return {result, remains, resourceStatus:resource.status, resourceType:resource.headers.get('content-type')};
+  })()`);
+  assert.deepEqual(webmcpResult, { result: '{"echo":"page input"}', remains: false, resourceStatus: 200, resourceType: 'text/javascript; charset=utf-8' });
   assert.equal(await window.webContents.executeJavaScript(`typeof require + ':' + typeof window.lingxi`), 'undefined:undefined');
   assert.equal(await window.webContents.executeJavaScript(`window.localApp.clipboard.read().then(()=>false,()=>true)`), true);
   await window.webContents.executeJavaScript(`localStorage.count='7'`);
@@ -143,6 +166,11 @@ async function main() {
   assert.equal(previousWindow.isDestroyed(), true, 'the previous revision window is destroyed after replacement');
   assert.match(await window.webContents.executeJavaScript(`document.querySelector('h1').textContent`), /v2/);
   assert.equal(await window.webContents.executeJavaScript(`localStorage.count`), '7');
+  assert.equal(
+    await window.webContents.executeJavaScript(`document.modelContext.getTools().then(tools=>tools.some(tool=>tool.name==='local-app.echo'))`),
+    false,
+    'a replacement revision starts with an empty WebMCP context',
+  );
 
   // A delayed closed callback from an older window must not stop a reopen.
   const originalGet = host.store.get.bind(host.store);

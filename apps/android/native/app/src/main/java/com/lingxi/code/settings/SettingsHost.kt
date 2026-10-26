@@ -108,6 +108,7 @@ fun SettingsHost(
     val modelStates by VoiceModelDownloader.states.collectAsStateWithLifecycle()
     val audioRoutingSession = engineSource?.activeSessionState?.collectAsStateWithLifecycle()?.value
     val audioRoutingModel = engineSource?.modelState?.collectAsStateWithLifecycle()?.value
+    val runtimeMcpServers = engineSource?.mcpServers?.collectAsStateWithLifecycle()?.value.orEmpty()
     val probedVoiceCapability by produceState(
         initialValue = state.voiceCapability,
         key1 = context.applicationContext,
@@ -265,7 +266,7 @@ fun SettingsHost(
                         EngineSettingsPage(SettingsRoutes.PROJECTS, engineBridge)
                     }
                 }
-                page(SettingsRoutes.ENGINE_MCP) { McpConfigurationPage(engineBridge) }
+                page(SettingsRoutes.ENGINE_MCP) { McpDirectoryPage(engineBridge, runtimeMcpServers) }
                 (layeredPageKeys.keys.filter { it != SettingsRoutes.PROJECTS && it != SettingsRoutes.PLUGINS } + SettingsRoutes.DIAGNOSTICS).forEach { engineRoute ->
                     page(engineRoute) { EngineSettingsPage(engineRoute, engineBridge, reconnectSafely) }
                 }
@@ -392,7 +393,7 @@ fun SettingsHost(
                     SkillManager(engineBridge, initialId = it.arguments?.getString("id"))
                 }
                 // Preserve the legacy route while directing it to authoritative configuration.
-                page(SettingsRoutes.MCP_LIST) { McpConfigurationPage(engineBridge) }
+                page(SettingsRoutes.MCP_LIST) { McpDirectoryPage(engineBridge, runtimeMcpServers) }
                 page(SettingsRoutes.LINUX_RUNTIME) {
                     LinuxRuntimePage(
                         state = state,

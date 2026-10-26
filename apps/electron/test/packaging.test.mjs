@@ -1,5 +1,6 @@
 import { extractFile } from '@electron/asar';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,7 +24,7 @@ import {
   validatePackageOutputRoot,
   validateZipEntries,
 } from '../scripts/package-support.mjs';
-import { runningAppCommands } from '../scripts/packaged-app-smoke.mjs';
+import { runningAppCommands, waitForPackagedAppExit } from '../scripts/packaged-app-smoke.mjs';
 import {
   BROKER_ALLOWED_CALLERS,
   brokerIdentifiers,
@@ -606,4 +607,25 @@ test('macOS package verification requires the actual signed bundle to declare li
     execFileSync('/usr/bin/plutil', ['-replace', 'CFBundleURLTypes', '-json', '[{"CFBundleURLSchemes":["wrong-scheme"]}]', plistPath]);
     assert.throws(() => assertLingxiProtocolInfoPlist(plistPath), /does not register lingxi/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('packaged quit observes exit emitted while the quit request is awaiting CDP', async () => {
+  const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  await waitForPackagedAppExit(child, async () => {
+    assert.equal(child.listenerCount('exit'), 1);
+    child.emit('exit', 0, null);
+    // Keep fields unset to ensure the already emitted event, rather than a
+    // later state check, satisfies the wait.
+    await Promise.resolve();
+  });
+  assert.equal(child.listenerCount('exit'), 0);
+});
+
+test('packaged quit skips exited processes and removes listeners when requesting quit fails', async () => {
+  const exited = Object.assign(new EventEmitter(), { exitCode: 0, signalCode: null });
+  await waitForPackagedAppExit(exited, () => { throw new Error('quit should not run'); });
+  const running = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  await assert.rejects(waitForPackagedAppExit(running, async () => { throw new Error('quit failed'); }), /quit failed/);
+  assert.equal(running.listenerCount('exit'), 0);
 });

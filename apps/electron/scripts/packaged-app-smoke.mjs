@@ -548,24 +548,46 @@ function packagedAppBundleId(appPath) {
   ], { encoding: 'utf8' }).trim();
 }
 
-async function closePackagedApp(browser, child, bundleId) {
+export async function waitForPackagedAppExit(child, requestQuit) {
   if (child.exitCode !== null || child.signalCode !== null) return;
+  let onExit;
+  let timer;
+  const exited = new Promise((resolvePromise) => {
+    onExit = resolvePromise;
+    child.once('exit', onExit);
+  });
   try {
-    execFileSync('/usr/bin/osascript', ['-e', `tell application id "${bundleId}" to quit`], { stdio: 'pipe' });
-  } catch {
-    try {
-      await Promise.race([
-        browser.send('Browser.close'),
-        delay(2_000).then(() => { throw new Error('Browser.close timed out'); }),
-      ]);
-    } catch {
-      // Best effort fallback when Apple Events are unavailable.
-    }
+    // Subscribe before requesting quit: CDP may close its socket only after
+    // the process has already exited. Listening afterwards loses that event.
+    await requestQuit();
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    await Promise.race([
+      exited,
+      new Promise((_, rejectPromise) => {
+        timer = setTimeout(() => rejectPromise(new Error('packaged app did not exit after Browser.close')), 10_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    child.removeListener('exit', onExit);
   }
-  await Promise.race([
-    new Promise((resolvePromise) => child.once('exit', resolvePromise)),
-    delay(10_000).then(() => { throw new Error('packaged app did not exit after Browser.close'); }),
-  ]);
+}
+
+async function closePackagedApp(browser, child, bundleId) {
+  await waitForPackagedAppExit(child, async () => {
+    try {
+      execFileSync('/usr/bin/osascript', ['-e', `tell application id "${bundleId}" to quit`], { stdio: 'pipe' });
+    } catch {
+      try {
+        await Promise.race([
+          browser.send('Browser.close'),
+          delay(2_000).then(() => { throw new Error('Browser.close timed out'); }),
+        ]);
+      } catch {
+        // Best effort fallback when Apple Events are unavailable.
+      }
+    }
+  });
 }
 
 async function assertRendererContract(page, leakPatterns) {

@@ -1,3 +1,4 @@
+import type { FileOffer, FileReceipt, FileCheckpoint } from './files.js';
 /**
  * Parameter and result types of the `lingxi-rc/1` RPC methods, and the
  * `RemoteRecord` union that carries session content. Plain types only: the
@@ -301,6 +302,7 @@ export interface ImageGetResult {
 
 /** `prompt.send` (request). While a turn runs the host takes plain text only. */
 export interface PromptSendParams {
+  file_refs?: string[];
   session_id: string;
   text: string;
   /** At most 4, each already shrunk to 2 MiB or less by the viewer. */
@@ -376,6 +378,11 @@ export interface ModelsListResult {
 
 /** Requests a viewer sends to the host: method name to its params and result. */
 export interface ViewerRequests {
+  'file.offer': { params: FileOffer; result: FileCheckpoint };
+  'file.commit': { params: { session_id: string; transfer_id: string }; result: FileReceipt };
+  'file.cancel': { params: { session_id: string; transfer_id: string }; result: EmptyResult };
+  'file.list': { params: { session_id: string }; result: { files: FileReceipt[] } };
+  'file.download': { params: { session_id: string; transfer_id: string; offset: number }; result: FileReceipt };
   initialize: { params: InitializeParams; result: InitializeResult };
   'sessions.list': { params: SessionsListParams; result: SessionsListResult };
   'sessions.watch': { params: SessionsWatchParams; result: SessionsWatchResult };

@@ -35,6 +35,7 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
+    "@noble/hashes": "1.8.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

@@ -9,6 +9,7 @@
 import {
   DATA_CHANNEL_BUFFER_HIGH_BYTES,
   DATA_CHANNEL_LABEL,
+  FILE_CHANNEL_LABEL,
   FRAGMENT_MAX_BYTES,
   ICE_GATHER_TIMEOUT_MS,
   SDP_MAX_CHARS,
@@ -27,6 +28,8 @@ interface Peer {
   pc: RTCPeerConnection;
   channel: RTCDataChannel | undefined;
   paused: boolean;
+  files?: RTCDataChannel;
+  filePaused?: boolean;
 }
 
 const peers = new Map<string, Peer>();
@@ -53,6 +56,7 @@ function release(peer: Peer): void {
     channel.onclose = null;
     channel.onbufferedamountlow = null;
   }
+  peer.files?.close();
   pc.close();
 }
 
@@ -135,31 +139,39 @@ async function candidateType(pc: RTCPeerConnection): Promise<RtcCandidateType | 
 
 /** Take the viewer's DataChannel; anything but the one reliable, ordered channel of the protocol is closed. */
 function adopt(peer: Peer, channel: RTCDataChannel): void {
-  const protocol = channel.label === DATA_CHANNEL_LABEL && channel.ordered
+  const bulk = channel.label === FILE_CHANNEL_LABEL;
+  const lane = bulk ? { lane: 'files' as const } : {};
+  const protocol = (channel.label === DATA_CHANNEL_LABEL || bulk) && channel.ordered
     && channel.maxRetransmits === null && channel.maxPacketLifeTime === null;
-  if (peer.channel !== undefined || !protocol) {
+  if ((bulk ? peer.files !== undefined : peer.channel !== undefined) || !protocol) {
     channel.close();
     return;
   }
-  peer.channel = channel;
+  if (bulk) peer.files = channel;
+  else peer.channel = channel;
   channel.binaryType = 'arraybuffer';
   channel.bufferedAmountLowThreshold = BUFFER_LOW_BYTES;
   channel.onmessage = (event: MessageEvent) => {
     const data: unknown = event.data;
     // The protocol is binary fragments of 1 to 16 KiB; a peer that sends anything else is not a LingXi viewer.
     if (!(data instanceof ArrayBuffer) || data.byteLength < 1 || data.byteLength > FRAGMENT_MAX_BYTES) {
-      failPeer(peer, 'the viewer sent a message that is not a fragment');
+      if (bulk) channel.close();
+      else failPeer(peer, 'the viewer sent a message that is not a fragment');
       return;
     }
-    post({ t: 'data', conn: peer.conn, data });
+    post({ t: 'data', conn: peer.conn, data, ...lane });
   };
   channel.onbufferedamountlow = () => {
-    if (!peer.paused) return;
-    peer.paused = false;
-    post({ t: 'drain', conn: peer.conn });
+    if (!(bulk ? peer.filePaused : peer.paused)) return;
+    if (bulk) peer.filePaused = false; else peer.paused = false;
+    post({ t: 'drain', conn: peer.conn, ...lane });
   };
-  channel.onclose = () => lost(peer, 'closed');
+  channel.onclose = () => {
+    if (bulk) post({ t: 'state', conn: peer.conn, state: 'closed', ...lane });
+    else lost(peer, 'closed');
+  };
   const opened = (): void => {
+    if (bulk) { post({ t: 'state', conn: peer.conn, state: 'connected', ...lane, max_message_bytes: Math.min(FRAGMENT_MAX_BYTES, peer.pc.sctp?.maxMessageSize || FRAGMENT_MAX_BYTES) }); return; }
     void candidateType(peer.pc).then((candidate) => {
       if (peers.get(peer.conn) !== peer) return;
       post(candidate === undefined
@@ -199,19 +211,20 @@ async function answer(conn: string, offer: string, ice: string[]): Promise<void>
   }
 }
 
-function send(conn: string, data: ArrayBuffer): void {
+function send(conn: string, data: ArrayBuffer, lane?: 'files'): void {
   const peer = peers.get(conn);
-  const channel = peer?.channel;
+  const channel = lane === 'files' ? peer?.files : peer?.channel;
   if (!peer || !channel || channel.readyState !== 'open') return;
   try {
     channel.send(data);
   } catch (error) {
-    failPeer(peer, `send failed: ${describe(error)}`);
+    if (lane === 'files') channel.close();
+    else failPeer(peer, `send failed: ${describe(error)}`);
     return;
   }
-  if (!peer.paused && channel.bufferedAmount > DATA_CHANNEL_BUFFER_HIGH_BYTES) {
-    peer.paused = true;
-    post({ t: 'buffered', conn });
+  if (!(lane === 'files' ? peer.filePaused : peer.paused) && channel.bufferedAmount > DATA_CHANNEL_BUFFER_HIGH_BYTES) {
+    if (lane === 'files') peer.filePaused = true; else peer.paused = true;
+    post({ t: 'buffered', conn, ...(lane ? { lane } : {}) });
   }
 }
 
@@ -223,7 +236,10 @@ function receive(value: unknown): void {
       void answer(message.conn, message.sdp, message.ice);
       return;
     case 'send':
-      send(message.conn, message.data);
+      send(message.conn, message.data, message.lane);
+      return;
+    case 'close_files':
+      peers.get(message.conn)?.files?.close();
       return;
     case 'close':
       closeFromMain(message.conn);

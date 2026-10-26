@@ -4,7 +4,7 @@
  * DataChannel. The test's main process drives it through `window.viewer`.
  */
 
-import { DATA_CHANNEL_BUFFER_HIGH_BYTES, DATA_CHANNEL_LABEL, MessageTransport, type FragmentLink } from '@lingxi/bridge-client/remote';
+import { DATA_CHANNEL_BUFFER_HIGH_BYTES, DATA_CHANNEL_LABEL, FILE_CHANNEL_LABEL, FileChannel, hashFile, MessageTransport, type FileOffer, type FragmentLink } from '@lingxi/bridge-client/remote';
 
 const pattern = (seed: string, length: number): string => seed.repeat(Math.ceil(length / seed.length)).slice(0, length);
 
@@ -53,6 +53,9 @@ interface Session {
   pc: RTCPeerConnection;
   channel: RTCDataChannel;
   transport?: MessageTransport;
+  bulk?: FileChannel;
+  bulkReady?: boolean;
+  fileOffset?: number;
   opened: boolean;
   closed: boolean;
   received: Array<{ length: number; ok: boolean }>;
@@ -82,6 +85,11 @@ function gathered(pc: RTCPeerConnection): Promise<void> {
     const channel = pc.createDataChannel(options.label ?? DATA_CHANNEL_LABEL, { ordered: options.ordered ?? true });
     const session: Session = { pc, channel, opened: false, closed: false, received: [] };
     channel.onopen = () => { session.opened = true; };
+    if (options.ordered !== false && !options.label) {
+      const bulk = pc.createDataChannel(FILE_CHANNEL_LABEL, { ordered: true });
+      session.bulk = new FileChannel(new ChannelLink(bulk));
+      bulk.onopen = () => { session.bulkReady = true; };
+    }
     channel.addEventListener('close', () => { session.closed = true; });
     sessions.set(name, session);
     await pc.setLocalDescription(await pc.createOffer());
@@ -91,10 +99,29 @@ function gathered(pc: RTCPeerConnection): Promise<void> {
   async accept(name: string, sdp: string): Promise<void> {
     await get(name).pc.setRemoteDescription({ type: 'answer', sdp });
   },
-  status(name: string): { opened: boolean; closed: boolean; received: Array<{ length: number; ok: boolean }> } {
-    const { opened, closed, received } = get(name);
-    return { opened, closed, received };
+  status(name: string): { opened: boolean; closed: boolean; bulkReady?: boolean; fileOffset?: number; received: Array<{ length: number; ok: boolean }> } {
+    const { opened, closed, received, bulkReady, fileOffset } = get(name);
+    return { opened, closed, received, bulkReady, fileOffset };
   },
+  async prepareFile(size: number, id: string): Promise<FileOffer> {
+    const source = { size, read: async (at: number, n: number) => Uint8Array.from({ length: Math.min(size - at, n) }, (_, i) => (at+i)%251) };
+    return { transfer_id: id, session_id: 'fixture', name: 'original.zip', size, sha256: await hashFile(source) };
+  },
+  async uploadFile(name: string, offer: FileOffer): Promise<unknown> {
+    return get(name).bulk!.send(offer, { size: offer.size, read: async (at,n) => Uint8Array.from({ length: Math.min(offer.size-at,n) },(_,i)=>(at+i)%251) }, {
+      offer: async () => ({ offset: 0 }), commit: async () => ({ ...offer, ref: offer.transfer_id }), cancel: async () => undefined,
+    });
+  },
+  receiveFile(name: string, offer: FileOffer): void {
+    const session = get(name); let offset = 0;
+    session.bulk!.receive(offer.transfer_id, {
+      get offset() { return offset; },
+      write: async (at,bytes) => { if (at !== offset || bytes.some((b,i)=>b!==(at+i)%251)) throw new Error('corrupt original bytes'); offset += bytes.length; session.fileOffset = offset; },
+      finish: async () => { if (offset !== offer.size) throw new Error('incomplete original'); return { ...offer, ref: offer.transfer_id }; },
+      close: async () => undefined, cancel: async () => undefined,
+    });
+  },
+  async finishFile(name: string, id: string): Promise<unknown> { return get(name).bulk!.commit(id); },
   startTransport(name: string, expectSeed: string, expectLength: number): void {
     const session = get(name);
     const transport = new MessageTransport(new ChannelLink(session.channel));

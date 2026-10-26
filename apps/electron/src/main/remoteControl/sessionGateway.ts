@@ -22,6 +22,9 @@ import { basename } from 'node:path';
 
 import {
   RemoteRpcError,
+  validateFileOffer,
+  type FileSink,
+  type FileOffer,
   type Clock,
   type RemotePendingAction,
   type RemoteSessionSummary,
@@ -38,6 +41,7 @@ import type { PushPresence } from './pushRequests.js';
 import type { RemoteCommands } from './remoteCommands.js';
 import type { RemoteRuntime, RemoteRuntimes, RuntimeLease } from './remoteRuntime.js';
 import { SessionAttachment } from './sessionAttachment.js';
+import type { RemoteFileStore } from './fileStore.js';
 import { parseImageRef } from './snapshot.js';
 
 /** A session stays open this long after its last viewer detached. */
@@ -53,6 +57,7 @@ export interface SessionGatewayDeps {
   runtimes: RemoteRuntimes;
   policy: Pick<RemotePolicy, 'enabledSessions' | 'find' | 'wasEnabled' | 'onChange'>;
   commands: RemoteCommands;
+  files?: RemoteFileStore;
   /** The session's title, from the persisted transcript. */
   titleOf(ref: SessionRef): Promise<string | undefined>;
   /** The model a session that is not open will use. */
@@ -82,6 +87,8 @@ interface ViewerState {
   watching: boolean;
   lastList?: string;
   closed: boolean;
+  files: Map<string, { offer: FileOffer; sink: FileSink }>;
+  downloads: Map<string, { session: string; controller: AbortController; done: Promise<unknown> }>;
 }
 
 type Json = Record<string, unknown>;
@@ -92,6 +99,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   private readonly titles = new Map<string, { title: string; at: number }>();
   private readonly watchers = new Set<() => void>();
   private readonly viewerListeners = new Set<() => void>();
+  private readonly fileOperations = new Map<string, Promise<unknown>>();
   private listTimer: unknown;
   private disposed = false;
 
@@ -129,8 +137,36 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         return this.deps.commands.history(this.attachedRuntime(state, params), params);
       case 'image.get':
         return this.deps.commands.imageGet(this.imageRuntime(params), params);
-      case 'prompt.send':
-        return this.deps.commands.promptSend(this.attachedRuntime(state, params), viewer, params);
+      case 'file.offer':
+      case 'file.commit':
+      case 'file.cancel':
+      case 'file.list':
+      case 'file.download': {
+        // Offer/commit/cancel for one transfer are serialized across asynchronous disk work.
+        // Download is independent: waiting for bulk ACKs must not block cancellation.
+        const runtime = this.attachedRuntime(state, params);
+        const attachment = state.attached.get(runtime.sessionId)!;
+        const operation = () => this.fileRequest(state, method, params, attachment);
+        if (method === 'file.download' || method === 'file.list') return operation();
+        return this.queueFile(state, String((params as Json)?.['transfer_id']), operation);
+      }
+      case 'prompt.send': {
+        const runtime = this.attachedRuntime(state, params);
+        const attachment = state.attached.get(runtime.sessionId);
+        const refs = (params as Json)?.['file_refs'];
+        if (refs === undefined) return this.deps.commands.promptSend(runtime, viewer, params);
+        if (!Array.isArray(refs) || refs.length > 4 || refs.some(ref => typeof ref !== 'string')
+          || typeof (params as Json)['text'] !== 'string' || /^\s*\//u.test((params as Json)['text'] as string)) {
+          throw new RemoteRpcError('invalid_params', 'invalid file attachments');
+        }
+        const store = this.deps.files;
+        if (!store) throw new RemoteRpcError('invalid_params', 'files unavailable');
+        const owner = this.fileOwner(viewer);
+        const references = await Promise.all(refs.map(id => store.promptReference(owner, runtime.sessionId, id)));
+        if (state.attached.get(runtime.sessionId) !== attachment) throw new RemoteRpcError('not_approved', 'file attachment changed');
+        this.attachedRuntime(state, params);
+        return this.deps.commands.promptSend(runtime, viewer, { ...(params as Json), text: [(params as Json)['text'], ...references].join('\n\n') });
+      }
       case 'turn.cancel':
         return this.deps.commands.turnCancel(this.attachedRuntime(state, params), params);
       case 'permission.respond':
@@ -152,11 +188,110 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     }
   }
 
+  private fileOwner(viewer: RemoteViewer): string {
+    if (!viewer.account_uid) throw new RemoteRpcError('not_approved', 'missing account scope');
+    return `${viewer.account_uid}\0${viewer.device_id}`;
+  }
+
+  private queueFile<T>(state: ViewerState, id: string, operation: () => Promise<T>): Promise<T> {
+    const key = `${state.viewer.conn_id}/${id}`;
+    const next = (this.fileOperations.get(key) ?? Promise.resolve()).catch(() => undefined).then(operation);
+    this.fileOperations.set(key, next);
+    void next.finally(() => { if (this.fileOperations.get(key) === next) this.fileOperations.delete(key); }).catch(() => undefined);
+    return next;
+  }
+
+  private async fileRequest(state: ViewerState, method: string, raw: unknown, attachment: Attached): Promise<unknown> {
+    const params = raw as Json;
+    const runtime = this.attachedRuntime(state, params);
+    const session = runtime.sessionId;
+    const store = this.deps.files;
+    if (!store) throw new RemoteRpcError('invalid_params', 'files unavailable');
+    const owner = this.fileOwner(state.viewer);
+    const authorize = (): void => {
+      if (state.closed || this.disposed) throw new Error('viewer closed');
+      if (state.attached.get(session) !== attachment) throw new Error('file attachment changed');
+      this.attachedRuntime(state, { session_id: session });
+    };
+    authorize();
+    if (method === 'file.list') {
+      const listed = await store.list(owner, session);
+      authorize();
+      return { files: listed };
+    }
+    const files = state.channel.files;
+    if (!files) throw new RemoteRpcError('invalid_params', 'files require an open WebRTC connection');
+    const authorizeTransfer = (): void => {
+      authorize();
+      if (state.channel.files !== files) throw new Error('file authorization ended');
+    };
+    const id = params?.['transfer_id'];
+    if (typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id)) throw new RemoteRpcError('invalid_params', 'invalid transfer id');
+    try {
+      if (method === 'file.offer') {
+        const offer = validateFileOffer(params);
+        const previous = state.files.get(id);
+        if (previous) {
+          if (JSON.stringify(previous.offer) !== JSON.stringify(offer)) throw new Error('transfer metadata changed');
+          return { offset: previous.sink.offset };
+        }
+        if (state.files.size >= 4) throw new Error('too many transfers');
+        const sink = await store.accept(owner, offer, authorizeTransfer);
+        try { authorizeTransfer(); files.receive(id, sink); } catch (error) { await sink.close(); throw error; }
+        state.files.set(id, { offer, sink });
+        return { offset: sink.offset };
+      }
+      const active = state.files.get(id);
+      if (active && active.offer.session_id !== session) throw new Error('wrong session');
+      if (method === 'file.commit') {
+        try {
+          const receipt = active ? await files.commit(id) : await store.receipt(owner, session, id);
+          authorizeTransfer();
+          return receipt;
+        }
+        finally { state.files.delete(id); }
+      }
+      if (method === 'file.cancel') {
+        const download = state.downloads.get(id);
+        if (download) {
+          if (download.session !== session) throw new Error('wrong session');
+          download.controller.abort();
+          await download.done.catch(() => undefined);
+        }
+        await files.cancel(id);
+        state.files.delete(id);
+        return {};
+      }
+      if (method === 'file.download') {
+        const offset = params['offset'];
+        if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0) throw new Error('invalid offset');
+        if (state.downloads.has(id) || state.downloads.size >= 4) throw new Error('file sender busy');
+        const controller = new AbortController();
+        const done = (async () => {
+          const { offer, source } = await store.source(owner, session, id);
+          authorizeTransfer();
+          return files.send(offer, { size: source.size, read: async (at, size) => {
+            authorizeTransfer();
+            const bytes = await source.read(at, size);
+            authorizeTransfer();
+            return bytes;
+          } }, {
+            offer: async () => ({ offset }), commit: async () => { authorizeTransfer(); return offer; }, cancel: async () => undefined,
+          }, undefined, controller.signal);
+        })();
+        state.downloads.set(id, { session, controller, done });
+        try { return await done; } finally { state.downloads.delete(id); }
+      }
+      throw new Error('unknown file method');
+    } catch (error) { throw new RemoteRpcError('invalid_params', describeError(error)); }
+  }
+
   viewerClosed(viewer: RemoteViewer): void {
     const state = this.viewers.get(viewer.conn_id);
     if (state === undefined) return;
     state.closed = true;
     state.attaching.clear();
+    for (const download of state.downloads.values()) download.controller.abort();
     this.viewers.delete(viewer.conn_id);
     for (const sessionId of [...state.attached.keys()]) this.dropAttachment(state, sessionId, true);
     this.viewersChanged();
@@ -172,6 +307,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     for (const state of [...this.viewers.values()]) {
       state.closed = true;
       state.attaching.clear();
+      for (const download of state.downloads.values()) download.controller.abort();
       for (const sessionId of [...state.attached.keys()]) this.dropAttachment(state, sessionId, true);
     }
     this.viewers.clear();
@@ -182,7 +318,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   private stateOf(viewer: RemoteViewer, channel: RemoteViewerChannel): ViewerState {
     let state = this.viewers.get(viewer.conn_id);
     if (state === undefined) {
-      state = { viewer, channel, attached: new Map(), attaching: new Map(), watching: false, closed: false };
+      state = { viewer, channel, attached: new Map(), attaching: new Map(), watching: false, closed: false, files: new Map(), downloads: new Map() };
       this.viewers.set(viewer.conn_id, state);
     }
     return state;
@@ -333,6 +469,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     const attached = state.attached.get(sessionId);
     if (attached === undefined) return;
     state.attached.delete(sessionId);
+    this.releaseAttachmentFiles(state, sessionId);
     attached.attachment.close();
     if (release) this.release(attached.lease);
   }
@@ -342,8 +479,24 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     const attached = state.attached.get(sessionId);
     if (attached?.attachment !== attachment) return;
     state.attached.delete(sessionId);
+    this.releaseAttachmentFiles(state, sessionId);
     this.release(attached.lease);
     this.viewersChanged();
+  }
+
+  private releaseAttachmentFiles(state: ViewerState, sessionId: string): void {
+    for (const download of state.downloads.values()) if (download.session === sessionId) download.controller.abort();
+    const files = state.channel.files;
+    for (const [id, entry] of state.files) {
+      if (entry.offer.session_id !== sessionId) continue;
+      state.files.delete(id);
+      // Keep cleanup in the transfer's lane: a new offer must not reuse its
+      // receiver until old writes/verification and handle release have settled.
+      void this.queueFile(state, id, async () => {
+        if (files) await files.detach(id);
+        else await entry.sink.close();
+      }).catch(error => this.deps.diagnostics('warn', `could not release a remote file (${describeError(error)})`));
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -467,6 +620,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       for (const [sessionId, attached] of [...state.attached]) {
         if (this.deps.policy.find(sessionId) !== undefined) continue;
         state.attached.delete(sessionId);
+        this.releaseAttachmentFiles(state, sessionId);
         attached.attachment.close('remote_disabled');
         this.releaseNow(attached.lease);
       }

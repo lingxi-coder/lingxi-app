@@ -360,6 +360,7 @@ struct AttemptData {
     kind: Option<TransportKind>,
     peer: Option<Arc<dyn PeerHandle>>,
     direct: Option<Arc<DirectLink>>,
+    files: Option<Arc<crate::files::FileLane>>,
     tunnel: Option<TunnelLink>,
     rpc: Option<RpcPeer>,
     /// Set once `initialize` succeeded and, if needed, the user approved.
@@ -556,6 +557,26 @@ impl ViewerConnection {
             .lock()
             .expect("listeners")
             .retain(|(existing, _)| *existing != id.0);
+    }
+
+    /// Independent binary file transport, available only on an approved direct connection.
+    pub fn file_transport(&self) -> Result<(Arc<crate::files::FileLane>, RpcPeer), String> {
+        let live = self
+            .inner
+            .core
+            .lock()
+            .expect("core")
+            .live
+            .clone()
+            .ok_or("not connected")?;
+        let data = live.data.lock().expect("attempt");
+        if !data.ready || data.kind != Some(TransportKind::Webrtc) {
+            return Err("files require WebRTC".into());
+        }
+        Ok((
+            data.files.clone().ok_or("file channel unavailable")?,
+            data.rpc.clone().ok_or("control channel unavailable")?,
+        ))
     }
 
     /// Send a request on the ready link. Fails with `closed` when there is none.
@@ -1128,6 +1149,9 @@ impl Inner {
             return Ok(None);
         };
         let peer = offerer.peer;
+        if let Some(files) = peer.take_file_channel() {
+            a.data.lock().expect("attempt").files = Some(crate::files::FileLane::start(files));
+        }
         {
             a.data.lock().expect("attempt").peer = Some(Arc::clone(&peer));
         }

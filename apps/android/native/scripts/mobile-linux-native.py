@@ -46,7 +46,10 @@ def verify_elf(path, machine):
         raise ValueError(f"wrong ELF64 architecture: {path}")
 
 
-def verify(source, destination, abis=ABIS):
+def verify(source, destination, abis=None):
+    abis = tuple(ABIS if abis is None else abis)
+    if not abis or len(set(abis)) != len(abis) or any(abi not in ABIS for abi in abis):
+        raise ValueError("invalid selected ABIs")
     entries = inventory(source)
     for abi in abis:
         machine = ABIS[abi]

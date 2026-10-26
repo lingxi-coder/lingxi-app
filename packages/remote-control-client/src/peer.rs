@@ -107,6 +107,11 @@ impl std::fmt::Debug for PeerOfferer {
 /// One peer connection.
 #[async_trait]
 pub trait PeerHandle: Send + Sync {
+    /// Take the independent bulk channel once. Older/fake peers may omit it.
+    fn take_file_channel(&self) -> Option<crate::files::FilePeer> {
+        None
+    }
+
     /// Create the offer, set it locally and wait (at most the configured gather
     /// timeout) for ICE gathering; returns the complete SDP with its candidates.
     async fn offer_sdp(&self) -> Result<String, PeerError>;

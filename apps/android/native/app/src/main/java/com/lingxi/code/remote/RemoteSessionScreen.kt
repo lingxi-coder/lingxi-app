@@ -216,6 +216,7 @@ internal fun RemoteSessionScreen(
                 }.padding(vertical = 8.dp),
             )
         }
+        RemoteFilesPanel(manager, hostId, sessionId, enabled = meta.phase == com.lingxi.code.bindings.android.RemoteSessionPhaseFfi.LIVE)
         ChatScreen(
             modifier = Modifier.weight(1f),
             state = state,

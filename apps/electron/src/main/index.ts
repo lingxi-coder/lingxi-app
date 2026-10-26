@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { LocalAppCoreClient } from './local-apps/coreClient.js';
+import { RemoteFileStore } from './remoteControl/fileStore.js';
 import { LocalAppHost } from './local-apps/host.js';
 import { resolveDesktopAuthoringBinding } from './local-apps/authoring.js';
 import { LocalAppAgentBroker } from './local-apps/agentBroker.js';
@@ -602,6 +603,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   remotePolicy = policy;
   const runtimes = bridge;
   const gateway = new SessionGateway({
+    files: new RemoteFileStore(join(userData, 'remote-files')),
     runtimes,
     policy,
     commands: new RemoteCommands({

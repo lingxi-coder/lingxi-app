@@ -198,7 +198,7 @@ listOf("play", "direct").forEach { distribution ->
     val capitalized = distribution.replaceFirstChar(Char::uppercaseChar)
     tasks.register<Exec>("verify${capitalized}MobileLinuxNative") {
         group = "verification"
-        description = "Verify MobileLinux ELF artifacts for both supported ABIs ($distribution)."
+        description = "Verify MobileLinux ELF artifacts for the selected ABIs ($distribution)."
         commandLine(
             rootProject.file("scripts/verify-mobile-linux-native.sh").absolutePath,
             "--variant",

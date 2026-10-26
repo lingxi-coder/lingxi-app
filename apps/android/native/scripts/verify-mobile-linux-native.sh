@@ -6,6 +6,7 @@ ABIS="arm64-v8a,x86_64"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --variant) VARIANT="${2:?missing variant}"; shift 2 ;;
+    --abis) ABIS="${2:?missing ABI list}"; shift 2 ;;
     --jni-root) JNI_ROOT="${2:?missing JNI root}"; shift 2 ;;
     --abis) ABIS="${2:?missing ABI list}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -13,7 +14,7 @@ while [[ $# -gt 0 ]]; do
 done
 case "${VARIANT}" in
   play|direct) ;;
-  *) echo "usage: $0 --variant <play|direct> [--jni-root DIR]" >&2; exit 2 ;;
+  *) echo "usage: $0 --variant <play|direct> [--jni-root DIR] [--abis arm64-v8a,x86_64]" >&2; exit 2 ;;
 esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"

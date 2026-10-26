@@ -2419,4 +2419,14 @@
     <string name="workspace_browser_not_directory">所选路径不是文件夹。</string>
     <string name="workspace_browser_already_exists">已存在同名项目。</string>
     <string name="cron_resume_before_running">请先恢复此任务，再运行。</string>
+    <string name="remote_files">文件</string>
+    <string name="remote_file_upload">上传原文件</string>
+    <string name="remote_file_cancel">取消传输</string>
+    <string name="remote_file_attach">发送到会话</string>
+    <string name="remote_file_download">下载</string>
+    <string name="remote_file_export">保存或分享文件</string>
+    <string name="remote_file_requires_webrtc">文件传输需要 WebRTC 连接；不会上传到云端存储。</string>
+    <string name="remote_file_preparing">正在校验原文件…</string>
+    <string name="remote_file_uploading">正在上传到电脑…</string>
+    <string name="remote_file_downloading">正在下载文件…</string>
 </resources>

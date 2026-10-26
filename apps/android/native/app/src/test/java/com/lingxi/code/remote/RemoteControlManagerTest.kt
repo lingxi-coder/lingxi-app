@@ -1,5 +1,6 @@
 package com.lingxi.code.remote
 
+import com.lingxi.code.bindings.android.RemoteFileFfi
 import com.lingxi.code.bindings.android.AndroidRemoteListener
 import com.lingxi.code.bindings.android.RemoteConnectionPhaseFfi
 import com.lingxi.code.bindings.android.RemoteConnectionStateFfi
@@ -36,6 +37,13 @@ class RemoteControlManagerTest {
     }
 
     private class FakeClient(val uid: String, val listener: AndroidRemoteListener) : RemoteClientPort {
+        override suspend fun prepareFile(sessionId: String, path: String, name: String): RemoteFileFfi = error("file API not exercised by manager lifecycle test")
+        override suspend fun uploadFile(file: RemoteFileFfi, path: String): RemoteFileFfi = error("file API not exercised by manager lifecycle test")
+        override suspend fun downloadFile(file: RemoteFileFfi, path: String): RemoteFileFfi = error("file API not exercised by manager lifecycle test")
+        override suspend fun listFiles(sessionId: String): List<RemoteFileFfi> = error("file API not exercised by manager lifecycle test")
+        override fun fileProgress(transferId: String): ULong = error("file API not exercised by manager lifecycle test")
+        override fun cancelFile(transferId: String) = error("file API not exercised by manager lifecycle test")
+        override suspend fun sendPromptWithFiles(sessionId: String, text: String, images: List<com.lingxi.code.bindings.android.RemotePromptImageFfi>, fileRefs: List<String>) = error("file API not exercised by manager lifecycle test")
         val calls = mutableListOf<String>()
         var closed = false
         var pushId: String? = "unset"

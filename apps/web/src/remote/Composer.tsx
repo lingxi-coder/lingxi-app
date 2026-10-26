@@ -10,6 +10,7 @@ interface ComposerProps {
   /** A turn is running: text only, and the stop button shows. */
   running: boolean;
   disabled: boolean;
+  hasFiles?: boolean;
   onSend(text: string, images: ImageRefDto[]): void;
   onStop(): void;
 }
@@ -20,13 +21,13 @@ const IMAGE_ERRORS: Record<ImageRejected['reason'], StringKey> = {
   size: 'imageSizeError',
 };
 
-export function Composer({ locale, running, disabled, onSend, onStop }: ComposerProps) {
+export function Composer({ locale, running, disabled, hasFiles, onSend, onStop }: ComposerProps) {
   const [text, setText] = useState('');
   const [images, setImages] = useState<ImageRefDto[]>([]);
   const [problem, setProblem] = useState<string | null>(null);
   const [shrinking, setShrinking] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  const canSend = !disabled && !shrinking && (text.trim().length > 0 || (!running && images.length > 0));
+  const canSend = !disabled && !shrinking && (text.trim().length > 0 || hasFiles || (!running && images.length > 0));
 
   const send = (): void => {
     if (!canSend) return;

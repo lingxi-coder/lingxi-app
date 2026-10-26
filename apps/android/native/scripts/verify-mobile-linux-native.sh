@@ -8,7 +8,6 @@ while [[ $# -gt 0 ]]; do
     --variant) VARIANT="${2:?missing variant}"; shift 2 ;;
     --abis) ABIS="${2:?missing ABI list}"; shift 2 ;;
     --jni-root) JNI_ROOT="${2:?missing JNI root}"; shift 2 ;;
-    --abis) ABIS="${2:?missing ABI list}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

@@ -2187,10 +2187,7 @@ struct RootView: View {
             Task { @MainActor in
                 await LocalApps.initializeOnce()
                 await LocalApps.library.refresh()
-                let chatID = AppsModel.chatAppID(of: id) ?? id
-                let chatExists = await LocalApps.chat.exists(chatID) == true
                 guard requestID == externalAsyncRouteID else { return }
-                let marketExists = LocalApps.market?.installed.contains(where: { $0.appId == id && !$0.removing }) == true
                 if LocalApps.library.record(id) != nil {
                     if target.params["review"] == "agent" {
                         LocalApps.library.browserReviewAppID = id
@@ -2203,14 +2200,6 @@ struct RootView: View {
                             )
                         }
                     }
-                    navigation.runApp(id)
-                } else if AppsModel.chatAppID(of: id) != nil, chatExists {
-                    navigation.runApp(id)
-                } else if chatExists && marketExists {
-                    externalLinkError = String(localized: "deep_link_app_ambiguous")
-                } else if chatExists {
-                    navigation.runApp(AppsModel.chatAppKey(chatID))
-                } else if marketExists {
                     navigation.runApp(id)
                 } else {
                     _ = missingLinkedResource("installed app")

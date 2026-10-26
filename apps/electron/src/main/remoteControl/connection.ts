@@ -518,6 +518,8 @@ export class HostConnection {
       conn_id: this.connId,
       ...(request.pushInstallationId === undefined ? {} : { push_installation_id: request.pushInstallationId }),
     };
+    // A valid request also proves the transport opened, even if its stats report stalls.
+    this.transportUp();
     if (registry.isApproved(uid, offer.device.id, offer.device.key)) {
       this.approve();
       registry.touch(uid, offer.device.id);

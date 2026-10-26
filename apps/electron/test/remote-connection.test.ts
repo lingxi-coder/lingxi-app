@@ -559,6 +559,8 @@ for (const approved of [true, false]) {
 
       // Control messages can arrive while the renderer is still awaiting getStats.
       assert.equal((await viewer.initialize<InitializeResult>()).status, approved ? 'approved' : 'pending_approval');
+      await elapse(h.clock, 21_000);
+      assert.equal(host.closeReason, undefined, 'valid initialize also satisfies the transport-open deadline');
       host.open('host');
       await elapse(h.clock, 16_000);
       assert.equal(host.closeReason, undefined);

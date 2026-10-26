@@ -28,8 +28,11 @@ the control channel could deliver valid `initialize` before the renderer's
 asynchronous connected notification. That later notification incorrectly armed
 a new 15-second initialization deadline, closing an already initialized peer
 and its file channel. Desktop now starts that deadline only while no valid
-handshake has begun. Regression tests cover approved and pending viewers with
-this event ordering, and confirm that invalid initialization still times out.
+handshake has begun. A valid initialization also satisfies the transport-open
+deadline, so delayed connection statistics cannot trigger its separate 20-second
+timeout. Regression tests delay the connected report by 21 seconds for approved
+and pending viewers, then run past the initialization deadline; invalid
+initialization still times out.
 
 Current source checks: Web 170 passed with production build and typecheck;
 Desktop 375 passed with three Firebase-Emulator-only skips, plus 82 focused file,
@@ -58,15 +61,27 @@ FCM notification, notification tap into the correct APRICOT/PEAR session, and
 PEAR answer synchronization passed. Exact APK identities for these checks and
 the subsequent peer-recovery APK's focused SAF rechecks are recorded separately.
 
+With the signed Desktop initialization-timer repair and latest Android APK,
+17 MiB SAF export passed after an intentional 30-second picker delay. A second
+download removed only the verified generated-file cache first: Desktop then
+sent 1090 frames covering all original bytes, and the exported SHA-256 matched.
+A later peer-loss event occurred after completion and is tracked separately;
+this is not a claim that mobile networking never disconnects. The supplementary
+20-second transport-deadline repair still requires a new signed-package retest.
+
 Chrome also passed real tunnel-mode control replies with original-file upload
 disabled, plus withdrawal during a 2 GiB upload: bytes stopped, no receipt was
 published, and all send/download controls disabled. Restoring only the original
 shared session and reattaching restored control replies without automatically
 resuming the old transfer.
 
-The new iOS FullDebug app and device XCFramework are built and signed;
-installation and original-file physical acceptance remain pending while another
-task owns the phone. APNs is deferred by user request; Safari is optional.
+The new iOS FullDebug app and device XCFramework are built and signed. The app
+was installed and launched before the phone was handed back to its other task;
+original-file physical acceptance remains pending. An independent iOS simulator
+and matching arm64 FFI are now prepared, with original device libraries retained
+and identical Swift bindings. Its application linked, but XCTest was stopped by
+the low-disk guard before completion; no simulator test pass is claimed yet.
+APNs is deferred by user request; Safari is optional.
 These open checks are not claimed as passed by source/build validation.
 
 Evidence: `acceptance/remote-control-20261022/integration-20261025/` in the shared

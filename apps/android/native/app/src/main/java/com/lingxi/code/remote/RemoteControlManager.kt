@@ -65,7 +65,15 @@ class FirebaseRemoteAccount(private val auth: FirebaseAuth = FirebaseAuth.getIns
 
     override suspend fun idToken(forceRefresh: Boolean): String {
         val user = auth.currentUser ?: throw IllegalStateException("not signed in")
-        return checkNotNull(user.getIdToken(forceRefresh).await().token) { "no ID token" }
+        if (BuildConfig.DEBUG) android.util.Log.d("RemoteControl", "Requesting account token; refresh=$forceRefresh")
+        return try {
+            checkNotNull(user.getIdToken(forceRefresh).await().token) { "no ID token" }.also {
+                if (BuildConfig.DEBUG) android.util.Log.d("RemoteControl", "Account token ready")
+            }
+        } catch (error: Exception) {
+            if (BuildConfig.DEBUG) android.util.Log.d("RemoteControl", "Account token failed: ${error.javaClass.simpleName}")
+            throw error
+        }
     }
 }
 

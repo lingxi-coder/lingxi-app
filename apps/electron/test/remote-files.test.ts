@@ -1,9 +1,9 @@
 import { gatewayFixture, FakeRuntime, SESSION_A, SESSION_B, RecordingChannel, viewer } from './remote-session-helpers.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { FileChannel, FILE_CHUNK_BYTES, decodeFileFrame, encodeFileFrame, hashFile, validateFileOffer, type FragmentLink, type FileOffer, type FileSink } from '@lingxi/bridge-client/remote';
 import { RemoteFileStore } from '../src/main/remoteControl/fileStore.js';
 class Link implements FragmentLink {
@@ -45,6 +45,81 @@ test('empty file publishes and lost commit response can be replayed', async () =
   assert.deepEqual(await store.receipt('owner', 'session', info.transfer_id), receipt);
   const replay = await store.accept('owner', info, authorize); assert.equal(replay.offset, 0); assert.deepEqual(await replay.finish(), receipt);
 }));
+test('explicit prompt creates an independent named working copy without trusting the private store', async () => withStore(async (store, root) => {
+  const workspace = await mkdtemp(join(root, 'workspace-'));
+  const info = await offer(31); const sink = await store.accept('owner', info, authorize);
+  const bytes = await pattern(31).read(0, 31); await sink.write(0, bytes); await sink.finish();
+  const ref = await store.promptReference('owner', 'session', info.transfer_id, workspace, authorize);
+  const path = JSON.parse(ref.text.split('Local path: ')[1]!);
+  assert.equal(dirname(dirname(path)), await realpath(workspace));
+  assert.equal(path.split('/').at(-1), info.name);
+  assert.deepEqual(new Uint8Array(await readFile(path)), bytes);
+  assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  await writeFile(path, 'model edit');
+  const original = await store.source('owner', 'session', info.transfer_id);
+  assert.equal(await hashFile(original.source), info.sha256, 'working copy cannot mutate the verified transfer');
+  await ref.discard(); assert.deepEqual(await readdir(workspace), []);
+}));
+test('revocation after receipt lookup never leaves an unpublished workspace attachment', async () => withStore(async (store, root) => {
+  const workspace = await mkdtemp(join(root, 'workspace-')); const info = await offer(0);
+  await (await store.accept('owner', info, authorize)).finish();
+  let calls = 0;
+  await assert.rejects(store.promptReference('owner', 'session', info.transfer_id, workspace, () => {
+    if (++calls === 5) throw new Error('revoked');
+  }), /revoked/);
+  assert.deepEqual(await readdir(workspace), []);
+}));
+test('discard never deletes a replacement workspace directory', async () => withStore(async (store, root) => {
+  const workspace = await mkdtemp(join(root, 'workspace-')); const info = await offer(0);
+  await (await store.accept('owner', info, authorize)).finish();
+  const ref = await store.promptReference('owner', 'session', info.transfer_id, workspace, authorize);
+  const path = dirname(JSON.parse(ref.text.split('Local path: ')[1]!));
+  await rename(path, `${path}-moved`); await mkdir(path); await writeFile(join(path, 'user-data'), 'preserve');
+  await ref.discard(); assert.equal(await readFile(join(path, 'user-data'), 'utf8'), 'preserve');
+}));
+test('an empty attachment list cannot send after its viewer closes before preparation', async () => withStore(async store => {
+  const f = gatewayFixture({ files: store }); f.enable(SESSION_A); f.runtimes.add(new FakeRuntime(SESSION_A)).resume();
+  const who = { viewer: viewer({ account_uid: 'account' }), channel: new RecordingChannel() };
+  try {
+    await f.call('session.attach', { session_id: SESSION_A }, who);
+    const pending = f.call('prompt.send', { session_id: SESSION_A, text: 'do not send', client_request_id: 'closed-empty-files', file_refs: [] }, who);
+    f.gateway.viewerClosed(who.viewer);
+    await assert.rejects(pending, /attachment|attach|closed/);
+    assert.equal(f.echoes.length, 0);
+  } finally { f.gateway.dispose(); }
+}));
+for (const failure of ['second reference', 'prompt refused', 'attachment replaced', 'workspace changed']) {
+  test(`unpublished working copies are removed when ${failure}`, async () => withStore(async (store, root) => {
+    const workspace = await mkdtemp(join(root, 'workspace-'));
+    const f = gatewayFixture({ files: store }); f.enable(SESSION_A);
+    const runtime = new FakeRuntime(SESSION_A); runtime.engineWorkspacePath = workspace;
+    f.runtimes.add(runtime).resume();
+    const who = { viewer: viewer({ account_uid: 'account' }), channel: new RecordingChannel() };
+    const info = { ...await offer(0), session_id: SESSION_A };
+    await (await store.accept('account\0device-1', info, authorize)).finish();
+    try {
+      await f.call('session.attach', { session_id: SESSION_A }, who);
+      if (failure === 'prompt refused') runtime.failSend = new Error('prompt refused');
+      if (failure === 'attachment replaced' || failure === 'workspace changed') {
+        const original = store.promptReference.bind(store);
+        store.promptReference = async (...args) => {
+          const ref = await original(...args);
+          if (failure === 'workspace changed') runtime.engineWorkspacePath = root;
+          else {
+            await f.call('session.detach', { session_id: SESSION_A }, who);
+            await f.call('session.attach', { session_id: SESSION_A }, who);
+          }
+          return ref;
+        };
+      }
+      await assert.rejects(f.call('prompt.send', { session_id: SESSION_A, text: 'Read file', client_request_id: 'copy-failure',
+        file_refs: failure === 'second reference' ? [info.transfer_id, 'ab'.repeat(16)] : [info.transfer_id] }, who));
+      assert.deepEqual(await readdir(workspace), []);
+      assert.equal(f.echoes.length, 0);
+    } finally { f.gateway.dispose(); }
+  }));
+}
 test('durable resume after store recreation; account and session isolation', async () => withStore(async (store, path) => {
   const info = await offer(FILE_CHUNK_BYTES * 2 + 7); const first = await store.accept('owner1', info, authorize);
   await first.write(0, await pattern(info.size).read(0, FILE_CHUNK_BYTES)); await first.close();
@@ -77,9 +152,10 @@ test('bad sequence and revoked session cannot overwrite/publish', async () => wi
   await assert.rejects(sink.write(1, new Uint8Array([1])), /invalid/); allowed = false; await assert.rejects(sink.write(0, new Uint8Array([0, 1])), /revoked/); await assert.rejects(sink.finish(), /revoked/); await sink.close();
 }));
 
-test('gateway requires approval scope, shared attached session and original-file ownership', async () => withStore(async store => {
+test('gateway requires approval scope, shared attached session and original-file ownership', async () => withStore(async (store, path) => {
   const f = gatewayFixture({ files: store }); f.enable(SESSION_A); f.enable(SESSION_B);
-  f.runtimes.add(new FakeRuntime(SESSION_A)).resume(); f.runtimes.add(new FakeRuntime(SESSION_B)).resume();
+  const runtime = new FakeRuntime(SESSION_A); runtime.engineWorkspacePath = path;
+  f.runtimes.add(runtime).resume(); f.runtimes.add(new FakeRuntime(SESSION_B)).resume();
   const { a, b } = pair(); const channel = Object.assign(new RecordingChannel(), { files: b });
   const phone = viewer({ account_uid: 'account' }); const who = { viewer: phone, channel };
   const info = { ...await offer(31), session_id: SESSION_A };
@@ -97,6 +173,8 @@ test('gateway requires approval scope, shared attached session and original-file
   assert.equal((await f.call('file.list', { session_id: SESSION_A }, other)).files.length, 0);
   await f.call('prompt.send', { session_id: SESSION_A, text: 'Read this file', client_request_id: 'file-prompt-1', file_refs: [receipt.ref] }, who);
   assert.match(f.echoes.at(-1)!.text, /Local path:/);
+  await f.call('prompt.send', { session_id: SESSION_A, text: 'Read this file', client_request_id: 'file-prompt-1', file_refs: [receipt.ref] }, who);
+  assert.equal((await readdir(path)).filter(name => name.startsWith('.lingxi-remote-attachment-')).length, 1, 'replayed prompts do not publish extra working copies');
   f.policy.setSessionEnabled({ projectPath: '/work/project-one', sessionId: SESSION_A }, false);
   await assert.rejects(f.call('file.list', { session_id: SESSION_A }, who));
   a.close(); b.close(); f.gateway.dispose();
@@ -172,7 +250,7 @@ for (const method of ['file.commit', 'prompt.send']) {
     const info = { ...await offer(0), session_id: SESSION_A };
     let release!: () => void;
     if (method === 'file.commit') store.receipt = () => new Promise(resolve => { release = () => resolve({ ...info, ref: info.transfer_id }); });
-    else store.promptReference = () => new Promise(resolve => { release = () => resolve('Local path: test'); });
+    else store.promptReference = () => new Promise(resolve => { release = () => resolve({ text: 'Local path: test', discard: async () => undefined }); });
     try {
       await f.call('session.attach', { session_id: SESSION_A }, who);
       const pending = f.call(method, { session_id: SESSION_A, transfer_id: info.transfer_id, file_refs: [info.transfer_id], text: 'Read file', client_request_id: 'stale-file-prompt' }, who);

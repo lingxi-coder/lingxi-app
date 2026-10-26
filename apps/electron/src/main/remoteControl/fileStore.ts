@@ -1,9 +1,15 @@
 /** Durable, account/device/session-scoped attachment staging. No viewer-supplied
  * path is opened. A receipt becomes usable only after SHA-256 verification. */
-import { createHash } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, stat, readdir } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { constants, type Stats } from 'node:fs';
+import { copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, rmdir, stat, readdir, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { validateFileOffer, type FileOffer, type FileSink, type FileReceipt, type FileSource } from '@lingxi/bridge-client/remote';
+
+export interface PromptFileReference {
+  text: string;
+  discard(): Promise<void>;
+}
 
 export class RemoteFileStore {
   private readonly active = new Set<string>();
@@ -126,9 +132,54 @@ export class RemoteFileStore {
     }
     return result;
   }
-  async promptReference(owner: string, session: string, id: string): Promise<string> {
+  async promptReference(owner: string, session: string, id: string, workspace: string, authorize: () => void): Promise<PromptFileReference> {
+    authorize();
     const receipt = await this.receipt(owner, session, id);
-    return `Attached file ${JSON.stringify(receipt.name)} (${receipt.size} bytes, SHA-256 ${receipt.sha256}). Local path: ${JSON.stringify(join(this.directory(owner, session, id), 'data'))}`;
+    authorize();
+    const cwd = await realpath(workspace);
+    const cwdIdentity = await lstat(cwd);
+    authorize();
+    // Only an explicit prompt publishes a working copy into the session's
+    // existing tool root. Never trust the private store or expose its metadata.
+    // A fresh directory prevents names from overwriting workspace files; copying
+    // (not hard-linking) keeps subsequent edits away from verified receipts.
+    // Prepare bytes in the private store, then publish the complete directory
+    // atomically. Workspace symlinks never participate in copy/chmod operations.
+    let directory = await mkdtemp(join(this.root, '.prompt-'));
+    const identity = await lstat(directory);
+    let fileIdentity: Stats | undefined;
+    const same = (a: typeof identity, b: typeof identity) => a.dev === b.dev && a.ino === b.ino;
+    const discard = async () => {
+      const current = await lstat(directory).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error; });
+      if (!current || current.isSymbolicLink() || !same(current, identity)) return;
+      const path = join(directory, receipt.name);
+      const file = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error; });
+      if (file && fileIdentity && !file.isSymbolicLink() && same(file, fileIdentity)) await unlink(path);
+      // Never recursively remove workspace contents another actor added.
+      await rmdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOTEMPTY' && error.code !== 'ENOENT') throw error; });
+    };
+    try {
+      authorize();
+      let path = join(directory, receipt.name);
+      await copyFile(join(this.directory(owner, session, id), 'data'), path, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+      fileIdentity = await lstat(path);
+      authorize();
+      if (!fileIdentity.isFile() || fileIdentity.isSymbolicLink() || fileIdentity.size !== receipt.size || await digest(path) !== receipt.sha256) throw new Error('attachment checksum mismatch');
+      const cwdCurrent = await lstat(cwd);
+      if (!cwdCurrent.isDirectory() || cwdCurrent.isSymbolicLink() || !same(cwdCurrent, cwdIdentity)) throw new Error('attachment workspace changed');
+      authorize();
+      const published = join(cwd, `.lingxi-remote-attachment-${randomBytes(16).toString('hex')}`);
+      await rename(directory, published);
+      directory = published;
+      path = join(directory, receipt.name);
+      const publishedIdentity = await lstat(directory);
+      const finalCwd = await lstat(cwd);
+      if (!same(publishedIdentity, identity) || publishedIdentity.isSymbolicLink() || !same(finalCwd, cwdIdentity) || finalCwd.isSymbolicLink()) throw new Error('attachment workspace changed');
+      authorize();
+      // Successful prompt copies remain available for later turns, like other
+      // workspace inputs. Failed/revoked sends remove their unpublished copies.
+      return { text: `Attached file ${JSON.stringify(receipt.name)} (${receipt.size} bytes, SHA-256 ${receipt.sha256}). Local path: ${JSON.stringify(path)}`, discard };
+    } catch (error) { await discard(); throw error; }
   }
   async source(owner: string, session: string, id: string): Promise<{ offer: FileReceipt; source: FileSource }> {
     const offer = await this.receipt(owner, session, id);

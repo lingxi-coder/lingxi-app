@@ -66,6 +66,7 @@ export class RecordingChannel implements RemoteViewerChannel {
 /** A runtime with the observable behaviour of `SessionRuntime`: sequences, a base, a journal, pending sets, observers. */
 export class FakeRuntime implements RemoteRuntime {
   readonly projectPath: string;
+  engineWorkspacePath?: string;
   connectionState: ConnectionState = { status: 'connected' };
   turnActive = false;
   remoteModel: string | undefined = 'model-one';

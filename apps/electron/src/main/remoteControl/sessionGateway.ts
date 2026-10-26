@@ -41,7 +41,7 @@ import type { PushPresence } from './pushRequests.js';
 import type { RemoteCommands } from './remoteCommands.js';
 import type { RemoteRuntime, RemoteRuntimes, RuntimeLease } from './remoteRuntime.js';
 import { SessionAttachment } from './sessionAttachment.js';
-import type { RemoteFileStore } from './fileStore.js';
+import type { PromptFileReference, RemoteFileStore } from './fileStore.js';
 import { parseImageRef } from './snapshot.js';
 
 /** A session stays open this long after its last viewer detached. */
@@ -162,10 +162,27 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         const store = this.deps.files;
         if (!store) throw new RemoteRpcError('invalid_params', 'files unavailable');
         const owner = this.fileOwner(viewer);
-        const references = await Promise.all(refs.map(id => store.promptReference(owner, runtime.sessionId, id)));
-        if (state.attached.get(runtime.sessionId) !== attachment) throw new RemoteRpcError('not_approved', 'file attachment changed');
-        this.attachedRuntime(state, params);
-        return this.deps.commands.promptSend(runtime, viewer, { ...(params as Json), text: [(params as Json)['text'], ...references].join('\n\n') });
+        const workspace = runtime.engineWorkspacePath ?? runtime.projectPath;
+        const authorize = () => {
+          if (state.closed || this.disposed || state.attached.get(runtime.sessionId) !== attachment) throw new RemoteRpcError('not_approved', 'file attachment changed');
+          if (this.attachedRuntime(state, params) !== runtime) throw new RemoteRpcError('not_approved', 'file runtime changed');
+          if ((runtime.engineWorkspacePath ?? runtime.projectPath) !== workspace) throw new RemoteRpcError('not_approved', 'file workspace changed');
+        };
+        const references: PromptFileReference[] = [];
+        try {
+          return await this.deps.commands.promptSend(runtime, viewer, params, { authorize, resolve: async input => {
+            authorize();
+            for (const id of refs) {
+              references.push(await store.promptReference(owner, runtime.sessionId, id, workspace, authorize));
+              authorize();
+            }
+            authorize();
+            return { ...input, text: [input['text'], ...references.map(ref => ref.text)].join('\n\n') };
+          } });
+        } catch (error) {
+          await Promise.allSettled(references.map(ref => ref.discard()));
+          throw error;
+        }
       }
       case 'turn.cancel':
         return this.deps.commands.turnCancel(this.attachedRuntime(state, params), params);

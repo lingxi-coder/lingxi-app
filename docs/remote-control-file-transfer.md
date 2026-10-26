@@ -63,6 +63,15 @@ to local attachment references and uses the usual prompt, permission and session
 execution path. Uploading alone does not send content to the model. The desktop
 must receive the explicit prompt action before using an attachment.
 
+On explicit Send, the host creates a separate verified working copy under the
+actual session working directory, retaining the original basename and extension.
+It publishes the complete directory atomically and passes that path through the
+normal prompt and file-tool permission path. It never trusts the private receipt
+store or hard-links its bytes. Failed or revoked sends discard unpublished copies.
+Successfully sent copies remain project inputs for later turns and follow the
+normal workspace file lifecycle; other sessions already authorized for the same
+project can access these published inputs. Uploading alone creates no project copy.
+
 ## Storage and UI
 
 - Desktop: account/device/session-scoped private directories, sequential writes,

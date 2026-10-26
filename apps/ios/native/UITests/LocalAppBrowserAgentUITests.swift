@@ -36,7 +36,7 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         textValues(app).joined(separator: "\n")
     }
 
-    private func textValues(_ app: XCUIApplication) -> [String] {
+    private func textValues(_ app: XCUIApplication, deduplicating: Bool = true) -> [String] {
         let leaves = app.otherElements.allElementsBoundByIndex.filter {
             $0.children(matching: .any).count == 0
         }
@@ -48,12 +48,74 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         var seen = Set<String>()
         var values: [String] = []
         for element in elements {
+            var elementValues = Set<String>()
             let candidates = [element.label, element.value as? String ?? ""]
-            for candidate in candidates where !candidate.isEmpty && seen.insert(candidate).inserted {
+            for candidate in candidates where !candidate.isEmpty && elementValues.insert(candidate).inserted {
+                if deduplicating && !seen.insert(candidate).inserted { continue }
                 values.append(candidate)
             }
         }
         return values
+    }
+
+    private func decodeRunResultPayload(_ text: String) -> [String: Any]? {
+        guard let data = text.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let input = payload["RunAgentInput"] as? [String: Any],
+              input["messages"] as? [[String: Any]] != nil,
+              let runAgentResult = payload["RunAgentResult"] as? [String: Any],
+              let result = runAgentResult["result"] as? [String: Any],
+              result["answer"] as? String != nil else {
+            return nil
+        }
+        return payload
+    }
+
+    private func runResultPayload(in app: XCUIApplication) -> [String: Any]? {
+        let values = textValues(app, deduplicating: false)
+        for value in values {
+            if let payload = decodeRunResultPayload(value) { return payload }
+        }
+
+        // WebKit can expose a <pre> as ordered leaf text nodes. Stitch only
+        // candidate fragments from those nodes, and accept them only if they
+        // decode as the fixture's RunAgentInput/RunAgentResult JSON object.
+        let starts = values.indices.filter { index in
+            let value = values[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.hasPrefix("{") || value.contains("\"RunAgentInput\"")
+        }
+        for start in starts {
+            var fragments: [String] = []
+            let endLimit = min(values.count, start + 160)
+            for end in start..<endLimit {
+                fragments.append(values[end])
+                guard fragments.count > 1 else { continue }
+                for separator in ["", "\n"] {
+                    if let payload = decodeRunResultPayload(fragments.joined(separator: separator)) {
+                        return payload
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private func inputMessages(in payload: [String: Any]) -> [[String: Any]]? {
+        (payload["RunAgentInput"] as? [String: Any])?["messages"] as? [[String: Any]]
+    }
+
+    private func textContent(in message: [String: Any]) -> String? {
+        if let content = message["content"] as? String { return content }
+        guard let parts = message["content"] as? [[String: Any]] else { return nil }
+        let textParts = parts.compactMap { part -> String? in
+            guard part["type"] as? String == "text" else { return nil }
+            return part["text"] as? String
+        }
+        return textParts.isEmpty ? nil : textParts.joined()
+    }
+
+    private func answer(in payload: [String: Any]) -> String? {
+        (((payload["RunAgentResult"] as? [String: Any])?["result"] as? [String: Any])?["answer"] as? String)
     }
 
     private func attachScreen(_ name: String) {
@@ -172,6 +234,7 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
     }
 
     private func startBrowserRun(_ browser: XCUIApplication, host: XCUIApplication) -> String? {
+        confirmLingxiWakeOpenPromptIfPresent(browser: browser, host: host)
         let start = host.buttons["开始 Agent 并返回应用"]
         XCTAssertTrue(start.waitForExistence(timeout: 45), "The browser run should reach the trusted native handoff. Host UI: \(host.debugDescription)")
         let waitingCopy = "浏览器 Agent 请求等待后台任务许可。运行："
@@ -185,6 +248,39 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         start.tap()
         XCTAssertTrue(browser.wait(for: .runningForeground, timeout: 60), "iOS did not return to the observed system-selected browser after the native lease action.")
         return nativeRunPrefix
+    }
+
+    private func confirmLingxiWakeOpenPromptIfPresent(
+        browser: XCUIApplication,
+        host: XCUIApplication,
+        timeout: TimeInterval = 8
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let alert = browser.alerts.firstMatch
+            if alert.exists {
+                let alertText = ([alert.label] + alert.staticTexts.allElementsBoundByIndex.map(\.label))
+                    .joined(separator: " ").lowercased()
+                let identifiesLingxi = alertText.contains("lingxi") || alertText.contains("灵犀")
+                let buttons = alert.buttons.allElementsBoundByIndex
+                let buttonLabels = buttons.map { $0.label.lowercased() }
+                let openIndex = buttonLabels.firstIndex { $0 == "open" || $0 == "打开" }
+                let cancelIndex = buttonLabels.firstIndex { $0 == "cancel" || $0 == "取消" }
+                guard identifiesLingxi,
+                      buttonLabels.count == 2,
+                      let openIndex,
+                      let cancelIndex,
+                      openIndex != cancelIndex else {
+                    XCTFail("Refusing to accept an unrelated browser alert during the Local App Agent wake. Alert: \(alertText) Buttons: \(buttonLabels)")
+                    return
+                }
+                buttons[openIndex].tap()
+                print("IOS_AGUI_LINGXI_WAKE_OPEN_CONFIRMED source=browser-alert")
+                return
+            }
+            if host.state == .runningForeground { return }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
     }
 
     private func runPageButton(
@@ -233,7 +329,10 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         tapPageButton("Create Chat", in: browser)
         let createdChat = waitForPageText("Created host-owned persistent Chat", in: browser, timeout: 30, scroll: true)
         XCTAssertTrue(createdChat.contains("threadId"), "Chat creation must expose its host-owned threadId.")
-        enterChatText("Answer with the exact phrase context-seed.", in: browser)
+        let markerSuffix = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12))
+        let contextMarker = "IOS_CHAT_CONTEXT_\(markerSuffix)"
+        let firstChatPrompt = "Remember this marker for my next message: \(contextMarker). For this turn, reply with exactly context-seed."
+        enterChatText(firstChatPrompt, in: browser)
         tapPageButton("Send Chat turn", in: browser)
         let firstChatRun = startBrowserRun(browser, host: host)
         var firstChatEvidence = waitForPageText("chat run succeeded", in: browser, timeout: 240, scroll: true)
@@ -241,7 +340,17 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             firstChatEvidence = waitForPageText("RUN_FINISHED", in: browser, timeout: 20, scroll: true)
         }
         let firstChatRunID = assertLifecycle(browser, outcome: "success", nativeRunPrefix: firstChatRun)
-        XCTAssertTrue(firstChatEvidence.contains("context-seed"), "The first Chat input and result should remain visible as canonical evidence.")
+        let firstPayload = try XCTUnwrap(runResultPayload(in: browser), "Could not decode the official RunAgentResult JSON from the page result element. Snapshot: \(pageText(browser).prefix(3000))")
+        let firstInput = try XCTUnwrap(firstPayload["RunAgentInput"] as? [String: Any], "The first RunAgentInput was missing.")
+        XCTAssertEqual(firstInput["runId"] as? String, firstChatRunID, "The first RunAgentInput must match the public run reported by lifecycle events.")
+        let firstMessages = try XCTUnwrap(inputMessages(in: firstPayload), "The first RunAgentInput must expose messages.")
+        XCTAssertEqual(firstMessages.count, 1, "The first Chat RunAgentInput must contain exactly its new user turn.")
+        let firstMessage = try XCTUnwrap(firstMessages.first, "The first RunAgentInput has no user message.")
+        XCTAssertEqual(firstMessage["role"] as? String, "user")
+        let firstInputText = try XCTUnwrap(textContent(in: firstMessage), "The first user message must include text content.")
+        XCTAssertTrue(firstInputText.contains(contextMarker), "The first user prompt must contain the unique synthetic context marker.")
+        let firstAnswer = try XCTUnwrap(answer(in: firstPayload), "RunAgentResult.result.answer was missing from the first Chat turn.")
+        XCTAssertEqual(firstAnswer, "context-seed", "The first Chat turn should answer exactly context-seed.")
         attachScreen("browser-chat-first-run-\(firstChatRunID.prefix(8))")
 
         tapPageButton("Read-only reconnect to last run", in: browser)
@@ -249,10 +358,13 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         XCTAssertTrue(reconnect.contains("no new run started"), "connectAgent must replay the existing run without submitting another run.")
         XCTAssertTrue(reconnect.contains(firstChatRunID), "Read-only replay must refer to the same public runId.")
         tapPageButton("Refresh Chat history", in: browser)
-        let history = waitForPageText("context-seed", in: browser, timeout: 30, scroll: true)
+        let history = waitForPageText(contextMarker, in: browser, timeout: 30, scroll: true)
+        XCTAssertTrue(history.contains("context-seed"), "Canonical Chat history should preserve the first assistant turn separately from the next RunAgentInput.")
         XCTAssertTrue(history.contains("assistant"), "Canonical Chat history should include the assistant reply.")
 
-        enterChatText("Using the previous message as context, answer with the exact phrase context-seed.", in: browser)
+        let followupPrompt = "What exact marker did I ask you to remember in the previous message? Reply with only the marker."
+        XCTAssertFalse(followupPrompt.contains(contextMarker), "The second user prompt must not reveal the marker.")
+        enterChatText(followupPrompt, in: browser)
         tapPageButton("Send Chat turn", in: browser)
         let followupRun = startBrowserRun(browser, host: host)
         var followup = waitForPageText("chat run succeeded", in: browser, timeout: 240, scroll: true)
@@ -260,8 +372,18 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             followup = waitForPageText("RUN_FINISHED", in: browser, timeout: 20, scroll: true)
         }
         let followupRunID = assertLifecycle(browser, outcome: "success", nativeRunPrefix: followupRun)
-        XCTAssertTrue(followup.contains("Answer with the exact phrase context-seed."), "The second Chat RunAgentInput must preserve the canonical first turn.")
-        XCTAssertTrue(followup.contains("Using the previous message as context"), "The second Chat RunAgentInput must append the new user turn.")
+        let followupPayload = try XCTUnwrap(runResultPayload(in: browser), "Could not decode the official RunAgentResult JSON from the follow-up page result element. Snapshot: \(pageText(browser).prefix(3000))")
+        let followupInput = try XCTUnwrap(followupPayload["RunAgentInput"] as? [String: Any], "The follow-up RunAgentInput was missing.")
+        XCTAssertEqual(followupInput["runId"] as? String, followupRunID, "The follow-up RunAgentInput must match the public run reported by lifecycle events.")
+        let followupMessages = try XCTUnwrap(inputMessages(in: followupPayload), "The second RunAgentInput must expose messages.")
+        XCTAssertEqual(followupMessages.count, 1, "The second RunAgentInput must send only the new user turn, not replay prior Chat history.")
+        let followupMessage = try XCTUnwrap(followupMessages.first, "The second RunAgentInput has no user message.")
+        XCTAssertEqual(followupMessage["role"] as? String, "user")
+        let followupInputText = try XCTUnwrap(textContent(in: followupMessage), "The second user message must include text content.")
+        XCTAssertEqual(followupInputText, followupPrompt, "The second RunAgentInput should contain only the new prompt.")
+        XCTAssertFalse(followupInputText.contains(contextMarker), "The second RunAgentInput must not include the marker as prompt text or replayed history.")
+        let followupAnswer = try XCTUnwrap(answer(in: followupPayload), "RunAgentResult.result.answer was missing from the follow-up Chat turn.")
+        XCTAssertEqual(followupAnswer, contextMarker, "The second Chat turn must recall the marker from the host-persisted prior turn.")
         attachScreen("browser-chat-followup-\(followupRunID.prefix(8))")
 
         enterChatText("Write a detailed 1500 word explanation of how a paper notebook is made. Continue until complete.", in: browser)

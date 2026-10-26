@@ -1,3 +1,4 @@
+import { COMPACT_DURING_TURN, isCompactTurnRejection } from './compactRejection';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type {
   AudioOperationDto,
@@ -749,6 +750,13 @@ export function useBridge(): UseBridge {
       const sessionId = envelope.sessionId;
       if (removedRuntimeIds.current.has(sessionId)) return;
       const event = envelope.event;
+      if (event.type === 'error' && isCompactTurnRejection(event.message)) {
+        updateRuntime(sessionId, (state) => ({
+          ...state, conversation: reduceEvent(state.conversation, event),
+        }));
+        if (activeSessionIdRef.current === sessionId) setError(COMPACT_DURING_TURN);
+        return;
+      }
       slashCommandTerminals.current.observe(sessionId, event);
       if (event.type === 'session_ended') slashCommandTerminals.current.clearSession(sessionId);
       // Side envelopes belong solely to the RAM-only side controller.
@@ -2137,6 +2145,13 @@ export function useBridge(): UseBridge {
   const forceCompact = useCallback(async (instructions?: string) => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
+    if (turnActiveRefs.current.get(sessionId) || runtimeStatesRef.current.get(sessionId)?.conversation.running) {
+      updateRuntime(sessionId, (state) => ({
+        ...state, conversation: reduceEvent(state.conversation, { type: 'error', kind: { type: 'protocol' }, message: COMPACT_DURING_TURN }),
+      }));
+      setError(COMPACT_DURING_TURN);
+      return;
+    }
     setError(null);
     updateRuntime(sessionId, (state) => ({
       ...state,
@@ -2148,6 +2163,13 @@ export function useBridge(): UseBridge {
         ? { type: 'run_slash_command', raw: `/compact ${instructions.trim()}`, images: [] }
         : { type: 'force_compact' });
     } catch (cause) {
+      if (isCompactTurnRejection(messageFrom(cause))) {
+        updateRuntime(sessionId, (state) => ({
+          ...state, conversation: reduceEvent(state.conversation, { type: 'error', kind: { type: 'protocol' }, message: COMPACT_DURING_TURN }),
+        }));
+        if (activeSessionIdRef.current === sessionId) setError(COMPACT_DURING_TURN);
+        return;
+      }
       updateRuntime(sessionId, (state) => ({
         ...state,
         conversation: reduceEvent(state.conversation, {

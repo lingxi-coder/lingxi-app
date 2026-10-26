@@ -1,3 +1,4 @@
+import { isCompactTurnRejection } from '../bridge/compactRejection';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { useEffect, useState, type CSSProperties } from 'react';
@@ -16,6 +17,7 @@ function ErrorNotification({ message, onDismiss }: { message: string; onDismiss:
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const compactRejected = isCompactTurnRejection(message);
   const error = classifyDesktopError(message);
   useEffect(() => {
     if (hovered || focused || detailsOpen) return;
@@ -24,9 +26,9 @@ function ErrorNotification({ message, onDismiss }: { message: string; onDismiss:
   }, [hovered, focused, detailsOpen, onDismiss]);
 
   return (
-    <div className="desktop-notification-region">
+    <div className={`desktop-notification-region${compactRejected ? ' desktop-notification-region-centered' : ''}`}>
       <div
-        className="desktop-notification"
+        className={`desktop-notification${compactRejected ? ' desktop-notification-compact' : ''}`}
         role="alert"
         aria-atomic="true"
         onMouseEnter={() => setHovered(true)}
@@ -44,8 +46,8 @@ function ErrorNotification({ message, onDismiss }: { message: string; onDismiss:
       >
         <span className="desktop-notification-icon" aria-hidden="true"><Icon name="circleAlert" size={19} /></span>
         <div className="desktop-notification-content">
-          <strong className="desktop-notification-title">{error.title}</strong>
-          <p className="desktop-notification-detail" tabIndex={0} aria-label={tr("desktop_ui_notifications")}>{error.detail}</p>
+          <strong className="desktop-notification-title">{compactRejected ? tr('desktop_misc_compact_during_turn') : error.title}</strong>
+          {!compactRejected && <p className="desktop-notification-detail" tabIndex={0} aria-label={tr("desktop_ui_notifications")}>{error.detail}</p>}
           {error.technicalDetail && (
             <details className="desktop-notification-diagnostics" onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
               <summary>{tr("desktop_ui_technical")}</summary>

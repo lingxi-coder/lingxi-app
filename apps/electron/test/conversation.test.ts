@@ -1269,3 +1269,39 @@ test('live user row identity uses only explicit turn correlation, never equal pr
   state = reduceEvent(state, { type: 'user_transcript_row_identity', row_token: 'client-turn:first', uuid: 'first-row' });
   assert.deepEqual(state.items.map(item => item.transcriptUuid), ['first-row', 'second-row']);
 });
+
+test('busy compact refusal preserves the active turn, running tools and streaming text', () => {
+  let state = reduceEvent(emptyConversation(), { type: 'turn_started' });
+  state = reduceEvent(state, { type: 'tool_use_started', id: 'busy-read', tool: 'Read', input_json: '{}', header: READ_HEADER });
+  state = reduceEvent(state, { type: 'text_delta', text: 'Still working' });
+  const before = state;
+  state = reduceEvent(state, { type: 'error', kind: { type: 'protocol' }, message: 'cannot compact the session while a turn is in flight' });
+  assert.deepEqual(state, before);
+  state = reduceEvent(state, { type: 'text_delta', text: '…' });
+  assert.equal(state.running, true);
+  assert.equal(state.items.length, before.items.length);
+  assert.equal((state.items[state.openAssistantIndex] as { text: string }).text, 'Still working…');
+});
+
+test('compact admission race removes only optimistic rows and keeps the new turn running', () => {
+  let state = beginCompaction(emptyConversation(), 100);
+  state = reduceEvent(state, { type: 'turn_started' }, 101);
+  state = reduceEvent(state, { type: 'text_delta', text: 'Working' }, 102);
+  state = reduceEvent(state, { type: 'error', kind: { type: 'protocol' }, message: 'force_compact failed: handle action failed: cannot compact the session while a turn is in flight' }, 103);
+  assert.equal(state.running, true);
+  assert.equal(state.activeCompactionId, null);
+  assert.equal(state.pendingSlashName, null);
+  assert.equal(state.items.length, 1);
+  state = reduceEvent(state, { type: 'text_delta', text: ' on it' }, 104);
+  assert.equal((state.items[state.openAssistantIndex] as { text: string }).text, 'Working on it');
+  assert.equal(state.lastError, null);
+});
+
+
+test('manual compact refusal does not settle automatic compaction owned by the turn', () => {
+  let state = reduceEvent(emptyConversation(), { type: 'turn_started' });
+  state = reduceEvent(state, { type: 'compaction_status', phase: 'summarizing' });
+  const before = state;
+  state = reduceEvent(state, { type: 'error', kind: { type: 'protocol' }, message: 'cannot compact the session while a turn is in flight' });
+  assert.deepEqual(state, before);
+});

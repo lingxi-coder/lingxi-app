@@ -1,3 +1,4 @@
+import { isCompactTurnRejection } from './compactRejection';
 import { spawnResultAgentId } from '../components/transcriptAgentPlacement';
 /**
  * Live-conversation reducer (M10 A1 — C3).
@@ -1148,6 +1149,27 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
     }
 
     case 'error': {
+      if (isCompactTurnRejection(event.message)) {
+        // Only discard the optimistic request. Automatic compaction and the
+        // active model turn retain their lifecycle and streaming indexes.
+        const index = state.items.findIndex((item) => item.id === state.activeCompactionId
+          && item.type === 'compaction' && item.phase === 'queued');
+        const removed = new Set<string>();
+        if (index >= 0) {
+          removed.add(state.items[index]!.id);
+          const echo = state.items[index - 1];
+          if (echo?.type === 'narration' && echo.role === 'user' && /^\/compact(?:\s|$)/i.test(echo.text)) removed.add(echo.id);
+        }
+        const items = state.items.filter((item) => !removed.has(item.id));
+        const remap = (index: number) => index < 0 ? -1 : items.findIndex((item) => item.id === state.items[index]?.id);
+        return {
+          ...state, items,
+          openAssistantIndex: remap(state.openAssistantIndex),
+          openThinkingIndex: remap(state.openThinkingIndex),
+          activeCompactionId: index >= 0 ? null : state.activeCompactionId,
+          pendingSlashName: state.pendingSlashName === '/compact' ? null : state.pendingSlashName,
+        };
+      }
       if (/^force_compact failed:\s*/i.test(event.message)) {
         const detail = event.message.replace(/^force_compact failed:\s*/i, '').replace(/^handle action failed:\s*/i, '').trim() || 'Unknown error';
         if (state.activeCompactionId !== null) {

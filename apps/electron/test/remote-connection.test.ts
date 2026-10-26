@@ -104,7 +104,7 @@ test('an unknown device gets a pairing code, the user allows it, and the device 
     assert.equal(h.gateway.calls.length, 1);
     assert.deepEqual(
       { ...h.gateway.calls[0]!.viewer },
-      { device_id: viewer.deviceId, device_name: 'Lingfeng iPhone', platform: 'ios', conn_id: viewer.connId },
+      { account_uid: h.uid, device_id: viewer.deviceId, device_name: 'Lingfeng iPhone', platform: 'ios', conn_id: viewer.connId },
     );
 
     // initialize again is idempotent and now says approved.
@@ -473,6 +473,24 @@ test('revocation blocks requests, notifications and session updates while its de
     assert.equal(h.gateway.calls.length, 0, 'revocation applies before the denial notice finishes');
     assert.equal(viewer.notifications.filter((item) => item.method === 'sessions.changed').length, 0);
     assert.equal(h.gateway.closed.length, 1);
+  });
+});
+
+test('revocation releases application state before a blocked denial notice can flush', async () => {
+  await withHarness(async (h) => {
+    const { viewer, host } = await approvedDirectViewer(h);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    (host as FakePeerLink & { whenWritable(): Promise<void> }).whenWritable = () => blocked;
+    const revoked = h.service.revokeDevice(viewer.deviceId);
+    try {
+      await settle();
+      assert.equal(h.gateway.closed.length, 1, 'revoke releases file and session ownership before awaiting network I/O');
+    } finally {
+      release();
+      await revoked;
+    }
+    assert.equal(h.gateway.closed.length, 1, 'final close releases the viewer only once');
   });
 });
 

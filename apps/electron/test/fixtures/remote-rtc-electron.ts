@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 /**
  * Main process of the real-Electron Remote Control test. It runs the
  * production `PeerHost`, `rtcWindow`, preload and page against a second hidden
@@ -7,6 +8,8 @@
  * `net.fetch` against a loopback server that speaks the REST and SSE shapes.
  */
 
+import { RemoteFileStore } from '../../src/main/remoteControl/fileStore.js';
+import { FileChannel, type FileOffer } from '@lingxi/bridge-client/remote';
 import { app, BrowserWindow, net } from 'electron';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -45,6 +48,12 @@ async function fakeDatabase() {
   const streams: Array<{ path: string; write(text: string): void }> = [];
   const server = http.createServer((req, res) => {
     const url = new URL(req.url!, 'http://127.0.0.1');
+    if (['/viewer.html', '/viewer.js', '/file-worker.js'].includes(url.pathname)) {
+      void readFile(join(root, url.pathname.slice(1))).then(bytes => {
+        res.writeHead(200, { 'content-type': url.pathname.endsWith('.js') ? 'application/javascript' : 'text/html' }); res.end(bytes);
+      }, () => { res.writeHead(404); res.end(); });
+      return;
+    }
     const path = decodeURIComponent(url.pathname).replace(/\.json$/, '').replace(/^\//, '');
     calls.push(`${req.method} ${path} auth=${url.searchParams.get('auth')}`);
     if (req.method === 'GET' && String(req.headers['accept']).includes('text/event-stream')) {
@@ -115,6 +124,49 @@ async function main(): Promise<void> {
   assert.deepEqual((await status('one')).received, [{ length: SIZE, ok: true }]);
   trace('2 MiB crossed both ways');
 
+  // Independent bulk data crosses the real DTLS/SCTP connection while the
+  // control channel continues to exchange messages. The host uses durable disk.
+  await until(() => link.files?.connected, 'independent file channel');
+  await until(async () => (await run<{bulkReady:boolean}>("window.viewer.status('one')")).bulkReady, 'viewer file channel');
+  const bulk = new FileChannel(link.files!);
+  const store = new RemoteFileStore(join(root, 'received-files'));
+  const file = await run<FileOffer>(`window.viewer.prepareFile(${SIZE}, '${'12'.repeat(16)}')`);
+  const sink = await store.accept('fixture', file, () => undefined);
+  bulk.receive(file.transfer_id, sink);
+  await Promise.all([
+    run(`window.viewer.uploadFile('one', ${JSON.stringify(file)})`),
+    transport.send(pattern('fedcba9876543210', SIZE)),
+  ]);
+  const receipt = await bulk.commit(file.transfer_id);
+  assert.equal(receipt.sha256, file.sha256);
+  const reverse = await run<FileOffer>(`window.viewer.prepareFile(${SIZE}, '${'34'.repeat(16)}')`);
+  await run(`window.viewer.receiveFile('one', ${JSON.stringify(reverse)})`);
+  const source = (await store.source('fixture', file.session_id, file.transfer_id)).source;
+  await bulk.send(reverse, source, {
+    offer: async () => ({ offset: 0 }), commit: async () => ({ ...reverse, ref: reverse.transfer_id }), cancel: async () => undefined,
+  });
+  await run(`window.viewer.finishFile('one', '${'34'.repeat(16)}')`);
+  await until(async () => (await status('one')).received.length === 2, 'control messages during file transfer');
+  // A DataChannel.send exception must close only the failed file lane.
+  await rtcWindow!.webContents.executeJavaScript(`(() => {
+    const original = RTCDataChannel.prototype.send;
+    RTCDataChannel.prototype.send = function(data) {
+      if (this.label === 'lingxi-files') {
+        RTCDataChannel.prototype.send = original;
+        throw new Error('injected file send failure');
+      }
+      return original.call(this, data);
+    };
+  })()`);
+  link.files!.sendFragment(new Uint8Array([1]));
+  await until(() => !link.files!.connected, 'file send failure closes the file lane');
+  assert.equal(bulk.closedSignal.aborted, true);
+  await transport.send(pattern('fedcba9876543210', SIZE));
+  await until(async () => (await status('one')).received.length === 3, 'control after closing only the file lane');
+  assert.equal(link.connected, true);
+  trace('original file channel transferred both ways with live control traffic');
+
+
   // ── A channel that is not the protocol's is closed by the page ──
   const offerTwo = await run<string>(`window.viewer.offer('two', { ordered: false })`);
   const answerTwo = await peers.answer(CONN_TWO, offerTwo, []);
@@ -161,6 +213,38 @@ async function main(): Promise<void> {
   await until(() => rtcWindow!.isDestroyed(), 'the window to be destroyed');
   assert.equal(peers.windowOpen, false);
   trace('closed');
+
+  // Exercise the production browser OPFS worker on an actual secure localhost
+  // origin, including a terminated worker and reopen from durable offset.
+  await viewerWindow.loadURL(`${database.url}/viewer.html`);
+  const opfs = await run<{ size:number; resumed:number; hash:boolean }>(`(async () => {
+    let worker = new Worker('/file-worker.js', { type: 'module' });
+    let seq = 0;
+    const call = (t, extra = {}) => new Promise((resolve,reject) => {
+      const id = seq++; worker.onmessage = event => { if (event.data.seq !== id) return; event.data.error ? reject(new Error(event.data.error)) : resolve(event.data.result); };
+      worker.onerror = event => reject(new Error(event.message)); worker.postMessage({seq:id,t,...extra});
+    });
+    const offer = ${JSON.stringify(file)};
+    const scope = '${'ab'.repeat(32)}';
+    let offset = await call('open', { scope, offer });
+    const bytes = (at,n) => Uint8Array.from({length:n},(_,i)=>(at+i)%251);
+    if (offset === 0) offset = await call('write', {offset:0,bytes:bytes(0,16359)});
+    await call('checkpoint');
+    await call('write', {offset,bytes:bytes(offset,17)}); // uncommitted tail must be discarded on reopen
+    await call('close'); worker.terminate();
+    worker = new Worker('/file-worker.js', { type:'module' });
+    const resumed = await call('open', {scope,offer}); offset = resumed;
+    while (offset < offer.size) offset = await call('write', {offset,bytes:bytes(offset,Math.min(16359,offer.size-offset))});
+    await call('checkpoint');
+    const saved = await call('finish');
+    const digest = await crypto.subtle.digest('SHA-256', await saved.arrayBuffer());
+    const hash = [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,'0')).join('') === offer.sha256;
+    await call('cancel'); worker.terminate();
+    return {size:saved.size,resumed,hash};
+  })()`);
+  assert.equal(opfs.size, SIZE); assert.equal(opfs.resumed, 16359); assert.equal(opfs.hash, true);
+  trace('browser OPFS worker persisted, reopened and verified original bytes');
+
 
   // ── RtdbClient over net.fetch: REST verbs and the event stream ──
   const client = new RtdbClient({ databaseUrl: database.url, getIdToken: async () => 'tok', fetch: (input, init) => net.fetch(input, init) });

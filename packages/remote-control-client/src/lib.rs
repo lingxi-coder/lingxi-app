@@ -17,6 +17,7 @@ mod direct;
 pub mod encoding;
 pub mod error;
 pub mod framing;
+pub mod files;
 pub mod keys;
 pub mod messages;
 #[cfg(feature = "webrtc")]

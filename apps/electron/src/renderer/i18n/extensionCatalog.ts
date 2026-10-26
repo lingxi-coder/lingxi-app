@@ -1441,6 +1441,62 @@ export const extensionCatalog: Record<string, Record<string, string>> = {
     "ja": "機密設定を消去できませんでした。",
     "ko": "민감한 구성을 지울 수 없습니다."
   },
+  "desktop_extension_plugin_secret_cleanup_done": {
+    "zh-Hans": "插件已卸载，安全保存的凭据已清理。",
+    "zh-Hant": "外掛已解除安裝，安全儲存的憑據已清理。",
+    "en": "Plugin uninstalled and securely stored credentials cleared.",
+    "ja": "プラグインをアンインストールし、安全に保存された資格情報を消去しました。",
+    "ko": "플러그인을 제거하고 안전하게 저장된 자격 증명을 삭제했습니다."
+  },
+  "desktop_extension_plugin_secret_cleanup_restart": {
+    "zh-Hans": "插件已卸载，凭据已清理；当前有活动回合，重启后生效。",
+    "zh-Hant": "外掛已解除安裝，憑據已清理；目前有進行中的回合，重新啟動後生效。",
+    "en": "Plugin uninstalled and credentials cleared. Restart after the active turn to apply.",
+    "ja": "プラグインをアンインストールし、資格情報を消去しました。現在のターン終了後に再起動すると適用されます。",
+    "ko": "플러그인을 제거하고 자격 증명을 삭제했습니다. 현재 턴이 끝난 후 다시 시작하면 적용됩니다."
+  },
+  "desktop_extension_plugin_secret_cleanup_restart_pending": {
+    "zh-Hans": "已清理的凭据将在活动回合结束并重启后从引擎缓存中移除。",
+    "zh-Hant": "已清理的憑據會在目前回合結束並重新啟動後從引擎快取中移除。",
+    "en": "The engine cache will drop cleared credentials after the active turn and a restart.",
+    "ja": "消去した資格情報は、現在のターン終了後に再起動するとエンジンキャッシュから削除されます。",
+    "ko": "정리된 자격 증명은 현재 턴이 끝난 뒤 다시 시작하면 엔진 캐시에서 제거됩니다."
+  },
+  "desktop_extension_plugin_secret_cleanup_retained": {
+    "zh-Hans": "插件仍安装在其他范围，凭据已保留。",
+    "zh-Hant": "外掛仍安裝在其他範圍，憑據已保留。",
+    "en": "The plugin remains installed in another scope, so its credentials were retained.",
+    "ja": "プラグインは別のスコープにインストールされているため、資格情報を保持しました。",
+    "ko": "플러그인이 다른 범위에 계속 설치되어 있어 자격 증명을 유지했습니다."
+  },
+  "desktop_extension_plugin_secret_cleanup_failed": {
+    "zh-Hans": "插件已卸载，但安全保存的凭据尚未全部清理。请重试清理。",
+    "zh-Hant": "外掛已解除安裝，但安全儲存的憑據尚未全部清理。請重試清理。",
+    "en": "Plugin uninstalled, but its securely stored credentials were not fully cleared. Retry cleanup.",
+    "ja": "プラグインはアンインストールされましたが、安全に保存された資格情報をすべて消去できませんでした。再試行してください。",
+    "ko": "플러그인을 제거했지만 안전하게 저장된 자격 증명을 모두 삭제하지 못했습니다. 정리를 다시 시도하세요."
+  },
+  "desktop_extension_plugin_secret_cleanup_deferred": {
+    "zh-Hans": "插件已卸载，但安装记录发生变化，凭据未清理。请重试清理。",
+    "zh-Hant": "外掛已解除安裝，但安裝記錄已變更，憑據未清理。請重試清理。",
+    "en": "Plugin uninstalled, but its install record changed, so credentials were left untouched. Retry cleanup.",
+    "ja": "プラグインはアンインストールされましたが、インストール記録が変わったため資格情報はそのままです。再試行してください。",
+    "ko": "플러그인을 제거했지만 설치 기록이 변경되어 자격 증명을 그대로 두었습니다. 정리를 다시 시도하세요."
+  },
+  "desktop_extension_plugin_secret_cleanup_unavailable": {
+    "zh-Hans": "插件已卸载，但无法确认凭据清理状态。请刷新后检查插件和凭据。",
+    "zh-Hant": "外掛已解除安裝，但無法確認憑據清理狀態。請重新整理後檢查外掛和憑據。",
+    "en": "Plugin uninstalled, but credential cleanup could not be verified. Refresh and check the plugin and its credentials.",
+    "ja": "プラグインはアンインストールされましたが、資格情報の消去状態を確認できませんでした。更新してプラグインと資格情報を確認してください。",
+    "ko": "플러그인을 제거했지만 자격 증명 정리 상태를 확인할 수 없습니다. 새로 고침한 뒤 플러그인과 자격 증명을 확인하세요."
+  },
+  "desktop_extension_plugin_secret_cleanup_retry": {
+    "zh-Hans": "重试清理凭据",
+    "zh-Hant": "重試清理憑據",
+    "en": "Retry credential cleanup",
+    "ja": "資格情報の消去を再試行",
+    "ko": "자격 증명 정리 다시 시도"
+  },
   "desktop_extension_required": {
     "zh-Hans": "必填",
     "zh-Hant": "必填",

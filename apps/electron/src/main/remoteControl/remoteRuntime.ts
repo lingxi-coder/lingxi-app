@@ -18,6 +18,7 @@ import type {
 export interface RemoteRuntime {
   readonly sessionId: string;
   readonly projectPath: string;
+  readonly engineWorkspacePath?: string;
   readonly connectionState: ConnectionState;
   readonly turnActive: boolean;
   readonly remoteModel: string | undefined;

@@ -17,6 +17,7 @@ import {
   CLIENT_PROTOCOL_MAJOR,
   MAX_HOST_CONNECTIONS,
   MessageTransport,
+  FileChannel,
   REMOTE_PROTOCOL_MAJOR,
   RemoteProtocolError,
   RemoteRpcError,
@@ -173,6 +174,7 @@ export class HostConnection {
   private peer: PeerLink | undefined;
   private tunnel: TunnelLink | undefined;
   private rpc: RpcPeer | undefined;
+  private fileChannel: FileChannel | undefined;
   private viewer: RemoteViewer | undefined;
   private pairingCode: string | undefined;
   private transportTimer: unknown;
@@ -185,13 +187,20 @@ export class HostConnection {
   private closed = false;
   /** Application traffic stops immediately, while a final denial may flush. */
   private disconnecting = false;
+  private viewerReleased = false;
   // Whether this connection's nodes in the database are to be removed once it ends.
   private removeNodes = false;
 
   constructor(private readonly deps: HostConnectionDeps) {
     this.connId = deps.connId;
     this.finished = new Promise<void>((resolve) => { this.resolveFinished = resolve; });
+    const connection = this;
     this.channel = {
+      get files() {
+        const link = connection.peer?.files;
+        if (!connection.approved || connection.kind !== 'webrtc' || !link?.connected) return undefined;
+        return connection.fileChannel ??= new FileChannel(link);
+      },
       notify: (method, params) => {
         if (this.closed || this.disconnecting) return;
         this.rpc?.notify(method, params).catch((error: unknown) => {
@@ -250,6 +259,7 @@ export class HostConnection {
   close(reason: string): void {
     if (this.closed) return;
     this.closed = true;
+    this.fileChannel?.close();
     this.deps.clock.clearTimeout(this.transportTimer);
     this.deps.clock.clearTimeout(this.initializeTimer);
     this.abort.abort();
@@ -257,17 +267,22 @@ export class HostConnection {
     const { rpc, tunnel, viewer } = this;
     if (rpc !== undefined) rpc.close(reason);
     else tunnel?.close(reason);
-    if (this.wasApproved && viewer !== undefined) {
-      try {
-        this.deps.gateway.viewerClosed(viewer);
-      } catch (error) {
-        this.deps.diagnostics('warn', `the session gateway failed to release a viewer (${describeError(error)})`);
-      }
-      if (this.offer !== undefined) this.deps.registry.touch(this.deps.uid, this.offer.device.id);
-    }
+    this.releaseViewer();
+    if (this.wasApproved && viewer !== undefined && this.offer !== undefined) this.deps.registry.touch(this.deps.uid, this.offer.device.id);
     this.deps.onClosed(this);
     this.deps.onChange();
     void this.cleanUp().finally(() => this.resolveFinished());
+  }
+
+  private releaseViewer(): void {
+    if (this.wasApproved && this.viewer !== undefined && !this.viewerReleased) {
+      this.viewerReleased = true;
+      try {
+        this.deps.gateway.viewerClosed(this.viewer);
+      } catch (error) {
+        this.deps.diagnostics('warn', `the session gateway failed to release a viewer (${describeError(error)})`);
+      }
+    }
   }
 
   /** Tell the viewer why (best effort, briefly), then end the connection. */
@@ -275,6 +290,8 @@ export class HostConnection {
     if (this.closed || this.disconnecting) return;
     this.disconnecting = true;
     this.approved = false;
+    this.fileChannel?.close();
+    this.releaseViewer();
     this.deps.onChange();
     const { rpc } = this;
     if (rpc !== undefined && this.transportIsUp) await within(this.deps.clock, NOTICE_WAIT_MS, rpc.notify('auth.denied', { reason: notice }));
@@ -490,6 +507,7 @@ export class HostConnection {
     const { uid, registry } = this.deps;
     this.deps.clock.clearTimeout(this.initializeTimer);
     this.viewer = {
+      account_uid: uid,
       device_id: offer.device.id,
       device_name: offer.device.name,
       platform: offer.device.platform,

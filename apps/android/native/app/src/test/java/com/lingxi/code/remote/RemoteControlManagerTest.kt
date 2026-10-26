@@ -1,5 +1,6 @@
 package com.lingxi.code.remote
 
+import com.lingxi.code.bindings.android.RemoteFileFfi
 import com.lingxi.code.bindings.android.AndroidRemoteListener
 import com.lingxi.code.bindings.android.RemoteConnectionPhaseFfi
 import com.lingxi.code.bindings.android.RemoteConnectionStateFfi
@@ -10,16 +11,19 @@ import com.lingxi.code.bindings.android.RemotePermissionModeFfi
 import com.lingxi.code.bindings.android.RemotePromptImageFfi
 import com.lingxi.code.bindings.android.RemoteSessionSummaryFfi
 import com.lingxi.code.bindings.android.RemoteSessionUpdateFfi
+import com.lingxi.code.bindings.android.RemoteTransportFfi
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import com.lingxi.code.conversation.remoteUpdate
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -36,6 +40,13 @@ class RemoteControlManagerTest {
     }
 
     private class FakeClient(val uid: String, val listener: AndroidRemoteListener) : RemoteClientPort {
+        override suspend fun prepareFile(sessionId: String, path: String, name: String): RemoteFileFfi = error("file API not exercised by manager lifecycle test")
+        override suspend fun uploadFile(file: RemoteFileFfi, path: String): RemoteFileFfi = error("file API not exercised by manager lifecycle test")
+        override suspend fun downloadFile(file: RemoteFileFfi, path: String): RemoteFileFfi = error("file API not exercised by manager lifecycle test")
+        override suspend fun listFiles(sessionId: String): List<RemoteFileFfi> = error("file API not exercised by manager lifecycle test")
+        override fun fileProgress(transferId: String): ULong = error("file API not exercised by manager lifecycle test")
+        override fun cancelFile(transferId: String) = error("file API not exercised by manager lifecycle test")
+        override suspend fun sendPromptWithFiles(sessionId: String, text: String, images: List<com.lingxi.code.bindings.android.RemotePromptImageFfi>, fileRefs: List<String>) = error("file API not exercised by manager lifecycle test")
         val calls = mutableListOf<String>()
         var closed = false
         var pushId: String? = "unset"
@@ -91,6 +102,70 @@ class RemoteControlManagerTest {
     )
 
     private fun host(id: String, paired: Boolean) = RemoteHostFfi(id, "Mac $id", "macos", "1.0", true, 0uL, paired)
+
+    @Test fun filePickerReturnWaitsForTheSamePeerToReconnect() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent(); val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.IDLE)
+        var result: Result<RemoteClientPort>? = null
+        val request = launch { result = runCatching { h.manager.filePort("u1", "h", flowOf(true)) } }
+        runCurrent(); assertNull(result); assertTrue(client.calls.contains("nudge"))
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY).copy(transport = RemoteTransportFfi.WEBRTC)
+        client.listener.onConnectionState(client.state!!); runCurrent(); request.join()
+        assertTrue(result!!.getOrThrow() === client)
+    }
+
+    @Test fun filePickerReturnCannotResumeIntoAnotherAccount() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        h.clients.single().state = connectionState("h", RemoteConnectionPhaseFfi.IDLE)
+        var result: Result<RemoteClientPort>? = null
+        val request = launch { result = runCatching { h.manager.filePort("u1", "h", flowOf(true)) } }
+        runCurrent(); h.account.mutableUid.value = "u2"; runCurrent(); request.join()
+        assertTrue(result!!.exceptionOrNull() is kotlinx.coroutines.CancellationException)
+    }
+
+    @Test fun filePickerReturnTimesOutWithoutStartingFileWork() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        var result: Result<RemoteClientPort>? = null
+        val request = launch { result = runCatching { h.manager.filePort("u1", "h", flowOf(true)) } }
+        runCurrent(); assertNull(result); advanceTimeBy(30_001); runCurrent(); request.join()
+        assertTrue(result!!.exceptionOrNull()?.message?.contains("reconnecting") == true)
+    }
+
+    @Test fun filePickerReturnRejectsTunnelAndAnotherHost() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent(); val client = h.clients.single()
+        client.state = connectionState("other", RemoteConnectionPhaseFfi.READY).copy(transport = RemoteTransportFfi.WEBRTC)
+        assertTrue(runCatching { h.manager.filePort("u1", "h", flowOf(true)) }.isFailure)
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY).copy(transport = RemoteTransportFfi.TUNNEL)
+        assertTrue(runCatching { h.manager.filePort("u1", "h", flowOf(true)) }.isFailure)
+    }
+
+    @Test fun filePickerReturnWaitsForSessionReattachmentAfterPeerReady() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent(); val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY).copy(transport = RemoteTransportFfi.WEBRTC)
+        val attached = MutableStateFlow(false)
+        var result: Result<RemoteClientPort>? = null
+        val request = launch { result = runCatching { h.manager.filePort("u1", "h", attached) } }
+        runCurrent(); assertNull(result)
+        attached.value = true; runCurrent(); request.join()
+        assertTrue(result!!.getOrThrow() === client)
+    }
+
+    @Test fun filePickerReturnBoundsClientConstructionAndFailure() = runTest(UnconfinedTestDispatcher()) {
+        for (fails in listOf(false, true)) {
+            val account = FakeAccount("u1")
+            val gate = CompletableDeferred<Unit>()
+            val manager = RemoteControlManager(backgroundScope, account, { _, _ ->
+                if (fails) error("client construction failed")
+                gate.await()
+                error("not reached")
+            }, { null })
+            var result: Result<RemoteClientPort>? = null
+            val request = launch { result = runCatching { manager.filePort("u1", "h", flowOf(true)) } }
+            runCurrent(); assertNull(result)
+            advanceTimeBy(30_001); runCurrent(); request.join()
+            assertTrue(result!!.exceptionOrNull()?.message?.contains("reconnecting") == true)
+        }
+    }
 
     @Test fun oneClientIsMadeForTheSignedInUserWithThePushInstallationId() = runTest(UnconfinedTestDispatcher()) {
         val harness = Harness(this, "u1")

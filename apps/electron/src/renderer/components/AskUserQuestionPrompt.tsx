@@ -58,7 +58,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
     const nextAnswers = answers.map((entry, index) => index === questionIndex ? next : entry);
     setAnswers(nextAnswers);
     setError(null);
-    if (advance) {
+    if (advance && request.questions.length > 1) {
       const firstUnanswered = request.questions.findIndex((question, index) =>
         !answerText(question, nextAnswers[index] ?? EMPTY_ANSWER),
       );
@@ -124,8 +124,8 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
     '--dialog-text': t.text,
     '--dialog-text-2': t.text2,
     '--dialog-text-3': t.text3,
-    '--dialog-accent': t.text2,
-    '--dialog-accent-border': t.borderStrong,
+    '--dialog-accent': t.accent,
+    '--dialog-accent-border': t.accentBorder,
     '--dialog-danger': t.danger,
   } as CSSProperties;
 
@@ -148,7 +148,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
           <Icon name="question" size={19} stroke={1.7} />
         </span>
         <h2 id="lingxi-ask-heading">{request.questions.length === 1 ? tr('desktop_interaction_single_question') : tr('desktop_interaction_question_count', request.questions.length)}</h2>
-        <span className="ask-dialog-progress">{tr('desktop_interaction_answered_count', answeredCount, request.questions.length)}</span>
+        <span className="ask-dialog-progress" role="status">{tr('desktop_interaction_answered_count', answeredCount, request.questions.length)}</span>
         <button
           type="button"
           className="inline-interaction-close"
@@ -224,7 +224,9 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                           checked={answer.selected.has(option.label)}
                           onChange={() => toggleOption(questionIndex, option.label)}
                         />
-                        <span className="ask-dialog-option-index" aria-hidden="true">{optionIndex + 1}</span>
+                        <span className="ask-dialog-option-index" aria-hidden="true">
+                          {answer.selected.has(option.label) ? <Icon name="check" size={14} stroke={2.4} /> : optionIndex + 1}
+                        </span>
                         <span className="ask-dialog-option-copy">
                           <span className="ask-dialog-option-title">{option.label}</span>
                           <span className="ask-dialog-option-description">{option.description}</span>

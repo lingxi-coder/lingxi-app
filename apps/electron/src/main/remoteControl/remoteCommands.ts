@@ -159,7 +159,7 @@ export class RemoteCommands {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** `prompt.send`. A retry with the same `client_request_id` from the same device gets the first answer instead of a second turn. */
-  promptSend(runtime: RemoteRuntime, viewer: RemoteViewer, value: unknown): Promise<PromptSendResult> {
+  promptSend(runtime: RemoteRuntime, viewer: RemoteViewer, value: unknown, prepare?: { resolve(input: Json): Promise<Json>; authorize(): void }): Promise<PromptSendResult> {
     const input = params(value);
     const clientRequestId = boundedString(input['client_request_id'], 'client_request_id', MAX_ID_CHARS);
     const key = `${viewer.device_id}\0${runtime.sessionId}\0${clientRequestId}`;
@@ -167,7 +167,13 @@ export class RemoteCommands {
     const earlier = this.sent.get(key);
     if (earlier !== undefined && now - earlier.at < IDEMPOTENCY_WINDOW_MS) return earlier.result;
     this.prune(now);
-    const result = this.sendPrompt(runtime, viewer, input);
+    // Resolve file working copies only for a new request, never an idempotent replay.
+    const result = prepare
+      ? Promise.resolve().then(() => { prepare.authorize(); return prepare.resolve(input); }).then(prepared => {
+          prepare.authorize();
+          return this.sendPrompt(runtime, viewer, prepared);
+        })
+      : this.sendPrompt(runtime, viewer, input);
     this.sent.set(key, { at: now, result });
     // A prompt that was refused or failed may be sent again.
     result.catch(() => { if (this.sent.get(key)?.result === result) this.sent.delete(key); });

@@ -41,7 +41,7 @@ test('connects directly when the desktop already trusts this browser', async () 
   assert.equal(offer.device.id, deviceId);
   assert.equal(offer.device.name, 'Test Browser');
   assert.equal(offer.device.platform, 'web');
-  assert.deepEqual(h.network.labels, ['lingxi-agent']);
+  assert.deepEqual(h.network.labels, ['lingxi-agent', 'lingxi-files']);
   assert.equal(connection.state.host?.name, 'Studio Mac');
 
   const listed = await connection.request('sessions.list', {});
@@ -454,4 +454,24 @@ test('a late repeated repair click cannot delete the new identity after redial h
     connection.stop();
     h.keys.resetIdentity = reset;
   }
+});
+
+test('file operations keep their control peer when the viewer reconnects', async () => {
+  const h = await harness();
+  await h.trustDevice();
+  const connection = h.connect();
+  connection.start();
+  await h.until(connection, 'ready');
+  h.network.connections.at(-1)!.channels[1]!.open();
+  const old = connection.fileSession();
+  assert.deepEqual(await old.request('sessions.list', {}), { sessions: [] });
+  connection.stop();
+  connection.start();
+  await h.until(connection, 'ready');
+  h.network.connections.at(-1)!.channels[1]!.open();
+  await assert.rejects(old.request('sessions.list', {}), (error: unknown) => error instanceof RemoteRpcError && error.code === 'closed');
+  assert.equal(old.channel.closedSignal.aborted, true);
+  assert.notEqual(connection.fileSession().channel, old.channel);
+  assert.deepEqual(await connection.request('sessions.list', {}), { sessions: [] });
+  connection.stop();
 });

@@ -139,6 +139,8 @@ pub struct OutgoingPrompt {
     pub text: String,
     /// Attached images.
     pub images: Vec<ImageRefDto>,
+    /// Published original-file receipts attached to this prompt.
+    pub file_refs: Vec<String>,
     /// State.
     pub status: OutgoingStatus,
     /// The turn the desktop assigned.
@@ -588,6 +590,16 @@ impl SessionController {
     /// Send a prompt. While a turn runs the desktop takes plain text only, so images
     /// are left out then; unsupported types and more than four images are dropped.
     pub async fn send_prompt(&self, text: &str, images: Vec<ImageRefDto>) {
+        self.send_prompt_with_files(text, images, Vec::new()).await;
+    }
+
+    /// Send already verified file receipts through the usual prompt lifecycle.
+    pub async fn send_prompt_with_files(
+        &self,
+        text: &str,
+        images: Vec<ImageRefDto>,
+        file_refs: Vec<String>,
+    ) {
         let running = self.state().turn.running;
         let attachments: Vec<ImageRefDto> = if running {
             Vec::new()
@@ -598,13 +610,14 @@ impl SessionController {
                 .take(MAX_IMAGE_ATTACHMENTS)
                 .collect()
         };
-        if text.trim().is_empty() && attachments.is_empty() {
+        if text.trim().is_empty() && attachments.is_empty() && file_refs.is_empty() {
             return;
         }
         let prompt = OutgoingPrompt {
             id: random_id(),
             text: text.to_owned(),
             images: attachments,
+            file_refs: file_refs.into_iter().take(4).collect(),
             status: OutgoingStatus::Sending,
             turn_id: None,
             error: None,
@@ -1066,6 +1079,9 @@ impl SessionInner {
             "text": prompt.text,
             "client_request_id": prompt.id,
         });
+        if !prompt.file_refs.is_empty() {
+            params["file_refs"] = json!(prompt.file_refs);
+        }
         if !prompt.images.is_empty() {
             params["images"] = json!(prompt.images);
         }

@@ -18,7 +18,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "fs", "io-util"] }
 tokio-util.workspace = true
 futures-util.workspace = true
 ring = "0.17"

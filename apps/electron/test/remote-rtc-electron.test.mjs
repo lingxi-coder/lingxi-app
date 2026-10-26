@@ -26,6 +26,7 @@ test('real Electron Remote Control transport: hidden WebRTC window, MessagePort,
       node('src/preload/remoteRtc.ts', join(temp, 'remoteRtc.cjs')),
       browser('src/renderer/remoteRtc/main.ts', join(temp, 'page.js')),
       browser('test/fixtures/remote-rtc-viewer.ts', join(temp, 'viewer.js')),
+      browser('../web/src/remote/fileWorker.ts', join(temp, 'file-worker.js')),
     ]);
 
     // The sandboxed preload may require nothing but electron.

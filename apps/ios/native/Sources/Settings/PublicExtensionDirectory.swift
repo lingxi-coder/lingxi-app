@@ -39,13 +39,64 @@ enum PublicMCPTemplateMatch: Equatable {
 }
 
 /// MCP snapshots expose a scope's `mcpServers` map, where the map key is the
-/// server name and each value is its raw JSON config. A name match alone is not
-/// enough to call a public template configured.
+/// server name and each value is its raw JSON config. Only the connection
+/// identity matters here; user headers, environment and other settings survive
+/// when a matching existing server is opened.
 func publicMCPTemplateMatch(name: String, template: [String: Any], configuredServers: [String: Any]) -> PublicMCPTemplateMatch {
     guard let existing = configuredServers[name] as? [String: Any] else { return .notConfigured }
-    guard let currentJSON = canonicalJSON(existing),
-          let templateJSON = canonicalJSON(template) else { return .nameConflict }
-    return currentJSON == templateJSON ? .sameConfiguration : .nameConflict
+    guard let currentIdentity = mcpConnectionIdentity(existing),
+          let templateIdentity = mcpConnectionIdentity(template) else { return .nameConflict }
+    return currentIdentity == templateIdentity ? .sameConfiguration : .nameConflict
+}
+
+private enum PublicMCPConnectionIdentity: Equatable {
+    case url(type: String, value: String)
+    case stdio(type: String, command: String, args: [String])
+}
+
+private func mcpConnectionIdentity(_ config: [String: Any]) -> PublicMCPConnectionIdentity? {
+    var explicitType: String?
+    for key in ["type", "transport"] where config.keys.contains(key) {
+        guard let value = config[key] as? String else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        if let explicitType, explicitType != normalized { return nil }
+        explicitType = normalized
+    }
+
+    let hasURL = config.keys.contains("url")
+    let hasCommand = config.keys.contains("command")
+    guard hasURL != hasCommand else { return nil }
+
+    if hasURL {
+        guard let url = config["url"] as? String else { return nil }
+        let endpoint = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !endpoint.isEmpty,
+              let components = URLComponents(string: endpoint),
+              let scheme = components.scheme?.lowercased(), ["http", "https", "ws", "wss"].contains(scheme),
+              components.host?.isEmpty == false,
+              components.user == nil,
+              components.password == nil,
+              components.fragment == nil else { return nil }
+        let type = explicitType ?? "http"
+        guard ["http", "streamable-http", "sse", "ws"].contains(type) else { return nil }
+        guard (type == "ws" && ["ws", "wss"].contains(scheme))
+            || (type != "ws" && ["http", "https"].contains(scheme)) else { return nil }
+        return .url(type: type, value: endpoint)
+    }
+
+    guard let command = config["command"] as? String else { return nil }
+    let executable = command.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !executable.isEmpty else { return nil }
+    if let explicitType, explicitType != "stdio" { return nil }
+    let args: [String]
+    if let rawArgs = config["args"] {
+        guard let values = rawArgs as? [String] else { return nil }
+        args = values
+    } else {
+        args = []
+    }
+    return .stdio(type: "stdio", command: executable, args: args)
 }
 
 enum PublicMarketplaceRegistration: Equatable {
@@ -62,37 +113,57 @@ func publicMarketplaceRegistration(
     _ candidate: PublicExtensionMarketplace,
     registered: [PluginMarketplace]
 ) -> PublicMarketplaceRegistration {
-    let candidateRepo = githubShorthandIdentity(candidate.source)
+    publicMarketplaceConfirmationRegistration(
+        candidateName: candidate.name,
+        enteredSource: candidate.source,
+        registered: registered
+    )
+}
+
+/// Re-evaluate the source text currently in the confirmation field against a
+/// freshly loaded catalog. This keeps a stale alert from submitting a source
+/// that is now present or collides with the curated marketplace name.
+func publicMarketplaceConfirmationRegistration(
+    candidateName: String,
+    enteredSource: String,
+    registered: [PluginMarketplace]
+) -> PublicMarketplaceRegistration {
+    let candidateRepo = githubRepositoryIdentity(enteredSource)
+    if let conflict = registered.first(where: { marketplace in
+        marketplace.name == candidateName
+            && (candidateRepo == nil || registeredGitHubRepository(marketplace) != candidateRepo)
+    }) {
+        return .nameConflict(existingName: conflict.name)
+    }
     if let candidateRepo,
        let match = registered.first(where: { marketplace in
            registeredGitHubRepository(marketplace) == candidateRepo
        }) {
         return .registered(name: match.name)
     }
-    if let conflict = registered.first(where: { $0.name == candidate.name }) {
-        return .nameConflict(existingName: conflict.name)
-    }
     return .notRegistered
 }
 
-private func canonicalJSON(_ object: [String: Any]) -> String? {
-    guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .fragmentsAllowed]) else { return nil }
-    return String(data: data, encoding: .utf8)
+func publicMarketplaceConfirmationIsCurrent(
+    capturedGeneration: Int,
+    currentGeneration: Int,
+    connected: Bool
+) -> Bool {
+    connected && capturedGeneration == currentGeneration
 }
 
 private func registeredGitHubRepository(_ marketplace: PluginMarketplace) -> String? {
-    guard let source = (try? JSONSerialization.jsonObject(with: Data(marketplace.sourceJSON.utf8))) as? [String: Any],
-          !source.keys.contains("ref"),
-          !source.keys.contains("path"),
-          !source.keys.contains("sparsePaths") else { return nil }
+    guard let source = (try? JSONSerialization.jsonObject(with: Data(marketplace.sourceJSON.utf8))) as? [String: Any] else { return nil }
 
     guard let sourceKind = source["source"] as? String else { return nil }
     switch sourceKind {
     case "github":
-        guard let repo = source["repo"] as? String else { return nil }
+        guard Set(source.keys) == Set(["source", "repo"]),
+              let repo = source["repo"] as? String else { return nil }
         return githubShorthandIdentity(repo)
     case "git":
-        guard let url = source["url"] as? String else { return nil }
+        guard Set(source.keys) == Set(["source", "url"]),
+              let url = source["url"] as? String else { return nil }
         return githubRemoteIdentity(url)
     default:
         return nil
@@ -102,25 +173,58 @@ private func registeredGitHubRepository(_ marketplace: PluginMarketplace) -> Str
 private func githubShorthandIdentity(_ source: String) -> String? {
     let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !value.contains(":") && !value.contains("#") && !value.contains("@") && !value.contains("?") else { return nil }
-    let parts = value.split(separator: "/", omittingEmptySubsequences: false)
-    guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
+    guard value.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$"#, options: .regularExpression) != nil else { return nil }
+    let parts = value.replacingOccurrences(of: #"\.git$"#, with: "", options: .regularExpression)
+        .split(separator: "/", omittingEmptySubsequences: false)
+    guard parts.count == 2, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
     return "\(parts[0].lowercased())/\(parts[1].lowercased())"
 }
 
 private func githubRemoteIdentity(_ source: String) -> String? {
-    guard let components = URLComponents(string: source),
-          components.scheme?.lowercased() == "https",
+    let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let match = value.range(of: #"^git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:\.git)?$"#, options: [.regularExpression, .caseInsensitive]) {
+        let scp = String(value[match])
+        let parts = scp.dropFirst("git@github.com:".count).replacingOccurrences(of: #"\.git$"#, with: "", options: [.regularExpression, .caseInsensitive]).split(separator: "/")
+        guard parts.count == 2, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
+        return "\(parts[0].lowercased())/\(parts[1].lowercased())"
+    }
+    guard !value.contains("\\"),
+          let schemeDelimiter = value.range(of: "://") else { return nil }
+    let authorityAndPath = value[schemeDelimiter.upperBound...]
+    let rawPath: String
+    if let pathStart = authorityAndPath.firstIndex(of: "/") {
+        rawPath = String(authorityAndPath[pathStart...])
+    } else {
+        rawPath = ""
+    }
+    if rawPath.contains("%") { return nil }
+    let rawSegments = rawPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        .split(separator: "/", omittingEmptySubsequences: false)
+    if rawSegments.contains(where: { $0 == "." || $0 == ".." }) { return nil }
+
+    guard let components = URLComponents(string: value),
+          let scheme = components.scheme?.lowercased(), ["https", "ssh"].contains(scheme),
           components.host?.lowercased() == "github.com",
-          components.user == nil,
-          components.password == nil,
-          components.port == nil,
           components.query == nil,
           components.fragment == nil else { return nil }
-    var path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    if scheme == "https" {
+        guard components.user == nil, components.password == nil,
+              components.port == nil || components.port == 443 else { return nil }
+    } else {
+        guard components.password == nil,
+              components.user == nil || components.user == "git",
+              components.port == nil || components.port == 22 else { return nil }
+    }
+    var path = components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     if path.lowercased().hasSuffix(".git") { path.removeLast(4) }
     let parts = path.split(separator: "/", omittingEmptySubsequences: false)
-    guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
+    guard parts.count == 2,
+          parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.range(of: #"^[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil }) else { return nil }
     return "\(parts[0].lowercased())/\(parts[1].lowercased())"
+}
+
+private func githubRepositoryIdentity(_ source: String) -> String? {
+    githubShorthandIdentity(source) ?? githubRemoteIdentity(source)
 }
 
 /// An entry from the bundled, curated directory. MCP config stays as a raw

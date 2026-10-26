@@ -1,3 +1,4 @@
+import type { RemoteFileStore } from '../src/main/remoteControl/fileStore.js';
 /**
  * Shared harness of the Remote Control session-layer tests (not a test file
  * itself): a fake session runtime that behaves like the observable parts of
@@ -65,6 +66,7 @@ export class RecordingChannel implements RemoteViewerChannel {
 /** A runtime with the observable behaviour of `SessionRuntime`: sequences, a base, a journal, pending sets, observers. */
 export class FakeRuntime implements RemoteRuntime {
   readonly projectPath: string;
+  engineWorkspacePath?: string;
   connectionState: ConnectionState = { status: 'connected' };
   turnActive = false;
   remoteModel: string | undefined = 'model-one';
@@ -346,7 +348,7 @@ export interface GatewayFixture {
   call(method: string, params?: unknown, who?: { viewer: RemoteViewer; channel: RecordingChannel }): Promise<any>;
 }
 
-export function gatewayFixture(options: { codec?: ImageCodec; turnIds?: number[] } = {}): GatewayFixture {
+export function gatewayFixture(options: { codec?: ImageCodec; turnIds?: number[]; files?: RemoteFileStore } = {}): GatewayFixture {
   const clock = newClock();
   const settings = new FakeSettings();
   const policy = new RemotePolicy({ settings });
@@ -366,6 +368,7 @@ export function gatewayFixture(options: { codec?: ImageCodec; turnIds?: number[]
   const gateway = new SessionGateway({
     runtimes,
     policy,
+    files: options.files,
     commands,
     titleOf: async (ref) => titles.get(ref.sessionId),
     modelOf: () => 'saved-model',

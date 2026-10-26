@@ -308,6 +308,7 @@ async fn send_hello(socket: &mut TestSocket) {
     send_frame(
         socket,
         Frame::Request(BridgeRequest {
+            trace_context: None,
             id: 1,
             method: "hello".into(),
             params: source(&ClientHello {
@@ -328,6 +329,7 @@ async fn send_command(socket: &mut TestSocket, command: &ClientCommand) {
     send_frame(
         socket,
         Frame::Request(BridgeRequest {
+            trace_context: None,
             id: 2,
             method: "submit".into(),
             params: source(command),

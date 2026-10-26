@@ -29,6 +29,7 @@ pub(super) async fn captured_sink() -> (bridge::McpEndpoint, Socket, FrameSink) 
     endpoint.set_auth_token("connection-regression-token".into());
     let mut socket = connect_authenticated(&endpoint).await;
     let frame = Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 0,
         method: "capture".into(),
         params: Utf16JsonProjection::parse("{}").expect("empty request params are valid JSON"),

@@ -187,6 +187,7 @@ where
 
 fn hello_frame() -> Frame {
     Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 1,
         method: "hello".into(),
         params: bridge_source(&ClientHello {
@@ -199,6 +200,7 @@ fn hello_frame() -> Frame {
 
 fn submit(command: &ClientCommand) -> Frame {
     Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 2,
         method: "submit".into(),
         params: bridge_source(&command),

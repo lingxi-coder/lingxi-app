@@ -442,6 +442,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   });
   notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
+    getTelemetryConfig: () => settings.getTelemetryConfig(),
     workspaceSettings: (projectPath) => sessionCatalog.workspaceSettings(projectPath),
     appVersion: app.getVersion(),
     getSavedPermissionMode: () => settings.getLastPermissionMode(),
@@ -559,6 +560,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         },
         sessionId: ref.sessionId,
         trusted: settings.isTrustedWorkspace(workspace),
+        telemetry: settings.getTelemetryConfig(),
         allowInsights: settings.getInsightsAllowed(),
         allowTeamOnboarding: settings.getTeamOnboardingAllowed(),
         remoteControlEnabled: (settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1'))

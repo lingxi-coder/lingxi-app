@@ -524,8 +524,9 @@ async fn run_slash_prompt_with_images(
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let admission_flag = admitted.clone();
     let admission_tx = tx.clone();
-    let result = orchestrator
-        .run_turn_streaming_with_cancel_image_sources_and_admission(
+    let result = crate::telemetry_host::with_request_span(
+        "tui",
+        orchestrator.run_turn_streaming_with_cancel_image_sources_and_admission(
             prompt.clone(),
             images,
             cancel,
@@ -535,8 +536,9 @@ async fn run_slash_prompt_with_images(
                 // admission alone is earlier and cannot consume the batch.
                 resolve_slash_images(&admission_tx, dispatch_id, None);
             }),
-        )
-        .await;
+        ),
+    )
+    .await;
     if !admitted.load(std::sync::atomic::Ordering::Acquire) {
         resolve_slash_images(tx, dispatch_id, Some(image_paths));
     }
@@ -572,16 +574,18 @@ async fn run_slash_prompt_batch_with_images(
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let admission_flag = admitted.clone();
     let admission_tx = tx.clone();
-    let result = runner
-        .run_prompt_batch(
+    let result = crate::telemetry_host::with_request_span(
+        "tui",
+        runner.run_prompt_batch(
             inputs,
             cancel,
             Box::new(move || {
                 admission_flag.store(true, std::sync::atomic::Ordering::Release);
                 resolve_slash_images(&admission_tx, dispatch_id, None);
             }),
-        )
-        .await;
+        ),
+    )
+    .await;
     if !admitted.load(std::sync::atomic::Ordering::Acquire) {
         resolve_slash_images(tx, dispatch_id, Some(image_paths));
     }
@@ -1159,68 +1163,75 @@ async fn drain_teammate_prompts(
             let _ = settle.send(Ok(result));
         }
         let cancel_probe = cancel.clone();
-        let result = if let Some(host) = pending_slashes.loop_host.get().filter(|_| {
-            command.source == msgqueue::QueueSource::Cron || command.uuid.starts_with("goal-retry-")
-        }) {
-            orchestrator::mod_prompt_origin::with_origin(
-                serde_json::json!({"kind":"scheduled-trigger"}),
-                host.run_scheduled(&text, &command, cancel),
-            )
-            .await
-        } else {
-            let origin = mod_origin.unwrap_or_else(|| match command.source {
-                msgqueue::QueueSource::PromptInput => serde_json::json!({"kind":"composer"}),
-                msgqueue::QueueSource::Cron => serde_json::json!({"kind":"scheduled-trigger"}),
-                msgqueue::QueueSource::AgentSendMessage => serde_json::json!({"kind":"peer"}),
-                _ => serde_json::json!({"kind":"unclassified"}),
-            });
-            let in_human_turn = mod_as_user
-                || command.source == msgqueue::QueueSource::PromptInput && !command.is_meta;
-            let native_source =
-                cli_native_source_for_queued_prompt(command.source, command.is_meta, mod_as_user);
-            let turn_result = if let Some(inputs) = queued_inputs {
-                let runner = source_batch_runner
-                    .expect("batch runner availability was checked before turn admission");
-                orchestrator::native_user_message_source::with_source(
-                    orchestrator::native_user_message_source::human(),
-                    orchestrator::mod_prompt_origin::with_origin(
-                        origin,
-                        runner.run_prompt_batch(inputs, cancel, Box::new(|| {})),
-                    ),
+        let result = crate::telemetry_host::with_request_span("tui", async {
+            if let Some(host) = pending_slashes.loop_host.get().filter(|_| {
+                command.source == msgqueue::QueueSource::Cron
+                    || command.uuid.starts_with("goal-retry-")
+            }) {
+                orchestrator::mod_prompt_origin::with_origin(
+                    serde_json::json!({"kind":"scheduled-trigger"}),
+                    host.run_scheduled(&text, &command, cancel),
                 )
                 .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-            } else if let Some(row_token) = transcript_row_token {
-                orchestrator::native_user_message_source::with_source(
-                    native_source,
-                    orchestrator::mod_prompt_origin::with_origin(
-                        origin,
-                        orchestrator.run_queued_turn_streaming_with_row_token(
-                            &text,
-                            cancel,
-                            in_human_turn,
-                            row_token,
-                        ),
-                    ),
-                )
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
             } else {
-                orchestrator::native_user_message_source::with_source(
-                    native_source,
-                    orchestrator::mod_prompt_origin::with_origin(
-                        origin,
-                        orchestrator.run_queued_turn_streaming(&text, cancel, in_human_turn),
-                    ),
-                )
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-            };
-            turn_result
-        };
+                let origin = mod_origin.unwrap_or_else(|| match command.source {
+                    msgqueue::QueueSource::PromptInput => serde_json::json!({"kind":"composer"}),
+                    msgqueue::QueueSource::Cron => serde_json::json!({"kind":"scheduled-trigger"}),
+                    msgqueue::QueueSource::AgentSendMessage => serde_json::json!({"kind":"peer"}),
+                    _ => serde_json::json!({"kind":"unclassified"}),
+                });
+                let in_human_turn = mod_as_user
+                    || command.source == msgqueue::QueueSource::PromptInput && !command.is_meta;
+                let native_source = cli_native_source_for_queued_prompt(
+                    command.source,
+                    command.is_meta,
+                    mod_as_user,
+                );
+                let turn_result = if let Some(inputs) = queued_inputs {
+                    let runner = source_batch_runner
+                        .expect("batch runner availability was checked before turn admission");
+                    orchestrator::native_user_message_source::with_source(
+                        orchestrator::native_user_message_source::human(),
+                        orchestrator::mod_prompt_origin::with_origin(
+                            origin,
+                            runner.run_prompt_batch(inputs, cancel, Box::new(|| {})),
+                        ),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                } else if let Some(row_token) = transcript_row_token {
+                    orchestrator::native_user_message_source::with_source(
+                        native_source,
+                        orchestrator::mod_prompt_origin::with_origin(
+                            origin,
+                            orchestrator.run_queued_turn_streaming_with_row_token(
+                                &text,
+                                cancel,
+                                in_human_turn,
+                                row_token,
+                            ),
+                        ),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                } else {
+                    orchestrator::native_user_message_source::with_source(
+                        native_source,
+                        orchestrator::mod_prompt_origin::with_origin(
+                            origin,
+                            orchestrator.run_queued_turn_streaming(&text, cancel, in_human_turn),
+                        ),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                };
+                turn_result
+            }
+        })
+        .await;
         if let Err(error) = result {
             let _ = turn_tx.send(tui::TurnEvent::TextDelta(error.to_string()));
             let _ = turn_tx.send(tui::TurnEvent::TurnEnded(
@@ -3875,9 +3886,12 @@ fn cli_native_source_for_queued_prompt(
 }
 
 async fn with_cli_composer_native_source<F: std::future::Future>(future: F) -> F::Output {
-    orchestrator::native_user_message_source::with_source(
-        orchestrator::native_user_message_source::human(),
-        future,
+    crate::telemetry_host::with_request_span(
+        "tui",
+        orchestrator::native_user_message_source::with_source(
+            orchestrator::native_user_message_source::human(),
+            future,
+        ),
     )
     .await
 }

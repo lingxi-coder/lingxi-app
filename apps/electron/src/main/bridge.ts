@@ -1,3 +1,5 @@
+import { DesktopTelemetry } from './telemetry.js';
+import { protectBridgeTelemetryEnvironment, resolveDesktopTelemetry, telemetryPrivacyDisabled } from './telemetryPolicy.js';
 import { assertComputerAccessSubset } from './computerAccessApproval.js';
 import {
   BridgeClient,
@@ -205,6 +207,8 @@ export class SessionRuntime {
   readonly projectPath: string;
   private child: ChildProcess | null = null;
   private client: BridgeClient | null = null;
+  private telemetry: DesktopTelemetry | undefined;
+  private telemetryRevoked = false;
   private state: ConnectionState = { status: 'idle' };
   private disposed = false;
   private restartChain: Promise<void> = Promise.resolve();
@@ -1334,6 +1338,18 @@ export class SessionRuntime {
     return this.restartChain;
   }
 
+  async disableTelemetry(): Promise<void> {
+    this.telemetryRevoked = true;
+    this.telemetry?.disable();
+    // Wait for any already-dispatched SDK export/retry before acknowledging
+    // consent revocation. The guarded shutdown drops all unsent queue entries.
+    const hostSettled = this.telemetry?.shutdown();
+    // A process can already be exporting while discovery/hello is in flight.
+    // Do not acknowledge revocation until that lifecycle applies it too.
+    if (this.state.status !== 'connected') await this.waitForLifecycle();
+    await Promise.all([hostSettled, this.client?.disableTelemetry()]);
+  }
+
   stop(): Promise<void> {
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) return;
@@ -1357,6 +1373,7 @@ export class SessionRuntime {
   }
 
   private async startInternal(): Promise<void> {
+    this.telemetryRevoked = false;
     this.liveConnectionRecovered = false;
     this.configuredCustomProviderIds = [];
     this.credentialRoutingSettings = undefined;
@@ -1396,6 +1413,13 @@ export class SessionRuntime {
         );
         try {
           await this.connectBridgeClient(reusable.lockfilePath, generation, false);
+          const telemetryConfig = this.opts.getTelemetryConfig?.() ?? resolveDesktopTelemetry({});
+          this.telemetry = new DesktopTelemetry({ ...telemetryConfig, enabled: telemetryConfig.enabled && !this.telemetryRevoked }, this.opts.appVersion);
+          if (!telemetryConfig.enabled || this.telemetryRevoked) {
+            this.telemetryRevoked = true;
+            this.telemetry.disable();
+            await this.client?.disableTelemetry();
+          }
           this.startupDiagnostic('bridge_start_completed', {
             adopted: true,
             durationMs: Date.now() - startedAt,
@@ -1417,6 +1441,10 @@ export class SessionRuntime {
 
     const launchConfigStartedAt = Date.now();
     const launch = await this.opts.launchConfig();
+    await this.telemetry?.shutdown();
+    const telemetryConfig = launch.telemetry ?? resolveDesktopTelemetry({});
+    this.telemetry = new DesktopTelemetry({ ...telemetryConfig, enabled: telemetryConfig.enabled && !this.telemetryRevoked
+      && !telemetryPrivacyDisabled(launch.settingsEnvironment ?? {}) }, this.opts.appVersion);
     this.startupDiagnostic('bridge_start_phase', {
       durationMs: Date.now() - launchConfigStartedAt,
       generation,
@@ -1538,6 +1566,12 @@ export class SessionRuntime {
     const handshakeStartedAt = Date.now();
     const hello = await client.connect();
     assertCurrentConnection();
+    if (this.telemetryRevoked || this.opts.getTelemetryConfig?.().enabled === false) {
+      this.telemetryRevoked = true;
+      this.telemetry?.disable();
+      await Promise.all([this.telemetry?.shutdown(), client.disableTelemetry()]);
+      assertCurrentConnection();
+    }
     this.verifiedRealtimeAudio = hello.capabilities.realtime_audio === true;
     this.startupDiagnostic('bridge_connect_phase', {
       durationMs: Date.now() - handshakeStartedAt,
@@ -1646,7 +1680,10 @@ export class SessionRuntime {
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
 
-    const environment = { ...buildBridgeEnvironment(process.env, launch.apiBaseUrl), ...launch.settingsEnvironment };
+    const environment = protectBridgeTelemetryEnvironment(
+      { ...buildBridgeEnvironment(process.env, launch.apiBaseUrl), ...launch.settingsEnvironment },
+      process.env, this.telemetryRevoked ? { ...(launch.telemetry ?? resolveDesktopTelemetry({})), enabled: false } : (launch.telemetry ?? resolveDesktopTelemetry({})),
+    );
     // These paths belong to Desktop main, never a workspace or a remembered
     // environment snapshot. Absence must also clear inherited integration flags.
     delete environment.LINGXI_DESKTOP_COMPUTER_POLICY;
@@ -1878,6 +1915,7 @@ export class SessionRuntime {
     // from SessionResumed by other connection events. Live deltas still need a turn.
     client.on('event', (event: ClientEvent) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
+      this.telemetry?.onEvent(event);
       if (event.type === 'side_chat_created') { this.pendingSideCreates.delete(event.request_id); this.liveSideChats.add(event.side_id); }
       if (event.type === 'side_chat_error' && event.request_id) this.pendingSideCreates.delete(event.request_id);
       if (event.type === 'side_chat_list') { this.pendingSideCreates.clear(); this.liveSideChats.clear(); for (const id of event.side_ids) this.liveSideChats.add(id); }
@@ -2463,11 +2501,15 @@ export class SessionRuntime {
     source?: PromptSource,
   ): void {
     const needsIdentityCommit = !this.sessionIdentityCommitted;
-    this.requireClient().sendPrompt(prompt, {
-      images: validatedImages,
-      ...(turnId !== undefined ? { turnId } : {}),
-      ...(visualizationContext !== undefined ? { visualizationContext } : {}),
-    });
+    const traceContext = this.telemetryRevoked ? undefined : this.telemetry?.beginTurn(turnId);
+    try {
+      this.requireClient().sendPrompt(prompt, {
+        images: validatedImages,
+        ...(traceContext ? { traceContext } : {}),
+        ...(turnId !== undefined ? { turnId } : {}),
+        ...(visualizationContext !== undefined ? { visualizationContext } : {}),
+      });
+    } catch (error) { this.telemetry?.endTurn('error', traceContext); throw error; }
     this.journalPrompt(prompt, validatedImages, turnId ?? 0, source);
     this.sessionHasHistory = true;
     if (needsIdentityCommit && this.opts.onFirstPromptSent?.() !== false) {
@@ -3234,6 +3276,7 @@ export class SessionRuntime {
   private setState(next: ConnectionState): void {
     this.state = next;
     if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
+      this.telemetry?.interrupt(next.status === 'error' ? 'error' : 'interrupted');
       this.disconnectedForegroundPending ||= this.activeTurn || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
       this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
@@ -3306,6 +3349,8 @@ export class SessionRuntime {
   }
 
   private async stopBridge(): Promise<void> {
+    await this.telemetry?.shutdown();
+    this.telemetry = undefined;
     const stoppingGeneration = this.generation;
     ++this.generation;
     await this.teardownAudioGeneration(stoppingGeneration);

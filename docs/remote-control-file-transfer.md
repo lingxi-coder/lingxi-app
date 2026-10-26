@@ -16,13 +16,26 @@ cache recovery. Explicit Send now publishes a verified workspace working copy
 so the normal file-reading tool can access the attachment without trusting the
 private receipt store. Android document-picker callbacks wait up to 30 seconds
 for the same account/host, WebRTC connection and session reattachment, including
-client-construction time in that bound.
+client-construction time in that bound. A transport closure during a resumable
+file operation permits one retry only after an actual peer phase/attempt
+transition and renewed session readiness. A file-only closure of an otherwise
+healthy peer instead reports that Remote Control must be exited and reconnected;
+it never silently restarts the chat peer or retries prompt submission. New
+document imports clear the preceding file's progress before preparation.
+
+Physical Android retesting exposed a separate Desktop initialization race:
+the control channel could deliver valid `initialize` before the renderer's
+asynchronous connected notification. That later notification incorrectly armed
+a new 15-second initialization deadline, closing an already initialized peer
+and its file channel. Desktop now starts that deadline only while no valid
+handshake has begun. Regression tests cover approved and pending viewers with
+this event ordering, and confirm that invalid initialization still times out.
 
 Current source checks: Web 170 passed with production build and typecheck;
-Desktop 374 passed with three Firebase-Emulator-only skips, plus 82 focused file,
+Desktop 375 passed with three Firebase-Emulator-only skips, plus 82 focused file,
 gateway and command tests (overlapping coverage, not additive); Rust viewer 121,
 iOS FFI 23 and Android FFI 23 passed; Harness WebRTC core 24 passed with two
-existing opt-in ignored cases. Android JVM tests and the final readiness APK
+existing opt-in ignored cases. Android JVM tests (1161 passed) and the final peer-recovery APK
 build passed; exact counts and immutable receipts are recorded in the acceptance
 folder below.
 
@@ -34,12 +47,26 @@ This is same-Mac WebRTC acceptance with the VPN connected, not proof of
 cross-Internet throughput. Signed Desktop packaging and full runtime smoke passed.
 
 Samsung authentication and direct connectivity recovered after the user enabled
-the phone VPN; a small SAF upload passed on the preceding APK. Final readiness
-APK install, download/export/hash and background checks remain pending. The new
-iOS FullDebug app and device XCFramework are built and signed; installation and
-original-file physical acceptance remain pending while another task owns the
-phone. File transfer under tunnel and share withdrawal during bulk transfer still
-need final UI acceptance. APNs is deferred by user request; Safari is optional.
+the phone VPN. Actual SAF upload/export of the 62-byte UTF-8 and 17 MiB files
+passed with matching source/host/export SHA-256. A 2 GiB transfer recovered from
+its retained approximately 15 MB checkpoint, progressed to approximately 77 MB,
+and explicit cancellation removed its incomplete host directory. Retrying that
+same cancelled identity restarted from a new low offset; a second cancellation
+again cleaned it up. This is partial large-file recovery/cancellation coverage,
+not a completed Android 2 GiB round trip. Actual background question restoration,
+FCM notification, notification tap into the correct APRICOT/PEAR session, and
+PEAR answer synchronization passed. Exact APK identities for these checks and
+the subsequent peer-recovery APK's focused SAF rechecks are recorded separately.
+
+Chrome also passed real tunnel-mode control replies with original-file upload
+disabled, plus withdrawal during a 2 GiB upload: bytes stopped, no receipt was
+published, and all send/download controls disabled. Restoring only the original
+shared session and reattaching restored control replies without automatically
+resuming the old transfer.
+
+The new iOS FullDebug app and device XCFramework are built and signed;
+installation and original-file physical acceptance remain pending while another
+task owns the phone. APNs is deferred by user request; Safari is optional.
 These open checks are not claimed as passed by source/build validation.
 
 Evidence: `acceptance/remote-control-20261022/integration-20261025/` in the shared

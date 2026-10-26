@@ -63,14 +63,16 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
     }
     val sessionReady = rememberUpdatedState(enabled)
     suspend fun client() = manager.filePort(owner, hostId, snapshotFlow { sessionReady.value })
+    suspend fun <T> fileOperation(action: suspend (RemoteClientPort) -> T): T =
+        manager.fileOperation(owner, hostId, snapshotFlow { sessionReady.value }, action)
     suspend fun upload() {
         val selected = source ?: return
         busy = true; problem = null; committed = 0UL
         try {
             transfer = selected.absolutePath
-            val file = prepared ?: client().prepareFile(sessionId, selected.absolutePath, selected.name).also { prepared = it }
+            val file = prepared ?: fileOperation { it.prepareFile(sessionId, selected.absolutePath, selected.name) }.also { prepared = it }
             transfer = file.transferId; total = file.size
-            val receipt = client().uploadFile(file, selected.absolutePath)
+            val receipt = fileOperation { it.uploadFile(file, selected.absolutePath) }
             client() // Recheck the account/host after suspension before publishing UI state.
             files = files.filterNot { it.transferId == receipt.transferId } + receipt
             source = null; prepared = null
@@ -91,7 +93,7 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
                     root.mkdirs()
                     File(root, file.transferId)
                 }
-                client().downloadFile(file, output.absolutePath)
+                fileOperation { it.downloadFile(file, output.absolutePath) }
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openOutputStream(uri, "wt").use { target ->
                         checkNotNull(target) { "Cannot open destination" }
@@ -114,7 +116,8 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) busy = false
         else operation = scope.launch {
-            problem = null
+            // Import/reconnect can take time. Clear the previous file's progress.
+            problem = null; committed = 0UL; total = 0UL; transfer = null
             var staging: File? = null
             var retained = false
             try {

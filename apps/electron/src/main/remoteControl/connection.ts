@@ -460,7 +460,11 @@ export class HostConnection {
     if (this.closed || this.transportIsUp) return;
     this.transportIsUp = true;
     this.deps.clock.clearTimeout(this.transportTimer);
-    this.initializeTimer = this.deps.clock.setTimeout(() => this.close('initialize_timeout'), INITIALIZE_WAIT_MS);
+    // initialize can arrive before the renderer's asynchronous connected report.
+    // A valid handshake (including pending approval) already met this deadline.
+    if (this.viewer === undefined) {
+      this.initializeTimer = this.deps.clock.setTimeout(() => this.close('initialize_timeout'), INITIALIZE_WAIT_MS);
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────────

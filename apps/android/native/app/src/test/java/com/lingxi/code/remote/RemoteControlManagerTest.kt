@@ -1,6 +1,7 @@
 package com.lingxi.code.remote
 
 import com.lingxi.code.bindings.android.RemoteFileFfi
+import com.lingxi.code.bindings.android.RemoteFfiException
 import com.lingxi.code.bindings.android.AndroidRemoteListener
 import com.lingxi.code.bindings.android.RemoteConnectionPhaseFfi
 import com.lingxi.code.bindings.android.RemoteConnectionStateFfi
@@ -165,6 +166,67 @@ class RemoteControlManagerTest {
             advanceTimeBy(30_001); runCurrent(); request.join()
             assertTrue(result!!.exceptionOrNull()?.message?.contains("reconnecting") == true)
         }
+    }
+
+    @Test fun resumableFileOperationRetriesClosedTransportOnceOnSameClient() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent(); val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY).copy(transport = RemoteTransportFfi.WEBRTC)
+        for (message in listOf("closed: ice_failed", "not connected")) {
+            var calls = 0
+            val answer = h.manager.fileOperation("u1", "h", flowOf(true)) { bound ->
+                assertTrue(bound === client)
+                if (++calls == 1) {
+                    client.state = client.state!!.copy(attempt = client.state!!.attempt + 1u)
+                    client.listener.onConnectionState(client.state!!)
+                    throw RemoteFfiException.InvalidArgument(message)
+                }
+                "verified"
+            }
+            assertEquals("verified", answer); assertEquals(2, calls)
+        }
+    }
+
+    @Test fun resumableFileOperationDoesNotRetryCancellationOrValidationFailures() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        h.clients.single().state = connectionState("h", RemoteConnectionPhaseFfi.READY).copy(transport = RemoteTransportFfi.WEBRTC)
+        for (failure in listOf(kotlinx.coroutines.CancellationException("cancelled"), RemoteFfiException.InvalidArgument("file checksum mismatch"))) {
+            var calls = 0
+            val result = runCatching { h.manager.fileOperation("u1", "h", flowOf(true)) { calls++; throw failure } }
+            assertTrue(result.exceptionOrNull() === failure); assertEquals(1, calls)
+        }
+    }
+
+    @Test fun resumableFileOperationRequiresReconnectForAFileOnlyClosure() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        h.clients.single().state = connectionState("h", RemoteConnectionPhaseFfi.READY).copy(transport = RemoteTransportFfi.WEBRTC)
+        var calls = 0
+        val result = runCatching { h.manager.fileOperation("u1", "h", flowOf(true)) { calls++; throw RemoteFfiException.InvalidArgument("file channel closed") } }
+        assertTrue(result.exceptionOrNull()?.message?.contains("Exit Remote Control and reconnect") == true)
+        assertEquals(1, calls)
+    }
+
+    @Test fun resumableFileOperationStopsAfterSecondClosureOnNewAttempt() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent(); val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY).copy(transport = RemoteTransportFfi.WEBRTC)
+        var calls = 0
+        val result = runCatching { h.manager.fileOperation("u1", "h", flowOf(true)) {
+            calls++; client.state = client.state!!.copy(attempt = client.state!!.attempt + 1u)
+            client.listener.onConnectionState(client.state!!)
+            throw RemoteFfiException.InvalidArgument("file channel closed")
+        } }
+        assertTrue(result.exceptionOrNull()?.message?.contains("Exit Remote Control and reconnect") == true)
+        assertEquals(2, calls)
+    }
+
+    @Test fun resumableFileOperationCannotRetryAfterAccountChange() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        h.clients.single().state = connectionState("h", RemoteConnectionPhaseFfi.READY).copy(transport = RemoteTransportFfi.WEBRTC)
+        var calls = 0
+        val result = runCatching { h.manager.fileOperation("u1", "h", flowOf(true)) {
+            calls++; h.account.mutableUid.value = "u2"
+            throw RemoteFfiException.InvalidArgument("file channel closed")
+        } }
+        assertTrue(result.exceptionOrNull() is kotlinx.coroutines.CancellationException); assertEquals(1, calls)
     }
 
     @Test fun oneClientIsMadeForTheSignedInUserWithThePushInstallationId() = runTest(UnconfinedTestDispatcher()) {

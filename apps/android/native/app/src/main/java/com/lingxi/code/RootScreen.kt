@@ -2324,6 +2324,7 @@ fun RootScreen(
                     onStop = chatViewModel::cancel,
                     onDiscardRecoveredTurn = chatViewModel::discardRecoveredTurn,
                     onDismissError = chatViewModel::dismissError,
+                    onDismissCompactRejection = chatViewModel::dismissCompactRejection,
                     showOfflineBanner = shouldShowOfflineBanner(isOnline, dismissedWhileOffline),
                     onDismissOffline = { dismissedWhileOffline = true },
                     // "重试" re-sends the last user turn through the same path the

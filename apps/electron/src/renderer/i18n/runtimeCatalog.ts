@@ -1,4 +1,13 @@
 export const runtimeCatalog: Record<string, Record<string, string>> = {
+  "desktop_runtime_outputs": {"en": "Outputs", "zh-Hans": "产出", "zh-Hant": "產出", "ja": "成果物", "ko": "결과물"},
+  "desktop_runtime_create_output": {"en": "Create a file or site", "zh-Hans": "创建文件或网站", "zh-Hant": "建立檔案或網站", "ja": "ファイルやサイトを作成", "ko": "파일 또는 사이트 만들기"},
+  "desktop_runtime_create_output_prompt": {"en": "Help me create a file or site.", "zh-Hans": "帮我创建文件或网站。", "zh-Hant": "幫我建立檔案或網站。", "ja": "ファイルやサイトの作成を手伝ってください。", "ko": "파일 또는 사이트를 만들어 주세요."},
+  "desktop_runtime_side_chats": {"en": "Side chats", "zh-Hans": "侧聊", "zh-Hant": "側聊", "ja": "サイドチャット", "ko": "사이드 채팅"},
+  "desktop_runtime_side_chat": {"en": "Side chat", "zh-Hans": "侧聊", "zh-Hant": "側聊", "ja": "サイドチャット", "ko": "사이드 채팅"},
+  "desktop_runtime_background_processes": {"en": "Background processes", "zh-Hans": "后台进程", "zh-Hant": "背景程序", "ja": "バックグラウンドプロセス", "ko": "백그라운드 프로세스"},
+  "desktop_runtime_sources": {"en": "Sources", "zh-Hans": "来源", "zh-Hant": "來源", "ja": "ソース", "ko": "소스"},
+  "desktop_runtime_manage_sources": {"en": "Manage sources", "zh-Hans": "管理来源", "zh-Hant": "管理來源", "ja": "ソースを管理", "ko": "소스 관리"},
+
   "desktop_scheduled_daily": {
     "en": "Daily",
     "zh-Hans": "每天",

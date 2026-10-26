@@ -575,6 +575,7 @@ final class ConversationModel: ObservableObject {
     @Published var slashCommandPending = false
     /// Latest manual `/compact` lifecycle; terminal state remains until the next action.
     @Published var compactionStatus: ConversationCompactionStatus? = nil
+    @Published var compactRejectionID: UUID? = nil
     /// A transient, dim status line (tool activity / connection state). NOT used
     /// for errors anymore — those go to `error` (the persistent banner).
     @Published var statusLine: String? = nil

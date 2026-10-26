@@ -7290,6 +7290,40 @@
         }
       }
     },
+    "chat_compact_during_turn": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对话进行中，暂时无法压缩上下文"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "對話進行中，暫時無法壓縮上下文"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compact is disabled while a chat is in progress"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "チャットの実行中はコンパクトできません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "채팅 진행 중에는 압축할 수 없습니다"
+          }
+        }
+      }
+    },
     "chat_compacted %lld %lld": {
       "localizations": {
         "zh-Hans": {

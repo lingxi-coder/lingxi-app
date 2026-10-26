@@ -10,6 +10,7 @@ import {
   setRuntimeCenterOverviewOpen, setRuntimeInspectorOpen,
   type RuntimeCenterItemRef,
 } from '../../src/renderer/bridge/runtimeCenterState';
+import { newSideChat } from '../../src/renderer/bridge/sideChatState';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
@@ -48,6 +49,9 @@ const longSummary = [
 ].join('\n\n');
 
 function Fixture() {
+  const [showSides, setShowSides] = useState(false);
+  const [selectedSide, setSelectedSide] = useState('');
+  const [outputDraft, setOutputDraft] = useState('');
   const [compactCalls, setCompactCalls] = useState(0);
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [sessionKey, setSessionKey] = useState('session-a');
@@ -58,6 +62,7 @@ function Fixture() {
   useEffect(() => {
     const reset = (event: Event) => {
       const options = (event as CustomEvent).detail;
+      if (options.showSides !== undefined) setShowSides(Boolean(options.showSides));
       if (options.theme) setTheme(options.theme);
       if (options.longSummaries !== undefined) setLongSummaries(Boolean(options.longSummaries));
       if (options.sessionKey) {
@@ -73,7 +78,9 @@ function Fixture() {
   const closeRuntimeItem = useCallback((item: RuntimeCenterItemRef) => setCenter((current) => closeRuntimeCenterItem(current, item)), []);
   const setOverview = useCallback((open: boolean) => setCenter((current) => setRuntimeCenterOverviewOpen(current, open)), []);
   const setInspector = useCallback((open: boolean) => setCenter((current) => setRuntimeInspectorOpen(current, open)), []);
-  const desktop = useMemo(() => emptyDesktopState(), []);
+  const desktop = useMemo(() => ({ ...emptyDesktopState(), tasks: showSides ? {
+    shell: { task_id: 'shell', task_type: 'local_bash', status: { type: 'running' as const }, description: 'git status --short && git rev-parse HEAD' },
+  } : {} }), [showSides]);
   const bridge = {
     activeSession: { projectPath: '/Users/tester/Projects/LingXi-Next', sessionId: sessionKey },
     bootstrap: { workspace: { path: '/Users/tester/Projects/LingXi-Next', trusted: true } },
@@ -88,13 +95,14 @@ function Fixture() {
     },
     runtimeCenter: center, desktop,
     openRuntimeItem, closeRuntimeItem, setRuntimeCenterOverviewOpen: setOverview, setRuntimeInspectorOpen: setInspector,
+    offerLinkDraft: ({ text }: { text: string }) => setOutputDraft(text),
     forceCompact: async () => { setCompactCalls((count) => count + 1); },
     refreshTasks: idle, refreshSessionAgents: idle, loadSessionAgentTranscript: idle, taskOutput: idle,
     previewWorkspaceFile: async () => ({ content: 'Reference content', path: '/workspace/requirements.md', kind: 'text' }),
   };
   return (
     <Theme.Provider value={palette}>
-      <div data-compact-calls={compactCalls} className="desktop-shell" style={{ width: '100vw', height: '100vh', position: 'relative', display: 'flex', overflow: 'hidden', background: palette.stageBg, color: palette.text }}>
+      <div data-compact-calls={compactCalls} data-selected-side={selectedSide} data-output-draft={outputDraft} className="desktop-shell" style={{ width: '100vw', height: '100vh', position: 'relative', display: 'flex', overflow: 'hidden', background: palette.stageBg, color: palette.text }}>
         <main className="desktop-main" style={{ minWidth: 0, position: 'relative', flex: 1, display: 'flex', flexDirection: 'column' }}>
           <div style={{ height: 'var(--desktop-toolbar-height, 44px)', flexShrink: 0 }}>
             <BetaTopBar bridge={bridge as never} runtimeCenterOpen={center.overviewOpen} onToggleRuntimeCenter={() => setOverview(!center.overviewOpen)} />
@@ -112,7 +120,7 @@ function Fixture() {
               </div>
               <div style={{ margin: '16px 28px', padding: '18px 20px', border: `1px solid ${palette.border}`, borderRadius: 24, color: palette.text3 }}>Ask a follow-up…</div>
             </div>
-            <RuntimeCenterOverview bridge={bridge as never} />
+            <RuntimeCenterOverview bridge={bridge as never} sideChats={showSides ? { sides: [newSideChat('side-1', sessionKey)], select: setSelectedSide, setOpen: () => undefined } as never : undefined} />
           </div>
         </main>
         <RuntimeCenterInspector bridge={bridge as never} />

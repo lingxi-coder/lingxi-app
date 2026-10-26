@@ -505,7 +505,7 @@ export function App() {
                   </div>
                 ))}
             </div>
-            {!bridge.sessionLoading && <RuntimeCenterOverview bridge={planBridge} />}
+            {!bridge.sessionLoading && <RuntimeCenterOverview bridge={planBridge} sideChats={sideChats} onManageSources={() => openSettings({ pageId: 'mcp' })} />}
           </div>
 
           </div>

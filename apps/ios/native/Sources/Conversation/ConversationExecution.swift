@@ -972,6 +972,13 @@ struct ConversationCompactionSnapshot: Identifiable, Equatable {
 }
 
 enum ConversationCompactionStatus: Equatable {
+    static func isTurnRejection(_ message: String) -> Bool {
+        let detail = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "^(?:force_compact failed:\\s*)?(?:handle action failed:\\s*)?", with: "", options: [.regularExpression, .caseInsensitive])
+        return detail == "cannot compact the session while a turn is in flight"
+            || detail == "Compact is disabled while a chat is in progress"
+    }
+
     case queued
     case running(phase: String, startedAt: Date, phaseStartedAt: Date, unknownPhase: Bool = false)
     case completed(messagesBefore: UInt32?, messagesAfter: UInt32?, bytesSaved: UInt64?)

@@ -450,6 +450,10 @@ class ChatViewModel(
      *    the plan outlives the turn that rewrote it.
      */
     internal fun reduceClientEvent(event: ClientEvent) {
+        if (event is ClientEvent.Error && isCompactTurnRejection(event.message.displayText())) {
+            showCompactRejection()
+            return
+        }
         if (source is ExternalTurnConversationSource && event is ClientEvent.SlashCommandResult) {
             // A remote configuration command has no locally owned turn. Its result
             // must also leave an unrelated running desktop turn intact.
@@ -2346,6 +2350,10 @@ class ChatViewModel(
     ) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        if (trimmed.split(Regex("\\s+"), limit = 2).first().equals("/compact", ignoreCase = true) && _state.value.streaming) {
+            showCompactRejection()
+            return
+        }
         (source as? ExternalTurnConversationSource)?.let { external ->
             // No side chat, no local turn: the desktop validates the prompt and
             // is the only place a turn starts.
@@ -2390,6 +2398,10 @@ class ChatViewModel(
             viewModelScope.launch {
                 runCatching { source.submitClientCommand(ClientCommand.ForceCompact) }
                     .onFailure { failure ->
+                        if (isCompactTurnRejection(failure.message.orEmpty())) {
+                            showCompactRejection()
+                            return@onFailure
+                        }
                         _state.update { state ->
                             val active = state.compaction
                             if (active?.status != CompactionProgressStatus.Running) state else state.copy(
@@ -2593,6 +2605,23 @@ class ChatViewModel(
             runCatching { source.submitClientCommand(ClientCommand.PromptSuggestionFeedback(sessionId, uuid, action)) }
         }
     }
+
+    private fun showCompactRejection() {
+        _state.update { state ->
+            val optimistic = state.compaction?.let {
+                it.status == CompactionProgressStatus.Running && it.phase == "queued"
+            } == true
+            state.copy(
+                compactRejectionId = java.util.UUID.randomUUID().toString(),
+                compaction = if (optimistic) null else state.compaction,
+                messages = if (optimistic && state.messages.lastOrNull()?.let {
+                    it.role == Role.User && isManualCompactCommand(it.text)
+                } == true) state.messages.dropLast(1) else state.messages,
+            )
+        }
+    }
+
+    fun dismissCompactRejection() { _state.update { it.copy(compactRejectionId = null) } }
 
     /** Dismiss the persistent error banner (its × affordance). */
     fun dismissError() {

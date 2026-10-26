@@ -254,7 +254,7 @@ fun clientEventToReply(
     is ClientEvent.MessageIdentity -> ReplyEvent.MessageIdentity(event.messageId)
     is ClientEvent.MessageRetracted -> ReplyEvent.MessageRetracted(event.messageId)
     is ClientEvent.TurnEnded -> ReplyEvent.End
-    is ClientEvent.Error -> ReplyEvent.Error(
+    is ClientEvent.Error -> if (isCompactTurnRejection(event.message.displayText())) null else ReplyEvent.Error(
         userFacingEngineError(event.kind, event.message, strings),
     )
     else -> null // model / session / permission / listings ride out-of-band flows
@@ -316,7 +316,7 @@ internal fun retainedTurnEventToReply(
             ),
             strings,
         )
-        "error" -> ReplyEvent.Error(event.optString("message"))
+        "error" -> event.optString("message").takeUnless(::isCompactTurnRejection)?.let { ReplyEvent.Error(it) }
         // `outcome` is an internally TAGGED OBJECT on the wire, not a string:
         // client-protocol's `TurnOutcomeDto` carries `#[serde(tag = "type")]`,
         // and the blessed fixture

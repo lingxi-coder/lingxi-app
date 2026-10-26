@@ -38,8 +38,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetValue
+import androidx.compose.material3.Surface
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -80,6 +83,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -167,6 +171,7 @@ fun ChatScreen(
     onStop: () -> Unit = {},
     onDiscardRecoveredTurn: () -> Unit = {},
     onDismissError: () -> Unit = {},
+    onDismissCompactRejection: () -> Unit = {},
     /** True to surface the dismissible offline banner above the composer. */
     showOfflineBanner: Boolean = false,
     onDismissOffline: () -> Unit = {},
@@ -533,6 +538,17 @@ fun ChatScreen(
                 onOpenProviderSettings = onOpenProviderSettings,
                 onStop = onStop,
                 onDiscardRecovery = onDiscardRecoveredTurn,
+            )
+        }
+        state.compactRejectionId?.let { id ->
+            val accessibilityManager = androidx.compose.ui.platform.LocalAccessibilityManager.current
+            LaunchedEffect(id) {
+                delay(accessibilityManager?.calculateRecommendedTimeoutMillis(5_000, containsText = true, containsControls = true) ?: 5_000)
+                onDismissCompactRejection()
+            }
+            CompactRejectionAlert(
+                onDismiss = onDismissCompactRejection,
+                modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 16.dp).padding(top = if (showTopBar) 64.dp else 8.dp),
             )
         }
     }
@@ -1149,4 +1165,27 @@ internal fun sendComposerIfAdmitted(
     clearDraft()
     removeAttachment()
     followTail()
+}
+
+@Composable
+private fun CompactRejectionAlert(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+    val t = LingXiTheme.palette
+    Surface(
+        modifier = modifier.widthIn(max = 560.dp).testTag("conversation.compact-rejection")
+            .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
+        color = androidx.compose.ui.graphics.lerp(t.windowBg, t.danger, 0.06f),
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, t.danger.copy(alpha = 0.22f)),
+        shadowElevation = 6.dp,
+    ) {
+        Row(modifier = Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = t.danger, modifier = Modifier.size(20.dp))
+            Text(stringResource(R.string.chat_compact_during_turn), color = t.danger,
+                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f, fill = false))
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Outlined.Close, contentDescription = stringResource(R.string.chat_dismiss_error), tint = t.danger, modifier = Modifier.size(16.dp))
+            }
+        }
+    }
 }

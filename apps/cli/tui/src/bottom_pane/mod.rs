@@ -343,7 +343,7 @@ pub struct BottomPane {
     /// Owner-fed task status (spinner text + running flag).
     status: BottomPaneStatus,
     /// Most recent Mod toast, held only until its timeout expires.
-    mod_toast: Option<(client::protocol::text::ClientTextDto, Instant)>,
+    mod_toast: Option<(client::protocol::text::ClientTextDto, Instant, bool)>,
     /// Insertion-ordered pinned lines, one per plugin.
     mod_statuses: Vec<(String, client::protocol::text::ClientTextDto)>,
     /// Current terminal `AbovePrompt` Mod tree, flattened to its measured row budget.
@@ -798,7 +798,7 @@ impl BottomPane {
         if self
             .mod_toast
             .as_ref()
-            .is_some_and(|(_, until)| now >= *until)
+            .is_some_and(|(_, until, _)| now >= *until)
         {
             self.mod_toast = None;
         }
@@ -1152,7 +1152,24 @@ impl BottomPane {
 
     /// Show a transient Mod notification below the composer.
     pub fn set_mod_toast(&mut self, text: client::protocol::text::ClientTextDto, timeout_ms: u64) {
-        self.mod_toast = Some((text, Instant::now() + Duration::from_millis(timeout_ms)));
+        self.mod_toast = Some((
+            text,
+            Instant::now() + Duration::from_millis(timeout_ms),
+            false,
+        ));
+    }
+
+    /// Non-blocking command refusal; never becomes a transcript error.
+    pub fn set_command_alert(
+        &mut self,
+        text: client::protocol::text::ClientTextDto,
+        timeout_ms: u64,
+    ) {
+        self.mod_toast = Some((
+            text,
+            Instant::now() + Duration::from_millis(timeout_ms),
+            true,
+        ));
     }
 
     /// Replace or clear one plugin's pinned status without affecting others.
@@ -2314,11 +2331,15 @@ impl BottomPane {
     }
 
     fn mod_toast_line(&self) -> Option<Line<'static>> {
-        let (text, until) = self.mod_toast.as_ref()?;
+        let (text, until, is_error) = self.mod_toast.as_ref()?;
         (Instant::now() < *until).then(|| {
             Line::from(Span::styled(
                 text.display(),
-                Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
+                Style::default().fg(crate::style_adapter::to_ratatui(if *is_error {
+                    self.theme.error
+                } else {
+                    self.theme.dim
+                })),
             ))
         })
     }
@@ -2851,6 +2872,22 @@ mod tests {
     use super::*;
     use crate::bottom_pane::view::AgentsPaneRow;
     use crate::renderable::Renderable;
+
+    #[test]
+    fn command_alert_uses_error_color_and_expires_without_touching_the_composer() {
+        let mut pane = BottomPane::new(Theme::dark());
+        pane.set_command_alert(
+            "Compact is disabled while a chat is in progress".into(),
+            5_000,
+        );
+        let line = pane.mod_toast_line().unwrap();
+        assert_eq!(
+            line.spans[0].style.fg,
+            Some(crate::style_adapter::to_ratatui(pane.theme.error))
+        );
+        pane.handle_view_tick(Instant::now() + Duration::from_secs(6));
+        assert!(pane.mod_toast_line().is_none());
+    }
 
     #[test]
     fn mod_toast_is_visible_below_composer_then_expires() {

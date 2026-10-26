@@ -80,7 +80,7 @@ function runtimeBridge(): UseBridge {
 test('overview exposes background task data and detail preserves the task stage', () => {
   const bridge = runtimeBridge();
   const html = render(React.createElement(RuntimeCenterOverview, { bridge }));
-  assert.ok(html.includes('local_fusion') || html.includes('background task'));
+  assert.ok(html.includes('Background processes') && html.includes('/fusion compare two approaches'));
   const active = { kind: 'task', id: FUSION_TASK.task_id } as const;
   bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: active, tabs: [active] };
   assert.ok(render(React.createElement(RuntimeCenterInspector, { bridge })).includes('Running panels 2/3'));
@@ -102,7 +102,7 @@ test('summary reserves a side rail only while the message region is wide enough'
   assert.match(render(React.createElement(RuntimeCenterOverview, { bridge })), /data-inspector-open="true"/);
 });
 
-test('pinned summary is a nonmodal region with context actions and only populated categories', () => {
+test('pinned summary is a nonmodal region with outputs and only populated categories', () => {
   const bridge = runtimeBridge();
   bridge.desktop = emptyDesktopState();
   const html = render(React.createElement(RuntimeCenterOverview, { bridge }));
@@ -110,7 +110,7 @@ test('pinned summary is a nonmodal region with context actions and only populate
   assert.ok(html.includes('aria-label="Pinned summary"'));
   assert.ok(!html.includes('role="dialog"'));
   const headings = [...html.matchAll(/<h2>(.*?)<\/h2>/g)].map((match) => match[1]);
-  assert.deepEqual(headings, ['Context']);
+  assert.deepEqual(headings, ['Outputs']);
   for (const absent of ['Subagents', 'Todos', 'Resources', 'Plan']) assert.ok(!html.includes(`<h2>${absent}</h2>`));
   for (const empty of ['No subagents or background tasks.', 'No todos yet.', 'No input resources in this session.', 'No submitted plan yet.']) assert.ok(!html.includes(empty));
 });
@@ -254,7 +254,7 @@ test('plan approval state overrides running label and clears after either decisi
   }
   const bridge = runtimeBridge();
   bridge.desktop = { ...emptyDesktopState(), tasks: { [task.task_id]: task } };
-  assert.ok(render(React.createElement(RuntimeCenterOverview, { bridge })).includes('1 awaiting approval'));
+  assert.ok(render(React.createElement(RuntimeCenterOverview, { bridge })).includes('>awaiting approval</span>'));
 });
 
 function renderAgentActivity(status: string, activity?: string, withTranscript = true): string {
@@ -380,16 +380,23 @@ test('finished agents and tasks render claude-code labels, and the summary still
   const overview = render(React.createElement(RuntimeCenterOverview, {
     bridge: { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, overviewOpen: true } } as unknown as UseBridge,
   }));
-  assert.ok(overview.includes('2 done · 2 failed'), `background-task summary counts raw statuses: ${overview}`);
+  assert.ok(overview.includes('Background processes') && overview.includes('done, unread') && overview.includes('stopped'));
   assert.ok(overview.includes('1 done'), `subagent summary counts raw statuses: ${overview}`);
 });
 
-test('summary owns context browsing and compaction controls', () => {
+test('summary removes Context and Changes and separates side questions from subagents', () => {
   const bridge = runtimeBridge();
+  bridge.runtimeCenter.agents = {
+    side: { agent_id: 'side', agent_type: 'side_question', name: 'A side question', status: 'running' },
+    worker: { agent_id: 'worker', agent_type: 'Explore', name: 'Worker', status: 'completed' },
+  };
   const html = render(React.createElement(RuntimeCenterOverview, { bridge }));
-  assert.match(html, /aria-label="Open context summaries"/);
-  assert.match(html, /aria-label="Compact conversation"/);
-  assert.match(html, /Compact/);
+  const headings = [...html.matchAll(/<h2>(.*?)<\/h2>/g)].map(match => match[1]);
+  assert.deepEqual(headings, ['Outputs', 'Side chats', 'Subagents', 'Background processes']);
+  assert.ok(html.includes('A side question'));
+  assert.ok(html.includes('1 done'));
+  assert.ok(!html.includes('1 running'));
+  assert.doesNotMatch(html, /Open context summaries|Compact conversation|aria-label="Changes"/);
 });
 
  test('subagents are grouped by lifecycle with counts, newest first and empty states', () => {
@@ -435,5 +442,5 @@ test('background agents show task titles and avatars without duplicating linked 
   assert.ok(html.includes('Background task empty'));
   const overview = render(React.createElement(RuntimeCenterOverview, { bridge }));
   assert.ok(overview.includes('1 running'));
-  assert.ok(overview.includes('3 background tasks'));
+  assert.ok(overview.includes('Audit build scripts') && overview.includes('Review test coverage'));
 });

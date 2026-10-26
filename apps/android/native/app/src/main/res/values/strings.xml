@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_compact_during_turn">对话进行中，暂时无法压缩上下文</string>
     <string name="chat_message_copy">复制</string>
     <string name="chat_message_copied">已复制</string>
     <string name="app_intent_ask_description">把来自 Siri、快捷指令或其他 App 的文本带入新对话。</string>

@@ -38,6 +38,37 @@ import SwiftUI
             )
         }
 
+        func testCompactRefusalLeavesTheActiveTurnAndAutomaticCompactionRunning() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 31, sessionId: "compact-refusal")
+            source.applyForTesting(.turnStarted(turnId: 31))
+            source.applyForTesting(.textDelta(text: "Working".clientTextDto))
+            source.applyForTesting(.compactionStatus(phase: "summarizing", error: nil))
+            let before = source.model.compactionStatus
+            let run = source.model.items
+            source.applyForTesting(.error(kind: .protocol, message: "cannot compact the session while a turn is in flight".clientTextDto))
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertNil(source.model.error)
+            XCTAssertNotNil(source.model.compactRejectionID)
+            XCTAssertEqual(source.model.compactionStatus, before)
+            XCTAssertEqual(source.model.items, run)
+            source.applyForTesting(.textDelta(text: " on it".clientTextDto))
+            XCTAssertTrue(source.model.streaming)
+        }
+
+        func testManualCompactDuringTurnIsRejectedBeforeSubmission() async throws {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 32, sessionId: "compact-refusal")
+            source.applyForTesting(.turnStarted(turnId: 32))
+            let before = source.model.messages
+            XCTAssertNil(source.send("/compact preserve decisions", images: []))
+            try await source.submitEngineCommand(.forceCompact)
+            XCTAssertNotNil(source.model.compactRejectionID)
+            XCTAssertEqual(source.model.messages, before)
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertNil(source.model.error)
+        }
+
         private func makeSandboxRoot() throws -> String {
             let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
                 .appendingPathComponent(UUID().uuidString, isDirectory: true)

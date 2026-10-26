@@ -118,25 +118,8 @@ async function main() {
 
     assert.equal(await js(`Boolean(document.querySelector('.desktop-topbar [aria-label="More chat actions"], .desktop-topbar .git-topbar'))`), false);
     await click('[aria-label="Toggle pinned summary"]');
-    await click('[aria-label="Open context summaries"]');
-    await waitFor(wc, `Boolean(document.querySelector('#context-summary-panel'))`);
-    await waitFor(wc, `document.activeElement?.getAttribute('aria-label') === 'Close context summaries'`);
-    await js(`document.querySelectorAll('[role="option"]')[1].click()`);
-    await waitFor(wc, `document.querySelector('.context-summary-markdown')?.textContent.includes('Provider routing')`);
-    await click('[aria-label="Close context summaries"]');
-    await waitFor(wc, `document.activeElement?.getAttribute('aria-label') === 'Open context summaries'`);
-    await click('[aria-label="Open context summaries"]');
-    await waitFor(wc, `document.activeElement?.getAttribute('aria-label') === 'Close context summaries'`);
-    await capture('context-detail');
-    wc.sendInputEvent({type:'keyDown',keyCode:'Escape'});
-    wc.sendInputEvent({type:'keyUp',keyCode:'Escape'});
-    await waitFor(wc, `!document.querySelector('#context-summary-panel') && Boolean(document.querySelector('#runtime-center-overview'))`);
-    await click('[aria-label="Compact conversation"]');
-    await waitFor(wc, `document.querySelector('.desktop-shell').dataset.compactCalls === '1'`);
-    assert.equal(await js(`document.querySelector('[aria-label="Compact conversation"]').disabled`), true);
-    await click('[aria-label="Compact conversation"]');
-    assert.equal(await js(`document.querySelector('.desktop-shell').dataset.compactCalls`), '1');
-    checks.push('context browsing focus and guarded compaction in summary');
+    assert.equal(await js(`Boolean(document.querySelector('#runtime-center-overview [aria-label="Context"], #runtime-center-overview [aria-label="Changes"]'))`), false);
+    checks.push('summary excludes context and changes');
 
     await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview'))`);
     await settleFixtureAnimations(wc, '#runtime-center-overview');
@@ -154,7 +137,7 @@ async function main() {
     })()`);
     assert.equal(overview.width, 300);
     assert.equal(overview.radius, '20px');
-    assert.deepEqual(overview.sections, ['Context', 'Subagents', 'Resources', 'Plan']);
+    assert.deepEqual(overview.sections, ['Outputs', 'Subagents', 'Sources']);
     assert.equal(overview.fourthResource, false);
     // macOS may constrain the requested window height to the available screen.
     // The rail hugs its content until it reaches the row's 20px margin budget.
@@ -176,6 +159,10 @@ async function main() {
     await js(`document.querySelector('[data-fixture-chat]').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))`);
     assert.equal(await js(`Boolean(document.querySelector('#runtime-center-overview'))`), true);
     await capture('summary-light');
+    await js(`window.dispatchEvent(new CustomEvent('fixture-reset', { detail: { showSides: true } }))`);
+    await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview [aria-label="Side chats"]'))`);
+    await capture('summary-populated');
+    await js(`window.dispatchEvent(new CustomEvent('fixture-reset', { detail: { showSides: false } }))`);
     checks.push('pinned overview hugs content bounded scroll and resource limit');
 
     await click('[aria-label="Toggle right panel"]');
@@ -184,8 +171,8 @@ async function main() {
     await waitFor(wc, `document.querySelector('#runtime-inspector-panel')?.textContent.includes('Inspect the existing desktop layout')`);
     assert.equal(await js(`Boolean(document.querySelector('#runtime-center-overview'))`), true);
     assert.equal(await js(`document.querySelectorAll('[role="tab"]').length`), 1);
-    await clickText('#runtime-center-overview [aria-label="Plan"]', 'Desktop workspace');
-    await clickText('#runtime-center-overview [aria-label="Plan"]', 'Desktop workspace');
+    await clickText('#runtime-center-overview [aria-label="Outputs"]', 'Desktop workspace');
+    await clickText('#runtime-center-overview [aria-label="Outputs"]', 'Desktop workspace');
     assert.equal(await js(`document.querySelectorAll('[role="tab"]').length`), 2);
     await waitFor(wc, `document.querySelector('#runtime-inspector-panel')?.textContent.includes('Bring the desktop toolbar')`);
     await js(`document.querySelector('[data-runtime-inspector-active="true"]').focus()`);
@@ -211,7 +198,7 @@ async function main() {
     await waitFor(wc, `Boolean(document.querySelector('.runtime-inspector-landing'))`);
     checks.push('hide preserves tabs last close shows landing');
 
-    await clickText('#runtime-center-overview [aria-label="Resources"]', 'View all');
+    await clickText('#runtime-center-overview [aria-label="Sources"]', 'View all');
     await waitFor(wc, `document.querySelector('#runtime-inspector-panel')?.textContent.includes('acceptance.md')`);
     await js(`document.querySelector('#runtime-center-overview button').focus()`);
     wc.sendInputEvent({type:'keyDown',keyCode:'Escape'});
@@ -249,58 +236,17 @@ async function main() {
     assert.equal(await js(`document.querySelector('#runtime-center-overview').textContent.includes('Desktop workspace')`), false);
     await capture('empty-light');
     checks.push('session reset and empty categories stay hidden');
-    // Exercise actual wheel input, so an unconstrained overflow:auto child cannot pass.
     await click('[aria-label="Hide right panel"]');
-    await js(`window.dispatchEvent(new CustomEvent('fixture-reset',{detail:{longSummaries:true}}))`);
-    await click('[aria-label="Open context summaries"]');
-    await waitFor(wc, `document.querySelectorAll('.context-summary-item').length === 13`);
-    const panes = ['.context-summary-list', '.context-summary-markdown'];
-    const measure = () => js(`(() => {
-      const panel = document.querySelector('#context-summary-panel');
-      const bounds = panel.getBoundingClientRect();
-      return {
-        viewport: { width: innerWidth, height: innerHeight },
-        bounds: { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom },
-        panes: ${JSON.stringify(panes)}.map(selector => {
-          const element = document.querySelector(selector);
-          return { top: element.scrollTop, height: element.clientHeight, contentHeight: element.scrollHeight, width: element.clientWidth, contentWidth: element.scrollWidth };
-        }),
-        headers: ['.context-summary-heading', '.context-summary-detail-heading'].map(selector => {
-          const rect = document.querySelector(selector).getBoundingClientRect();
-          return { top: rect.top, bottom: rect.bottom };
-        }),
-        overflow: ['#context-summary-panel', '.context-summary-sidebar', '.context-summary-detail'].some(selector => {
-          const element = document.querySelector(selector);
-          return element.scrollWidth > element.clientWidth + 1;
-        }),
-      };
-    })()`);
-    for (const [name, width, height] of [['regular', 1400, 900], ['narrow', 600, 600], ['short', 900, 360]]) {
-      window.setContentSize(width, height);
-      await delay(150);
-      await js(`${JSON.stringify(panes)}.forEach(selector => { document.querySelector(selector).scrollTop = 0; })`);
-      await capture(`context-long-${name}`);
-      const initial = await measure();
-      assert.ok(initial.bounds.left >= 0 && initial.bounds.top >= 0 && initial.bounds.right <= width && initial.bounds.bottom <= height, `${name}: dialog fits viewport`);
-      assert.equal(initial.overflow, false, `${name}: no horizontal container overflow`);
-      for (const [index, selector] of panes.entries()) {
-        assert.ok(initial.panes[index].height > 0 && initial.panes[index].contentHeight > initial.panes[index].height, `${name}: ${selector} is a bounded scroll pane`);
-        // Let smooth scrolling and Chromium's previous wheel gesture settle.
-        await delay(250);
-        const before = await measure();
-        const point = await js(`(() => { const rect = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + Math.min(35, rect.height / 2)) }; })()`);
-        wc.sendInputEvent({ type: 'mouseMove', ...point });
-        wc.sendInputEvent({ type: 'mouseWheel', ...point, deltaX: 0, deltaY: -240, canScroll: true });
-        await waitFor(wc, `document.querySelector(${JSON.stringify(selector)}).scrollTop > ${before.panes[index].top}`);
-        await delay(250);
-        const after = await measure();
-        assert.equal(after.panes[1 - index].top, before.panes[1 - index].top, `${name}: panes scroll independently`);
-        assert.deepEqual(after.headers, initial.headers, `${name}: headers stay pinned`);
-        assert.ok(after.headers.every(header => header.top >= after.bounds.top && header.bottom <= after.bounds.bottom), `${name}: headers remain visible`);
-      }
-      assert.equal((await measure()).panes[1].contentWidth <= initial.panes[1].width + 1, true, `${name}: long inline paths wrap inside markdown`);
-    }
-    checks.push('long context bounded layout independent wheel scrolling and pinned headers at three viewport sizes');
+    await js(`window.dispatchEvent(new CustomEvent('fixture-reset', { detail: { showSides: true } }))`);
+    await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview [aria-label="Side chats"]'))`);
+    await clickText('#runtime-center-overview [aria-label="Side chats"]', 'Side chat');
+    assert.equal(await js(`document.querySelector('.desktop-shell').dataset.selectedSide`), 'side-1');
+    assert.equal(await js(`document.querySelector('#runtime-center-overview')`), null);
+    await click('[aria-label="Toggle pinned summary"]');
+    await pointerClick('.runtime-summary-create');
+    assert.equal(await js(`document.querySelector('.desktop-shell').dataset.outputDraft`), 'Help me create a file or site.');
+    assert.equal(await js(`document.querySelector('#runtime-center-overview')`), null);
+    checks.push('side chat selection and output draft close the summary');
     if (process.env.LINGXI_TOPBAR_SCREENSHOT) {
       await mkdir(dirname(process.env.LINGXI_TOPBAR_SCREENSHOT), { recursive: true });
       await writeFile(process.env.LINGXI_TOPBAR_SCREENSHOT, (await wc.capturePage()).toPNG());

@@ -5577,17 +5577,13 @@ impl ChatWidget {
         if self.current_compaction.is_some() {
             return self.show_system_text("Compaction already in progress", true);
         }
-        if self.current_turn.is_some() {
-            if self.queued_compact.is_none() {
-                let args = args.to_string();
-                let preview = if args.trim().is_empty() {
-                    "/compact".to_string()
-                } else {
-                    format!("/compact {args}")
-                };
-                self.queued_compact = Some(args);
-                self.bottom_pane.set_queued_messages(vec![preview]);
-            }
+        if self.current_turn.is_some()
+            || self.pending_slash_dispatches.iter().any(PendingSlashDispatch::is_pending)
+        {
+            self.bottom_pane.set_command_alert(
+                "Compact is disabled while a chat is in progress".into(),
+                5_000,
+            );
             return ChatOutcome::Continue;
         }
         let token = CancellationToken::new();
@@ -9422,7 +9418,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_rejects_overlapping_compaction_and_queues_during_live_turn() {
+    fn compact_rejects_overlapping_compaction_and_live_turn_without_queueing() {
         let (mut widget, _mock) = widget_with_orchestrator();
         assert!(matches!(
             widget.cmd_compact("first"),
@@ -9441,10 +9437,15 @@ mod tests {
             widget.submit_prompt("running".into()),
             ChatOutcome::Submit(_, _, _, _)
         ));
-        assert!(matches!(widget.cmd_compact(""), ChatOutcome::Continue));
-        assert!(widget.queued_compact.is_some());
+        let transcript_len = cells(&widget).len();
+        assert!(matches!(widget.handle_slash("/compact preserve decisions".into()), Some(ChatOutcome::Continue)));
+        assert_eq!(cells(&widget).len(), transcript_len);
+        assert!(!widget.current_turn.as_ref().unwrap().is_cancelled());
+        assert!(widget.queued_compact.is_none());
+        assert!(widget.current_turn.is_some());
+        assert!(widget.current_compaction.is_none());
 
-        // Editing remains live after queueing; replay must not consume the
+        // Editing remains live after refusal; feedback must not consume the
         // composer's follow-up draft.
         for ch in "draft".chars() {
             assert!(matches!(
@@ -9457,16 +9458,8 @@ mod tests {
         ));
         assert_eq!(widget.bottom_pane().composer().text(), "draft");
 
-        let Some((args, token)) = widget.take_ready_compact() else {
-            panic!("queued /compact must be replayed at TurnEnded");
-        };
-        assert_eq!(args, "");
-        assert!(!token.is_cancelled());
-        assert!(widget.current_compaction.is_some());
-        assert!(
-            widget.take_ready_compact().is_none(),
-            "queued compact callback is exactly once"
-        );
+        assert!(widget.take_ready_compact().is_none());
+        assert!(widget.current_compaction.is_none());
     }
 
     #[test]

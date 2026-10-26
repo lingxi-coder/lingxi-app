@@ -195,7 +195,11 @@ internal class DurableTurnReplayGate {
         }
         is ClientEvent.TurnEventReplay ->
             suppressingRetainedReplayTurnId != event.turnId.toLong()
-        is ClientEvent.TurnEnded, is ClientEvent.Error -> {
+        is ClientEvent.Error -> {
+            if (!isCompactTurnRejection(event.message.displayText())) clearAll()
+            true
+        }
+        is ClientEvent.TurnEnded -> {
             clearAll()
             true
         }

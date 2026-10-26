@@ -2003,7 +2003,11 @@ export interface BridgeWireError {
  * `params` carries a {@link ClientCommand} (or a {@link ClientHello} when
  * `method === "hello"`).
  */
+/** Standard W3C trace carrier supplied by a trusted caller with an actual parent span. */
+export interface BridgeTraceContext { traceparent: string; tracestate?: string }
+
 export interface BridgeRequest {
+  trace_context?: BridgeTraceContext;
   id: number;
   method: string;
   params: unknown;

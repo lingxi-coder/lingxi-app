@@ -1,0 +1,20 @@
+services:
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.163.2
+    command: ["--config=/etc/otelcol/collector.yaml"]
+    user: "${LINGXI_OTEL_UID:-1000}:${LINGXI_OTEL_GID:-1000}"
+    environment:
+      LINGXI_OTEL_BIND_ADDRESS: 0.0.0.0
+      LINGXI_OTEL_OUTPUT_DIR: /capture
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
+    volumes:
+      - ./collector.yaml:/etc/otelcol/collector.yaml:ro
+      - ${LINGXI_OTEL_CAPTURE_DIR:?Set a new absolute capture directory}:/capture:rw
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 384m
+    stop_grace_period: 10s

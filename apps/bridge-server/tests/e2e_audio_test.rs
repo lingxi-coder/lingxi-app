@@ -99,6 +99,7 @@ async fn connect(
         .expect("ws upgrade must succeed");
     assert_eq!(response.status(), 101, "upgrade must return 101");
     let hello = Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 0,
         method: "hello".into(),
         params: bridge_source(&ClientHello {
@@ -146,6 +147,7 @@ where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
     let frame = Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 1,
         method: "submit".into(),
         params: bridge_source(&command),

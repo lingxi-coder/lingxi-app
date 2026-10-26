@@ -740,6 +740,7 @@ struct Composer: View {
         sendEnabled
             && !isWaitingForSlashCatalog
             && !(streaming
+                && draft.split(whereSeparator: { $0.isWhitespace }).first?.lowercased() != "/compact"
                 && SideChatCommand.input(draft) == nil
                 && slashCommandsLoaded
                 && SlashCommandMatcher.exactCommand(

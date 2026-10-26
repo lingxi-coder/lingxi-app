@@ -248,6 +248,7 @@ internal fun RemoteSessionScreen(
             onRemoveAttachment = { attachments.clear() },
             onStop = chat::cancel,
             onDismissError = chat::dismissError,
+                    onDismissCompactRejection = chat::dismissCompactRejection,
             onAnswerQuestion = chat::answerQuestion,
             onCancelQuestion = chat::cancelQuestion,
             onToggleToolCall = chat::toggleToolCall,

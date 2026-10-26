@@ -1,4 +1,5 @@
 {
+  "chat_compact_during_turn": "채팅 진행 중에는 압축할 수 없습니다",
   "chat_message_copy": "복사",
   "chat_message_copied": "복사됨",
   "__info_plist__": {

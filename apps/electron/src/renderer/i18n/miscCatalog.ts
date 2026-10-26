@@ -15,6 +15,7 @@ const rows: Record<string, readonly [string, string, string, string, string]> = 
   recovering: ['正在检查并恢复…', '正在檢查並復原…', 'Checking and recovering…', '確認して復旧中…', '확인 및 복구 중…'],
   retry_continue: ['重试并继续', '重試並繼續', 'Retry and continue', '再試行して続行', '다시 시도하고 계속하기'],
   unknown_error: ['未知的桌面端错误', '未知的桌面端錯誤', 'Unknown desktop error', '不明なデスクトップエラー', '알 수 없는 데스크톱 오류'],
+  compact_during_turn: ['对话进行中，暂时无法压缩上下文', '對話進行中，暫時無法壓縮上下文', 'Compact is disabled while a chat is in progress', 'チャットの実行中はコンパクトできません', '채팅 진행 중에는 압축할 수 없습니다'],
   turn_in_progress: ['当前任务仍在运行', '目前工作仍在執行', 'Turn in progress', 'ターンを実行中', '턴 진행 중'],
   secure_unavailable: ['安全存储不可用', '安全儲存不可用', 'Secure persistence unavailable', '安全な保存領域を利用できません', '보안 저장소 사용 불가'],
   keychain_reconnect: ['允许灵犀访问钥匙串，然后重新连接提供商。', '允許靈犀存取鑰匙圈，然後重新連線提供商。', 'Allow LingXi Code to access Keychain, then reconnect the provider.', 'LingXi Code にキーチェーンへのアクセスを許可し、プロバイダーに再接続してください。', 'LingXi Code의 키체인 접근을 허용한 후 제공업체에 다시 연결하세요.'],

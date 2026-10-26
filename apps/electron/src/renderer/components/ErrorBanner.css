@@ -102,3 +102,26 @@
   .desktop-notification { background: var(--notification-surface); backdrop-filter: none; border-color: var(--notification-text); }
   .desktop-notification-detail { color: var(--notification-text); }
 }
+
+/* Compact refusal stays above the conversation without moving its content. */
+.desktop-notification-region-centered { justify-content: center; top: 12px; }
+.desktop-notification-compact {
+  align-items: center;
+  gap: .65rem;
+  width: fit-content;
+  max-width: min(100%, 42rem);
+  padding: .65rem .75rem .65rem 1rem;
+  border-radius: 14px;
+  color: var(--notification-danger);
+  border-color: color-mix(in srgb, var(--notification-danger) 22%, transparent);
+  background: color-mix(in srgb, var(--notification-danger) 6%, var(--notification-surface));
+  box-shadow: 0 6px 22px rgb(0 0 0 / .09);
+}
+.desktop-notification-compact .desktop-notification-icon { flex-basis: 20px; height: 24px; background: transparent; }
+.desktop-notification-compact .desktop-notification-content { padding: 0; }
+.desktop-notification-compact .desktop-notification-title { font-size: .9375rem; font-weight: 500; line-height: 1.4; letter-spacing: 0; }
+.desktop-notification-compact .desktop-notification-close { flex-basis: 32px; height: 32px; margin: 0; color: var(--notification-danger); }
+.desktop-notification-compact .desktop-notification-close::before { background: transparent; }
+@media (prefers-contrast: more) {
+  .desktop-notification-compact { border-color: var(--notification-danger); }
+}

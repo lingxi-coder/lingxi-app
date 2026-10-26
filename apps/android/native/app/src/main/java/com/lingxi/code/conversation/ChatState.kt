@@ -62,6 +62,7 @@ data class ChatState(
     val statusLine: String? = null,
     /** Latest manual `/compact` lifecycle; terminal state remains until the next action. */
     val compaction: CompactionProgressUi? = null,
+    val compactRejectionId: String? = null,
     /** Live/completed shell calls for the current session, keyed by task id. */
     val shellTools: List<ShellToolCardState> = emptyList(),
     /** Latest android_use invocation, used to reopen setup guidance after dismissal. */

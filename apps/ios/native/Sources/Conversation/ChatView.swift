@@ -294,7 +294,10 @@ struct ChatView: View {
         #endif
         .onChange(of: draft) { _, _ in reportSuggestionContext() }
         .onChange(of: scenePhase) { _, _ in reportSuggestionContext() }
-        .onChange(of: convo.activeSessionId) { _, _ in reportSuggestionContext() }
+        .onChange(of: convo.activeSessionId) { _, _ in
+            convo.compactRejectionID = nil
+            reportSuggestionContext()
+        }
         .onChange(of: attachment) { _, value in reportSuggestionContext(); onDraftMediaChanged(value != nil || convo.visualizationChip != nil) }
         .onChange(of: convo.visualizationChip?.id) { _, _ in reportSuggestionContext(); onDraftMediaChanged(attachment != nil || convo.visualizationChip != nil) }
         .onChange(of: convo.pendingQuestions.map(\.requestId)) { _, _ in reportSuggestionContext() }
@@ -303,6 +306,19 @@ struct ChatView: View {
     var body: some View {
         let visibleAvailableModels = providerRepository.visibleModelReferences(convo.availableModels)
         conversationContent
+        .overlay(alignment: .top) {
+            if let rejectionID = convo.compactRejectionID {
+                CompactRejectionAlert { convo.compactRejectionID = nil }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .id(rejectionID)
+                    .task(id: rejectionID) {
+                        guard !UIAccessibility.isVoiceOverRunning else { return }
+                        do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                        if convo.compactRejectionID == rejectionID { convo.compactRejectionID = nil }
+                    }
+            }
+        }
         .environment(\.theme, t)
         .tint(t.accent)
         .buttonStyle(.plain)
@@ -1396,6 +1412,43 @@ private struct RuntimeErrorBanner: View {
             .tint(t.accent)
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+        }
+    }
+}
+
+private struct CompactRejectionAlert: View {
+    @Environment(\.theme) private var t
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.circle")
+                .accessibilityHidden(true)
+            Text(String(localized: "chat_compact_during_turn"))
+                .font(.subheadline.weight(.medium))
+                .fixedSize(horizontal: false, vertical: true)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.semibold))
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(.rect)
+            }
+            .accessibilityLabel(String(localized: "chat_dismiss_error"))
+        }
+        .foregroundStyle(t.danger)
+        .padding(.leading, 14)
+        .padding(.trailing, 4)
+        .padding(.vertical, 4)
+        .background {
+            RoundedRectangle(cornerRadius: 14).fill(t.windowBg)
+                .overlay { RoundedRectangle(cornerRadius: 14).fill(t.danger.opacity(0.06)) }
+        }
+        .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(t.danger.opacity(0.22), lineWidth: 1) }
+        .shadow(color: .black.opacity(0.09), radius: 12, y: 4)
+        .frame(maxWidth: 560)
+        .accessibilityIdentifier("conversation.compact-rejection")
+        .onAppear {
+            UIAccessibility.post(notification: .announcement, argument: String(localized: "chat_compact_during_turn"))
         }
     }
 }

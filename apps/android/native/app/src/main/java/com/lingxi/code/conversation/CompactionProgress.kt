@@ -80,3 +80,10 @@ internal fun formatCompactBytes(bytes: Long): String = when {
     bytes >= 1_024L -> String.format(Locale.ROOT, "%.0f KB", bytes / 1_024.0)
     else -> "$bytes B"
 }
+
+
+internal fun isCompactTurnRejection(message: String): Boolean =
+    compactFailureDetail(message) in setOf(
+        "cannot compact the session while a turn is in flight",
+        "Compact is disabled while a chat is in progress",
+    )

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -121,13 +122,14 @@ fun AskUserQuestionCard(
     }
 
     Card(
-        shape = RoundedCornerShape(24.dp),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         modifier = modifier.fillMaxWidth(),
     ) {
         Column(
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxWidth().padding(16.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -140,11 +142,14 @@ fun AskUserQuestionCard(
                 Text(
                     text = androidx.compose.ui.res.stringResource(R.string.chat_ask_user_question_title),
                     color = MaterialTheme.colorScheme.onSurface,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Normal,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f).padding(start = 10.dp).semantics { heading() },
                 )
-                if (questions.size > 1) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                ) {
                     Text(
                         text = androidx.compose.ui.res.stringResource(
                             R.string.chat_question_answered_progress,
@@ -152,7 +157,8 @@ fun AskUserQuestionCard(
                             questions.size,
                         ),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
                     )
                 }
                 IconButton(onClick = { onCancel(request.requestId) }) {
@@ -186,7 +192,7 @@ fun AskUserQuestionCard(
                                 question.multiSelect,
                             )
                             selections[index] = next
-                            if (!question.multiSelect && next.isNotEmpty()) {
+                            if (questions.size > 1 && !question.multiSelect && next.isNotEmpty()) {
                                 expandedQuestion = questions.indices.firstOrNull { candidate ->
                                     candidate != index &&
                                         selections[candidate].orEmpty().isEmpty() &&
@@ -222,7 +228,7 @@ private fun AskQuestionAccordionRow(
     onFreeTextChange: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(18.dp)
+    val shape = RoundedCornerShape(12.dp)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -234,7 +240,7 @@ private fun AskQuestionAccordionRow(
                 .fillMaxWidth()
                 .semantics { heading() }
                 .clickable(onClick = onExpand)
-                .padding(horizontal = 8.dp, vertical = 10.dp),
+                .padding(vertical = 10.dp),
         ) {
             Column(
                 verticalArrangement = Arrangement.spacedBy(3.dp),
@@ -244,13 +250,15 @@ private fun AskQuestionAccordionRow(
                     text = question.question.displayText(),
                     style = MaterialTheme.typography.bodyLarge,
                     color = colors.onSurface,
-                    fontWeight = FontWeight.Normal,
+                    fontWeight = FontWeight.SemiBold,
                 )
-                Text(
-                    text = answer ?: androidx.compose.ui.res.stringResource(R.string.chat_question_tap_to_answer),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = colors.onSurfaceVariant.copy(alpha = 0.65f),
-                )
+                if (!expanded) {
+                    Text(
+                        text = answer ?: androidx.compose.ui.res.stringResource(R.string.chat_question_tap_to_answer),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
             }
             Icon(
                 imageVector = if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
@@ -261,16 +269,16 @@ private fun AskQuestionAccordionRow(
 
         AnimatedVisibility(visible = expanded) {
             Column(
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth().selectableGroup().padding(bottom = 6.dp),
             ) {
                 question.options.forEachIndexed { optionIndex, option ->
                     val active = optionIndex in selected
                     Surface(
                         shape = shape,
-                        color = if (active) colors.secondaryContainer.copy(alpha = 0.7f) else colors.surface,
+                        color = if (active) colors.primary.copy(alpha = 0.08f) else colors.surfaceContainerLow,
                         border = BorderStroke(
-                            width = 1.dp,
+                            width = if (active) 1.5.dp else 1.dp,
                             color = if (active) colors.primary else colors.outlineVariant,
                         ),
                         modifier = Modifier
@@ -283,7 +291,7 @@ private fun AskQuestionAccordionRow(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier.heightIn(min = 56.dp).padding(horizontal = 12.dp, vertical = 8.dp),
                         ) {
                             if (question.multiSelect) {
                                 Checkbox(checked = active, onCheckedChange = null)
@@ -291,12 +299,12 @@ private fun AskQuestionAccordionRow(
                                 RadioButton(selected = active, onClick = null)
                             }
                             Spacer(Modifier.width(8.dp))
-                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = option.label.displayText(),
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = colors.onSurface,
-                                    fontWeight = FontWeight.Medium,
+                                    fontWeight = FontWeight.SemiBold,
                                 )
                                 if (option.description.displayText().isNotBlank()) {
                                     Text(
@@ -310,15 +318,12 @@ private fun AskQuestionAccordionRow(
                     }
                 }
 
-                Text(
-                    text = androidx.compose.ui.res.stringResource(R.string.chat_ask_other_option),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = colors.onSurfaceVariant,
-                )
                 OutlinedTextField(
                     value = freeText,
                     onValueChange = onFreeTextChange,
                     placeholder = { Text(androidx.compose.ui.res.stringResource(R.string.chat_question_other_placeholder)) },
+                    label = { Text(androidx.compose.ui.res.stringResource(R.string.chat_ask_other_option)) },
+                    shape = shape,
                     minLines = 1,
                     maxLines = 3,
                     modifier = Modifier.fillMaxWidth(),

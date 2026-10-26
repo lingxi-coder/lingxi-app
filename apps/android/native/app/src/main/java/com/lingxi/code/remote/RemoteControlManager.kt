@@ -1,5 +1,6 @@
 package com.lingxi.code.remote
 
+import com.lingxi.code.bindings.android.RemoteFileFfi
 import android.content.Context
 import android.os.Build
 import com.google.firebase.auth.FirebaseAuth
@@ -16,6 +17,7 @@ import com.lingxi.code.bindings.android.RemotePermissionModeFfi
 import com.lingxi.code.bindings.android.RemotePromptImageFfi
 import com.lingxi.code.bindings.android.RemoteSessionSummaryFfi
 import com.lingxi.code.bindings.android.RemoteSessionUpdateFfi
+import com.lingxi.code.bindings.android.RemoteTransportFfi
 import com.lingxi.code.bindings.android.buildAndroidRemoteControlClient
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import com.lingxi.code.conversation.RemoteSessionPort
@@ -40,6 +42,7 @@ import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -64,12 +67,28 @@ class FirebaseRemoteAccount(private val auth: FirebaseAuth = FirebaseAuth.getIns
 
     override suspend fun idToken(forceRefresh: Boolean): String {
         val user = auth.currentUser ?: throw IllegalStateException("not signed in")
-        return checkNotNull(user.getIdToken(forceRefresh).await().token) { "no ID token" }
+        if (BuildConfig.DEBUG) android.util.Log.d("RemoteControl", "Requesting account token; refresh=$forceRefresh")
+        return try {
+            checkNotNull(user.getIdToken(forceRefresh).await().token) { "no ID token" }.also {
+                if (BuildConfig.DEBUG) android.util.Log.d("RemoteControl", "Account token ready")
+            }
+        } catch (error: Exception) {
+            if (BuildConfig.DEBUG) android.util.Log.d("RemoteControl", "Account token failed: ${error.javaClass.simpleName}")
+            throw error
+        }
     }
 }
 
 /** What the app uses of the generated client; tests substitute it. */
 interface RemoteClientPort {
+    suspend fun prepareFile(sessionId: String, path: String, name: String): RemoteFileFfi
+    suspend fun uploadFile(file: RemoteFileFfi, path: String): RemoteFileFfi
+    suspend fun downloadFile(file: RemoteFileFfi, path: String): RemoteFileFfi
+    suspend fun listFiles(sessionId: String): List<RemoteFileFfi>
+    fun fileProgress(transferId: String): ULong
+    fun cancelFile(transferId: String)
+    suspend fun sendPromptWithFiles(sessionId: String, text: String, images: List<com.lingxi.code.bindings.android.RemotePromptImageFfi>, fileRefs: List<String>)
+
     fun setPushInstallationId(id: String?)
     suspend fun watchHosts()
     suspend fun stopWatchingHosts()
@@ -299,6 +318,24 @@ class RemoteControlManager(
         return client
     }
 
+    /** A system document picker can outlive the peer. Wait for the existing
+     * account/host to reconnect before starting file RPCs on return. */
+    internal suspend fun filePort(ownerUid: String?, hostId: String, sessionReady: Flow<Boolean>): RemoteClientPort {
+        return checkNotNull(withTimeoutOrNull(30_000) {
+            val bound = port(ownerUid, hostId)
+            bound.nudge()
+            combine(mutableClient, mutableConnection, account.uid, sessionReady) { binding, _, uid, attached ->
+                if (uid != ownerUid || binding?.client !== bound) throw CancellationException("remote account changed")
+                val state = bound.connectionState()
+                check(state?.hostId == null || state.hostId == hostId) { "remote computer changed" }
+                if (state?.phase == RemoteConnectionPhaseFfi.READY) {
+                    check(state.transport == RemoteTransportFfi.WEBRTC) { "File transfer requires a WebRTC connection" }
+                    bound.takeIf { attached }
+                } else null
+            }.filterNotNull().first()
+        }) { "Remote computer is still reconnecting; retry when connected" }
+    }
+
     private inner class ManagerListener(private val mine: Int, private val ownerUid: String) : AndroidRemoteListener {
         override suspend fun onConnectionState(state: RemoteConnectionStateFfi) {
             if (mine != generation.get() || account.uid.value != ownerUid) return
@@ -416,6 +453,14 @@ internal class FfiRemoteClientFactory(
 
 /** [RemoteClientPort] over the generated [AndroidRemoteControlClient]. */
 internal class FfiRemoteClientPort(private val client: AndroidRemoteControlClient) : RemoteClientPort {
+    override suspend fun prepareFile(sessionId: String, path: String, name: String) = client.prepareFile(sessionId, path, name)
+    override suspend fun uploadFile(file: RemoteFileFfi, path: String) = client.uploadFile(file, path)
+    override suspend fun downloadFile(file: RemoteFileFfi, path: String) = client.downloadFile(file, path)
+    override suspend fun listFiles(sessionId: String) = client.listFiles(sessionId)
+    override fun fileProgress(transferId: String) = client.fileProgress(transferId)
+    override fun cancelFile(transferId: String) = client.cancelFile(transferId)
+    override suspend fun sendPromptWithFiles(sessionId: String, text: String, images: List<com.lingxi.code.bindings.android.RemotePromptImageFfi>, fileRefs: List<String>) = client.sendPromptWithFiles(sessionId, text, images, fileRefs)
+
     override fun setPushInstallationId(id: String?) = client.setPushInstallationId(id)
     override suspend fun watchHosts() = client.watchHosts()
     override suspend fun stopWatchingHosts() = client.stopWatchingHosts()

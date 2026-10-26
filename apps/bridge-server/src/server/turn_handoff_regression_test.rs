@@ -417,6 +417,7 @@ async fn send_request<P: serde::Serialize>(socket: &mut Socket, id: u64, method:
     socket
         .send(Message::Text(
             serde_json::to_string(&Frame::Request(BridgeRequest {
+                trace_context: None,
                 id,
                 method: method.into(),
                 params,

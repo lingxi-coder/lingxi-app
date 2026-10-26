@@ -64,11 +64,25 @@ FINAL_NATIVE_SYMBOLS_DIR="${LINGXI_ANDROID_NATIVE_SYMBOLS_DIR:-${ANDROID_DIR}/ap
 STAGING_PARENT="${ANDROID_DIR}/app/build/nativeStaging/${VARIANT}"
 KOTLIN_OUT="${LINGXI_KOTLIN_OUT:-${ANDROID_DIR}/app/src/main/java}"   # bindgen writes <pkg-path>/*.kt under here
 
-PROFILE="release"
+# Match the iOS FFI builder: debug is useful for constrained local acceptance;
+# release remains the default for distributed artifacts.
+PROFILE="${LINGXI_FFI_PROFILE:-release}"
+case "${PROFILE}" in
+  release) PROFILE_ARGS=(--release) ;;
+  debug) PROFILE_ARGS=(--profile dev) ;;
+  *) echo "ERROR: LINGXI_FFI_PROFILE must be release or debug" >&2; exit 1 ;;
+esac
 
 # Rust target triple → Android ABI directory name. (Portable to bash 3.2 — macOS
 # ships no associative arrays, so map via a case function instead of `declare -A`.)
 TARGETS=("aarch64-linux-android" "x86_64-linux-android")
+# Local device acceptance can build a single ABI without packaging stale bytes.
+case "${LINGXI_ANDROID_ABI:-all}" in
+  all) ;;
+  arm64-v8a) TARGETS=("aarch64-linux-android") ;;
+  x86_64) TARGETS=("x86_64-linux-android") ;;
+  *) echo "ERROR: LINGXI_ANDROID_ABI must be all, arm64-v8a, or x86_64" >&2; exit 1 ;;
+esac
 abi_of() {
   case "$1" in
     aarch64-linux-android) echo "arm64-v8a" ;;
@@ -292,11 +306,11 @@ done
 if [[ "${VARIANT}" == "direct" ]]; then
   ( cd "${CARGO_DIR}" && CARGO_PROFILE_RELEASE_DEBUG=1 cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
       build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
-      --features android-computer-use --"${PROFILE}" )
+      --features android-computer-use "${PROFILE_ARGS[@]}" )
 else
   ( cd "${CARGO_DIR}" && CARGO_PROFILE_RELEASE_DEBUG=1 cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
       build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
-      --"${PROFILE}" )
+      "${PROFILE_ARGS[@]}" )
 fi
 
 # Verify every expected ABI `.so` landed.
@@ -319,7 +333,7 @@ done
 # invocation's unstripped staging copy and strip it only for APK packaging.
 # Bindings must describe the library this invocation will publish. A shared
 # Cargo target directory may be rebuilt by another checkout while bindgen runs.
-INTROSPECT_LIB="${JNILIBS_DIR}/arm64-v8a/${SONAME}"
+INTROSPECT_LIB="${JNILIBS_DIR}/$(abi_of "${TARGETS[0]}")/${SONAME}"
 
 # Build the standalone metadata extractor before generating bindings from the
 # matching staged cdylib; this does not compile a second platform's runtime.
@@ -358,23 +372,21 @@ done
 # UniFFI metadata lives in linker sections that llvm-strip removes. Keep the
 # staging libraries intact until bindgen has inspected one of them, then strip
 # only the runtime payloads immediately before copying them into the APK tree.
-if [[ "${PROFILE}" == "release" ]]; then
-  case "$(uname -s)" in
-    Darwin) _NDK_HOST_TAG="darwin-x86_64" ;;
-    Linux) _NDK_HOST_TAG="linux-x86_64" ;;
-    *) _NDK_HOST_TAG="unknown" ;;
-  esac
-  _LLVM_STRIP="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/${_NDK_HOST_TAG}/bin/llvm-strip"
-  if [[ -x "${_LLVM_STRIP}" ]]; then
-    for t in "${TARGETS[@]}"; do
-      abi="$(abi_of "${t}")"
-      so="${JNILIBS_DIR}/${abi}/${SONAME}"
-      "${_LLVM_STRIP}" "${so}" || {
-        echo "ERROR: llvm-strip failed for ${so}" >&2
-        exit 1
-      }
-    done
-  fi
+case "$(uname -s)" in
+  Darwin) _NDK_HOST_TAG="darwin-x86_64" ;;
+  Linux) _NDK_HOST_TAG="linux-x86_64" ;;
+  *) _NDK_HOST_TAG="unknown" ;;
+esac
+_LLVM_STRIP="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/${_NDK_HOST_TAG}/bin/llvm-strip"
+if [[ -x "${_LLVM_STRIP}" ]]; then
+  for t in "${TARGETS[@]}"; do
+    abi="$(abi_of "${t}")"
+    so="${JNILIBS_DIR}/${abi}/${SONAME}"
+    "${_LLVM_STRIP}" "${so}" || {
+      echo "ERROR: llvm-strip failed for ${so}" >&2
+      exit 1
+    }
+  done
 fi
 
 # ---------------------------------------------------------------------------

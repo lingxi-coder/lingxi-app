@@ -7,6 +7,8 @@ import { createElement, useState } from 'react';
 import { ManualClock } from '@lingxi/bridge-client/remote';
 import type { MessageDto } from '@lingxi/bridge-client';
 import { Composer } from '../src/remote/Composer';
+import { Files } from '../src/remote/Files';
+import type { RemoteClient } from '../src/remote/remoteClient';
 import { SessionController, questionAnswers, type SessionIo } from '../src/remote/remoteClient';
 
 const { create, act } = createRequire(import.meta.url)('react-test-renderer');
@@ -18,6 +20,20 @@ function deferred<T>() {
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
 }
+
+test('a delayed file listing preserves a receipt uploaded after the listing started', async () => {
+  const listing = deferred<any[]>();
+  const receipt = { transfer_id: 'ab'.repeat(16), ref: 'ab'.repeat(16), session_id: 's', name: 'new.bin', size: 0, sha256: '0'.repeat(64) };
+  const client = { listFiles: () => listing.promise, uploadFile: async () => receipt } as unknown as RemoteClient;
+  let renderer: any;
+  await act(async () => { renderer = create(createElement(Files, { client, session: 's', locale: 'en', disabled: false, onAttach() {} })); });
+  try {
+    await act(async () => { renderer.root.findByType('input').props.onChange({ target: { files: [new File([], 'new.bin')], value: '' } }); });
+    assert.equal(renderer.root.findAllByType('li').length, 1);
+    await act(async () => { listing.resolve([]); await listing.promise; });
+    assert.equal(renderer.root.findAllByType('li').length, 1);
+  } finally { await act(async () => renderer.unmount()); }
+});
 function historyController() {
   const histories: ReturnType<typeof deferred<{ messages: MessageDto[]; first_index: number; has_more: boolean }>>[] = [];
   const io: SessionIo = {

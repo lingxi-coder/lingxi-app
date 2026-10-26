@@ -1,3 +1,5 @@
+import { uploadFile, downloadFile } from './fileTransfer';
+import { validateFileOffer, type FileReceipt, type FileProgress } from '@lingxi/bridge-client/remote';
 import type {
   AskUserQuestionRequestDto,
   ConversationControlsDto,
@@ -45,6 +47,7 @@ export interface OutgoingPrompt {
   id: string;
   text: string;
   images: readonly ImageRefDto[];
+  files?: readonly string[];
   status: 'sending' | 'failed';
   turnId?: number;
   error?: string;
@@ -407,11 +410,11 @@ export class SessionController {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** Send a prompt. While a turn runs the desktop takes plain text only, so images are left out then. */
-  async sendPrompt(text: string, images: readonly ImageRefDto[] = []): Promise<void> {
+  async sendPrompt(text: string, images: readonly ImageRefDto[] = [], files: readonly string[] = []): Promise<void> {
     const running = this.current.turn.running || this.current.transcript.conversation.running;
     const attachments = running ? [] : images.filter((image) => isSupportedImageMediaType(image.media_type)).slice(0, MAX_IMAGE_ATTACHMENTS);
-    if (text.trim().length === 0 && attachments.length === 0) return;
-    const prompt: OutgoingPrompt = { id: randomId(), text, images: attachments, status: 'sending' };
+    if (text.trim().length === 0 && attachments.length === 0 && files.length === 0) return;
+    const prompt: OutgoingPrompt = { id: randomId(), text, images: attachments, files, status: 'sending' };
     this.commit({ outgoing: [...this.current.outgoing, prompt] });
     await this.dispatchPrompt(prompt);
   }
@@ -434,6 +437,7 @@ export class SessionController {
         session_id: this.sessionId,
         text: prompt.text,
         ...(prompt.images.length > 0 ? { images: [...prompt.images] } : {}),
+        ...((prompt.files?.length ?? 0) > 0 ? { file_refs: [...prompt.files!] } : {}),
         client_request_id: prompt.id,
       });
       if (this.seenTurns.has(result.turn_id)) this.dismissPrompt(prompt.id);
@@ -620,6 +624,16 @@ export class RemoteClient {
     }
     return controller;
   }
+
+  listFiles(session_id: string): Promise<FileReceipt[]> { return this.connection.request('file.list', { session_id }).then(result => result.files.map(file => {
+    const offer = validateFileOffer(file);
+    if (offer.session_id !== session_id || file.ref !== offer.transfer_id) throw new Error('Invalid file receipt');
+    return { ...offer, ref: file.ref };
+  })); }
+  uploadFile(session: string, file: File, progress?: FileProgress, signal?: AbortSignal): Promise<FileReceipt> {
+    return uploadFile(this.connection, session, file, progress, signal);
+  }
+  downloadFile(file: FileReceipt, progress?: FileProgress, signal?: AbortSignal): Promise<File> { return downloadFile(this.connection, file, progress, signal); }
 
   /** The models the desktop offers; asked once per connection. */
   models(): Promise<ModelsListResult> {

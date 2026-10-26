@@ -69,6 +69,8 @@ export interface SidebarPreferences {
 export interface ArchivedSessionRecord extends SessionRef { title?: string; archivedAt?: string }
 
 export interface PublicSettings {
+  /** Consent for performance diagnostics; separate from crash reporting. */
+  telemetryEnabled?: boolean;
   archivedSessions?: ArchivedSessionRecord[];
   version: typeof SETTINGS_VERSION;
   theme?: 'dark' | 'light' | 'system';

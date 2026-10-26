@@ -13,17 +13,18 @@ export type RtcPeerState = 'connected' | 'failed' | 'closed';
 /** main → page. `ice` is the STUN list the peer connection is built with. */
 export type MainToPage =
   | { t: 'answer'; conn: string; sdp: string; ice: string[] }
-  | { t: 'send'; conn: string; data: ArrayBuffer }
-  | { t: 'close'; conn: string };
+  | { t: 'send'; conn: string; data: ArrayBuffer; lane?: 'files' }
+  | { t: 'close'; conn: string }
+  | { t: 'close_files'; conn: string };
 
 /** page → main. `buffered`/`drain` are the DataChannel's backpressure edges. */
 export type PageToMain =
   | { t: 'answered'; conn: string; sdp: string }
   | { t: 'error'; conn: string; message: string }
-  | { t: 'state'; conn: string; state: RtcPeerState; candidate?: RtcCandidateType }
-  | { t: 'data'; conn: string; data: ArrayBuffer }
-  | { t: 'buffered'; conn: string }
-  | { t: 'drain'; conn: string };
+  | { t: 'state'; conn: string; lane?: 'files'; state: RtcPeerState; candidate?: RtcCandidateType; max_message_bytes?: number }
+  | { t: 'data'; conn: string; lane?: 'files'; data: ArrayBuffer }
+  | { t: 'buffered'; conn: string; lane?: 'files' }
+  | { t: 'drain'; conn: string; lane?: 'files' };
 
 /** Peer connections the page keeps at once. */
 export const MAX_RTC_PEERS = MAX_HOST_CONNECTIONS;
@@ -72,6 +73,8 @@ function sdp(value: unknown): value is string {
 export function parseMainToPage(value: unknown): MainToPage | undefined {
   if (!isObject(value) || !isRtcConnId(value['conn'])) return undefined;
   const conn = value['conn'];
+  if (value['lane'] !== undefined && value['lane'] !== 'files') return undefined;
+  const lane = value['lane'] === 'files' ? { lane: 'files' as const } : {};
   switch (value['t']) {
     case 'answer': {
       const ice = value['ice'];
@@ -81,8 +84,10 @@ export function parseMainToPage(value: unknown): MainToPage | undefined {
     }
     case 'send': {
       const data = fragment(value['data']);
-      return data === undefined ? undefined : { t: 'send', conn, data };
+      return data === undefined ? undefined : { t: 'send', conn, data, ...lane };
     }
+    case 'close_files':
+      return { t: 'close_files', conn };
     case 'close':
       return { t: 'close', conn };
     default:
@@ -94,6 +99,8 @@ export function parseMainToPage(value: unknown): MainToPage | undefined {
 export function parsePageToMain(value: unknown): PageToMain | undefined {
   if (!isObject(value) || !isRtcConnId(value['conn'])) return undefined;
   const conn = value['conn'];
+  if (value['lane'] !== undefined && value['lane'] !== 'files') return undefined;
+  const lane = value['lane'] === 'files' ? { lane: 'files' as const } : {};
   switch (value['t']) {
     case 'answered':
       return sdp(value['sdp']) ? { t: 'answered', conn, sdp: value['sdp'] } : undefined;
@@ -104,18 +111,23 @@ export function parsePageToMain(value: unknown): PageToMain | undefined {
       const candidate = value['candidate'];
       if (typeof state !== 'string' || !PEER_STATES.includes(state)) return undefined;
       if (candidate !== undefined && (typeof candidate !== 'string' || !CANDIDATE_TYPES.includes(candidate))) return undefined;
-      const message: PageToMain = { t: 'state', conn, state: state as RtcPeerState };
+      const message: PageToMain = { t: 'state', conn, state: state as RtcPeerState, ...lane };
       if (candidate !== undefined) message.candidate = candidate as RtcCandidateType;
+      const limit = value['max_message_bytes'];
+      if (limit !== undefined) {
+        if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > FRAGMENT_MAX_BYTES) return undefined;
+        message.max_message_bytes = limit;
+      }
       return message;
     }
     case 'data': {
       const data = fragment(value['data']);
-      return data === undefined ? undefined : { t: 'data', conn, data };
+      return data === undefined ? undefined : { t: 'data', conn, data, ...lane };
     }
     case 'buffered':
-      return { t: 'buffered', conn };
+      return { t: 'buffered', conn, ...lane };
     case 'drain':
-      return { t: 'drain', conn };
+      return { t: 'drain', conn, ...lane };
     default:
       return undefined;
   }

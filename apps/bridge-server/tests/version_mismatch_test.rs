@@ -79,6 +79,7 @@ where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
     let frame = Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 2,
         method: "submit".into(),
         params: bridge_source(&command),
@@ -136,6 +137,7 @@ where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
     let frame = Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 1,
         method: "hello".into(),
         params: bridge_source(&hello),

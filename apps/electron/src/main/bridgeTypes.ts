@@ -38,6 +38,8 @@ export type ConnectionState =
   | { status: 'error'; message: string };
 
 export interface BridgeLaunchConfig {
+  /** Device-owned policy, never merged from workspace settings. */
+  telemetry?: import('./telemetryPolicy.js').DesktopTelemetryConfig;
   workspace: string;
   /** Stable identity for the engine process and its persisted transcript. */
   sessionId?: string;
@@ -78,6 +80,7 @@ export interface BridgeRuntimeVersions {
 export interface BridgeManagerOptions {
   /** Actual desktop package version; absent in deterministic test hosts. */
   appVersion?: string;
+  getTelemetryConfig?: () => import('./telemetryPolicy.js').DesktopTelemetryConfig;
   /** Development-only binary override. Ignored in packaged builds. */
   serverBin?: string;
   /** Parent for owner-only, per-launch discovery directories. */

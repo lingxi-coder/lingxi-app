@@ -2449,4 +2449,14 @@
     <string name="extension_directory_refresh_mcp">Refresh MCP configuration</string>
     <string name="extension_directory_kind_mcp">MCP</string>
     <string name="extension_directory_kind_plugin">Plugin</string>
+    <string name="remote_files">Files</string>
+    <string name="remote_file_upload">Upload file</string>
+    <string name="remote_file_cancel">Cancel transfer</string>
+    <string name="remote_file_attach">Send to session</string>
+    <string name="remote_file_download">Download</string>
+    <string name="remote_file_export">Save or share file</string>
+    <string name="remote_file_requires_webrtc">File transfer requires WebRTC. Files are not uploaded to cloud storage.</string>
+    <string name="remote_file_preparing">Verifying original file…</string>
+    <string name="remote_file_uploading">Sending to computer…</string>
+    <string name="remote_file_downloading">Receiving file…</string>
 </resources>

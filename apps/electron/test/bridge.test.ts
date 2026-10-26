@@ -849,8 +849,10 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
   const originalConnect = BridgeClient.prototype.connect;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
   let launchCalls = 0;
+  let telemetryRevocations = 0;
   BridgeClient.prototype.connect = async function () {
     this.sendCommand = (command) => assert.deepEqual(command, { type: 'get_audio_session_context' });
+    this.disableTelemetry = async () => { telemetryRevocations += 1; };
     return {
       server_name: 'lingxi-bridge-server/0.9.0',
       protocol_version: '0.2.0',
@@ -874,6 +876,7 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
   try {
     const runtime = await manager.openSession(ref);
     assert.equal(launchCalls, 0);
+    assert.equal(telemetryRevocations, 1, 'a newly adopted process honors default-off device policy');
     assert.equal(runtime.connectionState.status, 'connected');
     assert.strictEqual(manager.get(ref.sessionId), runtime);
     (runtime as any).stopAdoptedBridge = async () => {

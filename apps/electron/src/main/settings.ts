@@ -5,6 +5,7 @@ import { isSessionId } from './sessionIdentity.js';
 
 import {
   MAX_REMOTE_SESSIONS,
+  SETTINGS_VERSION,
   defaultSettings,
   isPermissionModeId,
   parseModelPickerVisibility,
@@ -25,6 +26,8 @@ import {
   type SessionRef,
   type SessionTranscriptSelection,
 } from './host-utils.js';
+
+import { resolveDesktopTelemetry, type DesktopTelemetryConfig } from './telemetryPolicy.js';
 
 export class SettingsStore {
   readonly settingsPath: string;
@@ -64,7 +67,11 @@ export class SettingsStore {
     }
     try {
       const raw: unknown = JSON.parse(contents);
-      const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+        || (raw as Record<string, unknown>)['version'] !== SETTINGS_VERSION) {
+        throw new Error('Unsupported device settings format');
+      }
+      const input = raw as Record<string, unknown>;
       const settings = parseSettings(raw);
       // Decode the managed scope separately so the Project limit cannot discard
       // sessions belonging to the app's scheduled workspace or user projects.
@@ -94,6 +101,10 @@ export class SettingsStore {
     const temporary = `${this.settingsPath}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(this.settings, null, 2)}\n`, { mode: 0o600 });
     renameSync(temporary, this.settingsPath);
+  }
+
+  getTelemetryConfig(source: NodeJS.ProcessEnv = process.env): DesktopTelemetryConfig {
+    return resolveDesktopTelemetry(source, this.settingsWritable ? this.settings : { telemetryEnabled: false });
   }
 
   getPublic(): PublicSettings {
@@ -280,6 +291,7 @@ export class SettingsStore {
   }
 
   update(patch: {
+    telemetryEnabled?: boolean;
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;
     model?: string | null;
@@ -290,6 +302,13 @@ export class SettingsStore {
     modelPickerVisibility?: unknown;
     sidebar?: unknown;
   }): PublicSettings {
+    if ('telemetryEnabled' in patch) {
+      if (typeof patch.telemetryEnabled !== 'boolean' || Object.keys(patch).length !== 1) throw new Error('diagnostics consent must be saved separately as a boolean');
+      const previous = this.settings;
+      this.settings = { ...previous, telemetryEnabled: patch.telemetryEnabled };
+      try { this.persist(); } catch (error) { this.settings = previous; throw error; }
+      return this.getPublic();
+    }
     if ('voice' in patch) {
       if (Object.keys(patch).some((key) => key !== 'voice' && key !== 'voiceRevision')) {
         throw new Error('audio configuration must be saved separately from other settings');

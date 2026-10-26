@@ -89,6 +89,14 @@ class NativeIntegrationTests(unittest.TestCase):
         native.verify(self.source, self.jni)
         apk.verify_apk(self.make_apk(), self.source, self.jni, self.assets)
 
+    def test_selected_native_abi_does_not_require_an_unselected_ffi(self):
+        (self.jni / "x86_64/libandroid_aar.so").unlink()
+        native.verify(self.source, self.jni, ["arm64-v8a"])
+        with self.assertRaises(FileNotFoundError):
+            native.verify(self.source, self.jni)
+        with self.assertRaisesRegex(ValueError, "invalid selected ABIs"):
+            native.verify(self.source, self.jni, [])
+
     def test_full_sdk_core_is_rejected(self):
         self.manifest["contains_rust_core"] = True
         self.save_manifest()

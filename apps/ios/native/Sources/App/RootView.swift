@@ -2188,22 +2188,22 @@ struct RootView: View {
                 await LocalApps.initializeOnce()
                 await LocalApps.library.refresh()
                 guard requestID == externalAsyncRouteID else { return }
-                guard LocalApps.library.record(id) != nil else {
-                    _ = missingLinkedResource("installed app")
-                    return
-                }
-                if target.params["review"] == "agent" {
-                    LocalApps.library.browserReviewAppID = id
-                    if let runID = target.params["runId"],
-                       let revision = target.params["revision"].flatMap(UInt64.init) {
-                        LocalApps.library.queueBrowserAgentWake(
-                            appID: id,
-                            revision: revision,
-                            runID: runID
-                        )
+                if LocalApps.library.record(id) != nil {
+                    if target.params["review"] == "agent" {
+                        LocalApps.library.browserReviewAppID = id
+                        if let runID = target.params["runId"],
+                           let revision = target.params["revision"].flatMap(UInt64.init) {
+                            LocalApps.library.queueBrowserAgentWake(
+                                appID: id,
+                                revision: revision,
+                                runID: runID
+                            )
+                        }
                     }
+                    navigation.runApp(id)
+                } else {
+                    _ = missingLinkedResource("installed app")
                 }
-                navigation.runApp(id)
             }
         case "market": navigation.openMarketApp(id)
         case "import":

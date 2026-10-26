@@ -1,15 +1,22 @@
 //! Mobile data-only WebRTC adapter. One task owns the session and drains its
 //! receive queue; control calls never hold a mutex across network awaits.
 
+use crate::files::{FileEvent, FilePeer, FileSender};
 use crate::peer::{
     PeerAnswer, PeerConfig, PeerConnectionState, PeerConnector, PeerError, PeerEvent, PeerHandle,
     PeerOfferer,
 };
 use async_trait::async_trait;
 use lingxi_webrtc_core::{AnswerOutcome, IceConfig, IceServer, RtcSession, SessionConfig};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::peer_connection::RTCPeerConnectionState;
 
 /// Uses the Harness transport without adding an audio/video track.
@@ -22,6 +29,8 @@ enum Command {
 }
 
 struct NativePeer {
+    files: Mutex<Option<FilePeer>>,
+    file_limit: Arc<AtomicUsize>,
     commands: mpsc::Sender<Command>,
     closed: CancellationToken,
 }
@@ -60,9 +69,53 @@ impl PeerConnector for NativePeerConnector {
         let (commands, requests) = mpsc::channel(32);
         let (events, receiver) = mpsc::unbounded_channel();
         let closed = CancellationToken::new();
+        let file_channel = session.open_file_channel().await.map_err(failure)?;
+        let (file_events, file_receiver) = mpsc::channel(256);
+        let file_cancel = closed.child_token();
+        let file_limit = Arc::new(AtomicUsize::new(16 * 1024));
+        let file_sender = Arc::new(NativeFileSender {
+            limit: file_limit.clone(),
+            channel: file_channel.clone(),
+            closed: file_cancel.clone(),
+        });
+        tokio::spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    _ = file_cancel.cancelled() => break,
+                    event = file_channel.poll() => event,
+                };
+                let event = match event {
+                    Some(DataChannelEvent::OnOpen) => FileEvent::Open,
+                    Some(DataChannelEvent::OnMessage(message))
+                        if !message.is_string && message.data.len() <= 16 * 1024 =>
+                    {
+                        FileEvent::Message(message.data.to_vec())
+                    }
+                    Some(
+                        DataChannelEvent::OnBufferedAmountLow
+                        | DataChannelEvent::OnBufferedAmountHigh,
+                    ) => continue,
+                    _ => break,
+                };
+                if file_events.try_send(event).is_err() {
+                    break;
+                }
+            }
+            file_cancel.cancel();
+            let _ = file_channel.close().await;
+        });
+        let files = Mutex::new(Some(FilePeer {
+            sender: file_sender,
+            events: file_receiver,
+        }));
         tokio::spawn(run(session, requests, events, closed.clone()));
         Ok(PeerOfferer {
-            peer: Arc::new(NativePeer { commands, closed }),
+            peer: Arc::new(NativePeer {
+                commands,
+                closed,
+                files,
+                file_limit,
+            }),
             events: receiver,
         })
     }
@@ -87,10 +140,27 @@ impl NativePeer {
 
 #[async_trait]
 impl PeerHandle for NativePeer {
+    fn take_file_channel(&self) -> Option<FilePeer> {
+        self.files.lock().expect("file channel").take()
+    }
+
     async fn offer_sdp(&self) -> Result<String, PeerError> {
         self.request(Command::Offer).await
     }
     async fn apply_answer(&self, sdp: &str) -> Result<PeerAnswer, PeerError> {
+        let limit = sdp
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("a=max-message-size:")?
+                    .parse::<usize>()
+                    .ok()
+            })
+            .filter(|size| *size > 0)
+            .min()
+            .unwrap_or(16 * 1024)
+            .min(16 * 1024);
+        self.file_limit.store(limit, Ordering::Release);
         self.request(|reply| Command::Answer(sdp.to_owned(), reply))
             .await
     }
@@ -258,5 +328,31 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+}
+
+struct NativeFileSender {
+    limit: Arc<AtomicUsize>,
+    channel: Arc<dyn DataChannel>,
+    closed: CancellationToken,
+}
+#[async_trait]
+impl FileSender for NativeFileSender {
+    fn max_frame_bytes(&self) -> usize {
+        self.limit.load(Ordering::Acquire)
+    }
+    async fn send(&self, data: Vec<u8>) -> Result<(), String> {
+        if data.is_empty() || data.len() > 16 * 1024 {
+            return Err("invalid file frame".into());
+        }
+        tokio::select! {
+            _ = self.closed.cancelled() => Err("file channel closed".into()),
+            result = tokio::time::timeout(std::time::Duration::from_secs(60), self.channel.send(data.as_slice().into())) => {
+                result.map_err(|_| "file send timed out".to_owned())?.map_err(|e| e.to_string())
+            }
+        }
+    }
+    fn close(&self) {
+        self.closed.cancel();
     }
 }

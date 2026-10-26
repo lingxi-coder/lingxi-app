@@ -29,6 +29,7 @@ export interface DataChannelLike {
 export interface PeerConnectionLike {
   readonly iceGatheringState: RTCIceGatheringState;
   readonly connectionState: RTCPeerConnectionState;
+  readonly sctp?: { readonly maxMessageSize: number } | null;
   readonly localDescription: { readonly sdp: string } | null;
   onicegatheringstatechange: ((event: Event) => void) | null;
   onconnectionstatechange: ((event: Event) => void) | null;
@@ -77,7 +78,7 @@ export function waitForIceGathering(peer: PeerConnectionLike, clock: Clock, time
  * pile up in memory.
  */
 export class DataChannelLink implements FragmentLink {
-  readonly maxFragmentBytes = FRAGMENT_MAX_BYTES;
+  get maxFragmentBytes(): number { return Math.min(FRAGMENT_MAX_BYTES, this.messageLimit()); }
 
   private handler: ((fragment: Uint8Array) => void) | undefined;
   private readonly early: Uint8Array[] = [];
@@ -85,7 +86,7 @@ export class DataChannelLink implements FragmentLink {
   private readonly waiters: Array<() => void> = [];
   private closedReason: string | undefined;
 
-  constructor(private readonly channel: DataChannelLike) {
+  constructor(private readonly channel: DataChannelLike, private readonly messageLimit: () => number = () => FRAGMENT_MAX_BYTES) {
     channel.binaryType = 'arraybuffer';
     channel.bufferedAmountLowThreshold = Math.floor(DATA_CHANNEL_BUFFER_HIGH_BYTES / 2);
     channel.onmessage = (event) => this.receive(event.data);

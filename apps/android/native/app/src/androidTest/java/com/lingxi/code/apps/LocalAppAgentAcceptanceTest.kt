@@ -1,10 +1,16 @@
 package com.lingxi.code.apps
 
 import android.content.Intent
+import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.lingxi.code.MainActivity
 import com.lingxi.code.model.canonicalSessionId
+import com.lingxi.code.model.ConnStatus
+import com.lingxi.code.model.GenericProvider
+import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.settings.ProviderSettingsRepository
 import kotlinx.coroutines.*
 import org.json.JSONArray
@@ -46,6 +52,1170 @@ class LocalAppAgentAcceptanceTest {
         return null
     }
 
+    private fun sha256(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun persistProviderRowsForAcceptance(providers: List<GenericProvider>) {
+        val encoded = ProviderSettingsRepository.encodeProvidersJson(providers)
+        check(context.getSharedPreferences("provider_settings", android.content.Context.MODE_PRIVATE)
+            .edit().putString("providers_llm", encoded).commit()) {
+            "The Android provider fixture preferences could not be flushed to disk."
+        }
+    }
+
+    private fun restoreProviderSettingsRawValues(
+        providersPresent: Boolean,
+        providersRaw: String?,
+        audioRegionPresent: Boolean,
+        audioRegionRaw: String?,
+    ) {
+        check(!providersPresent || providersRaw != null)
+        check(!audioRegionPresent || audioRegionRaw != null)
+        val preferences = context.getSharedPreferences("provider_settings", android.content.Context.MODE_PRIVATE)
+        val editor = preferences.edit()
+        if (providersPresent) editor.putString("providers_llm", providersRaw) else editor.remove("providers_llm")
+        if (audioRegionPresent) editor.putString("audio_provider_region", audioRegionRaw)
+        else editor.remove("audio_provider_region")
+        check(editor.commit()) { "The original provider and audio preference fields could not be restored." }
+        check(preferences.contains("providers_llm") == providersPresent)
+        check(preferences.getString("providers_llm", null) == providersRaw)
+        check(preferences.contains("audio_provider_region") == audioRegionPresent)
+        check(preferences.getString("audio_provider_region", null) == audioRegionRaw)
+    }
+
+    private fun rawProviderRowsWithFixture(originalRaw: String?, fixtureProvider: GenericProvider): String {
+        val originalRows = JSONArray(originalRaw ?: "[]")
+        check((0 until originalRows.length()).none {
+            originalRows.getJSONObject(it).optString("id") == fixtureProvider.id
+        }) { "The fixture provider ID already occurs in the raw provider preferences." }
+        val fixtureRows = JSONArray(ProviderSettingsRepository.encodeProvidersJson(listOf(fixtureProvider)))
+        check(fixtureRows.length() == 1)
+        originalRows.put(fixtureRows.getJSONObject(0))
+        return originalRows.toString()
+    }
+
+    private fun rawProviderRowsWithoutFixture(
+        originalRaw: String?,
+        providerId: String,
+        requirePresent: Boolean = true,
+    ): String? {
+        if (originalRaw == null) return null
+        val originalRows = JSONArray(originalRaw)
+        val restoredRows = JSONArray()
+        var removedCount = 0
+        for (index in 0 until originalRows.length()) {
+            val row = originalRows.getJSONObject(index)
+            if (row.optString("id") == providerId) removedCount++ else restoredRows.put(row)
+        }
+        check(removedCount <= 1 && (!requirePresent || removedCount == 1)) {
+            "The exact interrupted fixture ID must occur at most once in raw provider preferences."
+        }
+        if (removedCount == 0) return originalRaw
+        return restoredRows.toString()
+    }
+
+    private fun providerRowsFromFreshPreferencesFile(): String? {
+        val prefsFile = File(context.applicationContext.dataDir, "shared_prefs/provider_settings.xml")
+        check(prefsFile.isFile) { "The Android provider preferences file is missing after cleanup." }
+        val parser = android.util.Xml.newPullParser()
+        prefsFile.inputStream().buffered().use { stream ->
+            parser.setInput(stream, "UTF-8")
+            while (parser.next() != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                if (parser.eventType == org.xmlpull.v1.XmlPullParser.START_TAG &&
+                    parser.name == "string" && parser.getAttributeValue(null, "name") == "providers_llm"
+                ) {
+                    return parser.nextText()
+                }
+            }
+        }
+        return null
+    }
+
+    private fun executeShell(command: String): String {
+        val descriptor = instrumentation.uiAutomation.executeShellCommand(command)
+        return ParcelFileDescriptor.AutoCloseInputStream(descriptor).bufferedReader().use { it.readText() }
+    }
+
+    private fun dumpsysRecord(dump: String, header: String, matches: (String) -> Boolean): String? {
+        val lines = dump.lines()
+        val starts = lines.indices.filter { lines[it].contains(header) }
+        for ((index, start) in starts.withIndex()) {
+            val end = starts.getOrNull(index + 1) ?: lines.size
+            val block = lines.subList(start, end).joinToString("\n").trim()
+            if (matches(block)) return block
+        }
+        return null
+    }
+
+    private data class NativeWakeEvidence(
+        val uri: Uri,
+        val resolvedActivity: String,
+        val packageAtMainActivity: String,
+        val activityDump: String,
+        val mainActivityObservedElapsedMs: Long,
+        val browserReturnElapsedMs: Long,
+    )
+
+    private class SkillBrowserDiagnosticException(
+        val phase: String,
+        val code: String,
+        val errorName: String,
+        val taskState: String,
+        val taskErrorCode: String,
+        val eventSummary: String,
+        val lastReplay: String,
+    ) : IllegalStateException(
+        "Browser-side acceptance failed: phase=$phase, code=$code, errorName=$errorName, " +
+            "taskState=$taskState, taskErrorCode=$taskErrorCode, eventSummary=$eventSummary, lastReplay=$lastReplay",
+    )
+
+    private data class SkillBackgroundSnapshot(
+        val requestElapsedMs: Long,
+        val runState: JSONObject,
+        val runStateReadElapsedMs: Long,
+        val hostActivityResumed: Boolean,
+        val serviceRecord: String,
+        val notificationRecord: String,
+        val notificationForegroundFlag: Boolean,
+        val activityFile: File,
+        val serviceFile: File,
+        val notificationFile: File,
+    )
+
+    private data class SkillEvidenceContext(
+        val apps: UnifiedLocalApps,
+        val app: AppRecord,
+        val release: AppRelease,
+        val savedSettings: JSONObject,
+        val launch: AppLaunch,
+        val providerBaseUrl: String,
+        val providerModel: String,
+        val skillId: String,
+        val skillNonce: String,
+        val skillFileSha256: String,
+        val skillNonceSha256: String,
+        val unlistedSkillId: String,
+        val unlistedSkillFileSha256: String,
+        val unlistedSkillNonceSha256: String,
+        val prompt: String,
+        val outputSchema: JSONObject,
+        val chatTitle: String,
+        val reportKey: String,
+        val runId: String,
+        val browserPackage: String,
+        val nativeWake: NativeWakeEvidence,
+        val background: SkillBackgroundSnapshot,
+    )
+
+    private data class SkillFixtureResources(
+        val apps: UnifiedLocalApps,
+        val sources: MutableList<File>,
+        val ids: MutableList<String>,
+        val providerSettings: ProviderSettingsRepository,
+        val originalProviders: List<GenericProvider>,
+        val originalDefaultModel: String,
+        val providerBaseUrl: String,
+        val fixtureProvider: GenericProvider,
+        val fixtureJournal: File,
+        val originalProvidersLlmPresent: Boolean,
+        val originalProvidersLlmRaw: String?,
+        val originalAudioProviderRegionPresent: Boolean,
+        val originalAudioProviderRegionRaw: String?,
+        var credentialSource: com.lingxi.code.conversation.EngineConversationSource? = null,
+        var credentialWriteAttempted: Boolean = false,
+        var appAgentHostTouched: Boolean = false,
+    )
+
+    private data class SkillAcceptanceScenario(
+        val skillId: String,
+        val skillNonce: String,
+        val skillBody: String,
+        val skillFileSha256: String,
+        val skillNonceSha256: String,
+        val unlistedSkillId: String,
+        val unlistedSkillNonce: String,
+        val unlistedSkillBody: String,
+        val unlistedSkillFileSha256: String,
+        val unlistedSkillNonceSha256: String,
+        val prompt: String,
+        val outputSchema: JSONObject,
+        val chatTitle: String,
+        val runId: String,
+        val reportKey: String,
+    )
+
+    private data class PreparedSkillApp(
+        val app: AppRecord,
+        val release: AppRelease,
+        val savedSettings: JSONObject,
+        val browserPackages: Set<String>,
+    )
+
+    private suspend fun nativeWakeAndReturnToBrowser(
+        appId: String,
+        revision: String,
+        runId: String,
+        browserPackages: Set<String>,
+        dumpDirectory: File,
+    ): NativeWakeEvidence {
+        val wakeUri = Uri.Builder().scheme("lingxi").authority("apps").appendPath(appId)
+            .appendQueryParameter("review", "agent")
+            .appendQueryParameter("runId", runId)
+            .appendQueryParameter("revision", revision)
+            .build()
+        val wakeIntent = Intent(Intent.ACTION_VIEW, wakeUri)
+            .setPackage(context.packageName)
+            .addCategory(Intent.CATEGORY_BROWSABLE)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val resolvedWakeActivity = context.packageManager.resolveActivity(wakeIntent, 0)?.activityInfo
+            ?: error("The native Local App wake URI does not resolve through Android.")
+        assertEquals("The native wake URI must resolve to the installed LingXi app",
+            context.packageName, resolvedWakeActivity.packageName)
+        assertEquals("The native wake URI must resolve to LingXi MainActivity",
+            MainActivity::class.java.name, resolvedWakeActivity.name)
+        File(dumpDirectory, "native-wake-uri.txt").writeText(wakeUri.toString())
+        val wakeStartedAt = android.os.SystemClock.elapsedRealtime()
+        context.startActivity(wakeIntent)
+
+        var foregroundPackage = ""
+        var packageAtMainActivity = ""
+        var activityDump = ""
+        var mainActivityObserved = false
+        var mainActivityObservedElapsedMs = -1L
+        var browserReturnElapsedMs = -1L
+        var browserReturned = false
+        val returnedToBrowser = withTimeoutOrNull(90_000) {
+            while (true) {
+                val root = instrumentation.uiAutomation.rootInActiveWindow
+                foregroundPackage = root?.packageName?.toString().orEmpty()
+                if (foregroundPackage == context.packageName) {
+                    if (!mainActivityObserved) {
+                        activityDump = executeShell("dumpsys activity activities")
+                        val resumedActivityLines = activityDump.lineSequence().filter {
+                            it.contains("mResumedActivity") || it.contains("topResumedActivity") ||
+                                it.contains("Resumed Activity")
+                        }
+                        val mainActivityComponent = "${context.packageName}/${MainActivity::class.java.name}"
+                        if (resumedActivityLines.any { it.contains(mainActivityComponent) }) {
+                            mainActivityObserved = true
+                            packageAtMainActivity = foregroundPackage
+                            mainActivityObservedElapsedMs = android.os.SystemClock.elapsedRealtime() - wakeStartedAt
+                        }
+                    }
+                    val text = visibleUiText(root)
+                    if (text.contains("本地应用")) {
+                        var action = findAccessibilityNodeByText(root, "返回浏览器")
+                        while (action != null && !action.isClickable) action = action.parent
+                        action?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                    }
+                }
+                if (mainActivityObserved && foregroundPackage in browserPackages) {
+                    browserReturned = true
+                    browserReturnElapsedMs = android.os.SystemClock.elapsedRealtime() - wakeStartedAt
+                    return@withTimeoutOrNull true
+                }
+                delay(250)
+            }
+            false
+        }
+        assertTrue("The native wake route must return to the actual external browser",
+            returnedToBrowser == true && browserReturned && mainActivityObserved)
+        assertTrue("The native wake URI must display MainActivity before returning to the browser",
+            activityDump.contains(MainActivity::class.java.name))
+        return NativeWakeEvidence(
+            uri = wakeUri,
+            resolvedActivity = resolvedWakeActivity.name,
+            packageAtMainActivity = packageAtMainActivity,
+            activityDump = activityDump,
+            mainActivityObservedElapsedMs = mainActivityObservedElapsedMs,
+            browserReturnElapsedMs = browserReturnElapsedMs,
+        )
+    }
+
+    private suspend fun captureSkillBackgroundSnapshot(
+        launch: AppLaunch,
+        runId: String,
+        providerBaseUrl: String,
+        browserPackage: String,
+        native: NativeAppActivityHost,
+        skillNonceSha256: String,
+        unlistedSkillNonceSha256: String,
+        dumpDirectory: File,
+    ): SkillBackgroundSnapshot {
+        suspend fun currentFixtureRequest(): JSONObject? {
+            val state = fixtureState(providerBaseUrl)
+            val rows = state.getJSONArray("requests")
+            return (0 until rows.length()).map { rows.getJSONObject(it) }
+                .firstOrNull { it.optString("marker") == "SKILL_BACKGROUND_WAKE_PROBE" }
+        }
+
+        val observedRequest = withTimeout(45_000) {
+            while (true) {
+                val row = currentFixtureRequest()
+                if (row != null) return@withTimeout row
+                delay(300)
+            }
+            error("The deterministic provider did not receive the Skill task.")
+        }
+        assertTrue("The only source of the test nonce must be the materialized Skill instructions",
+            observedRequest.optBoolean("skillNoncePresent"))
+        assertEquals(skillNonceSha256, observedRequest.optString("skillNonceSha256"))
+        val observedNonceDigests = observedRequest.getJSONArray("skillNonceSha256s")
+        assertEquals("Only the selected immutable Skill nonce may reach the provider", 1, observedNonceDigests.length())
+        assertEquals(skillNonceSha256, observedNonceDigests.getString(0))
+        assertFalse((0 until observedNonceDigests.length()).any {
+            observedNonceDigests.getString(it) == unlistedSkillNonceSha256
+        })
+        assertFalse("The submitted user message must not contain the Skill nonce",
+            observedRequest.optBoolean("userMessageContainsSkillNonce"))
+        assertTrue("The provider must receive the host-owned StructuredOutput tool",
+            observedRequest.optBoolean("structuredOutputToolPresent"))
+        assertTrue("The provider request must still be pending before the native wake",
+            observedRequest.isNull("status"))
+
+        val twentySecondRequest = withTimeout(70_000) {
+            while (true) {
+                val row = currentFixtureRequest() ?: error("The deterministic provider request disappeared.")
+                if (row.optLong("elapsedMs") >= 22_000) {
+                    assertTrue("The delayed model request unexpectedly completed before the 20-second snapshot",
+                        row.isNull("status"))
+                    return@withTimeout row
+                }
+                delay(750)
+            }
+            error("unreachable")
+        }
+        val runStateReadStartedAt = android.os.SystemClock.elapsedRealtime()
+        val runStateAtSnapshot = taskGet(launch, runId)
+        val runStateReadElapsedMs = android.os.SystemClock.elapsedRealtime() - runStateReadStartedAt
+        assertEquals("running", runStateAtSnapshot.getString("state"))
+        assertEquals(browserPackage, instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString())
+        val hostActivityResumedAtSnapshot = native.isResumed()
+        assertFalse("The native Host Activity must remain paused during the 22-second browser background interval",
+            hostActivityResumedAtSnapshot)
+
+        val activityDump = executeShell("dumpsys activity activities")
+        val serviceDump = executeShell("dumpsys activity services")
+        val notificationDump = executeShell("dumpsys notification")
+        val resumedLines = activityDump.lineSequence().filter {
+            it.contains("mResumedActivity") || it.contains("topResumedActivity") || it.contains("Resumed Activity")
+        }.toList()
+        assertTrue("dumpsys activity must record the selected external browser as visible: $resumedLines",
+            resumedLines.any { it.contains(browserPackage) } || activityDump.contains(browserPackage))
+        val serviceRecord = dumpsysRecord(serviceDump, "ServiceRecord") {
+            it.contains(context.packageName) && it.contains("LocalAppProcessService")
+        } ?: error("dumpsys activity services omitted the LingXi LocalAppProcessService record.")
+        val notificationRecord = dumpsysRecord(notificationDump, "NotificationRecord") { block ->
+            val key = "|${context.packageName}|7242|"
+            (block.contains("pkg=${context.packageName}") || block.contains(key)) &&
+                (Regex("\\bid=7242\\b").containsMatchIn(block) || block.contains(key))
+        } ?: error("dumpsys notification omitted LingXi's own foreground-service notification id 7242.")
+        val ownForegroundNotifications = context.getSystemService(android.app.NotificationManager::class.java)
+            .activeNotifications.filter { it.packageName == context.packageName && it.id == 7242 }
+        assertEquals("The Android NotificationManager must report exactly this app's running-app notification",
+            1, ownForegroundNotifications.size)
+        val foregroundFlagPresent = ownForegroundNotifications.single().notification.flags and
+            android.app.Notification.FLAG_FOREGROUND_SERVICE != 0
+        assertTrue("The same LingXi notification record must be marked as foreground-service notification",
+            foregroundFlagPresent || notificationRecord.contains("FOREGROUND_SERVICE"))
+
+        val activityFile = File(dumpDirectory, "activity-at-22s.txt")
+            .apply { writeText(resumedLines.joinToString("\n")) }
+        val serviceFile = File(dumpDirectory, "services-at-22s.txt").apply { writeText(serviceRecord) }
+        val notificationFile = File(dumpDirectory, "notification-at-22s.txt").apply { writeText(notificationRecord) }
+        return SkillBackgroundSnapshot(
+            requestElapsedMs = twentySecondRequest.optLong("elapsedMs"),
+            runState = runStateAtSnapshot,
+            runStateReadElapsedMs = runStateReadElapsedMs,
+            hostActivityResumed = hostActivityResumedAtSnapshot,
+            serviceRecord = serviceRecord,
+            notificationRecord = notificationRecord,
+            notificationForegroundFlag = foregroundFlagPresent,
+            activityFile = activityFile,
+            serviceFile = serviceFile,
+            notificationFile = notificationFile,
+        )
+    }
+
+    private suspend fun verifySkillRecoveryAndWriteEvidence(input: SkillEvidenceContext) {
+        val browserMarker = awaitBrowserReport(
+            input.launch,
+            input.reportKey,
+            input.runId,
+            timeoutMs = 120_000,
+        )
+        val task = awaitTerminal(input.launch, input.runId, 120_000)
+        assertEquals(task.toString(), "succeeded", task.getString("state"))
+        val eventPage = agentCall(input.launch, "agent.tasks.events", JSONObject().put("runId", input.runId)) as JSONObject
+        val events = eventPage.getJSONArray("events")
+        val startedEvents = (0 until events.length()).map { events.getJSONObject(it) }
+            .filter { it.optString("type") == "RUN_STARTED" }
+        val terminal = events.getJSONObject(events.length() - 1)
+        assertEquals("A browser reload must recover the existing run without a second start", 1, startedEvents.size)
+        assertEquals(input.runId, startedEvents.single().getString("runId"))
+        val startedInput = startedEvents.single().getJSONObject("input")
+        val submittedOptions = startedInput.getJSONObject("forwardedProps").getJSONObject("com.lingxi.localApp")
+        assertEquals(input.skillId, submittedOptions.getJSONArray("skills").getString(0))
+        assertEquals(1, submittedOptions.getJSONArray("skills").length())
+        assertFalse("The submitted AG-UI user input must not reveal the Skill nonce",
+            startedInput.toString().contains(input.skillNonce))
+        assertEquals("RUN_FINISHED", terminal.getString("type"))
+        assertEquals(input.runId, terminal.getString("runId"))
+        val result = terminal.getJSONObject("result")
+        assertEquals(input.skillNonce, result.getString("answer"))
+        assertEquals("The browser-side read-only recovery marker correlates this public run",
+            "agui:p:${input.reportKey}:${input.runId}", browserMarker.getString("title"))
+        val chatPage = agentCall(input.launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONObject
+        val chatRows = (0 until chatPage.getJSONArray("chats").length()).map {
+            chatPage.getJSONArray("chats").getJSONObject(it)
+        }
+        val chat = chatRows.single { it.optString("title") == input.chatTitle }
+        assertFalse(chat.getString("title").contains(input.skillNonce))
+        assertEquals(task.getString("threadId"), chat.getString("chatId"))
+        val history = agentCall(input.launch, "agent.chats.history",
+            JSONObject().put("chatId", chat.getString("chatId")).put("limit", 50)) as JSONObject
+        val historyMessages = history.getJSONArray("messages")
+        assertTrue((0 until historyMessages.length()).any {
+            historyMessages.getJSONObject(it).optString("role") == "assistant"
+        })
+
+        val finalFixtureState = fixtureState(input.providerBaseUrl)
+        val finalRows = finalFixtureState.getJSONArray("requests")
+        val providerCalls = (0 until finalRows.length()).map { finalRows.getJSONObject(it) }
+            .filter { it.optString("marker") == "SKILL_BACKGROUND_WAKE_PROBE" }
+        assertEquals("The same public run must issue one provider request", 1, providerCalls.size)
+        assertEquals(200, providerCalls.single().getInt("status"))
+        assertEquals(input.skillNonceSha256, providerCalls.single().optString("skillNonceSha256"))
+        val finalNonceDigests = providerCalls.single().getJSONArray("skillNonceSha256s")
+        assertEquals(1, finalNonceDigests.length())
+        assertFalse((0 until finalNonceDigests.length()).any {
+            finalNonceDigests.getString(it) == input.unlistedSkillNonceSha256
+        })
+
+        val evidence = JSONObject()
+            .put("acceptance", "ANDROID_SKILL_BACKGROUND_WAKE_PASS")
+            .put("device", JSONObject()
+                .put("serial", InstrumentationRegistry.getArguments().getString("deviceSerial").orEmpty())
+                .put("model", android.os.Build.MODEL)
+                .put("androidRelease", android.os.Build.VERSION.RELEASE))
+            .put("productRevision", "runtime-supplied-by-runner")
+            .put("sdkRevision", "runtime-supplied-by-runner")
+            .put("appId", input.app.id)
+            .put("releaseRevision", input.release.revision)
+            .put("releaseDigest", input.release.digest)
+            .put("skillId", input.skillId)
+            .put("skillPath", "skills/${input.skillId}/SKILL.md")
+            .put("skillFileSha256", input.skillFileSha256)
+            .put("skillNonceSha256", input.skillNonceSha256)
+            .put("skillNonce", input.skillNonce)
+            .put("unlistedNeighborSkillId", input.unlistedSkillId)
+            .put("unlistedNeighborSkillPath", "skills/${input.unlistedSkillId}/SKILL.md")
+            .put("unlistedNeighborSkillFileSha256", input.unlistedSkillFileSha256)
+            .put("unlistedNeighborSkillNonceSha256", input.unlistedSkillNonceSha256)
+            .put("unlistedNeighborSkillDeclared", false)
+            .put("unlistedNeighborSkillNonceObservedByProvider", false)
+            .put("skillApprovedByNativeHost", input.savedSettings.getJSONArray("skills").length() == 1)
+            .put("prompt", input.prompt)
+            .put("outputSchema", input.outputSchema)
+            .put("chatTitle", input.chatTitle)
+            .put("browserPackage", input.browserPackage)
+            .put("publicRunId", input.runId)
+            .put("chatId", chat.getString("chatId"))
+            .put("taskState", task.getString("state"))
+            .put("result", result)
+            .put("provider", JSONObject()
+                .put("type", "deterministic-local-test-provider")
+                .put("modelId", input.providerModel)
+                .put("requestCount", providerCalls.size)
+                .put("skillNonceObservedInActualModelRequest", providerCalls.single().optBoolean("skillNoncePresent"))
+                .put("skillNonceSha256", providerCalls.single().optString("skillNonceSha256"))
+                .put("skillNonceSha256s", providerCalls.single().getJSONArray("skillNonceSha256s"))
+                .put("unlistedNeighborNonceObservedInActualModelRequest",
+                    (0 until providerCalls.single().getJSONArray("skillNonceSha256s").length()).any {
+                        providerCalls.single().getJSONArray("skillNonceSha256s").getString(it) == input.unlistedSkillNonceSha256
+                    })
+                .put("userMessageContainsSkillNonce", providerCalls.single().optBoolean("userMessageContainsSkillNonce"))
+                .put("structuredOutputToolPresent", providerCalls.single().optBoolean("structuredOutputToolPresent"))
+                .put("requestElapsedAtBackgroundSnapshotMs", input.background.requestElapsedMs)
+                .put("providerResponseStatusAtSnapshot", JSONObject.NULL)
+                .put("providerResponseStatusAtCompletion", providerCalls.single().getInt("status")))
+            .put("pageValidatedCallbackContract", JSONObject()
+                .put("firstCallbackRequired", "RUN_STARTED")
+                .put("lastCallbackRequired", "RUN_FINISHED")
+                .put("runErrorCallbackRejected", true)
+                .put("successMarkerCreatedAfterValidation", browserMarker.getString("title")))
+            .put("publicEventTypes", JSONArray((0 until events.length()).map { events.getJSONObject(it).getString("type") }))
+            .put("runStartedCount", startedEvents.size)
+            .put("browserReadOnlyRecoveryMarker", browserMarker.getString("title"))
+            .put("nativeWake", JSONObject()
+                .put("uri", input.nativeWake.uri.toString())
+                .put("resolvedActivity", input.nativeWake.resolvedActivity)
+                .put("foregroundPackageAtMainActivity", input.nativeWake.packageAtMainActivity)
+                .put("mainActivityObservedElapsedMs", input.nativeWake.mainActivityObservedElapsedMs)
+                .put("browserReturnElapsedMs", input.nativeWake.browserReturnElapsedMs)
+                .put("mainActivityObservedInDumpsys", input.nativeWake.activityDump.contains("MainActivity")))
+            .put("backgroundSnapshot", JSONObject()
+                .put("hostAcceptanceActivityResumed", input.background.hostActivityResumed)
+                .put("windowPackage", input.browserPackage)
+                .put("foregroundServicePresent", input.background.serviceRecord.contains("LocalAppProcessService"))
+                .put("notificationRecordPackage", context.packageName)
+                .put("notificationRecordId", 7242)
+                .put("notificationForegroundFlag", input.background.notificationForegroundFlag)
+                .put("elapsedMs", input.background.requestElapsedMs)
+                .put("runStateReadOperation", "agent.tasks.get")
+                .put("runStateReadElapsedMs", input.background.runStateReadElapsedMs)
+                .put("runStateAtSnapshot", input.background.runState.getString("state"))
+                .put("files", JSONObject()
+                    .put("activity", input.background.activityFile.name)
+                    .put("activitySha256", sha256(input.background.activityFile.readBytes()))
+                    .put("service", input.background.serviceFile.name)
+                    .put("serviceSha256", sha256(input.background.serviceFile.readBytes()))
+                    .put("notification", input.background.notificationFile.name)
+                    .put("notificationSha256", sha256(input.background.notificationFile.readBytes()))))
+        File(context.filesDir, "ag-ui-android-skill-background-wake.json").writeText(evidence.toString(2))
+        val screenshot = instrumentation.uiAutomation.takeScreenshot()
+            ?: error("Could not capture the returned external browser Skill Chat.")
+        File(context.filesDir, "ag-ui-android-skill-background-wake.png").outputStream().use {
+            check(screenshot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it))
+        }
+        screenshot.recycle()
+        android.util.Log.i("LocalAppAgentAcceptance",
+            "SKILL_BACKGROUND_WAKE PASS provider=deterministic nonceObserved=true elapsedMs=${input.background.requestElapsedMs} runId=${input.runId} readOnlyRecovery=true")
+    }
+
+    private suspend fun captureSkillFailureEvidence(
+        launch: AppLaunch?,
+        scenario: SkillAcceptanceScenario,
+        dumpDirectory: File,
+        failure: Throwable,
+    ) = withContext(NonCancellable) {
+        fun safeCode(error: Throwable): String = when (error) {
+            is SkillBrowserDiagnosticException -> error.code
+            is AppServiceException -> error.code
+            else -> error.javaClass.simpleName
+        }
+        val evidence = JSONObject()
+            .put("schemaVersion", 1)
+            .put("scope", "exact-skill-run-failure-read-only")
+            .put("runIdSha256", sha256(scenario.runId.toByteArray()))
+            .put("capturedAtEpochMs", System.currentTimeMillis())
+            .put("primaryExceptionClass", failure.javaClass.simpleName)
+            .put("primaryErrorCode", safeCode(failure))
+            .put("primaryMessageRecorded", false)
+            .put("suppressedExceptions", JSONArray(failure.suppressed.map { suppressed ->
+                JSONObject().put("class", suppressed.javaClass.simpleName).put("code", safeCode(suppressed))
+            }))
+        if (failure is SkillBrowserDiagnosticException) {
+            evidence.put("browserPage", JSONObject()
+                .put("phase", failure.phase)
+                .put("code", failure.code)
+                .put("errorName", failure.errorName)
+                .put("taskState", failure.taskState)
+                .put("taskErrorCode", failure.taskErrorCode)
+                .put("eventSummary", failure.eventSummary)
+                .put("lastReplay", failure.lastReplay))
+        }
+
+        if (launch == null) {
+            evidence.put("taskQueryAttempted", false).put("eventQueryAttempted", false)
+        } else {
+            evidence.put("taskQueryAttempted", true).put("eventQueryAttempted", true)
+            try {
+                val task = withTimeout(5_000) { taskGet(launch, scenario.runId) }
+                val error = task.optJSONObject("error")
+                val result = task.optJSONObject("result")
+                val answer = result?.opt("answer") as? String
+                evidence.put("task", JSONObject()
+                    .put("runIdSha256", sha256(task.optString("runId").toByteArray()))
+                    .put("state", task.optString("state", "unknown"))
+                    .put("phase", task.optString("phase", ""))
+                    .put("updatedAt", task.optLong("updatedAt", -1))
+                    .put("errorPresent", error != null)
+                    .put("errorCode", error?.optString("code")?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+                    .put("resultPresent", result != null)
+                    .put("resultFields", JSONArray(result?.keys()?.asSequence()?.toList()?.sorted().orEmpty()))
+                    .put("answerBytes", answer?.toByteArray()?.size ?: JSONObject.NULL)
+                    .put("answerSha256", answer?.let { sha256(it.toByteArray()) } ?: JSONObject.NULL))
+            } catch (queryFailure: Throwable) {
+                evidence.put("taskQueryErrorCode", safeCode(queryFailure))
+            }
+            try {
+                val page = withTimeout(5_000) {
+                    agentCall(launch, "agent.tasks.events", JSONObject().put("runId", scenario.runId)) as JSONObject
+                }
+                val events = page.optJSONArray("events") ?: JSONArray()
+                val timeline = JSONArray()
+                for (index in 0 until events.length()) {
+                    val event = events.optJSONObject(index) ?: continue
+                    val eventId = event.optString("id", event.optString("eventId", ""))
+                    val body = event.optJSONObject("event")
+                    timeline.put(JSONObject()
+                        .put("type", event.optString("type", body?.optString("type") ?: "unknown"))
+                        .put("sequence", event.optLong("sequence", -1))
+                        .put("eventIdSha256", eventId.takeIf { it.isNotBlank() }?.let { sha256(it.toByteArray()) } ?: JSONObject.NULL)
+                        .put("timestamp", event.optString("timestamp", event.optString("createdAt", event.optString("recordedAt", ""))))
+                        .put("errorCode", event.optJSONObject("error")?.optString("code") ?: JSONObject.NULL))
+                }
+                evidence.put("eventCount", timeline.length()).put("eventTimeline", timeline)
+            } catch (queryFailure: Throwable) {
+                evidence.put("eventQueryErrorCode", safeCode(queryFailure))
+            }
+        }
+        File(dumpDirectory, "skill-failure-readonly.json").writeText(evidence.toString(2))
+    }
+
+    private fun splitSkillSections(skill: String): Pair<String, String> {
+        check(skill.startsWith("---\n")) { "Acceptance Skill is missing its opening frontmatter delimiter." }
+        val closingDelimiter = skill.indexOf("\n---\n", startIndex = 4)
+        check(closingDelimiter >= 0) { "Acceptance Skill is missing its closing frontmatter delimiter." }
+        return skill.substring(4, closingDelimiter) to skill.substring(closingDelimiter + "\n---\n".length)
+    }
+
+    private fun createSkillAcceptanceScenario(): SkillAcceptanceScenario {
+        val skillId = "acceptance-" + UUID.randomUUID().toString().replace("-", "").take(12)
+        val skillNonce = "SKILL_NONCE_" + UUID.randomUUID().toString().replace("-", "").uppercase()
+        val skillDescription = "Return the exact value in this Skill when the user requests acceptance verification."
+        val unlistedSkillId = "neighbor-" + UUID.randomUUID().toString().replace("-", "").take(12)
+        val unlistedSkillNonce = "SKILL_NONCE_" + UUID.randomUUID().toString().replace("-", "").uppercase()
+        val unlistedSkillDescription = "An unlisted package file that this request must not load."
+        val unlistedSkillBody = """
+            ---
+            name: $unlistedSkillId
+            description: $unlistedSkillDescription
+            ---
+            This unlisted neighbor Skill contains a separate value which must not be loaded for the approved Skill request.
+
+            $unlistedSkillNonce
+        """.trimIndent()
+        val (unlistedSkillFrontMatter, unlistedSkillInstructions) = splitSkillSections(unlistedSkillBody)
+        val skillBody = """
+            ---
+            name: $skillId
+            description: $skillDescription
+            ---
+            When asked to execute the approved acceptance skill for this app, return exactly the token below as the structured answer.
+            Do not infer, alter, or add words to the token.
+
+            $skillNonce
+        """.trimIndent()
+        val (skillFrontMatter, skillInstructions) = splitSkillSections(skillBody)
+        assertFalse(skillFrontMatter.contains(skillNonce))
+        assertTrue(skillInstructions.contains(skillNonce))
+        assertEquals(1, skillBody.split(skillNonce).size - 1)
+        assertFalse(unlistedSkillFrontMatter.contains(unlistedSkillNonce))
+        assertTrue(unlistedSkillInstructions.contains(unlistedSkillNonce))
+        assertEquals(1, unlistedSkillBody.split(unlistedSkillNonce).size - 1)
+        val prompt = "SKILL_BACKGROUND_WAKE_PROBE: Run the approved acceptance skill declared by this app. Return its exact value as the answer."
+        val outputSchema = JSONObject("""{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}""")
+        val chatTitle = "AG-UI Skill acceptance " + UUID.randomUUID()
+        val runId = "external-skill-wake-" + UUID.randomUUID()
+        val reportKey = UUID.randomUUID().toString().replace("-", "").take(8)
+        assertFalse(prompt.contains(skillNonce))
+        assertFalse(outputSchema.toString().contains(skillNonce))
+        assertFalse(chatTitle.contains(skillNonce))
+        assertFalse(skillDescription.contains(skillNonce))
+        assertFalse(prompt.contains(unlistedSkillNonce))
+        assertFalse(outputSchema.toString().contains(unlistedSkillNonce))
+        assertFalse(chatTitle.contains(unlistedSkillNonce))
+        assertFalse(unlistedSkillDescription.contains(unlistedSkillNonce))
+        return SkillAcceptanceScenario(
+            skillId = skillId,
+            skillNonce = skillNonce,
+            skillBody = skillBody,
+            skillFileSha256 = sha256(skillBody.toByteArray(Charsets.UTF_8)),
+            skillNonceSha256 = sha256(skillNonce.toByteArray(Charsets.UTF_8)),
+            unlistedSkillId = unlistedSkillId,
+            unlistedSkillNonce = unlistedSkillNonce,
+            unlistedSkillBody = unlistedSkillBody,
+            unlistedSkillFileSha256 = sha256(unlistedSkillBody.toByteArray(Charsets.UTF_8)),
+            unlistedSkillNonceSha256 = sha256(unlistedSkillNonce.toByteArray(Charsets.UTF_8)),
+            prompt = prompt,
+            outputSchema = outputSchema,
+            chatTitle = chatTitle,
+            runId = runId,
+            reportKey = reportKey,
+        )
+    }
+
+    private suspend fun recoverInterruptedSkillFixture(journal: File) {
+        if (!journal.isFile) return
+        val interruptedProviderId = JSONObject(journal.readText()).getString("providerId")
+        check(interruptedProviderId.startsWith("agui-fixture-")) {
+            "The interrupted Skill fixture journal contains an unexpected provider ID."
+        }
+        removeInterruptedSkillFixtureProvider(interruptedProviderId)
+        check(journal.delete() || !journal.exists()) {
+            "The interrupted Skill fixture journal could not be cleared after secure cleanup."
+        }
+    }
+
+    private fun createSkillFixtureResources(providerBaseUrl: String, providerModel: String, journal: File): SkillFixtureResources {
+        val preferences = context.getSharedPreferences("provider_settings", android.content.Context.MODE_PRIVATE)
+        val originalProvidersLlmPresent = preferences.contains("providers_llm")
+        val originalProvidersLlmRaw = preferences.getString("providers_llm", null)
+        val originalAudioProviderRegionPresent = preferences.contains("audio_provider_region")
+        val originalAudioProviderRegionRaw = preferences.getString("audio_provider_region", null)
+        check(!originalProvidersLlmPresent || originalProvidersLlmRaw != null) {
+            "The existing provider rows are not stored as a string and cannot be snapshotted safely."
+        }
+        check(!originalAudioProviderRegionPresent || originalAudioProviderRegionRaw != null) {
+            "The existing audio region preference is not stored as a string and cannot be snapshotted safely."
+        }
+        val providerSettings = ProviderSettingsRepository(context)
+        try {
+            val originalProviders = providerSettings.loadProviderState().first
+            val originalDefaultModel = providerSettings.engineLaunchConfig().defaultModel
+            check(originalProviders.none { it.id.startsWith("agui-fixture-") }) {
+                "An interrupted test fixture provider remains; run the exact fixture credential cleanup first."
+            }
+            val providerId = "agui-fixture-" + UUID.randomUUID().toString().replace("-", "").take(16)
+            check(originalProviders.none { it.id == providerId }) {
+                "The random test provider ID unexpectedly collides with a saved provider."
+            }
+            return SkillFixtureResources(
+                apps = UnifiedLocalApps.get(context),
+                sources = mutableListOf(),
+                ids = mutableListOf(),
+                providerSettings = providerSettings,
+                originalProviders = originalProviders,
+                originalDefaultModel = originalDefaultModel,
+                providerBaseUrl = providerBaseUrl,
+                fixtureProvider = GenericProvider(
+                    id = providerId,
+                    preset = "custom",
+                    name = "Local App acceptance fixture",
+                    url = providerBaseUrl,
+                    key = "",
+                    model = providerModel,
+                    status = ConnStatus.Configured,
+                    enabled = true,
+                    credentialConfigured = true,
+                    showInModelPicker = false,
+                ),
+                fixtureJournal = journal,
+                originalProvidersLlmPresent = originalProvidersLlmPresent,
+                originalProvidersLlmRaw = originalProvidersLlmRaw,
+                originalAudioProviderRegionPresent = originalAudioProviderRegionPresent,
+                originalAudioProviderRegionRaw = originalAudioProviderRegionRaw,
+            )
+        } catch (failure: Throwable) {
+            providerSettings.close()
+            throw failure
+        }
+    }
+
+    private suspend fun configureSkillFixtureProvider(resources: SkillFixtureResources, providerKey: String) {
+        check(resources.originalDefaultModel.isNotBlank()) {
+            "Configure a host default model before running the test-only provider acceptance."
+        }
+        check(!resources.fixtureJournal.exists()) { "A Skill fixture journal already exists before provider configuration." }
+        resources.fixtureJournal.writeText(JSONObject().put("providerId", resources.fixtureProvider.id).toString())
+        resources.providerSettings.persistProviders(ProviderKind.Llm, resources.originalProviders + resources.fixtureProvider)
+        persistProviderRowsForAcceptance(resources.originalProviders + resources.fixtureProvider)
+        val providerRowsWithFixture = rawProviderRowsWithFixture(resources.originalProvidersLlmRaw, resources.fixtureProvider)
+        check(context.getSharedPreferences("provider_settings", android.content.Context.MODE_PRIVATE)
+            .edit().putString("providers_llm", providerRowsWithFixture).commit()) {
+            "The synthetic provider row could not be added while preserving unknown original provider fields."
+        }
+        assertEquals(
+            ProviderSettingsRepository.encodeProvidersJson(resources.originalProviders + resources.fixtureProvider),
+            ProviderSettingsRepository.encodeProvidersJson(resources.providerSettings.loadProviderState().first),
+        )
+        resources.credentialSource = com.lingxi.code.conversation.EngineConversationSource.create(
+            context = context,
+            workspaceKey = "acceptance.skill-credential.${resources.fixtureProvider.id}",
+            reuseProcessSource = false,
+        ) as? com.lingxi.code.conversation.EngineConversationSource
+            ?: error("Could not create an isolated native source for the synthetic fixture credential.")
+        resources.providerSettings.bindSource(resources.credentialSource)
+        resources.credentialWriteAttempted = true
+        val credential = resources.providerSettings.setCredential(resources.fixtureProvider, providerKey)
+        check(credential.error == null && credential.storageEncrypted &&
+            resources.fixtureProvider.id in credential.configuredProviderIds &&
+            resources.fixtureProvider.id !in credential.unavailableProviderIds) {
+            "The synthetic acceptance provider credential was not stored in the Android secure credential service."
+        }
+        assertEquals("Adding the test-only provider must preserve the chat default model",
+            resources.originalDefaultModel, resources.providerSettings.engineLaunchConfig().defaultModel)
+    }
+
+    private suspend fun publishAndConfigureSkillApp(
+        resources: SkillFixtureResources,
+        scenario: SkillAcceptanceScenario,
+    ): PreparedSkillApp {
+        val page = """
+            <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Approved Skill acceptance</title>
+            <style>body{font-family:system-ui;margin:20px}#result{white-space:pre-wrap;overflow-wrap:anywhere}</style>
+            <h1>Approved Skill acceptance</h1><pre id="result">Waiting for the external browser and Host SDK</pre>
+            <script type="module">
+            (async()=>{
+              const output=document.getElementById('result');
+              const runId='${scenario.runId}';
+              const skillId='${scenario.skillId}';
+              const storageKey='lingxi-local-app-skill-wake-${scenario.runId}';
+              let phase='B';
+              let recoveredTaskState=null;
+              let recoveredTaskErrorCode=null;
+              let replayResultPresent=false;
+              let replayCallbacks=[];
+              let eventTimeline=[];
+              function loadState(){try{return JSON.parse(localStorage.getItem(storageKey)||'{}');}catch(_error){return {};}}
+              function saveState(value){localStorage.setItem(storageKey,JSON.stringify(value));}
+              document.addEventListener('visibilitychange',()=>{
+                if(document.visibilityState==='hidden'){
+                  const value=loadState();value.sawHidden=true;saveState(value);
+                }
+              });
+              try {
+                await import('/__local_app_sdk.js');
+                phase='S';
+                let state=loadState();
+                if(!state.chatId){
+                  const created=await localApp.agent.chats.create({title:'${scenario.chatTitle}'});
+                  state.chatId=created.id;
+                  state.started=false;
+                  state.runId=runId;
+                  saveState(state);
+                }
+                const chat=await localApp.agent.chats.open(state.chatId);
+                if(!state.started){
+                  const input={
+                    threadId:chat.id,
+                    runId,
+                    messages:[{id:'message-'+runId,role:'user',content:[{type:'text',text:'${scenario.prompt}'}]}],
+                    forwardedProps:{'com.lingxi.localApp':{
+                      version:1,
+                      outputSchema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},
+                      tools:[],skills:[skillId],maxTurns:8,timeoutMs:180000
+                    }}
+                  };
+                  state.started=true;state.runId=runId;saveState(state);
+                  phase='R';
+                  const sent=await chat.send(input);
+                  if(!sent.result||typeof sent.result.answer!=='string'||!Array.isArray(sent.newMessages)){
+                    throw new Error('Persistent Host/Harness Chat did not return a structured Skill result.');
+                  }
+                }
+                phase='W';
+                while(document.visibilityState!=='visible'||loadState().sawHidden!==true){
+                  await new Promise(resolve=>setTimeout(resolve,150));
+                }
+                phase='replay';
+                const replay=await localApp.agent.createClient({threadId:chat.id}).connectAgent(
+                  {runId},{onEvent({event}){replayCallbacks.push(event.type);}}
+                );
+                replayResultPresent=Boolean(replay.result);
+                phase='task-get';
+                const task=await localApp.agent.tasks.get(runId);
+                recoveredTaskState=typeof task.state==='string'?task.state:'unknown';
+                const taskError=task.error&&typeof task.error==='object'?task.error:null;
+                recoveredTaskErrorCode=typeof taskError?.code==='string'?taskError.code.replace(/[^A-Za-z0-9_-]/g,'').slice(0,24):null;
+                phase='events';
+                const eventPage=await localApp.agent.tasks.events({runId});
+                eventTimeline=eventPage.events.map(event=>({
+                  sequence:Number.isSafeInteger(event.sequence)?event.sequence:null,
+                  type:typeof event.type==='string'?event.type:'unknown',
+                  timestamp:typeof event.timestamp==='string'?event.timestamp:
+                    (typeof event.createdAt==='string'?event.createdAt:null),
+                }));
+                const eventTypes=eventTimeline.map(event=>event.type);
+                const started=eventPage.events.filter(event=>event.type==='RUN_STARTED');
+                const terminal=eventPage.events[eventPage.events.length-1];
+                phase='validation';
+                if(task.state!=='succeeded'||task.threadId!==chat.id||started.length!==1||
+                   terminal?.type!=='RUN_FINISHED'||terminal.runId!==runId||
+                   replayCallbacks[0]!=='RUN_STARTED'||replayCallbacks[replayCallbacks.length-1]!=='RUN_FINISHED'||
+                   replayCallbacks.includes('RUN_ERROR')||!replay.result?.answer||
+                   replay.result.answer!==terminal.result.answer){
+                  throw new Error('Same-run read-only recovery did not replay one terminal Skill task.');
+                }
+                phase='history';
+                const history=await chat.history({limit:50});
+                if(!history.messages.some(message=>message.role==='assistant')){
+                  throw new Error('Persistent Chat history did not retain an assistant turn.');
+                }
+                phase='V';
+                output.textContent=JSON.stringify({acceptance:'SKILL_BACKGROUND_WAKE_PASS',runId,chatId:chat.id,
+                  taskState:task.state,result:replay.result,replayCallbacks,eventTypes,historyRoles:history.messages.map(message=>message.role)});
+                await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+                phase='M';
+                await localApp.agent.chats.create({title:'agui:p:${scenario.reportKey}:${scenario.runId}'});
+              } catch(error) {
+                const code=String(error&&typeof error.code==='string'?error.code:'browser_error').toLowerCase().replace(/[^a-z0-9_-]/g,'').slice(0,8)||'error';
+                const errorName=String(error&&typeof error.name==='string'?error.name:'Error').replace(/[^A-Za-z0-9_.-]/g,'').slice(0,48);
+                const safeState=['queued','running','succeeded','failed','cancelled','interrupted'].includes(recoveredTaskState)?recoveredTaskState:'unknown';
+                const eventSummary=eventTimeline.slice(-3).map(event=>String(event.sequence??'x')+'-'+event.type.replace(/[^A-Z0-9_-]/g,'').slice(0,16)).join(',')||'none';
+                const lastReplay=replayCallbacks[replayCallbacks.length-1]||'none';
+                output.textContent='SKILL_WAKE_PAGE_DIAGNOSTIC '+JSON.stringify({phase,code,errorName,taskState:safeState,
+                  taskErrorCode:recoveredTaskErrorCode,replayResultPresent,eventSummary,lastReplay});
+                await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+                try { if(window.localApp?.agent?.chats?.create) await localApp.agent.chats.create({title:'agui:e:${scenario.reportKey}:${scenario.runId}:'+phase+':'+code+':'+errorName+':'+safeState+':'+(recoveredTaskErrorCode||'none')+':'+eventSummary+':'+lastReplay}); } catch(_reportError) {}
+              }
+            })();
+            </script>
+        """.trimIndent()
+        val app = publish(resources.apps, resources.sources, pageHtml = page,
+            skillId = scenario.skillId, skillBody = scenario.skillBody,
+            unlistedSkillId = scenario.unlistedSkillId, unlistedSkillBody = scenario.unlistedSkillBody)
+        resources.ids.add(app.id)
+        val release = resources.apps.release(app.id, app.currentRevision)
+        val declaredSkills = release.manifest.getJSONObject("agent").getJSONArray("skills")
+        assertEquals(1, declaredSkills.length())
+        assertEquals(scenario.skillId, declaredSkills.getJSONObject(0).getString("id"))
+        assertEquals("skills/${scenario.skillId}/SKILL.md", declaredSkills.getJSONObject(0).getString("path"))
+        assertFalse(release.manifest.toString().contains(scenario.skillNonce))
+        assertFalse(release.manifest.toString().contains(scenario.unlistedSkillNonce))
+        assertFalse((0 until declaredSkills.length()).any {
+            declaredSkills.getJSONObject(it).getString("id") == scenario.unlistedSkillId
+        })
+        assertFalse(app.name.contains(scenario.skillNonce))
+        assertFalse(app.summary.contains(scenario.skillNonce))
+        assertEquals("The immutable published Skill body matches its source",
+            scenario.skillFileSha256, sha256(File(resources.sources.single(), "skills/${scenario.skillId}/SKILL.md").readBytes()))
+        assertEquals("The unlisted neighbor file is packaged separately from the approved Skill",
+            scenario.unlistedSkillFileSha256,
+            sha256(File(resources.sources.single(), "skills/${scenario.unlistedSkillId}/SKILL.md").readBytes()))
+        val immutableRelease = resources.apps.request("getRelease", app.id) { put("revision", app.currentRevision) } as JSONObject
+        val immutableFiles = immutableRelease.getJSONArray("files")
+        fun immutableFile(path: String): JSONObject = (0 until immutableFiles.length())
+            .map { immutableFiles.getJSONObject(it) }.single { it.getString("path") == path }
+        assertEquals(scenario.skillFileSha256, immutableFile("skills/${scenario.skillId}/SKILL.md").getString("sha256"))
+        assertEquals(scenario.unlistedSkillFileSha256,
+            immutableFile("skills/${scenario.unlistedSkillId}/SKILL.md").getString("sha256"))
+
+        resources.appAgentHostTouched = true
+        val configured = configure(
+            resources.apps,
+            app.id,
+            photo = false,
+            skills = setOf(scenario.skillId),
+            selectedModel = JSONObject().put("providerId", resources.fixtureProvider.id)
+                .put("modelId", resources.fixtureProvider.model),
+        )
+        assertEquals(resources.fixtureProvider.id, configured.getString("providerId"))
+        assertEquals(resources.fixtureProvider.model, configured.getString("modelId"))
+        val savedSettings = resources.apps.agentHost(JSONObject().put("op", "settings").put("appId", app.id)) as JSONObject
+        assertEquals(1, savedSettings.getJSONArray("skills").length())
+        assertEquals(scenario.skillId, savedSettings.getJSONArray("skills").getString(0))
+        assertEquals("Native App Agent settings approve exactly the declared Skill",
+            scenario.skillId, declaredSkills.getJSONObject(0).getString("id"))
+
+        val browserPackages = LocalAppBrowser.installedHandlerPackages(context, "http://127.0.0.1/")
+        assertTrue("Install or enable an HTTP browser before this acceptance", browserPackages.isNotEmpty())
+        return PreparedSkillApp(app, release, savedSettings, browserPackages)
+    }
+
+    private suspend fun runSkillInExternalBrowserAndRecover(
+        resources: SkillFixtureResources,
+        scenario: SkillAcceptanceScenario,
+        prepared: PreparedSkillApp,
+    ) {
+        val hostIntent = Intent().setClassName(context.packageName, "com.lingxi.code.apps.LocalAppAcceptanceActivity")
+            .putExtra("appId", prepared.app.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val dumpDirectory = File(context.filesDir, "ag-ui-android-skill-wake-${scenario.runId}").apply {
+            check(mkdirs() || isDirectory)
+        }
+        var launchForFailure: AppLaunch? = null
+        try {
+        NativeAppActivityHost(hostIntent).use { native ->
+            var browserPackage = ""
+            var consentClickAttempted = false
+            val browserOpened = withTimeoutOrNull(60_000) {
+                while (true) {
+                    val root = instrumentation.uiAutomation.rootInActiveWindow
+                    browserPackage = root?.packageName?.toString().orEmpty()
+                    if (!consentClickAttempted && root != null) {
+                        var action = findAccessibilityNodeByText(root, "允许并打开浏览器")
+                        while (action != null && !action.isClickable) action = action.parent
+                        if (action != null) {
+                            consentClickAttempted = true
+                            action.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                        }
+                    }
+                    if (browserPackage in prepared.browserPackages) return@withTimeoutOrNull true
+                    delay(250)
+                }
+                false
+            }
+            assertTrue("The OS-selected external browser did not open: $browserPackage", browserOpened == true)
+            assertFalse("The native Host Activity must remain paused while the OS browser is foreground", native.isResumed())
+            assertTrue(LocalAppProcessService.owns(prepared.app.id))
+            assertTrue(LocalAppProcessService.notificationReady(prepared.app.id))
+
+            val launch = resources.apps.start(prepared.app.id)
+            launchForFailure = launch
+            val publicTaskStarted = withTimeout(45_000) {
+                while (true) {
+                    val current = runCatching { taskGet(launch, scenario.runId) }.getOrNull()
+                    if (current?.optString("state") == "running") return@withTimeout current
+                    check(current?.optString("state") !in setOf("failed", "cancelled", "interrupted", "succeeded")) {
+                        "The browser-created public Agent run ended before the provider delay began."
+                    }
+                    delay(250)
+                }
+                error("unreachable")
+            }
+            assertEquals(scenario.runId, publicTaskStarted.getString("runId"))
+
+            val background = captureSkillBackgroundSnapshot(
+                launch = launch,
+                runId = scenario.runId,
+                providerBaseUrl = resources.providerBaseUrl,
+                browserPackage = browserPackage,
+                native = native,
+                skillNonceSha256 = scenario.skillNonceSha256,
+                unlistedSkillNonceSha256 = scenario.unlistedSkillNonceSha256,
+                dumpDirectory = dumpDirectory,
+            )
+            val nativeWake = nativeWakeAndReturnToBrowser(
+                appId = prepared.app.id,
+                revision = prepared.app.currentRevision.toString(),
+                runId = scenario.runId,
+                browserPackages = prepared.browserPackages,
+                dumpDirectory = dumpDirectory,
+            )
+            verifySkillRecoveryAndWriteEvidence(
+                SkillEvidenceContext(
+                    apps = resources.apps,
+                    app = prepared.app,
+                    release = prepared.release,
+                    savedSettings = prepared.savedSettings,
+                    launch = launch,
+                    providerBaseUrl = resources.providerBaseUrl,
+                    providerModel = resources.fixtureProvider.model,
+                    skillId = scenario.skillId,
+                    skillNonce = scenario.skillNonce,
+                    skillFileSha256 = scenario.skillFileSha256,
+                    skillNonceSha256 = scenario.skillNonceSha256,
+                    unlistedSkillId = scenario.unlistedSkillId,
+                    unlistedSkillFileSha256 = scenario.unlistedSkillFileSha256,
+                    unlistedSkillNonceSha256 = scenario.unlistedSkillNonceSha256,
+                    prompt = scenario.prompt,
+                    outputSchema = scenario.outputSchema,
+                    chatTitle = scenario.chatTitle,
+                    reportKey = scenario.reportKey,
+                    runId = scenario.runId,
+                    browserPackage = browserPackage,
+                    nativeWake = nativeWake,
+                    background = background,
+                ),
+            )
+        }
+        } catch (failure: Throwable) {
+            try {
+                captureSkillFailureEvidence(launchForFailure, scenario, dumpDirectory, failure)
+            } catch (evidenceFailure: Throwable) {
+                if (evidenceFailure !== failure) runCatching { failure.addSuppressed(evidenceFailure) }
+            }
+            throw failure
+        }
+    }
+
+    private suspend fun cleanupSkillFixture(resources: SkillFixtureResources) {
+        var cleanupFailure: Throwable? = null
+        fun recordCleanupFailure(failure: Throwable) {
+            val previous = cleanupFailure
+            if (previous == null) cleanupFailure = failure else previous.addSuppressed(failure)
+        }
+        suspend fun collectCleanupFailure(action: suspend () -> Unit) {
+            try {
+                action()
+            } catch (failure: Throwable) {
+                recordCleanupFailure(failure)
+            }
+        }
+
+        var credentialCleanupComplete = !resources.credentialWriteAttempted
+        try {
+            resources.ids.forEach { id ->
+                collectCleanupFailure { resources.apps.remove(id) }
+            }
+            resources.sources.forEach { source ->
+                collectCleanupFailure {
+                    check(source.deleteRecursively()) { "The acceptance source directory could not be removed." }
+                }
+            }
+            if (resources.credentialWriteAttempted) {
+                credentialCleanupComplete = false
+                collectCleanupFailure {
+                    val source = checkNotNull(resources.credentialSource) {
+                        "The isolated credential source was lost before secure credential cleanup."
+                    }
+                    resources.providerSettings.bindSource(source)
+                    val deleted = resources.providerSettings.deleteCredential(resources.fixtureProvider)
+                    check(deleted.error == null && resources.fixtureProvider.id !in deleted.configuredProviderIds) {
+                        "The synthetic acceptance provider credential could not be deleted from secure storage."
+                    }
+                    credentialCleanupComplete = true
+                }
+            }
+        } finally {
+            val providerRowsToPersist = if (credentialCleanupComplete) {
+                resources.originalProviders
+            } else {
+                // Keep the exact synthetic row available while its secure credential needs a retry.
+                resources.originalProviders + resources.fixtureProvider
+            }
+            collectCleanupFailure {
+                if (resources.appAgentHostTouched) resources.apps.agentHost(JSONObject().put("op", "catalog"))
+            }
+            collectCleanupFailure { resources.providerSettings.bindSource(null) }
+            collectCleanupFailure {
+                resources.providerSettings.persistProviders(ProviderKind.Llm, providerRowsToPersist)
+            }
+            collectCleanupFailure {
+                persistProviderRowsForAcceptance(providerRowsToPersist)
+            }
+            collectCleanupFailure {
+                assertEquals(ProviderSettingsRepository.encodeProvidersJson(providerRowsToPersist),
+                    ProviderSettingsRepository.encodeProvidersJson(resources.providerSettings.loadProviderState().first))
+            }
+            collectCleanupFailure {
+                assertEquals("The host default model must be restored after the fixture provider is removed",
+                    resources.originalDefaultModel, resources.providerSettings.engineLaunchConfig().defaultModel)
+            }
+            collectCleanupFailure { resources.credentialSource?.close() }
+            collectCleanupFailure { resources.providerSettings.close() }
+
+            val rawProviderRowsToRestore = if (credentialCleanupComplete) {
+                resources.originalProvidersLlmRaw
+            } else {
+                rawProviderRowsWithFixture(resources.originalProvidersLlmRaw, resources.fixtureProvider)
+            }
+            val providerRowsPresentAfterCleanup = resources.originalProvidersLlmPresent || !credentialCleanupComplete
+            collectCleanupFailure {
+                restoreProviderSettingsRawValues(
+                    providersPresent = providerRowsPresentAfterCleanup,
+                    providersRaw = rawProviderRowsToRestore,
+                    audioRegionPresent = resources.originalAudioProviderRegionPresent,
+                    audioRegionRaw = resources.originalAudioProviderRegionRaw,
+                )
+            }
+            collectCleanupFailure {
+                assertEquals(rawProviderRowsToRestore, providerRowsFromFreshPreferencesFile())
+            }
+            if (credentialCleanupComplete) {
+                collectCleanupFailure {
+                    check(!resources.fixtureJournal.exists() || resources.fixtureJournal.delete()) {
+                        "The Skill fixture recovery journal could not be removed after cleanup."
+                    }
+                }
+            }
+        }
+        cleanupFailure?.let { throw it }
+    }
+
+    private suspend fun fixtureState(baseUrl: String): JSONObject = withContext(Dispatchers.IO) {
+        val uri = java.net.URI(baseUrl)
+        val connection = URL("${uri.scheme}://${uri.host}:${uri.port}/__fixture/state").openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 5_000
+            connection.readTimeout = 5_000
+            check(connection.responseCode == 200) { "The deterministic provider fixture state endpoint is unavailable." }
+            JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+        } finally { connection.disconnect() }
+    }
+
     private suspend fun browserCall(
         launch: AppLaunch,
         method: String,
@@ -55,6 +1225,7 @@ class LocalAppAgentAcceptanceTest {
         val bytes = JSONObject().put("method", method).put("args", args)
             .toString().toByteArray(Charsets.UTF_8)
         val connection = URL("${launch.origin}/__run/${launch.run.runId}/__host/agent").openConnection() as HttpURLConnection
+        val requestStartedAt = android.os.SystemClock.elapsedRealtime()
         try {
             connection.requestMethod = "POST"; connection.doOutput = true
             connection.connectTimeout = 10_000; connection.readTimeout = 30_000
@@ -65,14 +1236,21 @@ class LocalAppAgentAcceptanceTest {
             connection.setFixedLengthStreamingMode(bytes.size)
             connection.outputStream.use { it.write(bytes) }
             val status = connection.responseCode
-            if (status != 200) JSONObject().put("httpStatus", status)
-            else JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+            if (status != 200) {
+                val errorBody = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                JSONObject().put("httpStatus", status).put("httpErrorBody", errorBody.take(512))
+                    .put("httpElapsedMs", android.os.SystemClock.elapsedRealtime() - requestStartedAt)
+            } else JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
         } finally { connection.disconnect() }
     }
 
     private suspend fun agentCall(launch: AppLaunch, method: String, args: JSONObject): Any? {
         val response = browserCall(launch, method, args)
-        if (response.has("httpStatus")) throw IllegalStateException("Agent gateway HTTP ${response.getInt("httpStatus")}")
+        if (response.has("httpStatus")) {
+            val body = response.optString("httpErrorBody").take(256)
+            throw IllegalStateException("Agent gateway operation $method returned HTTP ${response.getInt("httpStatus")} " +
+                "after ${response.optLong("httpElapsedMs")}ms" + if (body.isNotEmpty()) ": $body" else "")
+        }
         if (!response.optBoolean("ok")) {
             val failure = response.optJSONObject("error")
             throw AppServiceException(failure?.optString("code") ?: "agent_error", failure?.optString("message") ?: response.toString())
@@ -97,6 +1275,7 @@ class LocalAppAgentAcceptanceTest {
     private fun runAgentInput(
         prompt: String,
         tools: Set<String> = emptySet(),
+        skills: Set<String> = emptySet(),
         outputSchema: JSONObject? = null,
         maxTurns: Int = 8,
         timeoutMs: Int = 180_000,
@@ -106,7 +1285,7 @@ class LocalAppAgentAcceptanceTest {
         val options = JSONObject()
             .put("version", 1)
             .put("tools", JSONArray(tools.toList()))
-            .put("skills", JSONArray())
+            .put("skills", JSONArray(skills.toList()))
             .put("maxTurns", maxTurns)
             .put("timeoutMs", timeoutMs)
         outputSchema?.let { options.put("outputSchema", it) }
@@ -131,18 +1310,31 @@ class LocalAppAgentAcceptanceTest {
     }
 
     /** Browser-side proof is an empty, app-owned Chat created only after page assertions and DOM update. */
-    private suspend fun awaitBrowserReport(launch: AppLaunch, nonce: String, runId: String): JSONObject =
-        withTimeout(30_000) {
+    private suspend fun awaitBrowserReport(
+        launch: AppLaunch,
+        nonce: String,
+        runId: String,
+        timeoutMs: Long = 30_000,
+    ): JSONObject = withTimeout(timeoutMs) {
             val successTitle = "agui:p:$nonce:$runId"
             val errorPrefix = "agui:e:$nonce:$runId:"
             while (true) {
-                val chats = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONArray
+                val chatPage = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONObject
+                val chats = chatPage.getJSONArray("chats")
                 val rows = (0 until chats.length()).map { chats.getJSONObject(it) }
                 val failures = rows.filter { it.optString("title").startsWith(errorPrefix) }
                 check(failures.size <= 1) { "Multiple browser-side error markers for runId=$runId" }
                 failures.singleOrNull()?.let { failure ->
                     val parts = failure.getString("title").removePrefix(errorPrefix).split(':')
-                    error("Browser-side acceptance failed: phase=${parts.getOrNull(0) ?: "?"}, code=${parts.getOrNull(1) ?: "?"}")
+                    throw SkillBrowserDiagnosticException(
+                        phase = parts.getOrNull(0) ?: "unknown",
+                        code = parts.getOrNull(1) ?: "unknown",
+                        errorName = parts.getOrNull(2) ?: "unknown",
+                        taskState = parts.getOrNull(3) ?: "unknown",
+                        taskErrorCode = parts.getOrNull(4) ?: "none",
+                        eventSummary = parts.getOrNull(5) ?: "none",
+                        lastReplay = parts.getOrNull(6) ?: "none",
+                    )
                 }
                 val matches = rows.filter { it.optString("title") == successTitle }
                 check(matches.size <= 1) { "Duplicate browser-side acceptance marker for runId=$runId" }
@@ -154,7 +1346,8 @@ class LocalAppAgentAcceptanceTest {
 
     private suspend fun failOnBrowserErrorReport(launch: AppLaunch, nonce: String, runId: String) {
         val errorPrefix = "agui:e:$nonce:$runId:"
-        val chats = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONArray
+        val chatPage = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONObject
+        val chats = chatPage.getJSONArray("chats")
         val failures = (0 until chats.length()).map { chats.getJSONObject(it) }
             .filter { it.optString("title").startsWith(errorPrefix) }
         check(failures.size <= 1) { "Multiple browser-side error markers for runId=$runId" }
@@ -164,12 +1357,21 @@ class LocalAppAgentAcceptanceTest {
         }
     }
 
-    private suspend fun configure(apps: UnifiedLocalApps, id: String, photo: Boolean = true, tools: Set<String> = emptySet()): JSONObject {
+    private suspend fun configure(
+        apps: UnifiedLocalApps,
+        id: String,
+        photo: Boolean = true,
+        tools: Set<String> = emptySet(),
+        skills: Set<String> = emptySet(),
+        selectedModel: JSONObject? = null,
+    ): JSONObject {
         val catalog = apps.agentHost(JSONObject().put("op", "catalog")) as JSONObject
         val args = InstrumentationRegistry.getArguments()
         val configured = ProviderSettingsRepository(context).engineLaunchConfig()
-        val requestedModel = args.getString("agentModel") ?: configured.defaultModel
-        val requestedProvider = args.getString("agentProvider")
+        val requestedModel = selectedModel?.optString("modelId")?.takeIf { it.isNotBlank() }
+            ?: args.getString("agentModel") ?: configured.defaultModel
+        val requestedProvider = selectedModel?.optString("providerId")?.takeIf { it.isNotBlank() }
+            ?: args.getString("agentProvider")
         val models = catalog.getJSONArray("models")
         val candidates = JSONArray()
         (0 until models.length()).map { models.getJSONObject(it) }
@@ -197,7 +1399,7 @@ class LocalAppAgentAcceptanceTest {
         android.util.Log.i("LocalAppAgentAcceptance", "MODEL_CATALOG_ROW $capabilityFields")
         val ref = JSONObject().put("providerId", model.getString("providerId")).put("modelId", model.getString("modelId"))
         val grants = JSONObject(); tools.forEach { grants.put(it, catalog.getJSONObject("tools").getJSONObject(it)) }
-        val settings = JSONObject().put("model", ref).put("tools", grants).put("skills", JSONArray())
+        val settings = JSONObject().put("model", ref).put("tools", grants).put("skills", JSONArray(skills.toList()))
             .put("background", false).put("maxTurns", 8).put("timeoutMs", 180_000)
         apps.agentHost(JSONObject().put("op", "configure").put("appId", id).put("settings", settings))
         assertEquals("App selection must not change the chat's default model", configured.defaultModel,
@@ -205,11 +1407,145 @@ class LocalAppAgentAcceptanceTest {
         return ref
     }
 
+    private suspend fun removeInterruptedSkillFixtureProvider(providerId: String) {
+        check(providerId.startsWith("agui-fixture-")) {
+            "Interrupted fixture cleanup only accepts the exact synthetic provider namespace."
+        }
+        val preferences = context.getSharedPreferences("provider_settings", android.content.Context.MODE_PRIVATE)
+        val originalProvidersLlmPresent = preferences.contains("providers_llm")
+        val originalProvidersLlmRaw = preferences.getString("providers_llm", null)
+        val originalAudioProviderRegionPresent = preferences.contains("audio_provider_region")
+        val originalAudioProviderRegionRaw = preferences.getString("audio_provider_region", null)
+        check(!originalProvidersLlmPresent || originalProvidersLlmRaw != null)
+        check(!originalAudioProviderRegionPresent || originalAudioProviderRegionRaw != null)
+        val providerSettings = ProviderSettingsRepository(context)
+        var credentialSource: com.lingxi.code.conversation.EngineConversationSource? = null
+        var rowsForRestore: List<GenericProvider>? = null
+        var credentialProvider: GenericProvider? = null
+        var fixtureProviderRowPresent = false
+        var cleanupComplete = false
+        try {
+            val (llmProviders, searchProviders, fetchProviders) = providerSettings.loadProviderState()
+            val provider = llmProviders.firstOrNull { it.id == providerId }
+            fixtureProviderRowPresent = provider != null
+            val appContext = context.applicationContext
+            val prefsFile = File(appContext.dataDir, "shared_prefs/provider_settings.xml")
+            android.util.Log.i("LocalAppAgentAcceptance",
+                "FIXTURE_CLEANUP package=${context.packageName} applicationPackage=${appContext.packageName} " +
+                    "dataDir=${appContext.dataDir.absolutePath} prefsFileExists=${prefsFile.isFile} " +
+                    "providerCount=${llmProviders.size} exactIdPresent=${provider != null}")
+            credentialProvider = provider ?: GenericProvider(
+                id = providerId,
+                preset = "custom",
+                name = "Interrupted Local App acceptance fixture",
+                url = "",
+                key = "",
+                model = "",
+                status = ConnStatus.Configured,
+                enabled = true,
+                credentialConfigured = true,
+                showInModelPicker = false,
+            )
+            val originalDefaultModel = providerSettings.engineLaunchConfig().defaultModel
+            credentialSource = com.lingxi.code.conversation.EngineConversationSource.create(
+                context = context,
+                workspaceKey = "acceptance.skill-credential-recovery.$providerId.${UUID.randomUUID()}",
+                reuseProcessSource = false,
+            ) as? com.lingxi.code.conversation.EngineConversationSource
+                ?: error("Could not create an isolated native source to remove the interrupted fixture credential.")
+            providerSettings.bindSource(credentialSource)
+            val deleted = providerSettings.deleteCredential(checkNotNull(credentialProvider))
+            check(deleted.error == null && providerId !in deleted.configuredProviderIds) {
+                "The interrupted Skill fixture credential could not be deleted from secure storage."
+            }
+            providerSettings.bindSource(null)
+            val restoredProviders = llmProviders.filterNot { it.id == providerId }
+            rowsForRestore = restoredProviders
+            providerSettings.persistProviders(ProviderKind.Llm, restoredProviders)
+            persistProviderRowsForAcceptance(restoredProviders)
+            assertEquals(ProviderSettingsRepository.encodeProvidersJson(restoredProviders),
+                ProviderSettingsRepository.encodeProvidersJson(providerSettings.loadProviderState().first))
+            assertEquals("Removing the interrupted fixture must preserve the host default model",
+                originalDefaultModel, providerSettings.engineLaunchConfig().defaultModel)
+            assertEquals(searchProviders, providerSettings.loadProviderState().second)
+            assertEquals(fetchProviders, providerSettings.loadProviderState().third)
+            cleanupComplete = true
+        } finally {
+            try {
+                providerSettings.bindSource(null)
+            } finally {
+                try {
+                    credentialSource?.close()
+                } finally {
+                    try {
+                        providerSettings.close()
+                    } finally {
+                        val restoredRaw = if (cleanupComplete) {
+                            rawProviderRowsWithoutFixture(
+                                originalProvidersLlmRaw,
+                                providerId,
+                                requirePresent = fixtureProviderRowPresent,
+                            )
+                        } else if (fixtureProviderRowPresent) {
+                            originalProvidersLlmRaw
+                        } else {
+                            rawProviderRowsWithFixture(originalProvidersLlmRaw, checkNotNull(credentialProvider))
+                        }
+                        val restoredRawPresent = if (cleanupComplete) {
+                            originalProvidersLlmPresent && restoredRaw != null
+                        } else {
+                            originalProvidersLlmPresent || restoredRaw != null
+                        }
+                        restoreProviderSettingsRawValues(
+                            providersPresent = restoredRawPresent,
+                            providersRaw = restoredRaw,
+                            audioRegionPresent = originalAudioProviderRegionPresent,
+                            audioRegionRaw = originalAudioProviderRegionRaw,
+                        )
+                    }
+                }
+            }
+        }
+        val restoredProviders = checkNotNull(rowsForRestore) {
+            "The exact fixture provider was not removed before preference verification."
+        }
+        val rawProviderRowsRestored = if (cleanupComplete) {
+            rawProviderRowsWithoutFixture(originalProvidersLlmRaw, providerId, requirePresent = fixtureProviderRowPresent)
+        } else if (fixtureProviderRowPresent) {
+            originalProvidersLlmRaw
+        } else {
+            rawProviderRowsWithFixture(originalProvidersLlmRaw, checkNotNull(credentialProvider))
+        }
+        assertEquals(
+            rawProviderRowsRestored,
+            providerRowsFromFreshPreferencesFile(),
+        )
+    }
+
+    @Test fun cleanupInterruptedSkillFixtureProvider() = runBlocking<Unit> {
+        val providerId = InstrumentationRegistry.getArguments().getString("fixtureCleanupProviderId")
+            ?: error("Pass the exact interrupted test-fixture provider ID for cleanup.")
+        val journal = File(context.filesDir, "ag-ui-android-skill-fixture-provider.json")
+        if (journal.isFile) {
+            assertEquals(providerId, JSONObject(journal.readText()).getString("providerId"))
+        }
+        removeInterruptedSkillFixtureProvider(providerId)
+        if (journal.isFile) {
+            check(journal.delete() || !journal.exists()) {
+                "The interrupted Skill fixture journal could not be cleared after secure cleanup."
+            }
+        }
+    }
+
     private suspend fun publish(
         apps: UnifiedLocalApps,
         sources: MutableList<File>,
         tools: Set<String> = emptySet(),
         pageHtml: String? = null,
+        skillId: String? = null,
+        skillBody: String? = null,
+        unlistedSkillId: String? = null,
+        unlistedSkillBody: String? = null,
     ): AppRecord {
         val sourceDirectory = apps.createAuthoring("Agent acceptance ${UUID.randomUUID()}")
         val source = apps.hostFile(sourceDirectory)
@@ -226,6 +1562,42 @@ class LocalAppAgentAcceptanceTest {
         if (tools.isNotEmpty()) {
             val manifest = File(source, "lingxi-app.json")
             val value = JSONObject(manifest.readText()); value.getJSONObject("agent").put("tools", JSONArray(tools.toList()))
+            manifest.writeText(value.toString())
+        }
+        if (skillId != null || skillBody != null) {
+            require(skillId != null && skillBody != null) { "An acceptance Skill needs both an ID and immutable SKILL.md body." }
+            val skillFile = File(source, "skills/$skillId/SKILL.md")
+            check(skillFile.parentFile!!.mkdirs())
+            skillFile.writeText(skillBody)
+            val manifest = File(source, "lingxi-app.json")
+            val value = JSONObject(manifest.readText())
+            val packageFiles = value.getJSONObject("package").getJSONArray("files")
+            val skillPath = "skills/$skillId/SKILL.md"
+            if ((0 until packageFiles.length()).none { packageFiles.getString(it) == skillPath }) {
+                packageFiles.put(skillPath)
+            }
+            value.getJSONObject("agent").put(
+                "skills",
+                JSONArray().put(JSONObject().put("id", skillId).put("path", skillPath)),
+            )
+            manifest.writeText(value.toString())
+        }
+        if (unlistedSkillId != null || unlistedSkillBody != null) {
+            require(unlistedSkillId != null && unlistedSkillBody != null) {
+                "An unlisted acceptance Skill needs both an ID and immutable SKILL.md body."
+            }
+            require(unlistedSkillId != skillId) { "The unlisted Skill must have a distinct ID." }
+            File(source, "skills/$unlistedSkillId/SKILL.md").also { file ->
+                check(file.parentFile!!.mkdirs())
+                file.writeText(unlistedSkillBody)
+            }
+            val manifest = File(source, "lingxi-app.json")
+            val value = JSONObject(manifest.readText())
+            val packageFiles = value.getJSONObject("package").getJSONArray("files")
+            val skillPath = "skills/$unlistedSkillId/SKILL.md"
+            if ((0 until packageFiles.length()).none { packageFiles.getString(it) == skillPath }) {
+                packageFiles.put(skillPath)
+            }
             manifest.writeText(value.toString())
         }
         val value = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
@@ -518,7 +1890,7 @@ class LocalAppAgentAcceptanceTest {
                   result:result.result,historyRoles:history.messages.map(message=>message.role),
                   historyIds:history.messages.map(message=>message.id),reopenedIds:reopenedHistory.messages.map(message=>message.id),
                   isolatedMessageCount:isolatedHistory.messages.length,
-                  chatListed:Array.isArray(listed)&&listed.some(item=>item.chatId===chat.id),
+                  chatListed:Array.isArray(listed.chats)&&listed.chats.some(item=>item.chatId===chat.id),
                   eventTypes:eventPage.events.map(event=>event.type),replayCallbacks
                 };
                 if(task.threadId!==chat.id||task.state!=='succeeded'||history.messages.length<2||
@@ -619,8 +1991,9 @@ class LocalAppAgentAcceptanceTest {
                 assertFalse((0 until events.length()).any { events.getJSONObject(it).optString("type") == "RUN_ERROR" })
 
                 val chatId = task.getString("threadId")
-                val chatList = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONArray
-                val summaries = (0 until chatList.length()).map { chatList.getJSONObject(it) }
+                val chatPage = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONObject
+                val chatRows = chatPage.getJSONArray("chats")
+                val summaries = (0 until chatRows.length()).map { chatRows.getJSONObject(it) }
                 val mainTitle = "AG-UI Chat acceptance $runId"
                 val isolationTitle = "AG-UI Chat isolation $runId"
                 val listedChat = summaries.singleOrNull { it.optString("title") == mainTitle }
@@ -771,6 +2144,36 @@ class LocalAppAgentAcceptanceTest {
             assertTrue("Revocation must fence new task admission", denied.isFailure)
             android.util.Log.i("LocalAppAgentAcceptance", "NATIVE_TASK_POLICY PASS app-scoped-task question-approval trusted-native-list-cancel revoke")
         } finally { runCatching { apps.remove(other.id) }; runCatching { apps.remove(app.id) }; sources.forEach { it.deleteRecursively() } }
+    }
+
+    @Test fun externalBrowserApprovedSkillRunsInBackgroundAndRecoversThroughNativeWakeLink() = runBlocking<Unit> {
+        val arguments = InstrumentationRegistry.getArguments()
+        val providerBaseUrl = arguments.getString("fixtureProviderUrl")
+            ?: error("Pass fixtureProviderUrl from the loopback test provider.")
+        val providerKey = arguments.getString("fixtureProviderKey")
+            ?: error("Pass the synthetic fixture key from the loopback test provider.")
+        val providerModel = arguments.getString("fixtureProviderModel") ?: "lingxi-local-app-fixture"
+        val scenario = createSkillAcceptanceScenario()
+        val fixtureJournal = File(context.filesDir, "ag-ui-android-skill-fixture-provider.json")
+        recoverInterruptedSkillFixture(fixtureJournal)
+        val resources = createSkillFixtureResources(providerBaseUrl, providerModel, fixtureJournal)
+        var primaryFailure: Throwable? = null
+        try {
+            configureSkillFixtureProvider(resources, providerKey)
+            val prepared = publishAndConfigureSkillApp(resources, scenario)
+            runSkillInExternalBrowserAndRecover(resources, scenario, prepared)
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            try {
+                cleanupSkillFixture(resources)
+            } catch (cleanupFailure: Throwable) {
+                val primary = primaryFailure
+                if (primary == null) throw cleanupFailure
+                if (primary !== cleanupFailure) runCatching { primary.addSuppressed(cleanupFailure) }
+            }
+        }
     }
 
     @Test fun externalGatewayRejectsInvalidRunAgentInput() = runBlocking<Unit> {

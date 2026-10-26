@@ -26,14 +26,34 @@ final class LocalAppMarketTests: XCTestCase {
         let url = URL(string: origin + "/__run/test/index.html?photo=kept")!
         XCTAssertTrue(LocalAppExternalBrowserURL.matches(url, origin: origin))
         let runID = "run + exact/&unicode-灵犀"
-        let ready = try LocalAppAgentWakeURL.ready(url, origin: origin, runID: runID)
+        let appRun = UnifiedAppRun(
+            appId: "app-a",
+            runId: "test",
+            revision: 7,
+            releaseDigest: "digest",
+            phase: "running",
+            services: [],
+            error: nil,
+            startedAtMs: 1,
+            updatedAtMs: 1
+        )
+        let launch = LocalAppLaunch(run: appRun, url: url, origin: origin)
+        let ready = try LocalAppAgentWakeURL.ready(launch, agentRunID: runID)
         let query = URLComponents(url: ready, resolvingAgainstBaseURL: false)?.queryItems
         XCTAssertEqual(query?.first(where: { $0.name == "photo" })?.value, "kept")
         XCTAssertEqual(query?.first(where: { $0.name == "__lingxi_ready" })?.value, runID)
         for value in ["http://127.0.0.1:33002/", "http://localhost:33001/", "https://127.0.0.1:33001/", "http://user@127.0.0.1:33001/"] {
             XCTAssertFalse(LocalAppExternalBrowserURL.matches(URL(string: value)!, origin: origin))
         }
-        XCTAssertThrowsError(try LocalAppAgentWakeURL.ready(url, origin: origin, runID: "bad\nrun"))
+        XCTAssertThrowsError(try LocalAppAgentWakeURL.ready(launch, agentRunID: "bad\nrun"))
+        let staleLaunch = LocalAppLaunch(
+            run: appRun,
+            url: URL(string: origin + "/__run/old-run/index.html")!,
+            origin: origin
+        )
+        XCTAssertThrowsError(try LocalAppAgentWakeURL.ready(staleLaunch, agentRunID: runID)) { error in
+            XCTAssertEqual((error as? LocalAppServiceFailure)?.code, "STALE_APP_RUN_URL")
+        }
     }
     @MainActor
     func testAgentHostRuntimeGateMatchesTheSelectedStoreOrFullTarget() {

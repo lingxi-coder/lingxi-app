@@ -359,9 +359,8 @@ struct AppRuntimeView: View {
                 Text("浏览器 Agent 请求等待后台任务许可。运行：\(wake.runID.prefix(8))")
                     .font(.footnote).foregroundStyle(.secondary)
                 Button("开始 Agent 并返回应用") {
-                    guard let launch else { return }
-                    Task { await returnToBrowser(wake, url: launch.url) }
-                }.disabled(busy || launch == nil)
+                    Task { await returnToBrowser(wake) }
+                }.disabled(busy)
                 Button("取消此次 Agent 请求", role: .cancel) {
                     Task { await library.cancelBrowserAgentHandoff(wake) }
                 }.disabled(busy)
@@ -403,31 +402,30 @@ struct AppRuntimeView: View {
             let release = try await library.release(appId, revision: app.currentRevision)
             hasAgent = (release.manifest.capabilities ?? []).contains("agent")
             if release.manifest.executesCode && !app.executionGrants.contains(release.digest) { consent = release; return }
+            if openBrowser, let wake = library.browserAgentWake(for: appId) {
+                await returnToBrowser(wake)
+                return
+            }
             let value = try await library.openExternalBrowser(appId)
             guard LocalAppExternalBrowserURL.matches(value.url, origin: value.origin) else {
                 throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL is not its registered local origin.")
             }
             launch = value; info.markOpened(app); opened = true
             if openBrowser {
-                if let wake = library.browserAgentWake(for: appId) {
-                    await returnToBrowser(wake, url: value.url)
-                } else {
-                    openURL(value.url) { accepted in if !accepted { self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。" } }
-                }
+                openURL(value.url) { accepted in if !accepted { self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。" } }
             }
         } catch { self.error = error.localizedDescription }
     }
-    private func returnToBrowser(_ wake: LocalAppAgentWakeRequest, url: URL) async {
+    private func returnToBrowser(_ wake: LocalAppAgentWakeRequest) async {
         let wasBusy = busy
         busy = true
         defer { busy = wasBusy }
         do {
-            guard let origin = launch?.origin,
-                  LocalAppExternalBrowserURL.matches(url, origin: origin) else {
-                throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL is not its registered local origin.")
-            }
-            let readyURL = try await library.prepareBrowserAgentHandoff(wake, returnURL: url, origin: origin)
-            openURL(readyURL) { accepted in
+            let handoff = try await library.prepareBrowserAgentHandoff(wake)
+            launch = handoff.launch
+            if let app = library.record(appId) { info.markOpened(app) }
+            opened = true
+            openURL(handoff.readyURL) { accepted in
                 Task { @MainActor in
                     if accepted { library.clearBrowserAgentWake(wake) }
                     else {

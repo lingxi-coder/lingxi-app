@@ -31,8 +31,7 @@ final class LocalAppAgentBackgroundController {
     func acquireAndReserve(
         _ wake: LocalAppAgentWakeRequest,
         appName: String,
-        returnURL: URL,
-        origin: String,
+        launch: LocalAppLaunch,
         client: LocalAppServiceClient
     ) async throws -> URL {
         guard #available(iOS 26.0, *) else {
@@ -42,16 +41,13 @@ final class LocalAppAgentBackgroundController {
               !wake.runID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             throw LocalAppServiceFailure("INVALID_AGENT_WAKE", "This Agent request has an invalid run id.")
         }
-        guard LocalAppExternalBrowserURL.matches(returnURL, origin: origin) else {
-            throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL is not its registered local origin.")
-        }
+        let readyURL = try LocalAppAgentWakeURL.ready(launch, agentRunID: wake.runID)
         guard let bundleID = Bundle.main.bundleIdentifier else {
             throw LocalAppServiceFailure("BACKGROUND_UNAVAILABLE", "The app identifier is unavailable.")
         }
         let contextKey = wake.contextKey
         if let existing = contexts[contextKey], !existing.finished {
             if tasks[contextKey] != nil, existing.reservationExpiry.map({ $0 > Date() }) == true {
-                let readyURL = try LocalAppAgentWakeURL.ready(returnURL, origin: origin, runID: wake.runID)
                 Self.logPhase("ready_url_returned", contextKey: contextKey, success: true)
                 return readyURL
             }
@@ -111,7 +107,6 @@ final class LocalAppAgentBackgroundController {
                 await self?.monitor(contextKey, client: client)
             }
             Self.logPhase("wake_reserve", contextKey: contextKey, success: true)
-            let readyURL = try LocalAppAgentWakeURL.ready(returnURL, origin: origin, runID: wake.runID)
             Self.logPhase("ready_url_returned", contextKey: contextKey, success: true)
             return readyURL
         } catch {
@@ -417,6 +412,23 @@ extension LocalAppAgentWakeRequest {
     var contextKey: String { "\(appID)\u{0}\(revision)\u{0}\(runID)" }
 }
 
+@MainActor
+enum LocalAppAgentHandoffLaunchResolver {
+    static func resolve(
+        _ wake: LocalAppAgentWakeRequest,
+        currentLaunch: () async throws -> LocalAppLaunch
+    ) async throws -> LocalAppLaunch {
+        let launch = try await currentLaunch()
+        guard launch.run.appId == wake.appID,
+              launch.run.revision == wake.revision,
+              launch.run.phase == "running" else {
+            throw LocalAppServiceFailure("STALE_AGENT_WAKE", "The current app run no longer matches this Agent request.")
+        }
+        _ = try LocalAppAgentWakeURL.ready(launch, agentRunID: wake.runID)
+        return launch
+    }
+}
+
 enum LocalAppAgentProgressReporting {
     static func update(
         _ progress: Progress,
@@ -460,26 +472,41 @@ enum LocalAppAgentProgressReporting {
 }
 
 enum LocalAppAgentWakeURL {
-    static func ready(_ url: URL, origin: String, runID: String) throws -> URL {
+    static func ready(_ launch: LocalAppLaunch, agentRunID: String) throws -> URL {
+        let url = launch.url
+        guard launch.run.phase == "running",
+              hasAppRunPath(url, runID: launch.run.runId) else {
+            throw LocalAppServiceFailure("STALE_APP_RUN_URL", "The app launch URL does not match its current run.")
+        }
         guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               parts.scheme?.lowercased() == "http", parts.host == "127.0.0.1",
               parts.user == nil, parts.password == nil, let port = parts.port, (1...65_535).contains(port),
-              !runID.isEmpty, runID.utf8.count <= 128,
-              !runID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+              !agentRunID.isEmpty, agentRunID.utf8.count <= 128,
+              !agentRunID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL is not a trusted local browser address.")
         }
-        if !LocalAppExternalBrowserURL.matches(url, origin: origin) {
+        if !LocalAppExternalBrowserURL.matches(url, origin: launch.origin) {
             throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app page does not match its registered local origin.")
         }
         var updated = parts
         var query = updated.queryItems ?? []
         query.removeAll { $0.name == "__lingxi_ready" }
-        query.append(URLQueryItem(name: "__lingxi_ready", value: runID))
+        query.append(URLQueryItem(name: "__lingxi_ready", value: agentRunID))
         updated.queryItems = query
         guard let result = updated.url else {
             throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL could not be prepared for return.")
         }
         return result
+    }
+
+    private static func hasAppRunPath(_ url: URL, runID: String) -> Bool {
+        let isValidRunID = !runID.isEmpty && runID.utf8.count <= 128 && runID.utf8.allSatisfy { byte in
+            (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte)
+                || byte == 45 || byte == 95
+        }
+        guard isValidRunID,
+              let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        return parts.percentEncodedPath.hasPrefix("/__run/\(runID)/")
     }
 }
 

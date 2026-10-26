@@ -43,9 +43,18 @@ test('real Electron Local Apps: tool transport, library, independent windows, ba
     assert.equal(result.backend, true);
   } finally {
     if (child && child.exitCode === null) {
+      const exited = new Promise(resolve => child.once('exit', resolve));
       child.kill('SIGTERM');
-      await new Promise(resolve => { const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 1500); child.once('exit', () => { clearTimeout(timer); resolve(); }); });
+      let timer;
+      const forced = new Promise(resolve => { timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 1500); });
+      await Promise.race([exited, forced]);
+      clearTimeout(timer);
     }
+    // Electron/Chromium descendants can keep the captured pipe handles open
+    // after the main process exits. Close the readers so the node:test worker
+    // itself can finish after the fixture has reported its assertions.
+    child?.stdout?.destroy();
+    child?.stderr?.destroy();
     await vite.close(); await rm(temp, { recursive: true, force: true });
   }
 });

@@ -1,6 +1,7 @@
 import { currentLocale, tr, translate, type DesktopLocale } from '../../../i18n/locale';
 import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { publicExtensionItems, publicExtensionText, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
 import { ExtensionGlyph } from './ExtensionHubIcons';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
@@ -60,9 +61,41 @@ type PluginSelection =
   | { kind: 'list' }
   | { kind: 'plugin'; id: string }
   | { kind: 'available'; id: string }
-  | { kind: 'marketplace'; name: string }
-  | { kind: 'marketplace-add' }
+  | { kind: 'marketplace'; name: string; sourceConflict?: string }
+  | { kind: 'marketplace-add'; source?: string }
   | { kind: 'policies' };
+
+const DESKTOP_PLATFORMS = new Set(['macos', 'windows', 'linux']);
+const PUBLIC_EXTENSION_CATEGORIES = ['browser', 'development', 'productivity'] as const;
+
+function publicCategoryLabel(category: string): string {
+  const key = {
+    browser: 'desktop_extension_category_browser',
+    development: 'desktop_extension_category_development',
+    productivity: 'desktop_extension_category_productivity',
+  }[category];
+  return key ? tr(key) : category;
+}
+
+type PublicDirectoryText = (typeof publicExtensionItems)[number]['description'];
+
+function localizedDirectoryText(value?: PublicDirectoryText): string {
+  return value ? publicExtensionText(value, currentLocale()) : '';
+}
+
+function publicPluginSearchText(item: (typeof publicExtensionItems)[number]): string {
+  return [
+    item.name,
+    item.publisher,
+    publicCategoryLabel(item.category),
+    localizedDirectoryText(item.description),
+    localizedDirectoryText(item.requirements),
+    item.marketplace?.name,
+    item.marketplace?.plugin,
+    item.sourceUrl,
+    item.documentationUrl,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
 
 interface PreparedPluginOperation {
   payload: Record<string, unknown>;
@@ -94,6 +127,74 @@ function pluginActionLabel(action: string): string {
   return keys[action] ? tr(keys[action]!) : action;
 }
 
+function githubRepoIdentity(source: string): string | null {
+  const shorthand = source.trim().match(/^([a-z0-9_.-]+)\/([a-z0-9_.-]+)$/i);
+  if (shorthand) return shorthand[1].toLowerCase() + '/' + shorthand[2].toLowerCase();
+  try {
+    const url = new URL(source);
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com') return null;
+    const parts = url.pathname.replace(/\/+$/, '').replace(/\.git$/i, '').split('/').filter(Boolean);
+    return parts.length === 2 ? parts.map((part) => part.toLowerCase()).join('/') : null;
+  } catch {
+    return null;
+  }
+}
+
+function marketplaceSourceMatches(source: string, sourceJson?: string): boolean {
+  if (!sourceJson) return false;
+  try {
+    const sourceRecord = JSON.parse(sourceJson) as Record<string, unknown>;
+    const expectedRepo = githubRepoIdentity(source);
+    if (!expectedRepo) return false;
+    if (sourceRecord.ref !== undefined && sourceRecord.ref !== null && sourceRecord.ref !== '') return false;
+    if (sourceRecord.source === 'github' && typeof sourceRecord.repo === 'string') {
+      return githubRepoIdentity(sourceRecord.repo) === expectedRepo;
+    }
+    if (sourceRecord.source === 'git' && typeof sourceRecord.url === 'string') {
+      return githubRepoIdentity(sourceRecord.url) === expectedRepo;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function findRegisteredPublicMarketplace(
+  marketplace: PublicExtensionItem['marketplace'],
+  registry: readonly { name: string; source_json?: string }[],
+) {
+  if (!marketplace) return undefined;
+  return registry.find((entry) => (
+    entry.name === marketplace.name && marketplaceSourceMatches(marketplace.source, entry.source_json)
+  ));
+}
+
+export function findConflictingPublicMarketplace(
+  marketplace: PublicExtensionItem['marketplace'],
+  registry: readonly { name: string; source_json?: string }[],
+) {
+  if (!marketplace) return undefined;
+  return registry.find((entry) => (
+    entry.name === marketplace.name && !marketplaceSourceMatches(marketplace.source, entry.source_json)
+  ));
+}
+
+export type PublicMarketplaceSourceAction =
+  | { kind: 'registered'; marketplace: { name: string; source_json?: string } }
+  | { kind: 'source-conflict'; marketplace: { name: string; source_json?: string } }
+  | { kind: 'add' };
+
+export function decidePublicMarketplaceSourceAction(
+  marketplace: NonNullable<PublicExtensionItem['marketplace']>,
+  registry: readonly { name: string; source_json?: string }[],
+): PublicMarketplaceSourceAction {
+  const registered = findRegisteredPublicMarketplace(marketplace, registry);
+  if (registered) return { kind: 'registered', marketplace: registered };
+  const conflict = findConflictingPublicMarketplace(marketplace, registry);
+  if (conflict) return { kind: 'source-conflict', marketplace: conflict };
+  return { kind: 'add' };
+}
+
 function callPluginAdmin(bridge: PageContentProps['bridge'], command: unknown) {
   const admin = (bridge as { pluginAdmin?: (payload: unknown) => Promise<unknown> }).pluginAdmin;
   return typeof admin === 'function' ? admin(command as never) : Promise.resolve();
@@ -116,6 +217,9 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   const revision = catalog.revisions?.[editingLayer] ?? '';
   const pluginIds = [...new Set([...Object.keys(enabledPlugins), ...Object.keys(pluginConfigs), ...(catalog.installed ?? []).map((entry) => entry.id || entry.name)])].sort();
   const availablePlugins = catalog.available ?? [];
+  const publicDirectoryPlugins = useMemo(() => publicExtensionItems.filter((item) => (
+    item.kind === 'plugin' && item.platforms.some((platform) => DESKTOP_PLATFORMS.has(platform))
+  )), []);
   const marketplaceNames = [...new Set([...Object.keys(marketplaces), ...(catalog.marketplaces ?? []).map((entry) => entry.name)])].sort();
 
   const appliedLink = useRef<string>();
@@ -136,6 +240,10 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [pendingHubPage, setPendingHubPage] = useState<{ pageId: string; pluginId?: string } | null>(null);
   const detailPageRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (selection.kind === 'marketplace-add' && selection.source) setMarketplaceSource(selection.source);
+  }, [selection]);
 
   useEffect(() => {
     if (adminAvailable) void callPluginAdmin(bridge, adminRecordCommand('get_catalog'));
@@ -168,6 +276,10 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     ? availablePlugins.find((entry) => entry.id === selection.id) ?? null
     : null;
   const selectedMarketplace = selection.kind === 'marketplace' ? selection.name : null;
+  const selectedMarketplaceConflict = selection.kind === 'marketplace' ? selection.sourceConflict : undefined;
+  const selectedMarketplaceConflictRow = selection.kind === 'marketplace' && selection.sourceConflict
+    ? findConflictingPublicMarketplace({ name: selection.name, source: selection.sourceConflict }, catalog.marketplaces ?? [])
+    : undefined;
 
   useEffect(() => {
     if (selectedPlugin) setConfigText(prettyJson(asRecord(draftConfigs[selectedPlugin])));
@@ -220,6 +332,13 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     ? availablePlugins.filter((entry) => `${entry.id} ${entry.name} ${entry.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase()))
     : availablePlugins;
   const filteredMarketplaces = search.trim() ? marketplaceNames.filter((name) => name.toLowerCase().includes(search.trim().toLowerCase())) : marketplaceNames;
+  const filteredPublicDirectory = search.trim()
+    ? publicDirectoryPlugins.filter((entry) => publicPluginSearchText(entry).includes(search.trim().toLowerCase()))
+    : publicDirectoryPlugins;
+  const publicDirectoryGroups = PUBLIC_EXTENSION_CATEGORIES
+    .map((category) => ({ category, entries: filteredPublicDirectory.filter((entry) => entry.category === category) }))
+    .filter((group) => group.entries.length > 0);
+  const hasPublicResults = filteredPublicDirectory.length > 0 || filteredAvailable.length > 0;
 
   const persistPayload = JSON.stringify({
     scope: editingLayer,
@@ -314,7 +433,17 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
       revision,
       payload_json: JSON.stringify({ ...preparedOperation.payload, scope: editingLayer, confirmed: true }),
     }))
-      .then(() => { setPreparedOperation(null); setMarketplaceSource(''); })
+      .then(() => {
+        const marketplaceAdded = preparedOperation.payload.action === 'marketplace_add';
+        const conflictMarketplaceRemoved = preparedOperation.payload.action === 'marketplace_remove' && Boolean(selectedMarketplaceConflict);
+        setPreparedOperation(null);
+        setMarketplaceSource('');
+        if (marketplaceAdded || conflictMarketplaceRemoved) {
+          setSelection({ kind: 'list' });
+          setCatalogTab('public');
+          return callPluginAdmin(bridge, adminRecordCommand('get_catalog'));
+        }
+      })
       .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_operation_failed')))
       .finally(() => setBusy(false));
   };
@@ -347,6 +476,34 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
       .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_plugins_failed')))
       .finally(() => setBusy(false));
   };
+  const openPublicDirectoryItem = (item: (typeof publicExtensionItems)[number]) => {
+    const marketplace = item.marketplace;
+    if (!marketplace) return;
+
+    const sourceAction = decidePublicMarketplaceSourceAction(marketplace, catalog.marketplaces ?? []);
+    if (sourceAction.kind === 'source-conflict') {
+      requestSelection({ kind: 'marketplace', name: sourceAction.marketplace.name, sourceConflict: marketplace.source });
+      return;
+    }
+
+    const pluginId = marketplace.plugin ? `${marketplace.plugin}@${marketplace.name}` : null;
+    if (pluginId && pluginIds.includes(pluginId)) {
+      requestSelection({ kind: 'plugin', id: pluginId });
+      return;
+    }
+    const available = pluginId ? availablePlugins.find((entry) => entry.id === pluginId) : undefined;
+    if (available) {
+      requestSelection({ kind: 'available', id: available.id });
+      return;
+    }
+
+    if (sourceAction.kind === 'registered') {
+      refreshCatalog();
+      requestSelection({ kind: 'marketplace', name: sourceAction.marketplace.name });
+      return;
+    }
+    requestSelection({ kind: 'marketplace-add', source: marketplace.source });
+  };
 
   return (
     <ExtensionHubLayout>
@@ -372,6 +529,40 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
           <button type="button" aria-pressed={catalogTab === 'public'} onClick={() => setCatalogTab('public')}>{tr('desktop_extension_public')}</button>
           <button type="button" aria-pressed={catalogTab === 'personal'} onClick={() => setCatalogTab('personal')}>{tr('desktop_personal')}</button>
         </nav>
+        {catalogTab === 'public' && publicDirectoryGroups.map((group) => <section className="extension-catalog-section" key={`featured-${group.category}`}>
+          <h2 className="extension-hub-group-title">{tr('desktop_extension_featured_sources')} · {publicCategoryLabel(group.category)}</h2>
+          <div className="extension-hub-list">
+            {group.entries.map((entry) => {
+              const marketplace = entry.marketplace;
+              const pluginId = marketplace?.plugin ? `${marketplace.plugin}@${marketplace.name}` : null;
+              const pluginInstalled = pluginId ? pluginIds.includes(pluginId) : false;
+              const pluginAvailable = pluginId ? availablePlugins.some((available) => available.id === pluginId) : false;
+              const sourceAction = marketplace ? decidePublicMarketplaceSourceAction(marketplace, catalog.marketplaces ?? []) : null;
+              const registeredMarketplace = sourceAction?.kind === 'registered';
+              const sourceConflict = sourceAction?.kind === 'source-conflict';
+              return <div key={entry.id} className="extension-hub-row">
+                <ExtensionIcon />
+                <div className="extension-hub-row-copy">
+                  <span className="extension-hub-row-title">{entry.name}</span>
+                  <span className="extension-hub-row-description">{localizedDirectoryText(entry.description)}</span>
+                  <span className="extension-hub-row-description">{entry.publisher}{sourceConflict ? ` · ${tr('desktop_extension_marketplace_source_conflict_short')}` : registeredMarketplace && !pluginAvailable ? ` · ${tr('desktop_extension_marketplace_added')}` : ''}</span>
+                  {entry.requirements && <span className="extension-hub-row-description">{tr('desktop_extension_requirements')}: {localizedDirectoryText(entry.requirements)}</span>}
+                </div>
+                <div className="extension-hub-row-side">
+                  {marketplace ? <button
+                    type="button"
+                    className="extension-hub-icon-button"
+                    aria-label={tr(sourceConflict ? 'desktop_extension_resolve_marketplace_conflict_named' : pluginInstalled ? 'desktop_extension_manage_named' : pluginAvailable ? 'desktop_extension_install_named' : registeredMarketplace ? 'desktop_extension_browse_marketplace_named' : 'desktop_extension_add_marketplace_named', entry.name)}
+                    onClick={() => openPublicDirectoryItem(entry)}
+                  ><ExtensionGlyph name={sourceConflict || pluginInstalled || (registeredMarketplace && !pluginAvailable) ? 'more' : 'plus'} size={20} /></button> : <>
+                    <a className="extension-hub-icon-button" href={entry.documentationUrl} target="_blank" rel="noopener noreferrer" aria-label={tr('desktop_extension_open_documentation_named', entry.name)} title={tr('desktop_extension_open_documentation')}><ExtensionGlyph name="chevronR" size={16} /></a>
+                    <a className="extension-hub-icon-button" href={entry.sourceUrl} target="_blank" rel="noopener noreferrer" aria-label={tr('desktop_extension_open_source_named', entry.name)} title={tr('desktop_extension_open_source')}><ExtensionGlyph name="plugin" size={16} /></a>
+                  </>}
+                </div>
+              </div>;
+            })}
+          </div>
+        </section>)}
         {catalogTab === 'public' && publicGroups.map((marketplace) => <section className="extension-catalog-section" key={marketplace}>
           <h2 className="extension-hub-group-title">{marketplace} <ExtensionGlyph name="chevronR" size={14} /></h2>
           <div className="extension-hub-list">
@@ -384,7 +575,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
             </div>)}
           </div>
         </section>)}
-        {(catalogTab === 'personal' || !publicGroups.length) && <section className="extension-catalog-section">
+        {catalogTab === 'personal' && <section className="extension-catalog-section">
           <h2 className="extension-hub-group-title">{tr('apps_installed')}</h2>
           <div className="extension-hub-list">
             {filteredPlugins.map((id) => {
@@ -400,7 +591,8 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
           </div>
           {!filteredPlugins.length && <div className="extension-hub-empty">{search ? tr('desktop_extension_no_plugins_search') : tr('desktop_extension_no_plugins')}</div>}
         </section>}
-        {catalogTab === 'public' && !publicGroups.length && !search && <button type="button" className="extension-see-more" onClick={() => requestSelection({ kind: 'marketplace-add' })}>{tr('desktop_extension_discover_plugins')} <ExtensionGlyph name="chevronR" size={14} /></button>}
+        {catalogTab === 'public' && search && !hasPublicResults && <div className="extension-hub-empty">{tr('desktop_extension_no_public_plugins_search')}</div>}
+        {catalogTab === 'public' && !hasPublicResults && !search && <button type="button" className="extension-see-more" onClick={() => requestSelection({ kind: 'marketplace-add' })}>{tr('desktop_extension_discover_plugins')} <ExtensionGlyph name="chevronR" size={14} /></button>}
         {marketplaceNames.length > 0 && <details className="extension-hub-marketplaces">
           <summary>{tr('desktop_extension_marketplaces_count', marketplaceNames.length)}</summary>
           <div className="extension-hub-list">{filteredMarketplaces.map((name) => <button key={name} type="button" className="extension-hub-row extension-hub-row-open" onClick={() => requestSelection({ kind: 'marketplace', name })}><ExtensionIcon /><span className="extension-hub-row-copy"><span className="extension-hub-row-title">{name}</span><span className="extension-hub-row-description">{asString(asRecord(draftMarketplaces[name]).source, tr('settings_parity_marketplace_source'))}</span></span></button>)}</div>
@@ -570,6 +762,9 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
                   <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selectedMarketplace}</div>
                   <SourcePill t={t} label={editingLayer} />
                 </div>
+                {selectedMarketplaceConflictRow && selectedMarketplaceConflict && <div role="alert" style={noteStyle(t, 'warn')}>
+                  {tr('desktop_extension_marketplace_source_conflict', selectedMarketplace, selectedMarketplaceConflictRow.source_json ?? tr('settings_parity_marketplace_source'), selectedMarketplaceConflict)}
+                </div>}
                 <Field t={t} label={tr('desktop_extension_marketplace_json')}>
                   <textarea
                     value={configText}
@@ -588,7 +783,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
                   />
                 </Field>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  <button type="button" disabled={busy} onClick={() => previewLifecycle({ action: 'marketplace_update', name: selectedMarketplace, scope: editingLayer })} style={ghostButtonStyle(t, busy)}>{tr('desktop_extension_preview_update')}</button>
+                  <button type="button" disabled={busy || Boolean(selectedMarketplaceConflictRow)} onClick={() => previewLifecycle({ action: 'marketplace_update', name: selectedMarketplace, scope: editingLayer })} style={ghostButtonStyle(t, busy || Boolean(selectedMarketplaceConflictRow))}>{tr('desktop_extension_preview_update')}</button>
                   <button type="button" disabled={busy} onClick={() => previewLifecycle({ action: 'marketplace_remove', name: selectedMarketplace, scope: editingLayer })} style={ghostButtonStyle(t, busy, true)}>{tr('desktop_extension_preview_remove')}</button>
                 </div>
               </>
@@ -612,7 +807,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
             )}
             {dirty && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button type="button" disabled={!dirty || busy} onClick={preview} style={ghostButtonStyle(t, !dirty || busy)}>{tr('desktop_extension_preview_configuration')}</button>
-              <button type="button" disabled={!dirty || busy} onClick={save} style={ghostButtonStyle(t, !dirty || busy)}>{tr('desktop_extension_save_configuration')}</button>
+              <button type="button" disabled={!dirty || busy || Boolean(selectedMarketplaceConflictRow)} onClick={save} style={ghostButtonStyle(t, !dirty || busy || Boolean(selectedMarketplaceConflictRow))}>{tr('desktop_extension_save_configuration')}</button>
               <button type="button" disabled={!dirty || busy} onClick={() => { setDraftEnabled(enabledPlugins); setDraftConfigs(pluginConfigs); setDraftMarketplaces(marketplaces); }} style={ghostButtonStyle(t, !dirty || busy, true)}>{tr('desktop_extension_cancel_changes')}</button>
             </div>}
             </div>

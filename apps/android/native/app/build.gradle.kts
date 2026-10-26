@@ -181,6 +181,7 @@ android {
 
     sourceSets {
         getByName("test").resources.srcDir(rootProject.file("../../../resources/voice"))
+        getByName("main").assets.srcDir(rootProject.file("../../../resources/extensions"))
         // Native libraries are built independently so the Play artifact never
         // links the Direct-only android_use implementation.
         getByName("main").jniLibs.setSrcDirs(emptyList<String>())

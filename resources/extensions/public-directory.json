@@ -1,0 +1,326 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-10-25",
+  "items": [
+    {
+      "id": "chrome-devtools",
+      "kind": "mcp",
+      "name": "Chrome DevTools",
+      "publisher": "Chrome DevTools",
+      "category": "browser",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "version": "1.12.0",
+      "description": {
+        "en": "Inspect, debug and test browser pages.",
+        "zh-Hans": "检查、调试和测试浏览器页面。",
+        "zh-Hant": "檢查、偵錯和測試瀏覽器頁面。",
+        "ja": "ブラウザのページを調査・デバッグ・テストします。",
+        "ko": "브라우저 페이지를 검사하고 디버깅·테스트합니다."
+      },
+      "requirements": {
+        "en": "Requires Node.js and Chrome 150+. WebMCP tools need the browser feature enabled.",
+        "zh-Hans": "需要 Node.js 和 Chrome 150+；WebMCP 工具需启用浏览器对应功能。",
+        "zh-Hant": "需要 Node.js 和 Chrome 150+；WebMCP 工具需啟用瀏覽器對應功能。",
+        "ja": "Node.js と Chrome 150 以降が必要です。WebMCP はブラウザ側でも有効にします。",
+        "ko": "Node.js와 Chrome 150 이상이 필요합니다. WebMCP는 브라우저에서도 활성화해야 합니다."
+      },
+      "sourceUrl": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+      "documentationUrl": "https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/chrome-devtools-mcp-v1.12.0/docs/configuration.md",
+      "mcp": {
+        "name": "chrome-devtools",
+        "config": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "chrome-devtools-mcp@1.12.0",
+            "--categoryExperimentalWebmcp=true"
+          ]
+        }
+      }
+    },
+    {
+      "id": "playwright",
+      "kind": "mcp",
+      "name": "Playwright",
+      "publisher": "Microsoft",
+      "category": "browser",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "version": "0.0.83",
+      "description": {
+        "en": "Automate browsers and verify web app workflows.",
+        "zh-Hans": "自动操作浏览器，验证网页应用流程。",
+        "zh-Hant": "自動操作瀏覽器，驗證網頁應用程式流程。",
+        "ja": "ブラウザを自動操作し、Web アプリの動作を検証します。",
+        "ko": "브라우저를 자동화하고 웹 앱의 흐름을 검증합니다."
+      },
+      "requirements": {
+        "en": "Requires Node.js and a supported browser. Native WebMCP support depends on the browser.",
+        "zh-Hans": "需要 Node.js 和受支持的浏览器；原生 WebMCP 能力取决于浏览器。",
+        "zh-Hant": "需要 Node.js 和受支援的瀏覽器；原生 WebMCP 能力取決於瀏覽器。",
+        "ja": "Node.js と対応ブラウザが必要です。WebMCP 対応はブラウザによって異なります。",
+        "ko": "Node.js와 지원되는 브라우저가 필요합니다. WebMCP 지원은 브라우저에 따라 다릅니다."
+      },
+      "sourceUrl": "https://github.com/microsoft/playwright-mcp",
+      "documentationUrl": "https://github.com/microsoft/playwright-mcp/blob/v0.0.83/README.md",
+      "mcp": {
+        "name": "playwright",
+        "config": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "@playwright/mcp@0.0.83"
+          ]
+        }
+      }
+    },
+    {
+      "id": "agent-browser",
+      "kind": "mcp",
+      "name": "agent-browser",
+      "publisher": "Vercel Labs",
+      "category": "browser",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "version": "0.39.3",
+      "description": {
+        "en": "Browse pages and invoke their WebMCP tools.",
+        "zh-Hans": "浏览网页并调用页面的 WebMCP 工具。",
+        "zh-Hant": "瀏覽網頁並呼叫頁面的 WebMCP 工具。",
+        "ja": "Web ページを操作し、WebMCP ツールを呼び出します。",
+        "ko": "웹 페이지를 탐색하고 WebMCP 도구를 호출합니다."
+      },
+      "requirements": {
+        "en": "Requires Node.js 24+ and a supported local Chrome browser.",
+        "zh-Hans": "需要 Node.js 24+ 和受支持的本机 Chrome 浏览器。",
+        "zh-Hant": "需要 Node.js 24+ 和受支援的本機 Chrome 瀏覽器。",
+        "ja": "Node.js 24 以降と対応するローカル Chrome が必要です。",
+        "ko": "Node.js 24 이상과 지원되는 로컬 Chrome이 필요합니다."
+      },
+      "sourceUrl": "https://github.com/vercel-labs/agent-browser",
+      "documentationUrl": "https://github.com/vercel-labs/agent-browser/blob/v0.39.3/docs/content/docs/webmcp.mdx",
+      "mcp": {
+        "name": "agent-browser",
+        "config": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "agent-browser@0.39.3",
+            "mcp",
+            "--tools",
+            "core,webmcp"
+          ]
+        }
+      }
+    },
+    {
+      "id": "context7",
+      "kind": "mcp",
+      "name": "Context7",
+      "publisher": "Upstash",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Find current library documentation and code examples.",
+        "zh-Hans": "查找最新的开发文档和代码示例。",
+        "zh-Hant": "查找最新的開發文件和程式碼範例。",
+        "ja": "最新のライブラリ資料とコード例を検索します。",
+        "ko": "최신 라이브러리 문서와 코드 예제를 찾습니다."
+      },
+      "requirements": {
+        "en": "An API key is recommended for higher rate limits. Configure credentials using the provider's instructions.",
+        "zh-Hans": "建议按提供商说明配置 API Key，以获取更高的调用额度。",
+        "zh-Hant": "建議依提供商說明設定 API Key，以取得更高的呼叫額度。",
+        "ja": "利用上限を増やすには、提供元の手順で API キーを設定してください。",
+        "ko": "더 높은 사용 한도를 위해 제공업체 안내에 따라 API 키를 설정하는 것이 좋습니다."
+      },
+      "sourceUrl": "https://github.com/upstash/context7",
+      "documentationUrl": "https://github.com/upstash/context7#readme",
+      "mcp": {
+        "name": "context7",
+        "config": {
+          "type": "http",
+          "url": "https://mcp.context7.com/mcp"
+        }
+      }
+    },
+    {
+      "id": "github",
+      "kind": "mcp",
+      "name": "GitHub",
+      "publisher": "GitHub",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Work with repositories, issues and pull requests.",
+        "zh-Hans": "处理代码仓库、议题和拉取请求。",
+        "zh-Hant": "處理程式碼儲存庫、議題和提取要求。",
+        "ja": "リポジトリ、Issue、プルリクエストを扱います。",
+        "ko": "저장소, 이슈, 풀 리퀘스트를 관리합니다."
+      },
+      "requirements": {
+        "en": "Requires GitHub authorization. Follow the provider's setup instructions to connect your account.",
+        "zh-Hans": "需要 GitHub 授权，请按提供商安装说明连接账号。",
+        "zh-Hant": "需要 GitHub 授權，請依提供商安裝說明連接帳號。",
+        "ja": "GitHub の認証が必要です。提供元の手順でアカウントを接続してください。",
+        "ko": "GitHub 인증이 필요합니다. 제공업체의 설정 안내에 따라 계정을 연결하세요."
+      },
+      "sourceUrl": "https://github.com/github/github-mcp-server",
+      "documentationUrl": "https://github.com/github/github-mcp-server#remote-github-mcp-server"
+    },
+    {
+      "id": "local-app-builder",
+      "kind": "plugin",
+      "name": "Local App Builder",
+      "publisher": "LingXi",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Create, modify and publish Local Apps.",
+        "zh-Hans": "创建、修改和发布 Local App。",
+        "zh-Hant": "建立、修改和發佈 Local App。",
+        "ja": "Local App を作成・編集・公開します。",
+        "ko": "Local App을 만들고 수정하고 게시합니다."
+      },
+      "sourceUrl": "https://github.com/lingxi-coder/local-app-builder",
+      "documentationUrl": "https://github.com/lingxi-coder/local-app-builder#readme",
+      "marketplace": {
+        "source": "lingxi-coder/local-app-builder",
+        "name": "lingxi",
+        "plugin": "local-app-builder"
+      }
+    },
+    {
+      "id": "ora-webmcp",
+      "kind": "plugin",
+      "name": "WebMCP",
+      "publisher": "Ora",
+      "category": "browser",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Add and verify tools that agents can use on web pages.",
+        "zh-Hans": "为网页添加并验证可供 Agent 调用的工具。",
+        "zh-Hant": "為網頁新增並驗證可供 Agent 呼叫的工具。",
+        "ja": "エージェント向けの Web ページツールを追加・検証します。",
+        "ko": "에이전트가 사용할 웹 페이지 도구를 추가하고 검증합니다."
+      },
+      "requirements": {
+        "en": "Third-party plugin. Some verification workflows require a desktop browser.",
+        "zh-Hans": "第三方插件；部分验证流程需要桌面浏览器。",
+        "zh-Hant": "第三方外掛；部分驗證流程需要桌面瀏覽器。",
+        "ja": "サードパーティ製プラグインです。一部の検証にはデスクトップブラウザが必要です。",
+        "ko": "타사 플러그인입니다. 일부 검증 과정에는 데스크톱 브라우저가 필요합니다."
+      },
+      "sourceUrl": "https://github.com/ora/webmcp",
+      "documentationUrl": "https://github.com/ora/webmcp#readme",
+      "marketplace": {
+        "source": "ora/webmcp",
+        "name": "ora",
+        "plugin": "webmcp"
+      }
+    },
+    {
+      "id": "webmcp-kit",
+      "kind": "plugin",
+      "name": "WebMCP Kit",
+      "publisher": "Nekuda",
+      "category": "browser",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Plan, implement and verify WebMCP tools for web apps.",
+        "zh-Hans": "规划、实现并验证网页应用的 WebMCP 工具。",
+        "zh-Hant": "規劃、實作並驗證網頁應用程式的 WebMCP 工具。",
+        "ja": "Web アプリ向け WebMCP ツールを設計・実装・検証します。",
+        "ko": "웹 앱용 WebMCP 도구를 설계하고 구현하고 검증합니다."
+      },
+      "requirements": {
+        "en": "Third-party plugin with its own SDK and optional account connection. Review its requirements before installing.",
+        "zh-Hans": "第三方插件，包含独立 SDK 和可选账号连接；安装前请查看提供商要求。",
+        "zh-Hant": "第三方外掛，包含獨立 SDK 和可選帳號連接；安裝前請查看提供商要求。",
+        "ja": "独自 SDK と任意のアカウント接続を含みます。インストール前に提供元の要件を確認してください。",
+        "ko": "자체 SDK와 선택적 계정 연결을 포함합니다. 설치 전에 제공업체의 요구 사항을 확인하세요."
+      },
+      "sourceUrl": "https://github.com/nekuda-ai/webmcp-kit",
+      "documentationUrl": "https://github.com/nekuda-ai/webmcp-kit#readme",
+      "marketplace": {
+        "source": "nekuda-ai/webmcp-kit",
+        "name": "nekuda",
+        "plugin": "webmcp-kit"
+      }
+    },
+    {
+      "id": "anthropic-plugins",
+      "kind": "plugin",
+      "name": "Claude Plugins",
+      "publisher": "Anthropic",
+      "category": "productivity",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Browse Anthropic's public directory of tools and integrations.",
+        "zh-Hans": "浏览 Anthropic 的公共工具和集成目录。",
+        "zh-Hant": "瀏覽 Anthropic 的公共工具和整合目錄。",
+        "ja": "Anthropic の公開ツール・連携ディレクトリを閲覧します。",
+        "ko": "Anthropic의 공개 도구 및 통합 디렉터리를 탐색합니다."
+      },
+      "requirements": {
+        "en": "Add the marketplace, then choose individual plugins. Each plugin has its own platform and account requirements.",
+        "zh-Hans": "添加市场后，再选择需要的插件；各插件有各自的平台和账号要求。",
+        "zh-Hant": "新增市集後，再選擇需要的外掛；各外掛有各自的平台和帳號要求。",
+        "ja": "マーケットプレイスを追加し、必要なプラグインを選択します。要件は各プラグインで異なります。",
+        "ko": "마켓플레이스를 추가한 다음 필요한 플러그인을 선택하세요. 플랫폼과 계정 요구 사항은 플러그인마다 다릅니다."
+      },
+      "sourceUrl": "https://github.com/anthropics/claude-plugins-official",
+      "documentationUrl": "https://github.com/anthropics/claude-plugins-official#readme",
+      "marketplace": {
+        "source": "anthropics/claude-plugins-official",
+        "name": "claude-plugins-official"
+      }
+    }
+  ]
+}

@@ -160,6 +160,8 @@ func xmlEscaped(_ value: String) -> String {
         .replacingOccurrences(of: "'", with: "&apos;")
 }
 
+// Requests arrive over XPC; allow their QoS to lift the broker out of the
+// background clamp while serving them, including peer signature validation.
 func renderedLaunchAgentPlist(machService: String, executablePath: String) -> String {
     """
     <?xml version="1.0" encoding="UTF-8"?>
@@ -169,7 +171,7 @@ func renderedLaunchAgentPlist(machService: String, executablePath: String) -> St
       <key>MachServices</key><dict><key>\(xmlEscaped(machService))</key><true/></dict>
       <key>ProgramArguments</key><array><string>\(xmlEscaped(executablePath))</string></array>
       <key>RunAtLoad</key><false/>
-      <key>ProcessType</key><string>Background</string>
+      <key>ProcessType</key><string>Adaptive</string>
     </dict></plist>
     """
 }

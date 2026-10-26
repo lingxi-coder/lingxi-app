@@ -403,6 +403,7 @@ test('Apple Speech is constrained to its on-device recognizer before audio is ap
 
 test('credential broker launch agent template keeps an install-time executable placeholder', () => {
   const plist = renderLaunchAgentTemplate();
+  assert.match(plist, /<key>ProcessType<\/key><string>Adaptive<\/string>/);
   assert.match(plist, /com\.lingxi\.code\.credential-broker/);
   assert.match(plist, /@BROKER_EXECUTABLE_PATH@/);
   assert.doesNotMatch(plist, /Application Support/);

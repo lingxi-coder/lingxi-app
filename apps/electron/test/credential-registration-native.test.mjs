@@ -17,7 +17,7 @@ test('native broker registration recovers a matching plist after bootstrap failu
   try {
     // Complete production source, with its @main disabled. The registration
     // function receives fake launchctl; all written files live under tmp.
-    execFileSync('xcrun', ['swiftc', '-swift-version', '5', '-parse-as-library',
+    execFileSync('xcrun', ['swiftc', '-O', '-swift-version', '5', '-parse-as-library',
       '-D', 'CREDENTIAL_BROKER_TESTING', '-module-cache-path', join(root, 'module-cache'),
       join(nativeRoot, 'BrokerCommon.swift'), join(nativeRoot, 'CredentialClientMain.swift'),
       fixture, '-o', binary,

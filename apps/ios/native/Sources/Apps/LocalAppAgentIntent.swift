@@ -10,6 +10,23 @@ struct LocalAppAgentNativeEvents: Decodable, Sendable {
     let sequence: UInt64
 }
 
+enum LocalAppAgentHostRequests {
+    /// Native task cancellation accepts the public AG-UI id as requestId.
+    /// Native runId is reserved for the host's internal task identity.
+    static func cancelPublicRequest(
+        appID: String,
+        revision: UInt64,
+        requestID: String
+    ) -> [String: LocalAppJSON] {
+        [
+            "op": .string("tasks.cancel"),
+            "appId": .string(appID),
+            "revision": .number(Double(revision)),
+            "requestId": .string(requestID)
+        ]
+    }
+}
+
 enum LocalAppAgentIntentInput {
     static let maximumInputBytes = 70 * 1024 * 1024
 
@@ -230,18 +247,29 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
     }
 }
 
-@available(iOS 27.0, *)
-private actor LocalAppAgentIntentCancellation {
-    private let client: LocalAppServiceClient
+actor LocalAppAgentIntentCancellation {
     private let appID: String
     private let revision: UInt64
+    private let sendHostRequest: @Sendable ([String: LocalAppJSON]) async -> Void
     private var runID: String?
     private(set) var isCancelled = false
 
     init(client: LocalAppServiceClient, appID: String, revision: UInt64) {
-        self.client = client
         self.appID = appID
         self.revision = revision
+        self.sendHostRequest = { request in
+            _ = try? await client.agentHost(request, as: LocalAppJSON.self)
+        }
+    }
+
+    init(
+        appID: String,
+        revision: UInt64,
+        sendHostRequest: @escaping @Sendable ([String: LocalAppJSON]) async -> Void
+    ) {
+        self.appID = appID
+        self.revision = revision
+        self.sendHostRequest = sendHostRequest
     }
 
     func didStart(_ runID: String) async throws {
@@ -258,11 +286,10 @@ private actor LocalAppAgentIntentCancellation {
     }
 
     private func cancelRun(_ runID: String) async {
-        _ = try? await client.agentHost([
-            "op": .string("tasks.cancel"),
-            "appId": .string(appID),
-            "revision": .number(Double(revision)),
-            "runId": .string(runID)
-        ], as: LocalAppJSON.self)
+        await sendHostRequest(LocalAppAgentHostRequests.cancelPublicRequest(
+            appID: appID,
+            revision: revision,
+            requestID: runID
+        ))
     }
 }

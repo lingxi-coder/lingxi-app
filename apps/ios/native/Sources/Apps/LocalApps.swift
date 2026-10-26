@@ -110,6 +110,22 @@ final class UnifiedLocalApps {
         guard browserAgentWake == wake else { return }
         browserAgentWake = nil
     }
+    func openBrowserPage(
+        scope: LocalAppBrowserDeliveryScope,
+        open: @MainActor () -> Void
+    ) -> LocalAppBrowserDeliveryController.Acquisition {
+        agentBackground.openBrowserPage(scope: scope, open: open)
+    }
+    func endBrowserPageDelivery(_ scope: LocalAppBrowserDeliveryScope) {
+        agentBackground.endBrowserDelivery(scope)
+    }
+    func cancelBrowserAgentScope(appID: String, revision: UInt64) async {
+        if let wake = browserAgentWake,
+           wake.appID == appID, wake.revision == revision {
+            browserAgentWake = nil
+        }
+        await agentBackground.cancel(appID: appID, revision: revision, client: client)
+    }
     func prepareBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest) async throws -> (launch: LocalAppLaunch, readyURL: URL) {
         guard browserAgentWake == wake, let app = record(wake.appID), app.currentRevision == wake.revision else {
             await agentBackground.cancel(wake, client: client)
@@ -161,15 +177,28 @@ final class UnifiedLocalApps {
         guard let app = record(id) else { throw LocalAppServiceFailure("APP_NOT_FOUND", "The local app was not found.") }
         let release = try await release(id, revision: app.currentRevision)
         if (release.manifest.capabilities ?? []).contains("agent") { try await LocalAppAgentModelHost.shared.ensure() }
-        return try await launch(id)
+        let previousRun = runs[id]
+        let currentRun = try await launch(id)
+        if let previousRun, previousRun.phase == "running",
+           previousRun.runId != currentRun.run.runId
+            || previousRun.revision != currentRun.run.revision {
+            await cancelAgentApp(id)
+        }
+        return currentRun
     }
 
     init(client: LocalAppServiceClient = LocalAppServiceClient()) { self.client = client }
     func initialize() async { await refresh(); initialized = true }
     func refresh() async {
         do {
+            let previousRuns = runs
+            let previousAppIDs = Set(records.map(\.appId))
             let rows: [UnifiedAppRecord] = try await client.request(["op": .string("list")])
             records = rows.filter { !$0.removed }.sorted { $0.updatedAtMs > $1.updatedAtMs }
+            let currentAppIDs = Set(records.map(\.appId))
+            for removedAppID in previousAppIDs.subtracting(currentAppIDs) {
+                await cancelAgentApp(removedAppID)
+            }
             let coreArchives: [LocalAppLegacyArchive] = try await client.request(["op": .string("legacyArchives")])
             let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             let nativeArchives = ["LocalAppMarket", "chat-apps.json", "local-app-info.json"].compactMap { name -> LocalAppLegacyArchive? in
@@ -181,10 +210,27 @@ final class UnifiedLocalApps {
             runs = runs.filter { key, _ in records.contains(where: { $0.appId == key }) }
             for record in records {
                 let status: LocalAppRuntimeStatus = try await client.request(["op": .string("status"), "appId": .string(record.appId)])
-                if let current = status.run { runs[record.appId] = current }
+                if let current = status.run {
+                    if current.phase == "running" {
+                        await agentBackground.cancelOutdated(
+                            appID: record.appId,
+                            keepingRevision: current.revision,
+                            client: client
+                        )
+                        if let previous = previousRuns[record.appId],
+                           previous.phase == "running",
+                           (previous.runId != current.runId || previous.revision != current.revision) {
+                            await cancelAgentApp(record.appId)
+                        }
+                    }
+                    runs[record.appId] = current
+                }
                 else {
                     let history: [UnifiedAppRun] = try await client.request(["op": .string("runs"), "appId": .string(record.appId)])
                     runs[record.appId] = history.max(by: { $0.startedAtMs < $1.startedAtMs })
+                    if previousRuns[record.appId]?.phase == "running" {
+                        await cancelAgentApp(record.appId)
+                    }
                 }
             }
             error = nil
@@ -214,6 +260,7 @@ final class UnifiedLocalApps {
     }
     func stop(_ id: String) async throws {
         let _: LocalAppJSON = try await client.request(["op": .string("stop"), "appId": .string(id)])
+        await cancelAgentApp(id)
         await refresh()
     }
     func action(_ operation: String, id: String, extra: [String: LocalAppJSON] = [:]) async throws {
@@ -221,6 +268,9 @@ final class UnifiedLocalApps {
         defer { busy.remove(id) }
         var request = extra; request["op"] = .string(operation); request["appId"] = .string(id)
         let _: LocalAppJSON = try await client.request(request)
+        if ["stop", "remove", "revoke"].contains(operation) {
+            await cancelAgentApp(id)
+        }
         if operation == "remove" { devicePermissions.revoke(appID: id) }
         await refresh()
     }
@@ -252,6 +302,12 @@ final class UnifiedLocalApps {
     }
     func bindAuthoring(_ id: String, authoring: LocalAppAuthoring) async throws {
         try await action("bindAuthoring", id: id, extra: ["authoring": try .encode(authoring)])
+    }
+    private func cancelAgentApp(_ appID: String) async {
+        if let wake = browserAgentWake, wake.appID == appID {
+            browserAgentWake = nil
+        }
+        await agentBackground.cancel(appID: appID, client: client)
     }
     /// Native-only pending binding for a newly-created app. This uses the
     /// trusted App Agent host channel; it is not part of the browser API.

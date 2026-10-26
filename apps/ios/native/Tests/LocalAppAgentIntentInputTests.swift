@@ -96,3 +96,69 @@ final class LocalAppAgentIntentInputTests: XCTestCase {
         XCTAssertFalse(LocalAppAgentRunEvent.matches(successWithOutcome, runID: "run-1", threadID: "other-thread"))
     }
 }
+
+private actor LocalAppAgentHostRequestRecorder {
+    private var recorded: [[String: LocalAppJSON]] = []
+
+    func append(_ request: [String: LocalAppJSON]) {
+        recorded.append(request)
+    }
+
+    func requests() -> [[String: LocalAppJSON]] {
+        recorded
+    }
+}
+
+final class LocalAppAgentIntentCancellationTests: XCTestCase {
+    func testIntentCancellationSendsThePublicRequestIdSelector() async throws {
+        let recorder = LocalAppAgentHostRequestRecorder()
+        let publicRequestID = "public-request-23"
+        let internalTaskID = "internal-task-uuid-91"
+        let cancellation = LocalAppAgentIntentCancellation(
+            appID: "app-7",
+            revision: 19,
+            sendHostRequest: { await recorder.append($0) }
+        )
+
+        try await cancellation.didStart(publicRequestID)
+        await cancellation.cancel()
+
+        let requests = await recorder.requests()
+        XCTAssertNotEqual(publicRequestID, internalTaskID)
+        XCTAssertEqual(requests, [[
+            "op": .string("tasks.cancel"),
+            "appId": .string("app-7"),
+            "revision": .number(19),
+            "requestId": .string(publicRequestID)
+        ]])
+        XCTAssertNil(requests.first?["runId"])
+    }
+
+    func testCancellationBeforeStartUsesTheSamePublicRequestIdSelector() async {
+        let recorder = LocalAppAgentHostRequestRecorder()
+        let publicRequestID = "public-request-23"
+        let cancellation = LocalAppAgentIntentCancellation(
+            appID: "app-7",
+            revision: 19,
+            sendHostRequest: { await recorder.append($0) }
+        )
+
+        await cancellation.cancel()
+        do {
+            try await cancellation.didStart(publicRequestID)
+            XCTFail("A start arriving after cancellation must remain cancelled.")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let requests = await recorder.requests()
+        XCTAssertEqual(requests, [[
+            "op": .string("tasks.cancel"),
+            "appId": .string("app-7"),
+            "revision": .number(19),
+            "requestId": .string(publicRequestID)
+        ]])
+        XCTAssertNil(requests.first?["runId"])
+    }
+}

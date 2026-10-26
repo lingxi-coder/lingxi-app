@@ -301,7 +301,16 @@ struct LocalAppDetailPage: View {
                 }
             }
         }
-        .sheet(item: $agentRelease) { release in LocalAppAgentSettingsView(client: library.client, appID: appId, release: release) }
+        .sheet(item: $agentRelease) { release in
+            LocalAppAgentSettingsView(
+                client: library.client,
+                appID: appId,
+                release: release,
+                onConfigurationChanged: {
+                    await library.cancelBrowserAgentScope(appID: appId, revision: release.revision)
+                }
+            )
+        }
         .sheet(item:$consent) { release in LocalAppConsentSheet(manifest:release.manifest,digest:release.digest,title:"授权此版本运行") { Task { do { try await library.grant(appId,digest:release.digest); consent = nil; await runRelease(release) } catch { self.error = error.localizedDescription; consent = nil } } } }
         .confirmationDialog("恢复可编辑源码副本？", isPresented: $restoring, titleVisibility: .visible) {
             Button("恢复副本并继续开发") { Task { do { guard let app = library.record(appId) else { return }; onDevelop(try await library.restoreAuthoring(app)) } catch { self.error = error.localizedDescription } } }
@@ -425,7 +434,22 @@ struct AppRuntimeView: View {
             }
             launch = value; info.markOpened(app); opened = true
             if openBrowser {
-                openURL(value.url) { accepted in if !accepted { self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。" } }
+                let scope = LocalAppBrowserDeliveryScope(appID: appId, revision: value.run.revision)
+                let acquisition = library.openBrowserPage(scope: scope) {
+                    openURL(value.url) { accepted in
+                        guard !accepted else { return }
+                        Task { @MainActor in
+                            library.endBrowserPageDelivery(scope)
+                            self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。"
+                        }
+                    }
+                }
+                guard acquisition != .unavailable else {
+                    throw LocalAppServiceFailure(
+                        "BROWSER_DELIVERY_UNAVAILABLE",
+                        "iOS could not reserve a short background window to open this Local App."
+                    )
+                }
             }
         } catch { self.error = error.localizedDescription }
     }

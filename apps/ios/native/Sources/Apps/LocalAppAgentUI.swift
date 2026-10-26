@@ -59,6 +59,7 @@ struct LocalAppAgentSettingsView: View {
     let client: LocalAppServiceClient
     let appID: String
     let release: UnifiedAppRelease
+    let onConfigurationChanged: @MainActor () async -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var catalog: AgentCatalog?
     @State private var model = ""
@@ -160,6 +161,7 @@ struct LocalAppAgentSettingsView: View {
     private func connect(_ serverID: String) {
         Task { busy = true; defer { busy = false }; do {
             catalog = try await call(["op": .string("connectMcp"), "serverId": .string(serverID)], as: AgentCatalog.self)
+            await onConfigurationChanged()
         } catch { self.error = error.localizedDescription } }
     }
     private func save() {
@@ -171,12 +173,14 @@ struct LocalAppAgentSettingsView: View {
             maxTurns: turns, timeoutMs: minutes * 60_000)
         Task { busy = true; defer { busy = false }; do {
             let _: LocalAppJSON = try await call(["op": .string("configure"), "appId": .string(appID), "settings": try .encode(settings)], as: LocalAppJSON.self)
+            await onConfigurationChanged()
             dismiss()
         } catch { self.error = error.localizedDescription } }
     }
     private func revoke() {
         Task { busy = true; defer { busy = false }; do {
             let _: LocalAppJSON = try await call(["op": .string("configure"), "appId": .string(appID), "settings": .null], as: LocalAppJSON.self)
+            await onConfigurationChanged()
             dismiss()
         } catch { self.error = error.localizedDescription } }
     }

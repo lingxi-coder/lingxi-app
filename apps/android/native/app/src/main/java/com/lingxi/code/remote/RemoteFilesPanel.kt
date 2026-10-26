@@ -61,7 +61,8 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
         val hash = MessageDigest.getInstance("SHA-256").digest(key.toByteArray()).joinToString("") { "%02x".format(it) }
         File(context.cacheDir, "remote-files/$hash")
     }
-    suspend fun client() = manager.port(owner, hostId)
+    val sessionReady = rememberUpdatedState(enabled)
+    suspend fun client() = manager.filePort(owner, hostId, snapshotFlow { sessionReady.value })
     suspend fun upload() {
         val selected = source ?: return
         busy = true; problem = null; committed = 0UL

@@ -17,6 +17,7 @@ import com.lingxi.code.bindings.android.RemotePermissionModeFfi
 import com.lingxi.code.bindings.android.RemotePromptImageFfi
 import com.lingxi.code.bindings.android.RemoteSessionSummaryFfi
 import com.lingxi.code.bindings.android.RemoteSessionUpdateFfi
+import com.lingxi.code.bindings.android.RemoteTransportFfi
 import com.lingxi.code.bindings.android.buildAndroidRemoteControlClient
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import com.lingxi.code.conversation.RemoteSessionPort
@@ -41,6 +42,7 @@ import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -314,6 +316,24 @@ class RemoteControlManager(
         val activeHost = client.connectionState()?.hostId ?: mutableConnection.value?.hostId
         check(activeHost == null || activeHost == hostId) { "remote computer changed" }
         return client
+    }
+
+    /** A system document picker can outlive the peer. Wait for the existing
+     * account/host to reconnect before starting file RPCs on return. */
+    internal suspend fun filePort(ownerUid: String?, hostId: String, sessionReady: Flow<Boolean>): RemoteClientPort {
+        return checkNotNull(withTimeoutOrNull(30_000) {
+            val bound = port(ownerUid, hostId)
+            bound.nudge()
+            combine(mutableClient, mutableConnection, account.uid, sessionReady) { binding, _, uid, attached ->
+                if (uid != ownerUid || binding?.client !== bound) throw CancellationException("remote account changed")
+                val state = bound.connectionState()
+                check(state?.hostId == null || state.hostId == hostId) { "remote computer changed" }
+                if (state?.phase == RemoteConnectionPhaseFfi.READY) {
+                    check(state.transport == RemoteTransportFfi.WEBRTC) { "File transfer requires a WebRTC connection" }
+                    bound.takeIf { attached }
+                } else null
+            }.filterNotNull().first()
+        }) { "Remote computer is still reconnecting; retry when connected" }
     }
 
     private inner class ManagerListener(private val mine: Int, private val ownerUid: String) : AndroidRemoteListener {

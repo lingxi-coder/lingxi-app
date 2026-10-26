@@ -1,30 +1,51 @@
 # Remote Control original-file transfer
 
-Integrated from `codex/remote-file-transfer` (`4bede9d98`) onto product main
-`dc2471bff`, preserving subsequent lifecycle and native-SDK changes. The 12 merge
-conflicts are resolved in an isolated worktree. All 44 Harness manifest entries
-and the corresponding lockfile records pin `f672a21e71d7adcaf832714f022de7cbf5891656`,
-which combines current Harness main `9c2de965` with the original independent file
-channel supplement `eeff93ab`. The integrated Harness is published on
-`codex/remote-control-native-final-20261025`; main publication awaits final
-package and installed-device acceptance.
+Integrated from `codex/remote-file-transfer` (`4bede9d98`) with subsequent
+lifecycle, native-SDK and telemetry changes. The integration conflicts were
+resolved in an isolated worktree. All 44 Harness manifest entries and lockfile
+records pin `cdf002334ff8698c9ccb1aa17c10314d340dcbe6`, which includes current
+Harness main `f6bdc7c9` and the independent file channel supplement. The SDK pin
+remains `bfd17e346f7ebbb2bcd5206f3c05f56b83a1858b`.
 
-## Integration review (2026-10-25)
+## Delivery validation (2026-10-26)
 
-Independent reviews found and repaired delayed revocation, attachment replacement,
-queued file operations, metadata/receipt/prompt lookup ownership, stale receiver
-cleanup (including sharing off/on), cross-tab resume identity deletion, delayed
-list overwrite and missing/truncated native download cache recovery. Regression
-logs preserve before-fix failures and successful retries.
+Independent reviews repaired delayed revocation, attachment replacement, queued
+file operations, account/device/session ownership, stale receiver cleanup,
+cross-tab resume identity deletion, delayed list overwrite and native download
+cache recovery. Explicit Send now publishes a verified workspace working copy
+so the normal file-reading tool can access the attachment without trusting the
+private receipt store. Android document-picker callbacks wait up to 30 seconds
+for the same account/host, WebRTC connection and session reattachment, including
+client-construction time in that bound.
 
-Source validation at this checkpoint: Web 170 passed with production build;
-Desktop 351 passed plus one actual Electron transport/OPFS/file failure-isolation
-check, with three Firebase-Emulator-only skips; Rust viewer with WebRTC 121 passed;
-Harness WebRTC core 24 passed with two existing opt-in ignored cases. Desktop and
-Web typechecks passed. These source results do not establish installed-app
-acceptance. Fresh JNI/APK, device XCFramework, signed Desktop/iOS packages and
-focused original-file physical acceptance remain in progress. The older branch
-build record below is historical, not proof of the integrated package.
+Current source checks: Web 170 passed with production build and typecheck;
+Desktop 374 passed with three Firebase-Emulator-only skips, plus 82 focused file,
+gateway and command tests (overlapping coverage, not additive); Rust viewer 121,
+iOS FFI 23 and Android FFI 23 passed; Harness WebRTC core 24 passed with two
+existing opt-in ignored cases. Android JVM tests and the final readiness APK
+build passed; exact counts and immutable receipts are recorded in the acceptance
+folder below.
+
+Actual Chrome and signed Desktop acceptance passed original-byte round trips
+for empty, 62-byte UTF-8, 17 MiB and 2 GiB files, with matching SHA-256; 2 GiB
+refresh/resume, cancel cleanup, retry and control replies during bulk download
+also passed. The approved tiny text was read through the normal model file tool.
+This is same-Mac WebRTC acceptance with the VPN connected, not proof of
+cross-Internet throughput. Signed Desktop packaging and full runtime smoke passed.
+
+Samsung authentication and direct connectivity recovered after the user enabled
+the phone VPN; a small SAF upload passed on the preceding APK. Final readiness
+APK install, download/export/hash and background checks remain pending. The new
+iOS FullDebug app and device XCFramework are built and signed; installation and
+original-file physical acceptance remain pending while another task owns the
+phone. File transfer under tunnel and share withdrawal during bulk transfer still
+need final UI acceptance. APNs is deferred by user request; Safari is optional.
+These open checks are not claimed as passed by source/build validation.
+
+Evidence: `acceptance/remote-control-20261022/integration-20261025/` in the shared
+workspace, including `state-current.json`, build result receipts and Web hash /
+resume / cancellation / concurrent-control evidence. The older branch record
+below is historical and does not establish acceptance of these packages.
 
 ## Wire contract
 

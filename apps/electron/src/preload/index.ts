@@ -241,6 +241,7 @@ export interface LingxiApi {
   settings(): Promise<PublicSettings>;
   openSettingsFile(path: string): Promise<void>;
   updateSettings(patch: {
+    telemetryEnabled?: boolean;
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;
     model?: string | null;

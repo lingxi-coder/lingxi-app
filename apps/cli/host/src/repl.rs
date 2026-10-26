@@ -548,9 +548,12 @@ pub async fn run_repl(argv: &Argv) -> i32 {
                     host.refresh_session().await;
                     let _ = host.begin(None, true);
                     queue.register_active_turn(token.clone()).await;
-                    let result = orchestrator::native_user_message_source::with_source(
-                        orchestrator::native_user_message_source::human(),
-                        o.run_turn_with_cancel(&prompt, token.clone()),
+                    let result = crate::telemetry_host::with_request_span(
+                        "repl",
+                        orchestrator::native_user_message_source::with_source(
+                            orchestrator::native_user_message_source::human(),
+                            o.run_turn_with_cancel(&prompt, token.clone()),
+                        ),
                     )
                     .await;
                     host.finish(&token).await;
@@ -570,11 +573,14 @@ pub async fn run_repl(argv: &Argv) -> i32 {
                 host.refresh_session().await;
                 let _ = host.begin(None, true);
                 queue.register_active_turn(token.clone()).await;
-                let result = orchestrator::native_user_message_source::with_source(
-                    orchestrator::native_user_message_source::human(),
-                    orchestrator::mod_prompt_origin::with_origin(
-                        serde_json::json!({"kind":"composer"}),
-                        o.run_queued_prompt_batch(inputs, token.clone()),
+                let result = crate::telemetry_host::with_request_span(
+                    "repl",
+                    orchestrator::native_user_message_source::with_source(
+                        orchestrator::native_user_message_source::human(),
+                        orchestrator::mod_prompt_origin::with_origin(
+                            serde_json::json!({"kind":"composer"}),
+                            o.run_queued_prompt_batch(inputs, token.clone()),
+                        ),
                     ),
                 )
                 .await;
@@ -604,13 +610,16 @@ pub async fn run_repl(argv: &Argv) -> i32 {
                     host.refresh_session().await;
                     let _ = host.begin(None, true);
                     queue.register_active_turn(token.clone()).await;
-                    let result = orchestrator::native_user_message_source::with_source(
-                        orchestrator::native_user_message_source::human(),
-                        o.run_turn_with_request_context(
-                            prompt,
-                            request_context,
-                            Some(transcript_attachment),
-                            token.clone(),
+                    let result = crate::telemetry_host::with_request_span(
+                        "repl",
+                        orchestrator::native_user_message_source::with_source(
+                            orchestrator::native_user_message_source::human(),
+                            o.run_turn_with_request_context(
+                                prompt,
+                                request_context,
+                                Some(transcript_attachment),
+                                token.clone(),
+                            ),
                         ),
                     )
                     .await;

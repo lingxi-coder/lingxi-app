@@ -151,6 +151,7 @@ async fn send(socket: &mut Socket, id: u64, method: &str, params: Utf16JsonProje
     socket
         .send(Message::Text(
             serde_json::to_string(&Frame::Request(BridgeRequest {
+                trace_context: None,
                 id,
                 method: method.into(),
                 params,

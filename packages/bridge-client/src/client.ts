@@ -31,6 +31,7 @@ import {
   CLIENT_PROTOCOL_VERSION,
   MAX_BRIDGE_FRAME_BYTES,
   type AudioCapabilitySnapshotDto,
+  type BridgeTraceContext,
   type ClientCommand,
   type ClientEvent,
   type ComputerAccessRequestDto,
@@ -426,9 +427,23 @@ export class BridgeClient extends EventEmitter {
   }
 
   /** Fire-and-forget a {@link ClientCommand} as a `Frame::Request` (no reply awaited). */
-  sendCommand(command: ClientCommand): void {
+  sendCommand(command: ClientCommand, traceContext?: BridgeTraceContext): void {
     const id = this.nextRequestId++;
-    this.sendFrame({ type: 'request', payload: { id, method: command.type, params: command } });
+    // Bound and validate metadata independently of command content. Invalid
+    // observability input never prevents the user's command from running.
+    const validContext = traceContext && /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/.test(traceContext.traceparent)
+      && !/^00-0{32}-/.test(traceContext.traceparent) && !/-0{16}-/.test(traceContext.traceparent)
+      && (traceContext.tracestate === undefined || (traceContext.tracestate.length <= 512 && !/[\r\n]/.test(traceContext.tracestate)))
+      ? traceContext : undefined;
+    this.sendFrame({ type: 'request', payload: { id, method: command.type, params: command,
+      ...(validContext ? { trace_context: { traceparent: validContext.traceparent,
+        ...(validContext.tracestate ? { tracestate: validContext.tracestate } : {}) } } : {}),
+    } });
+  }
+
+  /** Revoke reporting in this authenticated private host without interrupting its turn. */
+  async disableTelemetry(): Promise<void> {
+    await this.request('telemetry_disable', {});
   }
 
   private sendFrame(frame: Frame): void {
@@ -451,7 +466,7 @@ export class BridgeClient extends EventEmitter {
   /** Submit a user prompt to drive a turn ({@link ClientCommand} `send_prompt`). */
   sendPrompt(
     text: string,
-    opts: { images?: ImageRefDto[]; turnId?: number; visualizationContext?: VisualizationRefDto } = {},
+    opts: { images?: ImageRefDto[]; turnId?: number; visualizationContext?: VisualizationRefDto; traceContext?: BridgeTraceContext } = {},
   ): void {
     const command: ClientCommand = {
       type: 'send_prompt',
@@ -464,7 +479,7 @@ export class BridgeClient extends EventEmitter {
     if (opts.visualizationContext !== undefined) {
       command.visualization_context = opts.visualizationContext;
     }
-    this.sendCommand(command);
+    this.sendCommand(command, opts.traceContext);
   }
 
   // ── Inline visualization host (correlated `visualization` requests) ─────────

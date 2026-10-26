@@ -147,15 +147,15 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     let managed_settings_config = harness_runtime::desktop::DesktopConfig::default();
     let managed_otel_overrides =
         harness_runtime::desktop::managed_otel_env_overrides(&managed_settings_config).await;
-    let _telemetry_guard =
-        match telemetry::otel::OtelConfig::from_env_with_managed(&managed_otel_overrides) {
-            cfg if cfg.enabled => telemetry::otel::install_process_with_config(
-                "lingxi-cli",
-                telemetry_records_session,
-                cfg,
-            ),
-            _ => telemetry::otel::TelemetryGuard::disabled(),
-        };
+    let _telemetry_guard = match crate::telemetry_host::resolve_config(&managed_otel_overrides) {
+        cfg if cfg.enabled => telemetry::otel::install_process_with_config_async(
+            "lingxi-cli",
+            telemetry_records_session,
+            cfg,
+        )
+        .await,
+        _ => telemetry::otel::TelemetryGuard::disabled(),
+    };
     tracing::debug!(?parsed, "argv parsed");
 
     // (M3 cc2.1.198) `--bg`/`--background` × `--print`/`-p` is rejected UP

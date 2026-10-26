@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdir
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
+import { parseTelemetryEndpoint } from './telemetryPolicy.js';
 import { SETTINGS_VERSION } from '../shared/settings.js';
 import type {
   ModelPickerVisibilitySettings,
@@ -86,6 +87,10 @@ export interface SessionTranscriptSelection extends SessionRef {
 }
 
 export interface PersistedSettings {
+  /** Device consent; absent means the trusted host environment may opt in. */
+  telemetryEnabled?: boolean;
+  /** Host-private destination; never writable over renderer IPC. */
+  telemetryEndpoint?: string;
   archivedSessions?: import('../shared/settings.js').ArchivedSessionRecord[];
   version: typeof SETTINGS_VERSION;
   theme?: 'dark' | 'light' | 'system';
@@ -190,6 +195,11 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
 
   const settings = defaultSettings();
+  if ('telemetryEnabled' in value) settings.telemetryEnabled = value['telemetryEnabled'] === true;
+  if ('telemetryEndpoint' in value) {
+    settings.telemetryEndpoint = parseTelemetryEndpoint(value['telemetryEndpoint']);
+    if (!settings.telemetryEndpoint) settings.telemetryEnabled = false;
+  }
   settings.theme =
     value['theme'] === 'dark' || value['theme'] === 'light' || value['theme'] === 'system'
       ? value['theme']
@@ -340,7 +350,7 @@ export function parseSettings(value: unknown): PersistedSettings {
 
 export function publicSettings(settings: PersistedSettings): PublicSettings {
   const {
-    version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions,
+    version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions, telemetryEnabled,
     bypassPermissionsModeAccepted, voice, notifications, modelPickerVisibility, sidebar, collapseThoughtsByDefault,
   } = settings;
   return {
@@ -353,6 +363,7 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     projects: [...projects],
     ...(settings.archivedSessions ? { archivedSessions: settings.archivedSessions.map((item) => ({ ...item })) } : {}),
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
+    ...(typeof telemetryEnabled === 'boolean' ? { telemetryEnabled } : {}),
     ...(typeof collapseThoughtsByDefault === 'boolean' ? { collapseThoughtsByDefault } : {}),
     ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
     ...(voice ? { voice: parseVoicePreferences(voice) } : {}),

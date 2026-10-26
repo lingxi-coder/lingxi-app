@@ -39,7 +39,9 @@ async fn main() -> anyhow::Result<()> {
         return bridge_server::app_agent::run().await;
     }
     if std::env::args().nth(1).as_deref() == Some("--browser-native-host") {
-        let path = std::env::args_os().nth(2).ok_or_else(|| anyhow::anyhow!("browser descriptor path is required"))?;
+        let path = std::env::args_os()
+            .nth(2)
+            .ok_or_else(|| anyhow::anyhow!("browser descriptor path is required"))?;
         return bridge_server::browser_native_host::run(std::path::Path::new(&path)).await;
     }
     if std::env::args().nth(1).as_deref() == Some("--audio-service-json") {
@@ -135,7 +137,16 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|_| anyhow::anyhow!("session user settings owner is already fixed"))?;
     }
 
-    let _telemetry_guard = telemetry::otel::install_process("bridge-server", false);
+    let mut telemetry_config = telemetry::otel::OtelConfig::from_env();
+    if std::env::var("OTEL_SERVICE_NAME")
+        .ok()
+        .is_none_or(|name| name.trim().is_empty())
+    {
+        telemetry_config.service_name = "lingxi-bridge".into();
+    }
+    let _telemetry_guard =
+        telemetry::otel::install_process_with_config_async("bridge-server", false, telemetry_config)
+            .await;
     // Every HTTP and WebSocket client assembly builds trusts the OS store;
     // read it once, off this thread, while config and credentials resolve.
     platform_posix::http::prewarm_native_roots();
@@ -280,6 +291,9 @@ async fn main() -> anyhow::Result<()> {
     endpoint.shutdown().await;
     drain_session_lifecycle(&session_lifecycle).await;
     drop(lock_guard);
+    if _telemetry_guard.shutdown_async().await.is_err() {
+        tracing::warn!("bridge-server telemetry shutdown did not complete");
+    }
     if let Some(refusal) = policy_refusal {
         return Err(anyhow::Error::new(refusal));
     }

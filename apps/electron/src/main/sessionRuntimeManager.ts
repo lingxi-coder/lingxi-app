@@ -645,6 +645,13 @@ export class SessionRuntimeManager {
     if (failed?.status === 'rejected') throw failed.reason;
   }
 
+  async disableTelemetry(): Promise<void> {
+    // Revoke all host exporters synchronously before any network acknowledgement.
+    const results = await Promise.allSettled([...this.runtimes.values()].map(runtime => runtime.disableTelemetry()));
+    const failure = results.find(result => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw new Error('Some running chats could not confirm diagnostics were disabled.');
+  }
+
   async dispose(): Promise<void> {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();

@@ -1,0 +1,115 @@
+# Development only. The native runner binds loopback; Compose publishes only
+# loopback ports. Never expose these unauthenticated receivers publicly.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:LINGXI_OTEL_BIND_ADDRESS}:4317
+      http:
+        endpoint: ${env:LINGXI_OTEL_BIND_ADDRESS}:4318
+
+extensions:
+  health_check:
+    endpoint: ${env:LINGXI_OTEL_BIND_ADDRESS}:13133
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  # Defense in depth after the SDK's outbound schema filter. Never keep arbitrary
+  # request metadata. Keep ephemeral process identity only on resources so
+  # cumulative writers remain distinct. Drop data if transformation fails.
+  transform/diagnostics:
+    error_mode: propagate
+    trace_statements:
+      - context: resource
+        statements:
+          - keep_keys(attributes, ["service.name", "service.instance.id", "service.version", "service.namespace", "deployment.environment.name", "deployment.environment", "os.type", "host.arch", "lingxi.platform", "lingxi.release_channel", "lingxi.harness_revision"])
+          - truncate_all(attributes, 96)
+      - context: scope
+        statements:
+          - keep_keys(attributes, [])
+      - context: span
+        statements:
+          - keep_keys(attributes, ["request.kind", "entrypoint", "version", "platform", "release_channel", "provider", "model", "tool_name", "tool_source", "tool_type", "status", "result", "outcome", "success", "cancelled", "error_kind", "error.type", "status_code", "token_type", "type", "language", "decision", "source", "speed", "query_source", "querySource", "operation", "method", "hook_event", "hook_type", "metrics_exporter", "logs_exporter", "traces_exporter", "stream", "streaming", "duration_ms", "durationMs", "elapsed_ms", "uptime_ms", "attempt", "attempt_number", "retry_count", "turn_index", "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "inputTokens", "outputTokens", "cachedInputTokens", "uncachedInputTokens", "cost_usd", "cost_usd_micros", "costUSD", "first_token_ms", "prompt_length", "response_length", "tool_count"])
+          - truncate_all(attributes, 96)
+          - set(status.message, "")
+      - context: spanevent
+        statements:
+          - keep_keys(attributes, [])
+          - set(name, "event") where name != "lingxi.first_token"
+    metric_statements:
+      - context: resource
+        statements:
+          - keep_keys(attributes, ["service.name", "service.instance.id", "service.version", "service.namespace", "deployment.environment.name", "deployment.environment", "os.type", "host.arch", "lingxi.platform", "lingxi.release_channel", "lingxi.harness_revision"])
+          - truncate_all(attributes, 96)
+      - context: scope
+        statements:
+          - keep_keys(attributes, [])
+      - context: datapoint
+        statements:
+          - keep_keys(attributes, ["entrypoint", "version", "platform", "release_channel", "provider", "model", "tool_name", "tool_source", "tool_type", "status", "result", "outcome", "success", "cancelled", "error_kind", "error.type", "status_code", "token_type", "type", "language", "decision", "source", "speed", "query_source", "querySource", "operation", "method", "hook_event", "hook_type", "metrics_exporter", "logs_exporter", "traces_exporter", "stream", "streaming"])
+          - truncate_all(attributes, 96)
+    log_statements:
+      - context: resource
+        statements:
+          - keep_keys(attributes, ["service.name", "service.instance.id", "service.version", "service.namespace", "deployment.environment.name", "deployment.environment", "os.type", "host.arch", "lingxi.platform", "lingxi.release_channel", "lingxi.harness_revision"])
+          - truncate_all(attributes, 96)
+      - context: scope
+        statements:
+          - keep_keys(attributes, [])
+      - context: log
+        statements:
+          - keep_keys(attributes, ["request.kind", "event.name", "event_name", "entrypoint", "version", "platform", "release_channel", "provider", "model", "tool_name", "tool_source", "tool_type", "status", "result", "outcome", "success", "cancelled", "error_kind", "error.type", "status_code", "token_type", "type", "language", "decision", "source", "speed", "query_source", "querySource", "operation", "method", "hook_event", "hook_type", "metrics_exporter", "logs_exporter", "traces_exporter", "stream", "streaming", "duration_ms", "durationMs", "elapsed_ms", "uptime_ms", "attempt", "attempt_number", "retry_count", "turn_index", "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "inputTokens", "outputTokens", "cachedInputTokens", "uncachedInputTokens", "cost_usd", "cost_usd_micros", "costUSD", "first_token_ms", "prompt_length", "response_length", "tool_count"])
+          - truncate_all(attributes, 96)
+          - set(body, "")
+          - set(severity_text, "")
+  batch:
+    timeout: 200ms
+    send_batch_size: 128
+    send_batch_max_size: 256
+
+exporters:
+  file/traces:
+    path: ${env:LINGXI_OTEL_OUTPUT_DIR}/traces.jsonl
+    format: json
+    rotation:
+      max_megabytes: 10
+      max_backups: 1
+      max_days: 1
+  file/metrics:
+    path: ${env:LINGXI_OTEL_OUTPUT_DIR}/metrics.jsonl
+    format: json
+    rotation:
+      max_megabytes: 10
+      max_backups: 1
+      max_days: 1
+  file/logs:
+    path: ${env:LINGXI_OTEL_OUTPUT_DIR}/logs.jsonl
+    format: json
+    rotation:
+      max_megabytes: 10
+      max_backups: 1
+      max_days: 1
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/diagnostics, batch]
+      exporters: [file/traces]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/diagnostics, batch]
+      exporters: [file/metrics]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/diagnostics, batch]
+      exporters: [file/logs]

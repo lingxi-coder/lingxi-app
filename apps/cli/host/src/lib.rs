@@ -108,6 +108,7 @@ pub mod sigint;
 mod startup_resources;
 mod startup_trace;
 pub mod teammate_worker;
+mod telemetry_host;
 
 use crate::argv::Argv;
 

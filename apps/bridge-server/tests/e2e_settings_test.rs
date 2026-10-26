@@ -224,6 +224,7 @@ async fn connect(
     assert_eq!(response.status(), 101, "upgrade must return 101");
 
     let hello = Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 0,
         method: "hello".into(),
         params: bridge_source(&ClientHello {
@@ -267,6 +268,7 @@ where
 
 fn submit(command: &ClientCommand) -> Frame {
     Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 1,
         method: "submit".into(),
         params: bridge_source(&command),

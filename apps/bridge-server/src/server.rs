@@ -315,6 +315,14 @@ struct QueuedPromptPayload {
     images: Vec<ImageRefDto>,
     turn_id: Option<u64>,
     prompt_inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
+    trace_context: Option<telemetry::otel::SerializedTraceContext>,
+}
+
+impl QueuedPromptPayload {
+    /// Trace metadata must never change which user inputs can be batched.
+    fn requires_distinct_turn(&self) -> bool {
+        !self.images.is_empty() || self.turn_id.is_some() || self.prompt_inputs.is_some()
+    }
 }
 
 /// A [`ClientEventSink`] that forwards each lowered [`ClientEvent`] out as a
@@ -1634,12 +1642,22 @@ async fn batchable_prompt_snapshot(
     turn_handoff: &Arc<tokio::sync::Mutex<()>>,
 ) -> Vec<QueuedCommand> {
     let _handoff = turn_handoff.lock().await;
-    let payload_ids = queued_prompt_payloads
-        .lock()
-        .await
-        .keys()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
+    let snapshot = queue.snapshot().await;
+    let queued_ids = snapshot
+        .iter()
+        .map(|command| command.uuid.as_str())
+        .collect::<HashSet<_>>();
+    let payload_ids = {
+        let mut payloads = queued_prompt_payloads.lock().await;
+        // Text-only prompts may be consumed by the engine's mid-turn drain.
+        // Their tracing metadata has the same lifetime as the queued input.
+        payloads.retain(|id, _| queued_ids.contains(id.as_str()));
+        payloads
+            .iter()
+            .filter(|(_, payload)| payload.requires_distinct_turn())
+            .map(|(id, _)| id.clone())
+            .collect::<HashSet<_>>()
+    };
     if queue
         .peek(|c| c.is_main_thread())
         .await
@@ -1890,51 +1908,57 @@ async fn run_owned_bridge_slash(
     generation: u64,
     cancellation: CancellationToken,
     owner: BridgeSlashOwnerContext,
+    trace_context: Option<telemetry::otel::SerializedTraceContext>,
 ) {
-    let dispatch_was_cancelled = cancellation.is_cancelled()
-        || owner
-            .mod_drain
-            .policy_helper_refusal
-            .as_ref()
-            .is_some_and(|probe| probe.current().is_some());
-    if !dispatch_was_cancelled {
-        if let Some(registry) = &owner.task_notification_registry {
-            registry.update_shell_session_activity(true, true, true);
-        }
-        if let Some(units) = raw.string_units("") {
-            if let Ok(submission) = String::from_utf16(&units) {
-                owner
-                    .driver
-                    .record_prompt_suggestion_submission(&submission)
-                    .await;
+    telemetry::otel::with_trace_context_future(trace_context.as_ref(), async {
+        let dispatch_was_cancelled = cancellation.is_cancelled()
+            || owner
+                .mod_drain
+                .policy_helper_refusal
+                .as_ref()
+                .is_some_and(|probe| probe.current().is_some());
+        if !dispatch_was_cancelled {
+            if let Some(registry) = &owner.task_notification_registry {
+                registry.update_shell_session_activity(true, true, true);
+            }
+            if let Some(units) = raw.string_units("") {
+                if let Ok(submission) = String::from_utf16(&units) {
+                    owner
+                        .driver
+                        .record_prompt_suggestion_submission(&submission)
+                        .await;
+                }
+            }
+            if let Some(router) = &owner.mod_drain.router {
+                router.stop_realtime_audio().await;
             }
         }
-        if let Some(router) = &owner.mod_drain.router {
-            router.stop_realtime_audio().await;
+        let result = dispatch_queued_bridge_slash(
+            raw,
+            images,
+            turn_id,
+            generation,
+            cancellation,
+            &owner.mod_drain,
+        )
+        .await;
+        if let Some(gate) = owner.active_turn.gate() {
+            gate.set_session_id(owner.driver.current_session_id().await);
         }
-    }
-    let result = dispatch_queued_bridge_slash(
-        raw,
-        images,
-        turn_id,
-        generation,
-        cancellation,
-        &owner.mod_drain,
-    )
+        if let Some(turn) = result {
+            drive_queued_mod_turn(&owner.driver, turn).await;
+        }
+        finish_turn(
+            &owner.active_turn,
+            generation,
+            &owner.interactions,
+            &owner.turn_handoff,
+        )
+        .await;
+    })
     .await;
-    if let Some(gate) = owner.active_turn.gate() {
-        gate.set_session_id(owner.driver.current_session_id().await);
-    }
-    if let Some(turn) = result {
-        drive_queued_mod_turn(&owner.driver, turn).await;
-    }
-    finish_turn(
-        &owner.active_turn,
-        generation,
-        &owner.interactions,
-        &owner.turn_handoff,
-    )
-    .await;
+    // Queued inputs restore their own parents. The seed request must not
+    // become the parent of unrelated follow-up turns.
     loop {
         if owner
             .mod_drain
@@ -2370,19 +2394,25 @@ async fn drain_main_thread(
                             .as_ref()
                             .map(|payload| payload.images.clone())
                             .unwrap_or_default();
-                        let turn = match mod_drain {
-                            Some(mod_drain) => {
-                                dispatch_queued_bridge_slash(
-                                    raw, images, turn_id, generation, cancel, mod_drain,
-                                )
-                                .await
+                        let trace_context = payload
+                            .as_ref()
+                            .and_then(|payload| payload.trace_context.clone());
+                        telemetry::otel::with_trace_context_future(trace_context.as_ref(), async {
+                            let turn = match mod_drain {
+                                Some(mod_drain) => {
+                                    dispatch_queued_bridge_slash(
+                                        raw, images, turn_id, generation, cancel, mod_drain,
+                                    )
+                                    .await
+                                }
+                                None => None,
+                            };
+                            if let Some(turn) = turn {
+                                drive_queued_mod_turn(driver, turn).await;
                             }
-                            None => None,
-                        };
-                        if let Some(turn) = turn {
-                            drive_queued_mod_turn(driver, turn).await;
-                        }
-                        finish_turn(active_turn, generation, interactions, turn_handoff).await;
+                            finish_turn(active_turn, generation, interactions, turn_handoff).await;
+                        })
+                        .await;
                         continue;
                     }
                     if cmd.source == QueueSource::Plugin {
@@ -2414,50 +2444,55 @@ async fn drain_main_thread(
                         continue;
                     }
                     if let Some(payload) = payload {
-                        let (generation, cancel) = owned_turn.expect("complete prompt owns a turn");
-                        let native_source =
-                            if cmd.source == QueueSource::PromptInput && !cmd.is_meta {
-                                orchestrator::native_user_message_source::human()
+                        let trace_context = payload.trace_context.clone();
+                        telemetry::otel::with_trace_context_future(trace_context.as_ref(), async {
+                            let (generation, cancel) =
+                                owned_turn.expect("complete prompt owns a turn");
+                            let native_source =
+                                if cmd.source == QueueSource::PromptInput && !cmd.is_meta {
+                                    orchestrator::native_user_message_source::human()
+                                } else {
+                                    Default::default()
+                                };
+                            if let Some(inputs) = payload.prompt_inputs {
+                                if payload.images.is_empty() {
+                                    orchestrator::native_user_message_source::with_source(
+                                        native_source,
+                                        orchestrator::mod_prompt_origin::with_origin(
+                                            serde_json::json!({"kind":"bridge"}),
+                                            driver.run_queued_batch(inputs, cancel),
+                                        ),
+                                    )
+                                    .await;
+                                } else {
+                                    tracing::error!(
+                                        "queued prompt batch cannot also carry image attachments"
+                                    );
+                                }
                             } else {
-                                Default::default()
-                            };
-                        if let Some(inputs) = payload.prompt_inputs {
-                            if payload.images.is_empty() {
+                                let prompt = cmd
+                                    .text_projection()
+                                    .cloned()
+                                    .unwrap_or_else(|| Utf16JsonProjection::from(""));
+                                tag_loop_tick_in_flight(loop_runtime, false, &prompt);
                                 orchestrator::native_user_message_source::with_source(
                                     native_source,
                                     orchestrator::mod_prompt_origin::with_origin(
                                         serde_json::json!({"kind":"bridge"}),
-                                        driver.run_queued_batch(inputs, cancel),
+                                        driver.run_identified_turn(
+                                            prompt,
+                                            payload.images,
+                                            cancel,
+                                            payload.turn_id.map(|id| format!("client-turn:{id}")),
+                                            true,
+                                        ),
                                     ),
                                 )
                                 .await;
-                            } else {
-                                tracing::error!(
-                                    "queued prompt batch cannot also carry image attachments"
-                                );
                             }
-                        } else {
-                            let prompt = cmd
-                                .text_projection()
-                                .cloned()
-                                .unwrap_or_else(|| Utf16JsonProjection::from(""));
-                            tag_loop_tick_in_flight(loop_runtime, false, &prompt);
-                            orchestrator::native_user_message_source::with_source(
-                                native_source,
-                                orchestrator::mod_prompt_origin::with_origin(
-                                    serde_json::json!({"kind":"bridge"}),
-                                    driver.run_identified_turn(
-                                        prompt,
-                                        payload.images,
-                                        cancel,
-                                        payload.turn_id.map(|id| format!("client-turn:{id}")),
-                                        true,
-                                    ),
-                                ),
-                            )
-                            .await;
-                        }
-                        finish_turn(active_turn, generation, interactions, turn_handoff).await;
+                            finish_turn(active_turn, generation, interactions, turn_handoff).await;
+                        })
+                        .await;
                         continue;
                     }
                     if let Some(text) = cmd.text_projection() {
@@ -2589,6 +2624,11 @@ async fn drain_main_thread(
             queue
                 .consume(&failed_uuids, "loop instruction read failed")
                 .await;
+            let mut payloads = queued_prompt_payloads.lock().await;
+            for id in &failed_uuids {
+                payloads.remove(id);
+            }
+            drop(payloads);
             consumed.retain(|uuid| !failed_uuids.contains(uuid));
             loop_runtime.take_in_flight_prompt();
             driver.loop_prompt_failed(error).await;
@@ -2596,12 +2636,25 @@ async fn drain_main_thread(
                 continue;
             }
         }
-        let (generation, cancel) = {
+        let (generation, cancel, trace_context) = {
             let _handoff = turn_handoff.lock().await;
             queue
                 .consume(&consumed, "drained into follow-up turn")
                 .await;
-            begin_owned_turn(active_turn, driver, None).await
+            let mut payloads = queued_prompt_payloads.lock().await;
+            // A batch is one engine operation. Use its first captured parent;
+            // all entries are retired without changing batching or priority.
+            let trace_context = consumed.iter().find_map(|id| {
+                payloads
+                    .get(id)
+                    .and_then(|payload| payload.trace_context.clone())
+            });
+            for id in &consumed {
+                payloads.remove(id);
+            }
+            drop(payloads);
+            let (generation, cancel) = begin_owned_turn(active_turn, driver, None).await;
+            (generation, cancel, trace_context)
         };
         let in_human_turn = batch.iter().any(|cmd| {
             consumed.contains(&cmd.uuid) && cmd.source == QueueSource::PromptInput && !cmd.is_meta
@@ -2609,7 +2662,11 @@ async fn drain_main_thread(
         if cron_tick.is_some() && in_human_turn {
             loop_runtime.veto_tick(tool_cron::LoopFoldVeto::ForeignUserInput);
         }
-        driver.run_queued_batch(inputs, cancel).await;
+        telemetry::otel::with_trace_context_future(
+            trace_context.as_ref(),
+            driver.run_queued_batch(inputs, cancel),
+        )
+        .await;
         finish_turn(active_turn, generation, interactions, turn_handoff).await;
     }
 }
@@ -3769,6 +3826,7 @@ impl BridgeConnection {
                                 images: images.clone(),
                                 turn_id,
                                 prompt_inputs: None,
+                                trace_context: telemetry::otel::capture_current_trace_context(),
                             },
                         );
                         SlashAdmission::Queued(queued_command)
@@ -3853,6 +3911,7 @@ impl BridgeConnection {
                     generation,
                     cancellation,
                     owner,
+                    telemetry::otel::capture_current_trace_context(),
                 ));
                 *self
                     .active_turn_task
@@ -4124,14 +4183,20 @@ impl BridgeConnection {
                 } else {
                     let images = queued_images.take().unwrap_or_default();
                     let prompt_inputs = queued_inputs.take().unwrap_or(None);
-                    if !images.is_empty() || turn_id.is_some() || prompt_inputs.is_some() {
+                    let trace_context = telemetry::otel::capture_current_trace_context();
+                    let distinct_turn =
+                        !images.is_empty() || turn_id.is_some() || prompt_inputs.is_some();
+                    if distinct_turn {
                         queue_command.priority = QueuePriority::Later;
+                    }
+                    if distinct_turn || trace_context.is_some() {
                         payloads.insert(
                             queue_command.uuid.clone(),
                             QueuedPromptPayload {
                                 images,
                                 turn_id,
                                 prompt_inputs,
+                                trace_context,
                             },
                         );
                     }
@@ -4215,55 +4280,59 @@ impl BridgeConnection {
 
         let scheduled_sink = self.unscoped_event_sink();
         let mod_drain = self.mod_queue_drain();
+        let trace_context = telemetry::otel::capture_current_trace_context();
         let task = tokio::spawn(async move {
-            // Seed turn — the prompt that won the loop (carries its images).
-            if let Some((run_id, model, reasoning)) = scheduled {
-                let result = driver
-                    .run_scheduled_turn(text, model, reasoning, seed_cancel)
-                    .await;
-                let (summary, error) = match result {
-                    Ok(summary) => (Some(summary), None),
-                    Err(error) => (None, Some(error)),
-                };
-                scheduled_sink
-                    .emit(ClientEvent::ScheduledRunFinished {
-                        run_id,
-                        summary,
-                        error,
-                    })
-                    .await;
-            } else if let Some(inputs) = queued_inputs {
-                let human = inputs.iter().any(|input| !input.is_meta);
-                let native_source = if human {
-                    orchestrator::native_user_message_source::human()
-                } else {
-                    Default::default()
-                };
-                orchestrator::native_user_message_source::with_source(
-                    native_source,
-                    orchestrator::mod_prompt_origin::with_origin(
-                        serde_json::json!({"kind":"bridge"}),
-                        driver.run_queued_batch(inputs, seed_cancel),
-                    ),
-                )
-                .await;
-            } else {
-                orchestrator::native_user_message_source::with_source(
-                    orchestrator::native_user_message_source::human(),
-                    orchestrator::mod_prompt_origin::with_origin(
-                        serde_json::json!({"kind":"bridge"}),
-                        driver.run_identified_turn(
-                            text,
-                            images,
-                            seed_cancel,
-                            turn_id.map(|id| format!("client-turn:{id}")),
-                            false,
+            telemetry::otel::with_trace_context_future(trace_context.as_ref(), async {
+                // Seed turn — the prompt that won the loop (carries its images).
+                if let Some((run_id, model, reasoning)) = scheduled {
+                    let result = driver
+                        .run_scheduled_turn(text, model, reasoning, seed_cancel)
+                        .await;
+                    let (summary, error) = match result {
+                        Ok(summary) => (Some(summary), None),
+                        Err(error) => (None, Some(error)),
+                    };
+                    scheduled_sink
+                        .emit(ClientEvent::ScheduledRunFinished {
+                            run_id,
+                            summary,
+                            error,
+                        })
+                        .await;
+                } else if let Some(inputs) = queued_inputs {
+                    let human = inputs.iter().any(|input| !input.is_meta);
+                    let native_source = if human {
+                        orchestrator::native_user_message_source::human()
+                    } else {
+                        Default::default()
+                    };
+                    orchestrator::native_user_message_source::with_source(
+                        native_source,
+                        orchestrator::mod_prompt_origin::with_origin(
+                            serde_json::json!({"kind":"bridge"}),
+                            driver.run_queued_batch(inputs, seed_cancel),
                         ),
-                    ),
-                )
-                .await;
-            }
-            finish_turn(&active_turn, seed_generation, &interactions, &turn_handoff).await;
+                    )
+                    .await;
+                } else {
+                    orchestrator::native_user_message_source::with_source(
+                        orchestrator::native_user_message_source::human(),
+                        orchestrator::mod_prompt_origin::with_origin(
+                            serde_json::json!({"kind":"bridge"}),
+                            driver.run_identified_turn(
+                                text,
+                                images,
+                                seed_cancel,
+                                turn_id.map(|id| format!("client-turn:{id}")),
+                                false,
+                            ),
+                        ),
+                    )
+                    .await;
+                }
+                finish_turn(&active_turn, seed_generation, &interactions, &turn_handoff).await;
+            })
+            .await;
 
             // Between-turn drain: run queued main-thread prompts as follow-up
             // turns until the queue is empty. Re-check after clearing the flag to
@@ -4549,7 +4618,10 @@ impl FramePump for BridgeConnection {
         }
         // A widget's document and state requests are independent of the
         // command stream; a slow control must not leave a card loading.
-        if request.method == "permission_request_scope" || request.method == "visualization" {
+        if matches!(
+            request.method.as_str(),
+            "permission_request_scope" | "visualization" | "telemetry_disable"
+        ) {
             return self.handshaken.load(Ordering::SeqCst);
         }
         match deserialize_source::<ClientCommand>(&request.params) {
@@ -4609,7 +4681,12 @@ impl FramePump for BridgeConnection {
                     }
                 }
             },
-            Frame::Request(BridgeRequest { id, method, params }) => {
+            Frame::Request(BridgeRequest {
+                id,
+                method,
+                params,
+                trace_context,
+            }) => {
                 if !self.handshaken.load(Ordering::SeqCst) {
                     let message = if self.handshake_refused.load(Ordering::SeqCst) {
                         "connection handshake was refused"
@@ -4618,6 +4695,31 @@ impl FramePump for BridgeConnection {
                     };
                     if let Some(sink) = self.out.lock().await.as_ref() {
                         let _ = sink.send(Self::error_response(id, message));
+                    }
+                    return;
+                }
+                if method == "telemetry_disable" {
+                    let response = if params
+                        .object_entries()
+                        .is_some_and(|entries| entries.is_empty())
+                    {
+                        // Only the authenticated, handshaken host can revoke
+                        // this process. Re-enabling requires a fresh trusted
+                        // process configuration; project commands cannot do it.
+                        telemetry::otel::disable_process_async().await;
+                        Frame::Response(BridgeResponse {
+                            id,
+                            result: Some(
+                                serialize_source(&serde_json::json!({"status": "ok"}))
+                                    .expect("static telemetry response serializes"),
+                            ),
+                            error: None,
+                        })
+                    } else {
+                        Self::error_response(id, "telemetry_disable requires an empty object")
+                    };
+                    if let Some(sink) = self.out.lock().await.as_ref() {
+                        let _ = sink.send(response);
                     }
                     return;
                 }
@@ -4832,7 +4934,29 @@ impl FramePump for BridgeConnection {
                     return;
                 }
                 match deserialize_source::<ClientCommand>(&params) {
-                    Ok(command) => self.dispatch(command).await,
+                    Ok(command) => {
+                        let kind = match &command {
+                            ClientCommand::SendPrompt { .. } => "send_prompt",
+                            ClientCommand::RunSlashCommand { .. } => "slash",
+                            _ => "command",
+                        };
+                        let attributes = telemetry::otel::Attributes::from([(
+                            "request.kind".into(),
+                            telemetry::otel::AttrValue::from(kind),
+                        )]);
+                        telemetry::otel::with_trace_context_future(
+                            trace_context.as_ref(),
+                            telemetry::otel::with_operation_span(
+                                // This span measures admission only. The
+                                // Desktop parent's request span owns the full
+                                // lifetime of the asynchronously spawned turn.
+                                "lingxi.bridge.admission",
+                                attributes,
+                                self.dispatch(command),
+                            ),
+                        )
+                        .await;
+                    }
                     Err(e) => {
                         tracing::debug!(error = %e, "bridge-server: undecodable command params");
                     }
@@ -5053,6 +5177,10 @@ mod permission_owner_regression_test;
 #[cfg(test)]
 #[path = "server/prompt_ingress_regression_test.rs"]
 mod prompt_ingress_regression_test;
+
+#[cfg(test)]
+#[path = "server/telemetry_regression_test.rs"]
+mod telemetry_regression_test;
 
 #[cfg(test)]
 mod tests {
@@ -7304,6 +7432,7 @@ mod tests {
         let connection = BridgeConnection::new();
         let cancel = |turn_id| {
             Frame::Request(BridgeRequest {
+                trace_context: None,
                 id: 1,
                 method: "command".into(),
                 params: serialize_source(&ClientCommand::Cancel { turn_id })
@@ -7332,6 +7461,7 @@ mod tests {
 
         let connection = BridgeConnection::new();
         let update = Frame::Request(BridgeRequest {
+            trace_context: None,
             id: 1,
             method: "command".into(),
             params: serialize_source(&ClientCommand::UpdateAudioCapabilities {
@@ -8154,6 +8284,7 @@ mod realtime_audio_connection_tests {
     }
     fn input_frame() -> Frame {
         Frame::Request(bridge::BridgeRequest {
+            trace_context: None,
             id: 2,
             method: "command".into(),
             params: serialize_source(&ClientCommand::RealtimeAudioInput {
@@ -8426,6 +8557,7 @@ mod workspace_control_tests {
 
     fn request(id: u64, method: &str) -> Frame {
         Frame::Request(BridgeRequest {
+            trace_context: None,
             id,
             method: method.into(),
             params: Utf16JsonProjection::parse(r#"{"path":"/target"}"#).unwrap(),
@@ -8449,6 +8581,7 @@ mod workspace_control_tests {
         connection
             .on_frame(
                 Frame::Request(BridgeRequest {
+                    trace_context: None,
                     id: 2,
                     method: "hello".into(),
                     params: serialize_source(&hello()).unwrap(),

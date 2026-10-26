@@ -836,26 +836,17 @@ async function assertDesktopGit(page, workspace, tempRoot) {
   assert.ok(status.files.some(file => file.path === 'git-smoke.txt'));
   const diff = (await request({ kind: 'diff', mode: 'working', path: 'git-smoke.txt' })).diff;
   assert.ok(diff.patch.includes('+Desktop Review 中文'));
-  // Open Review through Summary. The topbar Git pill this used to click was
-  // REMOVED on purpose by `ecf0bf8d7` ("remove the topbar Git and More
-  // controls") fifteen minutes after this section was written, and that commit
-  // recorded `Not-tested: Rebuilt signed macOS package` — so nothing ran this
-  // again until the next package. `GitTopBar` still compiles and is still
-  // exercised by `test/fixtures/git-main.tsx`; it simply has no production call
-  // site, so the selector could never match here. Summary is the surviving
-  // route, and the steps below already use its toggle.
-  //
-  // Both steps are load-bearing, and the asserts below are what make that
-  // checkable: Review must be ABSENT first, or the wait for it passes on a panel
-  // that was already there. Deleting the `Changes` click once left the section
-  // green, which looked like the click was decoration — re-running with the
-  // preconditions asserted showed Review never appears without it. That first
-  // run had simply landed with the runtime centre already on `review`.
+  // Summary contains outputs/activity; Git Review opens from the desktop rail.
+  // Check the closed state first so an existing panel cannot mask a broken entry.
   assert.equal(await evaluate(page, `document.querySelector('.git-review') !== null`), false);
   assert.equal(await evaluate(page, `document.querySelector('#runtime-center-overview') !== null`), false);
   await evaluate(page, `document.querySelector('[aria-label="Toggle pinned summary"]').click()`);
-  await waitFor(() => evaluate(page, `document.querySelector('#runtime-center-overview .git-environment-content') !== null`), { label: 'summary Git environment' });
-  await evaluate(page, `Array.from(document.querySelectorAll('#runtime-center-overview .git-environment-content button')).find(button => button.textContent.includes('Changes')).click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('#runtime-center-overview [aria-label="Outputs"]') !== null`), { label: 'packaged summary outputs' });
+  assert.equal(await evaluate(page, `document.querySelector('#runtime-center-overview .git-environment-content') !== null`), false);
+  await evaluate(page, `document.querySelector('[aria-label="Toggle pinned summary"]').click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('#runtime-center-overview') === null`), { label: 'packaged summary closes' });
+  assert.equal(await evaluate(page, `document.querySelector('.git-review') !== null`), false);
+  await evaluate(page, `document.querySelector('.desktop-nav-rail [aria-label="Review changes"]').click()`);
   await waitFor(() => evaluate(page, `document.querySelector('.git-review') !== null`), { label: 'packaged Review tab' });
   await request({ kind: 'stage', paths: ['git-smoke.txt'], token: status.token });
   status = (await request({ kind: 'status' })).status;
@@ -877,9 +868,8 @@ async function assertDesktopGit(page, workspace, tempRoot) {
   await waitFor(() => evaluate(page, `document.querySelector('.git-diff')?.textContent.includes('Review preview')`), { label: 'packaged diff rendering' });
   const screenshot = await page.send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(tmpdir(), 'lingxi-git-packaged.png'), Buffer.from(screenshot.data, 'base64'));
-  await evaluate(page, `document.querySelector('[aria-label="Toggle pinned summary"]').click()`);
-  await waitFor(() => evaluate(page, `document.querySelector('#runtime-center-overview')?.textContent.includes('desktop-review-smoke')`), { label: 'summary environment shows current branch' });
-  await evaluate(page, `document.querySelector('#runtime-center-overview [data-git-branch-trigger]').click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('.git-review-toolbar [aria-label="Switch branch"]')?.textContent.includes('desktop-review-smoke')`), { label: 'Review toolbar shows current branch' });
+  await evaluate(page, `document.querySelector('.git-review-toolbar [aria-label="Switch branch"]').click()`);
   await waitFor(() => evaluate(page, `(() => {
     const current = document.querySelector('.git-branch-row[aria-current="true"]');
     const warning = document.querySelector('.git-branch-warning');
@@ -887,10 +877,10 @@ async function assertDesktopGit(page, workspace, tempRoot) {
       && current?.textContent.includes('Current')
       && warning?.textContent.includes('Changed files: 1.');
   })()`), { label: 'current branch and uncommitted change warning' });
-  const environmentScreenshot = await page.send('Page.captureScreenshot', { format: 'png' });
-  writeFileSync(join(tmpdir(), 'lingxi-git-environment-packaged.png'), Buffer.from(environmentScreenshot.data, 'base64'));
+  const branchScreenshot = await page.send('Page.captureScreenshot', { format: 'png' });
+  writeFileSync(join(tmpdir(), 'lingxi-git-branch-packaged.png'), Buffer.from(branchScreenshot.data, 'base64'));
   await evaluate(page, `document.querySelector('dialog[open] [aria-label="Close dialog"]').click()`);
-  log('packaged Git: init, branch, diff, stage, commit, local push/fetch/pull, Review watcher and summary environment passed');
+  log('packaged Git: init, branch, diff, stage, commit, local push/fetch/pull, summary outputs, Review rail entry, watcher and branch menu passed');
 }
 
 async function assertBottomTerminal(page) {

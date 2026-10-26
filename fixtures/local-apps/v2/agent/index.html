@@ -4,6 +4,39 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent device acceptance</title>
+  <script>
+    (() => {
+      const queueKey = '__lingxiAgentAcceptanceHandoffQueue';
+      const consumerKey = '__lingxiAgentAcceptanceHandoffConsumer';
+      const queue = [];
+      window[queueKey] = queue;
+
+      function safeRunId(value) {
+        return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null;
+      }
+      function safeCode(value) {
+        return typeof value === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(value) ? value : 'unknown';
+      }
+      function capture(type, event) {
+        const detail = event?.detail;
+        const record = {
+          type,
+          runId: safeRunId(detail?.runId),
+          ...(type === 'error' ? {code: safeCode(detail?.code)} : {}),
+        };
+        const consumer = window[consumerKey];
+        if (typeof consumer === 'function') {
+          consumer(record);
+          return;
+        }
+        queue.push(record);
+        if (queue.length > 12) queue.shift();
+      }
+
+      window.addEventListener('localApp:agent-handoff-ready', event => capture('ready', event));
+      window.addEventListener('localApp:agent-handoff-error', event => capture('error', event));
+    })();
+  </script>
   <style>
     :root { color-scheme: light dark; font: 16px/1.45 system-ui, sans-serif; }
     body { max-width: 900px; margin: 0 auto; padding: 1rem; }
@@ -19,6 +52,7 @@
     output, .note { display: block; overflow-wrap: anywhere; }
     #status { padding: .55rem .7rem; border-radius: .45rem; background: color-mix(in srgb, currentColor 8%, transparent); }
     #error { color: #d64242; white-space: pre-wrap; }
+    #recovery-error { color: #d64242; white-space: pre-wrap; }
     pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; padding: .65rem; border-radius: .45rem; background: color-mix(in srgb, currentColor 7%, transparent); }
     .muted { opacity: .76; font-size: .9rem; }
     @media (max-width: 520px) { body { padding: .75rem; } button { flex: 1 1 100%; } }
@@ -29,12 +63,15 @@
   <p class="muted">Runs use the model and permissions selected in the trusted LingXi Apps settings. This page does not configure providers or grants.</p>
   <output id="status" role="status" aria-live="polite">Loading the host Agent…</output>
   <output id="error" role="alert" hidden></output>
+  <output id="handoff-status" class="muted" role="status" aria-live="polite">No SDK handoff event observed.</output>
+  <output id="recovery-error" role="alert" hidden></output>
   <p id="recovery" class="muted">No model request is started automatically when this page opens.</p>
 
   <section aria-labelledby="single-title">
     <h2 id="single-title">Single runs</h2>
     <div class="row">
       <button id="run-image" type="button" data-testid="run-image" disabled>Run public image</button>
+      <button id="retry-image" type="button" data-testid="retry-image" hidden>Retry public image load</button>
       <button id="run-text-file" type="button" data-testid="run-text-file" disabled>Run text file</button>
       <button id="retry-pending" type="button" data-testid="retry-pending" hidden>Retry the same pending request</button>
       <button id="cancel-run" type="button" data-testid="cancel-run" disabled>Cancel active run</button>
@@ -70,6 +107,10 @@
     <h3>Standard BaseEvents</h3>
     <pre id="events">No run events yet.</pre>
   </section>
+  <details>
+    <summary>Safe diagnostics</summary>
+    <pre id="diagnostics" aria-label="Safe fixture diagnostics">Collecting app-scoped metadata…</pre>
+  </details>
 
   <script type="module">
     const $ = (id) => document.getElementById(id);
@@ -77,6 +118,10 @@
     const EXTENSION_KEY = 'com.lingxi.localApp';
     const MAX_PAGES = 128;
     const MAX_EVENTS = 20000;
+    const IMAGE_PRELOAD_TIMEOUT_MS = 10000;
+    const DIAGNOSTIC_TIMEOUT_MS = 1000;
+    const HANDOFF_QUEUE_KEY = '__lingxiAgentAcceptanceHandoffQueue';
+    const HANDOFF_CONSUMER_KEY = '__lingxiAgentAcceptanceHandoffConsumer';
     const imageSchema = {
       type: 'object', additionalProperties: false, required: ['food', 'description', 'visibleCount'],
       properties: {
@@ -95,13 +140,19 @@
     };
 
     let agent;
+    let sdkInfo = null;
     let chat;
     let publicImageFile = null;
+    let imageLoading = false;
+    let imageLoadInFlight = null;
     let busy = false;
     let activeRunId = null;
     let activeTask = false;
     let storageReady = true;
     let storageFailure = '';
+    let latestHandoff = {type: 'none', runId: null, code: null};
+    let latestHandoffErrorCode = null;
+    let diagnosticsGeneration = 0;
     let state = {version: 1, chatId: null, pending: null, lastRun: null};
 
     function setStatus(message) { $('status').textContent = message; }
@@ -112,6 +163,36 @@
     function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
     function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
     function newId() { return crypto.randomUUID(); }
+    function safeRunId(value) {
+      return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null;
+    }
+    function safeCode(value) {
+      return typeof value === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(value) ? value : 'unknown';
+    }
+    function safeFailureText(failure) {
+      const message = failure?.message || String(failure);
+      return message
+        .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, '[URL redacted]')
+        .slice(0, 240);
+    }
+    function withDiagnosticTimeout(promise) {
+      return new Promise(resolve => {
+        let settled = false;
+        const finish = value => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        };
+        const timer = setTimeout(() => finish(null), DIAGNOSTIC_TIMEOUT_MS);
+        Promise.resolve(promise).then(finish, () => finish(null));
+      });
+    }
+    function showRecoveryErrors(errors) {
+      const unique = [...new Set(errors)];
+      $('recovery-error').textContent = unique.join('\n');
+      $('recovery-error').hidden = unique.length === 0;
+    }
 
     function loadState() {
       try {
@@ -182,10 +263,96 @@
         : 'No standard BaseEvents were returned.';
     }
 
+    function fixtureStorageMetadata() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        return {exists: raw !== null, bytes: raw === null ? 0 : new TextEncoder().encode(raw).length};
+      } catch {
+        return {exists: 'unknown', bytes: null};
+      }
+    }
+
+    async function readSdkInfoForDiagnostics() {
+      if (typeof window.localApp?.info !== 'function') return;
+      const info = await withDiagnosticTimeout(Promise.resolve().then(() => window.localApp.info()));
+      if (isRecord(info) && typeof info.id === 'string'
+          && /^[A-Za-z0-9._-]{1,128}$/.test(info.id) && Number.isSafeInteger(info.revision)) {
+        sdkInfo = {id: info.id, revision: info.revision};
+      }
+      void refreshDiagnostics();
+    }
+
+    async function sdkPendingDatabaseMetadata() {
+      if (!sdkInfo || typeof window.indexedDB?.databases !== 'function') return {status: 'unavailable'};
+      const databases = await withDiagnosticTimeout(Promise.resolve().then(() => window.indexedDB.databases()));
+      if (!Array.isArray(databases)) return {status: 'unavailable'};
+      const expectedName = `lingxi-local-app-agui-${sdkInfo.id}`;
+      const match = databases.find(database => database?.name === expectedName);
+      return match
+        ? {status: 'present', version: Number.isSafeInteger(match.version) ? match.version : null}
+        : {status: 'absent', version: null};
+    }
+
+    async function refreshDiagnostics() {
+      const generation = ++diagnosticsGeneration;
+      let readyMarkerPresent = false;
+      try { readyMarkerPresent = new URL(location.href).searchParams.has('__lingxi_ready'); }
+      catch { /* Keep the diagnostic boolean false when the address cannot be parsed. */ }
+      const localStorageRecord = fixtureStorageMetadata();
+      const pendingRunId = safeRunId(state.pending?.input?.runId);
+      const lastRunId = safeRunId(state.lastRun?.runId);
+      const sdkDatabase = await sdkPendingDatabaseMetadata();
+      if (generation !== diagnosticsGeneration) return;
+      $('diagnostics').textContent = JSON.stringify({
+        origin: location.origin,
+        readyMarkerPresent,
+        fixtureStorageRecordExists: localStorageRecord.exists,
+        fixtureStorageBytes: localStorageRecord.bytes,
+        localPending: Boolean(state.pending),
+        pendingRunId,
+        lastRunId,
+        sdkPendingDatabase: sdkDatabase,
+        sdkHandoff: latestHandoff,
+        sdkHandoffErrorCode: latestHandoffErrorCode,
+      }, null, 2);
+    }
+
+    function handleHandoffRecord(record) {
+      if (!isRecord(record) || !['ready', 'error'].includes(record.type)) return;
+      const eventRunId = safeRunId(record.runId);
+      const pendingRunId = safeRunId(state.pending?.input?.runId);
+      const runId = eventRunId || (record.type === 'error' ? pendingRunId : null);
+      if (record.type === 'ready' && !runId) return;
+      const code = record.type === 'error' ? safeCode(record.code) : null;
+      latestHandoff = {type: record.type, runId: eventRunId, code};
+      if (record.type === 'error') latestHandoffErrorCode = code;
+      const matchesPending = Boolean(pendingRunId && (eventRunId === pendingRunId || !eventRunId));
+      $('handoff-status').textContent = record.type === 'ready'
+        ? `SDK handoff accepted · run ${runId}${matchesPending ? ' · waiting for the RunAgentResult' : ''}. No new request was sent by this notice.`
+        : matchesPending
+          ? `SDK handoff failed · run ${runId} · code ${code}. Pending input is retained; this notice does not retry it.`
+          : `SDK handoff failed · run ${runId || 'unknown'} · code ${code}. No request was retried by this notice.`;
+      if (matchesPending) {
+        setStatus(record.type === 'ready'
+          ? 'The SDK accepted the pending request; waiting for its RunAgentResult.'
+          : 'SDK handoff failed; the pending request remains available for an explicit same-ID retry.');
+      }
+      void refreshDiagnostics();
+    }
+
+    function activateHandoffCapture() {
+      const queue = window[HANDOFF_QUEUE_KEY];
+      const queued = Array.isArray(queue) ? queue.splice(0) : [];
+      window[HANDOFF_CONSUMER_KEY] = handleHandoffRecord;
+      queued.forEach(handleHandoffRecord);
+    }
+
     function updateControls() {
       const usable = Boolean(agent && storageReady && !busy);
       const canStart = usable && !state.pending;
       $('run-image').disabled = !canStart || !publicImageFile;
+      $('retry-image').hidden = Boolean(publicImageFile) || imageLoading;
+      $('retry-image').disabled = imageLoading;
       $('run-text-file').disabled = !canStart;
       $('create-chat').disabled = !canStart;
       $('open-chat').disabled = !usable || !state.chatId;
@@ -342,24 +509,48 @@
       $('chat-handle').textContent = `Open host Chat · threadId ${chat.id} · ${messages.length} canonical Messages`;
     }
 
-    async function preloadPublicImage() {
+    function preloadPublicImage() {
+      if (imageLoadInFlight) return imageLoadInFlight;
+      imageLoading = true;
       publicImageFile = null;
-      $('image-status').textContent = 'Loading the public image fixture…';
+      $('image-status').textContent = `Loading the public image fixture… (timeout ${IMAGE_PRELOAD_TIMEOUT_MS / 1000}s)`;
       updateControls();
-      try {
-        const response = await fetch(new URL('./public-apple.jpg', location.href), {cache: 'no-store'});
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const blob = await response.blob();
-        if (blob.size === 0) throw new Error('the image file was empty');
-        publicImageFile = new File([blob], 'public-apple.jpg', {type: blob.type || 'image/jpeg'});
-        $('image-status').textContent = `Public image fixture ready · ${publicImageFile.type} · ${publicImageFile.size} bytes.`;
-      } catch (failure) {
-        publicImageFile = null;
-        const reason = failure?.message || String(failure);
-        $('image-status').textContent = `Public image fixture unavailable (${reason}); only the image run is disabled.`;
-      } finally {
-        updateControls();
-      }
+      const controller = new AbortController();
+      let timeoutId;
+      const timeout = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();
+          reject(new Error(`Timed out after ${IMAGE_PRELOAD_TIMEOUT_MS / 1000}s.`));
+        }, IMAGE_PRELOAD_TIMEOUT_MS);
+      });
+      imageLoadInFlight = (async () => {
+        try {
+          const file = await Promise.race([
+            (async () => {
+              const response = await fetch(new URL('./public-apple.jpg', location.href), {
+                cache: 'no-store', signal: controller.signal,
+              });
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              const blob = await response.blob();
+              if (blob.size === 0) throw new Error('the image file was empty');
+              return new File([blob], 'public-apple.jpg', {type: blob.type || 'image/jpeg'});
+            })(),
+            timeout,
+          ]);
+          publicImageFile = file;
+          $('image-status').textContent = `Public image fixture ready · ${publicImageFile.type} · ${publicImageFile.size} bytes.`;
+        } catch (failure) {
+          publicImageFile = null;
+          $('image-status').textContent = `Public image fixture unavailable (${safeFailureText(failure)}); only the image run is disabled. Use Retry public image load to retry the public file only.`;
+        } finally {
+          clearTimeout(timeoutId);
+          imageLoading = false;
+          imageLoadInFlight = null;
+          updateControls();
+          void refreshDiagnostics();
+        }
+      })();
+      return imageLoadInFlight;
     }
 
     async function latestFromHost(listPage) {
@@ -395,7 +586,7 @@
         .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0] ?? null;
     }
 
-    async function showTaskSnapshot(reference, recoveryLabel) {
+    async function showTaskSnapshot(reference, recoveryLabel, recoveryErrors) {
       if (!reference) return null;
       try {
         const task = await readTask(reference.runId, reference.threadId);
@@ -406,25 +597,31 @@
         return task;
       } catch (failure) {
         if (!state.pending && state.lastRun?.runId === reference.runId) state.lastRun = null;
-        $('recovery').textContent = `${recoveryLabel} · task lookup: ${failure.message}`;
+        recoveryErrors.push(`Task restore: ${safeFailureText(failure)}`);
+        $('recovery').textContent = `${recoveryLabel} · task lookup failed.`;
         return null;
       }
     }
 
     async function restoreReadOnly() {
+      const recoveryErrors = [];
       let taskReference = state.lastRun;
       let taskSource = taskReference ? 'Saved run ID restored from this browser origin; host task lookup was read-only.' : '';
-      let task = taskReference ? await showTaskSnapshot(taskReference, taskSource) : null;
+      let task = taskReference ? await showTaskSnapshot(taskReference, taskSource, recoveryErrors) : null;
+      let taskInventoryFailed = false;
       if (!task && !state.pending) {
         try {
           const inventoryTask = await latestTaskInventory();
           taskReference = inventoryTask ? {runId: inventoryTask.runId, threadId: inventoryTask.threadId, kind: 'host-inventory', ...(inventoryTask.chatId ? {chatId: inventoryTask.chatId} : {})} : null;
           if (taskReference) {
             taskSource = 'Recovered the latest App-scoped task from host tasks.list; no model call was made.';
-            task = await showTaskSnapshot(taskReference, taskSource);
+            task = await showTaskSnapshot(taskReference, taskSource, recoveryErrors);
+            if (!task) taskSource = 'Host listed a task, but its read-only task lookup failed.';
           }
         } catch (failure) {
-          taskSource = `Host tasks.list recovery unavailable: ${failure.message}`;
+          taskInventoryFailed = true;
+          taskSource = `Host tasks.list recovery unavailable: ${safeFailureText(failure)}`;
+          recoveryErrors.push(taskSource);
         }
       } else if (!task && state.pending) {
         taskReference = {runId: state.pending.input.runId, threadId: state.pending.input.threadId,
@@ -435,12 +632,14 @@
       }
 
       let chatSource = state.chatId ? 'Saved Chat handle restored from this browser origin; history read was read-only.' : '';
+      let chatInventoryFailed = false;
       if (state.chatId) {
         try {
           chat = await agent.chats.open(state.chatId);
           await refreshChatHistory();
         } catch (failure) {
-          $('chat-history').textContent = `Saved Chat could not be opened: ${failure.message}`;
+          $('chat-history').textContent = 'Saved Chat could not be opened; see recovery diagnostics.';
+          recoveryErrors.push(`Saved Chat open/history: ${safeFailureText(failure)}`);
           chat = null;
           chatSource = '';
         }
@@ -456,17 +655,23 @@
             chatSource = 'Recovered the latest App-scoped Chat from host chats.list; history read was read-only.';
           }
         } catch (failure) {
-          chatSource = `Host chats.list recovery unavailable: ${failure.message}`;
+          chatInventoryFailed = true;
+          chatSource = `Host chats.list recovery unavailable: ${safeFailureText(failure)}`;
+          recoveryErrors.push(chatSource);
         }
       }
       if (!state.lastRun && !taskReference && !chat) {
-        $('recovery').textContent = 'No saved or host-listed task or Chat was found. Page startup made no model call.';
+        $('recovery').textContent = recoveryErrors.length || taskInventoryFailed || chatInventoryFailed
+          ? 'No task or Chat was restored; one or more read-only recovery checks failed. See recovery diagnostics.'
+          : 'No saved or host-listed task or Chat was found. Page startup made no model call.';
       } else {
         const sources = [taskSource, chatSource].filter(Boolean);
         if (sources.length) $('recovery').textContent = sources.join(' ');
       }
+      showRecoveryErrors(recoveryErrors);
       if (state.pending) showInput(state.pending.input);
       updateControls();
+      void refreshDiagnostics();
     }
 
     async function observeAfterFailure(input) {
@@ -532,6 +737,7 @@
         activeTask = false;
         busy = false;
         updateControls();
+        void refreshDiagnostics();
       }
     }
 
@@ -597,6 +803,7 @@
         state.chatId = chat.id;
         saveState();
         await refreshChatHistory();
+        void refreshDiagnostics();
         $('recovery').textContent = `Created host-owned persistent Chat; threadId is ${chat.id}.`;
         setStatus('Chat created. Send a first turn, then a follow-up to verify persistent context.');
         updateControls();
@@ -675,6 +882,7 @@
     }
 
     $('run-image').addEventListener('click', runImage);
+    $('retry-image').addEventListener('click', () => { void preloadPublicImage(); });
     $('run-text-file').addEventListener('click', runTextFile);
     $('create-chat').addEventListener('click', createChat);
     $('open-chat').addEventListener('click', openChat);
@@ -690,6 +898,7 @@
 
     async function bootstrap() {
       loadState();
+      activateHandoffCapture();
       try {
         if (!globalThis.localApp) await import('/__local_app_sdk.js');
         const deadline = Date.now() + 15000;
@@ -698,6 +907,7 @@
         agent = window.localApp.agent;
         if (typeof window.localApp.host?.open === 'function') $('host-open').hidden = false;
         setStatus('Host Agent ready. Model selection and approvals remain in trusted native settings.');
+        void readSdkInfoForDiagnostics();
         void preloadPublicImage();
         if (!storageReady) setError(`Saved acceptance state was not changed: ${storageFailure}`);
         await restoreReadOnly();
@@ -707,7 +917,10 @@
         }
         setStatus('Host Agent unavailable. Reopen this page from the native Apps library.');
         setError(failure?.message || String(failure));
-      } finally { updateControls(); }
+      } finally {
+        updateControls();
+        void refreshDiagnostics();
+      }
     }
 
     void bootstrap();

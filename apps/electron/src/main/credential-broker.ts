@@ -54,6 +54,12 @@ export interface PluginSecretPreview extends PluginSecretRef {
   maskedValue?: string;
 }
 
+export interface PluginSecretDeletionSummary {
+  deletedCount: number;
+  failedCount: number;
+  aborted: boolean;
+}
+
 export interface ProviderCredentialBroker {
   health(): Promise<CredentialBrokerHealth>;
   listStatus(providerIds: readonly string[]): Promise<CredentialBrokerStatus[]>;
@@ -126,10 +132,15 @@ function validateProviderId(providerId: string): string {
   return providerId;
 }
 
-function validatePluginSecretRef(pluginId: string, key: string): PluginSecretRef {
+export function validatePluginSecretPluginId(pluginId: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$/.test(pluginId)) {
     throw new Error('invalid plugin id');
   }
+  return pluginId;
+}
+
+function validatePluginSecretRef(pluginId: string, key: string): PluginSecretRef {
+  validatePluginSecretPluginId(pluginId);
   if (!/^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/.test(key)) {
     throw new Error('invalid plugin secret key');
   }
@@ -174,6 +185,39 @@ export async function resolveSessionLaunchPluginSecrets(
     (result[pluginId] ??= Object.create(null))[key] = value;
   }
   return result;
+}
+
+/** Delete every durable broker key for one plugin, including keys absent from its current schema. */
+export async function deletePluginSecretsForPlugin(
+  pluginId: string,
+  broker?: Pick<ProviderCredentialBroker, 'listPluginSecrets' | 'deletePluginSecret'>,
+  canDelete?: () => Promise<boolean>,
+): Promise<PluginSecretDeletionSummary> {
+  validatePluginSecretPluginId(pluginId);
+  if (!broker) throw new Error('secure plugin credential broker is unavailable');
+
+  const refs = await broker.listPluginSecrets();
+  if (refs.length > 256) throw new Error('credential broker contains too many plugin secrets');
+  const keys = new Set<string>();
+  for (const ref of refs) {
+    const validated = validatePluginSecretRef(ref.pluginId, ref.key);
+    if (validated.pluginId === pluginId) keys.add(validated.key);
+  }
+
+  let deletedCount = 0;
+  let failedCount = 0;
+  if (canDelete && !(await canDelete())) return { deletedCount, failedCount, aborted: true };
+  for (const key of keys) {
+    if (canDelete && !(await canDelete())) return { deletedCount, failedCount, aborted: true };
+    try {
+      await broker.deletePluginSecret(pluginId, key);
+      deletedCount += 1;
+    } catch {
+      // Do not return broker diagnostics or credential material to the renderer.
+      failedCount += 1;
+    }
+  }
+  return { deletedCount, failedCount, aborted: false };
 }
 
 function truncateStderr(stderr: string): string {

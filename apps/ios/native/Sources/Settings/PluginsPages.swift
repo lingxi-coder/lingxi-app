@@ -156,6 +156,7 @@ struct PluginsPage: View {
     @State private var confirmation: PluginConfirmation?
     @State private var addingMarketplace = false
     @State private var marketplaceSource = ""
+    @State private var pendingPublicMarketplace: PublicExtensionMarketplace?
 
     private var catalog: PluginCatalog { repository.pluginCatalog }
 
@@ -205,11 +206,20 @@ struct PluginsPage: View {
                 .autocorrectionDisabled().textInputAutocapitalization(.never)
             Button(String(localized: "plugins_marketplace_add")) {
                 let source = marketplaceSource.trimmingCharacters(in: .whitespacesAndNewlines)
+                let candidate = pendingPublicMarketplace
                 marketplaceSource = ""
+                pendingPublicMarketplace = nil
                 guard !source.isEmpty else { return }
-                run("marketplace:add", ["action": "marketplace_add", "source": source])
+                if let candidate {
+                    confirmPublicMarketplace(candidate, enteredSource: source)
+                } else {
+                    run("marketplace:add", ["action": "marketplace_add", "source": source])
+                }
             }
-            Button(String(localized: "common_cancel"), role: .cancel) { marketplaceSource = "" }
+            Button(String(localized: "common_cancel"), role: .cancel) {
+                marketplaceSource = ""
+                pendingPublicMarketplace = nil
+            }
         } message: {
             Text("plugins_marketplace_add_body")
         }
@@ -252,6 +262,7 @@ struct PluginsPage: View {
                         switch marketplaceRegistration(for: item) {
                         case .some(.notRegistered):
                             marketplaceSource = marketplace.source
+                            pendingPublicMarketplace = marketplace
                             addingMarketplace = true
                         case .some(.registered(_)), .some(.nameConflict(_)):
                             directoryTab = .personal
@@ -266,6 +277,7 @@ struct PluginsPage: View {
                     if let marketplace = item.marketplace {
                         return repository.connected
                             && repository.catalogs["plugin"] != nil
+                            && busy == nil
                             && !marketplace.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     }
                     return URL(string: item.documentationURL)?.scheme?.lowercased() == "https"
@@ -277,6 +289,64 @@ struct PluginsPage: View {
     private func openOfficialDocumentation(for item: PublicExtensionItem) {
         guard let url = URL(string: item.documentationURL), url.scheme?.lowercased() == "https" else { return }
         openURL(url)
+    }
+
+    private func confirmPublicMarketplace(_ candidate: PublicExtensionMarketplace, enteredSource: String) {
+        let sourceGeneration = repository.sourceGeneration
+        let previousArrival = repository.catalogArrivals["plugin", default: 0]
+        busy = "marketplace:add"
+        error = nil
+        Task {
+            defer { if busy == "marketplace:add" { busy = nil } }
+            await repository.admin(domain: "plugin", action: "get_catalog")
+            for _ in 0 ..< 50 where publicMarketplaceConfirmationIsCurrent(
+                capturedGeneration: sourceGeneration,
+                currentGeneration: repository.sourceGeneration,
+                connected: repository.connected
+            )
+                && repository.catalogArrivals["plugin", default: 0] <= previousArrival {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard publicMarketplaceConfirmationIsCurrent(
+                    capturedGeneration: sourceGeneration,
+                    currentGeneration: repository.sourceGeneration,
+                    connected: repository.connected
+                  ),
+                  repository.catalogArrivals["plugin", default: 0] > previousArrival else {
+                error = String(localized: "plugins_catalog_refresh_first")
+                return
+            }
+
+            switch publicMarketplaceConfirmationRegistration(
+                candidateName: candidate.name,
+                enteredSource: enteredSource,
+                registered: repository.pluginCatalog.marketplaces
+            ) {
+            case .registered, .nameConflict:
+                // A catalog update may have happened while the confirmation was
+                // open. Let the user inspect/manage that current catalog; do not
+                // submit an add that the engine could silently treat as a no-op.
+                directoryTab = .personal
+            case .notRegistered:
+                guard publicMarketplaceConfirmationIsCurrent(
+                    capturedGeneration: sourceGeneration,
+                    currentGeneration: repository.sourceGeneration,
+                    connected: repository.connected
+                ) else {
+                    error = String(localized: "plugins_catalog_refresh_first")
+                    return
+                }
+                do {
+                    try await repository.applyPluginOperation([
+                        "action": "marketplace_add",
+                        "source": enteredSource,
+                    ])
+                } catch is CancellationError {
+                } catch {
+                    self.error = error.localizedDescription
+                }
+            }
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -375,7 +445,7 @@ struct PluginsPage: View {
                 icon: .plus,
                 label: String(localized: "plugins_marketplace_add"),
                 isLast: true,
-                onTap: busy == nil ? { addingMarketplace = true } : nil
+                onTap: busy == nil ? { pendingPublicMarketplace = nil; addingMarketplace = true } : nil
             ) {
                 if busy == "marketplace:add" { ProgressView().controlSize(.small) }
             }

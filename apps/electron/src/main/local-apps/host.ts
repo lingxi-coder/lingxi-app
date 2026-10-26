@@ -49,6 +49,18 @@ interface LocalAppHtmlTag {
   declaration: boolean;
 }
 
+function isHtmlWhitespace(value: string | undefined): boolean {
+  return value === ' ' || value === '\t' || value === '\n' || value === '\f' || value === '\r';
+}
+
+function trimHtmlWhitespace(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isHtmlWhitespace(value[start])) start++;
+  while (end > start && isHtmlWhitespace(value[end - 1])) end--;
+  return value.slice(start, end);
+}
+
 function nextHtmlTag(html: string, from: number): LocalAppHtmlTag | undefined {
   let cursor = from;
   while (cursor < html.length) {
@@ -70,7 +82,7 @@ function nextHtmlTag(html: string, from: number): LocalAppHtmlTag | undefined {
     let nameEnd = nameStart;
     while (/[a-z0-9:-]/i.test(html[nameEnd] ?? '')) nameEnd++;
     const boundary = html[nameEnd];
-    if (!declaration && boundary !== undefined && boundary !== '>' && boundary !== '/' && !/\s/.test(boundary)) {
+    if (!declaration && boundary !== undefined && boundary !== '>' && boundary !== '/' && !isHtmlWhitespace(boundary)) {
       // Consume malformed tag-like text as a unit, so a pseudo-tag in one of
       // its quoted attributes cannot be mistaken for an insertion point.
       cursor = htmlTagEnd(html, start) ?? start + 1;
@@ -82,104 +94,275 @@ function nextHtmlTag(html: string, from: number): LocalAppHtmlTag | undefined {
   }
 }
 
-function skipRawTextElement(html: string, afterOpeningTag: number, name: string): number {
-  const closingTag = new RegExp(`</${name}(?=[\\s/>])`, 'ig');
+function matchingTagBoundary(value: string | undefined): boolean {
+  return isHtmlWhitespace(value) || value === '/' || value === '>';
+}
+
+function asciiLowercase(value: string): string {
+  return value.replace(/[A-Z]/g, character => String.fromCharCode(character.charCodeAt(0) + 32));
+}
+
+function skipScriptElement(html: string, lower: string, afterOpeningTag: number): number {
+  let state: 'data' | 'escaped' | 'double-escaped' = 'data';
+  let cursor = afterOpeningTag;
+  while (cursor < html.length) {
+    if (state !== 'data' && lower.startsWith('-->', cursor)) {
+      state = 'data';
+      cursor += 3;
+      continue;
+    }
+    if (state === 'data' && lower.startsWith('<!--', cursor)) {
+      state = 'escaped';
+      cursor += 4;
+      continue;
+    }
+    if (state === 'double-escaped' && lower.startsWith('</script', cursor)
+      && matchingTagBoundary(html[cursor + 8])) {
+      state = 'escaped';
+      cursor += 8;
+      continue;
+    }
+    if ((state === 'data' || state === 'escaped') && lower.startsWith('</script', cursor)
+      && matchingTagBoundary(html[cursor + 8])) {
+      return htmlTagEnd(html, cursor) ?? html.length;
+    }
+    if (state === 'escaped' && lower.startsWith('<script', cursor)
+      && matchingTagBoundary(html[cursor + 7])) {
+      state = 'double-escaped';
+      cursor += 7;
+      continue;
+    }
+    cursor++;
+  }
+  return html.length;
+}
+
+function skipRawTextElement(html: string, lower: string, afterOpeningTag: number, name: string): number {
+  if (name === 'plaintext') return html.length;
+  if (name === 'script') return skipScriptElement(html, lower, afterOpeningTag);
+  const closingTag = new RegExp(`</${name}(?=[\\t\\n\\f\\r />])`, 'ig');
   closingTag.lastIndex = afterOpeningTag;
   const match = closingTag.exec(html);
   return match ? htmlTagEnd(html, match.index) ?? html.length : html.length;
 }
 
-function nextHtmlTagCursor(html: string, tag: LocalAppHtmlTag): number {
+function nextRawTextCursor(html: string, lower: string, tag: LocalAppHtmlTag): number {
   if (!tag.closing && !tag.declaration) {
     const name = html.slice(tag.nameStart, tag.nameEnd).toLowerCase();
-    if (name === 'script' || name === 'style' || name === 'textarea' || name === 'title') {
-      return skipRawTextElement(html, tag.end, name);
+    if (['script', 'style', 'textarea', 'title', 'noscript', 'iframe', 'xmp', 'noembed', 'noframes', 'plaintext'].includes(name)) {
+      return skipRawTextElement(html, lower, tag.end, name);
     }
   }
   return tag.end;
 }
 
-function openingHtmlTagEnd(html: string, name: 'head' | 'html'): number | undefined {
-  let cursor = 0;
+function skipTemplateElement(html: string, lower: string, afterOpeningTag: number): number {
+  let depth = 1;
+  let cursor = afterOpeningTag;
   while (true) {
     const tag = nextHtmlTag(html, cursor);
-    if (!tag) return;
-    if (
-      !tag.closing
-      && !tag.declaration
-      && html.slice(tag.nameStart, tag.nameEnd).toLowerCase() === name
-    ) {
-      return tag.end;
+    if (!tag) return html.length;
+    if (!tag.declaration && html.slice(tag.nameStart, tag.nameEnd).toLowerCase() === 'template') {
+      if (tag.closing) {
+        depth--;
+        if (depth === 0) return tag.end;
+      } else {
+        depth++;
+      }
     }
-    cursor = nextHtmlTagCursor(html, tag);
+    // This cursor sees nested templates to balance their end tags, while the
+    // ordinary scanner skips the complete inert template subtree at once.
+    cursor = nextRawTextCursor(html, lower, tag);
   }
 }
 
-function scriptTagHasLocalAppSource(html: string, tag: LocalAppHtmlTag, appId: string, path: string): boolean {
+function nextHtmlTagCursor(html: string, lower: string, tag: LocalAppHtmlTag): number {
+  if (!tag.closing && !tag.declaration && html.slice(tag.nameStart, tag.nameEnd).toLowerCase() === 'template') {
+    return skipTemplateElement(html, lower, tag.end);
+  }
+  return nextRawTextCursor(html, lower, tag);
+}
+
+interface LocalAppScriptAttributes {
+  src?: string;
+  type?: string;
+  async: boolean;
+  defer: boolean;
+  noModule: boolean;
+  integrity: boolean;
+  href?: string;
+}
+
+function scriptAttributes(html: string, tag: LocalAppHtmlTag): LocalAppScriptAttributes {
   const attributes = html.slice(tag.nameEnd, tag.end - 1);
   let cursor = 0;
+  const seen = new Set<string>();
+  const result: LocalAppScriptAttributes = { async: false, defer: false, noModule: false, integrity: false };
   while (cursor < attributes.length) {
-    while (/\s|\//.test(attributes[cursor] ?? '')) cursor++;
+    while (isHtmlWhitespace(attributes[cursor]) || attributes[cursor] === '/') cursor++;
     const nameStart = cursor;
-    while (cursor < attributes.length && !/[\s=/>]/.test(attributes[cursor]!)) cursor++;
+    while (cursor < attributes.length && !isHtmlWhitespace(attributes[cursor]) && !/[=/>]/.test(attributes[cursor]!)) cursor++;
     if (cursor === nameStart) { cursor++; continue; }
-    const name = attributes.slice(nameStart, cursor);
-    while (/\s/.test(attributes[cursor] ?? '')) cursor++;
-    if (attributes[cursor] !== '=') continue;
-    cursor++;
-    while (/\s/.test(attributes[cursor] ?? '')) cursor++;
-    const quote = attributes[cursor] === '"' || attributes[cursor] === "'" ? attributes[cursor++] : undefined;
-    const valueStart = cursor;
-    if (quote) {
-      while (cursor < attributes.length && attributes[cursor] !== quote) cursor++;
-    } else {
-      while (cursor < attributes.length && !/[\s>]/.test(attributes[cursor]!)) cursor++;
+    const name = attributes.slice(nameStart, cursor).toLowerCase();
+    while (isHtmlWhitespace(attributes[cursor])) cursor++;
+    let value = '';
+    if (attributes[cursor] === '=') {
+      cursor++;
+      while (isHtmlWhitespace(attributes[cursor])) cursor++;
+      const quote = attributes[cursor] === '"' || attributes[cursor] === "'" ? attributes[cursor++] : undefined;
+      const valueStart = cursor;
+      if (quote) {
+        while (cursor < attributes.length && attributes[cursor] !== quote) cursor++;
+      } else {
+        while (cursor < attributes.length && !isHtmlWhitespace(attributes[cursor]) && attributes[cursor] !== '>') cursor++;
+      }
+      value = attributes.slice(valueStart, cursor);
+      if (quote && cursor < attributes.length) cursor++;
     }
-    const value = attributes.slice(valueStart, cursor);
-    if (quote && cursor < attributes.length) cursor++;
-    if (name.toLowerCase() !== 'src') continue;
-    try {
-      const source = new URL(value, `${LOCAL_APP_SCHEME}://${appId}/`);
-      if (source.protocol === `${LOCAL_APP_SCHEME}:` && source.hostname === appId && source.pathname === path) return true;
-    } catch { /* An invalid URL does not satisfy the host resource binding. */ }
+    if (seen.has(name)) continue;
+    seen.add(name);
+    if (name === 'src') result.src = value;
+    else if (name === 'type') result.type = value;
+    else if (name === 'async') result.async = true;
+    else if (name === 'defer') result.defer = true;
+    else if (name === 'nomodule') result.noModule = true;
+    else if (name === 'integrity') result.integrity = true;
+    else if (name === 'href') result.href = value;
   }
+  return result;
+}
+
+const JAVASCRIPT_MIME_TYPES = new Set([
+  'application/ecmascript', 'application/javascript', 'application/x-ecmascript',
+  'application/x-javascript', 'text/ecmascript', 'text/javascript', 'text/javascript1.0',
+  'text/javascript1.1', 'text/javascript1.2', 'text/javascript1.3', 'text/javascript1.4',
+  'text/javascript1.5', 'text/jscript', 'text/livescript', 'text/x-ecmascript', 'text/x-javascript',
+]);
+
+function isClassicScript(attributes: LocalAppScriptAttributes): boolean {
+  const type = trimHtmlWhitespace(attributes.type ?? '').toLowerCase();
+  if (!type) return true;
+  return JAVASCRIPT_MIME_TYPES.has(trimHtmlWhitespace(type.split(';', 1)[0]!));
+}
+
+function mayRunBeforeLaterHostScript(attributes: LocalAppScriptAttributes): boolean {
+  const type = trimHtmlWhitespace(attributes.type ?? '').toLowerCase();
+  if (type === 'module') return attributes.async;
+  if (!isClassicScript(attributes)) return false;
+  if (attributes.src === undefined) return true;
+  return attributes.async || attributes.noModule || !attributes.defer;
+}
+
+function scriptTagHasLocalAppSource(
+  attributes: LocalAppScriptAttributes,
+  appId: string,
+  path: string,
+  documentBase: string,
+): boolean {
+  if (attributes.src === undefined) return false;
+  try {
+    const source = new URL(attributes.src, documentBase);
+    return source.protocol === `${LOCAL_APP_SCHEME}:` && source.hostname === appId && source.pathname === path;
+  } catch { /* An invalid URL does not satisfy the host resource binding. */ }
   return false;
 }
 
-function htmlHasLocalAppScript(html: string, appId: string, path: string): boolean {
+function isLocalAppHostScript(
+  attributes: LocalAppScriptAttributes,
+  appId: string,
+  documentBase: string,
+): boolean {
+  return scriptTagHasLocalAppSource(attributes, appId, '/__lingxi_webmcp.js', documentBase)
+    || scriptTagHasLocalAppSource(attributes, appId, '/__lingxi_local_app_sdk.js', documentBase);
+}
+
+function reliableHostScript(attributes: LocalAppScriptAttributes): boolean {
+  return attributes.src !== undefined && isClassicScript(attributes)
+    && !attributes.async && !attributes.defer && !attributes.noModule && !attributes.integrity;
+}
+
+function htmlHasLocalAppScript(html: string, lower: string, appId: string, path: string, documentPath: string): boolean {
   let cursor = 0;
+  let earlierBlockingApplicationScript = false;
+  let documentBase = `${LOCAL_APP_SCHEME}://${appId}${documentPath}`;
+  let baseHrefSeen = false;
   while (true) {
     const tag = nextHtmlTag(html, cursor);
     if (!tag) return false;
     const name = html.slice(tag.nameStart, tag.nameEnd).toLowerCase();
-    if (!tag.closing && !tag.declaration && name === 'script' && scriptTagHasLocalAppSource(html, tag, appId, path)) return true;
-    cursor = nextHtmlTagCursor(html, tag);
+    if (!tag.closing && !tag.declaration && name === 'base') {
+      const attributes = scriptAttributes(html, tag);
+      if (!baseHrefSeen && attributes.href !== undefined) {
+        baseHrefSeen = true;
+        try {
+          const candidate = new URL(attributes.href, documentBase);
+          if (candidate.protocol !== 'data:' && candidate.protocol !== 'javascript:') {
+            documentBase = candidate.href;
+          }
+        } catch { /* Invalid and forbidden base URLs leave the document URL in effect. */ }
+      }
+    } else if (!tag.closing && !tag.declaration && name === 'script') {
+      const attributes = scriptAttributes(html, tag);
+      const hostScript = scriptTagHasLocalAppSource(attributes, appId, path, documentBase);
+      if (hostScript && reliableHostScript(attributes) && !earlierBlockingApplicationScript) return true;
+      if (!isLocalAppHostScript(attributes, appId, documentBase)
+        && mayRunBeforeLaterHostScript(attributes)) {
+        earlierBlockingApplicationScript = true;
+      }
+    }
+    cursor = nextHtmlTagCursor(html, lower, tag);
   }
 }
 
-function injectLocalAppScripts(html: string, appId: string): string {
-  const webmcpAlreadyLoaded = htmlHasLocalAppScript(html, appId, '/__lingxi_webmcp.js');
-  const localAppAlreadyLoaded = htmlHasLocalAppScript(html, appId, '/__lingxi_local_app_sdk.js');
+function injectLocalAppScripts(html: string, appId: string, documentPath: string): string {
+  const lower = asciiLowercase(html);
+  const webmcpAlreadyLoaded = htmlHasLocalAppScript(html, lower, appId, '/__lingxi_webmcp.js', documentPath);
+  const localAppAlreadyLoaded = htmlHasLocalAppScript(html, lower, appId, '/__lingxi_local_app_sdk.js', documentPath);
   const scripts = [
     ...(webmcpAlreadyLoaded ? [] : ['<script src="/__lingxi_webmcp.js" data-lingxi-webmcp></script>']),
     ...(localAppAlreadyLoaded ? [] : ['<script src="/__lingxi_local_app_sdk.js"></script>']),
   ].join('');
   if (!scripts) return html;
-  const doctype = findDoctypeEnd(html);
-  const insertionIndex = openingHtmlTagEnd(html, 'head')
-    ?? openingHtmlTagEnd(html, 'html')
-    ?? doctype
-    ?? 0;
+  const doctype = findLeadingDoctypeEnd(html, lower);
+  const insertionIndex = doctype ?? (html.charCodeAt(0) === 0xfeff ? 1 : 0);
   return html.slice(0, insertionIndex) + scripts + html.slice(insertionIndex);
 }
 
-function findDoctypeEnd(html: string): number | undefined {
+function isLeadingHtmlPreamble(value: string): boolean {
+  let cursor = value.charCodeAt(0) === 0xfeff ? 1 : 0;
+  while (cursor < value.length) {
+    if (isHtmlWhitespace(value[cursor])) {
+      cursor++;
+      continue;
+    }
+    if (value.startsWith('<!--', cursor)) {
+      const end = value.indexOf('-->', cursor + 4);
+      if (end < 0) return false;
+      cursor = end + 3;
+      continue;
+    }
+    if (value.startsWith('<?', cursor) || value.startsWith('<!', cursor)) {
+      const end = value.indexOf('>', cursor + 2);
+      if (end < 0) return false;
+      cursor = end + 1;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+function findLeadingDoctypeEnd(html: string, lower: string): number | undefined {
   let cursor = 0;
   while (true) {
     const tag = nextHtmlTag(html, cursor);
     if (!tag) return;
-    if (tag.declaration && html.slice(tag.nameStart, tag.nameEnd).toLowerCase() === 'doctype') return tag.end;
-    cursor = nextHtmlTagCursor(html, tag);
+    if (tag.declaration && html.slice(tag.nameStart, tag.nameEnd).toLowerCase() === 'doctype') {
+      const tagStart = tag.nameStart - 2;
+      return isLeadingHtmlPreamble(html.slice(0, tagStart)) ? tag.end : undefined;
+    }
+    if (!tag.declaration) return;
+    cursor = nextHtmlTagCursor(html, lower, tag);
   }
 }
 
@@ -1050,7 +1233,7 @@ export class LocalAppHost {
         if (serviceResponse) headers.delete('set-cookie');
         if (headers.get('content-type')?.toLowerCase().includes('text/html')) {
           const html = await response.text();
-          body = injectLocalAppScripts(html, id);
+          body = injectLocalAppScripts(html, id, url.pathname);
           headers.delete('Content-Length');
           headers.delete('Content-Encoding');
           headers.set('Content-Type', headers.get('content-type') ?? 'text/html; charset=utf-8');

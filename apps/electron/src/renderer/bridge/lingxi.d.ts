@@ -91,6 +91,7 @@ export interface WorkspaceMetadata {
 export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true; environmentOverride?: true; storageError?: string; codexAccountEmail?: string }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface PluginSecretMetadata { pluginId: string; key: string; configured: boolean; maskedValue?: string; storageError?: string; restartRequired?: boolean }
+export interface PluginSecretCleanupResult { pluginId: string; status: 'cleared' | 'retained' | 'deferred' | 'partial'; deletedCount: number; failedCount: number; restartRequired?: boolean }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
 export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
 export interface DiagnosticEntry {
@@ -197,6 +198,7 @@ export interface LingxiApi {
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
   clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
+  cleanupPluginSecretsAfterUninstall?(pluginId: string, lastScopeRemoved: true): Promise<PluginSecretCleanupResult>;
   restartBridge(sessionId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;

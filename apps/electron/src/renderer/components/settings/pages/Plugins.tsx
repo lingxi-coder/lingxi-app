@@ -127,31 +127,77 @@ function pluginActionLabel(action: string): string {
   return keys[action] ? tr(keys[action]!) : action;
 }
 
-function githubRepoIdentity(source: string): string | null {
-  const shorthand = source.trim().match(/^([a-z0-9_.-]+)\/([a-z0-9_.-]+)$/i);
-  if (shorthand) return shorthand[1].toLowerCase() + '/' + shorthand[2].toLowerCase();
+function validGithubSegment(value: string): boolean {
+  return /^[a-z0-9_.-]+$/i.test(value) && value !== '.' && value !== '..';
+}
+
+function githubShorthandIdentity(source: string): string | null {
+  const match = source.trim().match(/^([a-z0-9_.-]+)\/([a-z0-9_.-]+)(?:\.git)?$/i);
+  if (!match || !validGithubSegment(match[1]!) || !validGithubSegment(match[2]!)) return null;
+  return `${match[1]!.toLowerCase()}/${match[2]!.replace(/\.git$/i, '').toLowerCase()}`;
+}
+
+/** Canonicalize only a root GitHub remote. Reject credentials, refs, queries and subpaths. */
+function githubRemoteIdentity(source: string): string | null {
+  const value = source.trim();
+  if (value.includes('?') || value.includes('#')) return null;
+  const scp = value.match(/^git@github\.com:([a-z0-9_.-]+)\/([a-z0-9_.-]+)(?:\.git)?$/i);
+  if (scp && validGithubSegment(scp[1]!) && validGithubSegment(scp[2]!)) {
+    return `${scp[1]!.toLowerCase()}/${scp[2]!.replace(/\.git$/i, '').toLowerCase()}`;
+  }
+  if (value.includes('\\')) return null;
+  const rawRemote = value.match(/^(?:https|ssh):\/\/[^/?#]*(\/[^?#]*)?$/i);
+  if (!rawRemote) return null;
+  const rawPath = rawRemote[1] ?? '';
+  if (rawPath.includes('%')) return null;
+  const rawPathSegments = rawPath.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+  if (rawPathSegments.some((segment) => segment === '.' || segment === '..')) return null;
+
   try {
-    const url = new URL(source);
-    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com') return null;
-    const parts = url.pathname.replace(/\/+$/, '').replace(/\.git$/i, '').split('/').filter(Boolean);
-    return parts.length === 2 ? parts.map((part) => part.toLowerCase()).join('/') : null;
+    const url = new URL(value);
+    const protocol = url.protocol.toLowerCase();
+    if (url.hostname.toLowerCase() !== 'github.com'
+      || url.search !== ''
+      || url.hash !== '') return null;
+    if (protocol === 'https:') {
+      if (value.includes('@') || url.username !== '' || url.password !== '' || (url.port !== '' && url.port !== '443')) return null;
+    } else if (protocol === 'ssh:') {
+      if ((url.username !== '' && url.username !== 'git') || url.password !== '' || (url.port !== '' && url.port !== '22')) return null;
+      const authority = value.match(/^ssh:\/\/([^/]+)/i)?.[1] ?? '';
+      const userInfo = authority.includes('@') ? authority.slice(0, authority.indexOf('@')) : null;
+      if (userInfo !== null && userInfo !== 'git') return null;
+    } else {
+      return null;
+    }
+    const path = url.pathname.replace(/^\/+|\/+$/g, '');
+    const parts = path.split('/');
+    if (parts.length !== 2) return null;
+    const owner = parts[0]!;
+    const repo = parts[1]!.replace(/\.git$/i, '');
+    if (!validGithubSegment(owner) || !validGithubSegment(repo)) return null;
+    return `${owner.toLowerCase()}/${repo.toLowerCase()}`;
   } catch {
     return null;
   }
+}
+
+/** `marketplace_add` accepts shorthand or a root remote; the stored DTO keeps its discriminator. */
+function githubRepositoryIdentity(source: string): string | null {
+  return githubShorthandIdentity(source) ?? githubRemoteIdentity(source);
 }
 
 function marketplaceSourceMatches(source: string, sourceJson?: string): boolean {
   if (!sourceJson) return false;
   try {
     const sourceRecord = JSON.parse(sourceJson) as Record<string, unknown>;
-    const expectedRepo = githubRepoIdentity(source);
-    if (!expectedRepo) return false;
-    if (sourceRecord.ref !== undefined && sourceRecord.ref !== null && sourceRecord.ref !== '') return false;
-    if (sourceRecord.source === 'github' && typeof sourceRecord.repo === 'string') {
-      return githubRepoIdentity(sourceRecord.repo) === expectedRepo;
+    const expectedRepo = githubRepositoryIdentity(source);
+    if (!expectedRepo || typeof sourceRecord.source !== 'string') return false;
+    const keys = Object.keys(sourceRecord).sort().join(',');
+    if (sourceRecord.source === 'github' && keys === 'repo,source' && typeof sourceRecord.repo === 'string') {
+      return githubShorthandIdentity(sourceRecord.repo) === expectedRepo;
     }
-    if (sourceRecord.source === 'git' && typeof sourceRecord.url === 'string') {
-      return githubRepoIdentity(sourceRecord.url) === expectedRepo;
+    if (sourceRecord.source === 'git' && keys === 'source,url' && typeof sourceRecord.url === 'string') {
+      return githubRemoteIdentity(sourceRecord.url) === expectedRepo;
     }
     return false;
   } catch {
@@ -165,7 +211,7 @@ export function findRegisteredPublicMarketplace(
 ) {
   if (!marketplace) return undefined;
   return registry.find((entry) => (
-    entry.name === marketplace.name && marketplaceSourceMatches(marketplace.source, entry.source_json)
+    marketplaceSourceMatches(marketplace.source, entry.source_json)
   ));
 }
 
@@ -188,16 +234,41 @@ export function decidePublicMarketplaceSourceAction(
   marketplace: NonNullable<PublicExtensionItem['marketplace']>,
   registry: readonly { name: string; source_json?: string }[],
 ): PublicMarketplaceSourceAction {
-  const registered = findRegisteredPublicMarketplace(marketplace, registry);
-  if (registered) return { kind: 'registered', marketplace: registered };
   const conflict = findConflictingPublicMarketplace(marketplace, registry);
   if (conflict) return { kind: 'source-conflict', marketplace: conflict };
+  const registered = findRegisteredPublicMarketplace(marketplace, registry);
+  if (registered) return { kind: 'registered', marketplace: registered };
   return { kind: 'add' };
+}
+
+export function publicMarketplacePluginTargetId(
+  marketplace: PublicExtensionItem['marketplace'],
+  sourceAction: PublicMarketplaceSourceAction | null,
+): string | null {
+  if (!marketplace?.plugin) return null;
+  const registeredName = sourceAction?.kind === 'registered' ? sourceAction.marketplace.name : marketplace.name;
+  return `${marketplace.plugin}@${registeredName}`;
 }
 
 function callPluginAdmin(bridge: PageContentProps['bridge'], command: unknown) {
   const admin = (bridge as { pluginAdmin?: (payload: unknown) => Promise<unknown> }).pluginAdmin;
   return typeof admin === 'function' ? admin(command as never) : Promise.resolve();
+}
+
+export function pluginCredentialCleanupFromOperation(result: unknown): { pluginId: string; lastScopeRemoved: boolean } | undefined {
+  if (!result || typeof result !== 'object' || !('details_json' in result)) return undefined;
+  const details = (result as { details_json?: unknown }).details_json;
+  if (typeof details !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(details) as { credentialCleanup?: unknown };
+    const cleanup = parsed?.credentialCleanup;
+    if (!cleanup || typeof cleanup !== 'object' || Array.isArray(cleanup)) return undefined;
+    const value = cleanup as { pluginId?: unknown; lastScopeRemoved?: unknown };
+    if (typeof value.pluginId !== 'string' || !value.pluginId || typeof value.lastScopeRemoved !== 'boolean') return undefined;
+    return { pluginId: value.pluginId, lastScopeRemoved: value.lastScopeRemoved };
+  } catch {
+    return undefined;
+  }
 }
 
 function editableMarketplaces(snapshot: PageContentProps['snapshot'], editingLayer: EditableLayer): Record<string, unknown> {
@@ -235,6 +306,11 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   const [marketplaceSource, setMarketplaceSource] = useState('');
   const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
   const [secretNotice, setSecretNotice] = useState<{ text: string; restartRequired: boolean } | null>(null);
+  const [pluginSecretCleanupNotice, setPluginSecretCleanupNotice] = useState<{
+    kind: 'done' | 'restart' | 'retained' | 'failed' | 'deferred' | 'unavailable';
+    pluginId?: string;
+    restartRequired?: boolean;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [catalogTab, setCatalogTab] = useState<'public' | 'personal'>('public');
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -405,6 +481,41 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
       .finally(() => setBusy(false));
   };
 
+  const attemptPluginSecretCleanup = async (pluginId: string) => {
+    const cleanup = (bridge as { cleanupPluginSecretsAfterUninstall?: (id: string, lastScopeRemoved: true) => Promise<{
+      status: 'cleared' | 'retained' | 'deferred' | 'partial';
+      restartRequired?: boolean;
+    }> }).cleanupPluginSecretsAfterUninstall;
+    if (typeof cleanup !== 'function') {
+      setPluginSecretCleanupNotice({ kind: 'failed', pluginId });
+      return;
+    }
+    try {
+      const result = await cleanup(pluginId, true);
+      if (result.status === 'cleared') {
+        setPluginSecretCleanupNotice({ kind: result.restartRequired ? 'restart' : 'done' });
+      } else if (result.status === 'retained') {
+        setPluginSecretCleanupNotice({ kind: 'retained' });
+      } else {
+        setPluginSecretCleanupNotice({
+          kind: result.status === 'deferred' ? 'deferred' : 'failed',
+          pluginId,
+          ...(result.restartRequired ? { restartRequired: true } : {}),
+        });
+      }
+    } catch {
+      setPluginSecretCleanupNotice({ kind: 'failed', pluginId });
+    }
+  };
+
+  const retryPluginSecretCleanup = async () => {
+    const pluginId = pluginSecretCleanupNotice?.pluginId;
+    if (!pluginId || busy) return;
+    setBusy(true);
+    await attemptPluginSecretCleanup(pluginId);
+    setBusy(false);
+  };
+
   const previewLifecycle = (payload: Record<string, unknown>) => {
     setPageError(null);
     setBusy(true);
@@ -433,7 +544,13 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
       revision,
       payload_json: JSON.stringify({ ...preparedOperation.payload, scope: editingLayer, confirmed: true }),
     }))
-      .then(() => {
+      .then(async (result: unknown) => {
+        if (preparedOperation.payload.action === 'uninstall') {
+          const cleanup = pluginCredentialCleanupFromOperation(result);
+          if (cleanup?.lastScopeRemoved) await attemptPluginSecretCleanup(cleanup.pluginId);
+          else if (cleanup) setPluginSecretCleanupNotice({ kind: 'retained' });
+          else setPluginSecretCleanupNotice({ kind: 'unavailable' });
+        }
         const marketplaceAdded = preparedOperation.payload.action === 'marketplace_add';
         const conflictMarketplaceRemoved = preparedOperation.payload.action === 'marketplace_remove' && Boolean(selectedMarketplaceConflict);
         setPreparedOperation(null);
@@ -486,7 +603,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
       return;
     }
 
-    const pluginId = marketplace.plugin ? `${marketplace.plugin}@${marketplace.name}` : null;
+    const pluginId = publicMarketplacePluginTargetId(marketplace, sourceAction);
     if (pluginId && pluginIds.includes(pluginId)) {
       requestSelection({ kind: 'plugin', id: pluginId });
       return;
@@ -508,6 +625,25 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   return (
     <ExtensionHubLayout>
       {closePrompt}
+      {pluginSecretCleanupNotice && <div
+        role={pluginSecretCleanupNotice.kind === 'failed' || pluginSecretCleanupNotice.kind === 'deferred' || pluginSecretCleanupNotice.kind === 'unavailable' ? 'alert' : 'status'}
+        style={noteStyle(t, pluginSecretCleanupNotice.kind === 'failed' || pluginSecretCleanupNotice.kind === 'deferred' || pluginSecretCleanupNotice.kind === 'unavailable' ? 'danger' : 'neutral')}
+      >
+        <span>{tr({
+          done: 'desktop_extension_plugin_secret_cleanup_done',
+          restart: 'desktop_extension_plugin_secret_cleanup_restart',
+          retained: 'desktop_extension_plugin_secret_cleanup_retained',
+          failed: 'desktop_extension_plugin_secret_cleanup_failed',
+          deferred: 'desktop_extension_plugin_secret_cleanup_deferred',
+          unavailable: 'desktop_extension_plugin_secret_cleanup_unavailable',
+        }[pluginSecretCleanupNotice.kind])}</span>
+        {pluginSecretCleanupNotice.restartRequired && <span>{tr('desktop_extension_plugin_secret_cleanup_restart_pending')}</span>}
+        {(pluginSecretCleanupNotice.kind === 'failed' || pluginSecretCleanupNotice.kind === 'deferred') && pluginSecretCleanupNotice.pluginId && (
+          <button type="button" disabled={busy} onClick={() => { void retryPluginSecretCleanup(); }} style={ghostButtonStyle(t, busy)}>
+            {tr('desktop_extension_plugin_secret_cleanup_retry')}
+          </button>
+        )}
+      </div>}
       {pageError && selection.kind === 'list' && <div role="alert">{pageError}</div>}
       {linkRequest?.payload && <p role="status">{tr('desktop_extension_plugin_import')}</p>}
       {!isPluginDetail && <>
@@ -534,10 +670,10 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
           <div className="extension-hub-list">
             {group.entries.map((entry) => {
               const marketplace = entry.marketplace;
-              const pluginId = marketplace?.plugin ? `${marketplace.plugin}@${marketplace.name}` : null;
+              const sourceAction = marketplace ? decidePublicMarketplaceSourceAction(marketplace, catalog.marketplaces ?? []) : null;
+              const pluginId = publicMarketplacePluginTargetId(marketplace, sourceAction);
               const pluginInstalled = pluginId ? pluginIds.includes(pluginId) : false;
               const pluginAvailable = pluginId ? availablePlugins.some((available) => available.id === pluginId) : false;
-              const sourceAction = marketplace ? decidePublicMarketplaceSourceAction(marketplace, catalog.marketplaces ?? []) : null;
               const registeredMarketplace = sourceAction?.kind === 'registered';
               const sourceConflict = sourceAction?.kind === 'source-conflict';
               return <div key={entry.id} className="extension-hub-row">

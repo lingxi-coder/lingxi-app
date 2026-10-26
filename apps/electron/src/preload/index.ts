@@ -66,7 +66,7 @@ import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/sett
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
 import type { AudioConfigurationV4 } from '../shared/generatedAudioConfiguration.js';
 import { CH_SESSION_WORKSPACE, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
-import type { PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
+import type { PluginSecretCleanupResult, PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
 
 export type { AllowedClientCommand } from '../shared/clientCommands.js';
 export type {
@@ -113,6 +113,7 @@ const CH_PROVIDER_CONNECTION_TEST = 'lingxi:provider-connection:test';
 const CH_PLUGIN_SECRET_GET = 'lingxi:plugin-secret:get';
 const CH_PLUGIN_SECRET_SET = 'lingxi:plugin-secret:set';
 const CH_PLUGIN_SECRET_CLEAR = 'lingxi:plugin-secret:clear';
+const CH_PLUGIN_SECRET_CLEANUP = 'lingxi:plugin-secret:cleanup-after-uninstall';
 const CH_BRIDGE_RESTART = 'lingxi:bridge:restart';
 const modUiIpcQueue = new ModUiIpcQueue();
 const CH_DIAGNOSTICS_GET = 'lingxi:diagnostics:get';
@@ -269,6 +270,7 @@ export interface LingxiApi {
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
   clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
+  cleanupPluginSecretsAfterUninstall?(pluginId: string, lastScopeRemoved: true): Promise<PluginSecretCleanupResult>;
   restartBridge(sessionId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
@@ -447,6 +449,7 @@ const api: LingxiApi = {
   pluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_GET, pluginId, key) as Promise<PluginSecretMetadata>,
   setPluginSecret: (pluginId, key, secret) => ipcRenderer.invoke(CH_PLUGIN_SECRET_SET, pluginId, key, secret) as Promise<PluginSecretMetadata>,
   clearPluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_CLEAR, pluginId, key) as Promise<PluginSecretMetadata>,
+  cleanupPluginSecretsAfterUninstall: (pluginId, lastScopeRemoved) => ipcRenderer.invoke(CH_PLUGIN_SECRET_CLEANUP, pluginId, lastScopeRemoved) as Promise<PluginSecretCleanupResult>,
   restartBridge: (sessionId) => ipcRenderer.invoke(CH_BRIDGE_RESTART, sessionId) as Promise<void>,
   diagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_GET) as Promise<DiagnosticEntry[]>,
   copyDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_COPY) as Promise<void>,

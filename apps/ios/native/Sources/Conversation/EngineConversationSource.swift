@@ -1404,6 +1404,10 @@ final class EngineConversationSource: ConversationSource {
         images: [ImageRefDto],
         selectedSlashCommand: ConversationSlashCommand?
     ) -> ConversationTurnToken? {
+        if Self.isCompactSlash(text), model.streaming || model.slashCommandPending {
+            model.compactRejectionID = UUID()
+            return nil
+        }
         guard
             !sideEnded,
             !sideClosing,
@@ -1578,7 +1582,19 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func submitEngineCommand(_ command: ClientCommand) async throws {
-        try await submitCommand(command)
+        if case .forceCompact = command, model.streaming || model.slashCommandPending {
+            model.compactRejectionID = UUID()
+            return
+        }
+        do {
+            try await submitCommand(command)
+        } catch {
+            if case .forceCompact = command, ConversationCompactionStatus.isTurnRejection(String(describing: error)) {
+                model.compactRejectionID = UUID()
+                return
+            }
+            throw error
+        }
         if case .listModels = command {
             await listener?.waitUntilIdle()
             try Task.checkCancellation()
@@ -4087,6 +4103,15 @@ final class EngineConversationSource: ConversationSource {
 
         case let .error(kind, message):
             let displayMessage = message.displayText
+            if ConversationCompactionStatus.isTurnRejection(displayMessage) {
+                model.compactRejectionID = UUID()
+                if case .queued = model.compactionStatus {
+                    model.compactionStatus = nil
+                    model.slashCommandPending = false
+                    pendingSlashRaw = nil
+                }
+                return
+            }
             let accepted = acceptTurnEvent(event)
             if isSideChat {
                 Self.turnLog.error("side turn failed accepted=\(accepted, privacy: .public)")

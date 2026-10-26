@@ -328,6 +328,30 @@ class ChatViewModelReducerTest {
         }
     }
 
+    @Test fun busyCompactRefusalPreservesStreamingAndAutomaticCompaction() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        vm.send("working")
+        runCurrent()
+        vm.reduceClientEvent(ClientEvent.CompactionStatus(phase = "summarizing", error = null))
+        val before = vm.state.value
+        vm.send("/compact")
+        assertNotNull(vm.state.value.compactRejectionId)
+        assertEquals(before.messages, vm.state.value.messages)
+        assertEquals(before.compaction, vm.state.value.compaction)
+        vm.reduceClientEvent(ClientEvent.Error(
+            kind = com.lingxi.code.bindings.client.ErrorKindDto.PROTOCOL,
+            message = "cannot compact the session while a turn is in flight".toClientTextDto(),
+        ))
+        assertTrue(vm.state.value.streaming)
+        assertNull(vm.state.value.error)
+        assertEquals(before.agentRun, vm.state.value.agentRun)
+        assertEquals(before.compaction, vm.state.value.compaction)
+        assertTrue(source.commands.none { it is ClientCommand.ForceCompact })
+        vm.dismissCompactRejection()
+        assertNull(vm.state.value.compactRejectionId)
+    }
+
     @Test
     fun userTranscriptIdentityUsesExactSubmittedTurnAndNeverTextMatching() = runTest(dispatcher) {
         val source = RecordingSource()

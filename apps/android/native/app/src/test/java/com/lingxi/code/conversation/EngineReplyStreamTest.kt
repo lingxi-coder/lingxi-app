@@ -51,6 +51,15 @@ class EngineReplyStreamTest {
         formatted = "$0.00",
     )
 
+    @Test fun compactRefusalDoesNotTerminateTheReplyStream() = runTest {
+        val replies = mapReplyStream(kotlinx.coroutines.flow.flowOf(
+            ClientEvent.TextDelta("before".toClientTextDto()),
+            ClientEvent.Error(kind = ErrorKindDto.PROTOCOL, message = "cannot compact the session while a turn is in flight".toClientTextDto()),
+            ClientEvent.TextDelta("after".toClientTextDto()),
+        )).toList()
+        assertEquals(listOf(ReplyEvent.Thinking, ReplyEvent.Delta("before"), ReplyEvent.Delta("after")), replies)
+    }
+
     @Test
     fun losslessRelay_preservesBurstAndTerminalEvent_forSlowCollector() = runTest {
         val relay = LosslessEventRelay<ClientEvent>(backgroundScope)

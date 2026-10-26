@@ -119,6 +119,7 @@ internal fun SideChatSheet(manager: SideChatManager, isDark: Boolean, onCreate: 
                         onToggleToolCall = entry.viewModel::toggleToolCall,
                         onTogglePlan = entry.viewModel::togglePlanExpanded,
                         onDismissError = entry.viewModel::dismissError,
+                    onDismissCompactRejection = entry.viewModel::dismissCompactRejection,
                     )
                     PermissionPromptDialog(state = permission,
                         onApprove = { id, response -> scope.launch { entry.viewModel.approvePermission(id, response) } },

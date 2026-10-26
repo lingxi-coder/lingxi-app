@@ -716,7 +716,8 @@ class EngineConversationSource private constructor(
                         clearDurableSlashCommandCheckpoint(durableTurns, event)
                         permissionIngress.endTurn()
                     }
-                    if (event is ClientEvent.TurnEnded || event is ClientEvent.Error) {
+                    if (event is ClientEvent.TurnEnded ||
+                        (event is ClientEvent.Error && !isCompactTurnRejection(event.message.displayText()))) {
                         permissionIngress.endTurn()
                     }
                     if (durableReplayGate.shouldForward(event)) {

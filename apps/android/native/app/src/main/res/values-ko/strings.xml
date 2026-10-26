@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_compact_during_turn">채팅 진행 중에는 압축할 수 없습니다</string>
     <string name="chat_message_copy">복사</string>
     <string name="chat_message_copied">복사됨</string>
     <string name="app_intent_ask_description">Siri, 단축어 또는 다른 앱에서 전달된 텍스트를 새 대화로 가져옵니다.</string>

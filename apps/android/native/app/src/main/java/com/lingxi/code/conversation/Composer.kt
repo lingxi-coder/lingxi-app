@@ -23,7 +23,6 @@ import androidx.compose.ui.semantics.Role
 import com.lingxi.code.components.ModelSelectionSheet
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.IconButton
@@ -426,42 +425,22 @@ fun Composer(
                         contentDescription = stringResource(R.string.composer_camera))
                 }
             }
-            BoxWithConstraints(Modifier.fillMaxWidth()) {
-                val actionWidth = (if (voiceInputSupported) 48.dp else 0.dp) + when {
-                    isStreaming || showDiscardRecovery || hasText || voiceConversationSupported -> 48.dp
-                    else -> 0.dp
-                }
-                val hasContext = ComposerContextUsage.from(
-                    contextUsage, model.details?.contextBudget?.effectiveInputBudget,
-                ) != null
-                val configurationWidth = 96.dp + if (hasContext) 48.dp else 0.dp
-                val modelWidth = (maxWidth - actionWidth - configurationWidth).coerceAtLeast(48.dp)
-                val modelLabel = if (modelSetupRequired) stringResource(R.string.composer_setup_model) else model.shortName
-                val labelStyle = androidx.compose.material3.MaterialTheme.typography.bodySmall
-                val labelWidth = with(androidx.compose.ui.platform.LocalDensity.current) {
-                    textMeasurer.measure(modelLabel, labelStyle, maxLines = 1).size.width.toDp()
-                }
-                val compactModel = modelWidth < labelWidth + 58.dp
-                Row(
-                    Modifier.fillMaxWidth().testTag("composer.toolbar"),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    attachmentAction()
-                    ComposerPermissionButton(effectivePermissionMode, onOpenPermissionSettings)
-                    Spacer(Modifier.weight(1f))
-                    ComposerContextWindow(contextUsage, model.details?.contextBudget?.effectiveInputBudget, model.details)
-                    Box(Modifier.width(if (compactModel) 48.dp else modelWidth.coerceAtMost(200.dp))) {
-                        ModelChip(
-                            model = model, models = availableModels, modelSetupRequired = modelSetupRequired,
-                            onOpenModelSettings = onOpenModelSettings, providerStatuses = modelProviderStatuses,
-                            remoteModelSelection = remoteModelSelection,
-                            onOpenProviderSettings = onOpenProviderSettings, onModelChange = onModelChange,
-                            reasoning = reasoning, onReasoningChange = onReasoningChange,
-                            compact = compactModel,
-                        )
-                    }
-                    turnActions()
-                }
+            Row(
+                Modifier.fillMaxWidth().testTag("composer.toolbar"),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                attachmentAction()
+                ComposerPermissionButton(effectivePermissionMode, onOpenPermissionSettings)
+                Spacer(Modifier.weight(1f))
+                ComposerContextWindow(contextUsage, model.details?.contextBudget?.effectiveInputBudget, model.details)
+                ModelChip(
+                    model = model, models = availableModels, modelSetupRequired = modelSetupRequired,
+                    onOpenModelSettings = onOpenModelSettings, providerStatuses = modelProviderStatuses,
+                    remoteModelSelection = remoteModelSelection,
+                    onOpenProviderSettings = onOpenProviderSettings, onModelChange = onModelChange,
+                    reasoning = reasoning, onReasoningChange = onReasoningChange,
+                )
+                turnActions()
             }
         }
     }
@@ -559,7 +538,6 @@ private fun ModelChip(
     onModelChange: (ModelOption) -> Unit,
     reasoning: ReasoningControl?,
     onReasoningChange: (String) -> Unit,
-    compact: Boolean = false,
 ) {
     val t = LingXiTheme.palette
     val context = LocalContext.current
@@ -567,7 +545,6 @@ private fun ModelChip(
     var open by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var selectedDetails by remember { mutableStateOf<CatalogModelDetails?>(null) }
-    val chipShape = RoundedCornerShape(8.dp)
     val visibleModels = remember(models, providerStatuses) {
         EngineModelCatalog.visibleModels(models, providerStatuses)
     }
@@ -589,57 +566,27 @@ private fun ModelChip(
         }
     }
 
+    val modelDescription = if (modelSetupRequired) stringResource(R.string.composer_setup_model)
+        else "${model.name}, $reasoningLabel"
     Box {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        IconButton(
+            onClick = {
+                if (modelSetupRequired) onOpenModelSettings() else open = true
+            },
             modifier = Modifier
-                .clip(chipShape)
-                .background(if (open) t.surfaceHover else Color.Transparent)
-                .clickable {
-                    if (modelSetupRequired) {
-                        onOpenModelSettings()
-                    } else {
-                        open = true
-                    }
-                }
+                .size(48.dp)
                 .then(
                     if (modelSetupRequired) Modifier.testTag(UiTags.MODEL_SETUP_CHIP)
                     else Modifier.testTag(UiTags.MODEL_PICKER_CHIP),
                 )
-                .heightIn(min = 48.dp)
-                .semantics { contentDescription = "${model.name}, $reasoningLabel" }
-                .padding(horizontal = if (compact) 14.dp else 9.dp, vertical = 5.dp),
+                .semantics { contentDescription = modelDescription },
         ) {
-            if (compact) {
-                if (modelSetupRequired) {
-                    LXIcon(name = LXIconName.Cog, size = 20.dp, color = t.text3)
-                } else {
-                    androidx.compose.material3.Icon(
-                        painter = androidx.compose.ui.res.painterResource(R.drawable.ic_model_brain),
-                        contentDescription = null, tint = t.text3, modifier = Modifier.size(20.dp),
-                    )
-                }
-            } else {
-                if (modelSetupRequired) {
-                    LXIcon(name = LXIconName.Cog, size = 13.dp, color = t.accent, stroke = 1.9f)
-                } else {
-                    Dot(color = model.color, size = 6.dp)
-                }
-                Text(
-                    text = if (modelSetupRequired) stringResource(R.string.composer_setup_model) else model.shortName,
-                    color = if (modelSetupRequired) t.accent else t.text2,
-                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
-                )
-                LXIcon(
-                    name = if (modelSetupRequired) LXIconName.ChevronR else LXIconName.Chevron,
-                    size = 11.dp,
-                    color = if (modelSetupRequired) t.accent else t.text4,
-                    stroke = 2f,
-                )
-            }
+            androidx.compose.material3.Icon(
+                painter = androidx.compose.ui.res.painterResource(R.drawable.ic_model_brain),
+                contentDescription = null,
+                tint = t.text2,
+                modifier = Modifier.size(20.dp),
+            )
         }
 
         if (open) {
@@ -792,15 +739,7 @@ private fun ModelSearchField(
     )
 }
 
-@Composable
-private fun Dot(color: Color, size: androidx.compose.ui.unit.Dp) {
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(androidx.compose.foundation.shape.CircleShape)
-            .background(color),
-    )
-}
+
 
 /** Remote model commands are validated by the desktop that supplied the catalog. */
 internal fun modelPickerCanSelect(remote: Boolean, provider: ModelProviderStatus?): Boolean =

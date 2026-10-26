@@ -878,10 +878,8 @@ struct ChatView: View {
         .padding(.horizontal, 24)
     }
 
-    /// A runtime footer for the main agent. Error details wrap and support
-    /// copying so the underlying failure is available for diagnosis. Durable
-    /// completion is intentionally silent; only work needing attention remains
-    /// visible below the transcript.
+    /// Keep failures compact beside the composer; the complete diagnostic is
+    /// available in a native sheet. Durable completion remains silent.
     @ViewBuilder
     private var runtimeFooter: some View {
         switch runtimeFooterState {
@@ -890,13 +888,12 @@ struct ChatView: View {
         case let .compaction(status):
             CompactionRuntimeFooter(status: status)
         case let .error(message):
-            runtimeFooterRow(
-                label: String(localized: "chat_error_generic_headline"),
-                detail: message,
-                color: t.danger,
-                isAnimated: false,
+            RuntimeErrorBanner(
+                title: runtimeErrorTitle(message),
+                message: message,
                 onDismiss: dismissRuntimeError
             )
+            .id(message)
         }
     }
 
@@ -913,88 +910,11 @@ struct ChatView: View {
         return .hidden
     }
 
-    private func runtimeFooterRow(
-        label: String,
-        detail: String?,
-        color: Color,
-        isAnimated: Bool,
-        icon: LXIconName? = nil,
-        onDismiss: (() -> Void)? = nil
-    ) -> some View {
-        let hasIcon = icon != nil
-        return HStack(spacing: 8) {
-            HStack(spacing: 8) {
-                if let icon {
-                    LXIcon(name: icon, size: 15, color: color, stroke: 1.7)
-                        .frame(width: 18)
-                } else {
-                    switch RuntimeFooterMotionPolicy.indicatorPresentation(
-                        isAnimated: isAnimated,
-                        hasIcon: hasIcon,
-                        reduceMotion: reduceMotion
-                    ) {
-                    case .hidden:
-                        // Both sibling cases occupy 18pt, so an EmptyView here
-                        // collapses the leading slot and shifts the label by
-                        // that width plus the HStack's spacing — on every
-                        // turn boundary and every tool start/stop. The running
-                        // affordance is the text sweep, not this slot, but the
-                        // slot still has to hold its place.
-                        Color.clear
-                            .frame(width: 18, height: 18)
-                            .accessibilityHidden(true)
-                    case .staticIndicator:
-                        LLMActivityIndicator(isActive: false, color: color)
-                            .frame(width: 18)
-                    case .activeIndicator:
-                        // Reduce Motion keeps the active path reachable while
-                        // LLMActivityIndicator itself renders it statically.
-                        LLMActivityIndicator(isActive: true, color: color)
-                            .frame(width: 18)
-                    }
-                }
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(label)
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(color)
-                        .runtimeTextSweep(
-                            isActive: RuntimeFooterMotionPolicy.textSweepIsActive(
-                                isAnimated: isAnimated,
-                                reduceMotion: reduceMotion
-                            ),
-                            highlightColor: t.text
-                        )
-                    if let detail, !detail.isEmpty {
-                        Text(detail)
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(t.text4)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-            .accessibilityElement(children: .combine)
-
-            if let onDismiss {
-                Button(action: onDismiss) {
-                    LXIcon(name: .x, size: 13, color: t.text3, stroke: 2)
-                        .frame(width: 28, height: 28)
-                        .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("chat_dismiss_error")
-                .accessibilityIdentifier("conversation.runtime-error.dismiss")
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 5)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(t.border.opacity(0.35))
-                .frame(height: 0.5)
-        }
-        .accessibilityIdentifier("conversation.llm-status")
+    private func runtimeErrorTitle(_ message: String) -> String {
+        let resumeFailure = String(localized: "chat_resume_session_failed")
+        if message.hasPrefix(resumeFailure) { return resumeFailure }
+        if captureStatus == nil, let error = convo.error { return error.kind.label }
+        return String(localized: "chat_error_generic_headline")
     }
 
     private func dismissRuntimeError() {
@@ -1367,79 +1287,115 @@ extension View {
     }
 }
 
-private struct LLMActivityIndicator: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let isActive: Bool
-    let color: Color
-    @State private var phase = false
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 3) {
-            ForEach(0..<3) { index in
-                Capsule()
-                    .fill(color)
-                    .frame(width: 3, height: 14)
-                    .scaleEffect(y: isActive && !reduceMotion && phase ? 1 : 0.52)
-                    .animation(
-                        reduceMotion
-                            ? nil
-                            : isActive
-                                ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true).delay(Double(index) * 0.12)
-                                : .easeOut(duration: 0.16),
-                        value: phase
-                    )
-            }
-        }
-        .frame(width: 18, height: 18)
-        .onAppear {
-            if isActive && !reduceMotion { phase = true }
-        }
-        .onChange(of: isActive) { _, active in
-            phase = active && !reduceMotion
-        }
-        .onChange(of: reduceMotion) { _, shouldReduceMotion in
-            phase = isActive && !shouldReduceMotion
-        }
-    }
-}
-
-// MARK: - Error banner (PR-4 item 4)
-
-/// A persistent, dismissible, kind-aware error surface. Unlike the dim
-/// `statusLine`, it stays until the user taps × — and its label/tint are driven
-/// by the error `kind` (transport vs. server vs. internal …) so the user can
-/// tell a network hiccup from a protocol fault.
-private struct ErrorBanner: View {
+/// A non-blocking error summary. Technical details never compete with the
+/// draft, and opening or closing the sheet does not acknowledge the error.
+private struct RuntimeErrorBanner: View {
     @Environment(\.theme) private var t
-    let error: ConversationError
+    @Environment(\.colorSchemeContrast) private var contrast
+    @ScaledMetric(relativeTo: .subheadline) private var symbolSize: CGFloat = 20
+    let title: String
+    let message: String
     let onDismiss: () -> Void
+    @State private var showsDetails = false
+    @State private var copied = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            LXIcon(name: .warning, size: 16, color: t.danger, stroke: 1.8)
-                .frame(width: 20, height: 20)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(error.kind.label)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(t.text)
-                Text(error.message)
-                    .font(.system(size: 12.5))
-                    .foregroundColor(t.text2)
-                    .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: 0) {
+            Button { showsDetails = true } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: min(symbolSize, 26)))
+                        .foregroundStyle(t.danger)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(t.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 4) {
+                            Text("chat_error_view_details")
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .font(.caption)
+                        .foregroundStyle(t.text2)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 14)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(.rect)
             }
-            Spacer(minLength: 8)
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("conversation.runtime-error.details")
+
             Button(action: onDismiss) {
-                LXIcon(name: .x, size: 14, color: t.text3, stroke: 2)
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(t.text2)
                     .frame(width: 28, height: 28)
-                    .contentShape(RoundedRectangle(cornerRadius: 8))
+                    .background(t.surfaceHover, in: Circle())
+                    .frame(width: 44, height: 44)
+                    .contentShape(.rect)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("chat_dismiss_error")
+            .accessibilityIdentifier("conversation.runtime-error.dismiss")
+            .padding(.trailing, 4)
         }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .background(t.danger.opacity(0.10))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.danger.opacity(0.40), lineWidth: 0.5))
-        .padding(.bottom, 18)
+        .background(t.surface, in: .rect(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(t.danger.opacity(contrast == .increased ? 0.8 : 0.18),
+                              lineWidth: contrast == .increased ? 1 : 0.5)
+                .allowsHitTesting(false)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .fixedSize(horizontal: false, vertical: true)
+        .layoutPriority(1)
+        .accessibilityIdentifier("conversation.llm-status")
+        .sheet(isPresented: $showsDetails, onDismiss: { copied = false }) {
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Label(title, systemImage: "exclamationmark.circle")
+                            .font(.headline)
+                            .foregroundStyle(t.text)
+                        Text(message)
+                            .font(.callout)
+                            .foregroundStyle(t.text2)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityIdentifier("conversation.runtime-error.message")
+                    }
+                    .padding(20)
+                }
+                .background(t.windowBg)
+                .navigationTitle("chat_error_details_title")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("common_close", systemImage: "xmark") { showsDetails = false }
+                            .accessibilityIdentifier("conversation.runtime-error.close-details")
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            UIPasteboard.general.string = message
+                            copied = true
+                        } label: {
+                            Label(copied ? "chat_message_copied" : "chat_message_copy",
+                                  systemImage: copied ? "checkmark" : "doc.on.doc")
+                        }
+                        .accessibilityIdentifier("conversation.runtime-error.copy")
+                    }
+                }
+            }
+            .tint(t.accent)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
     }
 }

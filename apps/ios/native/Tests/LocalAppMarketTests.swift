@@ -79,7 +79,9 @@ final class LocalAppMarketTests: XCTestCase {
 
         let response = try JSONDecoder().decode(LocalAppAgentTaskListResponse.self, from: Data(#"{"appId":"a12345678901234567890123456789012","revision":7,"tasks":[{"runId":"run-1","requestId":"opaque request","state":"running","sequence":3,"createdAt":1000,"updatedAt":1200,"model":{"providerId":"p","modelId":"m"},"limits":{"maxTurns":20,"timeoutMs":600000},"progress":{"completedModelTurns":2,"turnLimit":20}}]}"#.utf8))
         XCTAssertEqual(response.revision, 7)
+        XCTAssertEqual(response.tasks.first?.runId, "run-1")
         XCTAssertEqual(response.tasks.first?.requestId, "opaque request")
+        XCTAssertNotEqual(response.tasks.first?.runId, response.tasks.first?.requestId)
         XCTAssertEqual(response.tasks.first?.progress?.completedModelTurns, 2)
         XCTAssertEqual(response.tasks.first?.limits.timeoutMs, 600_000)
     }

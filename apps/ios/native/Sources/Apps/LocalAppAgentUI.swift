@@ -313,30 +313,57 @@ struct LocalAppAgentTasks: View {
     @State private var cancelling = Set<String>()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             if tasks.isEmpty {
                 Text("No Agent tasks for this app version.").font(.footnote).foregroundStyle(.secondary)
             }
             ForEach(tasks) { task in
-                HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(task.phase ?? task.state).font(.subheadline.weight(.medium))
-                        if let progress = task.progress, progress.turnLimit > 0 {
-                            Text("Completed \(progress.completedModelTurns) model turns; limit \(progress.turnLimit)")
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
-                        Text(task.runId).font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(String(localized: "session_details_status")): \(task.state)")
+                        .font(.subheadline.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let phase = task.phase {
+                        Text(phase)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    Spacer(minLength: 4)
+                    Text("\(String(localized: "cron_run_id_label")): \(task.requestId)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let progress = task.progress, progress.turnLimit > 0 {
+                        Text("Completed \(progress.completedModelTurns) model turns; limit \(progress.turnLimit)")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let taskError = task.error {
+                        Text(String(localized: "cron_error_section"))
+                            .font(.subheadline.weight(.medium))
+                        Text(taskError.code)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(taskError.message)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if !task.isTerminal {
                         Button("Stop", role: .destructive) { cancel(task) }
                             .disabled(cancelling.contains(task.runId))
                     }
                 }
-                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
             }
             if let error { Text(error).font(.footnote).foregroundStyle(.red) }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .task(id: "\(appID):\(revision)") {
             while !Task.isCancelled {
                 do {

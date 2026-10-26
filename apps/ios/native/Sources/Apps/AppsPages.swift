@@ -348,33 +348,50 @@ struct AppRuntimeView: View {
     @State private var busy = false
     @State private var consent: UnifiedAppRelease?
     var body: some View {
-        VStack(spacing: 20) {
-            Text(library.record(appId)?.name ?? "本地应用").font(.title2)
-            Text("应用页面在系统默认浏览器打开。模型凭据、Agent 授权和工具审批由灵犀管理。")
-            Text("iOS 26 会为已确认的 Agent 请求申请有限后台任务；系统仍可中断任务。普通浏览器页面暂停后，请返回灵犀重新打开。")
-                .font(.footnote).foregroundStyle(.secondary)
-            if busy { ProgressView() }
-            if let error { Text(error).foregroundStyle(.red) }
-            if let wake = library.browserAgentWake(for: appId) {
-                Text("浏览器 Agent 请求等待后台任务许可。运行：\(wake.runID.prefix(8))")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(library.record(appId)?.name ?? "本地应用").font(.title2)
+                Text("应用页面在系统默认浏览器打开。模型凭据、Agent 授权和工具审批由灵犀管理。")
+                Text("iOS 26 会为已确认的 Agent 请求申请有限后台任务；系统仍可中断任务。普通浏览器页面暂停后，请返回灵犀重新打开。")
                     .font(.footnote).foregroundStyle(.secondary)
-                Button("开始 Agent 并返回应用") {
-                    Task { await returnToBrowser(wake) }
-                }.disabled(busy)
-                Button("取消此次 Agent 请求", role: .cancel) {
-                    Task { await library.cancelBrowserAgentHandoff(wake) }
-                }.disabled(busy)
-            } else {
-                Button(launch == nil ? "启动并在默认浏览器打开" : "返回默认浏览器") { Task { await load(openBrowser: true) } }.disabled(busy)
+                if busy { ProgressView() }
+                if let error {
+                    Text(error)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let wake = library.browserAgentWake(for: appId) {
+                    Text("浏览器 Agent 请求等待后台任务许可。运行：\(wake.runID)")
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("开始 Agent 并返回应用") {
+                        Task { await returnToBrowser(wake) }
+                    }.disabled(busy)
+                    Button("取消此次 Agent 请求", role: .cancel) {
+                        Task { await library.cancelBrowserAgentHandoff(wake) }
+                    }.disabled(busy)
+                } else {
+                    Button(launch == nil ? "启动并在默认浏览器打开" : "返回默认浏览器") {
+                        Task { await load(openBrowser: true) }
+                    }.disabled(busy)
+                }
+                if hasAgent, let revision = library.record(appId)?.currentRevision {
+                    LocalAppAgentTasks(client: library.client, appID: appId, revision: revision)
+                }
+                Button("应用设置与 Agent 授权") { onShowDetails(appId) }
+                Button("停止应用与 Agent 任务", role: .destructive) { Task {
+                    do { try await library.stop(appId); onClose() } catch { self.error = error.localizedDescription }
+                } }
+                Button("关闭管理页面", action: onClose)
+                Text("关闭此管理页面不会停止浏览器中的应用。")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
-            Button("应用设置与 Agent 授权") { onShowDetails(appId) }
-            Button("停止应用与 Agent 任务", role: .destructive) { Task {
-                do { try await library.stop(appId); onClose() } catch { self.error = error.localizedDescription }
-            } }
-            Button("关闭管理页面", action: onClose)
-            Text("关闭此管理页面不会停止浏览器中的应用。").font(.footnote).foregroundStyle(.secondary)
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("app-runtime")
         }
-        .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: appId) { await load(openBrowser: !opened && !library.consumeBrowserReview(appId)) }
         .sheet(item: $consent) { release in
             LocalAppConsentSheet(manifest: release.manifest, digest: release.digest, title: "授权此版本运行") {
@@ -385,12 +402,8 @@ struct AppRuntimeView: View {
         .background {
             if hasAgent {
                 LocalAppAgentInteractions(client: library.client, appID: appId)
-                if let revision = library.record(appId)?.currentRevision {
-                    LocalAppAgentTasks(client: library.client, appID: appId, revision: revision)
-                }
             }
         }
-        .accessibilityIdentifier("app-runtime")
     }
     private func load(openBrowser: Bool) async {
         guard !busy else { return }

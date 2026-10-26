@@ -120,6 +120,8 @@
     const MAX_EVENTS = 20000;
     const IMAGE_PRELOAD_TIMEOUT_MS = 10000;
     const DIAGNOSTIC_TIMEOUT_MS = 1000;
+    const RECOVERY_TASK_LOOKUP_ATTEMPTS = 8;
+    const RECOVERY_TASK_LOOKUP_DELAY_MS = 250;
     const HANDOFF_QUEUE_KEY = '__lingxiAgentAcceptanceHandoffQueue';
     const HANDOFF_CONSUMER_KEY = '__lingxiAgentAcceptanceHandoffConsumer';
     const imageSchema = {
@@ -153,6 +155,11 @@
     let latestHandoff = {type: 'none', runId: null, code: null};
     let latestHandoffErrorCode = null;
     let diagnosticsGeneration = 0;
+    let bootstrapReady = false;
+    const queuedRecoveryRunIds = new Set();
+    const startedRecoveryRunIds = new Set();
+    const recoveryFlights = new Map();
+    const recoveryErrors = new Map();
     let state = {version: 1, chatId: null, pending: null, lastRun: null};
 
     function setStatus(message) { $('status').textContent = message; }
@@ -189,9 +196,83 @@
       });
     }
     function showRecoveryErrors(errors) {
-      const unique = [...new Set(errors)];
+      const unique = [...new Set([...recoveryErrors.values(), ...errors])];
       $('recovery-error').textContent = unique.join('\n');
       $('recovery-error').hidden = unique.length === 0;
+    }
+
+    function addRecoveryError(runId, code, message) {
+      const safeRun = safeRunId(runId) || 'unknown';
+      const safeCodeValue = safeCode(code);
+      const safeMessage = safeFailureText({message: message || 'The saved run could not be restored.'});
+      recoveryErrors.set(`${safeRun}:${safeCodeValue}`, `Read-only recovery · ${safeCodeValue} · run ${safeRun}: ${safeMessage}`);
+      showRecoveryErrors([]);
+      setStatus(`Read-only recovery stopped · code ${safeCodeValue}. No new request was sent.`);
+    }
+
+    function clearRecoveryErrors(runId, preservePendingRequestMissing = false) {
+      const prefix = `${safeRunId(runId) || 'unknown'}:`;
+      for (const key of recoveryErrors.keys()) {
+        if (!key.startsWith(prefix)) continue;
+        if (preservePendingRequestMissing && key.slice(prefix.length) === 'pending_request_missing') continue;
+        recoveryErrors.delete(key);
+      }
+      showRecoveryErrors([]);
+    }
+
+    function recoveryReferenceFor(runId) {
+      const safeRun = safeRunId(runId);
+      if (!safeRun) return null;
+      const pending = state.pending;
+      if (pending?.input?.runId === safeRun) {
+        const input = pending.input;
+        if (typeof input.threadId !== 'string' || !input.threadId
+            || !['image', 'document', 'chat'].includes(pending.kind)) return null;
+        return {runId: safeRun, threadId: input.threadId, kind: pending.kind,
+          ...(pending.chatId ? {chatId: pending.chatId} : {})};
+      }
+      const saved = state.lastRun;
+      if (saved?.runId !== safeRun || typeof saved.threadId !== 'string' || !saved.threadId
+          || !['image', 'document', 'chat'].includes(saved.kind)) return null;
+      const chatId = saved.chatId || (saved.kind === 'chat' ? state.chatId : null);
+      return {runId: safeRun, threadId: saved.threadId, kind: saved.kind, ...(chatId ? {chatId} : {})};
+    }
+
+    function recoveryFailure(code, message, terminalObserved = false, terminal = null) {
+      const failure = new Error(message || 'The saved Agent run could not be restored.');
+      failure.code = safeCode(code);
+      failure.terminalObserved = terminalObserved;
+      failure.terminal = terminal;
+      return failure;
+    }
+
+    function clearPendingForRun(runId) {
+      if (state.pending?.input?.runId !== runId) return;
+      const pending = state.pending;
+      state.pending = null;
+      if (storageReady) {
+        try { saveState(); }
+        catch (failure) {
+          state.pending = pending;
+          throw failure;
+        }
+      }
+    }
+
+    function scheduleQueuedRecovery() {
+      if (!bootstrapReady || document.visibilityState === 'hidden' || busy) return;
+      for (const runId of queuedRecoveryRunIds) {
+        if (startedRecoveryRunIds.has(runId) || recoveryFlights.has(runId)) continue;
+        const reference = recoveryReferenceFor(runId);
+        if (!reference) {
+          addRecoveryError(runId, 'pending_request_missing',
+            'The accepted handoff has no matching saved RunAgentInput or known run metadata. No request was started.');
+          startedRecoveryRunIds.add(runId);
+          continue;
+        }
+        void beginReadOnlyRecovery(reference, true);
+        return;
+      }
     }
 
     function loadState() {
@@ -321,18 +402,38 @@
       if (!isRecord(record) || !['ready', 'error'].includes(record.type)) return;
       const eventRunId = safeRunId(record.runId);
       const pendingRunId = safeRunId(state.pending?.input?.runId);
-      const runId = eventRunId || (record.type === 'error' ? pendingRunId : null);
-      if (record.type === 'ready' && !runId) return;
+      const savedRunId = safeRunId(state.lastRun?.runId);
+      const runId = eventRunId || (record.type === 'error' ? pendingRunId || savedRunId : null);
       const code = record.type === 'error' ? safeCode(record.code) : null;
       latestHandoff = {type: record.type, runId: eventRunId, code};
       if (record.type === 'error') latestHandoffErrorCode = code;
+      const matchesSavedRun = Boolean(runId && recoveryReferenceFor(runId));
       const matchesPending = Boolean(pendingRunId && (eventRunId === pendingRunId || !eventRunId));
       $('handoff-status').textContent = record.type === 'ready'
-        ? `SDK handoff accepted · run ${runId}${matchesPending ? ' · waiting for the RunAgentResult' : ''}. No new request was sent by this notice.`
+        ? `SDK handoff accepted · run ${runId || 'unknown'}${matchesSavedRun ? ' · waiting for read-only recovery' : ''}. No new request was sent by this notice.`
         : matchesPending
           ? `SDK handoff failed · run ${runId} · code ${code}. Pending input is retained; this notice does not retry it.`
           : `SDK handoff failed · run ${runId || 'unknown'} · code ${code}. No request was retried by this notice.`;
-      if (matchesPending) {
+      if (record.type === 'ready') {
+        if (!runId || !matchesSavedRun) {
+          addRecoveryError(runId, 'pending_request_missing',
+            'The SDK returned from a handoff, but this browser origin has no matching saved request or known run. No request was started.');
+        } else {
+          queuedRecoveryRunIds.add(runId);
+          if (!startedRecoveryRunIds.has(runId)) {
+            setStatus(`The SDK accepted saved run ${runId}; waiting for read-only task recovery.`);
+          }
+          scheduleQueuedRecovery();
+        }
+      } else if (code === 'pending_request_missing') {
+        addRecoveryError(runId, code,
+          'The browser SDK could not find the saved pending request for this handoff. No request was retried.');
+      } else if (matchesSavedRun) {
+        addRecoveryError(runId, code, 'The SDK handoff did not complete. The saved request remains unchanged; no request was retried.');
+      } else {
+        addRecoveryError(runId, code, 'The SDK handoff failed and does not match a saved run. No request was retried.');
+      }
+      if (record.type === 'error' && matchesPending) {
         setStatus(record.type === 'ready'
           ? 'The SDK accepted the pending request; waiting for its RunAgentResult.'
           : 'SDK handoff failed; the pending request remains available for an explicit same-ID retry.');
@@ -360,7 +461,7 @@
       $('send-chat').disabled = !canStart || !chat || !$('chat-prompt').value.trim();
       $('retry-pending').hidden = !state.pending;
       $('retry-pending').disabled = !usable || !state.pending;
-      $('reconnect-last').disabled = !agent || !state.lastRun || busy;
+      $('reconnect-last').disabled = !agent || !recoveryReferenceFor(state.pending?.input?.runId || state.lastRun?.runId) || busy;
       $('cancel-run').disabled = !agent || !activeRunId || !activeTask;
       if (!storageReady) $('recovery').textContent = `Browser-origin storage is unavailable: ${storageFailure}`;
     }
@@ -429,9 +530,23 @@
     async function readTask(runId, threadId) {
       const task = await agent.tasks.get(runId);
       if (!isRecord(task) || task.runId !== runId || task.threadId !== threadId) {
-        throw new Error('Host task identity did not match the public AG-UI run and thread IDs.');
+        throw recoveryFailure('task_identity_mismatch', 'Host task identity did not match the saved run and thread IDs.');
       }
       return task;
+    }
+
+    async function readTaskWithBoundedRetry(runId, threadId) {
+      let lastFailure;
+      for (let attempt = 0; attempt < RECOVERY_TASK_LOOKUP_ATTEMPTS; attempt += 1) {
+        try {
+          return await readTask(runId, threadId);
+        } catch (failure) {
+          lastFailure = failure;
+          if (failure?.code !== 'task_not_found' || attempt + 1 >= RECOVERY_TASK_LOOKUP_ATTEMPTS) throw failure;
+          await delay(RECOVERY_TASK_LOOKUP_DELAY_MS);
+        }
+      }
+      throw lastFailure || recoveryFailure('task_not_found', 'The saved Agent task was not found.');
     }
 
     async function drainTaskEvents(runId) {
@@ -455,29 +570,67 @@
       throw new Error(`Task events were not fully drained after ${MAX_PAGES} pages.`);
     }
 
-    function terminalEvent(events, task) {
+    function terminalStatus(events, task) {
       const terminals = events.filter(event => event?.type === 'RUN_FINISHED' || event?.type === 'RUN_ERROR');
-      if (terminals.length !== 1 || events.at(-1) !== terminals[0]) {
-        throw new Error(`Expected exactly one final RUN_FINISHED or RUN_ERROR; received ${terminals.length}.`);
+      if (terminals.length > 1) {
+        return {state: 'failed', terminal: terminals.at(-1), code: 'duplicate_terminal_event',
+          message: `Received ${terminals.length} terminal AG-UI events; exactly one is required.`, terminalObserved: true};
+      }
+      if (terminals.length === 1 && events.at(-1) !== terminals[0]) {
+        return {state: 'failed', terminal: terminals[0], code: 'terminal_event_not_final',
+          message: 'The terminal AG-UI event was not the final event in the saved run.', terminalObserved: true};
+      }
+      if (terminals.length === 0) {
+        if (['failed', 'cancelled', 'interrupted'].includes(task?.state)) {
+          return {
+            state: task.state,
+            terminal: null,
+            code: safeCode(task.error?.code || (task.state === 'cancelled' ? 'cancelled' : 'missing_terminal_event')),
+            message: task.error?.message || 'The host recorded a terminal task state without a final AG-UI event.',
+            terminalObserved: true,
+          };
+        }
+        if (task?.state === 'succeeded') {
+          return {state: 'failed', terminal: null, code: 'missing_terminal_event',
+            message: 'The host marked this task complete without a final AG-UI event.', terminalObserved: true};
+        }
+        return {state: 'active', terminal: null, code: 'terminal_event_pending',
+          message: 'The saved run has no terminal AG-UI event yet.', terminalObserved: false};
       }
       const terminal = terminals[0];
+      if (terminal.type === 'RUN_ERROR') {
+        return {
+          state: 'failed', terminal,
+          code: safeCode(terminal.code || task.error?.code || 'agent_failed'),
+          message: terminal.message || task.error?.message || 'The Agent run returned RUN_ERROR.',
+          terminalObserved: true,
+        };
+      }
+      if (terminal.outcome?.type === 'cancelled' || task.state === 'cancelled') {
+        return {state: 'cancelled', terminal, code: safeCode(terminal.code || task.error?.code || 'cancelled'),
+          message: terminal.message || task.error?.message || 'The saved Agent run was cancelled.', terminalObserved: true};
+      }
       const unsuccessfulOutcome = terminal.outcome !== undefined
         && (!isRecord(terminal.outcome) || terminal.outcome.type !== 'success');
-      if (task.state !== 'succeeded' || terminal.type !== 'RUN_FINISHED' || unsuccessfulOutcome) {
-        const reason = terminal.type === 'RUN_ERROR' ? (terminal.message || terminal.code || 'RUN_ERROR')
-          : `task=${task.state}, outcome=${terminal.outcome?.type ?? 'missing'}`;
-        const failure = new Error(`Run did not finish successfully: ${reason}`);
-        failure.terminal = true;
-        throw failure;
+      if (task.state === 'succeeded' && terminal.type === 'RUN_FINISHED' && !unsuccessfulOutcome) {
+        return {state: 'succeeded', terminal, code: null, message: '', terminalObserved: true};
       }
-      return terminal;
+      const code = safeCode(task.error?.code || terminal.code || 'run_not_successful');
+      return {state: task.state || 'failed', terminal, code,
+        message: terminal.message || task.error?.message || `Run ended with task state ${task.state || 'unknown'}.`,
+        terminalObserved: true};
     }
 
     async function taskEvidence(runId, threadId) {
-      const task = await readTask(runId, threadId);
+      const task = await readTaskWithBoundedRetry(runId, threadId);
       const events = await drainTaskEvents(runId);
-      terminalEvent(events, task);
       return {task, events};
+    }
+
+    function terminalEvent(events, task) {
+      const status = terminalStatus(events, task);
+      if (status.state === 'succeeded') return status.terminal;
+      throw recoveryFailure(status.code, status.message, status.terminalObserved, status.terminal);
     }
 
     async function allChatMessages(handle) {
@@ -589,15 +742,15 @@
     async function showTaskSnapshot(reference, recoveryLabel, recoveryErrors) {
       if (!reference) return null;
       try {
-        const task = await readTask(reference.runId, reference.threadId);
+        const task = await readTaskWithBoundedRetry(reference.runId, reference.threadId);
         state.lastRun = {runId: task.runId, threadId: task.threadId, kind: reference.kind ?? 'recovered', ...(reference.chatId ? {chatId: reference.chatId} : {})};
+        clearRecoveryErrors(reference.runId, true);
         showTask(task);
         $('recovery').textContent = recoveryLabel;
         if (storageReady) saveState();
         return task;
       } catch (failure) {
-        if (!state.pending && state.lastRun?.runId === reference.runId) state.lastRun = null;
-        recoveryErrors.push(`Task restore: ${safeFailureText(failure)}`);
+        addRecoveryError(reference.runId, failure?.code || 'unknown', failure?.message || 'The saved task could not be read.');
         $('recovery').textContent = `${recoveryLabel} · task lookup failed.`;
         return null;
       }
@@ -605,14 +758,51 @@
 
     async function restoreReadOnly() {
       const recoveryErrors = [];
-      let taskReference = state.lastRun;
-      let taskSource = taskReference ? 'Saved run ID restored from this browser origin; host task lookup was read-only.' : '';
-      let task = taskReference ? await showTaskSnapshot(taskReference, taskSource, recoveryErrors) : null;
+      let taskReference = null;
+      let taskSource = '';
+      let task = null;
       let taskInventoryFailed = false;
+      if (state.pending) {
+        const pendingRunId = state.pending.input?.runId;
+        taskReference = recoveryReferenceFor(pendingRunId);
+        if (taskReference) {
+          taskSource = 'Pending RunAgentInput restored from this browser origin; startup checks its task read-only before any recovery.';
+          state.lastRun = {runId: taskReference.runId, threadId: taskReference.threadId, kind: taskReference.kind,
+            ...(taskReference.chatId ? {chatId: taskReference.chatId} : {})};
+          $('task-state').textContent = `pending · thread ${taskReference.threadId} · run ${taskReference.runId}`;
+          showInput(state.pending.input);
+          if (storageReady) saveState();
+          try {
+            task = await readTaskWithBoundedRetry(taskReference.runId, taskReference.threadId);
+            showTask(task);
+            queuedRecoveryRunIds.add(taskReference.runId);
+            taskSource = 'A matching durable host task exists; startup queued a read-only reconnect with the saved IDs.';
+          } catch (failure) {
+            if (failure?.code === 'task_not_found') {
+              taskSource = 'The saved request remains pending; the host task is not visible yet. Startup made no request and is waiting for SDK acceptance.';
+              $('task-state').textContent = `pending · waiting for host acceptance · run ${taskReference.runId}`;
+            } else {
+              addRecoveryError(taskReference.runId, failure?.code || 'unknown', failure?.message || 'The saved task could not be checked.');
+              recoveryErrors.push(`Read-only task check · code ${safeCode(failure?.code)}: ${safeFailureText(failure)}`);
+            }
+          }
+        } else {
+          addRecoveryError(pendingRunId, 'pending_request_missing',
+            'The saved pending record has no valid run, thread, or supported result kind. No request was started.');
+          recoveryErrors.push('Pending request metadata is incomplete; no model request was started.');
+        }
+      } else if (state.lastRun) {
+        taskReference = state.lastRun;
+        taskSource = 'Saved run metadata restored from this browser origin; the task lookup is read-only.';
+        task = await showTaskSnapshot(taskReference, taskSource, recoveryErrors);
+      }
       if (!task && !state.pending) {
         try {
           const inventoryTask = await latestTaskInventory();
-          taskReference = inventoryTask ? {runId: inventoryTask.runId, threadId: inventoryTask.threadId, kind: 'host-inventory', ...(inventoryTask.chatId ? {chatId: inventoryTask.chatId} : {})} : null;
+          const savedReference = state.lastRun?.runId === inventoryTask?.runId ? state.lastRun : null;
+          taskReference = inventoryTask ? {runId: inventoryTask.runId, threadId: inventoryTask.threadId,
+            kind: savedReference?.kind ?? 'host-inventory',
+            ...(savedReference?.chatId || inventoryTask.chatId ? {chatId: savedReference?.chatId || inventoryTask.chatId} : {})} : null;
           if (taskReference) {
             taskSource = 'Recovered the latest App-scoped task from host tasks.list; no model call was made.';
             task = await showTaskSnapshot(taskReference, taskSource, recoveryErrors);
@@ -623,12 +813,6 @@
           taskSource = `Host tasks.list recovery unavailable: ${safeFailureText(failure)}`;
           recoveryErrors.push(taskSource);
         }
-      } else if (!task && state.pending) {
-        taskReference = {runId: state.pending.input.runId, threadId: state.pending.input.threadId,
-          kind: state.pending.kind, ...(state.pending.chatId ? {chatId: state.pending.chatId} : {})};
-        state.lastRun = taskReference;
-        taskSource = 'Pending RunAgentInput restored from this browser origin; host task lookup was read-only and no run was started.';
-        $('task-state').textContent = `pending · thread ${taskReference.threadId} · run ${taskReference.runId}`;
       }
 
       let chatSource = state.chatId ? 'Saved Chat handle restored from this browser origin; history read was read-only.' : '';
@@ -680,10 +864,11 @@
         const events = await drainTaskEvents(input.runId);
         showTask(task);
         showEvents(events);
-        const terminal = events.find(event => event?.type === 'RUN_FINISHED' || event?.type === 'RUN_ERROR');
-        if (terminal) {
-          state.pending = null;
-          saveState();
+        const terminal = terminalStatus(events, task);
+        if (terminal.terminalObserved) {
+          startedRecoveryRunIds.add(input.runId);
+          clearPendingForRun(input.runId);
+          if (terminal.state !== 'succeeded') addRecoveryError(input.runId, terminal.code, terminal.message);
         }
         return true;
       } catch { return false; }
@@ -713,8 +898,11 @@
           : await agent.run(input);
         validateResult(kind, runResult);
         const {task, events} = await taskEvidence(input.runId, input.threadId);
+        terminalEvent(events, task);
+        startedRecoveryRunIds.add(input.runId);
         state.pending = null;
         saveState();
+        clearRecoveryErrors(input.runId);
         showTask(task);
         showEvents(events);
         $('result').textContent = JSON.stringify({
@@ -737,6 +925,7 @@
         activeTask = false;
         busy = false;
         updateControls();
+        scheduleQueuedRecovery();
         void refreshDiagnostics();
       }
     }
@@ -835,44 +1024,170 @@
       } catch (failure) { setError(failure?.message || String(failure)); }
     }
 
-    async function reconnectLastRun() {
-      setError('');
-      if (!state.lastRun) return;
+    function beginReadOnlyRecovery(reference, automatic = false) {
+      const runId = reference.runId;
+      const existing = recoveryFlights.get(runId);
+      if (existing) return existing;
+      if (busy || recoveryFlights.size > 0) return Promise.resolve(false);
+      startedRecoveryRunIds.add(runId);
+      const operation = Promise.resolve().then(() => performReadOnlyRecovery(reference, automatic));
+      recoveryFlights.set(runId, operation);
+      void operation.then(() => {
+        if (recoveryFlights.get(runId) === operation) recoveryFlights.delete(runId);
+        scheduleQueuedRecovery();
+      }, failure => {
+        if (recoveryFlights.get(runId) === operation) recoveryFlights.delete(runId);
+        addRecoveryError(runId, failure?.code, failure?.message);
+        scheduleQueuedRecovery();
+      });
+      return operation;
+    }
+
+    async function performReadOnlyRecovery(reference, automatic) {
+      const runId = reference.runId;
       busy = true;
+      activeRunId = runId;
+      activeTask = false;
+      setError('');
+      clearRecoveryErrors(runId, true);
+      if (state.pending?.input?.runId === runId) showInput(state.pending.input);
+      setStatus(automatic
+        ? `Read-only recovery for accepted run ${runId}; no request will be submitted.`
+        : `Read-only reconnect to saved run ${runId}; no request will be submitted.`);
+      $('recovery').textContent = `Reconnecting to saved run ${runId} with the existing thread and run IDs.`;
       updateControls();
-      setStatus(`Read-only reconnect to ${state.lastRun.runId}; this does not submit a new model request.`);
       try {
-        const reference = state.lastRun;
+        const initialTask = await readTaskWithBoundedRetry(runId, reference.threadId);
+        showTask(initialTask);
+        activeTask = ['queued', 'running'].includes(initialTask.state);
+        updateControls();
+
+        if (['failed', 'cancelled', 'interrupted'].includes(initialTask.state)) {
+          let events = [];
+          try { events = await drainTaskEvents(runId); } catch { /* The durable task row still provides its terminal code. */ }
+          showTask(initialTask);
+          showEvents(events);
+          const terminal = terminalStatus(events, initialTask);
+          clearPendingForRun(runId);
+          addRecoveryError(runId, terminal.code, terminal.message);
+          $('recovery').textContent = `Saved run ${runId} is terminal (${terminal.state}); no new request was sent.`;
+          return false;
+        }
+
+        if (reference.kind === 'chat' && reference.chatId && chat?.id !== reference.chatId) {
+          chat = await agent.chats.open(reference.chatId);
+        }
         const client = agent.createClient({threadId: reference.threadId});
         const callbackEvents = [];
-        const runResult = await client.connectAgent({runId: reference.runId}, {
-          onEvent: ({event}) => callbackEvents.push(
-            typeof window.LingxiLocalAppAGUI?.validateEvent === 'function'
-              ? window.LingxiLocalAppAGUI.validateEvent(event) : event,
-          ),
-        });
-        const {task, events} = await taskEvidence(reference.runId, reference.threadId);
-        const terminal = terminalEvent(callbackEvents, task);
-        if (terminal.type !== 'RUN_FINISHED'
-            || (terminal.outcome !== undefined && terminal.outcome?.type !== 'success')) {
-          throw new Error('Read-only reconnect did not receive a successful standard terminal event.');
+        let runResult = null;
+        let connectFailure = null;
+        try {
+          runResult = await client.connectAgent({runId}, {
+            onEvent: ({event}) => {
+              const validated = typeof window.LingxiLocalAppAGUI?.validateEvent === 'function'
+                ? window.LingxiLocalAppAGUI.validateEvent(event) : event;
+              callbackEvents.push(validated);
+            },
+          });
+        } catch (failure) {
+          connectFailure = failure;
         }
-        validateResult(reference.kind, runResult);
+
+        let task;
+        let events;
+        try {
+          ({task, events} = await taskEvidence(runId, reference.threadId));
+        } catch (failure) {
+          const callbackTerminal = terminalStatus(callbackEvents, initialTask);
+          if (callbackTerminal.terminalObserved && callbackTerminal.state !== 'succeeded') {
+            clearPendingForRun(runId);
+            addRecoveryError(runId, callbackTerminal.code, callbackTerminal.message);
+            return false;
+          }
+          addRecoveryError(runId, failure?.code || 'task_evidence_unavailable', failure?.message
+            || 'The host accepted the reconnect but did not return durable task evidence.');
+          return false;
+        }
         showTask(task);
         showEvents(events);
+        const durableTerminal = terminalStatus(events, task);
+        if (durableTerminal.state !== 'succeeded') {
+          if (durableTerminal.terminalObserved) {
+            clearPendingForRun(runId);
+            addRecoveryError(runId, durableTerminal.code, durableTerminal.message);
+            $('recovery').textContent = `Saved run ${runId} is terminal (${durableTerminal.state}); no replacement request was sent.`;
+          } else {
+            const failure = connectFailure || recoveryFailure(durableTerminal.code, durableTerminal.message);
+            addRecoveryError(runId, failure.code, failure.message);
+          }
+          return false;
+        }
+
+        if (connectFailure) {
+          clearPendingForRun(runId);
+          addRecoveryError(runId, connectFailure.code || 'result_unavailable',
+            `The host reports a successful terminal run, but RunAgentResult could not be restored: ${connectFailure.message || 'unknown host error'}`);
+          return false;
+        }
+
+        const callbackTerminal = terminalStatus(callbackEvents, task);
+        if (callbackTerminal.state !== 'succeeded') {
+          clearPendingForRun(runId);
+          addRecoveryError(runId, callbackTerminal.code || 'callback_terminal_missing', callbackTerminal.message
+            || 'The durable task completed, but reconnect did not receive its successful terminal callback.');
+          return false;
+        }
+
+        try {
+          validateResult(reference.kind, runResult);
+        } catch (failure) {
+          clearPendingForRun(runId);
+          addRecoveryError(runId, failure?.code || 'output_schema_invalid', failure?.message
+            || 'The recovered RunAgentResult did not match the saved output schema.');
+          return false;
+        }
+
+        clearPendingForRun(runId);
+        clearRecoveryErrors(runId);
         $('result').textContent = JSON.stringify({
-          reconnect: {mode: 'read-only', threadId: reference.threadId, runId: reference.runId},
+          reconnect: {mode: 'read-only', threadId: reference.threadId, runId},
           RunAgentResult: redactProtocol(runResult),
           callbackEventTypes: callbackEvents.map(event => event.type),
         }, null, 2);
         setStatus(`Read-only reconnect succeeded · ${callbackEvents.length} callback events · no new run started.`);
+        $('recovery').textContent = `Recovered the existing ${reference.kind} RunAgentResult; the saved input and IDs were unchanged.`;
+        if (reference.kind === 'chat' && reference.chatId) {
+          try {
+            chat = await agent.chats.open(reference.chatId);
+            await refreshChatHistory();
+          } catch (failure) {
+            addRecoveryError(runId, failure?.code || 'chat_history_unavailable', failure?.message
+              || 'The run was recovered, but canonical Chat history could not be refreshed.');
+          }
+        }
+        return true;
       } catch (failure) {
-        setError(failure?.message || String(failure));
-        setStatus('Read-only reconnect failed; no replacement run was started.');
+        addRecoveryError(runId, failure?.code || 'unknown', failure?.message || 'The saved run could not be restored.');
+        $('recovery').textContent = `Read-only recovery stopped for ${runId}; no replacement request was sent.`;
+        return false;
       } finally {
+        activeRunId = null;
+        activeTask = false;
         busy = false;
         updateControls();
       }
+    }
+
+    async function reconnectLastRun() {
+      setError('');
+      const runId = state.pending?.input?.runId || state.lastRun?.runId;
+      const reference = recoveryReferenceFor(runId);
+      if (!reference) {
+        addRecoveryError(runId, 'pending_request_missing',
+          'No saved RunAgentInput or known result kind exists for this run. No request was started.');
+        return false;
+      }
+      return beginReadOnlyRecovery(reference, false);
     }
 
     async function retryPending() {
@@ -895,6 +1210,9 @@
     $('retry-pending').addEventListener('click', retryPending);
     $('cancel-run').addEventListener('click', cancelActiveRun);
     $('host-open').addEventListener('click', () => window.localApp?.host?.open?.());
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') scheduleQueuedRecovery();
+    });
 
     async function bootstrap() {
       loadState();
@@ -906,11 +1224,15 @@
         if (!window.localApp?.agent) throw new Error('The host did not provide localApp.agent.');
         agent = window.localApp.agent;
         if (typeof window.localApp.host?.open === 'function') $('host-open').hidden = false;
-        setStatus('Host Agent ready. Model selection and approvals remain in trusted native settings.');
+        if ($('recovery-error').hidden) {
+          setStatus('Host Agent ready. Model selection and approvals remain in trusted native settings.');
+        }
         void readSdkInfoForDiagnostics();
         void preloadPublicImage();
         if (!storageReady) setError(`Saved acceptance state was not changed: ${storageFailure}`);
         await restoreReadOnly();
+        bootstrapReady = true;
+        scheduleQueuedRecovery();
       } catch (failure) {
         if (!agent) {
           $('image-status').textContent = 'Public image fixture unavailable because the host Agent did not become ready; only the image run is disabled.';

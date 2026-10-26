@@ -96,7 +96,9 @@ struct LocalAppAgentTaskProgress: Decodable, Equatable, Sendable {
     let turnLimit: UInt64
 }
 struct LocalAppAgentTaskSummary: Decodable, Identifiable, Equatable, Sendable {
+    /// Host task identity used for task operations such as cancellation.
     let runId: String
+    /// Public AG-UI request/run identifier supplied by the browser.
     let requestId: String
     let state: String
     let sequence: UInt64

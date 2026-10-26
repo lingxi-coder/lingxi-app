@@ -100,11 +100,11 @@ struct AskUserQuestionCard: View {
         VStack(spacing: 0) {
             header
                 .padding(.horizontal, 20)
-                .padding(.top, 18)
-                .padding(.bottom, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 6)
 
             ScrollView {
-                VStack(spacing: 10) {
+                VStack(spacing: 12) {
                     ForEach(questions.indices, id: \.self) { index in
                         questionRow(questions[index], at: index)
                     }
@@ -115,7 +115,6 @@ struct AskUserQuestionCard: View {
             .scrollBounceBehavior(.basedOnSize)
             .scrollDismissesKeyboard(.interactively)
 
-            Divider().overlay(t.border)
             submitAction
                 .padding(.horizontal, 20)
                 .padding(.vertical, 14)
@@ -136,24 +135,25 @@ struct AskUserQuestionCard: View {
                 .frame(width: 20, height: 20)
                 .accessibilityHidden(true)
             Text("chat_ask_user_question_title")
-                .font(.body)
-                .foregroundStyle(t.text)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(t.text2)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             Spacer(minLength: 0)
-            if questions.count > 1 {
-                Text("\(answeredCount)/\(questions.count)")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(t.text3)
-                    .accessibilityLabel("\(answeredCount) of \(questions.count) answered")
-            }
+            Text("\(answeredCount)/\(questions.count)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(t.text2)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(t.text.opacity(0.05), in: Capsule())
+                .accessibilityLabel("\(answeredCount) of \(questions.count) answered")
             Button {
                 resolve { await onCancel() }
             } label: {
                 Image(systemName: "xmark")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(t.text3)
-                    .frame(width: 36, height: 36)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(t.text2)
+                    .frame(width: 44, height: 44)
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
@@ -172,20 +172,20 @@ struct AskUserQuestionCard: View {
             Button {
                 guard !submitting else { return }
                 focusedQuestionIndex = nil
-                withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.88)) {
+                withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 1)) {
                     expandedQuestion = expanded ? nil : index
                 }
             } label: {
                 HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: answer == nil ? 0 : 3) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(current.question)
-                            .font(.body)
-                            .foregroundStyle(t.text3)
+                            .font(.headline)
+                            .foregroundStyle(t.text)
                             .fixedSize(horizontal: false, vertical: true)
-                        if let answer {
+                        if !expanded, let answer {
                             Text(answer)
-                                .font(.body)
-                                .foregroundStyle(t.text4)
+                                .font(.subheadline)
+                                .foregroundStyle(t.text2)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -203,22 +203,17 @@ struct AskUserQuestionCard: View {
 
             if expanded {
                 questionOptions(current, at: index)
-                    .padding(.bottom, 14)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .padding(.bottom, 6)
+                    .transition(.opacity)
             }
         }
-        .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.88), value: expanded)
+        .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 1), value: expanded)
     }
 
     @ViewBuilder
     private func questionOptions(_ current: ConversationAskQuestion, at index: Int) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !current.header.isEmpty {
-                Text(current.header)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(t.text3)
-                    .textCase(.uppercase)
-            }
+        let customActive = focusedQuestionIndex == index || !(custom[index] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(current.options.indices, id: \.self) { optionIndex in
                 let option = current.options[optionIndex]
                 let active = (selected[index] ?? []).contains(optionIndex)
@@ -229,47 +224,48 @@ struct AskUserQuestionCard: View {
                         in: selected[index] ?? [],
                         multiSelect: current.multiSelect
                     )
-                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.9)) {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 1)) {
                         selected[index] = next
                     }
                     if current.multiSelect {
                         expandedQuestion = index
-                    } else if !next.isEmpty {
+                    } else if questions.count > 1 && !next.isEmpty {
                         expandedQuestion = questions.indices.first(where: { candidate in
                             candidate != index && !isAnswered(at: candidate)
                         })
                     }
                 } label: {
-                    HStack(alignment: .top, spacing: 11) {
+                    HStack(alignment: .center, spacing: 12) {
                         Image(systemName: current.multiSelect
                             ? (active ? "checkmark.square.fill" : "square")
                             : (active ? "checkmark.circle.fill" : "circle"))
                             .font(.title3)
                             .foregroundStyle(active ? t.accent : t.text3)
                             .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 2) {
                             Text(option.label)
-                                .font(.body.weight(.medium))
+                                .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(t.text)
                             if !option.description.isEmpty {
                                 Text(option.description)
                                     .font(.subheadline)
-                                    .foregroundStyle(t.text3)
+                                    .foregroundStyle(t.text2)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .multilineTextAlignment(.leading)
-                    .padding(13)
-                    .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
-                    .background(active ? t.accent.opacity(0.1) : t.surface, in: .rect(cornerRadius: 15))
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 11)
+                    .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                    .background(active ? t.accent.opacity(0.08) : t.surface, in: .rect(cornerRadius: 12))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .stroke(active ? t.accent : t.border, lineWidth: active ? 1.4 : 0.8)
                     }
-                    .contentShape(.rect(cornerRadius: 15))
+                    .contentShape(.rect(cornerRadius: 12))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(AskQuestionOptionButtonStyle())
                 .disabled(submitting)
                 .accessibilityAddTraits(active ? [.isSelected] : [])
                 .accessibilityIdentifier("chat.ask.option.\(index).\(optionIndex)")
@@ -277,8 +273,8 @@ struct AskUserQuestionCard: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("chat_ask_other_option")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(t.text3)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(t.text2)
                 TextField(
                     String(localized: "chat_ask_other_placeholder"),
                     text: Binding(
@@ -289,15 +285,16 @@ struct AskUserQuestionCard: View {
                 )
                 .font(.body)
                 .textFieldStyle(.plain)
-                .lineLimit(2 ... 5)
-                .padding(14)
-                .background(t.surface, in: .rect(cornerRadius: 15))
+                .lineLimit(1 ... 4)
+                .padding(12)
+                .background(t.surface, in: .rect(cornerRadius: 12))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 15, style: .continuous)
-                        .stroke(focusedQuestionIndex == index ? t.accent : t.border, lineWidth: 0.8)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(customActive ? t.accent : t.border, lineWidth: customActive ? 1.4 : 0.8)
                 }
                 .focused($focusedQuestionIndex, equals: index)
                 .disabled(submitting)
+                .accessibilityLabel(String(localized: "chat_ask_other_option"))
                 .accessibilityIdentifier("chat.ask.other.\(index)")
             }
         }
@@ -342,6 +339,16 @@ struct AskUserQuestionCard: View {
             // remains actionable so the user can retry.
             if !accepted { submitting = false }
         }
+    }
+}
+
+private struct AskQuestionOptionButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.75 : 1)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.995 : 1)
     }
 }
 

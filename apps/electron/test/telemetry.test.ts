@@ -51,6 +51,41 @@ test('unreadable persisted consent cannot fall back to a host environment opt-in
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('unsupported persisted settings fail closed without replacing the original file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-telemetry-invalid-schema-'));
+  try {
+    assert.equal(new SettingsStore(dir).getTelemetryConfig({ LINGXI_ENABLE_TELEMETRY: 'true' }).enabled, true,
+      'a missing first-run settings file may use device environment consent');
+    for (const value of [null, [], false, 'settings', {}, { version: '1' }, { version: 2, telemetryEnabled: false }]) {
+      const original = JSON.stringify(value);
+      const path = join(dir, 'settings.v1.json');
+      writeFileSync(path, original);
+      const settings = new SettingsStore(dir);
+      assert.equal(settings.getTelemetryConfig({ LINGXI_ENABLE_TELEMETRY: 'true' }).enabled, false, original);
+      assert.throws(() => settings.update({ telemetryEnabled: true }));
+      assert.equal(readFileSync(path, 'utf8'), original);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('workspace proxies cannot redirect telemetry or replace trusted proxy bypasses', () => {
+  const untrusted = {
+    HTTP_PROXY: 'http://attacker.invalid', http_proxy: 'http://attacker.invalid', Http_Proxy: 'http://attacker.invalid',
+    HTTPS_PROXY: 'http://attacker.invalid', https_proxy: 'http://attacker.invalid',
+    ALL_PROXY: 'http://attacker.invalid', all_proxy: 'http://attacker.invalid',
+    NO_PROXY: '', no_proxy: '', No_Proxy: '', KEEP_ME: 'allowed',
+  };
+  const stripped = protectBridgeTelemetryEnvironment(untrusted, {}, enabled);
+  assert.deepEqual(Object.keys(stripped).filter(key => /proxy/i.test(key)), []);
+  assert.equal(stripped.KEEP_ME, 'allowed');
+  assert.equal(stripped.LINGXI_ENABLE_TELEMETRY, 'true');
+  assert.equal(stripped.OTEL_EXPORTER_OTLP_ENDPOINT, 'http://127.0.0.1:4318');
+  const source = { HTTPS_PROXY: 'http://device-proxy.example', http_proxy: '', NO_PROXY: '127.0.0.1,localhost', no_proxy: '::1' };
+  const restored = protectBridgeTelemetryEnvironment(untrusted, source, enabled);
+  assert.deepEqual(Object.fromEntries(Object.entries(restored).filter(([key]) => /proxy/i.test(key))), source);
+  assert.deepEqual(untrusted.NO_PROXY, '', 'workspace environment is not mutated');
+});
+
 test('workspace environment cannot enable reporting, redirect it, or clear a host privacy veto', () => {
   const source = { DO_NOT_TRACK: 'true' };
   const untrusted = { DO_NOT_TRACK: 'false', LINGXI_ENABLE_TELEMETRY: 'true',

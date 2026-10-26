@@ -5,6 +5,7 @@ import { isSessionId } from './sessionIdentity.js';
 
 import {
   MAX_REMOTE_SESSIONS,
+  SETTINGS_VERSION,
   defaultSettings,
   isPermissionModeId,
   parseModelPickerVisibility,
@@ -66,7 +67,11 @@ export class SettingsStore {
     }
     try {
       const raw: unknown = JSON.parse(contents);
-      const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+        || (raw as Record<string, unknown>)['version'] !== SETTINGS_VERSION) {
+        throw new Error('Unsupported device settings format');
+      }
+      const input = raw as Record<string, unknown>;
       const settings = parseSettings(raw);
       // Decode the managed scope separately so the Project limit cannot discard
       // sessions belonging to the app's scheduled workspace or user projects.

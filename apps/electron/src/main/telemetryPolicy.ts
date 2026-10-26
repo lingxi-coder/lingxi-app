@@ -61,10 +61,17 @@ export function protectBridgeTelemetryEnvironment(
 ): NodeJS.ProcessEnv {
   const result = { ...environment };
   const disabled = telemetryPrivacyDisabled(source) || telemetryPrivacyDisabled(environment);
+  // HTTP exporters honor proxy environment variables independently of the
+  // configured endpoint. A workspace proxy must not receive collector traffic
+  // or its credentials, including HTTP requests to the loopback collector.
+  const proxyVariable = /^(?:https?|all|no)_proxy$/i;
   for (const key of Object.keys(result)) {
     if (/^(?:OTEL_|LINGXI_OTEL_|CLAUDE_CODE_OTEL_)/.test(key)
       || key === 'LINGXI_ENABLE_TELEMETRY' || key === 'CLAUDE_CODE_ENABLE_TELEMETRY'
-      || key === 'CLAUDE_CODE_ENHANCED_TELEMETRY_BETA') delete result[key];
+      || key === 'CLAUDE_CODE_ENHANCED_TELEMETRY_BETA' || proxyVariable.test(key)) delete result[key];
+  }
+  for (const [key, value] of Object.entries(source)) {
+    if (proxyVariable.test(key) && value !== undefined) result[key] = value;
   }
   for (const flag of PRIVACY_FLAGS) {
     if (flag === 'DO_NOT_TRACK' ? truthy(source[flag]) : Boolean(source[flag])) result[flag] = 'true';

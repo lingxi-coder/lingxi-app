@@ -193,6 +193,13 @@ under `--output`. It starts no Electron window; it verifies the host SDK, carrie
 bridge, Agent and exporter integration, not packaged application UI behavior.
 The output directory includes process logs, Collector captures and `result.json`.
 
+Run the Python regressions with the pinned native Collector to check that hook
+phases and failure classifications survive its privacy filter:
+
+```sh
+OTELCOL_CONTRIB=/path/to/otelcol-contrib python3 -m unittest discover -s scripts/telemetry -p 'test_*.py'
+```
+
 ## Privacy and interpretation
 
 The SDK enforces the outbound schema before network egress. The Collector adds

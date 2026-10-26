@@ -1,11 +1,17 @@
 import BackgroundTasks
 import CryptoKit
 import Foundation
+import OSLog
 
 /// A browser request may wake the app, but only this foreground action can
 /// install the iOS 26 continued-processing lease that authorizes that request.
 @MainActor
 final class LocalAppAgentBackgroundController {
+    private static let backgroundLog = Logger(
+        subsystem: "com.lingxi.code",
+        category: "LocalAppAgentBackground"
+    )
+
     private struct Context {
         let wake: LocalAppAgentWakeRequest
         let appName: String
@@ -45,7 +51,9 @@ final class LocalAppAgentBackgroundController {
         let contextKey = wake.contextKey
         if let existing = contexts[contextKey], !existing.finished {
             if tasks[contextKey] != nil, existing.reservationExpiry.map({ $0 > Date() }) == true {
-                return try LocalAppAgentWakeURL.ready(returnURL, origin: origin, runID: wake.runID)
+                let readyURL = try LocalAppAgentWakeURL.ready(returnURL, origin: origin, runID: wake.runID)
+                Self.logPhase("ready_url_returned", contextKey: contextKey, success: true)
+                return readyURL
             }
             throw LocalAppServiceFailure("AGENT_WAKE_IN_PROGRESS", "This browser request is already being prepared. Wait briefly before returning to it.")
         }
@@ -58,9 +66,11 @@ final class LocalAppAgentBackgroundController {
         catch {
             contexts.removeValue(forKey: contextKey)
             requestIDsByIdentifier.removeValue(forKey: identifier)
+            Self.logFailure(error, contextKey: contextKey)
             throw error
         }
 
+        Self.logPhase("registered", contextKey: contextKey, success: true)
         let request = BGContinuedProcessingTaskRequest(
             identifier: identifier,
             title: String(localized: "Local App Agent · \(appName)"),
@@ -70,6 +80,7 @@ final class LocalAppAgentBackgroundController {
 
         do {
             try await submit(request)
+            Self.logPhase("submitted", contextKey: contextKey, success: true)
             try await waitForAttachment(contextKey: contextKey)
             guard !contexts[contextKey, default: context].finished,
                   tasks[contextKey] != nil else {
@@ -99,9 +110,13 @@ final class LocalAppAgentBackgroundController {
             monitors[contextKey] = Task { @MainActor [weak self] in
                 await self?.monitor(contextKey, client: client)
             }
-            return try LocalAppAgentWakeURL.ready(returnURL, origin: origin, runID: wake.runID)
+            Self.logPhase("wake_reserve", contextKey: contextKey, success: true)
+            let readyURL = try LocalAppAgentWakeURL.ready(returnURL, origin: origin, runID: wake.runID)
+            Self.logPhase("ready_url_returned", contextKey: contextKey, success: true)
+            return readyURL
         } catch {
             await cancel(wake, client: client)
+            Self.logFailure(error, contextKey: contextKey)
             throw error
         }
     }
@@ -110,6 +125,7 @@ final class LocalAppAgentBackgroundController {
         let contextKey = wake.contextKey
         guard var context = contexts[contextKey], context.wake == wake, !context.finished else {
             try? await clearReservation(wake, client: client)
+            Self.logPhase("cancel_requested", contextKey: contextKey, success: nil)
             return
         }
         context.finished = true
@@ -128,6 +144,7 @@ final class LocalAppAgentBackgroundController {
         finishTask(contextKey: contextKey, success: false)
         contexts.removeValue(forKey: contextKey)
         requestIDsByIdentifier.removeValue(forKey: context.identifier)
+        Self.logPhase("cancel_requested", contextKey: contextKey, success: nil)
     }
 
     private func submit(_ request: BGContinuedProcessingTaskRequest) async throws {
@@ -175,6 +192,7 @@ final class LocalAppAgentBackgroundController {
             return
         }
         tasks[contextKey] = continued
+        Self.logPhase("task_attached", contextKey: contextKey, success: true)
         continued.updateTitle(
             String(localized: "Local App Agent · \(contexts[contextKey]?.appName ?? "")"),
             subtitle: "Waiting for this browser request"
@@ -259,6 +277,7 @@ final class LocalAppAgentBackgroundController {
             } catch is CancellationError {
                 return
             } catch let failure as LocalAppServiceFailure where Self.isPermanentMonitorFailure(failure) {
+                Self.logFailure(failure, contextKey: contextKey)
                 await complete(context.wake, success: false, client: client)
                 return
             } catch {
@@ -305,6 +324,7 @@ final class LocalAppAgentBackgroundController {
 
     private func expire(_ contextKey: String) async {
         guard let context = contexts[contextKey], !context.finished else { return }
+        Self.logPhase("expire", contextKey: contextKey, success: nil)
         await cancel(context.wake, client: context.client)
     }
 
@@ -319,6 +339,7 @@ final class LocalAppAgentBackgroundController {
         finishTask(contextKey: contextKey, success: success)
         contexts.removeValue(forKey: contextKey)
         requestIDsByIdentifier.removeValue(forKey: context.identifier)
+        Self.logPhase("complete", contextKey: contextKey, success: success)
     }
 
     private func clearReservation(_ wake: LocalAppAgentWakeRequest, client: LocalAppServiceClient) async throws {
@@ -335,6 +356,39 @@ final class LocalAppAgentBackgroundController {
         task.expirationHandler = nil
         LocalAppAgentProgressReporting.finish(task.progress, success: success)
         task.setTaskCompleted(success: success)
+    }
+
+    private static func logPhase(_ phase: String, contextKey: String, success: Bool?) {
+        if let success {
+            backgroundLog.log(
+                "phase=\(phase, privacy: .public) keyhash=\(keyHash(contextKey), privacy: .public) success=\(success, privacy: .public)"
+            )
+        } else {
+            backgroundLog.log(
+                "phase=\(phase, privacy: .public) keyhash=\(keyHash(contextKey), privacy: .public)"
+            )
+        }
+    }
+
+    private static func logFailure(_ error: Error, contextKey: String) {
+        let digest = keyHash(contextKey)
+        if let failure = error as? LocalAppServiceFailure {
+            backgroundLog.error(
+                "phase=failure keyhash=\(digest, privacy: .public) success=false failureCode=\(failure.code, privacy: .public)"
+            )
+        } else {
+            let nsError = error as NSError
+            backgroundLog.error(
+                "phase=failure keyhash=\(digest, privacy: .public) success=false errorDomain=\(nsError.domain, privacy: .public) errorCode=\(nsError.code, privacy: .public)"
+            )
+        }
+    }
+
+    private static func keyHash(_ contextKey: String) -> String {
+        SHA256.hash(data: Data(contextKey.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     static func isPermanentMonitorFailure(_ error: Error) -> Bool {

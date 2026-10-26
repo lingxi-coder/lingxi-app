@@ -1,8 +1,8 @@
 import { createPortal } from 'react-dom';
 import { useInspectorMotion } from './useInspectorMotion';
-import { SummaryContextActions } from './BetaDesktop';
 import { PlanDocument } from './PlanDocument';
-import { GitReview, GitEnvironment } from './GitReview';
+import { GitReview } from './GitReview';
+import type { SideChatsController } from '../bridge/useSideChats';
 import {
   useCallback,
   useEffect,
@@ -162,7 +162,7 @@ function taskAvatarId(task: TaskRowDto): string | undefined {
 
 function standaloneAgents(agents: Record<string, SessionAgentSummaryDto>, tasks: TaskRowDto[]): SessionAgentSummaryDto[] {
   const linkedIds = new Set(tasks.map((task) => task.agent_id).filter(Boolean));
-  return Object.values(agents).filter((agent) => agent.agent_id !== 'main' && !linkedIds.has(agent.agent_id));
+  return Object.values(agents).filter((agent) => agent.agent_id !== 'main' && agent.agent_type !== 'side_question' && !linkedIds.has(agent.agent_id));
 }
 
 function EmptyRow({ children }: { children: ReactNode }) {
@@ -179,9 +179,11 @@ function OverviewRow({
   status,
   statusText,
   onClick,
+  trailing,
 }: {
   icon: string;
   title: string;
+  trailing?: string;
   subtitle?: string;
   thumbnail?: string;
   agentId?: string;
@@ -196,6 +198,8 @@ function OverviewRow({
     <button
       type="button"
       onClick={onClick}
+      className="runtime-overview-row"
+      title={title}
       style={{
         width: '100%', display: 'flex', alignItems: 'center', gap: 9, minHeight: 42,
         padding: '7px 9px', border: 0, borderRadius: 8, background: 'transparent',
@@ -211,14 +215,16 @@ function OverviewRow({
         <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 14, fontWeight: 400 }}>{title}</span>
         {subtitle && <span style={{ display: 'block', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.dark ? t.text2 : t.text3, fontSize: 12 }}>{subtitle}</span>}
       </span>
+      {trailing && <span className="runtime-summary-trailing">{trailing}</span>}
       {status && <span className={status === 'running' ? 'running-sweep' : undefined} style={{ flexShrink: 0, color: statusColor(t, status), fontSize: 10 }}>{statusText ?? runtimeStatusLabel(status)}</span>}
     </button>
   );
 }
 
-function SummarySection({ section, children }: { section: RuntimeCenterSection; children: ReactNode }) {
-  return <section className="runtime-summary-section" aria-label={sectionLabel(section)}>
-    <h2>{sectionLabel(section)}</h2>{children}
+function SummarySection({ section, label, action, children }: { section?: RuntimeCenterSection; label?: string; action?: ReactNode; children: ReactNode }) {
+  const title = label ?? sectionLabel(section!);
+  return <section className="runtime-summary-section" aria-label={title}>
+    <div className="runtime-summary-heading"><h2>{title}</h2>{action}</div>{children}
   </section>;
 }
 
@@ -262,7 +268,12 @@ function planHeading(content: string): string {
   return shorten(content.split('\n').find((line) => line.trim())?.replace(/^#+\s*/, '') ?? tr('desktop_runtime_submitted_plan'), 70);
 }
 
-export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
+function sideChatTitle(items: UseBridge['conversation']['items']): string {
+  const prompt = items.find(item => item.type === 'narration' && item.role === 'user');
+  return prompt?.type === 'narration' ? shorten(prompt.text, 80) : tr('desktop_runtime_side_chat');
+}
+
+export function RuntimeCenterOverview({ bridge, sideChats, onManageSources }: { bridge: UseBridge; sideChats?: SideChatsController; onManageSources?(): void }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
   const [isOverlayLayout, setIsOverlayLayout] = useState(false);
@@ -359,22 +370,37 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
       [...tabs].find((tab) => tab.dataset.runtimeInspectorTab === key)?.focus();
     });
   };
+  const createOutput = () => {
+    if (!bridge.activeSession) return;
+    bridge.offerLinkDraft({ sessionId: bridge.activeSession.sessionId, text: tr('desktop_runtime_create_output_prompt'), requestId: crypto.randomUUID() });
+    closeOverview(false);
+  };
   return (
     <div ref={ref} id="runtime-center-overview" className="runtime-summary" data-inspector-open={center.inspectorOpen ? 'true' : undefined} role="region" aria-label={tr('desktop_runtime_pinned_summary')}
       onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeOverview(true); } }}
-      style={{ '--runtime-border': t.border, '--runtime-muted': t.dark ? t.text2 : t.text3, background: t.surface, color: t.text } as CSSProperties}>
-      <GitEnvironment onNavigate={() => bridge.setRuntimeCenterOverviewOpen(false)} />
-      <SummaryContextActions key={bridge.conversation.sessionKey} bridge={bridge} />
-      {(agents.length > 0 || tasks.length > 0) && <SummarySection section="agents">
-        {agents.length > 0 && <OverviewRow icon="subagent" title={agentStatusSummary(agents.map((agent) => agent.status))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
-        {tasks.length > 0 && <OverviewRow icon="activity" title={tr(tasks.length === 1 ? 'desktop_runtime_background_task_count' : 'desktop_runtime_background_tasks_count', tasks.length)} subtitle={agentStatusSummary(tasks.map(taskSummaryStatus))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
+      style={{ '--runtime-border': t.border, '--runtime-hover': t.surfaceHover, '--runtime-pressed': t.surfaceActive, '--runtime-muted': t.dark ? t.text2 : t.text3, background: t.surface, color: t.text } as CSSProperties}>
+      <SummarySection label={tr('desktop_runtime_outputs')} action={<button type="button" className="runtime-summary-add" aria-label={tr('desktop_runtime_create_output')} disabled={!bridge.activeSession} onClick={createOutput}><Icon name="plus" size={18} /></button>}>
+        {center.submittedPlan && <OverviewRow icon="file" title={planHeading(center.submittedPlan.content)} subtitle={planStatusLabel(center.submittedPlan.status)} onClick={() => open({ kind: 'plan-document', id: center.submittedPlan!.id })} />}
+        <button type="button" className="runtime-summary-create" disabled={!bridge.activeSession} onClick={createOutput}>{tr('desktop_runtime_create_output')}</button>
+      </SummarySection>
+      {Boolean(sideChats?.sides.length || Object.values(center.agents).some(agent => agent.agent_type === 'side_question')) && <SummarySection label={tr('desktop_runtime_side_chats')}>
+        {sideChats?.sides.map(side => <OverviewRow key={side.id} icon="chat" title={sideChatTitle(side.conversation.items)}
+          onClick={() => { sideChats.select(side.id); sideChats.setOpen(true); closeOverview(false); }} />)}
+        {Object.values(center.agents).filter(agent => agent.agent_type === 'side_question').map(agent => <OverviewRow key={agent.agent_id} icon="chat" title={agent.name || tr('desktop_runtime_side_chat')} onClick={() => open({ kind: 'agent', id: agent.agent_id })} />)}
       </SummarySection>}
-      {center.resources.length > 0 && <SummarySection section="resources">
+      {agents.length > 0 && <SummarySection section="agents">
+        <OverviewRow icon="subagent" title={agents.every(agent => agent.status === 'completed') ? tr('desktop_runtime_count_done', agents.length) : agentStatusSummary(agents.filter(agent => agent.status !== 'completed').map(agent => agent.status))}
+          trailing={!agents.every(agent => agent.status === 'completed') && agents.some(agent => agent.status === 'completed') ? tr('desktop_runtime_count_done', agents.filter(agent => agent.status === 'completed').length) : undefined}
+          onClick={() => open({ kind: 'section', id: 'agents' })} />
+      </SummarySection>}
+      {tasks.length > 0 && <SummarySection label={tr('desktop_runtime_background_processes')}>
+        {tasks.map(task => <OverviewRow key={task.task_id} icon={task.task_type === 'local_bash' ? 'terminal' : 'activity'} title={taskLabel(task)} status={taskSummaryStatus(task)} statusText={taskDisplayStatus(task)} onClick={() => open({ kind: 'task', id: task.task_id })} />)}
+      </SummarySection>}
+      {(center.resources.length > 0 || bridge.mcpServersEvent?.servers.length || onManageSources) && <SummarySection label={tr('desktop_runtime_sources')}
+        action={onManageSources && <button type="button" className="runtime-summary-add" aria-label={tr('desktop_runtime_manage_sources')} onClick={onManageSources}><Icon name="plus" size={18} /></button>}>
+        {(bridge.mcpServersEvent?.servers ?? []).slice(0, 3).map(server => <OverviewRow key={server.name} icon="mcp" title={server.name} onClick={() => onManageSources ? onManageSources() : open({ kind: 'section', id: 'resources' })} />)}
         {center.resources.slice(0, 3).map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : resource.kind === 'file' ? 'file' : 'resources'} title={resource.name} thumbnail={resource.kind === 'image' ? resource.url : undefined} onClick={() => open({ kind: 'resource', id: resource.id })} />)}
-        <OverviewRow icon="resources" title={tr('desktop_runtime_view_all')} onClick={() => open({ kind: 'section', id: 'resources' })} />
-      </SummarySection>}
-      {center.submittedPlan && <SummarySection section="plan">
-        <OverviewRow icon="file" title={planHeading(center.submittedPlan.content)} subtitle={planStatusLabel(center.submittedPlan.status)} onClick={() => open({ kind: 'plan-document', id: center.submittedPlan!.id })} />
+        {(center.resources.length > 0 || (bridge.mcpServersEvent?.servers.length ?? 0) > 3) && <OverviewRow icon="resources" title={tr('desktop_runtime_view_all')} onClick={() => center.resources.length > 0 ? open({ kind: 'section', id: 'resources' }) : onManageSources?.()} />}
       </SummarySection>}
     </div>
   );

@@ -15,7 +15,7 @@ const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'topbar-summary-electron.mjs');
 
 for (const controlsOnly of [false, true]) {
-  test(controlsOnly ? 'real Electron inspector header controls respond to mouse input' : 'real Electron workspace keeps summary pinned with independent details and restored context access', async () => {
+  test(controlsOnly ? 'real Electron inspector header controls respond to mouse input' : 'real Electron workspace keeps summary pinned with independent details and sources access', async () => {
     const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-topbar-summary-vite-'));
     const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-topbar-summary-electron-'));
     const vite = await createServer({
@@ -75,7 +75,7 @@ for (const controlsOnly of [false, true]) {
         return;
       }
       assert.equal(result.checks.length, 9);
-      assert.deepEqual(result.overview.sections, ['Context', 'Subagents', 'Resources', 'Plan']);
+      assert.deepEqual(result.overview.sections, ['Outputs', 'Subagents', 'Sources']);
       assert.equal(result.overview.width, 300);
       assert.deepEqual(result.heights, { chat: 44, detail: 44, panel: 390 });
 

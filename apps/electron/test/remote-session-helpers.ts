@@ -5,7 +5,21 @@ import type { RemoteFileStore } from '../src/main/remoteControl/fileStore.js';
  * `SessionRuntime`, a recording viewer channel, and event builders.
  */
 
-import type { AskUserQuestionRequestDto, ClientCommand, ClientEvent, ImageRefDto, PermissionRequest } from '@lingxi/bridge-client';
+import type {
+  AskUserQuestionRequestDto,
+  ClientCommand,
+  ClientEvent,
+  ImageRefDto,
+  MediaContentDto,
+  MediaConnectionRequestDto,
+  MediaConnectionResponseDto,
+  MediaControlRequestDto,
+  MediaControlResponseDto,
+  MediaOperationDto,
+  MediaOperationIdDto,
+  MediaResultDto,
+  PermissionRequest,
+} from '@lingxi/bridge-client';
 import { ManualClock, RemoteRpcError, type DevicePlatform, type RemotePending } from '@lingxi/bridge-client/remote';
 
 import type {
@@ -48,14 +62,34 @@ export const questionRequest = (requestId: number): AskUserQuestionRequestDto =>
 });
 
 export function viewer(overrides: Partial<RemoteViewer> = {}): RemoteViewer {
-  return { device_id: 'device-1', device_name: 'Test phone', platform: 'ios' as DevicePlatform, conn_id: 'conn-1', ...overrides };
+  return { host_id: 'host-1', device_id: 'device-1', device_name: 'Test phone', platform: 'ios' as DevicePlatform, conn_id: 'conn-1', ...overrides };
 }
 
 export interface Notification { method: string; params: any }
 
 export class RecordingChannel implements RemoteViewerChannel {
   readonly sent: Notification[] = [];
+  readonly requests: Array<{ method: string; params: unknown }> = [];
   notify(method: string, params: unknown): void { this.sent.push({ method, params }); }
+  async request(method: 'media.offer' | 'media.control', params: unknown): Promise<unknown> {
+    this.requests.push({ method, params });
+    if (method === 'media.offer' && typeof params === 'object' && params !== null) {
+      const offer = params as { media_session_ref?: unknown; offer_sdp?: unknown };
+      return { v: 1, media_session_ref: offer.media_session_ref, answer_sdp: offer.offer_sdp };
+    }
+    if (method === 'media.control' && typeof params === 'object' && params !== null) {
+      const control = params as { media_session_ref: string; generation: number; target_audio_sequence: number; target_sample_frames: number };
+      return {
+        v: 1,
+        media_session_ref: control.media_session_ref,
+        generation: control.generation,
+        audio_sequence: control.target_audio_sequence,
+        accepted_sample_frames: control.target_sample_frames,
+        played_sample_frames: control.target_sample_frames,
+      };
+    }
+    return undefined;
+  }
   of(method: string): any[] { return this.sent.filter((item) => item.method === method).map((item) => item.params); }
   /** The `session.event` records, in the order they were sent. */
   records(): Array<{ seq: number; record: any }> { return this.of('session.event').map((params) => ({ seq: params.seq, record: params.record })); }
@@ -83,6 +117,10 @@ export class FakeRuntime implements RemoteRuntime {
   readonly questions = new Map<number, AskUserQuestionRequestDto>();
   readonly observers = new Set<RemoteObserver>();
   readonly calls: Array<{ method: string; args: unknown[] }> = [];
+  readonly mediaConnectionResponses: MediaConnectionResponseDto[] = [];
+  readonly mediaControlResponses: MediaControlResponseDto[] = [];
+  private readonly mediaConnectionListeners = new Set<(request: MediaConnectionRequestDto) => void>();
+  private readonly mediaControlListeners = new Set<(request: MediaControlRequestDto) => void>();
   failSend: Error | undefined;
   disposed = false;
 
@@ -238,6 +276,52 @@ export class FakeRuntime implements RemoteRuntime {
   async dispatchCommand(command: ClientCommand | unknown, source?: PromptSource): Promise<void> {
     this.calls.push({ method: 'dispatchCommand', args: [command, source] });
     if (this.failSend) throw this.failSend;
+  }
+
+  async executeMedia(_operation: MediaOperationDto, _limits?: { timeout_budget_ms?: number; max_payload_bytes?: number }): Promise<{ operation_id: MediaOperationIdDto; result: MediaResultDto }> {
+    throw new Error('unused media operation in FakeRuntime');
+  }
+
+  async readMedia(_mediaRef: string): Promise<MediaContentDto> {
+    throw new Error('unused media read in FakeRuntime');
+  }
+
+  async cancelMedia(_operationId: MediaOperationIdDto): Promise<void> {
+    throw new Error('unused media cancellation in FakeRuntime');
+  }
+
+  async registerMediaConnection(connectionId: string, label: string, modes: readonly string[], sourceKinds: readonly ('microphone' | 'camera' | 'screen')[]): Promise<void> {
+    this.calls.push({ method: 'registerMediaConnection', args: [connectionId, label, modes, sourceKinds] });
+  }
+
+  async unregisterMediaConnection(connectionId: string): Promise<void> {
+    this.calls.push({ method: 'unregisterMediaConnection', args: [connectionId] });
+  }
+
+  onMediaConnectionRequest(listener: (request: MediaConnectionRequestDto) => void): () => void {
+    this.mediaConnectionListeners.add(listener);
+    return () => this.mediaConnectionListeners.delete(listener);
+  }
+
+  async respondToMediaConnection(response: MediaConnectionResponseDto): Promise<void> {
+    this.mediaConnectionResponses.push(response);
+  }
+
+  onMediaControlRequest(listener: (request: MediaControlRequestDto) => void): () => void {
+    this.mediaControlListeners.add(listener);
+    return () => this.mediaControlListeners.delete(listener);
+  }
+
+  async respondToMediaControl(response: MediaControlResponseDto): Promise<void> {
+    this.mediaControlResponses.push(response);
+  }
+
+  emitMediaConnectionRequest(request: MediaConnectionRequestDto): void {
+    for (const listener of [...this.mediaConnectionListeners]) listener(request);
+  }
+
+  emitMediaControlRequest(request: MediaControlRequestDto): void {
+    for (const listener of [...this.mediaControlListeners]) listener(request);
   }
 
   async scheduledModelCatalog(): Promise<Extract<ClientEvent, { type: 'model_list' }>> {

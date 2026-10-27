@@ -56,6 +56,8 @@ Browser task and Chat reads have a five-second transport deadline, including the
 
 Native status reads, cancellation, and cleanup reuse an already initialized model host. They do not refresh credentials or replace the executor on every poll. A temporary secure-storage read error during a required configuration check is reported as unavailable, rather than interpreted as a deleted credential. Real configuration changes still take effect before new work starts.
 
+The isolated App Agent host does not inherit the ordinary conversation's native media service or realtime handoff. It can initialize without native camera/audio callbacks or a default audio-provider binding. Browser-selected image and file attachments still use the selected model's supported input capabilities. A host media initialization error must not prevent these requests from starting.
+
 Effective tool authority is the intersection of release-declared tools, native host grants, the request, platform capability, and enterprise policy. Native UI owns permission and question approval; those controls are never exposed to page JavaScript. MCP access is bound to the selected configuration ID and revision, raw tool name, and definition digest. The host checks it at discovery and execution, including after approval or reconnect, and revocation blocks later calls. Apps cannot provide MCP URLs or credentials.
 
 An immutable release may declare runtime Skills as `manifest.agent.skills: {id, path}[]`; each path is exactly `skills/<id>/SKILL.md` within that release. Native settings approve a subset of those IDs, and a request may use only the intersection. A Skill supplies instructions; it does not grant tools or permission to install dependencies or run scripts outside existing task permissions.
@@ -102,6 +104,8 @@ The App library and agent data live below the config root under `local-apps/v2/a
 ## External browser and process lifetime
 
 Android and iOS open the app page in the operating system's resolved external HTTP browser handler. The OS uses the user's actual default browser or presents its resolver when needed. This includes OEM and third-party browsers; product code must not pin a browser brand, package, or application ID. Mobile Local App content is not rendered in Android WebView or iOS WKWebView. Browser camera and file selection use standard browser flows; the browser returns selected content as `File` objects through the SDK.
+
+The mobile loopback gateway runs on the phone. A phone browser's `127.0.0.1` addresses that phone; a Mac request to the same address addresses the Mac and cannot test the phone's gateway. The host supplies the current scoped entry URL and binds the gateway to the phone's loopback interface.
 
 On Android, a user-started foreground service owns the Local App runtime before the app hands off to the browser. Its persistent notification provides stop and view actions. Task records can be inspected after process death, but work is not replayed. Stop and cancellation target the App or named run and wait for cleanup before releasing admission.
 

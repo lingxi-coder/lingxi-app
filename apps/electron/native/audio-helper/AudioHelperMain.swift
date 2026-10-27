@@ -383,6 +383,7 @@ struct HelperSnapshot: Encodable, Sendable {
     let capabilities: HelperAudioCapabilities?
     let configurationRevision: UInt64?
     let currentOperation: HelperAudioCurrentOperation?
+    var mediaSessionModes: [String] = []
     var audioOperations: [HelperAudioOperationTrace] = []
     var activeOperationCount: Int = 0
     var pendingOperationCount: Int = 0
@@ -622,6 +623,27 @@ actor LineWriter {
                )) {
                 emit(fallback)
             }
+            return
+        }
+        emit(data)
+    }
+
+    func writeMediaResponse(id: String, response: HelperMediaDeviceResponseDto) {
+        let envelope = HelperMediaOutputEnvelope(id: id, response: response)
+        guard let data = try? JSONEncoder().encode(envelope) else { return }
+        if data.count > maxLineBytes {
+            let fallback = HelperMediaOutputEnvelope(
+                id: id,
+                response: HelperMediaDeviceResponseDto(
+                    requestID: response.requestID,
+                    result: .error(HelperMediaErrorDto(
+                        kind: "media_too_large",
+                        message: "native media response exceeded the JSONL size limit"
+                    ))
+                )
+            )
+            guard let fallbackData = try? JSONEncoder().encode(fallback) else { return }
+            emit(fallbackData)
             return
         }
         emit(data)
@@ -2375,6 +2397,20 @@ actor HelperStateStore {
     private var listeningOwner: HelperOwner?
     private var activeSession: ListeningSession?
     private var activeSpeech: PlaybackSession?
+    private struct ActiveMediaDeviceLease {
+        let leaseID: String
+        let owner: HelperAudioOwner
+        let identity: HelperAudioOperationIdentity
+        let session: HelperMediaDeviceSession
+    }
+    private var mediaDeviceLease: ActiveMediaDeviceLease?
+    private var stoppedMediaLeaseIDs = Set<String>()
+    private var stoppedMediaLeaseHistory: [String] = []
+    private var mediaOpeningOwnerCounts: [String: Int] = [:]
+    private var seenMediaRequestIDs = Set<String>()
+    private var mediaRequestHistory: [String] = []
+    private var seenMediaIdentityKeys = Set<String>()
+    private var mediaIdentityHistory: [String] = []
     private var speechTask: Task<Void, Never>?
     private var helperMessage: String?
     private var isShuttingDown = false
@@ -2449,6 +2485,15 @@ actor HelperStateStore {
     ) async -> HelperSnapshot {
         let speechStatus = SFSpeechRecognizer.authorizationStatus()
         let configuration = configurationOverride ?? audioConfiguration
+        let mediaPlaybackActive: Bool
+        let mediaCaptureActive: Bool
+        if let mediaDeviceLease {
+            mediaCaptureActive = await mediaDeviceLease.session.status().audioEnabled
+            mediaPlaybackActive = await mediaDeviceLease.session.hasPendingPlayback()
+        } else {
+            mediaCaptureActive = false
+            mediaPlaybackActive = false
+        }
         return HelperSnapshot(
             helper: .init(state: "running", message: message ?? helperMessage),
             permissions: .init(
@@ -2468,13 +2513,211 @@ actor HelperStateStore {
             currentOperation: activeRequestIdentity.flatMap { identity in
                 activeRequestOwner.map { HelperAudioCurrentOperation(identity: identity, owner: $0) }
             },
+            mediaSessionModes: HelperMediaDeviceSession.supportedMediaSessionModes,
             audioOperations: operationTraces,
-            activeOperationCount: activeOperations.count,
-            pendingOperationCount: activeOperations.count,
-            activeRecordingCount: owner == nil || activity != "listening" ? 0 : 1,
-            activePlaybackCount: activeSpeech == nil ? 0 : 1,
+            activeOperationCount: activeOperations.count + (mediaDeviceLease == nil ? 0 : 1),
+            pendingOperationCount: activeOperations.count + (mediaDeviceLease == nil ? 0 : 1),
+            activeRecordingCount: activeSession != nil || mediaCaptureActive ? 1 : 0,
+            activePlaybackCount: activeSpeech == nil && !mediaPlaybackActive ? 0 : 1,
             activeModelReferenceCount: await models.activeReferenceCount()
         )
+    }
+
+    func handleMediaDeviceRequest(id: String, rawRequest: Any?) async {
+        let rawEnvelope = rawRequest as? [String: Any]
+        let fallbackRequestID = rawEnvelope?["request_id"] as? String ?? "invalid"
+        do {
+            let request = try parseHelperMediaDeviceRequest(rawRequest)
+            guard rememberMediaRequestID(request.requestID) else {
+                throw HelperError.cancelled("the native media request identity is stale")
+            }
+            let result = try await executeMediaDeviceRequest(request.operation)
+            await writer.writeMediaResponse(
+                id: id,
+                response: HelperMediaDeviceResponseDto(requestID: request.requestID, result: result)
+            )
+        } catch {
+            await writer.writeMediaResponse(
+                id: id,
+                response: HelperMediaDeviceResponseDto(
+                    requestID: fallbackRequestID,
+                    result: .error(helperMediaErrorDto(error))
+                )
+            )
+        }
+    }
+
+    private func executeMediaDeviceRequest(_ operation: HelperMediaDeviceOperation) async throws -> HelperMediaDeviceResultDto {
+        try Task.checkCancellation()
+        switch operation {
+        case let .open(request):
+            let leaseID = try await openMediaDevice(request)
+            return .opened(leaseID)
+        case let .nextInput(leaseID):
+            let lease = try requireMediaDeviceLease(leaseID)
+            return .input(try await lease.session.nextInput())
+        case let .writeAudio(leaseID, frame):
+            let lease = try requireMediaDeviceLease(leaseID)
+            return .audioWritten(try await lease.session.writeAudio(frame))
+        case let .writeVideo(leaseID):
+            _ = try requireMediaDeviceLease(leaseID)
+            throw HelperError.unsupported("the Desktop native media helper has no video renderer")
+        case let .flushAudio(leaseID):
+            let lease = try requireMediaDeviceLease(leaseID)
+            return .audioFlushed(try await lease.session.flushAudio())
+        case let .interruptAudio(leaseID):
+            let lease = try requireMediaDeviceLease(leaseID)
+            return .audioInterrupted(try await lease.session.interruptAudio())
+        case let .update(leaseID, update):
+            let lease = try requireMediaDeviceLease(leaseID)
+            return .updated(try await lease.session.update(update))
+        case let .stop(leaseID):
+            try await stopMediaDeviceLease(leaseID)
+            return .stopped
+        }
+    }
+
+    private func openMediaDevice(_ request: HelperMediaOpenRequest) async throws -> String {
+        let ownerKey = helperAudioOwnerKey(request.owner.helperOwner)
+        let identityKey = helperAudioIdentityKey(request.identity)
+        guard !isShuttingDown, endingOwners[ownerKey, default: 0] == 0 else {
+            throw HelperError.cancelled("the native media owner is being torn down")
+        }
+        guard !seenMediaIdentityKeys.contains(identityKey) else {
+            throw HelperError.cancelled("the native media operation identity is stale")
+        }
+        rememberMediaIdentity(identityKey)
+        mediaOpeningOwnerCounts[ownerKey, default: 0] += 1
+        defer { finishMediaOpen(ownerKey: ownerKey) }
+
+        try reservePhysical(identity: request.identity, owner: request.owner.helperOwner, activity: "listening")
+        owner = request.owner.helperOwner
+        activity = "listening"
+        var openedSession: HelperMediaDeviceSession?
+        do {
+            let session = try await MainActor.run {
+                let session = try HelperMediaDeviceSession(request: request)
+                try session.start()
+                return session
+            }
+            openedSession = session
+            try Task.checkCancellation()
+            guard !isShuttingDown,
+                  endingOwners[ownerKey, default: 0] == 0,
+                  reservedPhysicalIdentity == request.identity else {
+                throw HelperError.cancelled("the native media open was cancelled")
+            }
+            let leaseID = UUID().uuidString.lowercased()
+            mediaDeviceLease = ActiveMediaDeviceLease(
+                leaseID: leaseID,
+                owner: request.owner,
+                identity: request.identity,
+                session: session
+            )
+            await publishOwnerChanged()
+            await publishSnapshotChanged()
+            try Task.checkCancellation()
+            guard !isShuttingDown,
+                  endingOwners[ownerKey, default: 0] == 0,
+                  mediaDeviceLease?.leaseID == leaseID else {
+                throw HelperError.cancelled("the native media open was ended before acknowledgement")
+            }
+            return leaseID
+        } catch {
+            if let openedSession { await openedSession.stop() }
+            releaseMediaPhysicalLease(identity: request.identity, owner: request.owner.helperOwner)
+            await publishOwnerChanged()
+            await publishSnapshotChanged()
+            throw error
+        }
+    }
+
+    private func requireMediaDeviceLease(_ leaseID: String) throws -> ActiveMediaDeviceLease {
+        guard let lease = mediaDeviceLease, lease.leaseID == leaseID else {
+            throw HelperError.notRecording("the native media lease was not found")
+        }
+        return lease
+    }
+
+    private func stopMediaDeviceLease(_ leaseID: String) async throws {
+        guard let lease = mediaDeviceLease, lease.leaseID == leaseID else {
+            if stoppedMediaLeaseIDs.contains(leaseID) { return }
+            throw HelperError.notRecording("the native media lease was not found")
+        }
+        await lease.session.stop()
+        if mediaDeviceLease?.leaseID == leaseID {
+            mediaDeviceLease = nil
+            rememberStoppedMediaLease(leaseID)
+            releaseMediaPhysicalLease(identity: lease.identity, owner: lease.owner.helperOwner)
+            await publishOwnerChanged()
+            await publishSnapshotChanged()
+        }
+    }
+
+    private func rememberStoppedMediaLease(_ leaseID: String) {
+        guard stoppedMediaLeaseIDs.insert(leaseID).inserted else { return }
+        stoppedMediaLeaseHistory.append(leaseID)
+        if stoppedMediaLeaseHistory.count > 256 {
+            let oldest = stoppedMediaLeaseHistory.removeFirst()
+            stoppedMediaLeaseIDs.remove(oldest)
+        }
+    }
+
+    private func stopMediaDeviceLease(ownerKey: String) async {
+        guard let lease = mediaDeviceLease,
+              helperAudioOwnerKey(lease.owner.helperOwner) == ownerKey else { return }
+        try? await stopMediaDeviceLease(lease.leaseID)
+    }
+
+    private func releaseMediaPhysicalLease(identity: HelperAudioOperationIdentity, owner expectedOwner: HelperOwner) {
+        if reservedPhysicalIdentity == identity {
+            reservedPhysicalIdentity = nil
+            reservedPhysicalOwner = nil
+        }
+        if owner == expectedOwner,
+           listeningIdentity == nil,
+           speechIdentity == nil,
+           mediaDeviceLease?.identity != identity {
+            owner = nil
+            activity = "idle"
+        } else if owner == nil, reservedPhysicalIdentity == nil {
+            activity = "idle"
+        }
+    }
+
+    private func rememberMediaRequestID(_ requestID: String) -> Bool {
+        guard seenMediaRequestIDs.insert(requestID).inserted else { return false }
+        mediaRequestHistory.append(requestID)
+        if mediaRequestHistory.count > 4_096 {
+            let oldest = mediaRequestHistory.removeFirst()
+            seenMediaRequestIDs.remove(oldest)
+        }
+        return true
+    }
+
+    private func rememberMediaIdentity(_ identityKey: String) {
+        seenMediaIdentityKeys.insert(identityKey)
+        mediaIdentityHistory.append(identityKey)
+        if mediaIdentityHistory.count > 4_096 {
+            let oldest = mediaIdentityHistory.removeFirst()
+            seenMediaIdentityKeys.remove(oldest)
+        }
+    }
+
+    private func finishMediaOpen(ownerKey: String) {
+        let count = mediaOpeningOwnerCounts[ownerKey, default: 0]
+        if count <= 1 { mediaOpeningOwnerCounts.removeValue(forKey: ownerKey) }
+        else { mediaOpeningOwnerCounts[ownerKey] = count - 1 }
+    }
+
+    private func waitForMediaOpens(ownerKey: String, timeoutMs: UInt64) async -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutMs &* 1_000_000
+        while mediaOpeningOwnerCounts[ownerKey, default: 0] > 0 {
+            if DispatchTime.now().uptimeNanoseconds >= deadline { return false }
+            do { try await Task.sleep(nanoseconds: 10_000_000) }
+            catch { return false }
+        }
+        return true
     }
 
     private func audioCapabilities(speechStatus: SFSpeechRecognizerAuthorizationStatus, configuration: AudioConfigurationV4) async -> HelperAudioCapabilities {
@@ -2651,6 +2894,18 @@ actor HelperStateStore {
 
     func rejectOverloaded(_ envelope: [String: Any]) async {
         let id = envelope["id"] as? String ?? UUID().uuidString
+        if envelope["kind"] as? String == "media_request" {
+            let rawRequest = envelope["request"] as? [String: Any]
+            let requestID = rawRequest?["request_id"] as? String ?? "invalid"
+            await writer.writeMediaResponse(
+                id: id,
+                response: HelperMediaDeviceResponseDto(
+                    requestID: requestID,
+                    result: .error(HelperMediaErrorDto(kind: "busy", message: "the native media helper is at its in-flight request limit"))
+                )
+            )
+            return
+        }
         let request = envelope["request"] as? [String: Any] ?? [:]
         guard envelope["kind"] as? String == "engine_request",
               parseHelperAudioIdentity(request["identity"] as? [String: Any] ?? [:]) != nil,
@@ -2903,6 +3158,16 @@ actor HelperStateStore {
             operation.cancellation.cancel()
             listenWaiters.removeValue(forKey: key)?.complete(.failure(.cancelled("the audio helper is shutting down")))
         }
+        if let mediaDeviceLease {
+            try? await stopMediaDeviceLease(mediaDeviceLease.leaseID)
+        }
+        let openingOwners = Array(mediaOpeningOwnerCounts.keys)
+        var mediaOpensSettled = true
+        for ownerKey in openingOwners {
+            if !(await waitForMediaOpens(ownerKey: ownerKey, timeoutMs: 2_000)) {
+                mediaOpensSettled = false
+            }
+        }
         if let recordingOriginIdentity {
             await rollbackRecording(identity: recordingOriginIdentity, publishEvents: false)
         } else if let listeningIdentity {
@@ -2913,7 +3178,7 @@ actor HelperStateStore {
             clearPhysicalLease(identity: speechIdentity)
         }
         let cleanupKeys = Set(active.keys).union(finishingOperations)
-        let settled = await waitForOperations(Array(cleanupKeys), timeoutMs: 2_000)
+        let settled = await waitForOperations(Array(cleanupKeys), timeoutMs: 2_000) && mediaOpensSettled
         activeListenContexts.removeAll()
         listenFinalizers.removeAll()
         if !settled {
@@ -4193,6 +4458,7 @@ actor HelperStateStore {
             operation.cancellation.cancel()
             listenWaiters.removeValue(forKey: key)?.complete(.failure(.cancelled("the audio owner ended this operation")))
         }
+        await stopMediaDeviceLease(ownerKey: ownerKey)
         if let origin = recordingOriginIdentity, recordingOwner.map(helperAudioOwnerKey) == ownerKey {
             await rollbackRecording(identity: origin)
         }
@@ -4205,7 +4471,9 @@ actor HelperStateStore {
             if let activeSpeech { await MainActor.run { activeSpeech.stop() } }
             clearPhysicalLease(identity: speechIdentity)
         }
-        let settled = await waitForOperations(Array(active.keys), timeoutMs: 2_000)
+        let audioSettled = await waitForOperations(Array(active.keys), timeoutMs: 2_000)
+        let mediaSettled = await waitForMediaOpens(ownerKey: ownerKey, timeoutMs: 2_000)
+        let settled = audioSettled && mediaSettled
         let endCount = endingOwners[ownerKey, default: 1]
         if endCount <= 1 { endingOwners.removeValue(forKey: ownerKey) }
         else { endingOwners[ownerKey] = endCount - 1 }
@@ -4375,6 +4643,10 @@ private actor HelperInputTasks {
         }
     }
 
+    func cancel(id: String) {
+        entries[id]?.task.cancel()
+    }
+
     func cancel(ownerKey: String, excludingID: String) {
         for (id, entry) in entries
             where id != excludingID && entry.ownerKey == ownerKey && entry.operation != "end_owner" {
@@ -4418,6 +4690,10 @@ func readInputLines<S: AsyncSequence>(
         guard let data = line.data(using: .utf8), !data.isEmpty,
               let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
         let id = parsed["id"] as? String ?? UUID().uuidString
+        if parsed["kind"] as? String == "media_cancel" {
+            if let targetID = parsed["target_id"] as? String { await tasks.cancel(id: targetID) }
+            continue
+        }
         let command = parsed["command"] as? [String: Any]
         if command?["type"] as? String == "cancel_operation",
            let identityKey = audioIdentityKey(command?["identity"]) {
@@ -4426,6 +4702,32 @@ func readInputLines<S: AsyncSequence>(
             if !(await tasks.start(id: id, identityKey: nil) { await handle(parsed) }) {
                 await reject(parsed)
             }
+            continue
+        }
+        if parsed["kind"] as? String == "media_request" {
+            let mediaRequest = parsed["request"] as? [String: Any] ?? [:]
+            let operation = mediaRequest["request"] as? [String: Any] ?? [:]
+            let operationType = operation["type"] as? String
+            let openBody = operation["request"] as? [String: Any] ?? [:]
+            let owner: HelperAudioOwner?
+            if operationType == "open" {
+                guard let ownerBody = openBody["owner"] as? [String: Any],
+                      let parsedOwner = parseHelperAudioOwner(ownerBody) else {
+                    await reject(parsed)
+                    continue
+                }
+                owner = parsedOwner
+            } else {
+                owner = nil
+            }
+            let ownerKey = owner.map(helperAudioOwnerKey)
+            let accepted = await tasks.start(
+                id: id,
+                identityKey: nil,
+                ownerKey: ownerKey,
+                operationType: operationType.map { "media_\($0)" }
+            ) { await handle(parsed) }
+            if !accepted { await reject(parsed) }
             continue
         }
         let request = parsed["request"] as? [String: Any] ?? [:]
@@ -4453,6 +4755,10 @@ func readInputLines<S: AsyncSequence>(
 func handleHelperInputEnvelope(_ parsed: [String: Any], state: HelperStateStore) async {
     let id = parsed["id"] as? String ?? UUID().uuidString
     guard parsed["kind"] as? String == "engine_request" else {
+        if parsed["kind"] as? String == "media_request" {
+            await state.handleMediaDeviceRequest(id: id, rawRequest: parsed["request"])
+            return
+        }
         await state.handleCommand(id: id, input: parsed["command"] as? [String: Any] ?? [:])
         return
     }

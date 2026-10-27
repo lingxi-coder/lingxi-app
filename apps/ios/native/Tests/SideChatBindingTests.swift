@@ -13,11 +13,14 @@ final class SideChatBindingTests: XCTestCase {
             .appendingPathComponent("side-chat-binding-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let mediaHostComposition = try IOSNativeMediaHostComposition(
+            audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
+        )
         let engine = try buildIosEngine(
             apiBase: "https://api.anthropic.com", apiKey: "", model: "",
             appSandboxRoot: root.path,
-            listener: NoopEventListener(), audio: IOSAudioServiceCallbackAdapter.shared,
-            camera: CameraImpl(), share: ShareImpl(), notifications: NotificationImpl(),
+            listener: NoopEventListener(), mediaHost: mediaHostComposition.nativeHost,
+            share: ShareImpl(), notifications: NotificationImpl(),
             clipboard: ClipboardImpl(), permissions: NoopPermissionSink(),
             mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: root), secureStorage: nil, deviceControl: nil)
         let info = try await createIosSideChat(

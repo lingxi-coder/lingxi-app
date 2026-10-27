@@ -1168,7 +1168,8 @@ struct AudioHelperEncodingTests {
             ],
             capabilities: nil,
             configurationRevision: nil,
-            currentOperation: nil
+            currentOperation: nil,
+            mediaSessionModes: ["audio"]
         )
 
         let encoded = try JSONEncoder().encode(snapshot)
@@ -1176,6 +1177,7 @@ struct AudioHelperEncodingTests {
         #expect(object["storageRoot"] == nil)
         let helper = try #require(object["helper"] as? [String: Any])
         #expect(helper["path"] == nil)
+        #expect(object["mediaSessionModes"] as? [String] == ["audio"])
     }
 
     @Test
@@ -1339,4 +1341,154 @@ struct AudioHelperEncodingTests {
         language: "en-US", systemStatus: .available, offlineModels: [], systemVoiceIds: ["com.apple.voice.compact.en-US.Samantha"]))
     #expect(route.status == .unavailable)
     #expect(route.reason == "systemVoiceUnknown")
+}
+
+@Test func mediaOpenRejectsMissingOwnerBeforeNativeDeviceDispatch() async throws {
+    let raw: [String: Any] = [
+        "request_id": "invalid-open",
+        "request": [
+            "type": "open",
+            "request": [
+                "identity": ["id": UUID().uuidString, "generation": 1, "service_epoch": 1],
+                "max_payload_bytes": 65_536,
+                "request": ["mode": "audio", "intent": "conversation"],
+            ],
+        ],
+    ]
+    #expect(throws: HelperError.self) {
+        _ = try parseHelperMediaDeviceRequest(raw)
+    }
+
+    let calls = AudioOperationCallCounter()
+    let (lines, continuation) = AsyncStream<String>.makeStream()
+    let (rejected, rejectedContinuation) = AsyncStream<Void>.makeStream()
+    let dispatcher = Task {
+        await readInputLines(
+            lines,
+            handle: { _ in calls.increment() },
+            cancel: { _ in },
+            reject: { _ in rejectedContinuation.yield(()) }
+        )
+    }
+    let envelope: [String: Any] = ["id": "invalid-open-envelope", "kind": "media_request", "request": raw]
+    continuation.yield(String(data: try JSONSerialization.data(withJSONObject: envelope), encoding: .utf8)!)
+    var rejectionIterator = rejected.makeAsyncIterator()
+    #expect(await rejectionIterator.next() != nil)
+    continuation.finish()
+    await dispatcher.value
+    rejectedContinuation.finish()
+    #expect(calls.value == 0)
+}
+
+@Test func mediaWriteRejectsIncompleteInterleavedPcmFrames() {
+    let raw: [String: Any] = [
+        "request_id": "partial-pcm",
+        "request": [
+            "type": "write_audio",
+            "request": [
+                "lease_id": "lease-1",
+                "frame": ["sample_rate_hz": 24_000, "channels": 2, "pcm16le": [1, 2]],
+            ],
+        ],
+    ]
+    #expect(throws: HelperError.self) {
+        _ = try parseHelperMediaDeviceRequest(raw)
+    }
+}
+
+@Test func mediaFlushAndInterruptParseLeaseBoundControlRequests() throws {
+    for (type, expected) in [("flush_audio", "flush"), ("interrupt_audio", "interrupt")] {
+        let raw: [String: Any] = [
+            "request_id": "control-\(type)",
+            "request": ["type": type, "request": ["lease_id": "lease-1"]],
+        ]
+        let parsed = try parseHelperMediaDeviceRequest(raw)
+        switch (expected, parsed.operation) {
+        case let ("flush", .flushAudio(leaseID)), let ("interrupt", .interruptAudio(leaseID)):
+            #expect(leaseID == "lease-1")
+        default:
+            Issue.record("media control did not retain its exact lease ID")
+        }
+    }
+}
+
+@Test func mediaPlaybackBarrierReceiptIsClaimedOncePerGeneration() {
+    var ledger = HelperMediaPlaybackReceiptLedger()
+    ledger.recordPlayed(37, generation: 4, renderedAtUnixMs: 120)
+
+    let interrupted = ledger.take(generation: 4)
+    #expect(interrupted?.playedFrames == 37)
+    #expect(interrupted?.renderedAtUnixMs == 120)
+    #expect(ledger.take(generation: 4) == nil)
+
+    ledger.recordPlayed(9, generation: 5, renderedAtUnixMs: 140)
+    #expect(ledger.take(generation: 5)?.playedFrames == 9)
+}
+
+@Test func mediaPlaybackBarrierLedgerSeparatesInterruptedAndNewGenerations() {
+    var ledger = HelperMediaPlaybackReceiptLedger()
+    ledger.recordPlayed(12, generation: 7, renderedAtUnixMs: 170)
+    #expect(ledger.take(generation: 7)?.playedFrames == 12)
+
+    ledger.recordPlayed(5, generation: 8, renderedAtUnixMs: 180)
+    #expect(ledger.take(generation: 8)?.playedFrames == 5)
+    #expect(ledger.take(generation: 7) == nil)
+}
+
+@Test func mediaFlushRejectsAnUnknownDeviceLease() async throws {
+    let output = AudioHelperOutputProbe()
+    let state = HelperStateStore(
+        storageRoot: FileManager.default.temporaryDirectory.appending(path: "lingxi-media-unknown-lease-\(UUID().uuidString)"),
+        writer: LineWriter(emit: { output.append($0) })
+    )
+    let raw: [String: Any] = [
+        "request_id": "flush-unknown",
+        "request": ["type": "flush_audio", "request": ["lease_id": "not-opened"]],
+    ]
+    await state.handleMediaDeviceRequest(id: "flush-unknown-envelope", rawRequest: raw)
+    let data = try #require(output.values.first)
+    let envelope = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let response = try #require(envelope["response"] as? [String: Any])
+    let result = try #require(response["result"] as? [String: Any])
+    let error = try #require(result["error"] as? [String: Any])
+    #expect(envelope["type"] as? String == "media_response")
+    #expect(response["request_id"] as? String == "flush-unknown")
+    #expect(result["type"] as? String == "error")
+    #expect(error["kind"] as? String == "not_found")
+}
+
+@Test func mediaCancelTargetsOnlyItsInFlightHelperRequest() async throws {
+    let (lines, continuation) = AsyncStream<String>.makeStream()
+    let (events, eventContinuation) = AsyncStream<String>.makeStream()
+    let dispatcher = Task {
+        await readInputLines(
+            lines,
+            handle: { envelope in
+                let id = envelope["id"] as? String ?? "missing"
+                eventContinuation.yield("started:\(id)")
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_000_000)
+                }
+                eventContinuation.yield("cancelled:\(id)")
+            },
+            cancel: { _ in }
+        )
+    }
+    var eventIterator = events.makeAsyncIterator()
+    let mediaRequest: [String: Any] = [
+        "id": "media-target",
+        "kind": "media_request",
+        "request": [
+            "request_id": "media-request-target",
+            "request": ["type": "open", "request": ["owner": ["type": "session", "session_id": "session-1"]]],
+        ],
+    ]
+    continuation.yield(String(data: try JSONSerialization.data(withJSONObject: mediaRequest), encoding: .utf8)!)
+    #expect(await eventIterator.next() == "started:media-target")
+    let cancel: [String: Any] = ["id": "cancel-command", "kind": "media_cancel", "target_id": "media-target"]
+    continuation.yield(String(data: try JSONSerialization.data(withJSONObject: cancel), encoding: .utf8)!)
+    #expect(await eventIterator.next() == "cancelled:media-target")
+    continuation.finish()
+    await dispatcher.value
+    eventContinuation.finish()
 }

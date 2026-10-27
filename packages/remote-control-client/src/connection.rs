@@ -24,6 +24,11 @@ use crate::device::{DeviceIdentity, PinnedHost, TunnelMemory, ViewerKeys};
 use crate::direct::DirectLink;
 use crate::encoding::{b64u_decode, b64u_encode, random_bytes, random_id, random_unit};
 use crate::keys::EphemeralKey;
+use crate::media::{
+    RemoteMediaAnswer, RemoteMediaConnection, RemoteMediaControlChannel, RemoteMediaControlRequest,
+    RemoteMediaOffer, RemoteMediaOfferHandler, RemoteMediaPlaybackReceipt, MEDIA_CONTROL_METHOD,
+    MEDIA_OFFER_METHOD, MEDIA_PLAYBACK_RECEIPT_METHOD,
+};
 use crate::messages::{
     methods, AuthApprovedParams, AuthDeniedParams, InitializeParams, InitializeResult,
     RemoteAppInfo, RemoteHostInfo,
@@ -31,7 +36,8 @@ use crate::messages::{
 use crate::pairing::pairing_code_for;
 use crate::peer::{PeerAnswer, PeerConfig, PeerConnector, PeerHandle};
 use crate::rpc::{
-    KeepaliveKind, NotificationHandler, RemoteErrorCode, RpcError, RpcOptions, RpcPeer,
+    KeepaliveKind, NotificationHandler, RemoteErrorCode, RequestHandler, RpcError, RpcOptions,
+    RpcPeer,
 };
 use crate::rtdb::{ChangeKind, ListenItem, Listener, Rtdb, RtdbError, RtdbListenError, RtdbMirror};
 use crate::signaling::{
@@ -217,6 +223,9 @@ pub struct ViewerConnectionDeps {
     pub platform: DevicePlatform,
     /// Push registration of this install.
     pub push_installation_id: Option<String>,
+    /// Product-layer answerer for host-initiated media negotiation. It is called
+    /// only after the signed Remote Control connection is approved.
+    pub media_offer_handler: Option<Arc<dyn RemoteMediaOfferHandler>>,
 }
 
 impl std::fmt::Debug for ViewerConnectionDeps {
@@ -256,6 +265,7 @@ impl ViewerConnectionDeps {
             app_version: "dev".into(),
             platform,
             push_installation_id: None,
+            media_offer_handler: None,
         }
     }
 }
@@ -356,6 +366,7 @@ type Approval = Result<RemoteHostInfo, ConnectionFailure>;
 #[derive(Default)]
 struct AttemptData {
     conn_id: String,
+    device_id: String,
     offer_written: bool,
     kind: Option<TransportKind>,
     peer: Option<Arc<dyn PeerHandle>>,
@@ -458,6 +469,82 @@ impl NotificationHandler for AttemptNotifications {
         if let Some(inner) = self.inner.upgrade() {
             inner.receive(&self.attempt, method, params);
         }
+    }
+}
+
+struct AttemptRequests {
+    inner: std::sync::Weak<Inner>,
+    attempt: Arc<Attempt>,
+}
+
+#[async_trait::async_trait]
+impl RequestHandler for AttemptRequests {
+    async fn handle(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if !matches!(method, MEDIA_OFFER_METHOD | MEDIA_CONTROL_METHOD) {
+            return Err(RpcError::new(
+                RemoteErrorCode::InvalidParams,
+                "unsupported host request",
+            ));
+        }
+        let Some(inner) = self.inner.upgrade() else {
+            return Err(RpcError::code(RemoteErrorCode::Closed));
+        };
+        match method {
+            MEDIA_OFFER_METHOD => inner.accept_media_offer(&self.attempt, params).await,
+            MEDIA_CONTROL_METHOD => inner.control_media(&self.attempt, params).await,
+            _ => Err(RpcError::new(
+                RemoteErrorCode::InvalidParams,
+                "unsupported host request",
+            )),
+        }
+    }
+}
+
+struct AttemptMediaControl {
+    inner: std::sync::Weak<Inner>,
+    attempt: std::sync::Weak<Attempt>,
+}
+
+#[async_trait::async_trait]
+impl RemoteMediaControlChannel for AttemptMediaControl {
+    async fn playback_receipt(&self, receipt: RemoteMediaPlaybackReceipt) -> Result<(), RpcError> {
+        receipt.validate()?;
+        let inner = self
+            .inner
+            .upgrade()
+            .ok_or_else(|| RpcError::code(RemoteErrorCode::Closed))?;
+        let attempt = self
+            .attempt
+            .upgrade()
+            .ok_or_else(|| RpcError::code(RemoteErrorCode::Closed))?;
+        let rpc = {
+            let data = attempt.data.lock().expect("attempt");
+            if !data.ready || data.disposed {
+                return Err(RpcError::code(RemoteErrorCode::Closed));
+            }
+            data.rpc
+                .clone()
+                .ok_or_else(|| RpcError::code(RemoteErrorCode::Closed))?
+        };
+        if inner
+            .core
+            .lock()
+            .expect("core")
+            .live
+            .as_ref()
+            .is_none_or(|live| !Arc::ptr_eq(live, &attempt))
+        {
+            return Err(RpcError::code(RemoteErrorCode::Closed));
+        }
+        let params = serde_json::to_value(receipt).map_err(|_| {
+            RpcError::new(
+                RemoteErrorCode::Internal,
+                "media receipt could not be encoded",
+            )
+        })?;
+        rpc.notify(MEDIA_PLAYBACK_RECEIPT_METHOD, Some(params))
+            .await
+            .map_err(|error| RpcError::new(RemoteErrorCode::Closed, error.to_string()))
     }
 }
 
@@ -687,6 +774,111 @@ impl Inner {
         let live = self.core.lock().expect("core").live.clone()?;
         let rpc = live.data.lock().expect("attempt").rpc.clone();
         rpc
+    }
+
+    async fn accept_media_offer(
+        self: &Arc<Self>,
+        attempt: &Arc<Attempt>,
+        params: Value,
+    ) -> Result<Value, RpcError> {
+        let invalid = || RpcError::new(RemoteErrorCode::InvalidParams, "invalid media offer");
+        let offer: RemoteMediaOffer = serde_json::from_value(params).map_err(|_| invalid())?;
+        offer.validate()?;
+
+        let (handler, connection) = {
+            let data = attempt.data.lock().expect("attempt");
+            if !data.ready || data.disposed || data.conn_id.is_empty() || data.device_id.is_empty()
+            {
+                return Err(RpcError::code(RemoteErrorCode::NotApproved));
+            }
+            let handler =
+                self.deps.media_offer_handler.clone().ok_or_else(|| {
+                    RpcError::new(RemoteErrorCode::Forbidden, "media is unavailable")
+                })?;
+            let connection = RemoteMediaConnection {
+                account_uid: self.deps.uid.clone(),
+                host_id: self.deps.host_id.clone(),
+                device_id: data.device_id.clone(),
+                connection_id: data.conn_id.clone(),
+            };
+            (handler, connection)
+        };
+
+        let control: Arc<dyn RemoteMediaControlChannel> = Arc::new(AttemptMediaControl {
+            inner: Arc::downgrade(self),
+            attempt: Arc::downgrade(attempt),
+        });
+        let answer: RemoteMediaAnswer = handler
+            .accept_offer(&connection, offer.clone(), control)
+            .await?;
+        answer.validate_for(&offer)?;
+
+        // A close or revocation can race the native permission prompt or peer
+        // negotiation. Do not return an answer for an ended authenticated owner.
+        let still_approved = {
+            let data = attempt.data.lock().expect("attempt");
+            data.ready && !data.disposed && data.conn_id == connection.connection_id
+        };
+        if !still_approved {
+            handler.connection_closed(&connection).await;
+            return Err(RpcError::code(RemoteErrorCode::Closed));
+        }
+
+        serde_json::to_value(answer).map_err(|_| {
+            RpcError::new(
+                RemoteErrorCode::Internal,
+                "media answer could not be encoded",
+            )
+        })
+    }
+
+    async fn control_media(
+        self: &Arc<Self>,
+        attempt: &Arc<Attempt>,
+        params: Value,
+    ) -> Result<Value, RpcError> {
+        let invalid = || {
+            RpcError::new(
+                RemoteErrorCode::InvalidParams,
+                "invalid media control request",
+            )
+        };
+        let request: RemoteMediaControlRequest =
+            serde_json::from_value(params).map_err(|_| invalid())?;
+        request.validate()?;
+        let (handler, connection) = {
+            let data = attempt.data.lock().expect("attempt");
+            if !data.ready || data.disposed || data.conn_id.is_empty() || data.device_id.is_empty()
+            {
+                return Err(RpcError::code(RemoteErrorCode::NotApproved));
+            }
+            let handler =
+                self.deps.media_offer_handler.clone().ok_or_else(|| {
+                    RpcError::new(RemoteErrorCode::Forbidden, "media is unavailable")
+                })?;
+            let connection = RemoteMediaConnection {
+                account_uid: self.deps.uid.clone(),
+                host_id: self.deps.host_id.clone(),
+                device_id: data.device_id.clone(),
+                connection_id: data.conn_id.clone(),
+            };
+            (handler, connection)
+        };
+        let result = handler.control(&connection, request.clone()).await?;
+        result.validate_for(&request)?;
+        let still_approved = {
+            let data = attempt.data.lock().expect("attempt");
+            data.ready && !data.disposed && data.conn_id == connection.connection_id
+        };
+        if !still_approved {
+            return Err(RpcError::code(RemoteErrorCode::Closed));
+        }
+        serde_json::to_value(result).map_err(|_| {
+            RpcError::new(
+                RemoteErrorCode::Internal,
+                "media control result could not be encoded",
+            )
+        })
     }
 
     fn ever_ready(&self) -> bool {
@@ -921,6 +1113,7 @@ impl Inner {
             Ok(identity) => identity,
             Err(error) => return Err(failed(FailureKind::Unsupported, Some(&error.0), false)),
         };
+        a.data.lock().expect("attempt").device_id = identity.id.clone();
         let pin = self.raced(a, deps.keys.pinned_host(&deps.host_id)).await?;
         let mut eph = Some(EphemeralKey::generate());
         let expected_host_key = match &pin {
@@ -1082,7 +1275,13 @@ impl Inner {
             link,
             RpcOptions {
                 timeout: None,
-                requests: None,
+                // Only the offer negotiation and bounded audio flush/interrupt
+                // control are allowed after approval. No generic host command
+                // surface is exposed to the remote device.
+                requests: Some(Arc::new(AttemptRequests {
+                    inner: Arc::downgrade(self),
+                    attempt: Arc::clone(a),
+                })),
                 notifications: Some(Arc::new(AttemptNotifications {
                     inner: Arc::downgrade(self),
                     attempt: Arc::clone(a),
@@ -1352,6 +1551,11 @@ impl Inner {
                     }
                 },
                 platform: deps.platform,
+                media_capabilities: deps
+                    .media_offer_handler
+                    .as_ref()
+                    .and_then(|handler| handler.capabilities())
+                    .filter(|capabilities| capabilities.validate().is_ok()),
             },
             push_installation_id: deps.push_installation_id.clone(),
         })
@@ -1588,7 +1792,7 @@ impl Inner {
 
     /// Release everything an attempt holds and remove its database nodes. Safe to call twice.
     fn dispose(self: &Arc<Self>, a: &Arc<Attempt>, reason: &str) {
-        let (rpc, tunnel, direct, peer, conn_id, offer_written) = {
+        let (rpc, tunnel, direct, peer, conn_id, offer_written, device_id, was_ready) = {
             let mut data = a.data.lock().expect("attempt");
             if data.disposed {
                 return;
@@ -1602,6 +1806,8 @@ impl Inner {
                 data.peer.clone(),
                 data.conn_id.clone(),
                 data.offer_written,
+                data.device_id.clone(),
+                data.ready,
             )
         };
         a.cancel.cancel();
@@ -1617,6 +1823,17 @@ impl Inner {
         }
         if let Some(peer) = peer {
             peer.close();
+        }
+        if was_ready && !conn_id.is_empty() {
+            if let Some(handler) = self.deps.media_offer_handler.clone() {
+                let connection = RemoteMediaConnection {
+                    account_uid: self.deps.uid.clone(),
+                    host_id: self.deps.host_id.clone(),
+                    device_id,
+                    connection_id: conn_id.clone(),
+                };
+                tokio::spawn(async move { handler.connection_closed(&connection).await });
+            }
         }
         if conn_id.is_empty() {
             return;

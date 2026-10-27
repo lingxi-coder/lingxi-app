@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::host::AndroidNativeMediaHost;
 use async_trait::async_trait;
 use client::protocol::ask_user_question::AskUserQuestionRequestDto;
 use client::protocol::commands::ImageRefDto;
@@ -35,7 +36,7 @@ use client::protocol::events::ClientEvent;
 use client::protocol::listings::ModelDetailsDto;
 use client::protocol::message::MessageDto;
 use client::protocol::permission::PermissionRequest;
-use remote_control_client::clock::{Clock, system_clock};
+use remote_control_client::clock::{system_clock, Clock};
 use remote_control_client::connection::{
     ConnectionFailure, ConnectionListener, ConnectionPhase, ConnectionState, FailureKind,
     ViewerConnection, ViewerConnectionDeps,
@@ -47,10 +48,15 @@ use remote_control_client::device::{
 use remote_control_client::encoding::{b64_decode, b64_encode, random_unit};
 use remote_control_client::files::{FileOffer, FileReceipt, FileTask};
 use remote_control_client::keys::IdentityKey;
+use remote_control_client::media::{
+    RemoteIceServer, RemoteMediaConfig, RemoteMediaConfigProvider, RemoteMediaConnection,
+    RemoteMediaIntent, RemoteMediaMode, RemoteMediaOffer,
+};
 use remote_control_client::messages::{
     PermissionModeId, RemoteImageRef, RemotePending, RemotePendingAction, RemotePromptOrigin,
     RemoteRecord, RemoteSeqRecord, RemoteSessionStatus, RemoteSessionSummary, RemoteTurnState,
 };
+use remote_control_client::native_media::NativeMediaOfferHandler;
 use remote_control_client::peer::PeerConnector;
 use remote_control_client::rpc::RpcError;
 use remote_control_client::rtdb::{
@@ -61,7 +67,7 @@ use remote_control_client::session::{
     SessionListener, SessionState, SessionStatus,
 };
 use remote_control_client::signaling::{
-    DevicePlatform, HostPresence, HostRecord, TransportKind, hosts_path, parse_hosts_listing,
+    hosts_path, parse_hosts_listing, DevicePlatform, HostPresence, HostRecord, TransportKind,
 };
 use remote_control_client::text::display_text;
 use remote_control_client::version::HEARTBEAT_INTERVAL;
@@ -136,6 +142,156 @@ fn rpc_error(error: RpcError) -> RemoteFfiError {
 pub trait AndroidRemoteTokenProvider: Send + Sync {
     /// A valid ID token, minted afresh when `force_refresh` is set.
     async fn id_token(&self, force_refresh: bool) -> Result<String, RemoteFfiError>;
+}
+
+/// Media mode requested by the authenticated host. The negotiation SDP stays
+/// inside the Rust adapter and is deliberately not exposed to app callbacks.
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum RemoteMediaModeFfi {
+    Audio,
+    Video,
+    AudioVideo,
+}
+
+/// Whether this remote session is for observation or conversation input.
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum RemoteMediaIntentFfi {
+    Observation,
+    Conversation,
+}
+
+/// Verified connection and host-issued media references used to select ICE
+/// policy. No SDP or credentials are included in this callback request.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RemoteMediaConfigRequestFfi {
+    pub account_uid: String,
+    pub host_id: String,
+    pub device_id: String,
+    pub connection_id: String,
+    pub session_id: String,
+    pub media_session_ref: String,
+    pub generation: u64,
+    pub mode: RemoteMediaModeFfi,
+    pub intent: RemoteMediaIntentFfi,
+    pub audio_source_ref: Option<String>,
+    pub video_source_ref: Option<String>,
+}
+
+/// One product-selected STUN or TURN server. Credentials are redacted from
+/// Rust diagnostics and never enter Harness or model-facing DTOs.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemoteIceServerFfi {
+    pub urls: Vec<String>,
+    pub username: Option<String>,
+    pub credential: Option<String>,
+}
+
+impl std::fmt::Debug for RemoteIceServerFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteIceServerFfi")
+            .field("url_count", &self.urls.len())
+            .field("has_username", &self.username.is_some())
+            .field("has_credential", &self.credential.is_some())
+            .finish()
+    }
+}
+
+/// Product-configured transport policy frozen for one media session.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemoteMediaConfigFfi {
+    pub ice_servers: Vec<RemoteIceServerFfi>,
+    pub relay_only: bool,
+    pub gather_timeout_ms: u64,
+    pub connect_timeout_ms: u64,
+    pub max_payload_bytes: u64,
+}
+
+/// Product defaults for cross-device media; callers may add TURN credentials
+/// from their current Firebase/app settings before supplying the provider.
+#[uniffi::export]
+pub fn default_remote_media_config() -> RemoteMediaConfigFfi {
+    RemoteMediaConfigFfi {
+        ice_servers: remote_control_client::version::DEFAULT_STUN_URLS
+            .iter()
+            .map(|url| RemoteIceServerFfi {
+                urls: vec![(*url).to_owned()],
+                username: None,
+                credential: None,
+            })
+            .collect(),
+        relay_only: false,
+        gather_timeout_ms: 3_000,
+        connect_timeout_ms: 15_000,
+        max_payload_bytes: remote_control_client::media::MEDIA_PAYLOAD_MAX_BYTES,
+    }
+}
+
+/// Resolves ICE/TURN for each verified host connection and incoming media
+/// session. The app may use its Firebase-backed product settings here.
+#[uniffi::export(callback_interface)]
+#[async_trait::async_trait]
+pub trait AndroidRemoteMediaConfigProvider: Send + Sync {
+    async fn resolve(
+        &self,
+        request: RemoteMediaConfigRequestFfi,
+    ) -> Result<RemoteMediaConfigFfi, RemoteFfiError>;
+}
+
+struct MediaConfigProviderBridge {
+    inner: Box<dyn AndroidRemoteMediaConfigProvider>,
+}
+
+#[async_trait]
+impl RemoteMediaConfigProvider for MediaConfigProviderBridge {
+    async fn resolve(
+        &self,
+        connection: &RemoteMediaConnection,
+        offer: &RemoteMediaOffer,
+    ) -> Result<RemoteMediaConfig, RpcError> {
+        let request = RemoteMediaConfigRequestFfi {
+            account_uid: connection.account_uid.clone(),
+            host_id: connection.host_id.clone(),
+            device_id: connection.device_id.clone(),
+            connection_id: connection.connection_id.clone(),
+            session_id: offer.session_id.clone(),
+            media_session_ref: offer.media_session_ref.clone(),
+            generation: offer.generation,
+            mode: match offer.mode {
+                RemoteMediaMode::Audio => RemoteMediaModeFfi::Audio,
+                RemoteMediaMode::Video => RemoteMediaModeFfi::Video,
+                RemoteMediaMode::AudioVideo => RemoteMediaModeFfi::AudioVideo,
+            },
+            intent: match offer.intent {
+                RemoteMediaIntent::Observation => RemoteMediaIntentFfi::Observation,
+                RemoteMediaIntent::Conversation => RemoteMediaIntentFfi::Conversation,
+            },
+            audio_source_ref: offer.audio_source_ref.clone(),
+            video_source_ref: offer.video_source_ref.clone(),
+        };
+        let config = self.inner.resolve(request).await.map_err(|_| {
+            RpcError::new(
+                remote_control_client::rpc::RemoteErrorCode::Internal,
+                "media transport configuration unavailable",
+            )
+        })?;
+        let config = RemoteMediaConfig {
+            ice_servers: config
+                .ice_servers
+                .into_iter()
+                .map(|server| RemoteIceServer {
+                    urls: server.urls,
+                    username: server.username,
+                    credential: server.credential,
+                })
+                .collect(),
+            relay_only: config.relay_only,
+            gather_timeout_ms: config.gather_timeout_ms,
+            connect_timeout_ms: config.connect_timeout_ms,
+            max_payload_bytes: config.max_payload_bytes,
+        };
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 /// A computer this device has paired with. `host_key` is the `b64u` of the host's
@@ -1170,6 +1326,19 @@ fn webrtc_peer_connector() -> Option<Arc<dyn PeerConnector>> {
     ))
 }
 
+fn native_media_offer_handler(
+    host: Arc<AndroidNativeMediaHost>,
+    provider: Box<dyn AndroidRemoteMediaConfigProvider>,
+) -> Result<Option<Arc<dyn remote_control_client::media::RemoteMediaOfferHandler>>, RemoteFfiError>
+{
+    let provider = Arc::new(MediaConfigProviderBridge { inner: provider });
+    Ok(Some(NativeMediaOfferHandler::new(
+        host.media_service(),
+        host.device_ports(),
+        provider,
+    )))
+}
+
 /// What a client is made of; tests substitute the database and the clock.
 struct Parts {
     uid: String,
@@ -1178,6 +1347,7 @@ struct Parts {
     clock: Arc<dyn Clock>,
     random: Arc<dyn Fn() -> f64 + Send + Sync>,
     peers: Option<Arc<dyn PeerConnector>>,
+    media_offer_handler: Option<Arc<dyn remote_control_client::media::RemoteMediaOfferHandler>>,
     device_name: String,
     app_version: String,
 }
@@ -1292,6 +1462,8 @@ pub async fn build_android_remote_control_client(
     tokens: Box<dyn AndroidRemoteTokenProvider>,
     keys: Box<dyn AndroidRemoteKeyStore>,
     listener: Box<dyn AndroidRemoteListener>,
+    media_host: Arc<AndroidNativeMediaHost>,
+    media_config_provider: Box<dyn AndroidRemoteMediaConfigProvider>,
 ) -> Result<Arc<AndroidRemoteControlClient>, RemoteFfiError> {
     if uid.is_empty() || database_url.is_empty() {
         return Err(RemoteFfiError::InvalidArgument {
@@ -1302,6 +1474,7 @@ pub async fn build_android_remote_control_client(
         database_url,
         Arc::new(TokenBridge { inner: tokens }),
     ));
+    let media_offer_handler = native_media_offer_handler(media_host, media_config_provider)?;
     let parts = Parts {
         uid,
         rtdb: Arc::new(rtdb),
@@ -1309,6 +1482,7 @@ pub async fn build_android_remote_control_client(
         clock: system_clock(),
         random: Arc::new(random_unit),
         peers: webrtc_peer_connector(),
+        media_offer_handler,
         device_name,
         app_version,
     };
@@ -1414,6 +1588,7 @@ impl AndroidRemoteControlClient {
         deps.clock = Arc::clone(&parts.clock);
         deps.random = Arc::clone(&parts.random);
         deps.peers = parts.peers.clone();
+        deps.media_offer_handler = parts.media_offer_handler.clone();
         deps.device_name = parts.device_name.clone();
         deps.app_version = parts.app_version.clone();
         deps.tunnel_memory = Some(Arc::clone(&core.tunnel_memory));

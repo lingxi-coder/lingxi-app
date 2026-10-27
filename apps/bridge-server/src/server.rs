@@ -44,6 +44,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use crate::audio_bridge::{AudioRequestSink, AudioResponder};
+use crate::media_bridge::{
+    new_media_connection_channel, new_media_control_channel, BridgeMediaConnectionChannel,
+    BridgeMediaControlChannel, MediaConnectionResponder, MediaControlResponder,
+    MediaDeviceResponder,
+};
+use crate::media_service_rpc::MediaServiceRpc;
 use async_trait::async_trait;
 use bridge::wire::Frame;
 use bridge::{
@@ -724,6 +730,14 @@ pub struct BridgeConnection {
     /// bridge was wired at boot — `AudioResponse` is then silently dropped,
     /// exactly like an unrouted command with no [`CommandRouter`] bound.
     audio_responder: Option<AudioResponder>,
+    /// Response half for the host's shared native MediaDevicePorts callback.
+    media_device_responder: Option<MediaDeviceResponder>,
+    /// Response half for connector-owned offer/answer negotiation requests.
+    media_connection_responder: Option<MediaConnectionResponder>,
+    /// Response half for exact remote output barriers.
+    media_control_responder: Option<MediaControlResponder>,
+    /// Trusted current-session facade used by Electron's host-only media RPC.
+    media_service_rpc: Option<Arc<MediaServiceRpc>>,
     permission_gate_ref: SharedPermissionGate,
     computer_access_broker_ref: SharedComputerAccessBroker,
     ask_user_question_broker_ref: SharedAskUserQuestionBroker,
@@ -2728,6 +2742,10 @@ impl BridgeConnection {
             computer_access_broker: None,
             ask_user_question_broker: None,
             audio_responder: None,
+            media_device_responder: None,
+            media_connection_responder: None,
+            media_control_responder: None,
+            media_service_rpc: None,
             permission_gate_ref: Arc::new(StdMutex::new(None)),
             computer_access_broker_ref: Arc::new(StdMutex::new(None)),
             ask_user_question_broker_ref: Arc::new(StdMutex::new(None)),
@@ -3227,6 +3245,52 @@ impl BridgeConnection {
         self
     }
 
+    /// Attach the response half for native MediaDevicePorts requests. The
+    /// request callback uses the same authenticated connection sink.
+    #[must_use]
+    pub fn bind_media_device(mut self, responder: MediaDeviceResponder) -> Self {
+        self.media_device_responder = Some(responder);
+        self
+    }
+
+    /// Attach the response side for connector peer offer/answer requests.
+    #[must_use]
+    pub fn bind_media_connection(mut self, responder: MediaConnectionResponder) -> Self {
+        self.media_connection_responder = Some(responder);
+        self
+    }
+
+    /// Attach the response side for owner- and generation-bound peer barriers.
+    #[must_use]
+    pub fn bind_media_control(mut self, responder: MediaControlResponder) -> Self {
+        self.media_control_responder = Some(responder);
+        self
+    }
+
+    /// Bind host-only media operations to the exact session owner selected by
+    /// this Bridge process. The request DTO does not carry an owner.
+    #[must_use]
+    pub fn bind_media_service(mut self, rpc: Arc<MediaServiceRpc>) -> Self {
+        self.media_service_rpc = Some(rpc);
+        self
+    }
+
+    /// Build the authenticated offer/answer request channel for a configured
+    /// app MediaConnector.
+    #[must_use]
+    pub fn media_connection_channel(
+        &self,
+    ) -> (Arc<BridgeMediaConnectionChannel>, MediaConnectionResponder) {
+        new_media_connection_channel(self.audio_sink())
+    }
+
+    /// Build the authenticated peer output-barrier channel for a configured
+    /// app MediaConnector.
+    #[must_use]
+    pub fn media_control_channel(&self) -> (Arc<BridgeMediaControlChannel>, MediaControlResponder) {
+        new_media_control_channel(self.audio_sink())
+    }
+
     /// Attach the connection's `computer`-tool `request_access` broker and
     /// SPAWN its receive loop over `rx` (the receiving end of the SAME channel
     /// whose sender was wired into `DesktopConfig::computer_access_tx`, which
@@ -3402,6 +3466,15 @@ impl BridgeConnection {
         let response = if bridge_ok && client_ok {
             if let Some(responder) = self.audio_responder.as_ref() {
                 responder.update_capabilities(hello.capabilities.audio.clone());
+            }
+            if let Some(rpc) = self.media_service_rpc.as_ref() {
+                rpc.update_local_session_modes(
+                    hello
+                        .capabilities
+                        .media_session_modes
+                        .as_deref()
+                        .unwrap_or_default(),
+                );
             }
             self.handshaken.store(true, Ordering::SeqCst);
             BridgeResponse {
@@ -3728,8 +3801,25 @@ impl BridgeConnection {
             ClientCommand::AudioResponse { identity, result } => {
                 self.resolve_audio(identity, result).await;
             }
+            ClientCommand::MediaDeviceResponse { response } => {
+                self.resolve_media_device(response).await;
+            }
+            ClientCommand::MediaConnectionResponse { response } => {
+                self.resolve_media_connection(response).await;
+            }
+            ClientCommand::MediaServiceRequest { request } => {
+                self.dispatch_media_service_request(request);
+            }
+            ClientCommand::MediaControlResponse { response } => {
+                self.resolve_media_control(response).await;
+            }
             ClientCommand::UpdateAudioCapabilities { capabilities } => {
                 self.update_audio_capabilities(capabilities).await;
+            }
+            ClientCommand::UpdateMediaSessionModes { modes } => {
+                if let Some(rpc) = self.media_service_rpc.as_ref() {
+                    rpc.update_local_session_modes(&modes);
+                }
             }
             ClientCommand::AnswerAskUserQuestion {
                 request_id,
@@ -3946,6 +4036,14 @@ impl BridgeConnection {
                     // model output. Keep the normal event sink owner-scoped so
                     // late output from an old turn is still dropped.
                     router.route(command, self.unscoped_event_sink()).await;
+                }
+                if let (Some(rpc), Some(driver)) =
+                    (self.media_service_rpc.as_ref(), self.driver.as_ref())
+                {
+                    if let Some(session_id) = driver.current_session_id().await {
+                        rpc.update_owner(media_api::MediaOwner::Session { session_id })
+                            .await;
+                    }
                 }
                 self.refresh_permission_session().await;
             }
@@ -4263,6 +4361,15 @@ impl BridgeConnection {
                 }
             }
         };
+        if scheduled.is_none() && queued_inputs.is_none() {
+            // A direct SendPrompt opens a client-owned turn. Unlike queued and
+            // scheduled turns, its driver path does not announce itself, so
+            // publish the lifecycle event after ActiveTurn admission and
+            // before streamed events or permissions can arrive.
+            self.event_sink()
+                .emit(ClientEvent::TurnStarted { turn_id })
+                .await;
+        }
         self.loop_runtime.invalidate_noop_streak();
 
         let queue = self.queue.clone();
@@ -4557,6 +4664,82 @@ impl BridgeConnection {
         }
     }
 
+    async fn resolve_media_device(
+        &self,
+        response: client::protocol::media::MediaDeviceResponseDto,
+    ) {
+        let Some(responder) = self.media_device_responder.as_ref() else {
+            return;
+        };
+        if !responder.resolve(response.clone()).await {
+            tracing::debug!(
+                request_id = %response.request_id,
+                "bridge-server: response for unknown / expired native media callback"
+            );
+        }
+    }
+
+    async fn resolve_media_connection(
+        &self,
+        response: client::protocol::media::MediaConnectionResponseDto,
+    ) {
+        let Some(responder) = self.media_connection_responder.as_ref() else {
+            return;
+        };
+        if !responder.resolve(response.clone()).await {
+            tracing::debug!(
+                request_id = %response.request_id,
+                connection_id = %response.connection_id,
+                "bridge-server: response for unknown / expired media offer"
+            );
+        }
+    }
+
+    async fn resolve_media_control(
+        &self,
+        response: client::protocol::media::MediaControlResponseDto,
+    ) {
+        let Some(responder) = self.media_control_responder.as_ref() else {
+            return;
+        };
+        if !responder.resolve(response.clone()).await {
+            tracing::debug!(
+                request_id = %response.request_id,
+                connection_id = %response.connection_id,
+                generation = response.generation,
+                "bridge-server: response for unknown / expired media playback barrier"
+            );
+        }
+    }
+
+    fn dispatch_media_service_request(
+        &self,
+        request: client::protocol::media::MediaServiceRequestDto,
+    ) {
+        let Some(rpc) = self.media_service_rpc.clone() else {
+            let sink = self.unscoped_event_sink();
+            let response = client::protocol::media::MediaServiceResponseDto {
+                request_id: request.request_id,
+                result: None,
+                error: Some(client::protocol::media::MediaErrorDto {
+                    kind: client::protocol::media::MediaErrorKindDto::Unavailable,
+                    message: "the app-scoped media host is unavailable".into(),
+                }),
+            };
+            tokio::spawn(async move {
+                sink.emit(ClientEvent::MediaServiceResponse { response })
+                    .await;
+            });
+            return;
+        };
+        let sink = self.unscoped_event_sink();
+        tokio::spawn(async move {
+            let response = rpc.handle(request).await;
+            sink.emit(ClientEvent::MediaServiceResponse { response })
+                .await;
+        });
+    }
+
     async fn update_audio_capabilities(
         &self,
         capabilities: client::protocol::audio::AudioCapabilitySnapshotDto,
@@ -4637,9 +4820,14 @@ impl FramePump for BridgeConnection {
             // Keep epoch changes ordered with audio responses even when an
             // unrelated ordinary command is stalled. Before hello completes,
             // the update must remain behind the handshake.
-            Ok(ClientCommand::UpdateAudioCapabilities { .. }) => {
-                self.handshaken.load(Ordering::SeqCst)
-            }
+            Ok(
+                ClientCommand::UpdateAudioCapabilities { .. }
+                | ClientCommand::UpdateMediaSessionModes { .. }
+                | ClientCommand::MediaConnectionResponse { .. }
+                | ClientCommand::MediaDeviceResponse { .. }
+                | ClientCommand::MediaServiceRequest { .. }
+                | ClientCommand::MediaControlResponse { .. },
+            ) => self.handshaken.load(Ordering::SeqCst),
             Ok(
                 ClientCommand::ApprovePermission { .. }
                 | ClientCommand::DenyPermission { .. }
@@ -5154,6 +5342,36 @@ impl BridgeConnection {
                     "bridge-server: drained parked audio requests on close"
                 );
             }
+        }
+        if let Some(responder) = self.media_device_responder.as_ref() {
+            let drained = responder.drain().await;
+            if drained > 0 {
+                tracing::debug!(
+                    drained,
+                    "bridge-server: drained pending native media callbacks on close"
+                );
+            }
+        }
+        if let Some(responder) = self.media_connection_responder.as_ref() {
+            let drained = responder.drain().await;
+            if drained > 0 {
+                tracing::debug!(
+                    drained,
+                    "bridge-server: drained pending media offers on close"
+                );
+            }
+        }
+        if let Some(responder) = self.media_control_responder.as_ref() {
+            let drained = responder.drain().await;
+            if drained > 0 {
+                tracing::debug!(
+                    drained,
+                    "bridge-server: drained pending media output barriers on close"
+                );
+            }
+        }
+        if let Some(rpc) = self.media_service_rpc.as_ref() {
+            rpc.close().await;
         }
     }
 }

@@ -66,6 +66,48 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.94.0
 
+      - name: Restore the pinned Linux GStreamer runtime SDK cache
+        if: matrix.platform == 'linux'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/gstreamer-sdk/linux-source
+          key: gstreamer-linux-jammy-${{ hashFiles('scripts/ci/gstreamer-sdk-lock.json', 'scripts/ci/build_gstreamer_linux.py', 'scripts/ci/gstreamer_sdk.py', 'scripts/ci/gstreamer-linux-meson-requirements.txt') }}
+
+      - name: Install Linux GStreamer source-build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bison \
+            flex \
+            libglib2.0-dev \
+            libopus-dev \
+            libvpx-dev \
+            ninja-build \
+            pkg-config
+
+      - name: Install pinned Meson for the GStreamer 1.28.8 source build
+        if: matrix.platform == 'linux'
+        run: python3 -m pip install --no-deps --require-hashes -r scripts/ci/gstreamer-linux-meson-requirements.txt
+
+      - name: Build the pinned upstream Linux GStreamer SDK
+        if: matrix.platform == 'linux'
+        run: python3 scripts/ci/build_gstreamer_linux.py --root "$RUNNER_TEMP/gstreamer-sdk/linux-source"
+
+      - name: Stage the Linux GStreamer package SDK
+        if: matrix.platform == 'linux'
+        run: python3 scripts/ci/gstreamer_sdk.py linux --root "$RUNNER_TEMP/gstreamer-sdk/linux"
+
+      - name: Install the pinned macOS GStreamer SDK
+        if: matrix.platform == 'darwin'
+        run: python3 scripts/ci/gstreamer_sdk.py macos --root "$RUNNER_TEMP/gstreamer-sdk/macos"
+
+      - name: Install the pinned Windows GStreamer SDK
+        if: matrix.platform == 'win32'
+        shell: bash
+        run: python3 scripts/ci/gstreamer_sdk.py windows --root "$RUNNER_TEMP/gstreamer-sdk/windows"
+
       - uses: actions/setup-node@v7
         with:
           node-version: '24'

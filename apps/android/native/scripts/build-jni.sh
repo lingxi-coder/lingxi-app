@@ -182,7 +182,7 @@ lock_promotion_root() {
 # ---------------------------------------------------------------------------
 # 0. Preflight — tools, NDK, Rust targets
 # ---------------------------------------------------------------------------
-for tool in cargo rustc cargo-ndk node shasum; do
+for tool in cargo rustc cargo-ndk node python3 shasum; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "ERROR: required tool not found: ${tool}" >&2; exit 1; }
 done
 
@@ -280,10 +280,11 @@ SHERPA_AAR="${ANDROID_DIR}/app/libs/${SHERPA_AAR_NAME}"
 )
 
 # ---------------------------------------------------------------------------
-# 1. cargo-ndk cross-compile the cdylib into jniLibs/<abi>/
+# 1. cargo-ndk cross-compile each ABI against its matching static GStreamer SDK
 # ---------------------------------------------------------------------------
 # `cargo ndk -t <abi> -o <jniLibs>` places each built `.so` under
-# <jniLibs>/<abi>/. We pass the Gradle ABI names; cargo-ndk maps them to triples.
+# <jniLibs>/<abi>/. GStreamer is statically linked, so each ABI must resolve
+# pkg-config against its own official SDK slice rather than host libraries.
 log "Cross-compiling ${CRATE} cdylib (${PROFILE}) for: ${TARGETS[*]/#/}"
 mkdir -p "${STAGING_PARENT}"
 STAGING_ROOT="$(mktemp -d "${STAGING_PARENT}/build.XXXXXX")"
@@ -295,23 +296,23 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir -p "${JNILIBS_DIR}"
 
-NDK_ABI_ARGS=()
 for t in "${TARGETS[@]}"; do
-  NDK_ABI_ARGS+=(-t "$(abi_of "${t}")")
+  abi="$(abi_of "${t}")"
+  log "Building ${abi} with its configured GStreamer SDK slice…"
+  if [[ "${VARIANT}" == "direct" ]]; then
+    ( cd "${CARGO_DIR}" && CARGO_PROFILE_RELEASE_DEBUG=1 python3 "${REPO_ROOT}/scripts/lib/mobile_gstreamer_cargo.py" \
+        run android --target "${t}" --ndk "${ANDROID_NDK_HOME}" -- \
+        cargo ndk -t "${abi}" -P 24 -o "${JNILIBS_DIR}" \
+        build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
+        --features android-computer-use "${PROFILE_ARGS[@]}" )
+  else
+    ( cd "${CARGO_DIR}" && CARGO_PROFILE_RELEASE_DEBUG=1 python3 "${REPO_ROOT}/scripts/lib/mobile_gstreamer_cargo.py" \
+        run android --target "${t}" --ndk "${ANDROID_NDK_HOME}" -- \
+        cargo ndk -t "${abi}" -P 24 -o "${JNILIBS_DIR}" \
+        build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
+        "${PROFILE_ARGS[@]}" )
+  fi
 done
-
-# `cargo ndk` shells out to `cargo metadata` in the CURRENT directory BEFORE it
-# honors `--manifest-path`, so run it from the workspace root or it fails with
-# "could not find Cargo.toml" when invoked from elsewhere (e.g. the repo root).
-if [[ "${VARIANT}" == "direct" ]]; then
-  ( cd "${CARGO_DIR}" && CARGO_PROFILE_RELEASE_DEBUG=1 cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
-      build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
-      --features android-computer-use "${PROFILE_ARGS[@]}" )
-else
-  ( cd "${CARGO_DIR}" && CARGO_PROFILE_RELEASE_DEBUG=1 cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
-      build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
-      "${PROFILE_ARGS[@]}" )
-fi
 
 # Verify every expected ABI `.so` landed.
 for t in "${TARGETS[@]}"; do

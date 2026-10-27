@@ -30,7 +30,11 @@ final class NativeAdminEngineRoundtripTests: XCTestCase {
     // Keeping the handle in this frame releases it before the caller removes its sandbox.
     private func exercise(root: URL, workspace: URL) async throws {
         let listener = AdminRoundtripListener()
-        let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
+        let mediaHost = try await MainActor.run {
+            try IOSNativeMediaHostComposition(
+                audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
+            ).nativeHost
+        }
         let directories = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime", isDirectory: true).path)
         let handle = try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
             appVersion: nil,
@@ -44,7 +48,7 @@ final class NativeAdminEngineRoundtripTests: XCTestCase {
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
             mobileLinux: nil,
             physicalMemoryBytes: 0, hostEnvironment: nil),
-            listener: listener, audio: audio, camera: CameraImpl(), share: ShareImpl(),
+            listener: listener, mediaHost: mediaHost, share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
 

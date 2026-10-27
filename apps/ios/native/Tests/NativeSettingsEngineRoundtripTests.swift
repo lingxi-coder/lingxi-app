@@ -48,7 +48,11 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
     private func exercise(root: URL, workspace: URL,
                           layers: [(WritableScopeDto, String, URL, String)], write: Bool) async throws {
         let listener = SettingsRoundtripListener()
-        let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
+        let mediaHost = try await MainActor.run {
+            try IOSNativeMediaHostComposition(
+                audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
+            ).nativeHost
+        }
         let directories = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime", isDirectory: true).path)
         let handle = try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
             appVersion: nil,
@@ -62,7 +66,7 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
             mobileLinux: nil,
             physicalMemoryBytes: 0, hostEnvironment: nil),
-            listener: listener, audio: audio, camera: CameraImpl(), share: ShareImpl(),
+            listener: listener, mediaHost: mediaHost, share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
         try await handle.submit(command: .refreshListings(which: [.settings]))

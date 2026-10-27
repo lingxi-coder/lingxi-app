@@ -462,6 +462,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     providerIds: PROVIDER_IDS,
     diagnostics,
     audioService: nativeAudio ?? undefined,
+    getMediaAudioConfigurationJson: () => JSON.stringify(
+      settings.getPublic().voice ?? audioConfigurationDefaults(),
+    ),
     accessState: (ref: SessionRef) => {
       try {
         // Adding a Project is the Desktop trust decision. Repository edits must

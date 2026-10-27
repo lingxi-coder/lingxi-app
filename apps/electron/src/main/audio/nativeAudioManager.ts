@@ -5,7 +5,18 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-import type { AudioErrorKindDto, AudioOperationDto, AudioOperationIdDto, AudioOperationRequestDto, AudioOperationResultDto, AudioOwnerDto } from '@lingxi/bridge-client';
+import type {
+  AudioErrorKindDto,
+  AudioOperationDto,
+  AudioOperationIdDto,
+  AudioOperationRequestDto,
+  AudioOperationResultDto,
+  AudioOwnerDto,
+  MediaSessionModeDto,
+  MediaErrorKindDto,
+  MediaDeviceRequestEnvelopeDto,
+  MediaDeviceResponseDto,
+} from '@lingxi/bridge-client';
 
 import type { ProviderAudioHost, ProviderAudioSession } from './providerAudioHost.js';
 import type { DiagnosticBuffer } from '../host-utils.js';
@@ -31,6 +42,7 @@ import {
   type NativeAudioResponse,
   type NativeAudioSnapshot,
 } from '../../shared/nativeAudio.js';
+import { validateMediaDeviceRequest, validateMediaDeviceResponse } from '../../shared/nativeMedia.js';
 
 const AUDIO_HELPER_APP = 'LingXiAudioHelper.app';
 const AUDIO_HELPER_BIN = 'LingXiAudioHelper';
@@ -38,6 +50,9 @@ const AUDIO_HELPER_ENV = 'LINGXI_AUDIO_HELPER_BIN';
 const REQUEST_TIMEOUT_MS = 5 * 60_000;
 const SPEAK_TIMEOUT_MS = 20 * 60_000;
 const SUSPEND_TEARDOWN_TIMEOUT_MS = 3_000;
+const MEDIA_DEVICE_REQUEST_TIMEOUT_MS = 5 * 60_000;
+const MEDIA_DEVICE_OPERATION_TIMEOUT_MS = 30_000;
+const MEDIA_LATE_OPEN_CLEANUP_MS = 5 * 60_000;
 
 type HelperProcess = Pick<ChildProcessWithoutNullStreams, 'pid' | 'stdin' | 'stdout' | 'stderr' | 'kill' | 'once'>;
 type SpawnHelper = (path: string, args: string[], env: NodeJS.ProcessEnv) => HelperProcess;
@@ -60,6 +75,16 @@ interface PendingEngineRequest {
   resolve: (response: NativeAudioEngineResponse) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+}
+
+interface PendingMediaDeviceRequest {
+  kind: 'media';
+  request: MediaDeviceRequestEnvelopeDto;
+  resolve: (response: MediaDeviceResponseDto) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+  timedOut: boolean;
+  lateCleanupTimer?: NodeJS.Timeout;
 }
 
 interface InFlightAudioRequest {
@@ -88,7 +113,7 @@ interface UiOperationCancellation {
   cancelled: boolean;
 }
 
-type PendingRequest = PendingCommandRequest | PendingEngineRequest;
+type PendingRequest = PendingCommandRequest | PendingEngineRequest | PendingMediaDeviceRequest;
 
 export interface NativeAudioManagerOptions {
   providerAudio?: ProviderAudioHost;
@@ -151,6 +176,7 @@ function cloneSnapshot(snapshot: NativeAudioSnapshot): NativeAudioSnapshot {
     ...(snapshot.recognizerAvailable === undefined ? {} : { recognizerAvailable: snapshot.recognizerAvailable }),
     ...(snapshot.recognition ? { recognition: { ...snapshot.recognition } } : {}),
     ...(snapshot.playback ? { playback: { ...snapshot.playback } } : {}),
+    ...(snapshot.mediaSessionModes === undefined ? {} : { mediaSessionModes: [...snapshot.mediaSessionModes] }),
     ...(snapshot.capabilities ? {
       capabilities: {
         ...snapshot.capabilities,
@@ -202,6 +228,23 @@ function audioOwnerFromSnapshotOwner(owner: NativeAudioOwner): AudioOwnerDto | n
 
 function failedAudio(kind: AudioErrorKindDto, message: string): AudioOperationResultDto {
   return { type: 'failed', error: { kind, message } };
+}
+
+function mediaDeviceFailure(
+  requestId: string,
+  kind: MediaErrorKindDto,
+  message: string,
+): MediaDeviceResponseDto {
+  let bounded = message;
+  while (Buffer.byteLength(bounded, 'utf8') > 1_024) bounded = bounded.slice(0, -1);
+  return { request_id: requestId, result: { type: 'error', error: { kind, message: bounded || 'Native media request failed' } } };
+}
+
+function mediaDeviceTimeoutMs(request: MediaDeviceRequestEnvelopeDto): number {
+  if (request.request.type === 'open') {
+    return Math.min(request.request.request.timeout_budget_ms ?? MEDIA_DEVICE_OPERATION_TIMEOUT_MS, MEDIA_DEVICE_REQUEST_TIMEOUT_MS);
+  }
+  return request.request.type === 'next_input' ? MEDIA_DEVICE_REQUEST_TIMEOUT_MS : MEDIA_DEVICE_OPERATION_TIMEOUT_MS;
 }
 
 function audioIdentityKey(identity: AudioOperationIdDto): string {
@@ -284,6 +327,8 @@ export class NativeAudioManager {
   private readonly launchPermissionHelper: LaunchPermissionHelper;
   private readonly subscribers = new Set<(event: NativeAudioEvent) => void>();
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly seenMediaRequestIds = new Set<string>();
+  private readonly mediaRequestHistory: string[] = [];
   private readonly pendingAudioRequests = new Map<string, InFlightAudioRequest>();
   private readonly seenAudioIdentities = new Set<string>();
   private readonly audioIdentityHistory: string[] = [];
@@ -429,37 +474,69 @@ export class NativeAudioManager {
     }
   }
 
-  async startRealtimeCapture(sessionId: string, sampleRateHz: number): Promise<AudioOperationResultDto> {
+  async startMediaCapture(owner: AudioOwnerDto, sampleRateHz: number): Promise<AudioOperationResultDto> {
     await this.ensureCapabilities();
-    const owner: AudioOwnerDto = { type: 'session', session_id: sessionId };
-    this.streamCaptureOwners.add(audioOwnerKey(owner));
+    const ownerKey = audioOwnerKey(owner);
+    this.streamCaptureOwners.add(ownerKey);
     const identity = { id: randomUUID(), generation: ++this.streamGeneration, service_epoch: this.getCapabilities().service_epoch };
-    this.streamCaptureIdentities.set(audioOwnerKey(owner), identity);
+    this.streamCaptureIdentities.set(ownerKey, identity);
     try {
       const result = await this.executeAudioRequest({ identity, owner,
         operation: { type: 'start_recording', sample_rate_hz: sampleRateHz, format: 'wav' }, max_payload_bytes: this.getCapabilities().max_payload_bytes });
-      if (result.type === 'recording_started') this.realtimeRecordingHandles.set(sessionId, result.handle);
-      else this.streamCaptureOwners.delete(audioOwnerKey(owner));
+      if (result.type === 'recording_started') this.realtimeRecordingHandles.set(ownerKey, result.handle);
+      else {
+        this.streamCaptureOwners.delete(ownerKey);
+        this.streamCaptureIdentities.delete(ownerKey);
+      }
       return result;
-    } catch (error) { this.streamCaptureOwners.delete(audioOwnerKey(owner)); throw error; }
+    } catch (error) {
+      this.streamCaptureOwners.delete(ownerKey);
+      this.streamCaptureIdentities.delete(ownerKey);
+      throw error;
+    }
+  }
+
+  async startRealtimeCapture(sessionId: string, sampleRateHz: number): Promise<AudioOperationResultDto> {
+    return this.startMediaCapture({ type: 'session', session_id: sessionId }, sampleRateHz);
+  }
+
+  async stopMediaCapture(owner: AudioOwnerDto): Promise<void> {
+    const ownerKey = audioOwnerKey(owner);
+    const handle = this.realtimeRecordingHandles.get(ownerKey);
+    if (handle) {
+      try { await this.executeAudioRequest({ identity: { id: randomUUID(), generation: ++this.streamGeneration, service_epoch: this.getCapabilities().service_epoch }, owner, operation: { type: 'stop_recording', handle }, max_payload_bytes: this.getCapabilities().max_payload_bytes }); }
+      finally {
+        this.realtimeRecordingHandles.delete(ownerKey);
+        this.streamCaptureOwners.delete(ownerKey);
+        this.streamCaptureIdentities.delete(ownerKey);
+      }
+    } else {
+      this.streamCaptureOwners.delete(ownerKey);
+      this.streamCaptureIdentities.delete(ownerKey);
+      await this.endAudioOwner(owner);
+    }
   }
 
   async stopRealtimeCapture(sessionId: string): Promise<void> {
-    const handle = this.realtimeRecordingHandles.get(sessionId);
-    if (handle) {
-      try { await this.executeAudioRequest({ identity: { id: randomUUID(), generation: ++this.streamGeneration, service_epoch: this.getCapabilities().service_epoch }, owner: { type: 'session', session_id: sessionId }, operation: { type: 'stop_recording', handle }, max_payload_bytes: this.getCapabilities().max_payload_bytes }); }
-      finally { this.realtimeRecordingHandles.delete(sessionId); this.streamCaptureOwners.delete(`session:${sessionId}`); }
-    } else { this.streamCaptureOwners.delete(`session:${sessionId}`); await this.endAudioOwner({ type: 'session', session_id: sessionId }); }
+    return this.stopMediaCapture({ type: 'session', session_id: sessionId });
+  }
+
+  async playMediaAudio(owner: AudioOwnerDto, pcmBase64: string, sampleRateHz: number): Promise<AudioOperationResultDto> {
+    await this.ensureCapabilities();
+    return this.executeAudioRequest({ identity: { id: randomUUID(), generation: ++this.streamGeneration, service_epoch: this.getCapabilities().service_epoch }, owner,
+      operation: { type: 'play', pcm_base64: pcmBase64, sample_rate_hz: sampleRateHz }, max_payload_bytes: this.getCapabilities().max_payload_bytes });
   }
 
   async playRealtimeAudio(sessionId: string, pcmBase64: string, sampleRateHz: number): Promise<AudioOperationResultDto> {
-    await this.ensureCapabilities();
-    return this.executeAudioRequest({ identity: { id: randomUUID(), generation: ++this.streamGeneration, service_epoch: this.getCapabilities().service_epoch }, owner: { type: 'session', session_id: sessionId },
-      operation: { type: 'play', pcm_base64: pcmBase64, sample_rate_hz: sampleRateHz }, max_payload_bytes: this.getCapabilities().max_payload_bytes });
+    return this.playMediaAudio({ type: 'session', session_id: sessionId }, pcmBase64, sampleRateHz);
   }
 
   getCapabilities(): NonNullable<NativeAudioSnapshot['capabilities']> {
     return this.getSnapshot().capabilities ?? defaultNativeAudioSnapshot().capabilities!;
+  }
+
+  getMediaSessionModes(): MediaSessionModeDto[] {
+    return [...(this.getSnapshot().mediaSessionModes ?? [])];
   }
 
   async refreshHostedCapabilities(): Promise<void> { await this.refreshHostedSnapshot(); }
@@ -515,6 +592,68 @@ export class NativeAudioManager {
     }
   }
 
+  /** Execute one host-private native device callback on the existing helper. */
+  async executeMediaDevice(value: unknown): Promise<MediaDeviceResponseDto> {
+    let request: MediaDeviceRequestEnvelopeDto;
+    try {
+      request = validateMediaDeviceRequest(value);
+    } catch (error) {
+      const requestId = value && typeof value === 'object' && 'request_id' in value
+        && typeof value.request_id === 'string' && value.request_id.length <= 256
+        ? value.request_id
+        : 'invalid';
+      return mediaDeviceFailure(requestId, 'invalid_request', error instanceof Error ? error.message : 'Invalid native media request');
+    }
+    if (this.seenMediaRequestIds.has(request.request_id)) {
+      return mediaDeviceFailure(request.request_id, 'invalid_request', 'The native media request identity is stale');
+    }
+    this.rememberMediaRequestId(request.request_id);
+    if (!this.helperPath) {
+      return mediaDeviceFailure(request.request_id, 'unavailable', this.snapshot.helper.message ?? 'The native audio helper is unavailable');
+    }
+
+    const timeoutMs = mediaDeviceTimeoutMs(request);
+    const deadlineAt = performance.now() + timeoutMs;
+    try {
+      if (request.request.type === 'open' && request.request.request.request.mode !== 'audio') {
+        return mediaDeviceFailure(request.request_id, 'unsupported', 'The Desktop native media helper supports audio sessions only');
+      }
+      if (request.request.type === 'open' && this.opts.isForeground && !this.opts.isForeground()) {
+        return mediaDeviceFailure(request.request_id, 'unavailable', 'A foreground desktop window is required to open native audio');
+      }
+      await this.ensureHelper();
+      if (request.request.type === 'open' && this.opts.isPackaged) {
+        const remaining = Math.max(0, deadlineAt - performance.now());
+        if (remaining === 0) return mediaDeviceFailure(request.request_id, 'timeout', 'The native media open deadline expired');
+        let permissionTimer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            this.resolvePackagedPermissions(['microphone'], () => performance.now() < deadlineAt),
+            new Promise<void>((resolvePermission) => {
+              permissionTimer = setTimeout(resolvePermission, remaining);
+            }),
+          ]);
+        } finally {
+          if (permissionTimer) clearTimeout(permissionTimer);
+        }
+        if (performance.now() >= deadlineAt) {
+          return mediaDeviceFailure(request.request_id, 'timeout', 'The native media open deadline expired');
+        }
+      }
+      const remaining = Math.max(0, deadlineAt - performance.now());
+      if (remaining === 0) return mediaDeviceFailure(request.request_id, 'timeout', 'The native media request deadline expired');
+      return await this.sendHelperMediaRequest(request, remaining);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.opts.diagnostics.add('warn', 'host', `native media device request failed: ${message}`);
+      return mediaDeviceFailure(
+        request.request_id,
+        /timed out/i.test(message) ? 'timeout' : 'native_failure',
+        message,
+      );
+    }
+  }
+
   async executeAudioRequest(
     value: unknown,
     configurationSnapshot?: { configuration: AudioConfigurationV4; revision: number },
@@ -546,6 +685,19 @@ export class NativeAudioManager {
     if (['capture', 'listen', 'synthesize', 'speak'].includes(request.operation.type)) {
       try { earlyConfiguration = structuredClone(configurationSnapshot?.configuration ?? this.opts.getAudioConfiguration?.() ?? audioConfigurationDefaults()); }
       catch (error) { return failedAudio('unavailable', error instanceof Error ? error.message : 'the saved audio configuration is unavailable'); }
+    }
+    if (request.route_policy === 'host_configured_local_only') {
+      const operationType = request.operation.type;
+      if (!['listen', 'synthesize', 'speak'].includes(operationType) || !earlyConfiguration) {
+        return failedAudio('invalid_request', 'the host-local route policy is invalid for this audio operation');
+      }
+      const providerRoute = operationType === 'listen'
+        ? earlyConfiguration.recognition.source === 'provider'
+        : earlyConfiguration.speech.source === 'provider'
+          || earlyConfiguration.speech.voice?.source === 'provider';
+      if (providerRoute) {
+        return failedAudio('invalid_request', 'the native audio snapshot selects a provider route for a host-local operation');
+      }
     }
     const hosted = request.operation.type === 'capture'
       || (request.operation.type === 'listen' && earlyConfiguration?.recognition.source === 'provider')
@@ -1159,6 +1311,9 @@ export class NativeAudioManager {
         for (const recording of this.activeRecordingOrigins.values()) remember(recording.owner);
         for (const pending of this.pending.values()) {
           if (pending.kind === 'command' && pending.owner) rememberSnapshotOwner(pending.owner);
+          if (pending.kind === 'media' && pending.request.request.type === 'open') {
+            remember(pending.request.request.request.owner);
+          }
         }
         if (this.snapshot.currentOperation) remember(this.snapshot.currentOperation.owner);
         rememberSnapshotOwner(this.snapshot.owner);
@@ -1263,8 +1418,10 @@ export class NativeAudioManager {
 
   private applySnapshot(snapshot: NativeAudioSnapshot): void {
     const previousCapabilities = JSON.stringify(this.snapshot.capabilities ?? null);
+    const previousMediaModes = JSON.stringify(this.snapshot.mediaSessionModes);
     this.snapshot = cloneSnapshot(snapshot);
-    if (JSON.stringify(this.snapshot.capabilities ?? null) !== previousCapabilities) {
+    if (JSON.stringify(this.snapshot.capabilities ?? null) !== previousCapabilities
+      || JSON.stringify(this.snapshot.mediaSessionModes) !== previousMediaModes) {
       this.emit({ type: 'snapshot_changed', snapshot: this.getSnapshot() });
     }
   }
@@ -1303,6 +1460,7 @@ export class NativeAudioManager {
         state,
         ...(message ? { message } : {}),
       },
+      ...(state === 'running' ? {} : { mediaSessionModes: [] }),
     };
     const snapshot = this.getSnapshot();
     this.emit({ type: 'helper_state', snapshot, state, ...(message ? { message } : {}) });
@@ -1541,6 +1699,11 @@ export class NativeAudioManager {
   }
 
   private handleHelperEnvelope(value: unknown): void {
+    if (value && typeof value === 'object' && !Array.isArray(value)
+      && (value as { type?: unknown }).type === 'media_response') {
+      this.handleMediaHelperResponse(value);
+      return;
+    }
     const envelope = value as NativeAudioHelperEnvelope;
     if (envelope.type === 'event') {
       const event = validateNativeAudioEvent(envelope.event);
@@ -1561,38 +1724,137 @@ export class NativeAudioManager {
         }
         const response = this.errorResponse('native-error', envelope.error.message);
         if (pending.kind === 'command') pending.resolve(response);
-        else pending.resolve({
+        else if (pending.kind === 'engine') pending.resolve({
           type: 'engine_result',
           snapshot: this.getSnapshot(),
           result: failedAudio('native_failure', envelope.error.message),
         });
+        else pending.reject(new Error(envelope.error.message));
         return;
       }
       if ((envelope.result as { type?: string }).type === 'engine_result') {
         const response = validateNativeAudioEngineResponse(envelope.result);
         if (pending.kind === 'command') pending.resolve(this.normalizeCommandResponse(response));
-        else if (sameIdentity(response.snapshot.currentOperation?.identity, pending.request.identity) || isCurrentOrIdleSnapshot(response.snapshot, pending.request)) {
+        else if (pending.kind === 'engine' && (sameIdentity(response.snapshot.currentOperation?.identity, pending.request.identity) || isCurrentOrIdleSnapshot(response.snapshot, pending.request))) {
           pending.resolve(response);
-        } else {
+        } else if (pending.kind === 'engine') {
           pending.resolve({ type: 'engine_result', snapshot: this.getSnapshot(), result: response.result });
-        }
+        } else pending.reject(new Error('native audio helper returned an audio response for a media request'));
       } else {
         const response = validateNativeAudioResponse(envelope.result);
         if (pending.kind === 'command') pending.resolve(response);
-        else pending.resolve({
+        else if (pending.kind === 'engine') pending.resolve({
           type: 'engine_result',
           snapshot: this.getSnapshot(),
           result: failedAudio('native_failure', 'the audio helper returned a command response for an operation request'),
         });
+        else pending.reject(new Error('native audio helper returned an audio response for a media request'));
       }
     } catch (error) {
       pending.reject(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
+  private handleMediaHelperResponse(value: unknown): void {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    const envelope = value as { id?: unknown; response?: unknown };
+    if (typeof envelope.id !== 'string') return;
+    const pending = this.pending.get(envelope.id);
+    if (!pending || pending.kind !== 'media') return;
+    try {
+      const response = validateMediaDeviceResponse(envelope.response);
+      if (response.request_id !== pending.request.request_id) throw new Error('Native media helper returned a mismatched request ID');
+      clearTimeout(pending.timer);
+      if (pending.lateCleanupTimer) clearTimeout(pending.lateCleanupTimer);
+      this.pending.delete(envelope.id);
+      if (pending.timedOut) {
+        if (pending.request.request.type === 'open' && response.result.type === 'opened') {
+          void this.stopOrphanedMediaLease(response.result.lease.lease_id);
+        }
+        return;
+      }
+      pending.resolve(response);
+    } catch (error) {
+      clearTimeout(pending.timer);
+      if (pending.lateCleanupTimer) clearTimeout(pending.lateCleanupTimer);
+      this.pending.delete(envelope.id);
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  private rememberMediaRequestId(requestId: string): void {
+    this.seenMediaRequestIds.add(requestId);
+    this.mediaRequestHistory.push(requestId);
+    if (this.mediaRequestHistory.length > 4_096) {
+      const oldest = this.mediaRequestHistory.shift();
+      if (oldest) this.seenMediaRequestIds.delete(oldest);
+    }
+  }
+
+  private sendHelperMediaRequest(
+    request: MediaDeviceRequestEnvelopeDto,
+    timeoutMs: number,
+  ): Promise<MediaDeviceResponseDto> {
+    const helper = this.helper;
+    if (!helper?.stdin?.writable) throw new Error('native audio helper is not writable');
+    const id = randomUUID();
+    return new Promise((resolveMedia, rejectMedia) => {
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending || pending.kind !== 'media') return;
+        pending.timedOut = true;
+        pending.resolve(mediaDeviceFailure(request.request_id, 'timeout', 'The native media request timed out'));
+        this.sendHelperMediaCancel(id);
+        pending.lateCleanupTimer = setTimeout(() => {
+          if (this.pending.get(id) === pending) this.pending.delete(id);
+        }, MEDIA_LATE_OPEN_CLEANUP_MS);
+      }, Math.max(1, timeoutMs));
+      this.pending.set(id, {
+        kind: 'media',
+        request,
+        resolve: resolveMedia,
+        reject: rejectMedia,
+        timer,
+        timedOut: false,
+      });
+      try {
+        helper.stdin.write(`${JSON.stringify({ id, kind: 'media_request', request })}\n`, (error) => {
+          if (error) this.failHelper(helper, `native audio helper media input failed: ${error.message}`);
+        });
+      } catch (error) {
+        this.failHelper(helper, `native audio helper media input failed: ${String(error)}`);
+      }
+    });
+  }
+
+  private sendHelperMediaCancel(targetId: string): void {
+    const helper = this.helper;
+    if (!helper?.stdin?.writable) return;
+    const envelope = { id: randomUUID(), kind: 'media_cancel', target_id: targetId };
+    try {
+      helper.stdin.write(`${JSON.stringify(envelope)}\n`, (error) => {
+        if (error) this.opts.diagnostics.add('warn', 'host', `native media cancellation write failed: ${error.message}`);
+      });
+    } catch (error) {
+      this.opts.diagnostics.add('warn', 'host', `native media cancellation write failed: ${String(error)}`);
+    }
+  }
+
+  private async stopOrphanedMediaLease(leaseId: string): Promise<void> {
+    const request: MediaDeviceRequestEnvelopeDto = {
+      request_id: randomUUID(),
+      request: { type: 'stop', lease_id: leaseId },
+    };
+    const response = await this.executeMediaDevice(request);
+    if (response.result.type !== 'stopped') {
+      this.opts.diagnostics.add('warn', 'host', 'native media helper did not acknowledge cleanup of a late-opened lease');
+    }
+  }
+
   private failPending(message: string): void {
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
+      if (pending.kind === 'media' && pending.lateCleanupTimer) clearTimeout(pending.lateCleanupTimer);
       this.pending.delete(id);
       pending.reject(new Error(message));
     }

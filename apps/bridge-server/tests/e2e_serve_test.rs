@@ -270,6 +270,13 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
     let frame = tokio::time::timeout_at(auth_event_deadline, next_frame(&mut ws))
         .await
         .expect("credential rejection must not enter provider retry backoff");
+    match frame {
+        Frame::Event(ClientEvent::TurnStarted { turn_id: None }) => {}
+        other => panic!("expected exactly one start for the submitted turn, got {other:?}"),
+    }
+    let frame = tokio::time::timeout_at(auth_event_deadline, next_frame(&mut ws))
+        .await
+        .expect("credential rejection must not enter provider retry backoff");
     let frame = match frame {
         Frame::Event(ClientEvent::PromptSuggestionState { enabled, notice }) => {
             assert!(

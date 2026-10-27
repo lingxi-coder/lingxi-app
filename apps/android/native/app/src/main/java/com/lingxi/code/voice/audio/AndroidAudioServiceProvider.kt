@@ -84,6 +84,20 @@ internal object AndroidAudioServiceProvider {
         operation = DeviceAudioOperation.OffloadMediaPlay(sessionLabel, target),
     )
 
+    /** Open the RTC audio lane through the same device leases as one-shot audio. */
+    suspend fun openMediaAudioPort(
+        context: Context,
+        owner: AudioOwnerKey,
+        capture: Boolean,
+        playback: Boolean,
+        sampleRateHz: Int = 24_000,
+    ): AndroidMediaAudioPortSession = get(context).openMediaAudioPort(
+        owner = owner,
+        capture = capture,
+        playback = playback,
+        sampleRateHz = sampleRateHz,
+    )
+
     suspend fun controlOffloadMedia(
         context: Context,
         owner: AudioOwnerKey,

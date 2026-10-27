@@ -66,6 +66,53 @@ class AndroidAudioServiceCoreTest {
     }
 
     @Test
+    fun hostConfiguredLocalPolicyRejectsProviderSettingsBeforeCloudOrDeviceDispatch() = runTest {
+        val driver = FakeDriver()
+        val provider = FakeProvider()
+        val service = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch, provider)
+        val providerConfiguration = AudioConfigurationV4(
+            speech = AudioSpeechPreference(AudioSource.PROVIDER),
+        )
+
+        val result = service.execute(
+            request(
+                "local-only-provider-rejected",
+                DeviceAudioOperation.Synthesize("hello", null, null, null, providerConfiguration),
+                routePolicy = DeviceAudioRoutePolicy.HOST_CONFIGURED_LOCAL_ONLY,
+            ),
+        ) as DeviceAudioResult.Failed
+
+        assertEquals(DeviceAudioErrorKind.InvalidRequest, result.error.kind)
+        assertEquals(0, provider.syntheses)
+        assertFalse(driver.playStarted.isCompleted)
+        assertEquals(0, service.diagnostics().activeLeaseCount)
+    }
+
+    @Test
+    fun hostConfiguredLocalPolicyRejectsAutomaticProviderVoicePin() = runTest {
+        val provider = FakeProvider()
+        val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), 64, epoch, provider)
+        val configuration = AudioConfigurationV4(
+            speech = AudioSpeechPreference(
+                source = AudioSource.AUTOMATIC,
+                voice = AudioVoiceSelection(AudioSource.PROVIDER, "provider-voice", "voice-model", "voice-profile"),
+            ),
+        )
+
+        val result = service.execute(
+            request(
+                "local-only-provider-voice-rejected",
+                DeviceAudioOperation.Synthesize("hello", null, null, null, configuration),
+                routePolicy = DeviceAudioRoutePolicy.HOST_CONFIGURED_LOCAL_ONLY,
+            ),
+        ) as DeviceAudioResult.Failed
+
+        assertEquals(DeviceAudioErrorKind.InvalidRequest, result.error.kind)
+        assertEquals(0, provider.syntheses)
+        assertEquals(0, service.diagnostics().activeLeaseCount)
+    }
+
+    @Test
     fun providerCancellationDoesNotReturnLateTranscriptAndReleasesCapture() = runTest {
         val provider = FakeProvider().apply { blockTranscription = true }
         val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), 64, epoch, provider)
@@ -764,7 +811,11 @@ class AndroidAudioServiceCoreTest {
         id: String,
         operation: DeviceAudioOperation,
         owner: AudioOwnerKey = this.owner,
-    ) = DeviceAudioRequest(identity(id), owner, timeoutBudgetMs = null, maxPayloadBytes = 64, operation = operation)
+        routePolicy: DeviceAudioRoutePolicy = DeviceAudioRoutePolicy.DEFAULT,
+    ) = DeviceAudioRequest(
+        identity(id), owner, timeoutBudgetMs = null, maxPayloadBytes = 64, operation = operation,
+        routePolicy = routePolicy,
+    )
 
     private fun identity(id: String) = AudioOperationIdentity(id, generation = 1, serviceEpoch = epoch)
 

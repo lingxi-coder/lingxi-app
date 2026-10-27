@@ -138,6 +138,11 @@ final class IOSAudioProviderService {
         sessionContext.map { AudioProviderContext(profileId: $0.profileId) }
     }
 
+    func sessionContextIfOwned(ownerID: String) -> IOSAudioSessionContext? {
+        guard sessionContextOwnerID == ownerID else { return nil }
+        return sessionContext
+    }
+
     var routeCapabilities: [AudioProviderCapability] { capabilities.values.map(\.route) }
 
     func profileID(for binding: AudioCloudBinding) -> String? {

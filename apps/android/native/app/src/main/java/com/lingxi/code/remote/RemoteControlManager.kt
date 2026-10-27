@@ -8,6 +8,10 @@ import com.lingxi.code.BuildConfig
 import com.lingxi.code.bindings.android.AndroidRemoteControlClient
 import com.lingxi.code.bindings.android.AndroidRemoteKeyStore
 import com.lingxi.code.bindings.android.AndroidRemoteListener
+import com.lingxi.code.bindings.android.AndroidRemoteMediaConfigProvider
+import com.lingxi.code.bindings.android.AndroidNativeMediaHost
+import com.lingxi.code.bindings.android.RemoteMediaConfigRequestFfi
+import com.lingxi.code.bindings.android.RemoteMediaConfigFfi
 import com.lingxi.code.bindings.android.AndroidRemoteTokenProvider
 import com.lingxi.code.bindings.android.RemoteConnectionPhaseFfi
 import com.lingxi.code.bindings.android.RemoteConnectionStateFfi
@@ -19,9 +23,11 @@ import com.lingxi.code.bindings.android.RemoteSessionSummaryFfi
 import com.lingxi.code.bindings.android.RemoteSessionUpdateFfi
 import com.lingxi.code.bindings.android.RemoteTransportFfi
 import com.lingxi.code.bindings.android.buildAndroidRemoteControlClient
+import com.lingxi.code.bindings.android.defaultRemoteMediaConfig
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import com.lingxi.code.conversation.RemoteSessionPort
 import com.lingxi.code.push.PushRegistration
+import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -409,10 +415,17 @@ object RemoteControl {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val account = FirebaseRemoteAccount()
         val keys = DataStoreRemoteKeyStore.create(context, scope)
+        val mediaHost = AndroidNativeMediaHostProvider.get(context)
         return RemoteControlManager(
             scope = scope,
             account = account,
-            factory = FfiRemoteClientFactory(account, keys, deviceName()),
+            factory = FfiRemoteClientFactory(
+                account,
+                keys,
+                deviceName(),
+                mediaHost,
+                AppRemoteMediaConfigProvider,
+            ),
             pushInstallationId = { runCatching { PushRegistration.identity(context).id }.getOrNull() },
         )
     }
@@ -436,6 +449,8 @@ internal class FfiRemoteClientFactory(
     private val account: RemoteAccount,
     private val keys: AndroidRemoteKeyStore,
     private val deviceName: String,
+    private val mediaHost: AndroidNativeMediaHost,
+    private val mediaConfigProvider: AndroidRemoteMediaConfigProvider,
 ) : RemoteClientFactory {
     override suspend fun build(uid: String, listener: AndroidRemoteListener): RemoteClientPort =
         FfiRemoteClientPort(
@@ -447,8 +462,16 @@ internal class FfiRemoteClientFactory(
                 tokens = FfiTokenProvider(account),
                 keys = keys,
                 listener = listener,
+                mediaHost = mediaHost,
+                mediaConfigProvider = mediaConfigProvider,
             ),
         )
+}
+
+/** Android currently uses the product's public STUN defaults for media routes. */
+private object AppRemoteMediaConfigProvider : AndroidRemoteMediaConfigProvider {
+    override suspend fun resolve(request: RemoteMediaConfigRequestFfi): RemoteMediaConfigFfi =
+        defaultRemoteMediaConfig()
 }
 
 /** [RemoteClientPort] over the generated [AndroidRemoteControlClient]. */

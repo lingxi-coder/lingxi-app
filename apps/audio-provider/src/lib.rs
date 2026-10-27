@@ -15,7 +15,15 @@ use tokio_util::sync::CancellationToken;
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_AUDIO_BYTES: usize = 12 * 1024 * 1024;
 
+pub mod media_attachment;
+pub mod media_cloud;
+pub mod media_configuration;
+pub mod media_host;
+pub mod media_native;
+pub mod media_store;
 pub mod realtime;
+
+pub use media_attachment::{AppMediaConversationAttachment, AudioConfigurationSnapshot};
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -101,6 +109,20 @@ impl AudioProviderHost {
             keys: BTreeMap::new(),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    /// Exact immutable SDK client snapshot supplied to shared media routing.
+    pub(crate) fn client_snapshot(&self) -> sdk::ClientSnapshot {
+        self.client.snapshot()
+    }
+
+    /// Resolve a credential for an already pinned profile without exposing it
+    /// to logs or native callback DTOs.
+    pub(crate) async fn credential_for_profile(
+        &self,
+        profile: &str,
+    ) -> Result<sdk::protocol::Secret<String>, Value> {
+        self.credential(profile).await
     }
 
     /// Build a host from serialized provider profiles and trusted credential sources.

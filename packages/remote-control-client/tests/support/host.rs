@@ -22,6 +22,7 @@ use remote_control_client::tunnel_crypto::{derive_tunnel_keys, TunnelDir};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// What the fake desktop does.
 #[derive(Clone)]
@@ -372,6 +373,18 @@ impl FakeHost {
             .notify(method, Some(params))
             .await
             .unwrap();
+    }
+
+    /// Send a host-initiated RPC request, as the product media offerer does.
+    pub async fn request(
+        &self,
+        conn_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, RpcError> {
+        self.rpc_of(conn_id)
+            .request(method, Some(params), Some(Duration::from_secs(2)))
+            .await
     }
 
     pub fn drop_connection(&self, conn_id: &str, reason: &str) {

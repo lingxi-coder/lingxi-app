@@ -104,7 +104,7 @@ test('an unknown device gets a pairing code, the user allows it, and the device 
     assert.equal(h.gateway.calls.length, 1);
     assert.deepEqual(
       { ...h.gateway.calls[0]!.viewer },
-      { account_uid: h.uid, device_id: viewer.deviceId, device_name: 'Lingfeng iPhone', platform: 'ios', conn_id: viewer.connId },
+      { account_uid: h.uid, host_id: h.identity.hostId, device_id: viewer.deviceId, device_name: 'Lingfeng iPhone', platform: 'ios', conn_id: viewer.connId },
     );
 
     // initialize again is idempotent and now says approved.
@@ -213,6 +213,29 @@ test('initialize checks the protocol versions and its parameters', async () => {
     assert.equal(await viewer.callError('initialize', viewer.initializeParams({ params: { protocol: 1, client_protocol_version: CLIENT_PROTOCOL_MAJOR, app: { version: '' , platform: 'ios' } } })), 'invalid_params');
     assert.equal(listed(h, viewer)?.approved, false, 'none of those approved anything');
     assert.equal((await viewer.initialize<InitializeResult>()).status, 'approved');
+  });
+});
+
+test('initialize preserves only a valid explicitly declared media handler capability', async () => {
+  await withHarness(async (h) => {
+    const viewer = await h.viewer({ platform: 'ios' });
+    h.approveDevice(viewer);
+    await viewer.connect();
+    const caps = { version: 1, modes: ['audio', 'video', 'audio_video'], source_kinds: ['microphone', 'camera'] };
+    assert.equal(await viewer.callError('initialize', viewer.initializeParams({
+      mediaCapabilities: { version: 1, modes: ['audio'], source_kinds: ['camera'] },
+    })), 'invalid_params');
+    assert.equal(h.gateway.calls.length, 0, 'invalid capability cannot approve or dispatch a viewer');
+    await viewer.initialize({ mediaCapabilities: caps });
+    await viewer.call('sessions.list', {});
+    assert.deepEqual(h.gateway.calls[0]?.viewer.media_capabilities, caps);
+
+    const legacy = await h.viewer({ platform: 'web' });
+    h.approveDevice(legacy);
+    await legacy.connect();
+    await legacy.initialize();
+    await legacy.call('sessions.list', {});
+    assert.equal(h.gateway.calls[1]?.viewer.media_capabilities, undefined, 'ordinary approved links stay data-only');
   });
 });
 

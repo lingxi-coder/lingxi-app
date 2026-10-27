@@ -18,7 +18,7 @@ from sdk_tools import SdkSnapshot, WEB, cargo_args, cargo_target_lock, command
 
 PROFILES = [
     {"id": "harness-engine", "repo": "harness-runtime", "packages": ["harness-runtime"], "features": "engine", "crate": "harness_runtime", "label": {"en": "Harness · engine", "zh": "Harness · 引擎"}},
-    {"id": "harness-desktop", "repo": "harness-runtime", "packages": ["harness-runtime", "client", "tool-api", "audio-runtime"], "features": "harness-runtime/desktop", "crate": "harness_runtime", "label": {"en": "Harness · desktop", "zh": "Harness · 桌面"}},
+    {"id": "harness-desktop", "repo": "harness-runtime", "packages": ["harness-runtime", "client", "tool-api", "media-api", "media-runtime", "tool-media"], "features": "harness-runtime/desktop", "crate": "harness_runtime", "label": {"en": "Harness · desktop", "zh": "Harness · 桌面"}},
     {"id": "harness-mobile-uniffi", "repo": "harness-runtime", "packages": ["harness-runtime", "client"], "features": "harness-runtime/mobile,harness-runtime/uniffi", "crate": "harness_runtime", "label": {"en": "Harness · mobile + UniFFI", "zh": "Harness · 移动端与 UniFFI"}},
     {"id": "llm-core", "repo": "llm-client", "packages": ["lingxi-llm-client"], "features": "", "crate": "lingxi_llm_client", "label": {"en": "LLM · core", "zh": "LLM · 核心"}},
     {"id": "llm-websocket", "repo": "llm-client", "packages": ["lingxi-llm-client"], "features": "responses-websocket,realtime-websocket", "crate": "lingxi_llm_client", "label": {"en": "LLM · WebSocket", "zh": "LLM · WebSocket"}},

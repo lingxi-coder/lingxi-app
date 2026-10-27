@@ -696,6 +696,7 @@ fn rig() -> Rig {
         random: Arc::new(|| 0.0),
         // This fixture exercises the encrypted fallback; native WebRTC has its own adapter tests.
         peers: None,
+        media_offer_handler: None,
         device_name: "Pixel".into(),
         app_version: "1.0".into(),
     };
@@ -1275,6 +1276,7 @@ async fn disconnect_during_repair_without_an_active_host_prevents_a_late_connect
             clock: parts.clock.clone(),
             random: parts.random.clone(),
             peers: parts.peers.clone(),
+            media_offer_handler: parts.media_offer_handler.clone(),
             device_name: parts.device_name.clone(),
             app_version: parts.app_version.clone(),
         },

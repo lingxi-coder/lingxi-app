@@ -40,7 +40,7 @@ use client::protocol::events::ClientEvent;
 use futures_util::{SinkExt, StreamExt};
 use lingxi_core::host::audio::{
     AudioOperation, AudioOperationContext, AudioOperationId, AudioOperationSuccess, AudioOwner,
-    AudioRecordingHandle, AudioService,
+    AudioService,
 };
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
@@ -264,7 +264,9 @@ async fn disconnect_mid_audio_request_fails_the_parked_call() {
             .execute(
                 context(),
                 AudioOperation::StopRecording {
-                    handle: AudioRecordingHandle("recording-1".into()),
+                    handle: media_api::RecordingRef::from(media_api::RecordingId(
+                        "recording-1".into(),
+                    )),
                 },
             )
             .await
@@ -311,7 +313,7 @@ async fn an_audio_request_with_no_client_connected_fails_immediately() {
         .execute(
             context(),
             AudioOperation::StopRecording {
-                handle: AudioRecordingHandle("recording-1".into()),
+                handle: media_api::RecordingRef::from(media_api::RecordingId("recording-1".into())),
             },
         )
         .await

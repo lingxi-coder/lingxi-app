@@ -6,7 +6,6 @@ actor LocalAppServiceClient {
     private struct TargetCompatibility: Decodable, Sendable { let compatible: Bool }
     private var handle: MobileLocalAppServiceHandle?
     private var linuxAttached = false
-
     func request<T: Decodable & Sendable>(_ fields: [String: LocalAppJSON], as type: T.Type = T.self) async throws -> T {
         if handle == nil {
             let service = try buildIosLocalAppService(configHome: MobileUserStorage.directories().configHome, runtime: nil)

@@ -91,6 +91,11 @@ targets:
       - framework: Frameworks/LingxiCodeFFI.xcframework
         embed: false
         link: true
+      # Shared Rust media references the official static GStreamer archive;
+      # linking this XCFramework once at the app boundary resolves those symbols.
+      - framework: Frameworks/GStreamer.xcframework
+        embed: false
+        link: true
       # Native support contains Swift/ObjC/C iSH glue, with no second Rust core.
       - framework: Frameworks/MobileLinuxNativeSupport.xcframework
         embed: false
@@ -114,6 +119,9 @@ targets:
       - sdk: libsqlite3.tbd
       - sdk: libresolv.tbd
       - sdk: SystemConfiguration.framework
+      # The pinned GStreamer applemedia slice contains iosassetsrc, which
+      # retains the legacy AssetsLibrary class references in its static archive.
+      - sdk: AssetsLibrary.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
@@ -280,8 +288,12 @@ targets:
       - framework: Frameworks/LingxiCodeFFI.xcframework
         embed: false
         link: true
+      - framework: Frameworks/GStreamer.xcframework
+        embed: false
+        link: true
       - sdk: libz.tbd
       - sdk: libiconv.tbd
+      - sdk: AssetsLibrary.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.tests

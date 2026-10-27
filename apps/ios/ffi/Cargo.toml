@@ -36,6 +36,7 @@ uniffi = [
     "dep:async-trait",
     "dep:client",
     "dep:mobile-linux-ios",
+    "dep:media-api",
     "dep:platform-posix-minimal",
     "dep:tokio",
     "dep:orchestrator",
@@ -45,6 +46,7 @@ uniffi = [
 ]
 [dependencies]
 audio-provider = { path = "../../audio-provider" }
+media-api = { workspace = true, optional = true }
 core = { workspace = true }
 mobile-linux-api.workspace = true
 mobile-linux-core.workspace = true
@@ -70,7 +72,7 @@ mobile-linux-ios = { workspace = true, optional = true }
 platform-posix-minimal = { workspace = true, optional = true }
 orchestrator = { workspace = true, optional = true }
 # Remote Control viewer client (`lingxi-rc/1`), exposed to the app by `src/remote.rs`.
-remote-control-client = { path = "../../../packages/remote-control-client", optional = true, features = ["webrtc"] }
+remote-control-client = { path = "../../../packages/remote-control-client", optional = true, features = ["native-media"] }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]

@@ -25,6 +25,14 @@ import type {
   SessionModeDto,
 } from '../protocol.js';
 import type { DevicePlatform } from './signaling.js';
+import type {
+  RemoteMediaAnswerResult,
+  RemoteMediaCapabilities,
+  RemoteMediaControlRequestParams,
+  RemoteMediaControlResult,
+  RemoteMediaOfferParams,
+  RemoteMediaPlaybackReceipt,
+} from './media.js';
 
 /** A result with nothing in it; the confirmation that a command was accepted. */
 export type EmptyResult = Record<string, never>;
@@ -37,6 +45,8 @@ export type EmptyResult = Record<string, never>;
 export interface RemoteAppInfo {
   version: string;
   platform: DevicePlatform;
+  /** Explicitly declared handler support, absent on older/general viewers. */
+  media_capabilities?: RemoteMediaCapabilities;
 }
 
 /** The desktop, as described to an approved viewer. */
@@ -406,6 +416,7 @@ export interface ViewerNotifications {
   ping: PingParams;
   pong: PongParams;
   'session.presence': SessionPresenceParams;
+  'media.playback_receipt': RemoteMediaPlaybackReceipt;
 }
 
 /** Notifications the host sends to a viewer: method name to params. */
@@ -420,4 +431,10 @@ export interface HostNotifications {
   'session.pending': SessionPendingParams;
   'session.reset': SessionResetParams;
   'session.closed': SessionClosedParams;
+}
+
+/** Host requests after approval are limited to media negotiation and playback control. */
+export interface HostRequests {
+  'media.offer': { params: RemoteMediaOfferParams; result: RemoteMediaAnswerResult };
+  'media.control': { params: RemoteMediaControlRequestParams; result: RemoteMediaControlResult };
 }

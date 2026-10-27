@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::decode::{decode_client_event, DecodedEvent};
+use crate::media::RemoteMediaCapabilities;
 use crate::signaling::DevicePlatform;
 
 /// Method names of the protocol.
@@ -83,6 +84,10 @@ pub struct RemoteAppInfo {
     pub version: String,
     /// What kind of app.
     pub platform: DevicePlatform,
+    /// Explicitly declared Remote Control media support, when implemented by
+    /// this viewer build. Approval and platform alone never imply support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_capabilities: Option<RemoteMediaCapabilities>,
 }
 
 /// The desktop, as described to an approved viewer.

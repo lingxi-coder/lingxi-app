@@ -1,0 +1,2 @@
+meson==1.4.1 \
+    --hash=sha256:d5acc3abae2dad3c70ddcbd10acac92b78b144d34d43f40f5b8ac31dfd8a826a

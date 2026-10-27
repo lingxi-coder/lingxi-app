@@ -9,6 +9,8 @@ import FirebaseAuth
 @MainActor
 @Observable
 final class RemoteControlManager {
+    private let mediaHostComposition: IOSNativeMediaHostComposition?
+    private let mediaHostInitializationError: String?
     private(set) var uid: String?
     private(set) var hosts: [RemoteHostFfi] = []
     private(set) var hostsLoaded = false
@@ -22,6 +24,14 @@ final class RemoteControlManager {
         init(_ value: RemoteConversationSource) { self.value = value }
     }
     @ObservationIgnored private var sources: [String: SourceReference] = [:]
+
+    init(
+        mediaHostComposition: IOSNativeMediaHostComposition? = nil,
+        mediaHostInitializationError: String? = nil
+    ) {
+        self.mediaHostComposition = mediaHostComposition
+        self.mediaHostInitializationError = mediaHostInitializationError
+    }
 
     func configure(uid: String?) async {
         guard uid != self.uid || client == nil else { return }
@@ -40,13 +50,21 @@ final class RemoteControlManager {
         await previous?.stopWatchingHosts()
         await previous?.disconnect()
         guard let uid, mine == generation, !Task.isCancelled else { return }
+        guard let mediaHostComposition else {
+            self.error = mediaHostInitializationError
+                ?? "The app media host was not composed before Remote Control started."
+            return
+        }
         do {
             let created = try await buildIosRemoteControlClient(
                 databaseUrl: "https://lingxi-5e4b2-default-rtdb.firebaseio.com", uid: uid,
                 deviceName: UIDevice.current.name,
                 appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0",
                 tokens: RemoteTokenProvider(uid: uid), keys: RemoteKeyStore(uid: uid),
-                listener: RemoteListener(manager: self, generation: mine))
+                listener: RemoteListener(manager: self, generation: mine),
+                mediaHost: mediaHostComposition.nativeHost,
+                mediaConfigProvider: mediaHostComposition.remoteMediaConfigProvider
+            )
             guard mine == generation, !Task.isCancelled else {
                 await created.disconnect()
                 return

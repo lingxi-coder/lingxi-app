@@ -136,6 +136,9 @@ jobs:
           sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
+      - name: Install the pinned GStreamer Android SDK
+        run: python3 scripts/ci/gstreamer_sdk.py android --root "$RUNNER_TEMP/gstreamer-sdk/android"
+
       # Gradle build cache + dependency cache (also provisions Gradle itself).
       - uses: gradle/actions/setup-gradle@v4
 
@@ -229,6 +232,9 @@ jobs:
           sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
+      - name: Install the pinned GStreamer Android SDK
+        run: python3 scripts/ci/gstreamer_sdk.py android --root "$RUNNER_TEMP/gstreamer-sdk/android"
+
       - uses: gradle/actions/setup-gradle@v4
 
       # Rebuild jniLibs in THIS job — emulator-runner runs in the same job, but
@@ -293,6 +299,9 @@ jobs:
         run: |
           brew install xcodegen meson ninja llvm lld libarchive
           echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Install the pinned GStreamer iOS XCFramework
+        run: python3 scripts/ci/gstreamer_sdk.py ios --root "$RUNNER_TEMP/gstreamer-sdk/ios"
 
       - name: Build native support and verified release rootfs
         run: |

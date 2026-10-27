@@ -102,7 +102,7 @@
       }
     },
     {
-      "name": "automatic speech with a persisted fixed voice is promoted",
+      "name": "automatic speech preserves a persisted system voice pin",
       "input": {
         "schemaVersion": 4,
         "recognition": {
@@ -135,7 +135,10 @@
         "speech": {
           "source": "automatic",
           "offlineModelId": null,
-          "voice": null,
+          "voice": {
+            "source": "system",
+            "id": "com.apple.voice.compact.en-US.Alex"
+          },
           "cloud": {
             "binding": "follow_session",
             "profileId": null,
@@ -184,7 +187,10 @@
         "speech": {
           "source": "automatic",
           "offlineModelId": null,
-          "voice": null,
+          "voice": {
+            "source": "offline",
+            "id": "unbound-current-voice"
+          },
           "cloud": {
             "binding": "follow_session",
             "profileId": null,
@@ -698,6 +704,41 @@
         "effective": null,
         "status": "invalidRequest",
         "reason": "offlineModelConflict",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "automatic speech rejects a persisted provider voice pin",
+      "input": {
+        "kind": "speech",
+        "preference": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": {
+            "source": "provider",
+            "profileId": "voice-profile",
+            "modelId": "voice-model",
+            "id": "provider-voice"
+          }
+        },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": []
+      },
+      "expected": {
+        "requested": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": {
+            "source": "provider",
+            "profileId": "voice-profile",
+            "modelId": "voice-model",
+            "id": "provider-voice"
+          }
+        },
+        "effective": null,
+        "status": "invalidRequest",
+        "reason": "unsupportedVoiceSource",
         "fallbackReason": null
       }
     },

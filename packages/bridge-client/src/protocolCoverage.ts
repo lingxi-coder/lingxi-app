@@ -41,6 +41,10 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   side_chat_get: true,
   side_chat_end: true,
   side_chat_submit: true,
+  media_service_request: true,
+  media_connection_response: true,
+  media_device_response: true,
+  media_control_response: true,
   cron_manage: true,
   cron_run_completed: true,
   cron_run_started: true,
@@ -118,6 +122,7 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   stop_realtime_audio: true,
   get_audio_session_context: true,
   update_audio_capabilities: true,
+  update_media_session_modes: true,
 };
 
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
@@ -129,6 +134,10 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   side_chat_event: true,
   side_chat_ended: true,
   side_chat_error: true,
+  media_connection_request: true,
+  media_device_request: true,
+  media_service_response: true,
+  media_control_request: true,
   cron_result: true,
   ui_control_result: true,
   ui_client_frame: true,

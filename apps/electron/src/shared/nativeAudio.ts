@@ -7,6 +7,7 @@ import type {
   AudioOperationRequestDto,
   AudioOperationResultDto,
   AudioOwnerDto,
+  MediaSessionModeDto,
 } from '@lingxi/bridge-client';
 import type { MicrophonePermissionStatus } from './microphoneAccess.js';
 import { normalizeAudioConfiguration } from './generatedAudioConfiguration.js';
@@ -25,6 +26,8 @@ const MAX_LANGUAGE_LENGTH = 64;
 const MAX_TEXT_LENGTH = 256 * 1024;
 const MAX_VOICE_ID_LENGTH = 512;
 const MAX_MODEL_ID_LENGTH = 256;
+const MAX_MEDIA_SESSION_MODES = 3;
+const VALID_MEDIA_SESSION_MODES: readonly MediaSessionModeDto[] = ['audio', 'video', 'audio_video'];
 const MIN_SAMPLE_RATE_HZ = 8_000;
 const MAX_SAMPLE_RATE_HZ = 768_000;
 const MIN_RATE = 0.5;
@@ -42,6 +45,8 @@ export type SpeechPermissionStatus =
   | 'restricted'
   | 'not_determined'
   | 'unavailable';
+
+export type NativeAudioMediaSessionMode = MediaSessionModeDto;
 
 export type NativeAudioErrorCode =
   | 'permission'
@@ -153,6 +158,7 @@ export interface NativeAudioSnapshot {
   recognition?: NativeAudioRecognitionSnapshot;
   playback?: NativeAudioPlaybackSnapshot;
   capabilities?: AudioCapabilitySnapshotDto;
+  mediaSessionModes?: NativeAudioMediaSessionMode[];
   configurationRevision?: number;
   currentOperation?: { identity: AudioOperationIdDto; owner: AudioOwnerDto };
   audioOperations: NativeAudioOperationTrace[];
@@ -399,6 +405,21 @@ function validateAudioOperationTrace(value: unknown): NativeAudioOperationTrace 
   };
 }
 
+function validateNativeAudioMediaSessionModes(value: unknown): NativeAudioMediaSessionMode[] {
+  if (!Array.isArray(value) || value.length > MAX_MEDIA_SESSION_MODES) {
+    throw new Error('invalid audio media session modes');
+  }
+  const seen = new Set<NativeAudioMediaSessionMode>();
+  return value.map((entry) => {
+    const mode = boundedString(entry, 'audio media session mode', 16);
+    if (!VALID_MEDIA_SESSION_MODES.includes(mode as NativeAudioMediaSessionMode) || seen.has(mode as NativeAudioMediaSessionMode)) {
+      throw new Error('invalid audio media session mode');
+    }
+    seen.add(mode as NativeAudioMediaSessionMode);
+    return mode as NativeAudioMediaSessionMode;
+  });
+}
+
 export function defaultNativeAudioSnapshot(): NativeAudioSnapshot {
   return {
     helper: { state: 'stopped' },
@@ -407,6 +428,7 @@ export function defaultNativeAudioSnapshot(): NativeAudioSnapshot {
     activity: 'idle',
     voices: [],
     models: [],
+    mediaSessionModes: [],
     capabilities: {
       service_epoch: 0,
       support_revision: 0,
@@ -431,6 +453,7 @@ export function validateNativeAudioSnapshot(value: unknown): NativeAudioSnapshot
     [
       'helper', 'permissions', 'owner', 'activity', 'localeTag', 'recognizerAvailable', 'recognition', 'playback',
       'voices', 'models', 'capabilities', 'configurationRevision', 'currentOperation', 'audioOperations',
+      'mediaSessionModes',
       'activeOperationCount', 'pendingOperationCount', 'activeRecordingCount', 'activePlaybackCount',
       'activeModelReferenceCount',
     ],
@@ -466,6 +489,9 @@ export function validateNativeAudioSnapshot(value: unknown): NativeAudioSnapshot
     activity,
     voices: Array.isArray(input['voices']) ? input['voices'].map((entry) => validateVoiceOption(entry)) : [],
     models: Array.isArray(input['models']) ? input['models'].map((entry) => validateModel(entry)) : [],
+    mediaSessionModes: input['mediaSessionModes'] === undefined
+      ? []
+      : validateNativeAudioMediaSessionModes(input['mediaSessionModes']),
     ...(input['capabilities'] === undefined ? {} : { capabilities: validateAudioCapability(input['capabilities']) }),
     ...(input['configurationRevision'] === undefined ? {} : {
       configurationRevision: boundedInteger(input['configurationRevision'], 'audio configuration revision', 0, Number.MAX_SAFE_INTEGER),
@@ -721,7 +747,7 @@ function validateAudioCapability(value: unknown): AudioCapabilitySnapshotDto {
 
 export function validateNativeAudioOperationRequest(value: unknown): AudioOperationRequestDto {
   const input = object(value, 'audio operation request');
-  exactKeys(input, ['identity', 'owner', 'initiator', 'timeout_budget_ms', 'max_payload_bytes', 'operation'], 'audio operation request');
+  exactKeys(input, ['identity', 'owner', 'initiator', 'timeout_budget_ms', 'route_policy', 'max_payload_bytes', 'operation'], 'audio operation request');
   let initiator: AudioOperationRequestDto['initiator'];
   if (input['initiator'] !== undefined) {
     const raw = object(input['initiator'], 'audio operation initiator');
@@ -734,11 +760,16 @@ export function validateNativeAudioOperationRequest(value: unknown): AudioOperat
   }
   const timeout = input['timeout_budget_ms'] === undefined
     ? undefined : boundedInteger(input['timeout_budget_ms'], 'audio timeout budget', 0, Number.MAX_SAFE_INTEGER);
+  const routePolicy = input['route_policy'];
+  if (routePolicy !== undefined && routePolicy !== 'host_configured_local_only') {
+    throw new Error('invalid audio route policy');
+  }
   return {
     identity: validateNativeAudioOperationIdentity(input['identity']),
     owner: validateAudioOwnerDto(input['owner']),
     ...(initiator === undefined ? {} : { initiator }),
     ...(timeout === undefined ? {} : { timeout_budget_ms: timeout }),
+    ...(routePolicy === undefined ? {} : { route_policy: 'host_configured_local_only' }),
     max_payload_bytes: boundedInteger(input['max_payload_bytes'], 'audio payload bound', 0, MAX_AUDIO_PAYLOAD_BYTES),
     operation: validateAudioOperation(input['operation']),
   };

@@ -34,11 +34,21 @@ final class RemoteConversationSource: ConversationSource {
     @ObservationIgnored private var valid = true
     @ObservationIgnored private var nextSendID: UInt64 = 1
 
-    init(hostID: String, sessionID: String, uid: String, manager: RemoteControlManager? = nil) {
+    init(
+        hostID: String,
+        sessionID: String,
+        uid: String,
+        manager: RemoteControlManager? = nil,
+        mediaHostComposition: IOSNativeMediaHostComposition? = nil,
+        mediaHostInitializationError: String? = nil
+    ) {
         self.hostID = hostID
         self.sessionID = sessionID
         self.uid = uid
-        self.manager = manager ?? RemoteControlManager()
+        self.manager = manager ?? RemoteControlManager(
+            mediaHostComposition: mediaHostComposition,
+            mediaHostInitializationError: mediaHostInitializationError
+        )
         projection = EngineConversationSource(config: EngineConfig(
             apiBase: "", apiKey: "", model: "", appSandboxRoot: "", projectCwd: nil,
             sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)

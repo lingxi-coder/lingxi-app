@@ -52,6 +52,7 @@ import {
 } from './audio-helper.mjs';
 import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
 import { stageCrashlytics, signCrashlytics } from './desktop-crashlytics.mjs';
+import { prepareMacGStreamerRuntime, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
 
 function log(message) {
   process.stdout.write(`[package:mac] ${message}\n`);
@@ -263,6 +264,7 @@ async function main() {
   cpSync(join(packageRoot, 'browser-extension'), join(resources, 'browser-extension'), { recursive: true });
   copyFileSync(sidecar, packagedSidecar);
   chmodSync(packagedSidecar, 0o755);
+  prepareMacGStreamerRuntime(packagedSidecar, join(contents, 'Frameworks'), 'arm64');
   stageModBun(resources, modCompiler);
   const brokerResourceRoot = join(resources, BROKER_RESOURCE_DIRNAME);
   buildCredentialBrokerResources(brokerResourceRoot, {
@@ -309,6 +311,7 @@ async function main() {
     metadata.version,
     brokerChannel,
   );
+  verifyMacGStreamerRuntime(join(contents, 'Frameworks'), packagedSidecar);
 
   normalizeTimestamps(paths.appPath);
   createDeterministicZip(paths.appPath, paths.zipPath);

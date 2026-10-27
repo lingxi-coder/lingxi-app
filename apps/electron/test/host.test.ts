@@ -1206,9 +1206,19 @@ test('settings model, voice and Thought patches persist without restarting a liv
     removeHandler: (channel: string) => { handlers.delete(channel); },
   };
   let restartCalls = 0;
+  const mediaUpdates: Array<{ sessionId: string; configuration: unknown }> = [];
   const bridge = {
     registerIpc: () => undefined,
     registerWindow: () => undefined,
+    runtimeSummaries: [
+      { sessionId: 'connected', connection: { status: 'connected' } },
+      { sessionId: 'disconnected', connection: { status: 'disconnected' } },
+    ],
+    get: (sessionId: string) => ({
+      updateMediaAudioSettings: async (configuration: string) => {
+        mediaUpdates.push({ sessionId, configuration: JSON.parse(configuration) });
+      },
+    }),
     // If a `voice`-only patch ever triggered a restart, this would be
     // called — `main/host.ts`'s own `restartsBridge` check only looks at
     // `'model' in patch || 'apiBaseUrl' in patch`, deliberately excluding
@@ -1277,6 +1287,8 @@ test('settings model, voice and Thought patches persist without restarting a liv
     assert.equal(result.voiceRevision, expectedVoiceRevision + 1);
     assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
     assert.deepEqual(new SettingsStore(userData).getPublic().voice, result.voice, 'v4 preferences must survive reopening the settings store');
+    assert.deepEqual(mediaUpdates, [{ sessionId: 'connected', configuration: result.voice }],
+      'saved voice configuration reaches connected media sessions only');
     assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
 
     for (const value of [false, true]) {

@@ -100,15 +100,22 @@ actor LocalAppAgentModelHost {
         let digest = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
         if handle != nil && configurationDigest == digest { return }
         let task = Task.detached(priority: .userInitiated) { () throws -> MobileEngineHandle in
-        let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
             return try await withCheckedThrowingContinuation { continuation in
                 let thread = Thread {
                     autoreleasepool {
                         continuation.resume(with: Result {
                             let permissions = AppAgentBootstrapPermissions()
-                            let handle = try buildIosEngineWithConfig(config: configuration, listener: AppAgentBootstrapListener(), audio: audio,
-                                camera: CameraImpl(), share: ShareImpl(), notifications: NotificationImpl(), clipboard: ClipboardImpl(),
-                                permissions: permissions, secureStorage: SecureStorageImpl(), deviceControl: DeviceControlImpl())
+                            let handle = try buildIosEngineWithConfig(
+                                config: configuration,
+                                listener: AppAgentBootstrapListener(),
+                                mediaHost: nil,
+                                share: ShareImpl(),
+                                notifications: NotificationImpl(),
+                                clipboard: ClipboardImpl(),
+                                permissions: permissions,
+                                secureStorage: SecureStorageImpl(),
+                                deviceControl: DeviceControlImpl()
+                            )
                             permissions.attach(handle)
                             return handle
                         })

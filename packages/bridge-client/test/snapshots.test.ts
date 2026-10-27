@@ -33,6 +33,12 @@ import {
   ALL_TASK_ROW_DTO_KEYS,
 } from '../src/protocolCoverage.js';
 import { validateClientEvent, validateServerHello } from '../src/validation.js';
+import {
+  validateMediaConnectionResponse,
+  validateMediaControlResponse,
+  validateMediaDeviceResponse,
+  validateMediaServiceRequest,
+} from '../src/protocol.js';
 import { runtimePath } from './runtimeSource.js';
 
 const SNAP_ROOT = runtimePath('crates/client/snapshots');
@@ -1060,6 +1066,32 @@ function validateCommand(name: string, v: unknown): void {
     case 'update_audio_capabilities':
       validateAudioCapabilities(o['capabilities']);
       break;
+    case 'update_media_session_modes': {
+      exactObjectKeys(o, ['type', 'modes']);
+      assert.ok(Array.isArray(o['modes']) && o['modes'].length <= 3);
+      const modes = o['modes'] as unknown[];
+      for (const mode of modes) {
+        assert.ok(mode === 'audio' || mode === 'video' || mode === 'audio_video');
+      }
+      assert.equal(new Set(modes).size, modes.length, 'media session modes must be unique');
+      break;
+    }
+    case 'media_service_request':
+      exactObjectKeys(o, ['type', 'request'], [], `command snapshot ${name}`);
+      assert.deepEqual(validateMediaServiceRequest(o['request']), o['request']);
+      break;
+    case 'media_connection_response':
+      exactObjectKeys(o, ['type', 'response'], [], `command snapshot ${name}`);
+      assert.deepEqual(validateMediaConnectionResponse(o['response']), o['response']);
+      break;
+    case 'media_device_response':
+      exactObjectKeys(o, ['type', 'response'], [], `command snapshot ${name}`);
+      assert.deepEqual(validateMediaDeviceResponse(o['response']), o['response']);
+      break;
+    case 'media_control_response':
+      exactObjectKeys(o, ['type', 'response'], [], `command snapshot ${name}`);
+      assert.deepEqual(validateMediaControlResponse(o['response']), o['response']);
+      break;
     case 'side_chat_create':
       exactObjectKeys(o, ['type', 'request_id'], ['initial_input'], `command snapshot ${name}`);
       assert.ok(isString(o['request_id']));
@@ -1628,6 +1660,16 @@ function validateEvent(name: string, v: unknown): void {
       validateAudioCapabilities(o['capabilities']);
       assert.deepEqual(validateClientEvent(v), v);
       break;
+    case 'media_connection_request':
+    case 'media_device_request':
+    case 'media_control_request':
+      exactObjectKeys(o, ['type', 'request'], [], `event snapshot ${name}`);
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'media_service_response':
+      exactObjectKeys(o, ['type', 'response'], [], `event snapshot ${name}`);
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
     case 'side_chat_created':
       exactObjectKeys(o, ['type', 'request_id', 'side_id'], [], `event snapshot ${name}`);
       assert.ok(isString(o['request_id']) && isString(o['side_id']));
@@ -1935,6 +1977,38 @@ test('ALL_CLIENT_EVENT_TYPES matches the locked runtime exactly', () => {
   assert.deepEqual(Object.keys(ALL_CLIENT_EVENT_TYPES).sort(), [...typeTagsOnDisk('event')].sort());
 });
 
+test('ServerHello validates explicit native media modes and rejects malformed inventories', () => {
+  const base = {
+    protocol_version: '0.2.0',
+    server_name: 'lingxi-bridge-server/test',
+    capabilities: {
+      supports_streaming: true,
+      supports_tools: true,
+      supports_skills: true,
+      supports_commands: true,
+      client_protocol_version: '25.0.0',
+      media_session_modes: ['audio'],
+    },
+  };
+  assert.deepEqual(
+    validateServerHello(base).capabilities.media_session_modes,
+    ['audio'],
+  );
+  assert.deepEqual(
+    validateServerHello({ ...base, capabilities: { ...base.capabilities, media_session_modes: [] } })
+      .capabilities.media_session_modes,
+    [],
+  );
+  assert.throws(() => validateServerHello({
+    ...base,
+    capabilities: { ...base.capabilities, media_session_modes: ['audio', 'audio'] },
+  }), /duplicate media session mode/);
+  assert.throws(() => validateServerHello({
+    ...base,
+    capabilities: { ...base.capabilities, media_session_modes: ['video', 'audio', 'audio_video', 'audio'] },
+  }), /invalid media session modes/);
+});
+
 test('terminal_api_error validates its required terminal facts and optional HTTP status', () => {
   const apiFailure = {
     type: 'terminal_api_error',
@@ -2018,6 +2092,17 @@ test('audio_request covers every AudioOperationDto variant and its trusted conte
     validateEvent(`audio_request(${String((operation as { type: string }).type)}-${index})`, event);
     assert.deepEqual(validateClientEvent(event), event);
   }
+
+  const baseListen = AUDIO_REQUEST({ type: 'listen', language: 'en-US' });
+  const hostLocalListen = {
+    ...baseListen,
+    request: { ...baseListen.request, route_policy: 'host_configured_local_only' },
+  };
+  assert.deepEqual(validateClientEvent(hostLocalListen), hostLocalListen);
+  assert.throws(() => validateClientEvent({
+    ...hostLocalListen,
+    request: { ...hostLocalListen.request, route_policy: 'allow_provider_fallback' },
+  }), /audio route policy/);
 
   assert.throws(() => validateClientEvent({ type: 'audio_request' }), /audio operation request/);
   assert.throws(() => validateClientEvent(AUDIO_REQUEST({ type: 'stop_recording' })), /audio recording handle/);

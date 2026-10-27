@@ -32,6 +32,8 @@ fi
 
 task_firebase="$RUNNER_TEMP/firebase-cli/node_modules/.bin/firebase"
 task_bridge="$GITHUB_WORKSPACE/target/release/bridge-server"
+task_terminal_prepare="$GITHUB_WORKSPACE/scripts/ci/prepare_terminal_test_broker.py"
+task_terminal_tests="$GITHUB_WORKSPACE/scripts/tests/test_terminal_test_broker.py"
 test -x "$task_firebase"
 test -x "$task_bridge"
 command -v xvfb-run >/dev/null
@@ -40,6 +42,11 @@ command -v rg >/dev/null
 
 task_config="$(mktemp -d "$RUNNER_TEMP/lingxi-desktop-rtdb.XXXXXX")"
 mkdir -p "$task_evidence" "$task_config/config" "$task_config/emulators"
+python3 -B "$task_terminal_tests"
+task_terminal_wrapper="$task_config/terminal-test-bridge"
+python3 -B "$task_terminal_prepare" \
+  --workspace "$GITHUB_WORKSPACE" --runner-temp "$RUNNER_TEMP" \
+  --bridge "$task_bridge" --wrapper "$task_terminal_wrapper" --evidence "$task_evidence"
 cp "$GITHUB_WORKSPACE/infra/firebase/database.rules.json" "$task_config/database.rules.json"
 cat > "$task_config/firebase.json" <<'JSON'
 {"database":{"rules":"database.rules.json"},"emulators":{"database":{"host":"127.0.0.1","port":19261},"hub":{"host":"127.0.0.1","port":19401},"ui":{"enabled":false},"singleProjectMode":true}}
@@ -49,7 +56,7 @@ export XDG_CONFIG_HOME="$task_config/config"
 export FIREBASE_EMULATORS_PATH="$task_config/emulators"
 export LINGXI_BRIDGE_SERVER_BIN="$task_bridge"
 export LINGXI_LOCAL_APP_CORE_BIN="$task_bridge"
-export LINGXI_TERMINAL_TEST_BIN="$task_bridge"
+export LINGXI_TERMINAL_TEST_BIN="$task_terminal_wrapper"
 task_bun="$(command -v bun)"
 export LINGXI_MOD_BUN_EXECUTABLE="$task_bun"
 export NO_COLOR=1
@@ -73,6 +80,8 @@ python3 "$GITHUB_WORKSPACE/scripts/lib/runtime_source.py" --json > "$task_eviden
 python3 -c 'import json, sys; assert not json.load(open(sys.argv[1], encoding="utf-8"))["development"], "Harness must come from the locked source"' \
   "$task_evidence/runtime-source.json"
 sha256sum "$task_bridge" "$GITHUB_WORKSPACE/Cargo.toml" "$GITHUB_WORKSPACE/Cargo.lock" \
+  "$task_terminal_prepare" "$task_terminal_tests" "$task_terminal_wrapper" \
+  "$task_evidence/terminal-broker-provenance.json" \
   "$GITHUB_WORKSPACE/packages/bridge-client/package-lock.json" \
   "$GITHUB_WORKSPACE/apps/electron/package-lock.json" \
   "$GITHUB_WORKSPACE/infra/firebase/database.rules.json" "$task_config/database.rules.json" \
@@ -92,6 +101,7 @@ printf -v task_command 'bash %q --run-tests' "$task_script"
     --config "$task_config/firebase.json" "$task_command"
 )
 sha256sum --check "$task_evidence/inputs.sha256"
+python3 -B "$task_terminal_prepare" --verify "$task_evidence/terminal-broker-provenance.json"
 git -C "$GITHUB_WORKSPACE" diff --binary | sha256sum > "$task_evidence/tracked-after.sha256"
 git -C "$GITHUB_WORKSPACE" diff --cached --binary | sha256sum > "$task_evidence/index-after.sha256"
 (cd "$GITHUB_WORKSPACE" && find packages/bridge-client/dist -type f -print0 | sort -z | xargs -0 -r sha256sum) \

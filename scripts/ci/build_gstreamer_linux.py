@@ -11,6 +11,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 
 sys.dont_write_bytecode = True
 from gstreamer_sdk import SetupError, _require_runner_temp_root, _run_pkg_config, download_artifact, export_environment, load_lock, safe_extract_tar  # noqa: E402
@@ -189,6 +190,25 @@ def _validate_prefix(prefix: pathlib.Path, version: str, static_plugins: bool = 
         raise SetupError("GStreamer source license notices were not staged into the SDK prefix")
 
 
+def source_sdk_environment(prefix: pathlib.Path) -> dict[str, str]:
+    """Return the source SDK export shared with consumers of this build."""
+    return {
+        "LINGXI_GSTREAMER_SDK_LINUX_SOURCE": str(prefix),
+    }
+
+
+def source_sdk_prefix(environment: Mapping[str, str]) -> str | None:
+    """Read the source SDK export without maintaining a second environment key."""
+    name, = source_sdk_environment(pathlib.Path())
+    return environment.get(name)
+
+
+def source_sdk_marker(output: pathlib.Path) -> pathlib.Path:
+    """Locate the identity marker written by the source SDK builder."""
+    marker = output / ".lingxi-gstreamer-linux-source-sdk"
+    return marker
+
+
 def _environment(prefix: pathlib.Path, static_plugins: bool = False) -> dict[str, str]:
     library_dir = prefix / LIBDIR
     pkgconfig_dir = library_dir / "pkgconfig"
@@ -208,7 +228,7 @@ def _environment(prefix: pathlib.Path, static_plugins: bool = False) -> dict[str
     pkg_config_path = os.pathsep.join(sdk_pc_dirs)
     pkg_config_libdir = os.pathsep.join((*sdk_pc_dirs, *(path for path in system_pc_dirs if pathlib.Path(path).is_dir())))
     environment = {
-        "LINGXI_GSTREAMER_SDK_LINUX_SOURCE": str(prefix),
+        **source_sdk_environment(prefix),
         "PKG_CONFIG_PATH": pkg_config_path,
         "PKG_CONFIG_LIBDIR": pkg_config_libdir,
         "LD_LIBRARY_PATH": loader_path,
@@ -227,7 +247,7 @@ def _environment(prefix: pathlib.Path, static_plugins: bool = False) -> dict[str
 def _build_sdk(root: pathlib.Path, lock: dict, static_plugins: bool = False) -> pathlib.Path:
     identity = build_identity(lock, static_plugins)
     output = root / f"gstreamer-1.28.8-{identity}"
-    marker = output / ".lingxi-gstreamer-linux-source-sdk"
+    marker = source_sdk_marker(output)
     prefix = output / "prefix"
     if output.exists():
         if marker.is_file() and marker.read_text(encoding="ascii").strip() == identity:

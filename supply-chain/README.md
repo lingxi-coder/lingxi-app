@@ -8,9 +8,9 @@ Imported records retain the original auditor and notes, including named wildcard
 audits that attest to a publisher's release process for a specified period.
 There are no exemptions, publisher-trust rules or claimed local reviews.
 
-On 2026-10-27, the locked check reports 708 unvetted package versions: 699 need
+On 2026-10-27, the locked check reports 688 unvetted package versions: 679 need
 `safe-to-deploy` and 9 need `safe-to-run`, for Cargo.lock SHA-256
-`79b632ad4ba6874de2d2eca683262f010a5fe84bfdef95ed928235de4acac934`.
+`12ea25be126eb8b277eb5b823fa79f82f19d37fa019f722aae55e13b8eaa35b1`.
 The configured policies also require review of the crates.io baselines and
 specific Git revisions of patched dependencies. Closing the gate requires
 actual source reviews (including justified version deltas) or existing

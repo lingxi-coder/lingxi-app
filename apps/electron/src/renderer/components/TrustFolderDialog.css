@@ -1,0 +1,54 @@
+.desktop-dialog-overlay:has(> .trust-folder-dialog) {
+  padding: 20px;
+  background: rgba(0, 0, 0, .14);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.desktop-dialog-panel.trust-folder-dialog {
+  position: relative;
+  width: min(400px, 100%);
+  max-height: calc(100dvh - 40px);
+  padding: 22px 20px 19px;
+  border-radius: 17px;
+  background: var(--dialog-window);
+  box-shadow: 0 5px 12px rgba(0, 0, 0, .1);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.trust-folder-dialog .desktop-dialog-header { padding: 0 24px; text-align: center; }
+.trust-folder-dialog .desktop-dialog-icon { display: none; }
+.trust-folder-dialog .desktop-dialog-header h2 { font-size: 20px; line-height: 27px; font-weight: 650; letter-spacing: -.025em; }
+.trust-folder-dialog .desktop-dialog-body { padding: 0; }
+.trust-folder-close {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: var(--dialog-text-2);
+  background: transparent;
+  cursor: pointer;
+}
+.trust-folder-path { margin: 18px 0; color: var(--dialog-text-2); text-align: center; font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
+.trust-folder-description { margin: 0 5px 13px; color: var(--dialog-text-2); font-size: 14px; line-height: 21px; }
+.trust-folder-actions { display: flex; flex-direction: column; gap: 12px; }
+.trust-folder-actions button { min-height: 36px; padding: 7px 16px; border: 1px solid transparent; border-radius: 999px; font: inherit; font-size: 14px; line-height: 20px; cursor: pointer; }
+.trust-folder-confirm { background: var(--dialog-text); color: var(--dialog-window); }
+.trust-folder-actions .trust-folder-cancel { background: transparent; color: var(--dialog-text); border-color: var(--dialog-border); }
+.trust-folder-dialog button:hover { filter: brightness(.92); }
+.trust-folder-close:hover, .trust-folder-cancel:hover { background: var(--dialog-surface-hover); }
+.trust-folder-dialog button:active { transform: scale(.98); }
+.trust-folder-dialog button:focus-visible { outline: 2px solid var(--dialog-accent); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  .desktop-dialog-overlay:has(> .trust-folder-dialog), .desktop-dialog-panel.trust-folder-dialog { animation: none; }
+  .trust-folder-dialog button:active { transform: none; }
+}
+@media (prefers-contrast: more) {
+  .desktop-dialog-panel.trust-folder-dialog { border: 1px solid var(--dialog-text); }
+  .trust-folder-actions .trust-folder-cancel { border-color: var(--dialog-text-2); }
+}

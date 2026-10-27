@@ -150,6 +150,11 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             print("IOS_AGENT_RUNTIME_CONFIG managedRoot=\(mobileLinux.managedRoot) workspaceHost=\(mobileLinux.workspaceHostPath) stableWorkspaceId=\(mobileLinux.stableWorkspaceId) descriptorWorkspaceHost=\(runtime.workspace.hostPath) descriptorWorkspaceGuest=\(runtime.workspace.guestPath)")
             // Register an actual Code session for this dedicated source Project
             // before the test exercises the external-browser wake gate.
+            stage = "compose-code-session-media"
+            print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
+            let mediaHostComposition = try IOSNativeMediaHostComposition(
+                audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
+            )
             stage = "start-code-session"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
             let conversation = ConversationSourceFactory.make(
@@ -162,7 +167,8 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
                 defaultModelID: codeModelID,
                 visionDelegationEnabled: providerSnapshot.visionDelegationEnabled,
                 mobileLinux: mobileLinux,
-                projectMountGrants: projectMountGrants
+                projectMountGrants: projectMountGrants,
+                mediaHostComposition: mediaHostComposition
             )
             engine = conversation as? EngineConversationSource
             guard let activeEngine = engine else {

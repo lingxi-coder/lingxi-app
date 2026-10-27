@@ -4,7 +4,7 @@ enum LXIconName: String, CaseIterable {
     case menu, edit, pencil, search, sparkle, sparkles, book, bookOpen, listFiles, workflow, cog, wrench, plus, mic, paperclip
     case chevron, sun, moon, check, pin, brain, arrowUp, folder, clock, message
     case chevronR, play, pause, x, skill, plug, dream, link, copy, share, listChecks
-    case warning, stop, squareStop, arrowRight, audioWave, terminal, globe, appBuilder
+    case warning, stop, squareStop, arrowRight, audioWave, terminal, globe, appBuilder, mcpFallback
 }
 
 extension LXIconName {
@@ -55,6 +55,7 @@ extension LXIconName {
         case .terminal: "terminal"
         case .globe: "globe"
         case .appBuilder: "app.badge"
+        case .mcpFallback: "circle"
         }
     }
 }
@@ -66,9 +67,25 @@ struct LXIcon: View {
     var stroke: CGFloat = 1.7
 
     var body: some View {
-        Image(systemName: name.systemName)
-            .font(.system(size: size, weight: stroke >= 2 ? .semibold : .regular))
-            .foregroundStyle(color)
-            .frame(width: size, height: size)
+        Group {
+            if name == .mcpFallback {
+                Canvas { context, canvas in
+                    let scale = canvas.width / 16
+                    var path = Path()
+                    for x in [CGFloat(4.5), CGFloat(11.5)] {
+                        for y in [CGFloat(4.5), CGFloat(11.5)] {
+                            path.addEllipse(in: CGRect(x: (x - 2.25) * scale, y: (y - 2.25) * scale, width: 4.5 * scale, height: 4.5 * scale))
+                        }
+                    }
+                    path.move(to: CGPoint(x: 6.1 * scale, y: 9.9 * scale))
+                    path.addLine(to: CGPoint(x: 9.9 * scale, y: 6.1 * scale))
+                    context.stroke(path, with: .color(color), lineWidth: 1.05 * scale)
+                }
+            } else {
+                Image(systemName: name.systemName)
+                    .font(.system(size: size, weight: stroke >= 2 ? .semibold : .regular))
+                    .foregroundStyle(color)
+            }
+        }.frame(width: size, height: size)
     }
 }

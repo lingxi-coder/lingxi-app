@@ -1,6 +1,8 @@
 import { app, BrowserWindow } from 'electron';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const url = process.argv.find((argument) => argument.startsWith('http://'));
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
@@ -29,6 +31,20 @@ async function main() {
   }
   async function press(keyCode) { web.sendInputEvent({ type: 'keyDown', keyCode }); web.sendInputEvent({ type: 'keyUp', keyCode }); await delay(40); }
   const hintText = () => js(`${shown}?.textContent`);
+  const hintGeometry = () => js(`(() => {
+    const editor = ${prompt}, hint = ${shown};
+    const end = document.createRange(); end.selectNodeContents(editor.firstChild); end.collapse(false);
+    const caret = end.getBoundingClientRect(), box = hint.getBoundingClientRect();
+    return { x: Math.abs(caret.x - box.x), y: Math.abs(caret.y - box.y), visible: getComputedStyle(hint).visibility,
+      pointer: getComputedStyle(hint).pointerEvents, overflow: getComputedStyle(hint).textOverflow, truncated: hint.scrollWidth > hint.clientWidth };
+  })()`);
+  const hintWidthMatchesEditor = `(() => {
+    const editor = ${prompt}, hint = ${shown};
+    const end = document.createRange(); end.selectNodeContents(editor.firstChild); end.collapse(false);
+    const available = editor.clientWidth - parseFloat(getComputedStyle(editor).paddingRight)
+      - (end.getBoundingClientRect().left - editor.getBoundingClientRect().left);
+    return Math.abs(hint.clientWidth - Math.max(0, available)) < 1;
+  })()`;
   const reviewHint = '[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]';
   try {
     await window.loadURL(`${url}?slash-hints`);
@@ -37,16 +53,29 @@ async function main() {
     await until(`Boolean(${shown})`);
     assert.equal(await hintText(), reviewHint);
     assert.equal(await js(`${prompt}.textContent`), '/code-review ');
-    const geometry = await js(`(() => {
-      const editor = ${prompt}, hint = ${shown};
-      const end = document.createRange(); end.selectNodeContents(editor.firstChild); end.collapse(false);
-      const caret = end.getBoundingClientRect(), box = hint.getBoundingClientRect();
-      return { x: Math.abs(caret.x - box.x), y: Math.abs(caret.y - box.y), visible: getComputedStyle(hint).visibility,
-        pointer: getComputedStyle(hint).pointerEvents, overflow: getComputedStyle(hint).textOverflow, truncated: hint.scrollWidth > hint.clientWidth };
-    })()`);
+    const geometry = await hintGeometry();
     assert.ok(geometry.x < 1 && geometry.y < 1, JSON.stringify(geometry));
-    assert.deepEqual({ ...geometry, x: 0, y: 0 }, { x: 0, y: 0, visible: 'visible', pointer: 'none', overflow: 'ellipsis', truncated: true });
-    await writeFile('/tmp/lingxi-slash-argument-hint-desktop-dark.png', (await web.capturePage()).toPNG());
+    assert.deepEqual({ visible: geometry.visible, pointer: geometry.pointer, overflow: geometry.overflow },
+      { visible: 'visible', pointer: 'none', overflow: 'ellipsis' });
+    await writeFile(join(tmpdir(), 'lingxi-slash-argument-hint-desktop-dark.png'), (await web.capturePage()).toPNG());
+    const wideInnerWidth = await js('window.innerWidth');
+
+    // Installed font metrics determine whether this text overflows at 900px.
+    // Use an actual narrow window to exercise ellipsis on every platform.
+    window.setSize(360, 700);
+    await until(`window.innerWidth <= 480 && ${hintWidthMatchesEditor}`);
+    const narrowGeometry = await hintGeometry();
+    assert.ok(narrowGeometry.x < 1 && narrowGeometry.y < 1, JSON.stringify(narrowGeometry));
+    assert.deepEqual({ ...narrowGeometry, x: 0, y: 0 },
+      { x: 0, y: 0, visible: 'visible', pointer: 'none', overflow: 'ellipsis', truncated: true });
+    assert.equal(await hintText(), reviewHint);
+    assert.equal(await js(`${prompt}.textContent`), '/code-review ');
+    window.setSize(900, 700);
+    await until(`window.innerWidth === ${wideInnerWidth} && ${hintWidthMatchesEditor}`);
+    const restoredGeometry = await hintGeometry();
+    assert.ok(restoredGeometry.x < 1 && restoredGeometry.y < 1, JSON.stringify(restoredGeometry));
+    assert.deepEqual({ visible: restoredGeometry.visible, pointer: restoredGeometry.pointer, overflow: restoredGeometry.overflow },
+      { visible: 'visible', pointer: 'none', overflow: 'ellipsis' });
     await setDraft('/code-review ', 2);
     assert.equal(await hintText(), reviewHint);
     assert.equal(await js(`Boolean(document.querySelector('#slash-command-results'))`), false);
@@ -91,7 +120,7 @@ async function main() {
     window.setSize(480, 700);
     await delay(100);
     assert.equal(await js(`getComputedStyle(${shown}).visibility`), 'visible');
-    await writeFile('/tmp/lingxi-slash-argument-hint-desktop-light-narrow.png', (await web.capturePage()).toPNG());
+    await writeFile(join(tmpdir(), 'lingxi-slash-argument-hint-desktop-light-narrow.png'), (await web.capturePage()).toPNG());
     await press('Enter');
     await until(`window.__composerDraftTest.slashCommands().length === 1`);
     assert.deepEqual(await js(`window.__composerDraftTest.slashCommands()`), ['/code-review']);

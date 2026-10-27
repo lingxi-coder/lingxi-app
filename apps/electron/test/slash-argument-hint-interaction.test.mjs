@@ -15,15 +15,16 @@ const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const composerDraftDriver = join(fixtureRoot, 'slash-argument-hint-electron.mjs');
 
 test('real Electron renders native slash argument hints outside the editable draft', async () => {
+  const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-composer-draft-electron-'));
   const vite = await createServer({
     root: fixtureRoot,
+    cacheDir: join(temporaryUserData, 'vite-cache'),
     configFile: false,
     logLevel: 'error',
     server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false },
     plugins: [react()],
     resolve: { alias: { '@renderer': resolve(electronRoot, 'src/renderer') } },
   });
-  const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-composer-draft-electron-'));
   const childOutput = [];
   const childError = [];
   let child;

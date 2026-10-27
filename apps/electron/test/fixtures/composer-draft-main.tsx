@@ -24,6 +24,9 @@ const mentionsFixture = new URLSearchParams(location.search).has('mentions');
 const slashHintsFixture = new URLSearchParams(location.search).has('slash-hints');
 const suggestionFeedback: Array<{ sessionId: string; uuid: string; action: string }> = [];
 const suggestionContexts: Array<Record<string, unknown>> = [];
+// An unstable callback makes ordinary fixture renders trigger the composer's
+// session cleanup, which also reports input_empty:false.
+const recordSuggestionContext = async (context: Record<string, unknown>) => { suggestionContexts.push(context); };
 const openedSettings: string[] = [];
 const permissionChanges: string[] = [];
 const mentionSearch = async (query: string) => {
@@ -311,7 +314,7 @@ function Fixture() {
                 effective_globals: {}, diagnostics: [], default_strategy: fusionDefault ? { scope: 'project', id: 'shared' } : null,
               }) },
               fusionAdmin: async () => undefined,
-              updatePromptSuggestionContext: async (context: Record<string, unknown>) => { suggestionContexts.push(context); },
+              updatePromptSuggestionContext: recordSuggestionContext,
               promptSuggestionFeedback: async (sessionId: string, uuid: string, action: string) => { suggestionFeedback.push({ sessionId, uuid, action }); },
               conversation: { ...emptyConversation(), sessionKey: sessionId, suggestionTurn: suggestion?.turn ?? 0,
                 promptSuggestionEnabled: suggestionState.enabled, promptSuggestionNotice: suggestionState.notice,

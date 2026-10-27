@@ -555,25 +555,59 @@ function packagedAppBundleId(appPath) {
   ], { encoding: 'utf8' }).trim();
 }
 
-async function closePackagedApp(browser, child, bundleId) {
+export async function waitForPackagedAppExit(child, requestQuit) {
   if (child.exitCode !== null || child.signalCode !== null) return;
+  let onExit;
+  let timer;
+  const exited = new Promise((resolvePromise) => {
+    onExit = resolvePromise;
+    child.once('exit', onExit);
+  });
   try {
-    execFileSync('/usr/bin/osascript', ['-e', `tell application id "${bundleId}" to quit`], { stdio: 'pipe' });
-  } catch {
-    try {
-      await Promise.race([
-        browser.send('Browser.close'),
-        delay(2_000).then(() => { throw new Error('Browser.close timed out'); }),
-      ]);
-    } catch {
-      // Best effort fallback when Apple Events are unavailable.
-    }
+    // Subscribe before requesting quit: CDP may close its socket only after
+    // the process has already exited. Listening afterwards loses that event.
+    await requestQuit();
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    await Promise.race([
+      exited,
+      new Promise((_, rejectPromise) => {
+        timer = setTimeout(() => rejectPromise(new Error('packaged app did not exit after Browser.close')), 10_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    child.removeListener('exit', onExit);
   }
-  await Promise.race([
-    new Promise((resolvePromise) => child.once('exit', resolvePromise)),
-    delay(10_000).then(() => { throw new Error('packaged app did not exit after Browser.close'); }),
-  ]);
 }
+
+async function closePackagedApp(browser, child, bundleId) {
+  try {
+    await waitForPackagedAppExit(child, async () => {
+    try {
+      execFileSync('/usr/bin/osascript', ['-e', `tell application id "${bundleId}" to quit`], { stdio: 'pipe' });
+    } catch {
+      try {
+        await Promise.race([
+          browser.send('Browser.close'),
+          delay(2_000).then(() => { throw new Error('Browser.close timed out'); }),
+        ]);
+      } catch {
+        // Best effort fallback when Apple Events are unavailable.
+      }
+    }
+    });
+  } catch (error) {
+    if (process.platform === 'darwin' && child.exitCode === null && child.signalCode === null) {
+      const samplePath = join(tmpdir(), `lingxi-smoke-shutdown-${child.pid}-${Date.now()}.sample.txt`);
+      try {
+        execFileSync('/usr/bin/sample', [String(child.pid), '2', '-file', samplePath], { timeout: 5_000, stdio: 'pipe' });
+        log(`shutdown timeout sample: ${samplePath}`);
+      } catch { /* Diagnostics must not replace the original failure. */ }
+    }
+    throw error;
+  }
+}
+
 
 async function assertRendererContract(page, leakPatterns) {
   let lastDetails;
@@ -1210,6 +1244,23 @@ export async function enterPackagedProjectName(page, projectName) {
   assert.equal(enteredValue, projectName, 'native Project name must be entered through the renderer input');
 }
 
+/** Trust only the test-generated Local App source folder shown in the dialog. */
+export async function confirmPackagedLocalAppSourceTrust(page, expectedPath) {
+  const actualPath = await waitFor(() => evaluate(page,
+    `document.querySelector('.trust-folder-dialog .trust-folder-path')?.textContent`),
+  { label: 'native Local App source folder trust confirmation' });
+  assert.equal(actualPath, expectedPath, 'smoke must never trust a different folder');
+  const confirmed = await evaluate(page, `(() => {
+    const dialog = document.querySelector('.trust-folder-dialog');
+    const path = dialog?.querySelector('.trust-folder-path')?.textContent;
+    const button = dialog?.querySelector('.trust-folder-confirm');
+    if (path !== ${JSON.stringify(expectedPath)} || !button || button.disabled) return false;
+    button.click();
+    return true;
+  })()`);
+  assert.equal(confirmed, true, 'the exact test folder trust confirmation must remain available');
+}
+
 async function createPackagedLocalAppSourceSession(page, creatorSessionId, configHome) {
   const creator = await evaluate(page, 'window.lingxi.bootstrap().then(state => state.activeSession)');
   assert.equal(creator?.sessionId, creatorSessionId, 'the ordinary custom-provider chat must remain the creator chat');
@@ -1221,6 +1272,7 @@ async function createPackagedLocalAppSourceSession(page, creatorSessionId, confi
   await enterPackagedProjectName(page, projectName);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.create-project-submit:not(:disabled)'))`), { label: 'native Local App source Project is ready to create' });
   await evaluate(page, `document.querySelector('.create-project-submit').click()`);
+  await confirmPackagedLocalAppSourceTrust(page, join(configHome, '.apps', projectName));
   const sourceSession = await waitFor(async () => {
     const state = await evaluate(page, 'window.lingxi.bootstrap()');
     const active = state.activeSession;
@@ -1649,7 +1701,15 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     if (runtimeExceptions.length) log(`renderer exceptions: ${JSON.stringify(runtimeExceptions.slice(-3))}`);
     if (logErrors.length) log(`renderer log errors: ${JSON.stringify(logErrors.slice(-3))}`);
     if (existsSync(runtimePaths.diagnosticsPath)) {
-      log(`app diagnostics: ${readFileSync(runtimePaths.diagnosticsPath, 'utf8').split('\n').slice(-8).join('\n')}`);
+      const diagnosticLines = readFileSync(runtimePaths.diagnosticsPath, 'utf8').split('\n');
+      const shutdownPhases = diagnosticLines.flatMap(line => {
+        try {
+          const event = JSON.parse(JSON.parse(line).message);
+          return event.event === 'shutdown_phase' ? [{ phase: event.phase, status: event.status, durationMs: event.durationMs }] : [];
+        } catch { return []; }
+      });
+      if (shutdownPhases.length) log(`shutdown phases: ${JSON.stringify(shutdownPhases)}`);
+      log(`app diagnostics: ${diagnosticLines.slice(-8).join('\n')}`);
     }
     if (page && customProbe) {
       try { await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(customProbe.providerId)})`); } catch {}

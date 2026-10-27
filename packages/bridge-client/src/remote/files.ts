@@ -94,9 +94,56 @@ export async function hashFile(source: FileSource, signal?: AbortSignal): Promis
 interface Sending {
   ack: number;
   sent: number;
+  windows: Array<{ end: number; release: () => void }>;
   wake?: () => void;
   fail?: (error: Error) => void;
   drain?: () => void;
+}
+/** Limit the aggregate in-flight windows, including simultaneous files, to
+ * the capacity already reserved by both receivers. FIFO waiters keep a large
+ * transfer from monopolizing credits needed by other active transfers. */
+class FileWindowLimiter {
+  private available = FILE_MAX_ACTIVE;
+  private readonly pending: Array<{ grant: () => void; fail: (error: Error) => void }> = [];
+  private closed?: Error;
+
+  acquire(signal?: AbortSignal): Promise<() => void> {
+    if (this.closed) return Promise.reject(this.closed);
+    if (signal?.aborted) return Promise.reject(new Error('file transfer cancelled'));
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = (): void => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+      const waiter = {
+        grant: (): void => {
+          if (settled) return;
+          settled = true; cleanup(); this.available--;
+          let released = false;
+          resolve(() => { if (!released) { released = true; this.available++; this.pump(); } });
+        },
+        fail: (error: Error): void => {
+          if (settled) return;
+          settled = true; cleanup();
+          const index = this.pending.indexOf(waiter);
+          if (index >= 0) this.pending.splice(index, 1);
+          reject(error);
+        },
+      };
+      const abort = (): void => waiter.fail(new Error('file transfer cancelled'));
+      const timer = setTimeout(() => waiter.fail(new Error('file acknowledgement timed out')), FILE_ACK_TIMEOUT_MS);
+      signal?.addEventListener('abort', abort, { once: true });
+      this.pending.push(waiter);
+      if (signal?.aborted) abort();
+      else this.pump();
+    });
+  }
+  close(error: Error): void {
+    if (this.closed) return;
+    this.closed = error;
+    for (const waiter of this.pending.splice(0)) waiter.fail(error);
+  }
+  private pump(): void {
+    while (!this.closed && this.available > 0 && this.pending.length > 0) this.pending.shift()!.grant();
+  }
 }
 /** One connection, bidirectional, bounded to four active sends and 1 MiB of
  * queued ingress. Applications authorize an offer before calling receive(). */
@@ -104,6 +151,7 @@ export class FileChannel {
   private readonly sending = new Map<string, Sending>();
   private readonly sinks = new Map<string, FileSink>();
   private readonly commits = new Map<string, Promise<FileReceipt>>();
+  private readonly windows = new FileWindowLimiter();
   private incoming = Promise.resolve();
   private queued = 0;
   private closed: Error | undefined;
@@ -166,7 +214,7 @@ export class FileChannel {
     if (source.size !== offer.size) throw new Error('file size changed');
     if (this.closed) throw this.closed;
     if (this.sending.has(offer.transfer_id) || this.sinks.has(offer.transfer_id) || this.commits.has(offer.transfer_id) || this.sending.size >= FILE_MAX_ACTIVE) throw new Error('file sender busy');
-    const s: Sending = { ack: 0, sent: 0 };
+    const s: Sending = { ack: 0, sent: 0, windows: [] };
     this.sending.set(offer.transfer_id, s);
     let offered = false;
     const wait = <T>(promise: Promise<T>): Promise<T> => withAbort(withAbort(promise, this.closedSignal), signal);
@@ -180,8 +228,13 @@ export class FileChannel {
       if (!Number.isSafeInteger(offset) || offset < 0 || offset > offer.size) throw new Error('invalid checkpoint');
       s.ack = offset; s.sent = offset;
       progress?.(offset, offer.size);
-      while (s.ack < offer.size) {
-        const end = Math.min(offer.size, s.ack + chunkBytes * 16);
+      while (s.sent < offer.size) {
+        // Four 16-frame windows in total, across all sends, match the existing
+        // receiver bound. Keep the individual durable checkpoint every window.
+        const release = await this.windows.acquire(signal);
+        const end = Math.min(offer.size, s.sent + chunkBytes * 16);
+        s.windows.push({ end, release });
+        progress?.(s.ack, offer.size);
         while (s.sent < end) {
           signal?.throwIfAborted();
           if (this.closed) throw this.closed;
@@ -196,9 +249,9 @@ export class FileChannel {
           try { this.link.sendFragment(encodeFileFrame(s.sent === end ? 2 : 0, offer.transfer_id, start, bytes)); }
           catch (error) { s.sent = start; throw error; }
         }
-        await this.waitAck(s, end, signal);
-        progress?.(s.ack, offer.size);
       }
+      await this.waitAck(s, offer.size, signal);
+      progress?.(s.ack, offer.size);
       signal?.throwIfAborted();
       const receipt = await wait(control.commit(offer.transfer_id));
       if (JSON.stringify(validateFileOffer(receipt)) !== JSON.stringify(validateFileOffer(offer)) || receipt.ref !== offer.transfer_id) throw new Error('invalid file receipt');
@@ -224,6 +277,7 @@ export class FileChannel {
       throw error;
     } finally {
       this.sending.delete(offer.transfer_id);
+      for (const window of s.windows.splice(0)) window.release();
     }
   }
   private waitAck(s: Sending, end: number, signal?: AbortSignal): Promise<void> {
@@ -257,7 +311,9 @@ export class FileChannel {
       if (message.kind === 1) {
         const s = this.sending.get(message.id);
         if (!s || message.offset < s.ack || message.offset > s.sent) throw new Error('invalid file acknowledgement');
-        s.ack = message.offset; s.wake?.();
+        s.ack = message.offset;
+        while (s.windows.length && s.windows[0]!.end <= s.ack) s.windows.shift()!.release();
+        s.wake?.();
         return;
       }
       this.queued += frame.length;
@@ -274,6 +330,11 @@ export class FileChannel {
         if (message.kind === 3 && sink.offset !== message.offset) throw new Error('invalid file flush barrier');
         this.queued -= frame.length;
         if (this.closed) return;
+        // Kind 0 does not create a durable checkpoint. Repeating the previous
+        // offset for every frame serializes unrelated writes behind ACK sends.
+        // Senders only advance a window after its kind 2 checkpoint, while a
+        // kind 3 cancellation barrier still receives its distinct kind 4 ACK.
+        if (message.kind === 0) return;
         await this.link.whenWritable?.();
         this.link.sendFragment(encodeFileFrame(message.kind === 3 ? 4 : 1, message.id, sink.offset));
       }).catch(error => this.close(asError(error)));
@@ -282,6 +343,7 @@ export class FileChannel {
   close(error = new Error('file channel closed')): void {
     if (this.closed) return;
     this.closed = error;
+    this.windows.close(error);
     this.shutdown.abort(error);
     this.link.close('file_channel_closed');
     for (const s of this.sending.values()) s.fail?.(error);

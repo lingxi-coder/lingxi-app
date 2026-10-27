@@ -2487,6 +2487,8 @@
     <string name="remote_file_export">Save or share file</string>
     <string name="remote_file_preparing">Verifying original file…</string>
     <string name="remote_file_requires_webrtc">File transfer requires WebRTC. Files are not uploaded to cloud storage.</string>
+    <string name="remote_file_save_incomplete">The save did not finish. The selected file may be empty or incomplete; download again and choose a new file.</string>
+    <string name="remote_file_timeout">File transfer timed out. Check your connection and try again.</string>
     <string name="remote_file_upload">Upload file</string>
     <string name="remote_file_uploading">Sending to computer…</string>
     <string name="remote_files">Files</string>

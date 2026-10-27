@@ -2038,6 +2038,8 @@
     <string name="remote_fail_unsupported">このスマートフォンはリモート操作に必要な暗号機能に対応していません。</string>
     <string name="remote_fail_unknown_host">このパソコンの情報が見つかりません。デスクトップ版でリモート操作がオンになっているか確認してください。</string>
     <string name="remote_fail_network">クラウドサービスに接続できません。ネットワークを確認してください。</string>
+    <string name="remote_file_timeout">ファイルの転送がタイムアウトしました。接続を確認してから再試行してください。</string>
+    <string name="remote_file_save_incomplete">保存が完了しませんでした。選択したファイルは空または不完全な可能性があります。再度ダウンロードし、新しいファイルを選択してください。</string>
     <string name="remote_fail_network_denied">このアカウントはリモート操作のデータにアクセスできません。もう一度サインインしてください。</string>
     <string name="remote_fail_no_answer">パソコンから応答がありません。オンラインで LingXi が起動していることを確認してください。</string>
     <string name="remote_fail_closed">接続が閉じられました。</string>

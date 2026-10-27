@@ -1,5 +1,26 @@
 /** Desktop-only copy. Shared strings remain in resources/translations. */
 export const desktopCatalog: Record<string, Record<string, string>> = {
+  "desktop_project_trust_title": {
+    "zh-Hans": "信任此文件夹？",
+    "zh-Hant": "信任此資料夾？",
+    "en": "Trust this folder?",
+    "ja": "このフォルダを信頼しますか？",
+    "ko": "이 폴더를 신뢰하시겠어요?"
+  },
+  "desktop_project_trust_confirm": {
+    "zh-Hans": "信任文件夹",
+    "zh-Hant": "信任資料夾",
+    "en": "Trust folder",
+    "ja": "フォルダを信頼",
+    "ko": "폴더 신뢰"
+  },
+  "desktop_project_trust_description": {
+    "zh-Hans": "LingXi 可以读取、编辑和执行此处的文件。文件夹设置也可能自动运行代码，即使没有模型请求。请仅在信任这些文件时继续。",
+    "zh-Hant": "LingXi 可以讀取、編輯及執行此處的檔案。資料夾設定也可能自動執行程式碼，即使沒有模型請求。請僅在信任這些檔案時繼續。",
+    "en": "LingXi can read, edit, and execute files here. Folder settings can also run code automatically, even without a model request. Continue only if you trust these files.",
+    "ja": "LingXi はここにあるファイルを読み取り、編集、実行できます。フォルダの設定によっては、モデルからのリクエストがなくてもコードが自動実行されます。これらのファイルを信頼する場合のみ続行してください。",
+    "ko": "LingXi는 이 폴더의 파일을 읽고, 편집하고, 실행할 수 있습니다. 폴더 설정에 따라 모델 요청 없이도 코드가 자동으로 실행될 수 있습니다. 이 파일을 신뢰하는 경우에만 계속하세요."
+  },
   desktop_show_more: { 'zh-Hans': '显示更多', 'zh-Hant': '顯示更多', en: 'Show more', ja: 'さらに表示', ko: '더 보기' },
   "desktop_back": {
     "zh-Hans": "返回应用",

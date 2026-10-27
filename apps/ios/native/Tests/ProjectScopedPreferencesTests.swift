@@ -2,6 +2,42 @@ import XCTest
 @testable import LingxiCode
 
 final class ProjectScopedPreferencesTests: XCTestCase {
+    #if DEBUG
+    func testUITestSessionsAndDraftsCannotOverwriteUserPreferences() {
+        let appSuite = "ProjectScopedPreferencesTests.app.\(UUID().uuidString)"
+        let testSuite = "ProjectScopedPreferencesTests.ui.\(UUID().uuidString)"
+        let appDefaults = UserDefaults(suiteName: appSuite)!
+        let testDefaults = UserDefaults(suiteName: testSuite)!
+        defer {
+            appDefaults.removePersistentDomain(forName: appSuite)
+            testDefaults.removePersistentDomain(forName: testSuite)
+        }
+
+        let normal = ProjectScopedPreferences.forRuntime(
+            environment: [:], appDefaults: appDefaults, uiTestSuiteName: testSuite
+        )
+        normal.setActiveSessionID("real-session", scope: .global, mode: .code)
+        normal.setDraft("real draft", scope: .global, mode: .code)
+
+        let uiTest = ProjectScopedPreferences.forRuntime(
+            environment: ["LINGXI_UI_TESTING": "1"], appDefaults: appDefaults, uiTestSuiteName: testSuite
+        )
+        uiTest.setActiveSessionID("ui-files-session", scope: .global, mode: .code)
+        uiTest.setDraft("test draft", scope: .global, mode: .code)
+
+        let reopened = ProjectScopedPreferences.forRuntime(
+            environment: [:], appDefaults: appDefaults, uiTestSuiteName: testSuite
+        )
+        XCTAssertEqual(reopened.activeSessionID(scope: .global, mode: .code), "real-session")
+        XCTAssertEqual(reopened.draft(scope: .global, mode: .code), "real draft")
+        let reopenedUITest = ProjectScopedPreferences.forRuntime(
+            environment: ["LINGXI_UI_TESTING": "1"], appDefaults: appDefaults, uiTestSuiteName: testSuite
+        )
+        XCTAssertEqual(reopenedUITest.activeSessionID(scope: .global, mode: .code), "ui-files-session")
+        XCTAssertEqual(reopenedUITest.draft(scope: .global, mode: .code), "test draft")
+    }
+    #endif
+
     func testChatRestoreNeverFallsBackToLegacyCodeSession() {
         XCTAssertEqual(
             ConversationModeRestorePolicy.sessionID(

@@ -235,7 +235,7 @@ struct RootView: View {
         self.mediaHostInitializationError = mediaHostInitializationError
         #endif
         let root = ConversationSourceFactory.appSandboxRoot()
-        let projects = ProjectStore(managedRoot: LXISHDefaultWorkspace.managedRootPath())
+        let projects = ProjectStore.forRuntime(managedRoot: LXISHDefaultWorkspace.managedRootPath())
         let settings = SettingsStore()
         let providers = ProviderRepository.shared
         settings.llmProviders = providers.legacyProviders()
@@ -326,7 +326,7 @@ struct RootView: View {
             try await cron.pauseTasksForArchivedSession(projectID: projectID, sessionID: sessionID)
         }
         cron.defaultModel = snapshot.defaultModelID
-        let preferences = ProjectScopedPreferences()
+        let preferences = ProjectScopedPreferences.forRuntime()
         if preferences.cronResultsSeenAt() == nil {
             preferences.setCronResultsSeenAt(Date())
         }

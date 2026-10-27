@@ -95,6 +95,26 @@ struct CredentialRegistrationRegression {
         try register()
         precondition(launchd.count("bootstrap") == bootstrapsAfterKickstartFailure,
                      "already registered on-demand service was unnecessarily re-bootstrapped")
+        // A prior installation may still be registered with the old background
+        // clamp. Replace it once so on-demand XPC work can receive caller QoS.
+        let adaptivePlist = try String(contentsOf: plist, encoding: .utf8)
+        precondition(adaptivePlist.contains("<key>ProcessType</key><string>Adaptive</string>"))
+        let backgroundPlist = adaptivePlist.replacingOccurrences(
+            of: "<key>ProcessType</key><string>Adaptive</string>",
+            with: "<key>ProcessType</key><string>Background</string>"
+        )
+        try backgroundPlist.write(to: plist, atomically: true, encoding: .utf8)
+        let bootoutsBeforeUpgrade = launchd.count("bootout")
+        let bootstrapsBeforeUpgrade = launchd.count("bootstrap")
+        try register()
+        precondition(launchd.count("bootout") == bootoutsBeforeUpgrade + 1)
+        precondition(launchd.count("bootstrap") == bootstrapsBeforeUpgrade + 1)
+        let upgradedPlist = try String(contentsOf: plist, encoding: .utf8)
+        precondition(upgradedPlist == adaptivePlist)
+        let callsBeforeReuse = launchd.calls.count
+        try register()
+        precondition(launchd.calls.count == callsBeforeReuse + 1,
+                     "adaptive service was restarted on every call")
         print("registration retry, login recovery, configuration replacement and healthy reuse checks passed")
     }
 }

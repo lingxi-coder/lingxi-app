@@ -58,6 +58,7 @@ use std::sync::Weak;
 struct MediaAudioSessionBindingGuard {
     registry: Arc<AudioProviderCloudRegistry>,
     binding: std::sync::Mutex<Option<MediaAudioSessionBindingFfi>>,
+    refresh: tokio::sync::Mutex<()>,
 }
 
 #[cfg(feature = "uniffi")]
@@ -66,6 +67,7 @@ impl MediaAudioSessionBindingGuard {
         Self {
             registry,
             binding: std::sync::Mutex::new(None),
+            refresh: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -75,6 +77,17 @@ impl MediaAudioSessionBindingGuard {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(previous) = current.replace(binding) {
+            self.registry
+                .unregister_session_if_generation(&previous.session_id, previous.generation);
+        }
+    }
+
+    fn clear(&self) {
+        let mut current = self
+            .binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(previous) = current.take() {
             self.registry
                 .unregister_session_if_generation(&previous.session_id, previous.generation);
         }
@@ -262,12 +275,35 @@ impl IosNativeMediaHost {
 
     /// Refresh trusted provider/session bindings after an engine attaches or
     /// changes session. Provider credentials remain inside the engine/runtime.
+    /// An unconfigured inference route returns `None` without registering a
+    /// cloud binding; system and offline audio remain available independently.
     #[uniffi::method(async_runtime = "tokio")]
     pub async fn update_audio_session_context(
         &self,
         engine: Arc<MobileEngineHandle>,
-    ) -> Result<MediaAudioSessionBindingFfi, MobileEngineError> {
-        let context = engine.current_media_context().await?;
+    ) -> Result<Option<MediaAudioSessionBindingFfi>, MobileEngineError> {
+        let engine_key = Arc::as_ptr(&engine) as usize;
+        let guard = self
+            .route_guards
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&engine_key)
+            .and_then(Weak::upgrade);
+        // Serialize refreshes for this engine so an older unconfigured result
+        // cannot retire a newer successful binding.
+        let _refresh = match guard.as_ref() {
+            Some(guard) => Some(guard.refresh.lock().await),
+            None => None,
+        };
+        let context = match engine.current_media_context().await {
+            Ok(context) => context,
+            Err(_) => {
+                if let Some(guard) = guard.as_ref() {
+                    guard.clear();
+                }
+                return Ok(None);
+            }
+        };
         let session_id = context.session_id.clone();
         let (services, credential_ids, _) = engine.audio_provider_services();
         let provider = Arc::new(AudioProviderHost::from_provider_services(
@@ -294,17 +330,10 @@ impl IosNativeMediaHost {
             session_id,
             generation,
         };
-        let engine_key = Arc::as_ptr(&engine) as usize;
-        let guard = self
-            .route_guards
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&engine_key)
-            .and_then(Weak::upgrade);
-        if let Some(guard) = guard {
+        if let Some(guard) = guard.as_ref() {
             guard.update(binding.clone());
         }
-        Ok(binding)
+        Ok(Some(binding))
     }
 
     /// Remove a session's provider route when the Swift owner releases it.
@@ -737,4 +766,43 @@ pub fn build_ios_engine(
         device_control,
         None,
     )
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn clearing_an_audio_binding_preserves_a_newer_engine_owner() {
+        let registry = Arc::new(AudioProviderCloudRegistry::new("audio/wav"));
+        let provider =
+            Arc::new(AudioProviderHost::new("{}", "international", None, BTreeMap::new()).unwrap());
+        let guard = MediaAudioSessionBindingGuard::new(registry.clone());
+        let first = registry
+            .register_session("session", "first", "profile:first", provider.clone())
+            .unwrap();
+        guard.update(MediaAudioSessionBindingFfi {
+            session_id: "session".into(),
+            generation: first,
+        });
+        guard.clear();
+        assert_eq!(registry.session_identity("session"), None);
+
+        let old = registry
+            .register_session("session", "old", "profile:old", provider.clone())
+            .unwrap();
+        guard.update(MediaAudioSessionBindingFfi {
+            session_id: "session".into(),
+            generation: old,
+        });
+        registry
+            .register_session("session", "new", "profile:new", provider)
+            .unwrap();
+        guard.clear();
+        assert_eq!(
+            registry.session_identity("session"),
+            Some(("new".into(), "profile:new".into()))
+        );
+    }
 }

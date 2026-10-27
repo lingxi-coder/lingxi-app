@@ -14,6 +14,24 @@ struct ProjectScopedPreferences {
         self.defaults = defaults
     }
 
+    /// UI tests use simulated session identifiers and must never persist them
+    /// in the user's ordinary conversation preferences.
+    static func forRuntime(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        appDefaults: UserDefaults = .standard,
+        uiTestSuiteName: String = "\(Bundle.main.bundleIdentifier ?? "com.lingxi.code").ui-testing"
+    ) -> ProjectScopedPreferences {
+        #if DEBUG
+        if environment["LINGXI_UI_TESTING"] == "1" {
+            guard let defaults = UserDefaults(suiteName: uiTestSuiteName) else {
+                preconditionFailure("Unable to create isolated UI test preferences")
+            }
+            return ProjectScopedPreferences(defaults: defaults)
+        }
+        #endif
+        return ProjectScopedPreferences(defaults: appDefaults)
+    }
+
     // MARK: scope-keyed accessors
 
     func draft(scope: ConversationScope) -> String {

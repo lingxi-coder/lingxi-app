@@ -502,7 +502,11 @@ export class HostConnection {
     if (this.closed || this.transportIsUp) return;
     this.transportIsUp = true;
     this.deps.clock.clearTimeout(this.transportTimer);
-    this.initializeTimer = this.deps.clock.setTimeout(() => this.close('initialize_timeout'), INITIALIZE_WAIT_MS);
+    // initialize can arrive before the renderer's asynchronous connected report.
+    // A valid handshake (including pending approval) already met this deadline.
+    if (this.viewer === undefined) {
+      this.initializeTimer = this.deps.clock.setTimeout(() => this.close('initialize_timeout'), INITIALIZE_WAIT_MS);
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -558,6 +562,8 @@ export class HostConnection {
       conn_id: this.connId,
       ...(request.pushInstallationId === undefined ? {} : { push_installation_id: request.pushInstallationId }),
     };
+    // A valid request also proves the transport opened, even if its stats report stalls.
+    this.transportUp();
     if (registry.isApproved(uid, offer.device.id, offer.device.key)) {
       this.approve();
       registry.touch(uid, offer.device.id);

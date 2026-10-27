@@ -522,7 +522,7 @@ test('tool icon mapping covers the built-in tool families and has a fallback', (
   }
   assert.equal(toolIconName('GitCommit'), 'git');
   assert.equal(toolIconName('TodoWrite'), 'tasks');
-  assert.equal(toolIconName('mcp__unknown__call'), 'box');
+  assert.equal(toolIconName('mcp__unknown__call'), 'mcp-fallback');
 });
 
 test('short tool bodies and diffs stay unmounted until explicitly opened', () => {

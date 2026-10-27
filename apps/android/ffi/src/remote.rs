@@ -60,7 +60,8 @@ use remote_control_client::native_media::NativeMediaOfferHandler;
 use remote_control_client::peer::PeerConnector;
 use remote_control_client::rpc::RpcError;
 use remote_control_client::rtdb::{
-    ListenItem, Rtdb, RtdbClient, RtdbClientOptions, RtdbMirror, TokenError, TokenProvider,
+    ListenItem, Rtdb, RtdbClient, RtdbClientOptions, RtdbEventKind, RtdbMirror, TokenError,
+    TokenProvider,
 };
 use remote_control_client::session::{
     OutgoingPrompt, OutgoingStatus, RemoteClient, RemoteClientListener, SessionController,
@@ -2175,12 +2176,23 @@ async fn watch_hosts_task(
     let mut presence = HostPresence::new(clock);
     let mut entries: Vec<(String, HostRecord)> = Vec::new();
     let mut last: Option<Vec<RemoteHostFfi>> = None;
+    let mut initialized = false;
+    let mut timed_out = false;
+    let initial_timeout = tokio::time::sleep(std::time::Duration::from_secs(15));
+    tokio::pin!(initial_timeout);
     // Hosts that die produce no events, so online state is re-checked on the heartbeat period.
     let mut tick = tokio::time::interval(HEARTBEAT_INTERVAL);
     loop {
         tokio::select! {
             item = listener.recv() => match item {
                 Some(ListenItem::Event(event)) => {
+                    // The first RTDB event is a complete root snapshot. The
+                    // interval's immediate first tick is not evidence that
+                    // the account has no computers.
+                    if !initialized && (event.kind != RtdbEventKind::Put || event.path != "/") {
+                        continue;
+                    }
+                    initialized = true;
                     mirror.apply(&event);
                     let before: HashSet<String> = entries.iter().map(|(id, _)| id.clone()).collect();
                     entries = parse_hosts_listing(&mirror.get("/"));
@@ -2196,9 +2208,19 @@ async fn watch_hosts_task(
                     let _ = out.send(Out::HostsFailed(format!("{error:?}")));
                     return;
                 }
-                None => return,
+                None => {
+                    let _ = out.send(Out::HostsFailed("host list closed".into()));
+                    return;
+                },
             },
-            _ = tick.tick() => {}
+            _ = tick.tick() => { if !initialized { continue; } },
+            _ = &mut initial_timeout, if !initialized && !timed_out => {
+                // Show a retryable error without stopping the reconnecting
+                // listener; a later initial snapshot clears the error.
+                timed_out = true;
+                let _ = out.send(Out::HostsFailed("host list timed out".into()));
+                continue;
+            }
         }
         let paired = paired_hosts(keys.as_ref(), &entries).await;
         let hosts = host_views(&entries, &presence, &paired);

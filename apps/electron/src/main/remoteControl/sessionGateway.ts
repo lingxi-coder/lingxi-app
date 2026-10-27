@@ -301,16 +301,18 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         if (state.downloads.has(id) || state.downloads.size >= 4) throw new Error('file sender busy');
         const controller = new AbortController();
         const done = (async () => {
-          const { offer, source } = await store.source(owner, session, id);
-          authorizeTransfer();
-          return files.send(offer, { size: source.size, read: async (at, size) => {
+          const { offer, source, close } = await store.source(owner, session, id);
+          try {
             authorizeTransfer();
-            const bytes = await source.read(at, size);
-            authorizeTransfer();
-            return bytes;
-          } }, {
-            offer: async () => ({ offset }), commit: async () => { authorizeTransfer(); return offer; }, cancel: async () => undefined,
-          }, undefined, controller.signal);
+            return await files.send(offer, { size: source.size, read: async (at, size) => {
+              authorizeTransfer();
+              const bytes = await source.read(at, size);
+              authorizeTransfer();
+              return bytes;
+            } }, {
+              offer: async () => ({ offset }), commit: async () => { authorizeTransfer(); return offer; }, cancel: async () => undefined,
+            }, undefined, controller.signal);
+          } finally { await close(); }
         })();
         state.downloads.set(id, { session, controller, done });
         try { return await done; } finally { state.downloads.delete(id); }

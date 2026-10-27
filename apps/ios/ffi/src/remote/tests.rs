@@ -745,6 +745,101 @@ async fn hosts_are_listed_and_watched_with_their_online_state() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn host_watch_waits_for_the_initial_snapshot_and_recovers_after_timeout() {
+    use remote_control_client::device::MemoryViewerKeys;
+    use remote_control_client::rtdb::{
+        ListenControl, Listener, RtdbError, RtdbEvent, RtdbEventKind,
+    };
+
+    struct PendingDatabase(Mutex<Option<mpsc::UnboundedReceiver<ListenItem>>>);
+    struct Control;
+    impl ListenControl for Control {
+        fn close(&self) {}
+        fn reconnect(&self) {}
+    }
+    #[async_trait]
+    impl Rtdb for PendingDatabase {
+        async fn get(&self, _: &str) -> Result<Value, RtdbError> {
+            unreachable!()
+        }
+        async fn put(&self, _: &str, _: &Value) -> Result<(), RtdbError> {
+            unreachable!()
+        }
+        async fn patch(
+            &self,
+            _: &str,
+            _: &serde_json::Map<String, Value>,
+        ) -> Result<(), RtdbError> {
+            unreachable!()
+        }
+        async fn remove(&self, _: &str) -> Result<(), RtdbError> {
+            unreachable!()
+        }
+        fn listen(&self, _: &str) -> Listener {
+            Listener::new(self.0.lock().unwrap().take().unwrap(), Arc::new(Control))
+        }
+    }
+    let (input, input_rx) = mpsc::unbounded_channel();
+    let (out, mut received) = mpsc::unbounded_channel();
+    let task = tokio::spawn(watch_hosts_task(
+        UID.into(),
+        Arc::new(PendingDatabase(Mutex::new(Some(input_rx)))),
+        MemoryViewerKeys::new(),
+        ManualClock::new(1_800_000_000_000),
+        out,
+    ));
+    for _ in 0..30 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        matches!(received.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "no empty list before the server responds"
+    );
+    input
+        .send(ListenItem::Event(RtdbEvent {
+            kind: RtdbEventKind::Patch,
+            path: "/partial".into(),
+            data: json!({}),
+        }))
+        .unwrap();
+    for _ in 0..30 {
+        tokio::task::yield_now().await;
+    }
+    assert!(matches!(
+        received.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    tokio::time::advance(Duration::from_secs(20)).await;
+    for _ in 0..30 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        matches!(received.try_recv(), Ok(Out::HostsFailed(_))),
+        "a delayed first snapshot should offer a retry"
+    );
+    input
+        .send(ListenItem::Event(RtdbEvent {
+            kind: RtdbEventKind::Put,
+            path: "/".into(),
+            data: json!({}),
+        }))
+        .unwrap();
+    for _ in 0..30 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        matches!(received.try_recv(), Ok(Out::Hosts(hosts)) if hosts.is_empty()),
+        "a later real snapshot clears the error"
+    );
+    drop(input);
+    for _ in 0..30 {
+        tokio::task::yield_now().await;
+    }
+    assert!(matches!(received.try_recv(), Ok(Out::HostsFailed(_))));
+    task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn active_client_can_be_freed_on_a_foreign_thread() {
     let rig = rig();
     rig.host.publish_presence().await;

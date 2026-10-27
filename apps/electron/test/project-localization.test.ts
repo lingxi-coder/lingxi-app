@@ -14,6 +14,7 @@ import { tokens } from '../src/renderer/theme/tokens';
 const cssHook = registerHooks({ load(url, context, nextLoad) {
   return url.endsWith('.css') ? { format: 'module', source: 'export {};', shortCircuit: true } : nextLoad(url, context);
 } });
+const { TrustFolderDialog } = await import('../src/renderer/components/TrustFolderDialog');
 const { CreateProjectDialog } = await import('../src/renderer/components/CreateProjectDialog');
 cssHook.deregister();
 
@@ -35,6 +36,11 @@ test('project and conversation dialogs localize in all five languages while pres
     const create = render(React.createElement(CreateProjectDialog, { onDefaultFolder: async () => null, onPickFolder: async () => null, onCreate: async () => {}, onClose: noop }));
     assert.ok(create.includes(translate('desktop_create_project', locale)), locale);
     assert.ok(create.includes(translate('desktop_project_sources', locale)), locale);
+    const trust = render(React.createElement(TrustFolderDialog, { path: '/Users/tester/项目 <keep>', onClose: noop, onConfirm: noop }));
+    assert.notEqual(translate('desktop_project_trust_title', locale), 'desktop_project_trust_title');
+    assert.ok(trust.includes(translate('desktop_project_trust_title', locale)), locale);
+    assert.ok(trust.includes(translate('desktop_project_trust_description', locale)), locale);
+    assert.ok(trust.includes('/Users/tester/项目 &lt;keep&gt;'), locale);
     const rename = render(React.createElement(RenameSessionDialog, { title: 'User chat <keep>', busy: false, error: '', onClose: noop, onConfirm: noop }));
     assert.ok(rename.includes(translate('desktop_rename_chat', locale)), locale);
     assert.ok(rename.includes('User chat &lt;keep&gt;'), locale);

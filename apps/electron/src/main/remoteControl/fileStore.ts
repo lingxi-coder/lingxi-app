@@ -181,14 +181,19 @@ export class RemoteFileStore {
       return { text: `Attached file ${JSON.stringify(receipt.name)} (${receipt.size} bytes, SHA-256 ${receipt.sha256}). Local path: ${JSON.stringify(path)}`, discard };
     } catch (error) { await discard(); throw error; }
   }
-  async source(owner: string, session: string, id: string): Promise<{ offer: FileReceipt; source: FileSource }> {
+  /** The caller owns the source until close, including on cancellation or failure. */
+  async source(owner: string, session: string, id: string): Promise<{ offer: FileReceipt; source: FileSource; close(): Promise<void> }> {
     const offer = await this.receipt(owner, session, id);
     const path = join(this.directory(owner, session, id), 'data');
-    return { offer, source: {
-      size: offer.size,
-      read: async (offset, length) => {
-        const file = await open(path, 'r');
-        try {
+    const before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.size !== offer.size) throw new Error('invalid source file');
+    const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      const opened = await file.stat();
+      if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== offer.size) throw new Error('source file changed');
+      return { offer, source: {
+        size: offer.size,
+        read: async (offset, length) => {
           const buffer = new Uint8Array(Math.min(length, offer.size - offset));
           let read = 0;
           while (read < buffer.length) {
@@ -197,9 +202,12 @@ export class RemoteFileStore {
             read += result.bytesRead;
           }
           return buffer.subarray(0, read);
-        } finally { await file.close(); }
-      },
-    } };
+        },
+      }, close: () => file.close() };
+    } catch (error) {
+      await file.close().catch(() => undefined);
+      throw error;
+    }
   }
 }
 async function readJson(path: string): Promise<unknown> {

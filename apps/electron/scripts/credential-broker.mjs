@@ -46,6 +46,8 @@ function plistEscape(value) {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 }
 
+// Match the installed template: XPC activity must inherit caller QoS rather
+// than remain permanently background-clamped under host load.
 export function renderLaunchAgentTemplate(
   executablePath = '@BROKER_EXECUTABLE_PATH@',
   channel = BROKER_CHANNEL,
@@ -58,7 +60,7 @@ export function renderLaunchAgentTemplate(
   <key>MachServices</key><dict><key>${plistEscape(machService)}</key><true/></dict>
   <key>ProgramArguments</key><array><string>${plistEscape(executablePath)}</string></array>
   <key>RunAtLoad</key><false/>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Adaptive</string>
 </dict></plist>
 `;
 }

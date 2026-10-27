@@ -342,6 +342,47 @@ class RemoteControlManager(
         }) { "Remote computer is still reconnecting; retry when connected" }
     }
 
+    /** A peer can close just after readiness was observed. Original-file RPCs
+     * retain their transfer identity/checkpoint, so retry them once on the same
+     * authorized session after a transport closure. Never retry prompt sends. */
+    internal suspend fun <T> fileOperation(
+        ownerUid: String?, hostId: String, sessionReady: Flow<Boolean>,
+        action: suspend (RemoteClientPort) -> T,
+    ): T {
+        val bound = filePort(ownerUid, hostId, sessionReady)
+        val attempt = bound.connectionState()?.attempt
+        try {
+            return action(bound)
+        } catch (error: RemoteFfiException) {
+            if (!closedFileTransport(error)) throw error
+        }
+        // A file-only closure does not restart the healthy control peer. Wait
+        // for evidence of an actual peer transition, never reuse its dead lane.
+        val resumed = withTimeoutOrNull(30_000) {
+            combine(mutableClient, mutableConnection, account.uid) { binding, _, uid ->
+                if (uid != ownerUid || binding?.client !== bound) throw CancellationException("remote account changed")
+                val state = bound.connectionState()
+                check(state?.hostId == null || state.hostId == hostId) { "remote computer changed" }
+                state?.takeIf { it.phase != RemoteConnectionPhaseFfi.READY || it.attempt != attempt }
+            }.filterNotNull().first()
+            filePort(ownerUid, hostId, sessionReady)
+        } ?: throw IllegalStateException("File connection closed. Exit Remote Control and reconnect, then retry.")
+        if (resumed !== bound) throw CancellationException("remote account changed")
+        try {
+            return action(resumed)
+        } catch (error: RemoteFfiException) {
+            if (closedFileTransport(error)) throw IllegalStateException("File connection closed. Exit Remote Control and reconnect, then retry.", error)
+            throw error
+        }
+    }
+
+    private fun closedFileTransport(error: RemoteFfiException): Boolean = when (error) {
+        is RemoteFfiException.NotConnected -> true
+        is RemoteFfiException.Rpc -> error.code == "closed"
+        is RemoteFfiException.InvalidArgument -> error.message == "file channel closed" || error.message == "not connected" || error.message?.startsWith("closed:") == true
+        else -> false
+    }
+
     private inner class ManagerListener(private val mine: Int, private val ownerUid: String) : AndroidRemoteListener {
         override suspend fun onConnectionState(state: RemoteConnectionStateFfi) {
             if (mine != generation.get() || account.uid.value != ownerUid) return

@@ -89,7 +89,10 @@ impl PeerConnector for NativePeerConnector {
                     Some(DataChannelEvent::OnMessage(message))
                         if !message.is_string && message.data.len() <= 16 * 1024 =>
                     {
-                        FileEvent::Message(message.data.to_vec())
+                        // The WebRTC event already owns this buffer. Move it
+                        // into the bounded file queue instead of copying the
+                        // complete frame into a new Vec on every receive.
+                        FileEvent::Message(message.data)
                     }
                     Some(
                         DataChannelEvent::OnBufferedAmountLow

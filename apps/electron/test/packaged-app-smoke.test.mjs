@@ -12,6 +12,7 @@ import {
   assertPackagedLocalAppCatalogSession,
   assertPackagedLocalAppAuthoring,
   assertPackagedLocalAppPendingAuthoring,
+  confirmPackagedLocalAppSourceTrust,
   enterPackagedProjectName,
   createPackagedSettings,
   isExpectedBootstrapPromptPlaceholder,
@@ -142,6 +143,29 @@ test('packaged Local App creation waits for the default folder selection before 
   setTimeout(() => { inputReady = true; }, 15);
   await enterPackagedProjectName(page, projectName);
   assert.equal(inputValue, projectName);
+});
+
+test('packaged Local App smoke confirms only its exact generated source folder', async () => {
+  const expected = '/tmp/isolated-home/.lingxi/.apps/Smoke App';
+  const makePage = (actual, clicked) => {
+    const calls = [];
+    return { calls, send: async (method, { expression }) => {
+      assert.equal(method, 'Runtime.evaluate');
+      calls.push(expression);
+      return { result: { value: expression.includes('.trust-folder-dialog .trust-folder-path') ? actual : clicked } };
+    } };
+  };
+  const matching = makePage(expected, true);
+  await confirmPackagedLocalAppSourceTrust(matching, expected);
+  assert.equal(matching.calls.length, 2);
+  assert.match(matching.calls[1], /trust-folder-confirm/);
+
+  const wrongFolder = makePage('/tmp/unrelated', true);
+  await assert.rejects(confirmPackagedLocalAppSourceTrust(wrongFolder, expected), /must never trust a different folder/);
+  assert.equal(wrongFolder.calls.length, 1, 'a mismatched folder must never be confirmed');
+
+  const changedDialog = makePage(expected, false);
+  await assert.rejects(confirmPackagedLocalAppSourceTrust(changedDialog, expected), /must remain available/);
 });
 
 function temporaryDirectory() {

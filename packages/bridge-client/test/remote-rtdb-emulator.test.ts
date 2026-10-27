@@ -35,7 +35,7 @@ import { b64uEncode, randomId, utf8Encode } from '../src/remote/encoding.js';
 import { MemoryRtdb } from '../src/remote/memoryRtdb.js';
 import { RtdbClient, RtdbError, SERVER_TIMESTAMP, type FetchFn, type Rtdb, type RtdbClientOptions, type RtdbEvent, type RtdbListenError } from '../src/remote/rtdb.js';
 import { RtdbMirror } from '../src/remote/rtdbMirror.js';
-import { RpcPeer } from '../src/remote/rpc.js';
+import { RemoteRpcError, RpcPeer } from '../src/remote/rpc.js';
 import { downPath, parseFrameKey, toHostPath, upPath } from '../src/remote/signaling.js';
 import { MessageTransport } from '../src/remote/transport.js';
 import { TunnelLink } from '../src/remote/tunnel.js';
@@ -266,6 +266,68 @@ test('a tunnel runs over real streams: both directions, a 300 KB message, cleanu
   assert.equal(await viewerDb.get(up), null);
   assert.equal(await hostDb.get(down), null);
   await viewerDb.remove(`/remote-control/${uid}`);
+});
+
+test('a peer close rejects pending RPCs over real RTDB streams in both directions', { skip }, async () => {
+  for (const closer of ['viewer', 'host'] as const) {
+    const connId = randomId();
+    const hostId = randomId();
+    const uid = newUid();
+    const keys = await deriveTunnelKeys(crypto.getRandomValues(new Uint8Array(32)), connId);
+    const viewerDb = client(uid);
+    const hostDb = client(uid);
+    const up = upPath(uid, hostId, connId);
+    const down = downPath(uid, hostId, connId);
+    const viewerLink = new TunnelLink({ rtdb: viewerDb, connId, sendPath: up, sendDir: 'up', sendKey: keys.up, recvPath: down, recvDir: 'down', recvKey: keys.down, subscribe: true });
+    const hostLink = new TunnelLink({ rtdb: hostDb, connId, sendPath: down, sendDir: 'down', sendKey: keys.down, recvPath: up, recvDir: 'up', recvKey: keys.up, subscribe: false });
+    const mirror = new RtdbMirror();
+    const inbox = hostDb.listen(toHostPath(uid, hostId), (event) => {
+      for (const change of mirror.apply(event).at(3)) {
+        const [conn, side, key] = change.path;
+        if (conn !== connId || side !== 'up' || change.kind === 'removed') continue;
+        const seq = parseFrameKey(key!);
+        if (seq !== null) hostLink.deliverFrame(seq, change.value);
+      }
+    });
+    const viewerRpc = new RpcPeer(new MessageTransport(viewerLink));
+    const hostRpc = new RpcPeer(new MessageTransport(hostLink));
+    let arrived = false;
+    const handler = (side: 'viewer' | 'host') => (method: string) => {
+      if (method === 'ready') return side;
+      assert.equal(method, 'never-answered');
+      assert.equal(side, closer);
+      arrived = true;
+      return new Promise(() => undefined);
+    };
+    viewerRpc.onRequest(handler('viewer'));
+    hostRpc.onRequest(handler('host'));
+    try {
+      // Both successful round trips prove that the host inbox and viewer down
+      // SSE streams are subscribed before the close frame can be written.
+      assert.equal(await viewerRpc.request('ready', undefined, { timeoutMs: 10_000 }), 'host');
+      assert.equal(await hostRpc.request('ready', undefined, { timeoutMs: 10_000 }), 'viewer');
+      const waiting = closer === 'viewer' ? hostRpc : viewerRpc;
+      const leaving = closer === 'viewer' ? viewerLink : hostLink;
+      const outcome = waiting.request('never-answered').then(
+        (value) => ({ kind: 'fulfilled' as const, value }),
+        (error: unknown) => ({ kind: 'rejected' as const, error }),
+      );
+      await until(() => arrived, `${closer} to receive the pending request`, 10_000);
+      leaving.close('user_left');
+      await until(() => waiting.closed, `the peer to observe ${closer} closing`, 10_000);
+      const result = await outcome;
+      assert.equal(result.kind, 'rejected');
+      assert.ok(result.kind === 'rejected' && result.error instanceof RemoteRpcError);
+      assert.equal(result.error.code, 'closed');
+      assert.equal(result.error.message, 'peer_closed');
+    } finally {
+      viewerRpc.close('test_done');
+      hostRpc.close('test_done');
+      inbox.close();
+      await Promise.all([viewerLink.whenClosed(), hostLink.whenClosed()]);
+      await viewerDb.remove(`/remote-control/${uid}`);
+    }
+  }
 });
 
 test('another user\'s subtree is refused: a request fails with 401 after one fresh token, a stream ends once and is not retried', { skip }, async () => {

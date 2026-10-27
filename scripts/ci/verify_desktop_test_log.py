@@ -17,6 +17,7 @@ REQUIRED = {
         "REST writes and reads behave like the in-memory model (nulls, empties, arrays, timestamps)",
         "listen delivers an initial put, then events that rebuild the same tree; a reconnect repeats the snapshot",
         "a tunnel runs over real streams: both directions, a 300 KB message, cleanup on close",
+        "a peer close rejects pending RPCs over real RTDB streams in both directions",
         "another user's subtree is refused: a request fails with 401 after one fresh token, a stream ends once and is not retried",
         "read access withdrawn from a live stream ends it with one cancel, and the client does not reconnect",
     },

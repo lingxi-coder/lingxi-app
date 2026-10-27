@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import os
+import platform
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,70 @@ else:
 
 
 class LocalAppServiceProbeTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin" and os.environ.get("LINGXI_GSTREAMER_SDK_MACOS"),
+                         "requires the configured macOS GStreamer SDK")
+    def test_macos_sdk_dylib_needs_and_resolves_the_linked_rpath(self) -> None:
+        sdk_lib = Path(os.environ["LINGXI_GSTREAMER_SDK_MACOS"]) / "lib"
+        library = sdk_lib / "libgstvideo-1.0.0.dylib"
+        self.assertTrue(library.is_file(), f"SDK library missing: {library}")
+        subprocess.run(["/usr/bin/lipo", "-verify_arch", platform.machine(), str(library)], check=True)
+        install_name = subprocess.run(["/usr/bin/otool", "-D", str(library)],
+                                      check=True, text=True, capture_output=True).stdout
+        if "@rpath/libgstvideo-1.0.0.dylib" not in install_name:
+            self.skipTest("SDK libgstvideo uses a different install-name convention")
+        linker_argument = f"-Wl,-rpath,{sdk_lib}"
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            self.assertIn(f"-C link-arg={linker_argument}", os.environ.get("RUSTFLAGS", ""))
+        with tempfile.TemporaryDirectory(prefix="local-app-macos-rpath-") as directory:
+            root = Path(directory).resolve()
+            source = root / "main.c"
+            source.write_text(
+                '#include <stdio.h>\n'
+                'extern const char *gst_video_format_to_string(int);\n'
+                'int main(void) { char line[1024]; '
+                'if (!gst_video_format_to_string(1) || !fgets(line, sizeof(line), stdin)) return 1; '
+                'puts("{\\"id\\":\\"ci-local-app-list\\",\\"ok\\":true,\\"value\\":[]}"); return 0; }\n',
+                encoding="utf-8",
+            )
+            missing = root / "without-rpath"
+            linked = root / "with-rpath"
+            for binary, flags in ((missing, []), (linked, [linker_argument])):
+                subprocess.run(["/usr/bin/clang", str(source), str(library), *flags, "-o", str(binary)],
+                               check=True, capture_output=True, text=True)
+            # The negative binary must still fail when the caller supplies an
+            # otherwise sufficient DYLD override: the probe removes it.
+            with mock.patch.dict(os.environ, {"DYLD_LIBRARY_PATH": str(sdk_lib)}):
+                with self.assertRaisesRegex(RuntimeError, "exited .*no LC_RPATH's found"):
+                    probe([str(missing)], root / "missing", root)
+                probe([str(linked)], root / "linked", root)
+
+    def test_macos_does_not_inherit_dyld_search_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(service.sys, "platform", "darwin"), mock.patch.dict(os.environ, {
+                "DYLD_LIBRARY_PATH": "/external/libraries",
+                "DYLD_FRAMEWORK_PATH": "/external/frameworks",
+                "DYLD_FALLBACK_LIBRARY_PATH": "/external/fallback",
+                "DYLD_FALLBACK_FRAMEWORK_PATH": "/external/fallback-frameworks",
+                "DYLD_INSERT_LIBRARIES": "/external/injected.dylib",
+            }):
+                env = service.isolated_environment(Path(directory))
+            self.assertFalse(any(name.startswith("DYLD_") for name in env))
+            self.assertEqual(env["HOME"], str(Path(directory) / "home"))
+
+    def test_macos_reports_rpath_and_fails_on_load_command_inspection_error(self) -> None:
+        libraries = subprocess.CompletedProcess([], 0, "binary:\n\t@rpath/libgstvideo.dylib\n", "")
+        load_commands = subprocess.CompletedProcess([], 0, "cmd LC_RPATH\n  cmdsize 72\n  path /sdk/lib (offset 12)\n", "")
+        with mock.patch.object(service.sys, "platform", "darwin"), \
+                mock.patch.object(service.subprocess, "run", side_effect=[libraries, load_commands]), \
+                mock.patch("builtins.print") as output:
+            service.show_native_libraries(Path("/example/bridge-server"))
+        output.assert_any_call("Executable LC_RPATH entries: ['/sdk/lib']", flush=True)
+        failed = subprocess.CompletedProcess([], 1, "", "invalid Mach-O")
+        with mock.patch.object(service.sys, "platform", "darwin"), \
+                mock.patch.object(service.subprocess, "run", side_effect=[libraries, failed]):
+            with self.assertRaisesRegex(RuntimeError, "load-command inspection failed.*invalid Mach-O"):
+                service.show_native_libraries(Path("/example/bridge-server"))
+
     def run_probe(self, mode: str, timeout: float = 10.0) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

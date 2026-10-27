@@ -1,7 +1,7 @@
-#![cfg(windows)]
-
 //! Process-level checks use the real bridge binary and Windows pipes/Jobs.
 //! Harness separately tests the suspended-spawn boundary and Job failures.
+
+#![cfg(windows)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

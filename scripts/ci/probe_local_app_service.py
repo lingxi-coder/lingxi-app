@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -24,7 +25,11 @@ LOADER_ENV = (
 
 def isolated_environment(root: Path) -> dict[str, str]:
     """Retain native-loader settings only; never forward credentials or real homes."""
-    env = {name: os.environ[name] for name in LOADER_ENV if name in os.environ}
+    env = {
+        name: os.environ[name]
+        for name in LOADER_ENV
+        if name in os.environ and not (sys.platform == "darwin" and name.startswith("DYLD_"))
+    }
     home = root / "home"
     temporary = root / "tmp"
     appdata = root / "appdata"
@@ -146,6 +151,12 @@ def show_native_libraries(binary: Path) -> None:
         print(result.stderr, end="", file=sys.stderr)
     if result.returncode or "not found" in result.stdout:
         raise RuntimeError(f"native dependency inspection failed with exit {result.returncode}")
+    if sys.platform == "darwin":
+        loads = subprocess.run(["/usr/bin/otool", "-l", str(binary)], text=True, capture_output=True, check=False)
+        if loads.returncode:
+            raise RuntimeError(f"native load-command inspection failed with exit {loads.returncode}: {loads.stderr.strip()}")
+        rpaths = re.findall(r"\bcmd LC_RPATH\s+cmdsize \d+\s+path (.+?) \(offset \d+\)", loads.stdout)
+        print(f"Executable LC_RPATH entries: {rpaths}", flush=True)
 
 
 def main() -> None:

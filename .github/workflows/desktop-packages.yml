@@ -161,7 +161,24 @@ jobs:
       - name: Remap build-machine paths
         shell: bash
         run: |
-          echo "RUSTFLAGS=--remap-path-prefix=${GITHUB_WORKSPACE}=/workspace --remap-path-prefix=${CARGO_HOME}=/cargo" >> "$GITHUB_ENV"
+          rust_flags="--remap-path-prefix=${GITHUB_WORKSPACE}=/workspace --remap-path-prefix=${CARGO_HOME}=/cargo"
+          if [[ '${{ matrix.platform }}' == 'darwin' ]]; then
+            sdk_lib="${LINGXI_GSTREAMER_SDK_MACOS:?macOS GStreamer SDK was not configured}/lib"
+            case '${{ matrix.arch }}' in
+              arm64) sdk_arch=arm64 ;;
+              x64) sdk_arch=x86_64 ;;
+              *) echo 'Unsupported macOS GStreamer architecture' >&2; exit 1 ;;
+            esac
+            for dylib in libgstreamer-1.0.0.dylib libgstbase-1.0.0.dylib \
+              libgstapp-1.0.0.dylib libgstaudio-1.0.0.dylib libgstvideo-1.0.0.dylib; do
+              test -f "$sdk_lib/$dylib"
+              /usr/bin/lipo -verify_arch "$sdk_arch" "$sdk_lib/$dylib"
+            done
+            # The unpackaged Rust executables need the SDK to resolve @rpath.
+            # Packaging removes this absolute rpath and installs a bundle-relative one.
+            rust_flags+=" -C link-arg=-Wl,-rpath,$sdk_lib"
+          fi
+          printf 'RUSTFLAGS=%s\n' "$rust_flags" >> "$GITHUB_ENV"
 
       - name: Install shared SDK
         working-directory: packages/bridge-client
@@ -318,7 +335,11 @@ jobs:
       - name: Keyless packaged sidecar and cleanup smoke
         shell: bash
         working-directory: apps/electron
-        run: node scripts/packaged-sidecar-smoke.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+        run: |
+          if [[ '${{ matrix.platform }}' == 'darwin' ]]; then
+            for name in "${!DYLD_@}"; do unset "$name"; done
+          fi
+          node scripts/packaged-sidecar-smoke.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
 
       - uses: actions/upload-artifact@v4
         with:

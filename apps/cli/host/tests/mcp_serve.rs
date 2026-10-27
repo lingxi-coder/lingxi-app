@@ -19,10 +19,132 @@ fn isolated_command(temp: &tempfile::TempDir) -> Command {
     command
 }
 
-fn write_user_settings(temp: &tempfile::TempDir, contents: &str) {
+fn permission_settings(allow: &[String]) -> Value {
+    // Auto mode deliberately strips broad shell permissions. Use the normal
+    // policy in this isolated test home and grant only the permissions needed.
+    serde_json::json!({ "permissions": { "defaultMode": "default", "allow": allow } })
+}
+
+fn exact_shell_rule(tool: &str, command: &str) -> String {
+    permission::PermissionRuleValue {
+        tool_name: tool.to_owned(),
+        rule_content: Some(command.into()),
+        original_rule: None,
+    }
+    .to_rule_string()
+}
+
+fn write_user_permissions(temp: &tempfile::TempDir, allow: &[String]) {
     let config = temp.path().join("config");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(config.join("settings.json"), contents).unwrap();
+    std::fs::write(
+        config.join("settings.json"),
+        serde_json::to_vec(&permission_settings(allow)).unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn shell_fixture_command(name: &str) -> String {
+    assert!(name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
+    // Expand the runner shell's PID before starting the fixture. `$PPID`
+    // inside the fixture would identify the MCP server if the shell execs it.
+    format!("sh ./mcp-process-{name}.sh \"$$\"")
+}
+
+#[cfg(unix)]
+fn write_shell_fixture(project: &std::path::Path, name: &str, record_completion: bool) -> String {
+    // A literal `&` in the tool call triggers the background-operator safety
+    // guard even with an exact allow. The test-owned script keeps the real
+    // child process while the tool call itself can be allowed exactly.
+    let command = shell_fixture_command(name);
+    let script = format!(
+        "sleep 30 & child=$!; trap 'kill \"$child\" 2>/dev/null || true; wait \"$child\" 2>/dev/null || true' EXIT; printf '%s %s %s\\n' \"$1\" \"$$\" \"$child\" > started-{name}.tmp; mv started-{name}.tmp started-{name}; while [ ! -e gate-{name} ]; do sleep 0.05; done{}",
+        if record_completion {
+            format!("; printf finished > finished-{name}")
+        } else {
+            String::new()
+        }
+    );
+    std::fs::write(project.join(format!("mcp-process-{name}.sh")), script).unwrap();
+    command
+}
+
+#[cfg(unix)]
+fn fixture_process_ids(text: &str, server_pid: u32) -> Option<Vec<i32>> {
+    let mut pids: Vec<i32> = text
+        .split_whitespace()
+        .map(|part| part.parse().expect("fixture PID must be an integer"))
+        .collect();
+    if pids.len() != 3 {
+        return None;
+    }
+    for &pid in &pids {
+        assert!(
+            pid > 1 && pid as u32 != server_pid && pid as u32 != std::process::id(),
+            "fixture reported a non-owned PID: {pids:?}"
+        );
+    }
+    assert_ne!(pids[0], pids[2], "runner and sleep must be distinct");
+    assert_ne!(pids[1], pids[2], "fixture and sleep must be distinct");
+    // The runner shell may exec the fixture, in which case both IDs are equal.
+    pids.dedup();
+    Some(pids)
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_fixture_permission_is_exact_and_keeps_the_policy_enabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let command = write_shell_fixture(&project, "permission-probe", false);
+    let background_command = format!("{command} &");
+    write_user_permissions(
+        &temp,
+        &[
+            exact_shell_rule("Bash", &command),
+            exact_shell_rule("Bash", &background_command),
+        ],
+    );
+    let config = temp.path().join("config");
+    let raw = std::fs::read_to_string(config.join("settings.json")).unwrap();
+    let mode = permission::default_mode_from_settings_json(&raw).unwrap();
+    assert_eq!(mode, permission::PermissionMode::Default);
+    let rules = permission::permission_rules_from_settings_json(
+        &raw,
+        permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
+    )
+    .unwrap();
+    let policy =
+        permission::PermissionPolicy::from_rules(mode, rules).with_roots(permission::FsRoots {
+            cwd: project,
+            home: Some(temp.path().to_path_buf()),
+            lingxi_home: config,
+        });
+    let input = |command: &str| {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({ "command": command }),
+        )
+        .unwrap()
+    };
+    assert!(matches!(
+        policy.authorize("Bash", &input(&command)),
+        permission::PermissionResult::Allow { .. }
+    ));
+    assert!(!matches!(
+        policy.authorize("Bash", &input("sh ./mcp-process-other.sh \"$$\"")),
+        permission::PermissionResult::Allow { .. }
+    ));
+    assert!(matches!(
+        policy.authorize("Bash", &input(&background_command)),
+        permission::PermissionResult::Ask {
+            reason: permission::PermissionDecisionReason::SafetyCheck { .. },
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -267,10 +389,7 @@ fn serve_rejects_duplicate_tool_id_and_suppresses_cancelled_reply() {
     } else {
         ("Bash", "sleep 10")
     };
-    write_user_settings(
-        &temp,
-        &serde_json::json!({ "permissions": { "allow": [tool] } }).to_string(),
-    );
+    write_user_permissions(&temp, &[exact_shell_rule(tool, command)]);
     let initialize = serde_json::json!({
         "jsonrpc":"2.0", "id":1, "method":"initialize",
         "params":{"protocolVersion":"2025-06-18", "capabilities":{},
@@ -368,15 +487,11 @@ fn serve_duplicate_tools_call_id_keeps_original_call_cancellable() {
         }
     }
 
-    fn read_started(path: &std::path::Path) -> Vec<i32> {
+    fn read_started(path: &std::path::Path, server_pid: u32) -> Vec<i32> {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if let Ok(text) = std::fs::read_to_string(path) {
-                let pids: Vec<i32> = text
-                    .split_whitespace()
-                    .map(|part| part.parse().unwrap())
-                    .collect();
-                if pids.len() == 2 {
+                if let Some(pids) = fixture_process_ids(&text, server_pid) {
                     return pids;
                 }
             }
@@ -394,10 +509,15 @@ fn serve_duplicate_tools_call_id_keeps_original_call_cancellable() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    write_user_settings(&temp, r#"{"permissions":{"allow":["Bash","TaskOutput"]}}"#);
     let config = temp.path().join("config");
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    let mut allow = vec!["TaskOutput".to_owned()];
+    for name in ["a", "b", "c"] {
+        let command = write_shell_fixture(&project, name, true);
+        allow.push(exact_shell_rule("Bash", &command));
+    }
+    write_user_permissions(&temp, &allow);
     let stderr_path = temp.path().join("stderr.log");
     let stderr = std::fs::File::create(&stderr_path).unwrap();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lingxi-cli"))
@@ -457,9 +577,7 @@ fn serve_duplicate_tools_call_id_keeps_original_call_cancellable() {
     assert!(tools.iter().any(|tool| tool["name"] == "TaskOutput"));
     assert!(tools.iter().any(|tool| tool["name"] == "TaskStop"));
     let call = |id, suffix: &str| {
-        let command = format!(
-            "sleep 30 & child=$!; trap 'kill \"$child\" 2>/dev/null || true; wait \"$child\" 2>/dev/null || true' EXIT; printf '%s %s\\n' \"$$\" \"$child\" > started-{suffix}.tmp; mv started-{suffix}.tmp started-{suffix}; while [ ! -e gate-{suffix} ]; do sleep 0.05; done; printf finished > finished-{suffix}"
-        );
+        let command = shell_fixture_command(suffix);
         serde_json::json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
             "params": { "name": "Bash", "arguments": { "command": command },
@@ -469,8 +587,8 @@ fn serve_duplicate_tools_call_id_keeps_original_call_cancellable() {
     let first = call(7, "a");
     server.send(first.clone());
     server.send(call(8, "b"));
-    let cancelled_pids = read_started(&server.project.join("started-a"));
-    let other_pids = read_started(&server.project.join("started-b"));
+    let cancelled_pids = read_started(&server.project.join("started-a"), server.child.id());
+    let other_pids = read_started(&server.project.join("started-b"), server.child.id());
     server.send(first);
     let duplicate = server.until(|frame| frame["id"] == 7 && frame.get("error").is_some());
     assert_eq!(duplicate["error"]["code"], -32600);
@@ -562,7 +680,7 @@ fn serve_duplicate_tools_call_id_keeps_original_call_cancellable() {
         serde_json::json!({})
     );
     assert!(server.seen.iter().all(|frame| frame["id"] != 12));
-    let committed_pids = read_started(&server.project.join("started-c"));
+    let committed_pids = read_started(&server.project.join("started-c"), server.child.id());
     server.send(serde_json::json!({
         "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 10 }
     }));
@@ -653,18 +771,24 @@ mod transport_failure_tests {
     }
 
     impl Server {
-        fn start() -> Self {
-            Self::start_with_catalog_gate(false)
+        fn start(name: &str) -> Self {
+            Self::start_with_catalog_gate(false, Some(name))
         }
 
-        fn start_with_catalog_gate(gated: bool) -> Self {
+        fn start_with_catalog_gate(gated: bool, shell_fixture: Option<&str>) -> Self {
             let home = tempfile::tempdir().unwrap();
             let config = home.path().join("config");
             let project = home.path().join("project");
             std::fs::create_dir_all(&config).unwrap();
             std::fs::create_dir_all(&project).unwrap();
             let mut global = json!({});
-            let mut settings = json!({"permissions":{"allow":["Bash"]}});
+            let allow = shell_fixture
+                .map(|name| {
+                    let command = super::write_shell_fixture(&project, name, false);
+                    vec![super::exact_shell_rule("Bash", &command)]
+                })
+                .unwrap_or_default();
+            let mut settings = super::permission_settings(&allow);
             if gated {
                 let project_key = std::fs::canonicalize(&project)
                     .unwrap()
@@ -826,9 +950,7 @@ export function register(on) {
         }
 
         fn start_shell_with_id(&mut self, id: Value, name: &str, background: bool) -> Vec<i32> {
-            let command = format!(
-                "sleep 30 & child=$!; trap 'kill \"$child\" 2>/dev/null || true; wait \"$child\" 2>/dev/null || true' EXIT; printf '%s %s\\n' \"$$\" \"$child\" > started-{name}.tmp; mv started-{name}.tmp started-{name}; while [ ! -e gate-{name} ]; do sleep 0.05; done"
-            );
+            let command = super::shell_fixture_command(name);
             self.send(json!({
                 "jsonrpc": "2.0", "id": id, "method": "tools/call",
                 "params": { "name": "Bash", "arguments": {
@@ -839,11 +961,7 @@ export function register(on) {
             let deadline = Instant::now() + Duration::from_secs(20);
             loop {
                 if let Ok(text) = std::fs::read_to_string(&path) {
-                    let pids: Vec<i32> = text
-                        .split_whitespace()
-                        .map(|pid| pid.parse().unwrap())
-                        .collect();
-                    if pids.len() == 2 {
+                    if let Some(pids) = super::fixture_process_ids(&text, self.child.id()) {
                         return pids;
                     }
                 }
@@ -963,7 +1081,7 @@ export function register(on) {
 
     #[test]
     fn cancellation_reaps_the_process_while_stdout_is_full() {
-        let mut server = Server::start();
+        let mut server = Server::start("full");
         let pids = server.start_shell(7, "full", false);
         server.fill_stdout();
         server.send(json!({
@@ -984,7 +1102,7 @@ export function register(on) {
 
     #[test]
     fn broken_stdout_reaps_a_background_handle_before_handoff() {
-        let mut server = Server::start();
+        let mut server = Server::start("broken");
         server.fill_stdout();
         let pids = server.start_shell(7, "broken", true);
         drop(server.output.take());
@@ -999,7 +1117,7 @@ export function register(on) {
 
     #[test]
     fn eof_reaps_an_active_process() {
-        let mut server = Server::start();
+        let mut server = Server::start("eof");
         let pids = server.start_shell(7, "eof", false);
         drop(server.input.take());
         wait_reaped(&pids);
@@ -1008,7 +1126,7 @@ export function register(on) {
 
     #[test]
     fn visible_background_handoff_survives_eof() {
-        let mut server = Server::start();
+        let mut server = Server::start("handoff-eof");
         let pids = server.start_shell(7, "handoff-eof", true);
         let response = server.frame();
         assert_eq!(response["id"], 7);
@@ -1024,7 +1142,7 @@ export function register(on) {
 
     #[test]
     fn queued_ping_id_is_reserved_during_stdout_backpressure() {
-        let mut server = Server::start();
+        let mut server = Server::start("duplicate-backpressure");
         let pids = server.start_shell(7, "duplicate-backpressure", false);
         server.fill_stdout();
         server.send(json!({"jsonrpc":"2.0", "id":42, "method":"ping"}));
@@ -1054,7 +1172,7 @@ export function register(on) {
 
     #[test]
     fn stalled_catalog_does_not_block_cancellation_or_duplicate_ids() {
-        let mut server = Server::start_with_catalog_gate(true);
+        let mut server = Server::start_with_catalog_gate(true, Some("catalog-cancel"));
         let pids = server.start_shell(7, "catalog-cancel", false);
         server.send(json!({"jsonrpc":"2.0", "id":7, "method":"ping"}));
         let duplicate = server.frame();
@@ -1091,7 +1209,7 @@ export function register(on) {
 
     #[test]
     fn escaped_string_ids_match_for_duplicates_and_cancellation() {
-        let mut server = Server::start();
+        let mut server = Server::start("escaped-id");
         let pids = server.start_shell_with_id(json!("shell-a"), "escaped-id", false);
         server.send_bytes(
             concat!(
@@ -1114,7 +1232,7 @@ export function register(on) {
 
     #[test]
     fn adjacent_large_ids_remain_distinct_for_routing_duplicate_and_cancellation() {
-        let mut server = Server::start_with_catalog_gate(true);
+        let mut server = Server::start_with_catalog_gate(true, Some("catalog-large-id"));
         let list_id = 9_007_199_254_740_992_u64;
         let shell_id = 9_007_199_254_740_993_u64;
         let pids = server.start_shell(shell_id, "catalog-large-id", false);
@@ -1154,7 +1272,7 @@ export function register(on) {
 
     #[test]
     fn stalled_catalog_does_not_block_eof_process_cleanup() {
-        let mut server = Server::start_with_catalog_gate(true);
+        let mut server = Server::start_with_catalog_gate(true, Some("catalog-eof"));
         let pids = server.start_shell(7, "catalog-eof", false);
         server.block_catalog(8);
         drop(server.input.take());
@@ -1172,7 +1290,7 @@ export function register(on) {
 
     #[test]
     fn pending_catalog_count_is_bounded_without_blocking_other_requests() {
-        let mut server = Server::start_with_catalog_gate(true);
+        let mut server = Server::start_with_catalog_gate(true, None);
         server.block_catalog(100);
         for id in 101..116_u64 {
             server.send(json!({"jsonrpc":"2.0", "id":id, "method":"tools/list"}));
@@ -1197,7 +1315,7 @@ export function register(on) {
 
     #[test]
     fn stalled_catalog_does_not_block_broken_stdout_process_cleanup() {
-        let mut server = Server::start_with_catalog_gate(true);
+        let mut server = Server::start_with_catalog_gate(true, Some("catalog-broken"));
         let pids = server.start_shell(7, "catalog-broken", false);
         server.block_catalog(8);
         server.fill_stdout();
@@ -1214,7 +1332,7 @@ export function register(on) {
 
     #[test]
     fn invalid_input_preserves_the_read_error_and_reaps_the_process() {
-        let mut server = Server::start();
+        let mut server = Server::start("invalid");
         let pids = server.start_shell(7, "invalid", false);
         server.send_bytes(&[0xff, b'\n']);
         wait_reaped(&pids);
@@ -1235,7 +1353,7 @@ fn windows_duplicate_call_cancellation_reaps_the_started_process_tree() {
     use std::time::{Duration, Instant};
 
     let temp = tempfile::tempdir().unwrap();
-    write_user_settings(&temp, r#"{"permissions":{"allow":["PowerShell"]}}"#);
+    write_user_permissions(&temp, &["PowerShell".to_owned()]);
     let config = temp.path().join("config");
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -1429,7 +1547,7 @@ fn windows_full_stdout_does_not_block_cancellation_or_eof_cleanup() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    write_user_settings(&temp, r#"{"permissions":{"allow":["PowerShell"]}}"#);
+    write_user_permissions(&temp, &["PowerShell".to_owned()]);
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let stderr_path = temp.path().join("stderr-full.log");
@@ -1652,7 +1770,7 @@ fn windows_broken_stdout_cancels_open_stdin_and_reaps_the_running_shell() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    write_user_settings(&temp, r#"{"permissions":{"allow":["PowerShell"]}}"#);
+    write_user_permissions(&temp, &["PowerShell".to_owned()]);
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let stderr_path = temp.path().join("stderr-broken.log");
@@ -1711,12 +1829,17 @@ fn windows_broken_stdout_cancels_open_stdin_and_reaps_the_running_shell() {
         })
     )
     .unwrap();
-    writeln!(stdin, "{}", serde_json::json!({
-        "jsonrpc": "2.0", "id": 7, "method": "tools/call",
-        "params": { "name": "PowerShell", "arguments": {
-            "command": "$PID | Set-Content -Encoding ascii -Path 'started-broken'; Start-Sleep -Seconds 30"
-        }}
-    })).unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": { "name": "PowerShell", "arguments": {
+                "command": "$PID | Set-Content -Encoding ascii -Path 'started-broken'; Start-Sleep -Seconds 30"
+            }}
+        })
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if let Ok(text) = std::fs::read_to_string(project.join("started-broken")) {

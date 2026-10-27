@@ -218,7 +218,7 @@ audit-as-crates-io = true
 [policy.libssh2-sys]
 audit-as-crates-io = true
 
-[policy."nix:0.31.3@git:d331a906302a51f807f02814bcff56e5eaf20655"]
+[policy."nix:0.31.3@git:5c6daa012ecf66b61e4e266dafb4eda0b90f718c"]
 audit-as-crates-io = true
 
 [policy.xcap]

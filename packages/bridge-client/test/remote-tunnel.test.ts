@@ -12,13 +12,14 @@ import { RemoteProtocolError } from '../src/remote/errors.js';
 import { MemoryRtdb } from '../src/remote/memoryRtdb.js';
 import { RtdbError, type Rtdb, type RtdbListenError, type RtdbEvent, type RtdbSubscription } from '../src/remote/rtdb.js';
 import { RtdbMirror } from '../src/remote/rtdbMirror.js';
-import { RpcPeer } from '../src/remote/rpc.js';
+import { RemoteRpcError, RpcPeer } from '../src/remote/rpc.js';
 import { downPath, parseFrameKey, toHostPath, upPath } from '../src/remote/signaling.js';
 import { MessageTransport } from '../src/remote/transport.js';
 import { TunnelLink } from '../src/remote/tunnel.js';
 import { deriveTunnelKeys, openFrame, packFragments, sealFrame, unpackFragments, type TunnelDir } from '../src/remote/tunnelCrypto.js';
 import {
   FRAGMENT_MAX_BYTES,
+  RPC_DEFAULT_TIMEOUT_MS,
   TUNNEL_FRAGMENT_MAX_BYTES,
   TUNNEL_FRAME_PLAINTEXT_MAX,
   TUNNEL_GAP_TIMEOUT_MS,
@@ -83,6 +84,23 @@ class SpyRtdb extends MemoryRtdb {
   }
 }
 
+/** Hold one selected frame write until the test explicitly releases it. */
+class DelayedFrameRtdb extends SpyRtdb {
+  gatePath: string | undefined;
+  release: (() => void) | undefined;
+
+  override put(path: string, value: unknown): Promise<void> {
+    if (path !== this.gatePath) return super.put(path, value);
+    this.gatePath = undefined;
+    return new Promise<void>((resolve, reject) => {
+      this.release = () => {
+        this.release = undefined;
+        super.put(path, value).then(resolve, reject);
+      };
+    });
+  }
+}
+
 /** A MemoryRtdb that records the PATCHes it receives. */
 class RecordingRtdb extends MemoryRtdb {
   readonly patches: Array<{ path: string; keys: string[] }> = [];
@@ -137,14 +155,17 @@ async function connect(options: { rtdb?: SpyRtdb; clock?: ManualClock } = {}) {
   return { clock, rtdb, viewer, host };
 }
 
-/** Let real asynchronous work (WebCrypto) finish while fake time passes 25 ms per turn. */
-async function drive(clock: ManualClock, done: () => boolean, label = 'condition', limit = 5000): Promise<void> {
-  for (let turn = 0; turn < limit; turn++) {
-    if (done()) return;
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    clock.advance(25);
+/** Drive timers at wall-clock speed while WebCrypto and other async work run. */
+async function drive(clock: ManualClock, done: () => boolean, label = 'condition', limitMs = 5000): Promise<void> {
+  const started = performance.now();
+  let advanced = 0;
+  while (!done()) {
+    if (performance.now() - started >= limitMs) throw new Error(`timed out waiting for ${label}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+    const elapsed = Math.floor(performance.now() - started);
+    clock.advance(elapsed - advanced);
+    advanced = elapsed;
   }
-  throw new Error(`timed out waiting for ${label}`);
 }
 
 function frag(fill: number, size = TUNNEL_FRAGMENT_MAX_BYTES): Uint8Array {
@@ -315,23 +336,79 @@ test('close() flushes what is queued, removes the sender\'s subtree and stops li
 test('either side closing tells the other at once: pending requests fail with peer_closed instead of timing out', async () => {
   for (const closer of ['viewer', 'host'] as const) {
     const c = await connect();
-    const viewerRpc = new RpcPeer(new MessageTransport(c.viewer), { clock: c.clock });
-    const hostRpc = new RpcPeer(new MessageTransport(c.host), { clock: c.clock });
+    // Give the RPC deadline its own clock so asynchronous transport work cannot
+    // consume arbitrary fake time while the test drives the tunnel's timers.
+    const rpcClock = new ManualClock();
+    const viewerRpc = new RpcPeer(new MessageTransport(c.viewer), { clock: rpcClock });
+    const hostRpc = new RpcPeer(new MessageTransport(c.host), { clock: rpcClock });
     const waiting = closer === 'viewer' ? hostRpc : viewerRpc;
     const leaving = closer === 'viewer' ? c.viewer : c.host;
     let arrived = false;
+    let requestSettled = false;
     (closer === 'viewer' ? viewerRpc : hostRpc).onRequest(() => {
       arrived = true;
       return new Promise(() => undefined);
     });
-    const failure = assert.rejects(
-      waiting.request('never-answered'),
-      (e: unknown) => e instanceof Error && (e as { code?: string }).code === 'closed' && e.message === 'peer_closed',
+    const outcome = waiting.request('never-answered').then(
+      (value) => { requestSettled = true; return { kind: 'fulfilled' as const, value }; },
+      (error: unknown) => { requestSettled = true; return { kind: 'rejected' as const, error }; },
     );
-    await drive(c.clock, () => arrived, 'the request to arrive');
-    leaving.close('user_left');
-    await drive(c.clock, () => waiting.closed, 'the other side to notice');
-    await failure;
+    try {
+      await drive(c.clock, () => arrived, 'the request to arrive');
+      rpcClock.advance(RPC_DEFAULT_TIMEOUT_MS - 1);
+      await Promise.resolve();
+      assert.equal(requestSettled, false, 'the request is still pending one millisecond before its deadline');
+      leaving.close('user_left');
+      await drive(c.clock, () => waiting.closed, 'the other side to notice');
+      const result = await outcome;
+      assert.equal(result.kind, 'rejected');
+      assert.ok(result.kind === 'rejected' && result.error instanceof RemoteRpcError);
+      assert.equal(result.error.code, 'closed');
+      assert.equal(result.error.message, 'peer_closed');
+      assert.equal(rpcClock.pending, 0, 'closing clears the pending RPC timer');
+      rpcClock.advance(1);
+    } finally {
+      viewerRpc.close('test_done');
+      hostRpc.close('test_done');
+    }
+  }
+});
+
+test('a delayed close frame does not turn a pending request into a timeout', async () => {
+  const clock = new ManualClock(1_700_000_000_000);
+  const rtdb = new DelayedFrameRtdb({ clock });
+  const c = await connect({ rtdb, clock });
+  const viewerRpc = new RpcPeer(new MessageTransport(c.viewer), { clock });
+  const hostRpc = new RpcPeer(new MessageTransport(c.host), { clock });
+  let arrived = false;
+  hostRpc.onRequest(() => {
+    arrived = true;
+    return new Promise(() => undefined);
+  });
+  // Attach both handlers immediately so even a regression cannot become an
+  // unhandled rejection while the test is waiting for the close notice.
+  const outcome = viewerRpc.request('never-answered').then(
+    (value) => ({ kind: 'fulfilled' as const, value }),
+    (error: unknown) => ({ kind: 'rejected' as const, error }),
+  );
+  try {
+    await drive(clock, () => arrived, 'the request to arrive');
+    rtdb.gatePath = `${DOWN}/f0`;
+    c.host.close('user_left');
+    await until(() => rtdb.release !== undefined, 'the close frame to be held');
+    // Thousands of event-loop turns can pass while a real asynchronous write
+    // is pending. They must not turn into 30 seconds of RPC time.
+    const release = settle(2000).then(() => rtdb.release?.());
+    await Promise.all([drive(clock, () => viewerRpc.closed, 'the close notice'), release]);
+    const result = await outcome;
+    assert.equal(result.kind, 'rejected');
+    assert.ok(result.kind === 'rejected' && result.error instanceof RemoteRpcError);
+    assert.equal(result.error.code, 'closed');
+    assert.equal(result.error.message, 'peer_closed');
+  } finally {
+    rtdb.release?.();
+    viewerRpc.close('test_done');
+    hostRpc.close('test_done');
   }
 });
 

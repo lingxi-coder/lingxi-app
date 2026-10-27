@@ -65,6 +65,7 @@ interface FixtureApi {
   disableLateRender(): void;
   holdNextFrameOperation(): void;
   releaseHeldFrameOperations(): void;
+  initialStatusResizeHeld(): boolean;
   initialMountsHeld(): boolean;
   releaseInitialMounts(): void;
   emitNewerAsyncFrame(): void;
@@ -488,7 +489,7 @@ const host: ModUiClientHostApi = {
     const frame = makeRuntimeFrame(runtimeId, request.render_revision, tree);
     call.returnedRevision = frame.renderRevision;
     call.returnedFrameSequence = frame.frameSequence;
-    if (request.type === 'resize' && holdInitialResize) {
+    if (request.type === 'resize' && holdInitialResize && runtimeId === currentStatusRuntimeId) {
       holdInitialResize = false;
       return await holdFrameResult(frame) as UiClientOperationResponseFor<T>;
     }
@@ -613,6 +614,8 @@ window.__modUiClientFixture = {
     return {
       currentStatusRuntimeId,
       statusEpochs: [...statusMountCountsByEpoch.entries()],
+      initialStatusResizeHeld: !holdInitialResize && heldFrameOperationReleases.length > 0,
+      heldFrameOperations: heldFrameOperationReleases.length,
       statusDom: [...document.querySelectorAll('[data-client="status"]')].map((element) => ({
         text: element.textContent,
         module: element.getAttribute('data-module'),
@@ -729,6 +732,7 @@ window.__modUiClientFixture = {
   disableLateRender() { setLateEnabled(false); },
   holdNextFrameOperation() { holdNextFrame = true; },
   releaseHeldFrameOperations() { for (const release of heldFrameOperationReleases.splice(0)) release(); },
+  initialStatusResizeHeld() { return !holdInitialResize && heldFrameOperationReleases.length > 0; },
   initialMountsHeld() { return initialStatusMountRelease !== null && initialSiblingMountRelease !== null; },
   releaseInitialMounts() {
     initialStatusMountRelease?.();

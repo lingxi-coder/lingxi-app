@@ -128,7 +128,9 @@ async function main() {
     if (!drawBeforeMount) throw new Error('Client module mounted before its parent draw commit observed committed DOM');
     await wait(`document.querySelector('.mod-ui-client-surface')?.textContent.includes('Scheduled final frame')`);
     const preRegistrationFrameReplayed = await run(`document.querySelector('.mod-ui-client-surface')?.textContent.includes('Scheduled final frame') && !document.querySelector('.mod-ui-client-surface')?.textContent.includes('Mount response frame') && !document.querySelector('.mod-ui-client-surface')?.textContent.includes('Stale buffered frame')`);
-    await run(`window.__modUiClientFixture.releaseHeldFrameOperations()`);
+    // Wait until the status resize is actually held. Releasing before its
+    // request arrives leaves the subsequent operation queue blocked forever.
+    await wait(`window.__modUiClientFixture.initialStatusResizeHeld()`);
     // A viewport update can supersede an in-flight first mount. Track the
     // actual accepted runtime instead of assuming its first generated id.
     await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'resize' && call.request.runtimeId === window.__modUiClientFixture.debugSnapshot().currentStatusRuntimeId)`);
@@ -153,6 +155,12 @@ async function main() {
       }, { once: true });
       button.click();
     })()`);
+    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'control' && call.request.subtype === 'ui_client_press' && call.request.event.type === 'press')`);
+    // The button's host dispatch resolves asynchronously; let its continuation
+    // queue behind the held resize before proving it cannot run prematurely.
+    await run(`new Promise(resolve => setTimeout(resolve, 0))`);
+    assert.equal(await run(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 17)`), false);
+    await run(`window.__modUiClientFixture.releaseHeldFrameOperations()`);
     await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 17)`);
     const buttonPressHandled = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_client_press' && call.request.event.type === 'press').length === 1`);
     const buttonUsesCurrentHandle = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 17 && !('event' in call.request)).length === 1`);

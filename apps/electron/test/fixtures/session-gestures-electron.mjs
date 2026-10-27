@@ -233,11 +233,29 @@ async function main() {
     assert.deepEqual(await opened(), ['alpha'], 'drag does not open a session');
     await click('gamma');
     assert.deepEqual(await opened(), ['alpha', 'gamma'], 'click works immediately after drag');
+    await focusForInput('gamma same-row drag');
+    // The first drag animates rows into their new positions. Their visible
+    // bounds can overlap until the sortable animations finish, so a new
+    // center-point press may otherwise hit a different row.
+    await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    await wait(`Array.from(document.querySelectorAll('.sidebar-session-row[data-session-reorderable="true"]')).every(row => row.getAnimations().every(animation => animation.playState === 'finished' || animation.playState === 'idle'))`);
+    await wait(hitTargetExpression('gamma'));
     const currentGamma = await point('gamma');
+    await input('mouseMove', currentGamma);
+    await run(`window.fixtureSameRowDown = null; document.addEventListener('pointerdown', event => {
+      window.fixtureSameRowDown = { trusted: event.isTrusted, sessionId: event.target instanceof Element ? event.target.closest('[data-session-id]')?.dataset.sessionId ?? null : null };
+    }, { capture: true, once: true })`);
     await down(currentGamma);
+    await wait('Boolean(window.fixtureSameRowDown)');
+    assert.deepEqual(await run('window.fixtureSameRowDown'), { trusted: true, sessionId: 'gamma' }, 'same-row drag starts on gamma');
     await input('mouseMove', { x: currentGamma.x + 12, y: currentGamma.y }, { button: 'left', modifiers: ['leftButtonDown'] });
+    await wait(`${selector('gamma')}.closest('.sidebar-tree-row')?.dataset.dragging === 'true' && ${selector('gamma')}.closest('.sidebar-tree-row')?.dataset.dragTarget === 'true' && JSON.stringify(${projectSessionOrder}) === JSON.stringify(['gamma', 'alpha', 'beta'])`);
     await up({ x: currentGamma.x + 12, y: currentGamma.y });
+    await wait(`!document.querySelector('.sidebar-session-row[data-dragging="true"]')`);
+    await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     assert.equal(await run('window.sessionGesturesFixture.preferences.length'), 1, 'same-row drag does not persist an order');
+    assert.deepEqual(await run('window.sessionGesturesFixture.touched'), ['gamma'], 'same-row drag does not touch the session');
+    assert.deepEqual(await run(projectSessionOrder), ['gamma', 'alpha', 'beta'], 'same-row drag keeps the saved order');
     await click('gamma');
     assert.deepEqual(await opened(), ['alpha', 'gamma', 'gamma']);
     await focusForInput('pinned session long press');

@@ -22,12 +22,13 @@ async function setup(mode: string, service = false) {
   });
   const source = join(root, 'imports', 'source'); await fs.mkdir(source, { recursive: true });
   await fs.writeFile(join(source, 'index.html'), '<!doctype html>');
-  const step = { command: mode, env: { APP_ALLOWED: 'yes' } };
+  const crashMarker = join(root, 'crash');
+  const step = { command: mode, env: { APP_ALLOWED: 'yes', ...(mode === 'crash-controlled' ? { TEST_CRASH_MARKER: crashMarker } : {}) } };
   await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 2, name: 'Windows helper',
     targets: [{ platform: 'macos', environment: 'native' }], entry: { type: 'static', path: 'index.html' },
     ...(service ? { processes: [{ ...step, name: 'fixture', ready: { output: 'ready', timeoutMs: 3000 } }] } : { install: [step] }) }));
   const row = await store.publish({ staged_path: source }); row.grants = ['process']; await store.save(row);
-  return { root, runtime, row };
+  return { root, runtime, row, crashMarker };
 }
 
 async function asWindows<T>(run: () => Promise<T>): Promise<T> {
@@ -70,12 +71,15 @@ test('Windows runtime retains an unverified service until a bound stop retry suc
 });
 
 test('Windows runtime keeps a crashed helper unverified instead of losing its owner', { skip: process.platform === 'win32', timeout: 8000 }, async () => {
-  const { root, runtime, row } = await setup('crash', true);
+  const { root, runtime, row, crashMarker } = await setup('crash-controlled', true);
   try {
     await asWindows(async () => {
       await runtime.start(row.id);
+      assert.equal(runtime.phase(row.id), 'running');
+      await fs.writeFile(crashMarker, 'crash');
       for (let n = 0; n < 100 && runtime.phase(row.id) !== 'failed'; n++) await delay(20);
       assert.equal(runtime.phase(row.id), 'failed');
+      assert.match(runtime.status(row).error ?? '', /cleanup is unverified: helper exited without a verified receipt/);
       await assert.rejects(runtime.stop(row.id), /cleanup needs retry/);
       const current = (Reflect.get(runtime, 'invocations') as Map<string, { children: Set<unknown> }>).get(row.id)!;
       assert.equal(current.children.size, 1);

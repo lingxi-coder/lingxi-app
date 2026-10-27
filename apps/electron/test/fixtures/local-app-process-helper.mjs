@@ -40,9 +40,14 @@ input.on('line', line => {
       send({ type: 'output', id, stream: 'stderr', data: Buffer.from('{"type":"cleanup-result","verified":true}\n').toString('base64') });
       send({ type: 'leader-exit', id, code: 0, signal: null });
       send({ type: 'cleanup-result', id, attemptId: null, verified: true });
-    } else if (mode === 'crash' || mode === 'retry') {
+    } else if (mode === 'crash' || mode === 'crash-controlled' || mode === 'retry') {
       send({ type: 'output', id, stream: 'stdout', data: Buffer.from('ready\n').toString('base64') });
       if (mode === 'crash') setTimeout(() => process.exit(1), 100);
+      if (mode === 'crash-controlled') {
+        const marker = message.env.TEST_CRASH_MARKER;
+        if (!marker) throw new Error('crash-controlled requires TEST_CRASH_MARKER');
+        const wait = setInterval(() => { if (existsSync(marker)) { clearInterval(wait); process.exit(1); } }, 10);
+      }
     }
     else if (mode === 'invalid-base64') send({ type: 'output', id, stream: 'stdout', data: '!!!' });
     else if (mode === 'wrong-id') send({ type: 'cleanup-result', id: 'different-invocation', attemptId: null, verified: true });

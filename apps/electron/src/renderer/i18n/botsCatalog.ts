@@ -810,5 +810,292 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "en": "This task runs as the Bot, in its own workspace, with its persona, memory and skills.",
     "ja": "このタスクは Bot として、Bot 専用のワークスペースで、そのペルソナ・記憶・スキルを使って実行されます。",
     "ko": "이 작업은 Bot으로서 Bot 전용 작업 공간에서 해당 Bot의 페르소나, 기억, 스킬로 실행됩니다."
+  },
+  "bots_tab_tasks": {
+    "zh-Hans": "委派任务",
+    "zh-Hant": "委派任務",
+    "en": "Tasks",
+    "ja": "委任タスク",
+    "ko": "위임 작업"
+  },
+  "bots_tasks_hint": {
+    "zh-Hans": "其他 Bot 交给这个 Bot 的任务，以及它交给其他 Bot 的任务，最新的在前。每个任务都在接收任务的 Bot 的独立对话中完成。",
+    "zh-Hant": "其他 Bot 交給這個 Bot 的任務，以及它交給其他 Bot 的任務，最新的在前。每個任務都在接收任務的 Bot 的獨立對話中完成。",
+    "en": "Tasks other Bots handed to this Bot, and tasks it handed to them, newest first. Each one is done in a chat of its own, in the Bot that received it.",
+    "ja": "他の Bot がこの Bot に任せたタスクと、この Bot が他の Bot に任せたタスクを、新しい順に表示します。各タスクは、受け取った Bot の専用チャットで実行されます。",
+    "ko": "다른 Bot이 이 Bot에 맡긴 작업과 이 Bot이 다른 Bot에 맡긴 작업이 최신순으로 표시됩니다. 각 작업은 받은 Bot의 별도 채팅에서 수행됩니다."
+  },
+  "bots_tasks_loading": {
+    "zh-Hans": "正在读取任务…",
+    "zh-Hant": "正在讀取任務…",
+    "en": "Reading tasks…",
+    "ja": "タスクを読み込んでいます…",
+    "ko": "작업을 불러오는 중…"
+  },
+  "bots_tasks_failed": {
+    "zh-Hans": "无法读取任务：%1$s",
+    "zh-Hant": "無法讀取任務：%1$s",
+    "en": "Tasks could not be read: %1$s",
+    "ja": "タスクを読み込めませんでした：%1$s",
+    "ko": "작업을 불러오지 못했습니다: %1$s"
+  },
+  "bots_tasks_empty": {
+    "zh-Hans": "还没有任务。可以在“权限”中允许其他 Bot 把任务交给它。",
+    "zh-Hant": "還沒有任務。可以在「權限」中允許其他 Bot 把任務交給它。",
+    "en": "No tasks yet. Under Permissions you can allow other Bots to hand tasks to this one.",
+    "ja": "まだタスクはありません。「権限」で、他の Bot がこの Bot にタスクを任せられるよう許可できます。",
+    "ko": "아직 작업이 없습니다. '권한'에서 다른 Bot이 이 Bot에 작업을 맡길 수 있도록 허용할 수 있습니다."
+  },
+  "bots_tasks_truncated": {
+    "zh-Hans": "更早的任务未显示。",
+    "zh-Hant": "更早的任務未顯示。",
+    "en": "Older tasks are not shown.",
+    "ja": "古いタスクは表示されません。",
+    "ko": "오래된 작업은 표시되지 않습니다."
+  },
+  "bots_task_from": {
+    "zh-Hans": "来自 %1$s",
+    "zh-Hant": "來自 %1$s",
+    "en": "From %1$s",
+    "ja": "%1$s から",
+    "ko": "%1$s에서 받음"
+  },
+  "bots_task_to": {
+    "zh-Hans": "交给 %1$s",
+    "zh-Hant": "交給 %1$s",
+    "en": "To %1$s",
+    "ja": "%1$s へ",
+    "ko": "%1$s에게 맡김"
+  },
+  "bots_task_peer_gone": {
+    "zh-Hans": "已删除的 Bot",
+    "zh-Hant": "已刪除的 Bot",
+    "en": "a deleted Bot",
+    "ja": "削除された Bot",
+    "ko": "삭제된 Bot"
+  },
+  "bots_task_state_submitted": {
+    "zh-Hans": "准备开始",
+    "zh-Hant": "準備開始",
+    "en": "Starting",
+    "ja": "開始待ち",
+    "ko": "시작 대기"
+  },
+  "bots_task_state_working": {
+    "zh-Hans": "进行中",
+    "zh-Hant": "進行中",
+    "en": "Working",
+    "ja": "実行中",
+    "ko": "진행 중"
+  },
+  "bots_task_state_input_required": {
+    "zh-Hans": "需要你回复",
+    "zh-Hant": "需要你回覆",
+    "en": "Needs your answer",
+    "ja": "回答が必要",
+    "ko": "답변 필요"
+  },
+  "bots_task_state_completed": {
+    "zh-Hans": "已完成",
+    "zh-Hant": "已完成",
+    "en": "Done",
+    "ja": "完了",
+    "ko": "완료"
+  },
+  "bots_task_state_failed": {
+    "zh-Hans": "失败",
+    "zh-Hant": "失敗",
+    "en": "Failed",
+    "ja": "失敗",
+    "ko": "실패"
+  },
+  "bots_task_state_canceled": {
+    "zh-Hans": "已取消",
+    "zh-Hant": "已取消",
+    "en": "Canceled",
+    "ja": "キャンセル済み",
+    "ko": "취소됨"
+  },
+  "bots_task_state_rejected": {
+    "zh-Hans": "被拒绝",
+    "zh-Hant": "被拒絕",
+    "en": "Refused",
+    "ja": "拒否されました",
+    "ko": "거부됨"
+  },
+  "bots_task_due": {
+    "zh-Hans": "最迟 %1$s 完成",
+    "zh-Hant": "最遲 %1$s 完成",
+    "en": "Due by %1$s",
+    "ja": "%1$s までに完了",
+    "ko": "%1$s까지 완료"
+  },
+  "bots_task_updated": {
+    "zh-Hans": "更新于 %1$s",
+    "zh-Hant": "更新於 %1$s",
+    "en": "Updated %1$s",
+    "ja": "%1$s に更新",
+    "ko": "%1$s 업데이트"
+  },
+  "bots_task_result": {
+    "zh-Hans": "结果",
+    "zh-Hant": "結果",
+    "en": "Result",
+    "ja": "結果",
+    "ko": "결과"
+  },
+  "bots_task_result_cut": {
+    "zh-Hans": "结果的其余部分未在此显示。打开对话可查看全部内容。",
+    "zh-Hant": "結果的其餘部分未在此顯示。開啟對話可查看全部內容。",
+    "en": "The rest of the result is not shown here. Open the chat to read all of it.",
+    "ja": "結果の残りはここには表示されません。チャットを開くと全文を読めます。",
+    "ko": "결과의 나머지는 여기에 표시되지 않습니다. 채팅을 열면 전체를 볼 수 있습니다."
+  },
+  "bots_task_input_hint": {
+    "zh-Hans": "正在等你回复：请打开对话回答。",
+    "zh-Hant": "正在等你回覆：請開啟對話回答。",
+    "en": "Waiting for your answer. Open the chat to give it.",
+    "ja": "あなたの回答を待っています。チャットを開いて答えてください。",
+    "ko": "답변을 기다리고 있습니다. 채팅을 열어 답해 주세요."
+  },
+  "bots_task_files_from": {
+    "zh-Hans": "来自 %1$s 的文件",
+    "zh-Hant": "來自 %1$s 的檔案",
+    "en": "Files from %1$s",
+    "ja": "%1$s からのファイル",
+    "ko": "%1$s에서 받은 파일"
+  },
+  "bots_task_files_returned": {
+    "zh-Hans": "已回传给 %1$s 的文件",
+    "zh-Hant": "已回傳給 %1$s 的檔案",
+    "en": "Files returned to %1$s",
+    "ja": "%1$s に返したファイル",
+    "ko": "%1$s에게 돌려준 파일"
+  },
+  "bots_task_cost": {
+    "zh-Hans": "费用 %1$s",
+    "zh-Hant": "費用 %1$s",
+    "en": "Cost %1$s",
+    "ja": "費用 %1$s",
+    "ko": "비용 %1$s"
+  },
+  "bots_task_open_chat": {
+    "zh-Hans": "打开对话",
+    "zh-Hant": "開啟對話",
+    "en": "Open chat",
+    "ja": "チャットを開く",
+    "ko": "채팅 열기"
+  },
+  "bots_task_stop": {
+    "zh-Hans": "停止",
+    "zh-Hant": "停止",
+    "en": "Stop",
+    "ja": "停止",
+    "ko": "중지"
+  },
+  "bots_task_stop_title": {
+    "zh-Hans": "停止这个任务？",
+    "zh-Hant": "停止這個任務？",
+    "en": "Stop this task?",
+    "ja": "このタスクを停止しますか？",
+    "ko": "이 작업을 중지할까요?"
+  },
+  "bots_task_stop_confirm": {
+    "zh-Hans": "停止任务",
+    "zh-Hant": "停止任務",
+    "en": "Stop task",
+    "ja": "タスクを停止",
+    "ko": "작업 중지"
+  },
+  "bots_task_stopping": {
+    "zh-Hans": "正在停止…",
+    "zh-Hant": "正在停止…",
+    "en": "Stopping…",
+    "ja": "停止しています…",
+    "ko": "중지하는 중…"
+  },
+  "bots_task_stop_body": {
+    "zh-Hans": "正在执行任务的 Bot 会停下来，交出任务的 Bot 会收到任务已取消的通知。已完成的工作会保留在原处。",
+    "zh-Hant": "正在執行任務的 Bot 會停下來，交出任務的 Bot 會收到任務已取消的通知。已完成的工作會保留在原處。",
+    "en": "The Bot doing this task stops, and the Bot that handed it over is told it was canceled. Work already done stays where it is.",
+    "ja": "タスクを実行している Bot は停止し、タスクを任せた Bot にはキャンセルされたことが伝えられます。済んだ作業はそのまま残ります。",
+    "ko": "작업을 수행 중인 Bot이 멈추고, 작업을 맡긴 Bot에는 취소되었다고 알려줍니다. 이미 한 작업은 그대로 남습니다."
+  },
+  "bots_accept_title": {
+    "zh-Hans": "接收其他 Bot 的任务",
+    "zh-Hant": "接收其他 Bot 的任務",
+    "en": "Tasks from other Bots",
+    "ja": "他の Bot からのタスク",
+    "ko": "다른 Bot의 작업"
+  },
+  "bots_accept_intro": {
+    "zh-Hans": "选择可以把任务交给这个 Bot 的其他 Bot。",
+    "zh-Hant": "選擇可以把任務交給這個 Bot 的其他 Bot。",
+    "en": "Choose the Bots that may hand tasks to this one.",
+    "ja": "この Bot にタスクを任せてよい Bot を選んでください。",
+    "ko": "이 Bot에 작업을 맡길 수 있는 Bot을 선택하세요."
+  },
+  "bots_accept_run": {
+    "zh-Hans": "任务在这个 Bot 自己的对话中运行，使用它的权限和文件夹。",
+    "zh-Hant": "任務在這個 Bot 自己的對話中執行，使用它的權限與資料夾。",
+    "en": "A task runs in a chat of this Bot, with its permissions and folders.",
+    "ja": "タスクはこの Bot のチャットで、この Bot の権限とフォルダを使って実行されます。",
+    "ko": "작업은 이 Bot의 채팅에서 이 Bot의 권한과 폴더로 실행됩니다."
+  },
+  "bots_accept_files": {
+    "zh-Hans": "随任务发来的文件会复制到这个 Bot 的 inbox 文件夹。",
+    "zh-Hant": "隨任務送來的檔案會複製到這個 Bot 的 inbox 資料夾。",
+    "en": "Files that come with a task are copied into this Bot's inbox folder.",
+    "ja": "タスクに添付されたファイルは、この Bot の inbox フォルダにコピーされます。",
+    "ko": "작업과 함께 온 파일은 이 Bot의 inbox 폴더로 복사됩니다."
+  },
+  "bots_accept_visible": {
+    "zh-Hans": "这台电脑上的其他 Bot 在列出 Bot 时可以看到这个 Bot 的名称和描述。",
+    "zh-Hant": "這台電腦上的其他 Bot 在列出 Bot 時可以看到這個 Bot 的名稱與描述。",
+    "en": "Other Bots on this computer can see this Bot's name and description when they list Bots.",
+    "ja": "このコンピュータ上の他の Bot は、Bot を一覧するときにこの Bot の名前と説明を見られます。",
+    "ko": "이 컴퓨터의 다른 Bot은 Bot 목록을 볼 때 이 Bot의 이름과 설명을 볼 수 있습니다."
+  },
+  "bots_accept_none": {
+    "zh-Hans": "一个都不选，则没有 Bot 可以把任务交给它。",
+    "zh-Hant": "一個都不選，則沒有 Bot 可以把任務交給它。",
+    "en": "With none chosen, no Bot may hand this one a task.",
+    "ja": "何も選ばなければ、この Bot にタスクを任せられる Bot はありません。",
+    "ko": "아무것도 선택하지 않으면 이 Bot에 작업을 맡길 수 있는 Bot이 없습니다."
+  },
+  "bots_accept_empty": {
+    "zh-Hans": "还没有其他 Bot。",
+    "zh-Hant": "還沒有其他 Bot。",
+    "en": "There are no other Bots yet.",
+    "ja": "他の Bot はまだありません。",
+    "ko": "아직 다른 Bot이 없습니다."
+  },
+  "bots_accept_unknown": {
+    "zh-Hans": "Bot 列表尚未加载。",
+    "zh-Hant": "Bot 清單尚未載入。",
+    "en": "The list of Bots has not loaded yet.",
+    "ja": "Bot の一覧はまだ読み込まれていません。",
+    "ko": "Bot 목록을 아직 불러오지 못했습니다."
+  },
+  "bots_problem_accept_too_many": {
+    "zh-Hans": "最多可以选择 64 个 Bot。",
+    "zh-Hant": "最多可以選擇 64 個 Bot。",
+    "en": "At most 64 Bots can be chosen.",
+    "ja": "選べる Bot は最大 64 個です。",
+    "ko": "최대 64개의 Bot을 선택할 수 있습니다."
+  },
+  "bots_delete_tasks": {
+    "zh-Hans": "仍在进行的任务：收到 %1$s 个，交出 %2$s 个。删除这个 Bot 会取消它们。",
+    "zh-Hant": "仍在進行的任務：收到 %1$s 個，交出 %2$s 個。刪除這個 Bot 會取消它們。",
+    "en": "Tasks still going on: %1$s received, %2$s sent. Deleting this Bot cancels them.",
+    "ja": "進行中のタスク：受け取り %1$s 件、依頼 %2$s 件。この Bot を削除するとキャンセルされます。",
+    "ko": "진행 중인 작업: 받은 작업 %1$s개, 맡긴 작업 %2$s개. 이 Bot을 삭제하면 모두 취소됩니다."
+  },
+  "bots_delete_tasks_unknown": {
+    "zh-Hans": "无法检查仍在进行的任务。删除这个 Bot 会取消其中仍在进行的任务。",
+    "zh-Hant": "無法檢查仍在進行的任務。刪除這個 Bot 會取消其中仍在進行的任務。",
+    "en": "The tasks that are still going on could not be checked. Deleting this Bot cancels any that are.",
+    "ja": "進行中のタスクを確認できませんでした。この Bot を削除すると、進行中のタスクはキャンセルされます。",
+    "ko": "진행 중인 작업을 확인하지 못했습니다. 이 Bot을 삭제하면 진행 중인 작업은 취소됩니다."
   }
 };

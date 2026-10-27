@@ -226,6 +226,8 @@ export interface HostTurnOptions {
   signal?: AbortSignal;
   /** How long a cancelled turn is given to end before it is let go as `cancelled` all the same; ten seconds by default. */
   cancelGraceMs?: number;
+  /** Called once the engine has been handed the prompt, and not at all when it was not. */
+  onSent?: () => void;
 }
 
 /** How a turn that {@link SessionRuntime.runHostTurn} ran ended. */

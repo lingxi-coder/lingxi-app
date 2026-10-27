@@ -22,6 +22,7 @@ import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
 import { installDesktopUpdates } from './desktopUpdates.js';
 import { desktopUpdateManifestUrl } from '../shared/productConfig.js';
+import { CH_BOTS_PROMPT_SENT, CH_BOTS_TASKS_CHANGED, type BotPromptSentUi, type BotTasksChangedUi } from '../shared/bots.js';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -48,6 +49,7 @@ import { BotsUi } from './bots/rendererIpc.js';
 import { BotRouter } from './bots/router.js';
 import { BotService } from './bots/service.js';
 import { BotStore } from './bots/store.js';
+import { TaskChangeAnnouncer } from './bots/taskChanges.js';
 import { BotTasks } from './bots/taskService.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
@@ -125,6 +127,7 @@ let remoteUi: RemoteControlUi | null = null;
 let bots: BotService | null = null;
 /** The endpoint through which Bots hand tasks to each other; made with the Bots. */
 let botRouter: BotRouter | null = null;
+let botTasks: BotTasks | null = null;
 let remotePolicyTimer: NodeJS.Timeout | undefined;
 /** How often the administrator's `managed-settings.json` is read again. */
 const REMOTE_POLICY_RECHECK_MS = 30_000;
@@ -464,6 +467,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // Remote Control is built after the notifier; both are looked up when used.
     remote: (kind, sessionId) => remotePush?.notify(kind, sessionId),
     systemIdleSeconds: () => powerMonitor.getSystemIdleTime(),
+    // The tasks between Bots are made after the notifier too.
+    delegation: (sessionKey) => botTasks?.doing(sessionKey),
   });
   notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
@@ -759,15 +764,20 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       const botWarn = (message: string): void => { diagnostics.add('warn', 'host', `bots: ${message}`); };
       // Tasks between Bots, and the endpoint they are handed through. The router listens
       // before any session of a Bot is launched, which asks it for an address and a token.
-      const botTasks = new BotTasks({
+      const taskChanges = new TaskChangeAnnouncer((botIds) => host?.sendToWindows(CH_BOTS_TASKS_CHANGED, { botIds } satisfies BotTasksChangedUi));
+      const tasks = new BotTasks({
         store: botStore,
         runtimes: { withSession: (ref, empty, model, operation) => manager.withBackgroundSession(ref, empty, model, operation) },
         available: () => bots?.availability().available === true,
         isDeleting: (botId) => bots?.isDeleting(botId) === true,
         warn: botWarn,
+        changed: (botIds) => taskChanges.changed(botIds),
+        // The engine's events carry no user prompts: the window shows the one the task began with.
+        promptSent: (sessionId, text) => host?.sendToWindows(CH_BOTS_PROMPT_SENT, { sessionId, text } satisfies BotPromptSentUi),
       });
-      botTasks.load();
-      const router = new BotRouter({ backend: botTasks, warn: botWarn });
+      botTasks = tasks;
+      tasks.load();
+      const router = new BotRouter({ backend: tasks, warn: botWarn });
       botRouter = router;
       router.start().catch((error: unknown) => botWarn(`the router cannot listen: ${sanitizeDiagnostic(error)}`));
       router.watchRuntimes(manager);
@@ -775,7 +785,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         store: botStore,
         runtimes: bridge,
         router,
-        delegation: botTasks,
+        delegation: tasks,
         catalogFor: (configHome) => new ProjectSessionCatalog({ ...catalogOptions, configHome }),
         // The scheduler was made first; it learns of the Bots below, and is asked for these only when used.
         routines: {
@@ -785,7 +795,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         warn: botWarn,
       });
       scheduled?.attachBots(bots);
-      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore) }));
+      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore), tasks }));
     } catch (error) {
       diagnostics.add('warn', 'host', `bots unavailable: ${sanitizeDiagnostic(error)}`);
     }
@@ -964,6 +974,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   remoteUi = null;
   remotePolicy = null;
   bots = null;
+  botTasks = null;
   const currentBotRouter = botRouter;
   botRouter = null;
   const shutdownPhases: Array<[string, () => Promise<void>]> = [

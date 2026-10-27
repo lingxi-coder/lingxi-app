@@ -56,6 +56,20 @@ export const CH_BOTS_SKILL_DELETE = 'lingxi:bots:skills:delete';
 export const CH_BOTS_SKILL_IMPORT = 'lingxi:bots:skills:import';
 /** Invoke → `BotSkillUi[]`. The skills of the owner's own configuration that can be copied into a Bot. */
 export const CH_BOTS_SKILLS_IMPORTABLE = 'lingxi:bots:skills:importable';
+/** Invoke(`botId: string`) → `BotTasksUi`. The tasks the Bot was given and the ones it handed to other Bots. */
+export const CH_BOTS_TASKS_LIST = 'lingxi:bots:tasks:list';
+/** Invoke(`botId: string, taskId: string`) → `void`. The owner stops a task of the Bot that is still going on; one that has ended is left as it is. */
+export const CH_BOTS_TASK_CANCEL = 'lingxi:bots:tasks:cancel';
+/**
+ * Event(`BotTasksChangedUi`). Tasks of these Bots changed. Sent once a burst of
+ * changes has settled, so the window reads the list again instead of polling it.
+ */
+export const CH_BOTS_TASKS_CHANGED = 'lingxi:bots:tasks:changed';
+/**
+ * Event(`BotPromptSentUi`). The host sent a prompt to a session of a Bot on its own (a task
+ * was handed to it). The engine's events carry no user prompts, so the window shows the row itself.
+ */
+export const CH_BOTS_PROMPT_SENT = 'lingxi:bots:prompt:sent';
 
 /** Whether Bots can be used on this computer, and if not, why (in words fit for the owner). */
 export interface BotsAvailability {
@@ -143,6 +157,63 @@ export interface BotSkillUi {
   description?: string;
 }
 
+/** The states of a task between Bots, those of the A2A protocol. */
+export type BotTaskStateUi = 'submitted' | 'working' | 'input-required' | 'completed' | 'failed' | 'canceled' | 'rejected';
+
+/** Whether the Bot whose tasks are listed was given the task or handed it out. */
+export type BotTaskDirection = 'received' | 'sent';
+
+export interface BotTaskFileUi {
+  name: string;
+  /** Relative to the workspace of the Bot the file was copied to: `inbox/<task id>/<name>`. */
+  path: string;
+  size: number;
+}
+
+/** One task, as the owner reads it on the page of one of the two Bots it is between. */
+export interface BotTaskUi {
+  taskId: string;
+  direction: BotTaskDirection;
+  /** The other Bot of the task: the one that sent it to this Bot, or the one this Bot sent it to. */
+  peer: { botId: string; name?: string };
+  state: BotTaskStateUi;
+  /** The first line of what was asked, kept short. */
+  summary: string;
+  /** Why the task is in this state, when that is not obvious. One line. */
+  reason?: string;
+  /** What the receiving Bot ended with, cut short when it is long. */
+  result?: string;
+  resultTruncated?: boolean;
+  /** The files the receiving Bot attached, copied to the sending Bot's workspace. */
+  artifacts: BotTaskFileUi[];
+  costUsd?: number;
+  /** Epoch milliseconds. */
+  createdAt: number;
+  updatedAt: number;
+  deadlineAt: number;
+  /** The session of the receiving Bot that does the task. It has a chat to open once it has taken a turn. */
+  receiver: { botId: string; sessionId: string };
+  turns: number;
+}
+
+export interface BotTasksUi {
+  /** Newest first. */
+  tasks: BotTaskUi[];
+  /** Older tasks were left out. */
+  truncated: boolean;
+  /** How many of all the Bot's tasks, listed or not, are still going on. Deleting the Bot cancels them. */
+  active: { received: number; sent: number };
+}
+
+export interface BotTasksChangedUi {
+  botIds: string[];
+}
+
+export interface BotPromptSentUi {
+  sessionId: string;
+  text: string;
+}
+
 export interface BotsApi {
   /** Never rejects for a computer that cannot run Bots: that is the answer. */
   availability(): Promise<BotsAvailability>;
@@ -172,4 +243,12 @@ export interface BotsApi {
     /** What `importFromUser` can copy: the skills of the owner's configuration, whatever the Bot has. */
     listImportable(): Promise<BotSkillUi[]>;
   };
+  tasks: {
+    list(botId: string): Promise<BotTasksUi>;
+    cancel(botId: string, taskId: string): Promise<void>;
+    /** Called, after a burst of changes, with the Bots whose tasks changed. */
+    onChanged(callback: (change: BotTasksChangedUi) => void): () => void;
+  };
+  /** Called when the host sent a prompt to a session of a Bot on its own. */
+  onPromptSent(callback: (prompt: BotPromptSentUi) => void): () => void;
 }

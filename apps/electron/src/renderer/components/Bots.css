@@ -57,6 +57,13 @@
 .bots-page .bots-folder-list select { width: auto; padding: 5px 8px; }
 .bots-folder-path { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+.bots-accept-list { display: flex; flex-direction: column; gap: 6px; padding: 0; margin: 0; list-style: none; }
+.bots-accept-list label { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: baseline; gap: 4px 10px; padding: 8px 10px; border: 1px solid var(--bots-border); border-radius: 9px; background: var(--bots-surface); cursor: pointer; }
+.bots-page .bots-accept-list input[type='checkbox'] { width: auto; }
+.bots-accept-name { font-size: 13px; font-weight: 560; overflow-wrap: anywhere; }
+.bots-accept-description { overflow-wrap: anywhere; }
+.bots-hint-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0 0 0 18px; }
+
 .bots-panel { display: flex; flex-direction: column; gap: 14px; }
 .bots-rows { display: flex; flex-direction: column; gap: 8px; padding: 0; margin: 0; list-style: none; }
 .bots-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 14px; border: 1px solid var(--bots-border); border-radius: 10px; background: var(--bots-surface); }
@@ -66,6 +73,16 @@
 .bots-row-text { color: var(--bots-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .bots-row-actions { display: flex; flex: 0 0 auto; gap: 4px; }
 .bots-tag { font-size: 10px; font-weight: 500; padding: 1px 7px; border-radius: 99px; color: var(--bots-muted); border: 1px solid var(--bots-border); }
+.bots-tag[data-status='submitted'], .bots-tag[data-status='working'], .bots-tag[data-status='completed'] { color: var(--bots-ok); border-color: currentColor; }
+.bots-tag[data-status='input-required'] { color: var(--bots-warn); border-color: currentColor; }
+.bots-tag[data-status='failed'], .bots-tag[data-status='rejected'] { color: var(--bots-error); border-color: currentColor; }
+.bots-task { align-items: flex-start; }
+.bots-task .bots-row-main { flex: 1 1 auto; gap: 4px; }
+.bots-task-result summary { cursor: pointer; font-size: 12px; color: var(--bots-muted); }
+.bots-task-result .bots-memory-content { max-height: 240px; margin-top: 6px; }
+.bots-task-files { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.bots-task-files ul { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.bots-task-files li { overflow-wrap: anywhere; }
 .bots-page .bots-chat-row { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; padding: 11px 14px; text-align: left; border-radius: 10px; background: var(--bots-surface); }
 .bots-viewer { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid var(--bots-border); border-radius: 12px; }
 .bots-viewer > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }

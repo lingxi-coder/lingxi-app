@@ -3,6 +3,7 @@ import { tr } from '../i18n/locale';
 import { botMemoryProblem, type BotMemoryController } from '../bridge/botMemory';
 import { routineRow, type BotRoutinesController } from '../bridge/botRoutines';
 import type { BotSkillsController } from '../bridge/botSkills';
+import { taskRow, type BotTasksController } from '../bridge/botTasks';
 import { relativeActivity } from '../bridge/botSession';
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
 import { BotConfirm, BotDialog, problemText, useObservable } from './BotFields';
@@ -159,6 +160,63 @@ export function BotSkillsPanel({ controller }: { controller: BotSkillsController
     {deleting ? <BotConfirm title={tr('bots_skills_delete_title')} confirmLabel={tr('bots_skills_delete_confirm')} busyLabel={tr('bots_deleting')} busy={deleting.busy}
       error={deleting.error !== undefined ? tr('bots_action_failed', deleting.error) : undefined} onCancel={() => controller.cancelDelete()} onConfirm={() => void controller.confirmDelete()}>
       <p>{tr('bots_skills_delete_body', deleting.name)}</p>
+    </BotConfirm> : null}
+  </div>;
+}
+
+/** The tasks other Bots handed to this Bot and the ones it handed to them: who, how it stands, and what came of it. */
+export function BotTasksPanel({ controller, opening, disabled, onOpen }: {
+  controller: BotTasksController;
+  /** The task whose chat is being opened. */
+  opening: string | undefined;
+  /** A chat is being opened, or the window is busy showing one. */
+  disabled: boolean;
+  /** Show the chat of the session that does the task, which is a chat of the receiving Bot. */
+  onOpen(task: { taskId: string; botId: string; sessionId: string }): void;
+}) {
+  const state = useObservable(controller);
+  const { view, canceling } = state;
+  const rows = (view?.tasks ?? []).map((task) => taskRow(task));
+  const stopping = canceling ? taskRow(canceling.task) : undefined;
+  return <div className="bots-panel">
+    <p className="bots-hint">{tr('bots_tasks_hint')}</p>
+    {state.error !== undefined ? <p role="alert" className="bots-problem">{tr('bots_tasks_failed', state.error)} <button type="button" onClick={() => void controller.load()}>{tr('common_retry')}</button></p> : null}
+    {view === undefined && state.error === undefined ? <p role="status" className="bots-muted">{tr('bots_tasks_loading')}</p> : null}
+    {view !== undefined && rows.length === 0 ? <p className="bots-empty-line">{tr('bots_tasks_empty')}</p> : null}
+    {rows.length > 0 ? <ul className="bots-rows" aria-label={tr('bots_tab_tasks')}>
+      {rows.map((row) => <li key={row.id} className="bots-row bots-task" data-state={row.state}>
+        <div className="bots-row-main">
+          <span className="bots-row-title">{row.title}<span className="bots-tag" data-status={row.state}>{row.stateLabel}</span></span>
+          <span className="bots-row-text">{row.summary}</span>
+          <span className="bots-muted">{row.when}</span>
+          {row.reason !== undefined ? <span className="bots-muted">{row.reason}</span> : null}
+          {row.result ? <details className="bots-task-result">
+            <summary>{tr('bots_task_result')}</summary>
+            <pre className="bots-memory-content">{row.result.text}</pre>
+            {row.result.truncated ? <p className="bots-hint">{tr('bots_task_result_cut')}</p> : null}
+          </details> : null}
+          {row.files.length > 0 ? <div className="bots-task-files">
+            <span className="bots-muted">{row.filesLabel}</span>
+            <ul>{row.files.map((file) => <li key={file.path}>
+              <span>{file.name}</span> <span className="bots-muted">{file.size}</span> <span className="bots-muted mono">{file.path}</span>
+            </li>)}</ul>
+          </div> : null}
+          {row.cost !== undefined ? <span className="bots-muted">{row.cost}</span> : null}
+        </div>
+        <div className="bots-row-actions">
+          {row.openable ? <button type="button" data-variant="quiet" disabled={disabled || opening !== undefined} aria-busy={opening === row.id || undefined}
+            aria-label={`${tr('bots_task_open_chat')}: ${row.title}`} onClick={() => onOpen({ taskId: row.id, botId: row.receiver.botId, sessionId: row.receiver.sessionId })}>
+            {opening === row.id ? tr('bots_chat_opening') : tr('bots_task_open_chat')}
+          </button> : null}
+          {row.active ? <button type="button" data-variant="quiet" aria-label={`${tr('bots_task_stop')}: ${row.title}`} onClick={() => controller.askCancel(row.id)}>{tr('bots_task_stop')}</button> : null}
+        </div>
+      </li>)}
+    </ul> : null}
+    {view?.truncated ? <p className="bots-hint">{tr('bots_tasks_truncated')}</p> : null}
+    {canceling && stopping ? <BotConfirm title={tr('bots_task_stop_title')} icon="info" danger={false} confirmLabel={tr('bots_task_stop_confirm')} busyLabel={tr('bots_task_stopping')} busy={canceling.busy}
+      error={canceling.error !== undefined ? tr('bots_action_failed', canceling.error) : undefined} onCancel={() => controller.dismissCancel()} onConfirm={() => void controller.confirmCancel()}>
+      <p>{tr('bots_task_stop_body')}</p>
+      <p className="bots-muted">{stopping.title}: {stopping.summary}</p>
     </BotConfirm> : null}
   </div>;
 }

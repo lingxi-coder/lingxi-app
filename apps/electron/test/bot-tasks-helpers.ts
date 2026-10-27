@@ -32,6 +32,8 @@ export class FakeSession implements TaskRuntime {
     return new Promise((resolve, reject) => {
       this.turns.push({ prompt, options, finish: resolve, fail: reject });
       options?.signal?.addEventListener('abort', () => { if (!this.ignoreAbort) resolve({ status: 'cancelled', text: '' }); }, { once: true });
+      // The engine has the prompt as soon as the turn is under way.
+      options?.onSent?.();
     });
   }
 
@@ -84,12 +86,17 @@ export function setupTasks(t: { after(fn: () => void): void }, names: string[], 
   const warnings: string[] = [];
   const deleting = new Set<string>();
   const state = { available: true };
+  /** The Bots each announced change was between, and the prompts that were shown to the window. */
+  const changes: string[][] = [];
+  const prompts: Array<{ sessionId: string; text: string }> = [];
   const make = (): BotTasks => new BotTasks({
     store: f.store,
     runtimes,
     available: () => state.available,
     isDeleting: (botId) => deleting.has(botId),
     warn: (message) => warnings.push(message),
+    changed: (botIds) => changes.push([...botIds]),
+    promptSent: (sessionId, text) => prompts.push({ sessionId, text }),
     ...(options.clock !== undefined ? { now: () => options.clock!.time } : {}),
     ...(options.minuteMs !== undefined ? { minuteMs: options.minuteMs } : {}),
     ...(options.secondMs !== undefined ? { secondMs: options.secondMs } : {}),
@@ -100,7 +107,7 @@ export function setupTasks(t: { after(fn: () => void): void }, names: string[], 
   for (const name of names) bots[name] = f.store.create({ name, description: `${name} does things` });
   let counter = 100;
   return {
-    ...f, runtimes, warnings, deleting, state, tasks, bots, make,
+    ...f, runtimes, warnings, deleting, state, tasks, bots, make, changes, prompts,
     /** A session that is not doing a task: a chat of the Bot's owner, or a routine. */
     chat(bot: BotRecord): Caller { return { botId: bot.bot_id, sessionId: sessionId(++counter) }; },
     /** The session that is doing a task, which speaks for its Bot. */

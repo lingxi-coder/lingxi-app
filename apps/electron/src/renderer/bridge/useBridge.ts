@@ -97,6 +97,7 @@ import {
   acknowledgePromptDispatch,
   appendPendingUserPrompt,
   appendRemoteUserPrompt,
+  appendUserPrompt,
   beginCompaction,
   beginLocalSlashCommand,
   beginSlashCommand,
@@ -458,6 +459,22 @@ export function useBridge(): UseBridge {
         const conversation = appendRemoteUserPrompt(state.conversation, {
           turnId: echo.turnId, text: echo.text, images: echo.images, deviceName: echo.deviceName,
         });
+        return conversation === state.conversation ? state : { ...state, conversation };
+      });
+    });
+  }, [host, updateRuntime]);
+
+  // The host handed a task to a Bot and sent its session the prompt that says so. The engine's event
+  // stream carries no user prompts, so the window shows the row itself, as the first message of a
+  // chat it may not have heard of yet: the events of the task follow. A session the window already
+  // keeps gets the row of a follow-up after the messages it has.
+  useEffect(() => {
+    const bots = host?.bots;
+    if (!bots) return undefined;
+    return bots.onPromptSent(({ sessionId, text }) => {
+      if (removedRuntimeIds.current.has(sessionId)) return;
+      updateRuntime(sessionId, (state) => {
+        const conversation = appendUserPrompt(state.conversation, text);
         return conversation === state.conversation ? state : { ...state, conversation };
       });
     });

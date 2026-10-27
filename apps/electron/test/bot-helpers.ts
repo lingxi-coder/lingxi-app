@@ -34,3 +34,6 @@ export function botFixture(t: { after(fn: () => void): void }, options: { ids?: 
 }
 
 export const SESSION = '11111111-2222-4333-8444-555555555555';
+
+/** What a `BotsUi` is given where the test has nothing to do with tasks. */
+export const noTasks = { forOwner: () => ({ tasks: [], truncated: false, active: { received: 0, sent: 0 } }), cancelForOwner: () => undefined };

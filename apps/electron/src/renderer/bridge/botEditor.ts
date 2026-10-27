@@ -16,6 +16,7 @@ import {
   isEmptyPatch,
   saveBot,
   type BotDraft,
+  type BotPeers,
 } from './botForm';
 import { ObservableState } from './observableState';
 
@@ -39,9 +40,9 @@ export interface BotEditorState {
 }
 
 /** Whether the draft differs from what is saved. */
-export function botEditorDirty(state: BotEditorState): boolean {
+export function botEditorDirty(state: BotEditorState, peers?: BotPeers): boolean {
   if (!state.bot) return false;
-  const { patch, personaChanged } = botChanges(state.bot, state.persona, state.draft);
+  const { patch, personaChanged } = botChanges(state.bot, state.persona, state.draft, peers);
   return personaChanged || !isEmptyPatch(patch);
 }
 
@@ -53,6 +54,8 @@ export class BotEditorController extends ObservableState<BotEditorState> {
     private readonly botId: string,
     /** Told of every version of the record that was written, so that the list can follow. */
     private readonly onRecord: (bot: BotUi) => void,
+    /** The Bots the accept list is chosen among, as the list of Bots has them now; read when saving. */
+    private readonly peers: () => BotPeers = () => undefined,
   ) {
     super({ phase: 'loading', loadError: undefined, bot: undefined, persona: '', draft: emptyBotDraft(), save: { kind: 'idle' } });
   }
@@ -80,10 +83,11 @@ export class BotEditorController extends ObservableState<BotEditorState> {
   async save(): Promise<void> {
     const state = this.getSnapshot();
     if (state.phase !== 'ready' || !state.bot || state.save.kind === 'saving') return;
-    if (hasBotDraftProblems(botDraftProblems(state.draft)) || !botEditorDirty(state)) return;
+    const peers = this.peers();
+    if (hasBotDraftProblems(botDraftProblems(state.draft, peers)) || !botEditorDirty(state, peers)) return;
     const { bot, persona, draft } = state;
     this.update({ save: { kind: 'saving' } });
-    const result = await saveBot(this.api, bot, persona, draft);
+    const result = await saveBot(this.api, bot, persona, draft, peers);
     if (result.ok) {
       this.set({ ...this.getSnapshot(), bot: result.bot, persona: result.persona, draft: draftFromBot(result.bot, result.persona), save: { kind: 'saved' } });
       this.onRecord(result.bot);

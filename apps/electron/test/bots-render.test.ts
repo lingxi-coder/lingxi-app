@@ -372,8 +372,8 @@ test('a Bot opens to its chats first, with the sections of its settings, and a c
   const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
   assert.match(html, /<h1>Alpha<\/h1>/);
   assert.match(html, /First helper/);
-  for (const tab of ['Chats', 'Routines', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
-  assert.ok(html.indexOf('>Chats</button>') < html.indexOf('>Routines</button>') && html.indexOf('>Routines</button>') < html.indexOf('>General</button>'), 'the routines come after the chats');
+  for (const tab of ['Chats', 'Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
+  assert.ok(html.indexOf('>Chats</button>') < html.indexOf('>Routines</button>') && html.indexOf('>Routines</button>') < html.indexOf('>Tasks</button>') && html.indexOf('>Tasks</button>') < html.indexOf('>General</button>'), 'the routines and the tasks come after the chats');
   assert.match(html, /aria-current="page">Chats</);
   assert.match(html, />New chat</);
   assert.match(html, />Delete Bot</);

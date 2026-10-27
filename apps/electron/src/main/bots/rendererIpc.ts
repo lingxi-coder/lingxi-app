@@ -24,10 +24,13 @@ import {
   CH_BOTS_SKILL_IMPORT,
   CH_BOTS_SKILLS_IMPORTABLE,
   CH_BOTS_SKILLS_LIST,
+  CH_BOTS_TASK_CANCEL,
+  CH_BOTS_TASKS_LIST,
   CH_BOTS_UPDATE,
   type BotCreateRequest,
   type BotSessionRefUi,
   type BotSessionsUi,
+  type BotTasksUi,
   type BotUi,
   type BotUpdateRequest,
   type BotWorkspaceUi,
@@ -37,12 +40,20 @@ import { isSessionId } from '../sessionIdentity.js';
 import { memoryName, skillName, type BotContent } from './content.js';
 import type { BotService } from './service.js';
 import { isBotId, type BotRecord } from './store.js';
+import { isTaskId } from './tasks.js';
 
 export type BotsIpcHandler = (...args: unknown[]) => Promise<unknown> | unknown;
+
+/** What of the tasks between Bots the window may see and do. */
+export interface BotsUiTasks {
+  forOwner(botId: string): BotTasksUi;
+  cancelForOwner(botId: string, taskId: string): void;
+}
 
 export interface BotsUiDeps {
   service: BotService;
   content: BotContent;
+  tasks: BotsUiTasks;
 }
 
 function plainObject(value: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -53,6 +64,11 @@ function plainObject(value: unknown, allowed: readonly string[]): Record<string,
 
 function botId(value: unknown): string {
   if (!isBotId(value)) throw new Error('invalid Bot id');
+  return value;
+}
+
+function taskId(value: unknown): string {
+  if (!isTaskId(value)) throw new Error('invalid task id');
   return value;
 }
 
@@ -169,7 +185,7 @@ export class BotsUi {
 
   /** The invoke handlers by channel. */
   handlers(): Record<string, BotsIpcHandler> {
-    const { service, content } = this.deps;
+    const { service, content, tasks } = this.deps;
     const present = async (record: BotRecord): Promise<BotUi> => botUi(record, await service.lastActivityAt(record.bot_id));
     const handlers: Record<string, BotsIpcHandler> = {
       [CH_BOTS_LIST]: async (): Promise<BotUi[]> => Promise.all(service.list().map(present)),
@@ -189,6 +205,8 @@ export class BotsUi {
       [CH_BOTS_SKILL_DELETE]: async (id, name): Promise<void> => { await content.deleteSkill(botId(id), skillName(name)); },
       [CH_BOTS_SKILL_IMPORT]: (id, name) => content.importUserSkill(botId(id), skillName(name)),
       [CH_BOTS_SKILLS_IMPORTABLE]: () => content.listImportableSkills(),
+      [CH_BOTS_TASKS_LIST]: (id): BotTasksUi => tasks.forOwner(botId(id)),
+      [CH_BOTS_TASK_CANCEL]: (id, task): void => { tasks.cancelForOwner(botId(id), taskId(task)); },
     };
     // Where Bots cannot run, nothing but the question whether they can is answered.
     return {

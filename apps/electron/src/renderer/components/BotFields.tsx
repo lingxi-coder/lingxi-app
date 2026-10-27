@@ -3,6 +3,7 @@ import type { PermissionModeId } from '@lingxi/bridge-client';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { groupModelReferences, modelDisplayLabel, type ModelCatalogDetail } from '../bridge/modelCatalog';
+import type { BotUi } from '../../shared/bots';
 import { BOT_DESCRIPTION_MAX, BOT_FOLDERS_MAX, ipcErrorMessage, permissionModeNeedsConfirmation, withFolder, type BotDraft, type BotDraftProblem, type BotDraftProblems } from '../bridge/botForm';
 import type { BotMemoryProblem } from '../bridge/botMemory';
 import type { ObservableState } from '../bridge/observableState';
@@ -30,6 +31,7 @@ export function problemText(problem: BotDraftProblem | BotMemoryProblem): string
     case 'persona_too_long': return tr('bots_problem_persona_too_long');
     case 'folders_too_many': return tr('bots_problem_folders_too_many');
     case 'folders_duplicate': return tr('bots_problem_folders_duplicate');
+    case 'accept_too_many': return tr('bots_problem_accept_too_many');
     case 'too_large': return tr('bots_problem_memory_too_large');
     case 'invalid': return tr('bots_problem_memory_invalid');
   }
@@ -212,5 +214,40 @@ export function BotFoldersField({ draft, problems, disabled = false, pickFolder,
     <div><button type="button" disabled={picking || draft.workspaces.length >= BOT_FOLDERS_MAX} onClick={() => void add()}>{tr('bots_folders_add')}</button></div>
     {problems.folders ? <p className="bots-problem" role="alert">{problemText(problems.folders)}</p> : null}
     {error ? <p className="bots-problem" role="alert">{error}</p> : null}
+  </fieldset>;
+}
+
+/**
+ * Which of the owner's other Bots may hand this one tasks. `peers` are the other
+ * Bots, or absent while the list of Bots has not been read, when nothing can be
+ * chosen and the saved list is left as it is.
+ */
+export function BotAcceptField({ draft, problems, peers, disabled = false, onChange }: Pick<FieldsProps, 'draft' | 'problems' | 'disabled' | 'onChange'> & {
+  peers: readonly BotUi[] | undefined;
+}) {
+  const chosen = new Set(draft.acceptFrom);
+  const choose = (botId: string, on: boolean) => onChange({ acceptFrom: on ? [...draft.acceptFrom, botId] : draft.acceptFrom.filter((id) => id !== botId) });
+  const sorted = [...(peers ?? [])].sort((left, right) => left.name.localeCompare(right.name) || left.botId.localeCompare(right.botId));
+  return <fieldset className="bots-fields bots-accept" disabled={disabled}>
+    <legend className="bots-label">{tr('bots_accept_title')}</legend>
+    <p className="bots-hint">{tr('bots_accept_intro')}</p>
+    {peers === undefined ? <p role="status" className="bots-muted">{tr('bots_accept_unknown')}</p> : null}
+    {peers !== undefined && sorted.length === 0 ? <p className="bots-empty-line">{tr('bots_accept_empty')}</p> : null}
+    {sorted.length > 0 ? <ul className="bots-accept-list">
+      {sorted.map((peer) => <li key={peer.botId}>
+        <label>
+          <input type="checkbox" checked={chosen.has(peer.botId)} onChange={(event) => choose(peer.botId, event.target.checked)} />
+          <span className="bots-accept-name">{peer.name}</span>
+          {peer.description ? <span className="bots-muted bots-accept-description">{peer.description}</span> : null}
+        </label>
+      </li>)}
+    </ul> : null}
+    <ul className="bots-hint bots-hint-list">
+      <li>{tr('bots_accept_none')}</li>
+      <li>{tr('bots_accept_run')}</li>
+      <li>{tr('bots_accept_files')}</li>
+      <li>{tr('bots_accept_visible')}</li>
+    </ul>
+    {problems.accept ? <p className="bots-problem" role="alert">{problemText(problems.accept)}</p> : null}
   </fieldset>;
 }

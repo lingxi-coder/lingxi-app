@@ -16,6 +16,7 @@
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
+import type { BotTasksUi } from '../../shared/bots.js';
 import type { HostTurnOptions, HostTurnResult, RemoteObserver, SessionRef } from '../bridgeTypes.js';
 import { followUpPrompt, taskPrompt } from './taskEnvelope.js';
 import { FileRefusal, MAX_FILE_BYTES, MAX_TRANSFER_BYTES, MAX_TRANSFER_FILES, transferFiles } from './taskFiles.js';
@@ -43,6 +44,7 @@ import {
   type TaskRecord,
 } from './tasks.js';
 import type { BotRecord, BotStore } from './store.js';
+import { tasksUi } from './taskUi.js';
 
 /** At most this many tasks are being done at once by one Bot. */
 export const MAX_ACTIVE_PER_BOT = 2;
@@ -75,6 +77,10 @@ export interface BotTasksOptions {
   /** Whether the Bot is being deleted. */
   isDeleting(botId: string): boolean;
   warn?: (message: string) => void;
+  /** A task changed: these are the Bots it is between. */
+  changed?: (botIds: readonly string[]) => void;
+  /** The prompt of a task's turn was handed to the session that does the task. */
+  promptSent?: (sessionId: string, text: string) => void;
   now?: () => number;
   /** Milliseconds in a minute and in a second, and how long deleting a Bot waits for work to stop; shorter in tests. */
   minuteMs?: number;
@@ -138,6 +144,35 @@ export class BotTasks implements DelegationBackend {
   /** Every task there is, newest first. */
   list(): TaskRecord[] {
     return [...this.tasks.values()].map((task) => structuredClone(task)).sort((a, b) => b.created_at - a.created_at);
+  }
+
+  // What the owner's window asks
+
+  /** The tasks a Bot was given and the ones it handed out. */
+  forOwner(botId: string): BotTasksUi {
+    return tasksUi(this.tasks.values(), botId, {
+      nameOf: (id) => this.record(id)?.name,
+      workspaceOf: (id) => this.options.store.workspaceDir(id),
+    });
+  }
+
+  /** The owner stops a task of the Bot, whichever Bot sent it. One that has ended stays as it ended. */
+  cancelForOwner(botId: string, taskId: string): void {
+    const task = isTaskId(taskId) ? this.tasks.get(taskId) : undefined;
+    if (task === undefined || (task.sender.bot_id !== botId && task.receiver.bot_id !== botId)) throw new Error('This Bot has no such task.');
+    if (!isActive(task.state)) return;
+    this.settle(task, 'canceled', 'Canceled by the owner.');
+    this.running.get(taskId)?.controller.abort();
+  }
+
+  /** The Bots of the task a session is doing at the moment, if it is doing one. */
+  doing(sessionId: string): { receiver: string; sender: string } | undefined {
+    for (const task of this.tasks.values()) {
+      if (task.receiver.session_id === sessionId && isActive(task.state)) {
+        return { receiver: this.nameOf(task.receiver.bot_id), sender: this.nameOf(task.sender.bot_id) };
+      }
+    }
+    return undefined;
   }
 
   // What the router's tools ask
@@ -467,7 +502,10 @@ export class BotTasks implements DelegationBackend {
             task.turns += 1;
             this.touch(task);
           }
-          return await runtime.runHostTurn(prompt, { signal: controller.signal });
+          return await runtime.runHostTurn(prompt, {
+            signal: controller.signal,
+            onSent: () => this.options.promptSent?.(task.receiver.session_id, prompt),
+          });
         } finally {
           watch();
         }
@@ -516,13 +554,18 @@ export class BotTasks implements DelegationBackend {
     this.touch(task);
   }
 
-  /** Record a change: stamp, save, and wake whoever waits for the task. */
+  /** Record a change: stamp, save, say so to the window, and wake whoever waits for the task. */
   private touch(task: TaskRecord): void {
     task.updated_at = Math.max(this.now(), task.updated_at);
     try {
       this.taskStore.save(task);
     } catch (error) {
       this.warn(`Bot task ${task.task_id} was not saved: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      this.options.changed?.([task.sender.bot_id, task.receiver.bot_id]);
+    } catch (error) {
+      this.warn(`Bot task ${task.task_id}: the change was not announced: ${error instanceof Error ? error.message : String(error)}`);
     }
     for (const check of [...(this.waiters.get(task.task_id) ?? [])]) check();
   }

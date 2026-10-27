@@ -13,7 +13,7 @@ import { SettingsStore } from '../src/main/settings.js';
 import { CH_BOTS_CREATE, CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSION_SHOWN } from '../src/shared/bots.js';
 import { CH_SCHEDULED } from '../src/shared/scheduled.js';
 import { CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK } from '../src/shared/projectCreation.js';
-import { botFixture, SESSION } from './bot-helpers.js';
+import { botFixture, noTasks, SESSION } from './bot-helpers.js';
 
 const OWNER_SESSION = 'aaaaaaaa-2222-4333-8444-555555555555';
 const REPLACEMENT = 'bbbbbbbb-2222-4333-8444-555555555555';
@@ -73,7 +73,7 @@ function hostFixture(t: TestContext) {
     trustDirectory: async () => true,
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any, undefined, undefined, undefined, undefined, dialogs);
-  host.attachBots(new BotsUi({ service, content: new BotContent(f.store) }));
+  host.attachBots(new BotsUi({ service, content: new BotContent(f.store), tasks: noTasks }));
   scheduled = new ScheduledTaskService(settings, bridge as any, {} as any, () => false, () => undefined);
   scheduled.attachBots(service);
   host.attachScheduled(scheduled);

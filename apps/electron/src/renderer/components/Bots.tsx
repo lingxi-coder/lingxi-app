@@ -49,6 +49,7 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
           routines={bridge} onNewRoutine={onNewRoutine} onOpenRoutine={onOpenRoutine}
           onBack={() => setView({ kind: 'list' })}
           onOpenChat={async (sessionId) => { await bridge.openBotSession(view.botId, sessionId); onOpenChat(); }}
+          onOpenTaskChat={async (botId, sessionId) => { await bridge.openBotSession(botId, sessionId); onOpenChat(); }}
           onDelete={async () => { await bridge.deleteBot(view.botId); controller.remove(view.botId); setView({ kind: 'list' }); }} />
         : <BotList state={state} activityOf={activityOf} onNew={() => setView({ kind: 'create' })}
           onOpen={(botId) => setView({ kind: 'detail', botId })} onRetry={() => void controller.reload()} />}

@@ -19,6 +19,8 @@ export const BOT_NAME_MAX = 80;
 export const BOT_DESCRIPTION_MAX = 500;
 export const BOT_PERSONA_MAX_BYTES = 64 * 1024;
 export const BOT_FOLDERS_MAX = 16;
+/** How many Bots may be allowed to hand tasks to one. */
+export const BOT_ACCEPT_MAX = 64;
 
 export interface BotDraft {
   name: string;
@@ -30,15 +32,38 @@ export interface BotDraft {
   /** Empty: the engine's default, which is the mode that asks before it acts. */
   permissionMode: PermissionModeId | '';
   workspaces: BotWorkspaceUi[];
+  /** The ids of the Bots that may hand this one tasks, as saved; a Bot that was deleted since may still be among them. */
+  acceptFrom: string[];
 }
 
 export type BotDraftProblem =
   | 'name_required' | 'name_too_long' | 'name_invalid'
   | 'description_too_long'
   | 'persona_too_long'
-  | 'folders_too_many' | 'folders_duplicate';
+  | 'folders_too_many' | 'folders_duplicate'
+  | 'accept_too_many';
 
-export type BotDraftProblems = Partial<Record<'name' | 'description' | 'persona' | 'folders', BotDraftProblem>>;
+export type BotDraftProblems = Partial<Record<'name' | 'description' | 'persona' | 'folders' | 'accept', BotDraftProblem>>;
+
+/**
+ * The ids of the owner's other Bots, which the accept list is chosen among.
+ * Unknown (absent) until the list of Bots has been read and has this Bot in
+ * it: nothing is then known to be gone, so the accept list is left alone.
+ */
+export type BotPeers = ReadonlySet<string> | undefined;
+
+export function botPeers(bots: readonly Pick<BotUi, 'botId'>[], botId: string): BotPeers {
+  return bots.some((bot) => bot.botId === botId) ? new Set(bots.filter((bot) => bot.botId !== botId).map((bot) => bot.botId)) : undefined;
+}
+
+/** The ids of an accept list that are Bots to choose among. Where the Bots are not known, all of them. */
+function present(ids: readonly string[], peers: BotPeers): string[] {
+  return peers === undefined ? [...ids] : ids.filter((id) => peers.has(id));
+}
+
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id) => right.includes(id));
+}
 
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f]/;
@@ -49,7 +74,7 @@ export function permissionModeNeedsConfirmation(mode: PermissionModeId | ''): bo
 }
 
 export function emptyBotDraft(): BotDraft {
-  return { name: '', description: '', persona: '', model: '', permissionMode: '', workspaces: [] };
+  return { name: '', description: '', persona: '', model: '', permissionMode: '', workspaces: [], acceptFrom: [] };
 }
 
 export function draftFromBot(bot: BotUi, persona: string): BotDraft {
@@ -61,10 +86,11 @@ export function draftFromBot(bot: BotUi, persona: string): BotDraft {
     // Asking is what the default is, so a Bot that names it is shown as having none.
     permissionMode: bot.permissionMode === undefined || bot.permissionMode === 'default' ? '' : bot.permissionMode,
     workspaces: bot.workspaces.map((workspace) => ({ ...workspace })),
+    acceptFrom: [...(bot.acceptFrom ?? [])],
   };
 }
 
-export function botDraftProblems(draft: BotDraft): BotDraftProblems {
+export function botDraftProblems(draft: BotDraft, peers?: BotPeers): BotDraftProblems {
   const problems: BotDraftProblems = {};
   const name = draft.name.trim();
   if (name.length === 0) problems.name = 'name_required';
@@ -74,6 +100,8 @@ export function botDraftProblems(draft: BotDraft): BotDraftProblems {
   if (new TextEncoder().encode(draft.persona).length > BOT_PERSONA_MAX_BYTES) problems.persona = 'persona_too_long';
   if (draft.workspaces.length > BOT_FOLDERS_MAX) problems.folders = 'folders_too_many';
   else if (new Set(draft.workspaces.map((workspace) => workspace.path)).size !== draft.workspaces.length) problems.folders = 'folders_duplicate';
+  // Ids of Bots that are gone are dropped when the list is saved, so they are not counted.
+  if (present(draft.acceptFrom, peers).length > BOT_ACCEPT_MAX) problems.accept = 'accept_too_many';
   return problems;
 }
 
@@ -81,7 +109,7 @@ export function hasBotDraftProblems(problems: BotDraftProblems): boolean {
   return Object.keys(problems).length > 0;
 }
 
-/** What a new Bot is made from. Blank optional parts are left out, so that the Bot gets the defaults. */
+/** What a new Bot is made from. Blank optional parts are left out, so that the Bot gets the defaults; a new Bot accepts tasks from no one. */
 export function botCreateRequest(draft: BotDraft): BotCreateRequest {
   return {
     name: draft.name.trim(),
@@ -97,14 +125,22 @@ function sameFolders(left: readonly BotWorkspaceUi[], right: readonly BotWorkspa
   return left.length === right.length && left.every((folder, index) => folder.path === right[index]!.path && folder.mode === right[index]!.mode);
 }
 
-/** The persona is kept apart from the record, so its change is told separately from the patch. */
-export function botChanges(bot: BotUi, persona: string, draft: BotDraft): { patch: BotUpdateRequest; personaChanged: boolean } {
+/**
+ * The persona is kept apart from the record, so its change is told separately from the patch.
+ * The accept list is part of the patch only once the Bots it is chosen among are known, and then
+ * without the ids of Bots that are gone, which are no change of the owner's to save.
+ */
+export function botChanges(bot: BotUi, persona: string, draft: BotDraft, peers?: BotPeers): { patch: BotUpdateRequest; personaChanged: boolean } {
   const patch: BotUpdateRequest = {};
   if (draft.name.trim() !== bot.name) patch.name = draft.name.trim();
   if (draft.description.trim() !== bot.description) patch.description = draft.description.trim();
   if (draft.model !== (bot.model ?? '')) patch.model = draft.model || null;
   if ((draft.permissionMode || 'default') !== (bot.permissionMode ?? 'default')) patch.permissionMode = draft.permissionMode || null;
   if (!sameFolders(draft.workspaces, bot.workspaces)) patch.workspaces = draft.workspaces.map((workspace) => ({ ...workspace }));
+  if (peers !== undefined) {
+    const accepted = present(draft.acceptFrom, peers);
+    if (!sameIds(accepted, present(bot.acceptFrom ?? [], peers))) patch.acceptFrom = accepted;
+  }
   return { patch, personaChanged: draft.persona !== persona };
 }
 
@@ -149,9 +185,9 @@ export async function createBot(api: Pick<BotsApi, 'create'>, draft: BotDraft): 
  * and the owner is asked to reload. The persona is written after the record, so
  * that a conflict never leaves it half saved.
  */
-export async function saveBot(api: Pick<BotsApi, 'update' | 'persona'>, bot: BotUi, persona: string, draft: BotDraft): Promise<BotSave> {
-  if (hasBotDraftProblems(botDraftProblems(draft))) return { ok: false, conflict: false, message: '' };
-  const { patch, personaChanged } = botChanges(bot, persona, draft);
+export async function saveBot(api: Pick<BotsApi, 'update' | 'persona'>, bot: BotUi, persona: string, draft: BotDraft, peers?: BotPeers): Promise<BotSave> {
+  if (hasBotDraftProblems(botDraftProblems(draft, peers))) return { ok: false, conflict: false, message: '' };
+  const { patch, personaChanged } = botChanges(bot, persona, draft, peers);
   let saved = bot;
   try {
     if (!isEmptyPatch(patch)) saved = await api.update(bot.botId, bot.revision, patch);

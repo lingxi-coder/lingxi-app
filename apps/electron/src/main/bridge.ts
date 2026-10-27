@@ -277,6 +277,10 @@ export class SessionRuntime {
   private servedCodexToken: string | undefined;
   private oauthPersistence: Promise<void> = Promise.resolve();
   private activeTurnId: number | undefined;
+  /** The turn that ended last. `turn_ended` does not say which, and the active one is let go of by the time the notifier hears of it. */
+  private endedTurnId: number | undefined;
+  /** The turn the host ran last, by the id it gave it; the ones the window and devices number are small and their own. */
+  private hostTurnId: number | undefined;
   private cancellingTurn = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
   /** Permission requests remain replayable until the engine reports a terminal resolution. */
@@ -885,6 +889,7 @@ export class SessionRuntime {
     const { signal } = options;
     if (signal?.aborted) return { status: 'cancelled', text: '' };
     const turnId = randomHostTurnId();
+    this.hostTurnId = turnId;
     const costBefore = this.lastKnownCost?.total_usd ?? 0;
     return new Promise<HostTurnResult>((resolve, reject) => {
       let started = false;
@@ -947,9 +952,14 @@ export class SessionRuntime {
       const failed = (error: unknown): void => {
         settle(signal?.aborted ? { status: 'cancelled', text: '' } : error instanceof Error ? error : new Error(String(error)));
       };
+      const sentToEngine = (): void => {
+        if (done) return;
+        try { options.onSent?.(); } catch { /* Whoever wanted to know cannot make the turn fail. */ }
+      };
       try {
         const sent = this.sendPrompt(prompt, [], turnId, undefined, options.source ?? { origin: 'scheduled' });
-        if (sent) sent.catch(failed);
+        if (sent) sent.then(sentToEngine, failed);
+        else sentToEngine();
       } catch (error) { failed(error); }
     });
   }
@@ -1080,7 +1090,8 @@ export class SessionRuntime {
         notifier.turnStarted(this.sessionId, ref);
         break;
       case 'turn_ended':
-        notifier.turnEnded(this.sessionId, ref);
+        // A turn the host ran (a task handed to a Bot) is one nobody is waiting to come back to.
+        notifier.turnEnded(this.sessionId, ref, { idle: this.endedTurnId === undefined || this.endedTurnId !== this.hostTurnId });
         break;
       case 'session_ended':
         notifier.sessionEnded(this.sessionId);
@@ -2468,6 +2479,7 @@ export class SessionRuntime {
       }
       if (event.type === 'tool_use_started' && (event.tool === 'computer' || event.tool === 'browser')) this.computerAccessInTurn = true;
       if (event.type === 'turn_ended' || event.type === 'session_ended') {
+        this.endedTurnId = this.activeTurnId;
         this.activeTurn = false;
         this.activeTurnGeneration = undefined;
         this.activeTurnId = undefined;

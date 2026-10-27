@@ -8,7 +8,9 @@ import { PassThrough } from 'node:stream';
 import { test, type TestContext } from 'node:test';
 import { BRIDGE_PROTOCOL_VERSION, CLIENT_PROTOCOL_VERSION } from '@lingxi/bridge-client';
 import type { ClientEvent } from '@lingxi/bridge-client';
+import { HostNotifier } from '../src/main/notifications.js';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
+import { DEFAULT_IDLE_NOTIF_THRESHOLD_MS } from '../src/shared/notificationPreferences.js';
 
 const require = createRequire(new URL('../../../packages/bridge-client/package.json', import.meta.url));
 const { WebSocketServer } = require('ws');
@@ -28,7 +30,7 @@ const assistant = (text: string) => ({ role: 'assistant', blocks: [{ type: 'text
 interface Prompt { text: string; turnId: number }
 
 /** A session of a real runtime, connected to an engine that does what the test scripts when it is sent a prompt. */
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, options: { notifier?: HostNotifier } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-host-turn-'));
   const bridgeRoot = join(directory, 'managed');
   const launchDir = join(directory, 'existing');
@@ -78,6 +80,7 @@ async function fixture(t: TestContext) {
   });
   const manager = new SessionRuntimeManager({
     bridgeRoot,
+    ...(options.notifier !== undefined ? { notifier: options.notifier } : {}),
     accessState: () => ({ workspace: ref.projectPath, trusted: true }),
     launchConfig: () => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
     readProcessCommand: () => undefined, listProcessCommands: () => [], lockfileTimeoutMs: 1000,
@@ -302,4 +305,85 @@ test('a prompt the runtime refuses to send is the error of the call', async (t) 
   assert.equal(h.runtime.turnActive, false);
   h.onPrompt(goodTurn('Fine.', 0));
   assert.equal((await h.runtime.runHostTurn('Fine?')).text, 'Fine.');
+});
+
+test('the prompt is reported once the engine has it, and not when it could not be sent', async (t) => {
+  const h = await fixture(t);
+  h.onPrompt(goodTurn('Done.', 0.1));
+  let sent = 0;
+  const result = await h.runtime.runHostTurn('Go.', { onSent: () => { sent += 1; } });
+  assert.equal(result.status, 'completed');
+  assert.equal(sent, 1);
+  await assert.rejects(h.runtime.runHostTurn('', { onSent: () => { sent += 1; } }), /prompt/i);
+  const controller = new AbortController();
+  controller.abort();
+  await h.runtime.runHostTurn('Never sent.', { signal: controller.signal, onSent: () => { sent += 1; } });
+  assert.equal(sent, 1, 'a prompt that was never sent is not reported');
+});
+
+test('a prompt that is prepared first is reported when it has been sent, and one that fails to prepare is not reported at all', async (t) => {
+  const h = await fixture(t);
+  h.onPrompt(goodTurn('Done.', 0.1));
+  const sendPrompt = h.internal.sendPrompt.bind(h.internal);
+  let release: () => void = () => undefined;
+  h.internal.sendPrompt = (...args: unknown[]) => new Promise<void>((resolve) => { release = () => { sendPrompt(...args); resolve(); }; });
+  const reported: string[] = [];
+  const running = h.runtime.runHostTurn('Go.', { onSent: () => { reported.push('sent'); } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual([...reported], [], 'still being prepared');
+  assert.equal(h.prompts.length, 0);
+  release();
+  assert.equal((await running).status, 'completed');
+  assert.deepEqual([...reported], ['sent']);
+
+  h.internal.sendPrompt = () => Promise.reject(new Error('Prompt credential loading was interrupted.'));
+  await assert.rejects(h.runtime.runHostTurn('Go again.', { onSent: () => { reported.push('again'); } }), /credential loading was interrupted/);
+  assert.deepEqual([...reported], ['sent']);
+});
+
+test('whoever is told that the prompt was sent cannot make the turn fail', async (t) => {
+  const h = await fixture(t);
+  h.onPrompt(goodTurn('Done.', 0.1));
+  const result = await h.runtime.runHostTurn('Go.', { onSent: () => { throw new Error('the window is gone'); } });
+  assert.deepEqual(result, { status: 'completed', text: 'Done.', costUsd: 0.1 });
+});
+
+/** A notifier that is told what the runtime tells it, and whose timers the test can read. */
+function watchedNotifier() {
+  const timers: number[] = [];
+  const shown: string[] = [];
+  const notifier = new HostNotifier({
+    show: (title) => { shown.push(title); },
+    isWindowFocused: () => false,
+    schedule: ((_fn: () => void, ms: number) => { timers.push(ms); return timers.length as unknown as ReturnType<typeof setTimeout>; }) as never,
+    unschedule: (() => undefined) as never,
+  });
+  return { notifier, timers, shown, idleArmed: () => timers.filter((ms) => ms === DEFAULT_IDLE_NOTIF_THRESHOLD_MS).length };
+}
+
+test('a turn the host ran does not arm the idle notification, and a turn of the owner in the same session still does', async (t) => {
+  const watch = watchedNotifier();
+  const h = await fixture(t, { notifier: watch.notifier });
+  h.onPrompt(goodTurn('Done.', 0.1));
+  assert.equal((await h.runtime.runHostTurn('Do the task.')).status, 'completed');
+  assert.equal(watch.idleArmed(), 0, 'nobody is waiting to come back to a task');
+  assert.equal((await h.runtime.runHostTurn('Do the follow-up.')).status, 'completed');
+  assert.equal(watch.idleArmed(), 0);
+  // The owner types in the chat of the same session.
+  h.runtime.sendPrompt('A question of mine.', [], 5);
+  while (watch.idleArmed() === 0) await new Promise((resolve) => setTimeout(resolve, 2));
+  assert.equal(watch.idleArmed(), 1);
+  assert.deepEqual(watch.shown, []);
+});
+
+test('a turn that the owner started after a host turn ended is not taken for the host\'s', async (t) => {
+  const watch = watchedNotifier();
+  const h = await fixture(t, { notifier: watch.notifier });
+  h.onPrompt(goodTurn('Done.', 0.1, true));
+  await h.runtime.runHostTurn('Task.');
+  h.runtime.sendPrompt('Mine.', [], 7);
+  while (watch.idleArmed() === 0) await new Promise((resolve) => setTimeout(resolve, 2));
+  h.runtime.sendPrompt('Mine again.', [], 8);
+  while (watch.idleArmed() < 2) await new Promise((resolve) => setTimeout(resolve, 2));
+  assert.equal(watch.idleArmed(), 2);
 });

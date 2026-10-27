@@ -30,6 +30,7 @@
  * that by asserting `Notification.requestPermission()` resolves `'denied'`.
  */
 
+import { nativeTr } from '../shared/nativeLocale.js';
 import {
   PERMISSION_PROMPT_NOTIFY_DELAY_MS,
   defaultNotificationPreferences,
@@ -71,6 +72,14 @@ const REMOTE_PUSH_KINDS: Partial<Record<NotificationKind, RemotePushKind>> = {
   agent_completed: 'task',
 };
 
+/** The two Bots of a task, by name. */
+export interface DelegatedTask {
+  /** The Bot that does the task. */
+  receiver: string;
+  /** The Bot that handed it over. */
+  sender: string;
+}
+
 export interface HostNotifierDeps {
   /** Raises the actual OS notification. Injected so tests never touch Electron. */
   show(title: string, body: string, ref?: SessionRef): void;
@@ -86,6 +95,12 @@ export interface HostNotifierDeps {
   remote?(kind: RemotePushKind, sessionId: string): void;
   /** Seconds since the last keyboard or mouse input (`powerMonitor.getSystemIdleTime`). */
   systemIdleSeconds?(): number;
+  /**
+   * The task a session is doing for another Bot, if it is doing one. A request
+   * for an answer in such a session says whose task it is. Asked when the
+   * notification is about to go out, not when the request came.
+   */
+  delegation?(sessionKey: string): DelegatedTask | undefined;
   now?(): number;
   schedule?(fn: () => void, ms: number): TimerHandle;
   unschedule?(handle: TimerHandle): void;
@@ -148,13 +163,15 @@ export class HostNotifier {
   }
 
   /** Arms `idle_prompt`. Upstream re-arms on every turn-state change; a turn
-   * that ends, starts and ends again gets one fresh timer, not two. */
-  turnEnded(sessionKey: string, ref?: SessionRef): void {
+   * that ends, starts and ends again gets one fresh timer, not two. A turn the
+   * host ran on its own (`idle: false`) is one nobody is waiting to come back
+   * to, so it only ends: no timer is armed for it. */
+  turnEnded(sessionKey: string, ref?: SessionRef, options: { idle?: boolean } = {}): void {
     const state = this.stateFor(sessionKey, ref);
     state.turnActive = false;
     state.turnEndedAt = this.now();
     this.disarmIdle(state);
-    if (!isKindEnabled(this.prefs, 'idle_prompt')) return;
+    if (options.idle === false || !isKindEnabled(this.prefs, 'idle_prompt')) return;
     const threshold = this.prefs.messageIdleNotifThresholdMs;
     state.idleTimer = this.schedule(() => {
       state.idleTimer = undefined;
@@ -185,8 +202,10 @@ export class HostNotifier {
     if (!isKindEnabled(this.prefs, 'permission_prompt')) return;
     const timer = this.schedule(() => {
       state.permissionTimers.delete(requestId);
+      const task = this.deps.delegation?.(sessionKey);
       this.post('permission_prompt', sessionKey, `${sessionKey}:permission:${requestId}`,
-        NOTIFICATION_COPY.permissionTitle, NOTIFICATION_COPY.permissionBody(toolName), state.ref);
+        task ? nativeTr('native_task_input_title', task.receiver, task.sender) : NOTIFICATION_COPY.permissionTitle,
+        task ? nativeTr('native_task_input_permission', toolName) : NOTIFICATION_COPY.permissionBody(toolName), state.ref);
     }, PERMISSION_PROMPT_NOTIFY_DELAY_MS);
     state.permissionTimers.set(requestId, timer);
   }
@@ -205,8 +224,10 @@ export class HostNotifier {
    * in the next six seconds" case worth waiting out. */
   askUserQuestion(sessionKey: string, requestId: number, ref?: SessionRef): void {
     const state = this.stateFor(sessionKey, ref);
+    const task = this.deps.delegation?.(sessionKey);
     this.post('agent_needs_input', sessionKey, `${sessionKey}:question:${requestId}`,
-      NOTIFICATION_COPY.idleTitle, NOTIFICATION_COPY.idleBody, state.ref);
+      task ? nativeTr('native_task_input_title', task.receiver, task.sender) : NOTIFICATION_COPY.idleTitle,
+      task ? nativeTr('native_task_input_question') : NOTIFICATION_COPY.idleBody, state.ref);
   }
 
   /** `agent_completed`. `label` is the task's human description when the row

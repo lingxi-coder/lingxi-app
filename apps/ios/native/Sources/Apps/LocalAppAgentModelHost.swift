@@ -19,6 +19,13 @@ actor LocalAppAgentModelHost {
     private var building: Building?
     private var configurationDigest: String?
 
+    /// Existing tasks and their controls must not replace the executor merely
+    /// because a fresh configuration snapshot is temporarily unavailable.
+    func ensureAvailable() async throws {
+        guard handle == nil else { return }
+        try await ensure()
+    }
+
     func ensure() async throws {
         if let pending = building {
             try await complete(pending)
@@ -52,6 +59,17 @@ actor LocalAppAgentModelHost {
             // workspace/rootfs resources or registering Linux-only tools.
             mobileLinux = nil
             #endif
+            let apiBase: String?
+            let apiKey: String?
+            do {
+                apiBase = try Keychain.getOrThrow(.apiBase)
+                apiKey = try Keychain.getOrThrow(.apiKey)
+            } catch {
+                throw LocalAppServiceFailure(
+                    "CREDENTIAL_STORAGE_UNAVAILABLE",
+                    "The model's secure settings are temporarily unavailable. Try again when the device is unlocked."
+                )
+            }
             return IosEngineLaunchConfigFfi(
                 appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
                 appAgentHost: true,
@@ -59,7 +77,7 @@ actor LocalAppAgentModelHost {
                 linuxUser: directories.linuxUser,
                 configDirName: directories.configDirName,
                 nativeConfigHome: directories.configHome,
-                apiBase: Keychain.get(.apiBase) ?? "https://api.anthropic.com", apiKey: Keychain.get(.apiKey) ?? "",
+                apiBase: apiBase ?? "https://api.anthropic.com", apiKey: apiKey ?? "",
                 model: snapshot.defaultModelID ?? "", sessionMode: .code, visionDelegationEnabled: false,
                 appSandboxRoot: sandbox,
                 projectCwd: nil,

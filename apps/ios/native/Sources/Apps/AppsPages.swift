@@ -467,7 +467,7 @@ struct AppRuntimeView: View {
                     if accepted { library.clearBrowserAgentWake(wake) }
                     else {
                         self.error = "iOS could not return to the app page in the system default browser."
-                        await library.cancelBrowserAgentHandoff(wake)
+                        await library.cancelBrowserAgentHandoff(wake, reason: .acquireFailure)
                     }
                 }
             }

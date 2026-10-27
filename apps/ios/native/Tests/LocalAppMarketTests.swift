@@ -97,9 +97,9 @@ final class LocalAppMarketTests: XCTestCase {
         let request = try LocalAppAuthoringHostRequest.registerPending(authoring)
         XCTAssertEqual(request["op"], .string("registerAuthoring"))
         let requestBytes = try JSONEncoder().encode(request)
-        XCTAssertFalse(LocalAppAgentHostPolicy.requiresModelHost(String(decoding: requestBytes, as: UTF8.self)))
-        XCTAssertTrue(LocalAppAgentHostPolicy.requiresModelHost(#"{"op":"startNative"}"#))
-        XCTAssertTrue(LocalAppAgentHostPolicy.requiresModelHost("invalid JSON"))
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: String(decoding: requestBytes, as: UTF8.self)), .none)
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"startNative"}"#), .currentConfiguration)
+        XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: "invalid JSON"), .currentConfiguration)
         guard case .object(let fields)? = request["authoring"] else {
             return XCTFail("The trusted host request must carry the complete AuthoringRef.")
         }

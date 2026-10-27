@@ -48,7 +48,12 @@ actor LocalAppServiceClient {
     }
     // Trusted native UI only; page calls use the authenticated external-browser gateway.
     func agentHost(_ request: String) async throws -> LocalAppJSON {
-        if LocalAppAgentHostPolicy.requiresModelHost(request) {
+        switch LocalAppAgentHostPolicy.requirement(for: request) {
+        case .none:
+            break
+        case .available:
+            try await LocalAppAgentModelHost.shared.ensureAvailable()
+        case .currentConfiguration:
             try await LocalAppAgentModelHost.shared.ensure()
         }
         let _: LocalAppJSON = try await self.request(["op": .string("list")])
@@ -68,10 +73,39 @@ actor LocalAppServiceClient {
 }
 
 enum LocalAppAgentHostPolicy {
-    static func requiresModelHost(_ request: String) -> Bool {
+    enum Requirement: Equatable {
+        case none
+        case available
+        case currentConfiguration
+    }
+
+    static func requirement(for request: String) -> Requirement {
         guard let data = request.data(using: .utf8),
-              let fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return true }
-        return fields["op"] as? String != "registerAuthoring"
+              let fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let op = fields["op"] as? String else { return .currentConfiguration }
+        switch op {
+        case "registerAuthoring":
+            return .none
+        case "configure" where fields["settings"] is NSNull:
+            return .available
+        case "tasks.list", "eventsNative", "tasks.cancel", "wake.clear",
+             "interactions", "answer", "settings":
+            return .available
+        default:
+            return .currentConfiguration
+        }
+    }
+}
+
+enum LocalAppAgentHandoffCancellationPolicy {
+    static func staleReason(
+        wake: LocalAppAgentWakeRequest,
+        currentWake: LocalAppAgentWakeRequest?,
+        currentRevision: UInt64?
+    ) -> LocalAppAgentCancellationReason {
+        if let currentWake, currentWake != wake { return .requestReplaced }
+        if let currentRevision, currentRevision != wake.revision { return .releaseChanged }
+        return .acquireFailure
     }
 }
 
@@ -98,7 +132,7 @@ final class UnifiedLocalApps {
     func queueBrowserAgentWake(appID: String, revision: UInt64, runID: String) {
         let next = LocalAppAgentWakeRequest(appID: appID, revision: revision, runID: runID)
         if let previous = browserAgentWake, previous != next {
-            Task { await agentBackground.cancel(previous, client: client) }
+            Task { await agentBackground.cancel(previous, client: client, reason: .requestReplaced) }
         }
         browserAgentWake = next
     }
@@ -128,13 +162,13 @@ final class UnifiedLocalApps {
     }
     func prepareBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest) async throws -> (launch: LocalAppLaunch, readyURL: URL) {
         guard browserAgentWake == wake, let app = record(wake.appID), app.currentRevision == wake.revision else {
-            await agentBackground.cancel(wake, client: client)
+            await agentBackground.cancel(wake, client: client, reason: staleWakeCancellationReason(wake))
             clearBrowserAgentWake(wake)
             throw LocalAppServiceFailure("STALE_AGENT_WAKE", "The app version changed before this Agent request could start.")
         }
         let release = try await release(wake.appID, revision: wake.revision)
         guard (release.manifest.capabilities ?? []).contains("agent") else {
-            await agentBackground.cancel(wake, client: client)
+            await agentBackground.cancel(wake, client: client, reason: .acquireFailure)
             clearBrowserAgentWake(wake)
             throw LocalAppServiceFailure("AGENT_NOT_DECLARED", "This app version does not declare Agent support.")
         }
@@ -148,12 +182,12 @@ final class UnifiedLocalApps {
                 try await self.openExternalBrowser(wake.appID)
             }
         } catch {
-            await agentBackground.cancel(wake, client: client)
+            await agentBackground.cancel(wake, client: client, reason: .acquireFailure)
             clearBrowserAgentWake(wake)
             throw error
         }
         guard browserAgentWake == wake else {
-            await agentBackground.cancel(wake, client: client)
+            await agentBackground.cancel(wake, client: client, reason: staleWakeCancellationReason(wake))
             throw LocalAppServiceFailure("STALE_AGENT_WAKE", "This browser Agent request was replaced before it could start.")
         }
         let readyURL = try await agentBackground.acquireAndReserve(
@@ -164,13 +198,23 @@ final class UnifiedLocalApps {
         )
         guard browserAgentWake == wake,
               record(wake.appID)?.currentRevision == wake.revision else {
-            await agentBackground.cancel(wake, client: client)
+            await agentBackground.cancel(wake, client: client, reason: staleWakeCancellationReason(wake))
             throw LocalAppServiceFailure("STALE_AGENT_WAKE", "The app version or browser request changed before the handoff completed.")
         }
         return (launch, readyURL)
     }
-    func cancelBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest) async {
-        await agentBackground.cancel(wake, client: client)
+    private func staleWakeCancellationReason(_ wake: LocalAppAgentWakeRequest) -> LocalAppAgentCancellationReason {
+        LocalAppAgentHandoffCancellationPolicy.staleReason(
+            wake: wake,
+            currentWake: browserAgentWake,
+            currentRevision: record(wake.appID)?.currentRevision
+        )
+    }
+    func cancelBrowserAgentHandoff(
+        _ wake: LocalAppAgentWakeRequest,
+        reason: LocalAppAgentCancellationReason = .explicit
+    ) async {
+        await agentBackground.cancel(wake, client: client, reason: reason)
         clearBrowserAgentWake(wake)
     }
     func openExternalBrowser(_ id: String) async throws -> LocalAppLaunch {
@@ -182,7 +226,9 @@ final class UnifiedLocalApps {
         if let previousRun, previousRun.phase == "running",
            previousRun.runId != currentRun.run.runId
             || previousRun.revision != currentRun.run.revision {
-            await cancelAgentApp(id)
+            let reason: LocalAppAgentCancellationReason = previousRun.revision != currentRun.run.revision
+                ? .releaseChanged : .explicit
+            await cancelAgentApp(id, reason: reason)
         }
         return currentRun
     }
@@ -220,7 +266,9 @@ final class UnifiedLocalApps {
                         if let previous = previousRuns[record.appId],
                            previous.phase == "running",
                            (previous.runId != current.runId || previous.revision != current.revision) {
-                            await cancelAgentApp(record.appId)
+                            let reason: LocalAppAgentCancellationReason = previous.revision != current.revision
+                                ? .releaseChanged : .explicit
+                            await cancelAgentApp(record.appId, reason: reason)
                         }
                     }
                     runs[record.appId] = current
@@ -303,11 +351,14 @@ final class UnifiedLocalApps {
     func bindAuthoring(_ id: String, authoring: LocalAppAuthoring) async throws {
         try await action("bindAuthoring", id: id, extra: ["authoring": try .encode(authoring)])
     }
-    private func cancelAgentApp(_ appID: String) async {
+    private func cancelAgentApp(
+        _ appID: String,
+        reason: LocalAppAgentCancellationReason = .explicit
+    ) async {
         if let wake = browserAgentWake, wake.appID == appID {
             browserAgentWake = nil
         }
-        await agentBackground.cancel(appID: appID, client: client)
+        await agentBackground.cancel(appID: appID, client: client, reason: reason)
     }
     /// Native-only pending binding for a newly-created app. This uses the
     /// trusted App Agent host channel; it is not part of the browser API.

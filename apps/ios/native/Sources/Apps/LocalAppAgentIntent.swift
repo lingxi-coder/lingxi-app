@@ -91,6 +91,69 @@ enum LocalAppAgentRunEvent {
     }
 }
 
+/// Counts only newly observed AG-UI stream output for one native run. The
+/// transport cursor is per event and pages are contiguous; no output is kept.
+struct LocalAppAgentOutputProgress: Sendable {
+    private(set) var sequence: UInt64 = 0
+    private(set) var outputBytes: Int64 = 0
+
+    /// Returns true only when this validated page increases the byte count.
+    @discardableResult
+    mutating func consume(
+        _ batch: LocalAppAgentNativeEvents,
+        runID: String,
+        threadID: String? = nil
+    ) throws -> Bool {
+        guard batch.sequence >= sequence else {
+            throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App event sequence moved backwards.")
+        }
+        // A repeated page, including a non-empty replay, must never count twice.
+        guard batch.sequence > sequence else { return false }
+        guard UInt64(batch.events.count) == batch.sequence - sequence else {
+            throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App event page does not match its sequence.")
+        }
+
+        var nextBytes = outputBytes
+        var terminalSeen = false
+        for event in batch.events {
+            guard !terminalSeen, case let .object(fields) = event,
+                  case let .string(type)? = fields["type"], !type.isEmpty else {
+                throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App host returned an invalid AG-UI event.")
+            }
+            if type == "RUN_STARTED" || type == "RUN_FINISHED" {
+                guard case let .string(eventThreadID)? = fields["threadId"],
+                      LocalAppAgentRunEvent.matchesRun(event, runID: runID),
+                      threadID == nil || eventThreadID == threadID else {
+                    throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The AG-UI event belongs to a different thread or run.")
+                }
+            } else if type == "RUN_ERROR" {
+                guard case .string? = fields["message"] else {
+                    throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App host returned an invalid AG-UI error event.")
+                }
+            }
+            if type == "TEXT_MESSAGE_CONTENT" || type == "TOOL_CALL_ARGS" {
+                let idField = type == "TEXT_MESSAGE_CONTENT" ? "messageId" : "toolCallId"
+                guard case .string? = fields[idField], case let .string(delta)? = fields["delta"] else {
+                    throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App host returned an invalid AG-UI output event.")
+                }
+                nextBytes = Self.saturatingAdd(nextBytes, delta.utf8.count)
+            }
+            terminalSeen = type == "RUN_FINISHED" || type == "RUN_ERROR"
+        }
+        // Commit only after the entire page has been validated.
+        let increased = nextBytes > outputBytes
+        sequence = batch.sequence
+        outputBytes = nextBytes
+        return increased
+    }
+
+    static func saturatingAdd(_ current: Int64, _ byteCount: Int) -> Int64 {
+        let amount = Int64(clamping: max(0, byteCount))
+        let (sum, overflow) = current.addingReportingOverflow(amount)
+        return overflow ? Int64.max : sum
+    }
+}
+
 /// Shares the native Local App broker with browser runs. The intent carries the
 /// complete bounded input and never waits for an external browser handoff.
 @available(iOS 27.0, *)
@@ -122,6 +185,7 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
         let client = LocalApps.library.client
         let cancellation = LocalAppAgentIntentCancellation(client: client, appID: appID, revision: revisionValue)
         let taskProgress = progress
+        LocalAppAgentProgressReporting.update(taskProgress, outputBytes: 0)
 
         let terminalEvent = try await performBackgroundTask(operation: {
             let started = try await client.agentHost([
@@ -144,7 +208,7 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
                 progress: taskProgress
             )
         }, onCancel: { _ in
-            Task { await cancellation.cancel() }
+            Task { await cancellation.cancel(reason: .intentCancellation) }
         })
         let data = try JSONEncoder().encode(terminalEvent)
         let value = String(decoding: data, as: UTF8.self)
@@ -166,7 +230,8 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
         progress: Progress
     ) async throws -> LocalAppJSON {
         var deadline = Date().addingTimeInterval(3_600)
-        var afterSequence: UInt64 = 0
+        var outputProgress = LocalAppAgentOutputProgress()
+        let contextKey = LocalAppAgentWakeRequest(appID: appID, revision: revision, runID: runID).contextKey
         while Date() < deadline {
             try Task.checkCancellation()
             if await cancellation.isCancelled { throw CancellationError() }
@@ -183,12 +248,14 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
             if let observed = task.progress, observed.turnLimit > 0 {
                 LocalAppAgentProgressReporting.update(
                     progress,
+                    outputBytes: outputProgress.outputBytes,
                     completedModelTurns: observed.completedModelTurns,
                     turnLimit: observed.turnLimit
                 )
             } else {
                 LocalAppAgentProgressReporting.update(
                     progress,
+                    outputBytes: outputProgress.outputBytes,
                     description: task.phase ?? "Agent task \(task.state); waiting for observed model progress"
                 )
             }
@@ -200,18 +267,19 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
                 "appId": .string(appID),
                 "revision": .number(Double(revision)),
                 "runId": .string(runID),
-                "afterSequence": .number(Double(afterSequence))
+                "afterSequence": .number(Double(outputProgress.sequence))
             ], as: LocalAppAgentNativeEvents.self)
-            guard batch.sequence >= afterSequence else {
-                throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App event sequence moved backwards.")
+            let previousSequence = outputProgress.sequence
+            let outputIncreased = try outputProgress.consume(batch, runID: runID, threadID: threadID)
+            let events = batch.sequence > previousSequence ? batch.events : []
+            if outputIncreased {
+                LocalAppAgentProgressReporting.update(progress, outputBytes: outputProgress.outputBytes)
+                LocalAppAgentBackgroundController.logObservedOutput(
+                    contextKey: contextKey,
+                    outputBytes: outputProgress.outputBytes
+                )
             }
-            afterSequence = batch.sequence
-            for event in batch.events {
-                guard LocalAppAgentRunEvent.type(event) != nil else {
-                    throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App host returned an invalid AG-UI event.")
-                }
-            }
-            if let terminalEvent = LocalAppAgentRunEvent.terminalEvent(in: batch.events),
+            if let terminalEvent = LocalAppAgentRunEvent.terminalEvent(in: events),
                let type = LocalAppAgentRunEvent.type(terminalEvent) {
                 if type == "RUN_FINISHED" {
                     guard LocalAppAgentRunEvent.matches(terminalEvent, runID: runID, threadID: threadID) else {
@@ -241,7 +309,7 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
             }
             do { try await Task.sleep(for: .seconds(1)) } catch { throw CancellationError() }
         }
-        await cancellation.cancel()
+        await cancellation.cancel(reason: .intentDeadline)
         LocalAppAgentProgressReporting.finish(progress, success: false)
         throw LocalAppServiceFailure("AGENT_TASK_TIMEOUT", "The Local App Agent task exceeded its configured time limit.")
     }
@@ -252,6 +320,8 @@ actor LocalAppAgentIntentCancellation {
     private let revision: UInt64
     private let sendHostRequest: @Sendable ([String: LocalAppJSON]) async -> Void
     private var runID: String?
+    private var firstCancellationReason: LocalAppAgentCancellationReason?
+    private var cancellationLogged = false
     private(set) var isCancelled = false
 
     init(client: LocalAppServiceClient, appID: String, revision: UInt64) {
@@ -275,14 +345,26 @@ actor LocalAppAgentIntentCancellation {
     func didStart(_ runID: String) async throws {
         self.runID = runID
         if isCancelled {
+            logCancellationIfNeeded(runID)
             await cancelRun(runID)
             throw CancellationError()
         }
     }
 
-    func cancel() async {
+    func cancel(reason: LocalAppAgentCancellationReason = .intentCancellation) async {
         isCancelled = true
-        if let runID { await cancelRun(runID) }
+        if firstCancellationReason == nil { firstCancellationReason = reason }
+        if let runID {
+            logCancellationIfNeeded(runID)
+            await cancelRun(runID)
+        }
+    }
+
+    private func logCancellationIfNeeded(_ runID: String) {
+        guard !cancellationLogged, let reason = firstCancellationReason else { return }
+        cancellationLogged = true
+        let contextKey = LocalAppAgentWakeRequest(appID: appID, revision: revision, runID: runID).contextKey
+        LocalAppAgentBackgroundController.logCancellation(reason, contextKey: contextKey)
     }
 
     private func cancelRun(_ runID: String) async {

@@ -126,20 +126,110 @@ final class LocalAppAgentBackgroundContractTests: XCTestCase {
         let progress = Progress(totalUnitCount: 0)
         LocalAppAgentProgressReporting.update(
             progress,
+            outputBytes: 0,
             completedModelTurns: 3,
             turnLimit: 20
         )
 
         XCTAssertTrue(progress.isIndeterminate)
         XCTAssertEqual(progress.totalUnitCount, -1)
-        XCTAssertEqual(progress.completedUnitCount, 3)
+        XCTAssertEqual(progress.completedUnitCount, 0)
         XCTAssertEqual(progress.fractionCompleted, 0)
         XCTAssertEqual(progress.localizedAdditionalDescription, "Completed 3 model turns; limit 20")
 
         LocalAppAgentProgressReporting.finish(progress, success: true)
-        XCTAssertEqual(progress.totalUnitCount, 3)
-        XCTAssertEqual(progress.completedUnitCount, 3)
+        XCTAssertEqual(progress.totalUnitCount, 1)
+        XCTAssertEqual(progress.completedUnitCount, 1)
         XCTAssertEqual(progress.fractionCompleted, 1)
         XCTAssertEqual(progress.localizedAdditionalDescription, "Completed 3 model turns; limit 20")
+    }
+
+    func testOutputProgressCountsUTF8TextAndToolArgumentsOnlyOnce() throws {
+        var output = LocalAppAgentOutputProgress()
+        let batch = LocalAppAgentNativeEvents(events: [
+            .object(["type": .string("RUN_STARTED"), "runId": .string("run-1"), "threadId": .string("thread-1")]),
+            textEvent("A汉🙂"),
+            .object(["type": .string("TOOL_CALL_ARGS"), "toolCallId": .string("tool-1"), "delta": .string("{\"n\":1}")]),
+            textEvent(""),
+            .object(["type": .string("CUSTOM"), "delta": .string("not output")])
+        ], sequence: 5)
+
+        XCTAssertTrue(try output.consume(batch, runID: "run-1", threadID: "thread-1"))
+        XCTAssertEqual(output.sequence, 5)
+        XCTAssertEqual(output.outputBytes, Int64("A汉🙂".utf8.count + "{\"n\":1}".utf8.count))
+        XCTAssertFalse(try output.consume(batch, runID: "run-1", threadID: "thread-1"))
+        XCTAssertFalse(try output.consume(.init(events: [], sequence: 5), runID: "run-1"))
+        XCTAssertFalse(try output.consume(.init(events: [textEvent("")], sequence: 6), runID: "run-1"))
+        XCTAssertEqual(output.sequence, 6)
+        XCTAssertEqual(output.outputBytes, 15)
+    }
+
+    func testInvalidOrRegressingPagesAreAtomicAndNeverInflateOutput() throws {
+        var output = LocalAppAgentOutputProgress()
+        XCTAssertTrue(try output.consume(.init(events: [textEvent("ok")], sequence: 1), runID: "run-1"))
+        let invalidEvents: [LocalAppJSON] = [
+            .object(["type": .string("TEXT_MESSAGE_CONTENT"), "messageId": .string("m"), "delta": .number(1)]),
+            .object(["type": .string("TOOL_CALL_ARGS"), "delta": .string("missing id")]),
+            .object(["type": .string("RUN_ERROR"), "message": .null]),
+            .object(["type": .string("RUN_FINISHED"), "runId": .string("other"), "threadId": .string("thread-1")]),
+            .object(["type": .string("RUN_STARTED"), "runId": .string("run-1"), "threadId": .string("other")]),
+            .object(["type": .number(1)])
+        ]
+        for invalid in invalidEvents {
+            XCTAssertThrowsError(try output.consume(
+                .init(events: [textEvent("new"), invalid], sequence: 3),
+                runID: "run-1", threadID: "thread-1"
+            ))
+            XCTAssertEqual(output.sequence, 1)
+            XCTAssertEqual(output.outputBytes, 2)
+        }
+        XCTAssertThrowsError(try output.consume(.init(events: [], sequence: 0), runID: "run-1"))
+        XCTAssertThrowsError(try output.consume(.init(events: [textEvent("gap")], sequence: 3), runID: "run-1"))
+        XCTAssertEqual(output.sequence, 1)
+        XCTAssertEqual(output.outputBytes, 2)
+        XCTAssertEqual(LocalAppAgentOutputProgress.saturatingAdd(Int64.max - 1, 8), Int64.max)
+    }
+
+    func testObservedBytesAreNotResetByTurnsAndOnlySuccessCompletesProgress() {
+        let progress = Progress(totalUnitCount: 0)
+        LocalAppAgentProgressReporting.update(progress, outputBytes: 11)
+        LocalAppAgentProgressReporting.update(progress, outputBytes: 11, completedModelTurns: 20, turnLimit: 20)
+
+        XCTAssertTrue(progress.isIndeterminate)
+        XCTAssertEqual(progress.totalUnitCount, -1)
+        XCTAssertEqual(progress.completedUnitCount, 11)
+        XCTAssertEqual(progress.localizedAdditionalDescription, "Received 11 output bytes; total unknown")
+        LocalAppAgentProgressReporting.finish(progress, success: false)
+        XCTAssertTrue(progress.isIndeterminate)
+        XCTAssertEqual(progress.totalUnitCount, -1)
+        XCTAssertEqual(progress.completedUnitCount, 11)
+        XCTAssertEqual(progress.localizedAdditionalDescription, "Received 11 output bytes; total unknown; task ended")
+
+        LocalAppAgentProgressReporting.update(progress, outputBytes: 11)
+        LocalAppAgentProgressReporting.finish(progress, success: true)
+        XCTAssertEqual(progress.totalUnitCount, 11)
+        XCTAssertEqual(progress.completedUnitCount, 11)
+        XCTAssertEqual(progress.fractionCompleted, 1)
+        XCTAssertEqual(progress.localizedAdditionalDescription, "Received 11 output bytes; complete")
+    }
+
+    func testCancelledTerminalDoesNotFinishProgressAsSuccess() throws {
+        var output = LocalAppAgentOutputProgress()
+        let cancelled: LocalAppJSON = .object([
+            "type": .string("RUN_FINISHED"), "runId": .string("run-1"), "threadId": .string("thread-1"),
+            "outcome": .object(["type": .string("cancelled")])
+        ])
+        XCTAssertTrue(try output.consume(.init(events: [textEvent("partial"), cancelled], sequence: 2),
+                                         runID: "run-1", threadID: "thread-1"))
+        XCTAssertFalse(LocalAppAgentRunEvent.isSuccessfulTerminal(cancelled, runID: "run-1", threadID: "thread-1"))
+        let progress = Progress(totalUnitCount: 0)
+        LocalAppAgentProgressReporting.update(progress, outputBytes: output.outputBytes)
+        LocalAppAgentProgressReporting.finish(progress, success: false)
+        XCTAssertTrue(progress.isIndeterminate)
+        XCTAssertEqual(progress.completedUnitCount, 7)
+    }
+
+    private func textEvent(_ delta: String) -> LocalAppJSON {
+        .object(["type": .string("TEXT_MESSAGE_CONTENT"), "messageId": .string("m"), "delta": .string(delta)])
     }
 }

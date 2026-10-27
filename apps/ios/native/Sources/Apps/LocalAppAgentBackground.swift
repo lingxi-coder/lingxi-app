@@ -3,11 +3,23 @@ import CryptoKit
 import Foundation
 import OSLog
 
+enum LocalAppAgentCancellationReason: String, Sendable {
+    case explicit
+    case requestReplaced
+    case releaseChanged
+    case monitorDeadline
+    case monitorCancelled
+    case systemExpiration
+    case acquireFailure
+    case intentCancellation
+    case intentDeadline
+}
+
 /// A browser request may wake the app, but only this foreground action can
 /// install the iOS 26 continued-processing lease that authorizes that request.
 @MainActor
 final class LocalAppAgentBackgroundController {
-    private static let backgroundLog = Logger(
+    private nonisolated static let backgroundLog = Logger(
         subsystem: "com.lingxi.code",
         category: "LocalAppAgentBackground"
     )
@@ -43,7 +55,8 @@ final class LocalAppAgentBackgroundController {
     func cancel(
         appID: String,
         revision: UInt64,
-        client: LocalAppServiceClient
+        client: LocalAppServiceClient,
+        reason: LocalAppAgentCancellationReason = .explicit
     ) async {
         let scope = LocalAppBrowserDeliveryScope(appID: appID, revision: revision)
         browserDelivery.end(scope)
@@ -51,17 +64,21 @@ final class LocalAppAgentBackgroundController {
             .filter { $0.wake.appID == appID && $0.wake.revision == revision }
             .map(\.wake)
         for wake in wakes {
-            await cancel(wake, client: client)
+            await cancel(wake, client: client, reason: reason)
         }
     }
 
-    func cancel(appID: String, client: LocalAppServiceClient) async {
+    func cancel(
+        appID: String,
+        client: LocalAppServiceClient,
+        reason: LocalAppAgentCancellationReason = .explicit
+    ) async {
         browserDelivery.endAll(appID: appID)
         let wakes = contexts.values
             .filter { $0.wake.appID == appID }
             .map(\.wake)
         for wake in wakes {
-            await cancel(wake, client: client)
+            await cancel(wake, client: client, reason: reason)
         }
     }
 
@@ -75,7 +92,7 @@ final class LocalAppAgentBackgroundController {
             .filter { $0.wake.appID == appID && $0.wake.revision != revision }
             .map(\.wake)
         for wake in wakes {
-            await cancel(wake, client: client)
+            await cancel(wake, client: client, reason: .releaseChanged)
         }
     }
 
@@ -165,13 +182,17 @@ final class LocalAppAgentBackgroundController {
             Self.logPhase("ready_url_returned", contextKey: contextKey, success: true)
             return readyURL
         } catch {
-            await cancel(wake, client: client)
+            await cancel(wake, client: client, reason: .acquireFailure)
             Self.logFailure(error, contextKey: contextKey)
             throw error
         }
     }
 
-    func cancel(_ wake: LocalAppAgentWakeRequest, client: LocalAppServiceClient) async {
+    func cancel(
+        _ wake: LocalAppAgentWakeRequest,
+        client: LocalAppServiceClient,
+        reason: LocalAppAgentCancellationReason = .explicit
+    ) async {
         let contextKey = wake.contextKey
         browserDelivery.end(wake.deliveryScope)
         guard var context = contexts[contextKey], context.wake == wake, !context.finished else {
@@ -180,11 +201,12 @@ final class LocalAppAgentBackgroundController {
             } catch {
                 Self.logFailure(error, contextKey: contextKey)
             }
-            Self.logPhase("cancel_requested", contextKey: contextKey, success: nil)
+            Self.logPhase("cleanup_requested", contextKey: contextKey, success: nil)
             return
         }
         context.finished = true
         contexts[contextKey] = context
+        Self.logCancellation(reason, contextKey: contextKey)
         attachmentTimeouts.removeValue(forKey: contextKey)?.cancel()
         monitors.removeValue(forKey: contextKey)?.cancel()
         attachmentWaiters.removeValue(forKey: contextKey)?.resume(throwing: CancellationError())
@@ -209,7 +231,6 @@ final class LocalAppAgentBackgroundController {
         finishTask(contextKey: contextKey, success: false)
         contexts.removeValue(forKey: contextKey)
         requestIDsByIdentifier.removeValue(forKey: context.identifier)
-        Self.logPhase("cancel_requested", contextKey: contextKey, success: nil)
     }
 
     private func submit(_ request: BGContinuedProcessingTaskRequest) async throws {
@@ -258,6 +279,11 @@ final class LocalAppAgentBackgroundController {
         }
         tasks[contextKey] = continued
         Self.logPhase("task_attached", contextKey: contextKey, success: true)
+        LocalAppAgentProgressReporting.update(
+            continued.progress,
+            outputBytes: 0,
+            description: "Waiting for this browser request"
+        )
         continued.updateTitle(
             String(localized: "Local App Agent · \(contexts[contextKey]?.appName ?? "")"),
             subtitle: "Waiting for this browser request"
@@ -276,7 +302,7 @@ final class LocalAppAgentBackgroundController {
               let receiveDeadline = context.reservationExpiry else { return }
         let runID = context.wake.runID
         var runDeadline: Date?
-        var afterSequence: UInt64 = 0
+        var outputProgress = LocalAppAgentOutputProgress()
 
         while !Task.isCancelled, Date() < (runDeadline ?? receiveDeadline) {
             do {
@@ -297,7 +323,7 @@ final class LocalAppAgentBackgroundController {
                         runDeadline = Date(timeIntervalSince1970: TimeInterval(agentTask.createdAt) / 1_000)
                             .addingTimeInterval(TimeInterval(timeoutMs) / 1_000)
                     }
-                    report(agentTask, appName: context.appName, contextKey: contextKey)
+                    report(agentTask, outputBytes: outputProgress.outputBytes, appName: context.appName, contextKey: contextKey)
                 } else if Date() >= receiveDeadline {
                     break
                 }
@@ -307,18 +333,16 @@ final class LocalAppAgentBackgroundController {
                     "appId": .string(context.wake.appID),
                     "revision": .number(Double(context.wake.revision)),
                     "runId": .string(runID),
-                    "afterSequence": .number(Double(afterSequence))
+                    "afterSequence": .number(Double(outputProgress.sequence))
                 ], as: LocalAppAgentNativeEvents.self)
-                guard batch.sequence >= afterSequence else {
-                    throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App event sequence moved backwards.")
+                let previousSequence = outputProgress.sequence
+                let outputIncreased = try outputProgress.consume(batch, runID: runID)
+                let events = batch.sequence > previousSequence ? batch.events : []
+                if outputIncreased {
+                    report(agentTask, outputBytes: outputProgress.outputBytes, appName: context.appName, contextKey: contextKey)
+                    Self.logObservedOutput(contextKey: contextKey, outputBytes: outputProgress.outputBytes)
                 }
-                afterSequence = batch.sequence
-                for event in batch.events {
-                    guard LocalAppAgentRunEvent.type(event) != nil else {
-                        throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App host returned an invalid AG-UI event.")
-                    }
-                }
-                if let terminalEvent = LocalAppAgentRunEvent.terminalEvent(in: batch.events),
+                if let terminalEvent = LocalAppAgentRunEvent.terminalEvent(in: events),
                    let type = LocalAppAgentRunEvent.type(terminalEvent) {
                     if type == "RUN_FINISHED" {
                         guard LocalAppAgentRunEvent.matchesRun(terminalEvent, runID: runID) else {
@@ -378,39 +402,38 @@ final class LocalAppAgentBackgroundController {
             do { try await Task.sleep(for: .milliseconds(750)) } catch { return }
         }
 
-        await cancel(context.wake, client: client)
+        await cancel(
+            context.wake,
+            client: client,
+            reason: Task.isCancelled ? .monitorCancelled : .monitorDeadline
+        )
     }
 
-    private func report(_ agentTask: LocalAppAgentTaskSummary, appName: String, contextKey: String) {
+    private func report(
+        _ agentTask: LocalAppAgentTaskSummary?,
+        outputBytes: Int64,
+        appName: String,
+        contextKey: String
+    ) {
         guard let task = tasks[contextKey] else { return }
-        if let progress = agentTask.progress, progress.turnLimit > 0 {
-            LocalAppAgentProgressReporting.update(
-                task.progress,
-                completedModelTurns: progress.completedModelTurns,
-                turnLimit: progress.turnLimit
-            )
-            task.updateTitle(
-                String(localized: "Local App Agent · \(appName)"),
-                subtitle: "Completed \(progress.completedModelTurns) model turns; limit \(progress.turnLimit)"
-            )
-        } else if ["queued", "running"].contains(agentTask.state) {
-            LocalAppAgentProgressReporting.update(
-                task.progress,
-                description: agentTask.phase ?? "\(agentTask.state.capitalized); waiting for observed model progress"
-            )
-            task.updateTitle(
-                String(localized: "Local App Agent · \(appName)"),
-                subtitle: agentTask.phase ?? "\(agentTask.state.capitalized); waiting for observed model progress"
-            )
-        } else if let phase = agentTask.phase, !phase.isEmpty {
-            task.updateTitle(String(localized: "Local App Agent · \(appName)"), subtitle: phase)
-        }
+        let observed = agentTask?.progress
+        let hasTurnLimit = (observed?.turnLimit ?? 0) > 0
+        let fallback = agentTask?.phase
+            ?? agentTask.map { "\($0.state.capitalized); waiting for observed model progress" }
+        let subtitle = LocalAppAgentProgressReporting.update(
+            task.progress,
+            outputBytes: outputBytes,
+            completedModelTurns: hasTurnLimit ? observed?.completedModelTurns : nil,
+            turnLimit: hasTurnLimit ? observed?.turnLimit : nil,
+            description: fallback
+        )
+        task.updateTitle(String(localized: "Local App Agent · \(appName)"), subtitle: subtitle)
     }
 
     private func expire(_ contextKey: String) async {
         guard let context = contexts[contextKey], !context.finished else { return }
         Self.logPhase("expire", contextKey: contextKey, success: nil)
-        await cancel(context.wake, client: context.client)
+        await cancel(context.wake, client: context.client, reason: .systemExpiration)
     }
 
     private func complete(
@@ -487,6 +510,18 @@ final class LocalAppAgentBackgroundController {
         }
     }
 
+    nonisolated static func logCancellation(_ reason: LocalAppAgentCancellationReason, contextKey: String) {
+        backgroundLog.log(
+            "phase=cancel_requested keyhash=\(keyHash(contextKey), privacy: .public) reason=\(reason.rawValue, privacy: .public)"
+        )
+    }
+
+    nonisolated static func logObservedOutput(contextKey: String, outputBytes: Int64) {
+        backgroundLog.log(
+            "phase=output_observed keyhash=\(keyHash(contextKey), privacy: .public) outputBytes=\(outputBytes, privacy: .public)"
+        )
+    }
+
     private static func logFailure(_ error: Error, contextKey: String) {
         let digest = keyHash(contextKey)
         if let failure = error as? LocalAppServiceFailure {
@@ -501,7 +536,7 @@ final class LocalAppAgentBackgroundController {
         }
     }
 
-    private static func keyHash(_ contextKey: String) -> String {
+    private nonisolated static func keyHash(_ contextKey: String) -> String {
         SHA256.hash(data: Data(contextKey.utf8))
             .prefix(8)
             .map { String(format: "%02x", $0) }
@@ -555,22 +590,29 @@ enum LocalAppAgentHandoffLaunchResolver {
 }
 
 enum LocalAppAgentProgressReporting {
+    @discardableResult
     static func update(
         _ progress: Progress,
+        outputBytes: Int64,
         completedModelTurns: UInt64? = nil,
         turnLimit: UInt64? = nil,
         description: String? = nil
-    ) {
-        // A turn limit is a ceiling, not a forecast. Keep the system progress
-        // indeterminate and report only observed turn counts in its text.
+    ) -> String {
+        // The output length is unknown until the run ends. A turn limit is a
+        // ceiling, so it can be explanatory text but cannot be progress units.
         progress.totalUnitCount = -1
-        progress.completedUnitCount = Int64(completedModelTurns ?? 0)
+        progress.completedUnitCount = max(0, outputBytes)
         progress.localizedDescription = "Local App Agent"
-        if let completedModelTurns, let turnLimit {
-            progress.localizedAdditionalDescription = "Completed \(completedModelTurns) model turns; limit \(turnLimit)"
+        let observation: String
+        if outputBytes > 0 {
+            observation = "Received \(outputBytes) output bytes; total unknown"
+        } else if let completedModelTurns, let turnLimit {
+            observation = "Completed \(completedModelTurns) model turns; limit \(turnLimit)"
         } else {
-            progress.localizedAdditionalDescription = description ?? "Waiting for observed model progress"
+            observation = description ?? "Waiting for observed model progress"
         }
+        progress.localizedAdditionalDescription = observation
+        return observation
     }
 
     static func finish(_ progress: Progress, success: Bool) {
@@ -580,14 +622,16 @@ enum LocalAppAgentProgressReporting {
             let completed = max(1, progress.completedUnitCount)
             progress.totalUnitCount = completed
             progress.completedUnitCount = completed
-            if let observation, observation.hasPrefix("Completed ") {
+            if let observation, observation.hasPrefix("Received ") {
+                progress.localizedAdditionalDescription = "Received \(progress.completedUnitCount) output bytes; complete"
+            } else if let observation, observation.hasPrefix("Completed ") {
                 progress.localizedAdditionalDescription = observation
             } else {
                 progress.localizedAdditionalDescription = "Completed"
             }
         } else {
             progress.totalUnitCount = -1
-            if let observation, observation.hasPrefix("Completed ") {
+            if let observation, observation.hasPrefix("Completed ") || observation.hasPrefix("Received ") {
                 progress.localizedAdditionalDescription = "\(observation); task ended"
             } else {
                 progress.localizedAdditionalDescription = "Task ended"

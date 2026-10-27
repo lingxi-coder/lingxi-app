@@ -2364,7 +2364,7 @@ mod mcp_stdio_state_tests {
 
     #[test]
     fn non_cooperative_task_abort_is_bounded_and_unverified() {
-        const CHILD_ENV: &str = "LINGXI_TEST_MCP_STUCK_TASK_CHILD";
+        const CHILD_ENV: &str = "MCP_TEST_STUCK_TASK_CHILD";
         if std::env::var_os(CHILD_ENV).is_some() {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)

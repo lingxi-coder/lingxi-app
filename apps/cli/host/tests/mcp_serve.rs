@@ -672,10 +672,12 @@ mod transport_failure_tests {
                 global["projects"] = json!({});
                 global["projects"][project_key.as_str()] = json!({"hasTrustDialogAccepted": true});
                 let plugin = config.join("plugins/cache/test/catalog-gate/1.0.0");
-                std::fs::create_dir_all(plugin.join(".lingxi-plugin")).unwrap();
+                std::fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
                 std::fs::create_dir_all(plugin.join("hooks")).unwrap();
                 std::fs::write(
-                    plugin.join(".lingxi-plugin/plugin.json"),
+                    plugin
+                        .join(branding::PLUGIN_MANIFEST_DIR)
+                        .join("plugin.json"),
                     r#"{"name":"catalog-gate","version":"1.0.0"}"#,
                 )
                 .unwrap();

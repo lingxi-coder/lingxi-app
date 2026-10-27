@@ -51,7 +51,7 @@ final class ProjectStore {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> ProjectStore {
         #if DEBUG
-        if environment["LINGXI_UI_TESTING"] == "1" {
+        if environment[UITestEnvironment.enabledKey] == "1" {
             let testRoot = URL(fileURLWithPath: managedRoot, isDirectory: true)
                 .appendingPathComponent("ui-testing", isDirectory: true).path
             return ProjectStore(managedRoot: testRoot)

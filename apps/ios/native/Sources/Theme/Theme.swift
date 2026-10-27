@@ -2,6 +2,12 @@ import SwiftUI
 import Observation
 import UIKit
 
+#if DEBUG
+enum UITestEnvironment {
+    static let enabledKey = "LINGXI_UI_TESTING"
+}
+#endif
+
 // MARK: - Theme environment
 //
 // Mirrors the prototype's `Theme` React context + `useT()` hook.
@@ -66,7 +72,7 @@ final class AppState {
             if environment["LINGXI_FORCE_ONBOARDING"] == "1" {
                 setupDone = false
             } else {
-                setupDone = environment["LINGXI_UI_TESTING"] == "1"
+                setupDone = environment[UITestEnvironment.enabledKey] == "1"
                     || defaults.bool(forKey: "setupDone")
             }
         #else

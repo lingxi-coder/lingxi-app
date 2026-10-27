@@ -206,7 +206,8 @@ async fn background_permissions_survive_main_cancel_and_normal_terminal_but_not_
         assert_eq!(token.is_cancelled(), cancel);
         assert!(matches!(
             foreground.await.unwrap(),
-            PermissionOutcome::Deny { .. }
+            PermissionOutcome::TransportClosed { reason }
+                if reason.string_at("") == Some("permission request dropped (connection closed)")
         ));
         assert_eq!(gate.pending_count().await, 2);
         assert_eq!(
@@ -250,6 +251,29 @@ async fn background_permissions_survive_main_cancel_and_normal_terminal_but_not_
             scope(&mut socket, 8, named_request.request_id).await,
             serde_json::Value::Null
         );
+        let denied = check(&gate, "/tmp/explicitly-denied", true, None);
+        let denied_request = permission(&mut socket).await;
+        request(
+            &mut socket,
+            15,
+            "command",
+            ClientCommand::DenyPermission {
+                request_id: denied_request.request_id,
+            },
+        )
+        .await;
+        assert!(matches!(
+            next_frame(&mut socket).await,
+            Frame::Event(ClientEvent::PermissionRequestResolved {
+                request_id,
+                resolution: PermissionResolutionDto::Denied,
+            }) if request_id == denied_request.request_id
+        ));
+        assert!(matches!(
+            denied.await.unwrap(),
+            PermissionOutcome::Deny { reason }
+                if reason.string_at("") == Some("user denied via permission dialog")
+        ));
         let idle = check(&gate, "/tmp/idle-background", true, None);
         let idle_request = permission(&mut socket).await;
         assert_eq!(
@@ -266,11 +290,13 @@ async fn background_permissions_survive_main_cancel_and_normal_terminal_but_not_
         .expect("connection teardown must drain both background requests");
         assert!(matches!(
             unnamed.await.unwrap(),
-            PermissionOutcome::Deny { .. }
+            PermissionOutcome::TransportClosed { reason }
+                if reason.string_at("") == Some("permission request dropped (connection closed)")
         ));
         assert!(matches!(
             idle.await.unwrap(),
-            PermissionOutcome::Deny { .. }
+            PermissionOutcome::TransportClosed { reason }
+                if reason.string_at("") == Some("permission request dropped (connection closed)")
         ));
         assert!(connection.tool_names.lock().await.is_empty());
         endpoint.shutdown().await;
@@ -337,7 +363,8 @@ async fn delayed_foreground_permission_cannot_attach_to_a_successor_main_owner()
     connection.cancel_active_turn(Some(8)).await;
     assert!(matches!(
         successor.await.unwrap(),
-        PermissionOutcome::Deny { .. }
+        PermissionOutcome::TransportClosed { reason }
+            if reason.string_at("") == Some("permission request dropped (connection closed)")
     ));
     connection.active_turn.finish(new_generation);
     socket.close(None).await.unwrap();
@@ -436,7 +463,8 @@ async fn permission_scope_rpc_requires_hello_validates_params_and_bypasses_ordin
             .await
             .unwrap()
             .unwrap(),
-        PermissionOutcome::Deny { .. }
+        PermissionOutcome::TransportClosed { reason }
+            if reason.string_at("") == Some("permission request dropped (connection closed)")
     ));
     endpoint.shutdown().await;
 }

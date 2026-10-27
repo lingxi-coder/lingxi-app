@@ -30,7 +30,7 @@ final class ProjectStoreTests: XCTestCase {
         try await normal.recordStartedSession(projectId: nil, sessionId: "real-session", title: "Real")
 
         let uiTest = ProjectStore.forRuntime(
-            managedRoot: managedRoot.path, environment: ["LINGXI_UI_TESTING": "1"]
+            managedRoot: managedRoot.path, environment: [UITestEnvironment.enabledKey: "1"]
         )
         XCTAssertTrue(uiTest.projects.isEmpty)
         XCTAssertTrue(uiTest.globalSessions.isEmpty)
@@ -41,7 +41,7 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(reopened.projects.map(\.id), [userProject.id])
         XCTAssertEqual(reopened.globalSessions.map(\.sessionId), ["real-session"])
         let reopenedUITest = ProjectStore.forRuntime(
-            managedRoot: managedRoot.path, environment: ["LINGXI_UI_TESTING": "1"]
+            managedRoot: managedRoot.path, environment: [UITestEnvironment.enabledKey: "1"]
         )
         XCTAssertEqual(reopenedUITest.projects.map(\.id), [testProject.id])
         XCTAssertEqual(reopenedUITest.globalSessions.map(\.sessionId), ["ui-files-session"])

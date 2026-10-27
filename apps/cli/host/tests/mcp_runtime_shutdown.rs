@@ -38,11 +38,13 @@ fn cli_reports_unverified_shutdown_for_a_real_blocked_mod_read() {
     let config = home.path().join("config");
     let project = home.path().join("project");
     let plugin = config.join("plugins/cache/test/shutdown-gate/1.0.0");
-    std::fs::create_dir_all(plugin.join(".lingxi-plugin")).unwrap();
+    std::fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
     std::fs::create_dir_all(plugin.join("hooks")).unwrap();
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(
-        plugin.join(".lingxi-plugin/plugin.json"),
+        plugin
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
         r#"{"name":"shutdown-gate","version":"1.0.0"}"#,
     )
     .unwrap();
@@ -91,7 +93,7 @@ export function register(on) {
     let mut settings = json!({"projects": {}});
     settings["projects"][project_key.as_str()] = json!({"hasTrustDialogAccepted": true});
     std::fs::write(
-        config.join(".lingxi.json"),
+        config.join(branding::GLOBAL_CONFIG_FILE),
         serde_json::to_vec(&settings).unwrap(),
     )
     .unwrap();
@@ -115,7 +117,7 @@ export function register(on) {
     let child = Command::new(env!("CARGO_BIN_EXE_lingxi-cli"))
         .current_dir(&project)
         .env("HOME", home.path())
-        .env("LINGXI_CONFIG_DIR", &config)
+        .env(branding::CONFIG_DIR_ENV, &config)
         .env("MCP_TEST_RUNTIME_ARMED", project.join("runtime-armed"))
         .env("ANTHROPIC_API_KEY", "sk-ant-test-mcp-serve")
         .env("DISABLE_AUTOUPDATER", "1")

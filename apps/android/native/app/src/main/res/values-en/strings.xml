@@ -187,6 +187,19 @@
     <string name="chat_plan_state_pending">Pending</string>
     <string name="chat_plan_title">Plan</string>
     <string name="chat_provider_engine_unavailable">No provider engine is available in this preview environment.</string>
+    <string name="chat_queued_cancelled">A queued message was cancelled. Please review the conversation.</string>
+    <string name="chat_recovery_not_found">The run could not be found. Please review the conversation before continuing.</string>
+    <string name="chat_recovery_projection_uncertain">Some run content may not have been restored. Please review it before continuing.</string>
+    <string name="chat_recovery_replay_gap">The conversation could not be fully restored. Please reopen it.</string>
+    <string name="chat_recovery_review_button">Reviewed</string>
+    <string name="chat_recovery_review_confirm">Confirm review</string>
+    <string name="chat_recovery_review_message_fmt">This clears the %1$s recovery warning(s) shown for this conversation. New warnings will remain.</string>
+    <string name="chat_recovery_review_title">Confirm review?</string>
+    <string name="chat_recovery_reviewed">I have reviewed</string>
+    <string name="chat_recovery_session_unknown">The session is not ready yet. Please try again shortly.</string>
+    <string name="chat_recovery_storage_failed">Recovery state could not be saved. Restart the app and review the conversation.</string>
+    <string name="chat_recovery_unknown">The status of the operation could not be confirmed. Please retry.</string>
+    <string name="chat_recovery_warning_count_fmt">%1$s recovery notice(s) need review.</string>
     <string name="chat_redacted_thinking">[Thinking collapsed]</string>
     <string name="chat_result_added_label">Added %1$d line(s)</string>
     <string name="chat_result_added_removed_label">Added %1$d line(s), removed %2$d line(s)</string>
@@ -245,6 +258,9 @@
     <string name="chat_status_timed_out">Timed Out</string>
     <string name="chat_status_unknown">Unknown</string>
     <string name="chat_stopping">Stopping…</string>
+    <string name="chat_submission_not_found_unknown">No recovery record was found for this message; its outcome remains unknown.</string>
+    <string name="chat_submission_outcome_unknown">Message delivery is uncertain. Please check this session before sending again.</string>
+    <string name="chat_submission_storage_failed">The message status could not be saved. The message was not sent.</string>
     <string name="chat_task_failed_reason_fmt">Background task %1$s failed: %2$s</string>
     <string name="chat_tasks_collapse_hint">Hide the task list</string>
     <string name="chat_tasks_expand_hint">Show the task list</string>
@@ -277,6 +293,7 @@
     <string name="chat_tool_verb_task">Task</string>
     <string name="chat_tool_verb_todo">Update Todos</string>
     <string name="chat_tool_verb_update">Update</string>
+    <string name="chat_turn_id_exhausted">A new message identifier could not be allocated. Please reopen the session.</string>
     <string name="chat_usage_cache">Cache</string>
     <string name="chat_usage_cache_read">Cache read</string>
     <string name="chat_usage_cache_write">Cache write</string>
@@ -2492,11 +2509,4 @@
     <string name="remote_file_upload">Upload file</string>
     <string name="remote_file_uploading">Sending to computer…</string>
     <string name="remote_files">Files</string>
-    <string name="chat_recovery_replay_gap">The conversation could not be fully restored. Please reopen it.</string>
-    <string name="chat_recovery_projection_uncertain">Some run content may not have been restored. Please review it before continuing.</string>
-    <string name="chat_recovery_unknown">The status of the operation could not be confirmed. Please retry.</string>
-    <string name="chat_recovery_not_found">The run could not be found. Please review the conversation before continuing.</string>
-    <string name="chat_recovery_reviewed">I have reviewed</string>
-    <string name="chat_queued_cancelled">A queued message was cancelled. Please review the conversation.</string>
-    <string name="chat_recovery_storage_failed">Recovery state could not be saved. Restart the app and review the conversation.</string>
 </resources>

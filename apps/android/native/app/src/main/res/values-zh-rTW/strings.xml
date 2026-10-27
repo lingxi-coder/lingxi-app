@@ -187,6 +187,19 @@
     <string name="chat_plan_state_pending">待辦</string>
     <string name="chat_plan_title">任務清單</string>
     <string name="chat_provider_engine_unavailable">當前預覽環境沒有可用的 Provider 引擎。</string>
+    <string name="chat_queued_cancelled">一則排隊輸入已取消，請檢查對話。</string>
+    <string name="chat_recovery_not_found">找不到此執行記錄，請檢查對話後繼續。</string>
+    <string name="chat_recovery_projection_uncertain">部分執行內容可能未恢復，請檢查後繼續。</string>
+    <string name="chat_recovery_replay_gap">對話恢復不完整，請重新開啟對話。</string>
+    <string name="chat_recovery_review_button">已檢查</string>
+    <string name="chat_recovery_review_confirm">確認已檢查</string>
+    <string name="chat_recovery_review_message_fmt">將關閉此工作階段目前顯示的 %1$s 筆復原提醒。之後出現的新提醒會保留。</string>
+    <string name="chat_recovery_review_title">確認已檢查？</string>
+    <string name="chat_recovery_reviewed">我已檢查</string>
+    <string name="chat_recovery_session_unknown">工作階段尚未準備好，請稍後重試。</string>
+    <string name="chat_recovery_storage_failed">無法儲存對話恢復狀態，請重新啟動應用程式後檢查對話。</string>
+    <string name="chat_recovery_unknown">暫時無法確認操作狀態，請重試。</string>
+    <string name="chat_recovery_warning_count_fmt">%1$s 筆復原提醒需要檢查。</string>
     <string name="chat_redacted_thinking">[已摺疊的思考]</string>
     <string name="chat_result_added_label">新增 %1$d 行</string>
     <string name="chat_result_added_removed_label">新增 %1$d 行，刪除 %2$d 行</string>
@@ -245,6 +258,9 @@
     <string name="chat_status_timed_out">逾時</string>
     <string name="chat_status_unknown">未知</string>
     <string name="chat_stopping">正在停止…</string>
+    <string name="chat_submission_not_found_unknown">找不到此訊息的復原記錄，結果仍不確定。</string>
+    <string name="chat_submission_outcome_unknown">訊息是否送達尚不確定，請先檢查此工作階段。</string>
+    <string name="chat_submission_storage_failed">無法儲存訊息狀態，訊息未傳送。</string>
     <string name="chat_task_failed_reason_fmt">背景任務 %1$s 已失敗：%2$s</string>
     <string name="chat_tasks_collapse_hint">收合任務清單</string>
     <string name="chat_tasks_expand_hint">展開任務清單</string>
@@ -277,6 +293,7 @@
     <string name="chat_tool_verb_task">委派</string>
     <string name="chat_tool_verb_todo">更新任務清單</string>
     <string name="chat_tool_verb_update">修改</string>
+    <string name="chat_turn_id_exhausted">無法配置新的訊息識別碼，請重新開啟工作階段。</string>
     <string name="chat_usage_cache">快取</string>
     <string name="chat_usage_cache_read">快取命中</string>
     <string name="chat_usage_cache_write">快取寫入</string>
@@ -2038,8 +2055,6 @@
     <string name="remote_fail_unsupported">這支手機不支援遠端控制所需的加密功能。</string>
     <string name="remote_fail_unknown_host">找不到這台電腦的資訊。請確認桌面版已開啟遠端控制。</string>
     <string name="remote_fail_network">無法連線到雲端服務，請檢查網路。</string>
-    <string name="remote_file_timeout">檔案傳輸逾時，請檢查連線後重試。</string>
-    <string name="remote_file_save_incomplete">儲存未完成。所選檔案可能是空的或不完整，請重新下載並選擇新檔案。</string>
     <string name="remote_fail_network_denied">帳號沒有權限存取遠端控制資料。請重新登入。</string>
     <string name="remote_fail_no_answer">電腦沒有回應。請確認它在線上且靈犀桌面版正在執行。</string>
     <string name="remote_fail_closed">連線已關閉。</string>
@@ -2489,14 +2504,9 @@
     <string name="remote_file_export">儲存或分享檔案</string>
     <string name="remote_file_preparing">正在驗證原始檔案…</string>
     <string name="remote_file_requires_webrtc">檔案傳輸需要 WebRTC 連線；不會上傳至雲端儲存。</string>
+    <string name="remote_file_save_incomplete">儲存未完成。所選檔案可能是空的或不完整，請重新下載並選擇新檔案。</string>
+    <string name="remote_file_timeout">檔案傳輸逾時，請檢查連線後重試。</string>
     <string name="remote_file_upload">上傳原始檔案</string>
     <string name="remote_file_uploading">正在上傳至電腦…</string>
     <string name="remote_files">檔案</string>
-    <string name="chat_recovery_replay_gap">對話恢復不完整，請重新開啟對話。</string>
-    <string name="chat_recovery_projection_uncertain">部分執行內容可能未恢復，請檢查後繼續。</string>
-    <string name="chat_recovery_unknown">暫時無法確認操作狀態，請重試。</string>
-    <string name="chat_recovery_not_found">找不到此執行記錄，請檢查對話後繼續。</string>
-    <string name="chat_recovery_reviewed">我已檢查</string>
-    <string name="chat_queued_cancelled">一則排隊輸入已取消，請檢查對話。</string>
-    <string name="chat_recovery_storage_failed">無法儲存對話恢復狀態，請重新啟動應用程式後檢查對話。</string>
 </resources>

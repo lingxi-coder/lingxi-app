@@ -187,6 +187,19 @@
     <string name="chat_plan_state_pending">未着手</string>
     <string name="chat_plan_title">タスクリスト</string>
     <string name="chat_provider_engine_unavailable">現在のプレビュー環境には利用可能な Provider エンジンがありません。</string>
+    <string name="chat_queued_cancelled">待機中の入力がキャンセルされました。会話を確認してください。</string>
+    <string name="chat_recovery_not_found">実行記録が見つかりません。会話を確認してから続行してください。</string>
+    <string name="chat_recovery_projection_uncertain">実行内容の一部が復元されていない可能性があります。確認してから続行してください。</string>
+    <string name="chat_recovery_replay_gap">会話を完全に復元できませんでした。会話を開き直してください。</string>
+    <string name="chat_recovery_review_button">確認済み</string>
+    <string name="chat_recovery_review_confirm">確認を完了</string>
+    <string name="chat_recovery_review_message_fmt">この会話に表示された %1$s 件の復元に関する通知を閉じます。新しい通知は残ります。</string>
+    <string name="chat_recovery_review_title">確認済みにしますか？</string>
+    <string name="chat_recovery_reviewed">確認しました</string>
+    <string name="chat_recovery_session_unknown">セッションの準備ができていません。しばらくしてから再試行してください。</string>
+    <string name="chat_recovery_storage_failed">会話の復元状態を保存できません。アプリを再起動して会話を確認してください。</string>
+    <string name="chat_recovery_unknown">操作の状態を確認できません。もう一度お試しください。</string>
+    <string name="chat_recovery_warning_count_fmt">%1$s 件の復元に関する通知を確認してください。</string>
     <string name="chat_redacted_thinking">[折りたたまれた思考]</string>
     <string name="chat_result_added_label">%1$d 行を追加</string>
     <string name="chat_result_added_removed_label">%1$d 行を追加、%2$d 行を削除</string>
@@ -245,6 +258,9 @@
     <string name="chat_status_timed_out">タイムアウト</string>
     <string name="chat_status_unknown">不明</string>
     <string name="chat_stopping">停止中…</string>
+    <string name="chat_submission_not_found_unknown">このメッセージの復元記録が見つかりません。結果は不明です。</string>
+    <string name="chat_submission_outcome_unknown">メッセージが送信されたか確認できません。再送信する前にセッションを確認してください。</string>
+    <string name="chat_submission_storage_failed">メッセージの状態を保存できませんでした。メッセージは送信されていません。</string>
     <string name="chat_task_failed_reason_fmt">バックグラウンドタスク %1$s が失敗しました: %2$s</string>
     <string name="chat_tasks_collapse_hint">タスク一覧を隠す</string>
     <string name="chat_tasks_expand_hint">タスク一覧を表示</string>
@@ -277,6 +293,7 @@
     <string name="chat_tool_verb_task">委任</string>
     <string name="chat_tool_verb_todo">タスクリストを更新</string>
     <string name="chat_tool_verb_update">更新</string>
+    <string name="chat_turn_id_exhausted">新しいメッセージ識別子を割り当てられません。セッションを開き直してください。</string>
     <string name="chat_usage_cache">キャッシュ</string>
     <string name="chat_usage_cache_read">キャッシュヒット</string>
     <string name="chat_usage_cache_write">キャッシュ書き込み</string>
@@ -2038,8 +2055,6 @@
     <string name="remote_fail_unsupported">このスマートフォンはリモート操作に必要な暗号機能に対応していません。</string>
     <string name="remote_fail_unknown_host">このパソコンの情報が見つかりません。デスクトップ版でリモート操作がオンになっているか確認してください。</string>
     <string name="remote_fail_network">クラウドサービスに接続できません。ネットワークを確認してください。</string>
-    <string name="remote_file_timeout">ファイルの転送がタイムアウトしました。接続を確認してから再試行してください。</string>
-    <string name="remote_file_save_incomplete">保存が完了しませんでした。選択したファイルは空または不完全な可能性があります。再度ダウンロードし、新しいファイルを選択してください。</string>
     <string name="remote_fail_network_denied">このアカウントはリモート操作のデータにアクセスできません。もう一度サインインしてください。</string>
     <string name="remote_fail_no_answer">パソコンから応答がありません。オンラインで LingXi が起動していることを確認してください。</string>
     <string name="remote_fail_closed">接続が閉じられました。</string>
@@ -2489,14 +2504,9 @@
     <string name="remote_file_export">ファイルを保存または共有</string>
     <string name="remote_file_preparing">元のファイルを検証しています…</string>
     <string name="remote_file_requires_webrtc">ファイル転送には WebRTC 接続が必要です。ファイルはクラウドストレージにアップロードされません。</string>
+    <string name="remote_file_save_incomplete">保存が完了しませんでした。選択したファイルは空または不完全な可能性があります。再度ダウンロードし、新しいファイルを選択してください。</string>
+    <string name="remote_file_timeout">ファイルの転送がタイムアウトしました。接続を確認してから再試行してください。</string>
     <string name="remote_file_upload">元のファイルをアップロード</string>
     <string name="remote_file_uploading">コンピューターに送信しています…</string>
     <string name="remote_files">ファイル</string>
-    <string name="chat_recovery_replay_gap">会話を完全に復元できませんでした。会話を開き直してください。</string>
-    <string name="chat_recovery_projection_uncertain">実行内容の一部が復元されていない可能性があります。確認してから続行してください。</string>
-    <string name="chat_recovery_unknown">操作の状態を確認できません。もう一度お試しください。</string>
-    <string name="chat_recovery_not_found">実行記録が見つかりません。会話を確認してから続行してください。</string>
-    <string name="chat_recovery_reviewed">確認しました</string>
-    <string name="chat_queued_cancelled">待機中の入力がキャンセルされました。会話を確認してください。</string>
-    <string name="chat_recovery_storage_failed">会話の復元状態を保存できません。アプリを再起動して会話を確認してください。</string>
 </resources>

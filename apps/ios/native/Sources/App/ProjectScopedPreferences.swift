@@ -22,7 +22,7 @@ struct ProjectScopedPreferences {
         uiTestSuiteName: String = "\(Bundle.main.bundleIdentifier ?? "com.lingxi.code").ui-testing"
     ) -> ProjectScopedPreferences {
         #if DEBUG
-        if environment["LINGXI_UI_TESTING"] == "1" {
+        if environment[UITestEnvironment.enabledKey] == "1" {
             guard let defaults = UserDefaults(suiteName: uiTestSuiteName) else {
                 preconditionFailure("Unable to create isolated UI test preferences")
             }

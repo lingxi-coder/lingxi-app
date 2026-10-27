@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn mcp_stdio_restore_runs_after_runtime_shutdown_times_out() {
-        const CHILD: &str = "LINGXI_TEST_MCP_RESTORE_AFTER_TIMEOUT_CHILD";
+        const CHILD: &str = "MCP_TEST_RESTORE_AFTER_TIMEOUT_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn runtime_shutdown_reports_a_blocked_worker_without_hanging_the_process() {
-        const CHILD: &str = "LINGXI_TEST_MCP_RUNTIME_SHUTDOWN_CHILD";
+        const CHILD: &str = "MCP_TEST_RUNTIME_SHUTDOWN_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn mcp_panic_also_has_bounded_unverified_shutdown() {
-        const CHILD: &str = "LINGXI_TEST_MCP_RUNTIME_PANIC_CHILD";
+        const CHILD: &str = "MCP_TEST_RUNTIME_PANIC_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let code = run_panicking_blocked_runtime();
             assert_eq!(code, cli::exit_codes::RUNTIME_ERROR);
@@ -487,7 +487,7 @@ mod tests {
     fn mcp_panic_with_closed_stderr_still_has_bounded_shutdown() {
         use std::io::{BufRead as _, Write as _};
 
-        const CHILD: &str = "LINGXI_TEST_MCP_CLOSED_STDERR_CHILD";
+        const CHILD: &str = "MCP_TEST_CLOSED_STDERR_CHILD";
         if std::env::var_os(CHILD).is_some() {
             println!("MCP_STDERR_CLOSE_READY");
             std::io::stdout().flush().unwrap();

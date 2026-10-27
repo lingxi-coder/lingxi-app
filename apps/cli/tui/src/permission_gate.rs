@@ -125,7 +125,9 @@ impl PermissionGate for TuiPermissionGate {
             PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
                 PermissionDecision::Allow
             }
-            PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
+            PermissionOutcome::Deny { reason } | PermissionOutcome::TransportClosed { reason } => {
+                PermissionDecision::Deny { reason }
+            }
         }
     }
 
@@ -141,25 +143,18 @@ impl PermissionGate for TuiPermissionGate {
         input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
-        match self
-            .check_with_context_impl(
-                name,
-                input,
-                ctx.worker.clone(),
-                ctx.suppress_always_allow_rule || ctx.requires_user_interaction,
-                ctx.permission_suggestions.as_ref().and_then(|suggestions| {
-                    permission::allow_suggestion::permission_persistence_suggestion(
-                        name,
-                        suggestions,
-                    )
-                }),
-                ctx.auto_mode_prompt,
-                ctx.background_owned,
-            )
-            .await
-        {
-            outcome => outcome,
-        }
+        self.check_with_context_impl(
+            name,
+            input,
+            ctx.worker.clone(),
+            ctx.suppress_always_allow_rule || ctx.requires_user_interaction,
+            ctx.permission_suggestions.as_ref().and_then(|suggestions| {
+                permission::allow_suggestion::permission_persistence_suggestion(name, suggestions)
+            }),
+            ctx.auto_mode_prompt,
+            ctx.background_owned,
+        )
+        .await
     }
 }
 
@@ -265,19 +260,19 @@ impl TuiPermissionGate {
             auto_mode_prompt,
             background_owned,
         };
-        // G006: this deny reason can reach the calling MODEL as a tool-error
+        // G006: this reason can reach the calling MODEL as a tool-error
         // string (a background `/fusion` panel's Bash/WebFetch call denied
         // here feeds straight into that panel's next turn) — model-neutral
         // copy only, no transport-internal words ("TUI"/"dropped") a
         // provider model has no context for.
         if self.event_tx.send(exchange).await.is_err() {
             // TUI is gone — fail closed.
-            return PermissionOutcome::Deny {
+            return PermissionOutcome::TransportClosed {
                 reason: "permission request could not be delivered".into(),
             };
         }
         let Ok(response) = rx.await else {
-            return PermissionOutcome::Deny {
+            return PermissionOutcome::TransportClosed {
                 reason: "permission request was not resolved".into(),
             };
         };
@@ -895,6 +890,84 @@ mod tests {
             }
             PermissionDecision::Allow => panic!("expected Deny"),
         }
+        tui_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_request_channel_is_transport_closed_and_legacy_fails_closed() {
+        let (event_tx, event_rx) = mpsc::channel::<PermissionExchange>(4);
+        drop(event_rx);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules.clone());
+        let input = source_json(json!({"command": "ls"}));
+        let reason = "permission request could not be delivered";
+
+        assert_eq!(
+            gate.check_with_context("Bash", &input, &Default::default())
+                .await,
+            PermissionOutcome::TransportClosed {
+                reason: reason.into(),
+            }
+        );
+        assert_eq!(
+            gate.check("Bash", &input).await,
+            PermissionDecision::Deny {
+                reason: reason.into(),
+            }
+        );
+        assert!(rules.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropped_response_is_transport_closed_and_legacy_fails_closed() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules.clone());
+        let tui_task = tokio::spawn(async move {
+            for _ in 0..2 {
+                drop(event_rx.recv().await.expect("permission request"));
+            }
+        });
+        let input = source_json(json!({"command": "ls"}));
+        let reason = "permission request was not resolved";
+
+        assert_eq!(
+            gate.check_with_context("Bash", &input, &Default::default())
+                .await,
+            PermissionOutcome::TransportClosed {
+                reason: reason.into(),
+            }
+        );
+        assert_eq!(
+            gate.check_with_worker("Bash", &input, None).await,
+            PermissionDecision::Deny {
+                reason: reason.into(),
+            }
+        );
+        tui_task.await.unwrap();
+        assert!(rules.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_user_denial_remains_distinct_from_transport_closure() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let gate = TuiPermissionGate::new(event_tx, Arc::new(Mutex::new(Vec::new())));
+        let tui_task = tokio::spawn(async move {
+            event_rx
+                .recv()
+                .await
+                .expect("permission request")
+                .resp_tx
+                .send(PermissionResponse::Deny)
+                .unwrap();
+        });
+        assert_eq!(
+            gate.check_with_context("Bash", &source_json(json!({})), &Default::default())
+                .await,
+            PermissionOutcome::Deny {
+                reason: "user denied via dialog".into(),
+            }
+        );
         tui_task.await.unwrap();
     }
 

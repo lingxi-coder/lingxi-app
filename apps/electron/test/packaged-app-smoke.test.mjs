@@ -146,7 +146,7 @@ test('packaged Local App creation waits for the default folder selection before 
 });
 
 test('packaged Local App smoke confirms only its exact generated source folder', async () => {
-  const expected = '/tmp/isolated-home/.lingxi/.apps/Smoke App';
+  const expected = '/tmp/isolated-home/config/.apps/Smoke App';
   const makePage = (actual, clicked) => {
     const calls = [];
     return { calls, send: async (method, { expression }) => {

@@ -21,8 +21,8 @@ apps/web/public/api-index.json:~/.lingxi/bridge  # Generated Bridge SDK contract
 apps/web/public/api-index.json:LINGXI.md  # Generated SDK API summary naming the existing persisted memory-file contract; renaming the catalog would misdescribe the API.
 apps/web/public/api-index.json:LINGXI_SESSION_KIND  # Generated Harness SDK summary naming its current environment ABI for background-session deferral.
 apps/web/public/api-index.json:LINGXI_ENABLE_TODO_TOOLS  # Generated Harness SDK public constant value; consumers must set the actual environment key.
-apps/web/public/api-index.json:.lingxi-plugin/plugin.json  # Generated Harness SDK plugin-loader manifest namespace; extracted packages require this exact on-disk contract.
-apps/web/public/api-index.json:.lingxi-plugin/marketplace.json  # Generated Harness SDK marketplace manifest namespace; catalog parsing uses this exact persisted filename.
+apps/cli/host/src/commands/plugin.rs:.lingxi-plugin/plugin.json  # CLI plugin validation documents the exact persisted plugin manifest contract.
+apps/cli/host/src/commands/plugin.rs:.lingxi-plugin/marketplace.json  # CLI plugin validation documents the exact persisted marketplace manifest contract.
 apps/web/public/api-index.json:LINGXI_ENABLE_TOOL_SEARCH  # Generated Harness SDK summary of the supported tool-search environment ABI; keep the upstream public contract exact.
 
 # R30 reviewed identities: Native reference fixtures and current product/host APIs.

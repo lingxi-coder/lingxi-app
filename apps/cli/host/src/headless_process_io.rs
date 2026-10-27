@@ -574,7 +574,7 @@ mod tests {
 
     #[tokio::test]
     async fn managed_stdio_restores_shared_parent_pipes_with_live_output() -> io::Result<()> {
-        const CHILD: &str = "LINGXI_TEST_MCP_SHARED_PIPE_CHILD";
+        const CHILD: &str = "MCP_TEST_SHARED_PIPE_CHILD";
         if std::env::var_os(CHILD).is_some() {
             begin_mcp_stdio()?;
             let io = open_mcp()?;
@@ -683,7 +683,7 @@ mod tests {
 
     #[test]
     fn unarmed_library_open_and_panicking_managed_open_restore_flags() -> io::Result<()> {
-        const CHILD: &str = "LINGXI_TEST_MCP_OPEN_PANIC_CHILD";
+        const CHILD: &str = "MCP_TEST_OPEN_PANIC_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn poisoned_poll_gate_restores_shared_parent_pipe() -> io::Result<()> {
-        const CHILD: &str = "LINGXI_TEST_MCP_POISONED_POLL_CHILD";
+        const CHILD: &str = "MCP_TEST_POISONED_POLL_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

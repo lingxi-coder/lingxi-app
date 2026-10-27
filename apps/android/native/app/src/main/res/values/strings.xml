@@ -187,6 +187,19 @@
     <string name="chat_plan_state_pending">待办</string>
     <string name="chat_plan_title">任务清单</string>
     <string name="chat_provider_engine_unavailable">当前预览环境没有可用的 Provider 引擎。</string>
+    <string name="chat_queued_cancelled">一条排队输入已取消，请检查对话。</string>
+    <string name="chat_recovery_not_found">无法找到该运行记录，请检查对话后继续。</string>
+    <string name="chat_recovery_projection_uncertain">部分运行内容可能未恢复，请检查后继续。</string>
+    <string name="chat_recovery_replay_gap">对话恢复不完整，请重新打开对话。</string>
+    <string name="chat_recovery_review_button">已检查</string>
+    <string name="chat_recovery_review_confirm">确认已检查</string>
+    <string name="chat_recovery_review_message_fmt">将关闭此会话当前显示的 %1$s 条恢复提醒。之后出现的新提醒会保留。</string>
+    <string name="chat_recovery_review_title">确认已检查？</string>
+    <string name="chat_recovery_reviewed">我已检查</string>
+    <string name="chat_recovery_session_unknown">会话尚未准备好，请稍后重试。</string>
+    <string name="chat_recovery_storage_failed">无法保存对话恢复状态，请重新启动应用后检查对话。</string>
+    <string name="chat_recovery_unknown">暂时无法确认操作状态，请重试。</string>
+    <string name="chat_recovery_warning_count_fmt">%1$s 条恢复提醒需要检查。</string>
     <string name="chat_redacted_thinking">[已折叠的思考]</string>
     <string name="chat_result_added_label">新增 %1$d 行</string>
     <string name="chat_result_added_removed_label">新增 %1$d 行，删除 %2$d 行</string>
@@ -245,6 +258,9 @@
     <string name="chat_status_timed_out">超时</string>
     <string name="chat_status_unknown">未知</string>
     <string name="chat_stopping">正在停止…</string>
+    <string name="chat_submission_not_found_unknown">未找到此消息的恢复记录，结果仍不确定。</string>
+    <string name="chat_submission_outcome_unknown">消息是否送达尚不确定，请先检查此会话。</string>
+    <string name="chat_submission_storage_failed">无法保存消息状态，消息未发送。</string>
     <string name="chat_task_failed_reason_fmt">后台任务 %1$s 已失败：%2$s</string>
     <string name="chat_tasks_collapse_hint">收起任务列表</string>
     <string name="chat_tasks_expand_hint">展开任务列表</string>
@@ -277,6 +293,7 @@
     <string name="chat_tool_verb_task">委派</string>
     <string name="chat_tool_verb_todo">更新任务清单</string>
     <string name="chat_tool_verb_update">修改</string>
+    <string name="chat_turn_id_exhausted">无法分配新的消息标识，请重新打开会话。</string>
     <string name="chat_usage_cache">缓存</string>
     <string name="chat_usage_cache_read">缓存命中</string>
     <string name="chat_usage_cache_write">缓存写入</string>
@@ -2492,11 +2509,4 @@
     <string name="remote_file_upload">上传原文件</string>
     <string name="remote_file_uploading">正在上传到电脑…</string>
     <string name="remote_files">文件</string>
-    <string name="chat_recovery_replay_gap">对话恢复不完整，请重新打开对话。</string>
-    <string name="chat_recovery_projection_uncertain">部分运行内容可能未恢复，请检查后继续。</string>
-    <string name="chat_recovery_unknown">暂时无法确认操作状态，请重试。</string>
-    <string name="chat_recovery_not_found">无法找到该运行记录，请检查对话后继续。</string>
-    <string name="chat_recovery_reviewed">我已检查</string>
-    <string name="chat_queued_cancelled">一条排队输入已取消，请检查对话。</string>
-    <string name="chat_recovery_storage_failed">无法保存对话恢复状态，请重新启动应用后检查对话。</string>
 </resources>

@@ -201,13 +201,21 @@ class GStreamerSDKTests(unittest.TestCase):
                         "_run_pkg_config",
                         side_effect=[gstreamer_sdk.SetupError("GStreamer SDK version 1.20.3 does not match pinned 1.28.8"), "/fixture/plugins"],
                     ) as probe:
-                        with patch.object(gstreamer_sdk, "export_environment"):
+                        with patch.object(gstreamer_sdk, "export_environment") as exported:
                             gstreamer_sdk.install_macos(lock, base / "cache")
 
             self.assertEqual(len(installs), 2)
             self.assertEqual(probe.call_count, 2)
             self.assertTrue(any("gstreamer-1.0-1.28.8-universal.pkg" in call[3] for call in installs))
             self.assertTrue(any("gstreamer-1.0-devel-1.28.8-universal.pkg" in call[3] for call in installs))
+            prefix = pathlib.Path("/Library/Frameworks/GStreamer.framework/Versions/1.0")
+            pkg_config = str(prefix / "bin/pkg-config")
+            pkg_config_path = str(prefix / "lib/pkgconfig")
+            expected = gstreamer_sdk.macos_sdk_environment(prefix, pkg_config, pkg_config_path)
+            sdk_keys = [key for key, value in expected.items() if value == str(prefix)]
+            self.assertEqual(len(sdk_keys), 1)
+            self.assertEqual(expected[sdk_keys[0]], str(prefix))
+            exported.assert_called_once_with(expected, (str(prefix / "bin"),))
 
     def test_windows_rejects_unmarked_or_stale_sdk_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

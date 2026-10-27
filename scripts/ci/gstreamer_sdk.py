@@ -344,6 +344,16 @@ def _run_pkg_config(
     return plugin_dir
 
 
+def macos_sdk_environment(prefix: pathlib.Path, pkg_config: str, pkg_config_path: str) -> dict[str, str]:
+    """Return the environment exported for the installed macOS SDK."""
+    return {
+            "LINGXI_GSTREAMER_SDK_MACOS": str(prefix),
+            "PKG_CONFIG": pkg_config,
+            "PKG_CONFIG_PATH": pkg_config_path,
+            "PKG_CONFIG_LIBDIR": pkg_config_path,
+        }
+
+
 def install_macos(lock: dict, cache_root: pathlib.Path) -> None:
     prefix = pathlib.Path("/Library/Frameworks/GStreamer.framework/Versions/1.0")
     pkg_config_path = str(prefix / "lib/pkgconfig")
@@ -363,12 +373,7 @@ def install_macos(lock: dict, cache_root: pathlib.Path) -> None:
         expected_version=lock["version"],
     )
     export_environment(
-        {
-            "LINGXI_GSTREAMER_SDK_MACOS": str(prefix),
-            "PKG_CONFIG": pkg_config,
-            "PKG_CONFIG_PATH": pkg_config_path,
-            "PKG_CONFIG_LIBDIR": pkg_config_path,
-        },
+        macos_sdk_environment(prefix, pkg_config, pkg_config_path),
         (str(prefix / "bin"),),
     )
 

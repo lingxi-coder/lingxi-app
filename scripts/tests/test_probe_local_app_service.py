@@ -3,16 +3,31 @@
 from pathlib import Path
 import os
 import platform
+import shlex
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci"))
+import gstreamer_sdk  # noqa: E402
 import probe_local_app_service as service  # noqa: E402
 from probe_local_app_service import probe  # noqa: E402
+
+
+def macos_sdk_env_key() -> str:
+    marker = Path("sdk-prefix-fixture")
+    exported = gstreamer_sdk.macos_sdk_environment(marker, "pkg-config-fixture", "pkg-path-fixture")
+    keys = [key for key, value in exported.items() if value == str(marker)]
+    if len(keys) != 1:
+        raise AssertionError(f"expected exactly one macOS SDK prefix export, found {keys}")
+    return keys[0]
+
+
+MACOS_SDK_ENV = macos_sdk_env_key()
 
 
 CHILD = r'''
@@ -57,13 +72,13 @@ else:
 
 
 class LocalAppServiceProbeTests(unittest.TestCase):
-    @unittest.skipUnless(sys.platform == "darwin" and os.environ.get("LINGXI_GSTREAMER_SDK_MACOS"),
+    @unittest.skipUnless(sys.platform == "darwin" and os.environ.get(MACOS_SDK_ENV),
                          "requires the configured macOS GStreamer SDK")
     def test_macos_sdk_dylib_needs_and_resolves_the_linked_rpath(self) -> None:
-        sdk_lib = Path(os.environ["LINGXI_GSTREAMER_SDK_MACOS"]) / "lib"
+        sdk_lib = Path(os.environ[MACOS_SDK_ENV]) / "lib"
         library = sdk_lib / "libgstvideo-1.0.0.dylib"
         self.assertTrue(library.is_file(), f"SDK library missing: {library}")
-        subprocess.run(["/usr/bin/lipo", "-verify_arch", platform.machine(), str(library)], check=True)
+        subprocess.run(["/usr/bin/lipo", str(library), "-verify_arch", platform.machine()], check=True)
         install_name = subprocess.run(["/usr/bin/otool", "-D", str(library)],
                                       check=True, text=True, capture_output=True).stdout
         if "@rpath/libgstvideo-1.0.0.dylib" not in install_name:
@@ -93,6 +108,55 @@ class LocalAppServiceProbeTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "exited .*no LC_RPATH's found"):
                     probe([str(missing)], root / "missing", root)
                 probe([str(linked)], root / "linked", root)
+
+    @unittest.skipUnless(os.name == "posix", "workflow shell regression requires POSIX")
+    def test_macos_workflow_uses_xcode16_lipo_argument_order_and_rejects_missing_arch(self) -> None:
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/desktop-packages.yml").read_text()
+        step = workflow.split("      - name: Remap build-machine paths\n", 1)[1].split("\n      - name:", 1)[0]
+        body = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        self.assertEqual(body.count("/usr/bin/lipo "), 1)
+        libraries = (
+            "libgstreamer-1.0.0.dylib", "libgstbase-1.0.0.dylib",
+            "libgstapp-1.0.0.dylib", "libgstaudio-1.0.0.dylib", "libgstvideo-1.0.0.dylib",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sdk = root / "sdk"
+            lib = sdk / "lib"
+            lib.mkdir(parents=True)
+            for library in libraries:
+                (lib / library).touch()
+            strict_lipo = root / "strict-lipo"
+            strict_lipo.write_text(
+                '#!/bin/bash\n'
+                'if [[ $# -ne 3 || "$2" != "-verify_arch" || ! -f "$1" ]]; then exit 2; fi\n'
+                'printf "%s|%s\\n" "$1" "$3" >> "$FAKE_LIPO_LOG"\n'
+                '[[ "$3" == "$FAKE_SDK_ARCH" ]]\n',
+                encoding="utf-8",
+            )
+            strict_lipo.chmod(0o755)
+            body = body.replace("/usr/bin/lipo", shlex.quote(str(strict_lipo)))
+            for matrix_arch, sdk_arch, succeeds in (
+                ("arm64", "arm64", True), ("x64", "x86_64", True),
+                ("arm64", "x86_64", False), ("x64", "arm64", False),
+            ):
+                with self.subTest(matrix_arch=matrix_arch, sdk_arch=sdk_arch):
+                    github_env, log = root / "github-env", root / "lipo-log"
+                    github_env.write_text("")
+                    log.write_text("")
+                    env = dict(os.environ, GITHUB_ENV=str(github_env), GITHUB_WORKSPACE="/workspace-test",
+                               CARGO_HOME="/cargo-test", FAKE_SDK_ARCH=sdk_arch, FAKE_LIPO_LOG=str(log))
+                    env[MACOS_SDK_ENV] = str(sdk)
+                    script = body.replace("${{ matrix.platform }}", "darwin").replace("${{ matrix.arch }}", matrix_arch)
+                    result = subprocess.run(["/bin/bash", "-e", "-o", "pipefail", "-c", script],
+                                            env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+                    calls = log.read_text().splitlines()
+                    if succeeds:
+                        self.assertEqual(calls, [f"{lib / name}|{sdk_arch}" for name in libraries])
+                        self.assertIn(f"-C link-arg=-Wl,-rpath,{lib}", github_env.read_text())
+                    else:
+                        self.assertEqual(github_env.read_text(), "")
 
     def test_macos_does_not_inherit_dyld_search_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

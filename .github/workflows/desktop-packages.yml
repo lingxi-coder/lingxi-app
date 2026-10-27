@@ -172,7 +172,7 @@ jobs:
             for dylib in libgstreamer-1.0.0.dylib libgstbase-1.0.0.dylib \
               libgstapp-1.0.0.dylib libgstaudio-1.0.0.dylib libgstvideo-1.0.0.dylib; do
               test -f "$sdk_lib/$dylib"
-              /usr/bin/lipo -verify_arch "$sdk_arch" "$sdk_lib/$dylib"
+              /usr/bin/lipo "$sdk_lib/$dylib" -verify_arch "$sdk_arch"
             done
             # The unpackaged Rust executables need the SDK to resolve @rpath.
             # Packaging removes this absolute rpath and installs a bundle-relative one.

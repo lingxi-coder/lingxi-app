@@ -8,7 +8,10 @@ const url = process.argv.find((argument) => argument.startsWith('http://') || ar
 if (!url) throw new Error('fixture URL is required');
 if (process.env.LINGXI_TEST_USER_DATA) app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const startedAt = Date.now();
+const progress = (step) => process.stderr.write(`[topbar +${Date.now() - startedAt}ms] ${step}\n`);
 async function waitFor(webContents, expression, timeout = 8_000) {
+  progress(`wait for ${expression}`);
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (await webContents.executeJavaScript(expression)) return;
@@ -19,15 +22,21 @@ async function waitFor(webContents, expression, timeout = 8_000) {
 
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: false, width: 1400, height: 900, webPreferences: { sandbox: true, backgroundThrottling: false } });
+  // CI runs this under Xvfb. On Linux, hidden windows can have a throttled
+  // compositor despite backgroundThrottling: false; show the real window on
+  // the virtual display so animations, hit tests and keyboard focus can run.
+  const showOnCiDisplay = process.platform === 'linux' && process.env.CI === 'true' && Boolean(process.env.DISPLAY);
+  const window = new BrowserWindow({ show: showOnCiDisplay, width: 1400, height: 900, webPreferences: { sandbox: true, backgroundThrottling: false } });
   const checks = [];
   try {
+    progress(`platform=${process.platform} virtualDisplayVisible=${showOnCiDisplay} contentSize=${JSON.stringify(window.getContentSize())}`);
     await window.loadURL(url);
     await configureFixtureWindow(window);
     const wc = window.webContents;
     const js = (expression) => wc.executeJavaScript(expression);
-    const click = async (selector) => { await js(`document.querySelector(${JSON.stringify(selector)}).click()`); await delay(40); };
+    const click = async (selector) => { progress(`click ${selector}`); await js(`document.querySelector(${JSON.stringify(selector)}).click()`); await delay(40); };
     const pointerClick = async (selector) => {
+      progress(`pointer click ${selector}`);
       await js(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' })`);
       await js(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
       const point = await js(`(() => {
@@ -44,6 +53,7 @@ async function main() {
       await delay(40);
     };
     const clickText = async (scope, text) => {
+      progress(`click ${text} in ${scope}`);
       await js(`(() => { const target = [...document.querySelectorAll(${JSON.stringify(scope + ' button')})].find(el => el.textContent.includes(${JSON.stringify(text)})); if(!target) throw new Error('Missing button: '+${JSON.stringify(text)}); target.click(); })()`);
       await delay(40);
     };
@@ -122,6 +132,7 @@ async function main() {
     checks.push('summary excludes context and changes');
 
     await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview'))`);
+    progress('settle summary animations');
     await settleFixtureAnimations(wc, '#runtime-center-overview');
     const overview = await js(`(() => {
       const panel = document.querySelector('#runtime-center-overview');
@@ -135,6 +146,7 @@ async function main() {
       natural.remove();
       return { width: bounds.width, height: bounds.height, naturalHeight, rowHeight: row.getBoundingClientRect().height, scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, radius: getComputedStyle(panel).borderRadius, sections: [...panel.querySelectorAll('h2')].map(el=>el.textContent), fourthResource: panel.textContent.includes('acceptance.md') };
     })()`);
+    progress(`overview geometry ${JSON.stringify(overview)}`);
     assert.equal(overview.width, 300);
     assert.equal(overview.radius, '20px');
     assert.deepEqual(overview.sections, ['Outputs', 'Subagents', 'Sources']);
@@ -151,6 +163,7 @@ async function main() {
     window.setContentSize(1400, 420);
     await delay(150);
     const cramped = await js(`(() => { const panel = document.querySelector('#runtime-center-overview'); const row = panel.parentElement; return { height: panel.getBoundingClientRect().height, rowHeight: row.getBoundingClientRect().height, scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, overflow: getComputedStyle(panel).overflowY }; })()`);
+    progress(`cramped geometry ${JSON.stringify(cramped)} contentSize=${JSON.stringify(window.getContentSize())}`);
     assert.ok(cramped.height <= cramped.rowHeight - 20, `cramped summary rail ${cramped.height} exceeds row ${cramped.rowHeight}`);
     assert.equal(cramped.overflow, 'auto');
     assert.ok(cramped.scrollHeight > cramped.clientHeight, 'cramped summary rail scrolls internally');
@@ -182,6 +195,7 @@ async function main() {
     wc.sendInputEvent({type:'keyDown',keyCode:'End'});
     wc.sendInputEvent({type:'keyUp',keyCode:'End'});
     await waitFor(wc, `document.querySelector('[data-runtime-inspector-active="true"]')?.textContent.includes('Plan')`);
+    progress('settle inspector animations');
     await js(`Promise.all(document.querySelector('.runtime-inspector').getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {})))`);
     await capture('details-light');
     const heights = await js(`({ chat: document.querySelector('.desktop-topbar').getBoundingClientRect().height, detail: document.querySelector('.runtime-inspector-header').getBoundingClientRect().height, panel: document.querySelector('.runtime-inspector').getBoundingClientRect().width })`);

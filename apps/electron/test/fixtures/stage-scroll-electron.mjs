@@ -8,8 +8,14 @@ app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: false, width: 1000, height: 800, webPreferences: { sandbox: true, backgroundThrottling: false } });
+  // Linux CI supplies an Xvfb display. A hidden Linux window can throttle its
+  // compositor even with backgroundThrottling disabled, delaying the resize
+  // notifications this test is meant to exercise. Show it on that virtual
+  // display so it receives the same frame lifecycle as an open workspace.
+  const showOnCiDisplay = process.platform === 'linux' && process.env.CI === 'true' && Boolean(process.env.DISPLAY);
+  const window = new BrowserWindow({ show: showOnCiDisplay, width: 1000, height: 800, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
+    process.stderr.write(`[stage scroll] platform=${process.platform} virtualDisplayVisible=${showOnCiDisplay} contentSize=${JSON.stringify(window.getContentSize())}\n`);
     await window.loadURL(url);
     await configureFixtureWindow(window);
     const run = (script) => window.webContents.executeJavaScript(script);
@@ -72,11 +78,30 @@ async function main() {
     await run('window.stageScrollFixture.longList()');
     await settle();
     // Local child layout changes do not update Stage props (e.g. late markdown/media).
+    const logResizeState = async (phase) => {
+      try {
+        const state = await run(`(() => {
+          const stage = document.querySelector('.desktop-stage');
+          const thinking = document.querySelector('.transcript-thinking');
+          return { top: stage?.scrollTop ?? null, height: stage?.scrollHeight ?? null, viewport: stage?.clientHeight ?? null,
+            gap: stage ? stage.scrollHeight - stage.clientHeight - stage.scrollTop : null,
+            thinkingHeight: thinking?.getBoundingClientRect().height ?? null,
+            jumpVisible: Boolean(document.querySelector('.desktop-stage-jump')) };
+        })()`);
+        process.stderr.write(`[stage scroll ${phase}] ${JSON.stringify(state)}\n`);
+      } catch (diagnosticError) {
+        // Diagnostics must never replace the failure they are explaining.
+        try { process.stderr.write(`[stage scroll ${phase}] diagnostic unavailable: ${diagnosticError}\n`); } catch {}
+      }
+    };
+    await logResizeState('before growth');
     await run(`document.querySelector('.transcript-thinking').style.height = '150px'`);
-    await waitForFixture(window.webContents, `${metrics}.gap <= 1`);
+    try { await waitForFixture(window.webContents, `${metrics}.gap <= 1`); }
+    catch (error) { try { await logResizeState('growth timeout'); } catch {} throw error; }
     result.resizeGap = (await run(metrics)).gap;
     await run(`document.querySelector('.transcript-thinking').style.height = '20px'`);
-    await waitForFixture(window.webContents, `${metrics}.gap <= 1`);
+    try { await waitForFixture(window.webContents, `${metrics}.gap <= 1`); }
+    catch (error) { try { await logResizeState('shrink timeout'); } catch {} throw error; }
     result.shrinkGap = (await run(metrics)).gap;
     result.finalAncestorScroll = (await run(metrics)).ancestor;
     await run(`(() => { const style = document.createElement('style'); style.textContent = '* { animation: none !important; transition: none !important; }'; document.head.append(style); })()`);

@@ -3,7 +3,15 @@ use anyhow::{bail, Context, Result};
 use platform_pty::{spawn_pty_process, ProcessHandle, TerminalSize};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     sync::mpsc,
@@ -22,6 +30,9 @@ struct Request {
     cols: Option<u16>,
     rows: Option<u16>,
     data: Option<String>,
+    shell_selection: Option<bool>,
+    shell_program: Option<String>,
+    shell_launch_cwd: Option<String>,
 }
 
 #[derive(Default)]
@@ -58,37 +69,184 @@ impl Utf8Stream {
     }
 }
 
-fn shell() -> (String, Vec<String>) {
+fn shell(request: &Request) -> Result<(String, Vec<String>)> {
     #[cfg(unix)]
     {
+        if request.shell_selection.is_some()
+            || request.shell_program.is_some()
+            || request.shell_launch_cwd.is_some()
+        {
+            bail!("Windows shell selection is not supported on this platform");
+        }
         let shell = std::env::var("SHELL")
             .ok()
             .filter(|s| Path::new(s).is_absolute() && Path::new(s).is_file())
             .unwrap_or_else(|| "/bin/sh".into());
-        (shell, vec!["-l".into(), "-i".into()])
+        Ok((shell, vec!["-l".into(), "-i".into()]))
     }
     #[cfg(windows)]
     {
-        let paths = std::env::var_os("PATH").unwrap_or_default();
-        for name in ["pwsh.exe", "powershell.exe"] {
-            if let Some(path) = std::env::split_paths(&paths)
-                .map(|p| p.join(name))
-                .find(|p| p.is_file())
-            {
-                return (path.to_string_lossy().into_owned(), vec!["-NoLogo".into()]);
+        // Desktop main, not the renderer, selects from the original PATH.
+        // The broker's own PATH and cwd remain app-owned for native loading.
+        let environment = shell_environment();
+        match (
+            request.shell_selection,
+            request.shell_program.as_deref(),
+            request.shell_launch_cwd.as_deref(),
+        ) {
+            (Some(true), Some(program), None) => {
+                if !valid_windows_shell_program(program, |path| path.is_file()) {
+                    bail!("invalid Windows terminal shell selection");
+                }
+                return Ok((program.into(), vec!["-NoLogo".into()]));
             }
+            (Some(true), None, Some(cwd)) => {
+                let path = packaged_windows_fallback(&environment, Path::new(cwd))?;
+                return Ok((path.to_string_lossy().into_owned(), vec![]));
+            }
+            (None, None, None) => {}
+            _ => bail!("invalid Windows terminal shell selection"),
         }
-        (
-            std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
-            vec![],
-        )
+        let paths = shell_path(&environment).unwrap_or_default();
+        if let Some(path) = find_windows_shell(paths, |candidate| candidate.is_file()) {
+            return Ok((path.to_string_lossy().into_owned(), vec!["-NoLogo".into()]));
+        }
+        Ok((windows_fallback_shell(&environment).into(), vec![]))
     }
 }
 
+#[cfg(any(windows, test))]
+fn shell_path(environment: &HashMap<String, String>) -> Option<&str> {
+    shell_environment_value(environment, "PATH")
+}
+
+#[cfg(any(windows, test))]
+fn shell_environment_value<'a>(
+    environment: &'a HashMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
+    environment
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+#[cfg(any(windows, test))]
+fn valid_windows_shell_program(program: &str, is_file: impl Fn(&Path) -> bool) -> bool {
+    let path = Path::new(program);
+    let expected_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("pwsh.exe") || name.eq_ignore_ascii_case("powershell.exe")
+        });
+    path.is_absolute() && expected_name && is_file(path)
+}
+
+#[cfg(any(windows, test))]
+fn find_windows_shell(paths: &str, is_file: impl Fn(&Path) -> bool) -> Option<std::path::PathBuf> {
+    for name in ["pwsh.exe", "powershell.exe"] {
+        for entry in std::env::split_paths(paths) {
+            let candidate = entry.join(name);
+            if is_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(any(windows, test))]
+fn windows_fallback_shell(environment: &HashMap<String, String>) -> &str {
+    shell_environment_value(environment, "COMSPEC").unwrap_or("cmd.exe")
+}
+
+#[cfg(windows)]
+fn windows_path_from_launch_cwd(cwd: &Path, path: &Path) -> Result<std::path::PathBuf> {
+    use std::path::{Component, Prefix};
+    if !cwd.is_absolute() {
+        bail!("invalid Windows terminal launch directory");
+    }
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    let mut components = path.components();
+    if let Some(Component::Prefix(prefix)) = components.next() {
+        let drive = match prefix.kind() {
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+            _ => bail!("invalid relative Windows terminal shell path"),
+        };
+        let cwd_drive = match cwd.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => Some(drive),
+                _ => None,
+            },
+            _ => None,
+        };
+        // The broker receives an explicit environment without Windows' hidden
+        // per-drive cwd variables. A different drive therefore starts at its
+        // root, while the launch drive retains the parent's original cwd.
+        let base = if cwd_drive.is_some_and(|current| current.eq_ignore_ascii_case(&drive)) {
+            cwd.to_path_buf()
+        } else {
+            std::path::PathBuf::from(format!("{}:\\", drive as char))
+        };
+        return Ok(base.join(components.as_path()));
+    }
+    Ok(cwd.join(path))
+}
+
+#[cfg(windows)]
+fn packaged_windows_fallback(
+    environment: &HashMap<String, String>,
+    launch_cwd: &Path,
+) -> Result<std::path::PathBuf> {
+    let executable = Path::new(windows_fallback_shell(environment));
+    if let Some(paths) = shell_path(environment) {
+        let extensions = shell_environment_value(environment, "PATHEXT").unwrap_or(".EXE");
+        for entry in std::env::split_paths(paths) {
+            let candidate = entry.join(executable);
+            let resolved = windows_path_from_launch_cwd(launch_cwd, &candidate)?;
+            if resolved.exists() {
+                return Ok(resolved);
+            }
+            for extension in std::env::split_paths(extensions) {
+                let extension = extension.to_string_lossy();
+                if let Some(extension) = extension.get(1..) {
+                    let resolved = windows_path_from_launch_cwd(
+                        launch_cwd,
+                        &candidate.with_extension(extension),
+                    )?;
+                    if resolved.exists() {
+                        return Ok(resolved);
+                    }
+                }
+            }
+        }
+    }
+    let fallback = windows_path_from_launch_cwd(launch_cwd, executable)?;
+    // portable-pty searches PATH again when starting the selected program.
+    // If the original unqualified fallback does not exist, passing its new
+    // absolute spelling could make that second search select a PATHEXT file
+    // in the launch cwd that the original search would never have selected.
+    if !fallback.exists() {
+        bail!("Windows terminal fallback executable not found");
+    }
+    Ok(fallback)
+}
+
 fn shell_environment() -> HashMap<String, String> {
+    shell_environment_from(std::env::vars())
+}
+
+fn shell_environment_from(
+    source: impl Iterator<Item = (String, String)>,
+) -> HashMap<String, String> {
     // Deliberate allowlist: model credentials and app transport secrets never
     // cross this boundary. Login shell startup files still behave normally.
-    let mut env: HashMap<String, String> = std::env::vars()
+    let source: HashMap<String, String> = source.collect();
+    let mut env: HashMap<String, String> = source
+        .iter()
         .filter(|(key, _)| {
             matches!(
                 key.to_ascii_uppercase().as_str(),
@@ -122,7 +280,18 @@ fn shell_environment() -> HashMap<String, String> {
                     | "LC_TIME"
             )
         })
+        .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    if let Some(present) = source.get("DESKTOP_TERMINAL_SHELL_PATH_PRESENT") {
+        // Keep the original value intact so a maximal Windows PATH does not
+        // overflow the per-variable limit when it enters the broker.
+        env.retain(|key, _| !key.eq_ignore_ascii_case("PATH"));
+        if present == "1" {
+            if let Some(path) = source.get("DESKTOP_TERMINAL_SHELL_PATH") {
+                env.insert("PATH".into(), path.clone());
+            }
+        }
+    }
     env.insert("TERM".into(), "xterm-256color".into());
     env.insert("COLORTERM".into(), "truecolor".into());
     env
@@ -189,6 +358,13 @@ async fn dispatch(
     terminals: &mut HashMap<String, Arc<ProcessHandle>>,
     events: &mpsc::Sender<Value>,
 ) -> Result<()> {
+    if request.kind != "create"
+        && (request.shell_selection.is_some()
+            || request.shell_program.is_some()
+            || request.shell_launch_cwd.is_some())
+    {
+        bail!("shell selection is only valid for terminal creation");
+    }
     if request.request_id.is_empty()
         || request.request_id.len() > 128
         || request.terminal_id.is_empty()
@@ -225,7 +401,7 @@ async fn dispatch(
             if !cwd.is_absolute() || !cwd.is_dir() {
                 bail!("cwd must be an existing absolute directory");
             }
-            let (program, args) = shell();
+            let (program, args) = shell(request)?;
             let process = spawn_pty_process(
                 &program,
                 &args,
@@ -309,27 +485,41 @@ fn dimensions(request: &Request) -> Result<TerminalSize> {
     Ok(TerminalSize { rows, cols })
 }
 
+fn forward_terminal_stdin<R: std::io::Read>(
+    input: &mut R,
+    input_tx: mpsc::Sender<Vec<u8>>,
+    stdin_eof: &AtomicBool,
+) {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match input.read(&mut buffer) {
+            Ok(0) => {
+                stdin_eof.store(true, Ordering::Release);
+                break;
+            }
+            Err(_) => break,
+            Ok(count) => {
+                if input_tx.blocking_send(buffer[..count].to_vec()).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// Run the isolated newline-delimited terminal protocol on standard I/O.
 pub async fn run() -> Result<()> {
     // Tokio's stdin uses a non-cancellable blocking task, which keeps runtime
     // shutdown waiting for EOF after SIGTERM. A detached standard thread can
     // remain blocked in the OS read without holding the runtime alive.
     let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(8);
+    let stdin_eof = Arc::new(AtomicBool::new(false));
+    let stdin_eof_reader = stdin_eof.clone();
     std::thread::Builder::new()
         .name("desktop-terminal-stdin".into())
         .spawn(move || {
             let mut input = std::io::stdin().lock();
-            let mut buffer = [0_u8; 8192];
-            loop {
-                match std::io::Read::read(&mut input, &mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) => {
-                        if input_tx.blocking_send(buffer[..count].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
+            forward_terminal_stdin(&mut input, input_tx, &stdin_eof_reader);
         })?;
     let (input, mut input_writer) = tokio::io::duplex(8192);
     let pump = tokio::spawn(async move {
@@ -369,7 +559,7 @@ pub async fn run() -> Result<()> {
             }
         }
     });
-    let result = serve(input, output).await;
+    let result = serve(input, output, Some(stdin_eof)).await;
     pump.abort();
     if tokio::time::timeout(Duration::from_secs(1), &mut output_pump)
         .await
@@ -383,8 +573,23 @@ pub async fn run() -> Result<()> {
 
 async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
     input: R,
-    mut output: W,
+    output: W,
+    stdin_eof: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
+    serve_until(input, output, stdin_eof, shutdown_signal()).await
+}
+
+async fn serve_until<R, W, S>(
+    input: R,
+    mut output: W,
+    stdin_eof: Option<Arc<AtomicBool>>,
+    shutdown: S,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+    S: std::future::Future<Output = ()>,
+{
     let (events, mut receiver) = mpsc::channel::<Value>(32);
     let mut writer = tokio::spawn(async move {
         while let Some(event) = receiver.recv().await {
@@ -422,15 +627,35 @@ async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
         }
         Ok(())
     };
-    let result: Result<()> = tokio::select! {
-        result = operation => result,
-        () = shutdown_signal() => Ok(()),
+    let (result, observed_eof): (Result<()>, bool) = tokio::select! {
+        result = operation => (result, true),
+        () = shutdown => (Ok(()), false),
     };
     let mut cleanup = tokio::task::JoinSet::new();
     for (_, handle) in terminals {
         cleanup.spawn(async move { terminate_tree(&handle).await });
     }
-    while cleanup.join_next().await.is_some() {}
+    let mut cleanup_completed = true;
+    while let Some(result) = cleanup.join_next().await {
+        if result.is_err() {
+            cleanup_completed = false;
+        }
+    }
+    if observed_eof
+        && result.is_ok()
+        && cleanup_completed
+        && stdin_eof
+            .as_ref()
+            .is_none_or(|eof| eof.load(Ordering::Acquire))
+    {
+        // This confirms EOF and completion of the cleanup actions, not that
+        // every descendant has been reaped. Keep a blocked parent bounded.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(250),
+            events.send(json!({"kind":"shutdown","reason":"eof"})),
+        )
+        .await;
+    }
     drop(events);
     // A parent that stopped reading must not prevent child process cleanup.
     if !writer.is_finished()
@@ -480,6 +705,310 @@ mod tests {
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
     }
 
+    #[test]
+    fn shell_path_is_restored_without_native_loader_environment() {
+        let env = shell_environment_from(
+            [
+                ("PATH", "C:\\app\\gstreamer\\bin;C:\\user\\bin"),
+                ("DESKTOP_TERMINAL_SHELL_PATH", "C:\\user\\bin"),
+                ("DESKTOP_TERMINAL_SHELL_PATH_PRESENT", "1"),
+                ("LD_LIBRARY_PATH", "/injected"),
+                ("DYLD_INSERT_LIBRARIES", "/injected.dylib"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into())),
+        );
+        assert_eq!(env.get("PATH").map(String::as_str), Some("C:\\user\\bin"));
+        assert!(!env.contains_key("DESKTOP_TERMINAL_SHELL_PATH"));
+        assert!(!env.contains_key("DESKTOP_TERMINAL_SHELL_PATH_PRESENT"));
+        assert!(!env.contains_key("LD_LIBRARY_PATH"));
+        assert!(!env.contains_key("DYLD_INSERT_LIBRARIES"));
+        assert_eq!(shell_path(&env), Some("C:\\user\\bin"));
+
+        let mixed_case = shell_environment_from(
+            [("Path", "C:\\user\\tools")]
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        assert_eq!(shell_path(&mixed_case), Some("C:\\user\\tools"));
+
+        for (marker, expected) in [("0", None), ("1", Some(""))] {
+            let env = shell_environment_from(
+                [
+                    ("PATH", "broker-only"),
+                    ("DESKTOP_TERMINAL_SHELL_PATH_PRESENT", marker),
+                    ("DESKTOP_TERMINAL_SHELL_PATH", ""),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+            );
+            assert_eq!(env.get("PATH").map(String::as_str), expected);
+        }
+    }
+
+    #[test]
+    fn windows_shell_selection_uses_original_directory_and_safe_fallback() {
+        let base = std::env::temp_dir().join("lingxi-original-working-directory");
+        let relative = std::path::PathBuf::from("relative-tools");
+        let expected = relative.join("pwsh.exe");
+        let paths = std::env::join_paths([relative]).unwrap();
+        let selected = find_windows_shell(&paths.to_string_lossy(), |path| path == expected);
+        assert_eq!(selected.as_deref(), Some(expected.as_path()));
+        assert_eq!(
+            find_windows_shell(&paths.to_string_lossy(), |_| false),
+            None
+        );
+
+        let empty = HashMap::new();
+        assert_eq!(shell_path(&empty), None);
+        assert_eq!(windows_fallback_shell(&empty), "cmd.exe");
+        let comspec = [("ComSpec".into(), "custom-cmd.exe".into())]
+            .into_iter()
+            .collect();
+        assert_eq!(windows_fallback_shell(&comspec), "custom-cmd.exe");
+
+        let allowed = base.join("PWSH.EXE");
+        let wrong_name = base.join("other.exe");
+        assert!(valid_windows_shell_program(
+            &allowed.to_string_lossy(),
+            |_| true
+        ));
+        assert!(!valid_windows_shell_program("pwsh.exe", |_| true));
+        assert!(!valid_windows_shell_program(
+            &wrong_name.to_string_lossy(),
+            |_| true
+        ));
+        assert!(!valid_windows_shell_program(
+            &allowed.to_string_lossy(),
+            |_| false
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unpackaged_windows_shell_search_preserves_drive_relative_paths() {
+        for entry in ["C:tools", "D:tools", ""] {
+            let expected = Path::new(entry).join("pwsh.exe");
+            assert_eq!(
+                find_windows_shell(entry, |candidate| candidate == expected),
+                Some(expected)
+            );
+        }
+        let quoted = r#""C:\with;semicolon";C:tools"#;
+        let expected = Path::new(r"C:\with;semicolon").join("pwsh.exe");
+        assert_eq!(
+            find_windows_shell(quoted, |candidate| candidate == expected),
+            Some(expected)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unpackaged_windows_shell_search_resolves_current_drive_relative_path() {
+        use std::path::{Component, Prefix};
+
+        // Use the existing working directory so this native regression does
+        // not mutate the process-wide cwd while other tests may be running.
+        let cwd = std::env::current_dir().unwrap();
+        let drive = match cwd.components().next().unwrap() {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive as char,
+                _ => panic!("test requires a local Windows working directory"),
+            },
+            _ => panic!("test requires a Windows drive prefix"),
+        };
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let program = directory.path().join("pwsh.exe");
+        std::fs::write(&program, b"test shell").unwrap();
+        let entry = format!(
+            "{drive}:{}",
+            directory.path().file_name().unwrap().to_string_lossy()
+        );
+        let selected = find_windows_shell(&entry, |candidate| candidate.is_file()).unwrap();
+        assert!(!selected.is_absolute());
+        assert_eq!(
+            selected.canonicalize().unwrap(),
+            program.canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn packaged_windows_fallback_resolves_original_cwd_and_user_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path();
+        let tools = cwd.join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot");
+        let system_cmd = Path::new(&system_root).join("System32").join("cmd.exe");
+        let cwd_cmd = cwd.join("cmd.exe");
+        let tools_cmd = tools.join("cmd.exe");
+        std::fs::copy(&system_cmd, &cwd_cmd).unwrap();
+        std::fs::copy(&system_cmd, &tools_cmd).unwrap();
+
+        let mut environment = HashMap::new();
+        // A missing PATH and COMSPEC must use the original cwd, not resources/bin.
+        let selected = packaged_windows_fallback(&environment, cwd).unwrap();
+        assert_eq!(selected, cwd_cmd);
+        let status = std::process::Command::new(&selected)
+            .args(["/d", "/c", "exit 0"])
+            .current_dir(&tools)
+            .env_clear()
+            .env("SystemRoot", &system_root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        environment.insert("Path".into(), "tools".into());
+        assert_eq!(
+            packaged_windows_fallback(&environment, cwd).unwrap(),
+            tools_cmd
+        );
+
+        let nested = cwd.join("search").join("tools");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::copy(&system_cmd, nested.join("cmd.exe")).unwrap();
+        environment.insert("ComSpec".into(), "tools\\cmd.exe".into());
+        environment.insert("Path".into(), "search".into());
+        assert_eq!(
+            packaged_windows_fallback(&environment, cwd).unwrap(),
+            nested.join("cmd.exe")
+        );
+        environment.remove("Path");
+        assert_eq!(
+            packaged_windows_fallback(&environment, cwd).unwrap(),
+            tools_cmd
+        );
+
+        environment.insert("Path".into(), "".into());
+        environment.insert("ComSpec".into(), "alternate".into());
+        environment.insert("PATHEXT".into(), ".EXE;.COM".into());
+        let alternate = cwd.join("alternate.EXE");
+        std::fs::copy(&system_cmd, &alternate).unwrap();
+        assert_eq!(
+            packaged_windows_fallback(&environment, cwd).unwrap(),
+            alternate
+        );
+        environment.remove("Path");
+        assert!(!cwd.join("alternate").exists());
+        assert!(packaged_windows_fallback(&environment, cwd).is_err());
+        environment.insert("Path".into(), "missing".into());
+        assert!(packaged_windows_fallback(&environment, cwd).is_err());
+        std::fs::copy(&system_cmd, cwd.join("alternate")).unwrap();
+        assert_eq!(
+            packaged_windows_fallback(&environment, cwd).unwrap(),
+            cwd.join("alternate")
+        );
+
+        environment.insert("ComSpec".into(), system_cmd.to_string_lossy().into_owned());
+        assert_eq!(
+            packaged_windows_fallback(&environment, cwd).unwrap(),
+            system_cmd
+        );
+        assert!(packaged_windows_fallback(&environment, Path::new("relative")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn packaged_windows_fallback_preserves_drive_relative_semantics() {
+        let cwd = Path::new(r"C:\original\working");
+        assert_eq!(
+            windows_path_from_launch_cwd(cwd, Path::new(r"C:tools\cmd.exe")).unwrap(),
+            cwd.join(r"tools\cmd.exe")
+        );
+        assert_eq!(
+            windows_path_from_launch_cwd(cwd, Path::new(r"D:tools\cmd.exe")).unwrap(),
+            Path::new(r"D:\tools\cmd.exe")
+        );
+        assert_eq!(
+            windows_path_from_launch_cwd(cwd, Path::new(r"\tools\cmd.exe")).unwrap(),
+            Path::new(r"C:\tools\cmd.exe")
+        );
+        let verbatim = Path::new(r"\\?\C:\original\working");
+        assert_eq!(
+            windows_path_from_launch_cwd(verbatim, Path::new(r"C:tools\cmd.exe")).unwrap(),
+            verbatim.join(r"tools\cmd.exe")
+        );
+        let unc = Path::new(r"\\server\share\working");
+        assert_eq!(
+            windows_path_from_launch_cwd(unc, Path::new(r"D:tools\cmd.exe")).unwrap(),
+            Path::new(r"D:\tools\cmd.exe")
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_selection_fields_are_rejected_outside_create() {
+        let (events, _receiver) = mpsc::channel(1);
+        for field in [
+            json!({"shellSelection":true}),
+            json!({"shellProgram":"pwsh.exe"}),
+            json!({"shellLaunchCwd":"C:\\original"}),
+        ] {
+            let mut frame = json!({"kind":"input", "requestId":"request", "terminalId":"terminal"});
+            frame
+                .as_object_mut()
+                .unwrap()
+                .extend(field.as_object().unwrap().clone());
+            let request: Request = serde_json::from_value(frame).unwrap();
+            let error = dispatch(&request, &mut HashMap::new(), &events)
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("only valid for terminal creation"));
+        }
+        let unknown = json!({"kind":"create", "requestId":"request", "terminalId":"terminal", "shellPath":"pwsh.exe"});
+        assert!(serde_json::from_value::<Request>(unknown).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_rejects_windows_shell_selection_fields() {
+        let mut create = request("create", "test", Path::new("/"), None);
+        create.shell_selection = Some(true);
+        create.shell_program = Some("/tmp/pwsh.exe".into());
+        assert!(shell(&create)
+            .unwrap_err()
+            .to_string()
+            .contains("not supported"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_accepts_only_an_absolute_existing_expected_shell_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("pwsh.exe");
+        std::fs::write(&program, b"test shell").unwrap();
+        let mut create = request("create", "test", directory.path(), None);
+        create.shell_selection = Some(true);
+        create.shell_program = Some(program.to_string_lossy().into_owned());
+        assert_eq!(
+            shell(&create).unwrap().0,
+            program.to_string_lossy().into_owned()
+        );
+        create.shell_program = Some("pwsh.exe".into());
+        assert!(shell(&create).is_err());
+        let other = directory.path().join("other.exe");
+        std::fs::write(&other, b"wrong name").unwrap();
+        create.shell_program = Some(other.to_string_lossy().into_owned());
+        assert!(shell(&create).is_err());
+        let not_file = directory.path().join("directory").join("pwsh.exe");
+        std::fs::create_dir_all(&not_file).unwrap();
+        create.shell_program = Some(not_file.to_string_lossy().into_owned());
+        assert!(shell(&create).is_err());
+        create.shell_selection = None;
+        assert!(shell(&create).is_err());
+        create.shell_selection = Some(true);
+        create.shell_program = None;
+        assert!(shell(&create).is_err());
+        create.shell_launch_cwd = Some("relative".into());
+        assert!(shell(&create).is_err());
+        create.shell_launch_cwd = Some(directory.path().to_string_lossy().into_owned());
+        assert!(Path::new(&shell(&create).unwrap().0).is_absolute());
+        create.shell_program = Some(program.to_string_lossy().into_owned());
+        assert!(shell(&create).is_err());
+    }
+
     fn request(kind: &str, id: &str, cwd: &Path, data: Option<&str>) -> Request {
         Request {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -489,6 +1018,9 @@ mod tests {
             cols: Some(90),
             rows: Some(31),
             data: data.map(Into::into),
+            shell_selection: None,
+            shell_program: None,
+            shell_launch_cwd: None,
         }
     }
 
@@ -615,13 +1147,78 @@ mod tests {
     #[tokio::test]
     async fn oversize_and_malformed_frames_terminate_protocol() {
         let (input, mut client) = tokio::io::duplex(MAX_REQUEST + 2);
-        let task = tokio::spawn(serve(input, tokio::io::sink()));
+        let task = tokio::spawn(serve(input, tokio::io::sink(), None));
         client
             .write_all(&vec![b'x'; MAX_REQUEST + 1])
             .await
             .unwrap();
         assert!(task.await.unwrap().is_err());
-        assert!(serve(&b"{}\n"[..], tokio::io::sink()).await.is_err());
+        assert!(serve(&b"{}\n"[..], tokio::io::sink(), None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn eof_ack_requires_confirmed_clean_input_and_not_signal_shutdown() {
+        async fn capture(input: &[u8], eof: Option<Arc<AtomicBool>>) -> (Result<()>, String) {
+            let (output, mut client) = tokio::io::duplex(4096);
+            let result = serve(input, output, eof).await;
+            let mut frames = String::new();
+            client.read_to_string(&mut frames).await.unwrap();
+            (result, frames)
+        }
+        let (result, frames) = capture(b"", Some(Arc::new(AtomicBool::new(true)))).await;
+        assert!(result.is_ok());
+        assert_eq!(
+            serde_json::from_str::<Value>(frames.trim()).unwrap(),
+            json!({"kind":"shutdown","reason":"eof"})
+        );
+        let (result, frames) = capture(b"", Some(Arc::new(AtomicBool::new(false)))).await;
+        assert!(result.is_ok());
+        assert!(frames.is_empty());
+        let (result, frames) = capture(b"{}\n", Some(Arc::new(AtomicBool::new(true)))).await;
+        assert!(result.is_err());
+        assert!(frames.is_empty());
+
+        let (input, _open_input) = tokio::io::duplex(64);
+        let (output, mut client) = tokio::io::duplex(4096);
+        assert!(serve_until(input, output, None, std::future::ready(()))
+            .await
+            .is_ok());
+        let mut frames = String::new();
+        client.read_to_string(&mut frames).await.unwrap();
+        assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn stdin_reader_distinguishes_eof_error_and_receiver_close() {
+        struct DataThenError(bool);
+        impl std::io::Read for DataThenError {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    Err(std::io::Error::other("fixture read error"))
+                } else {
+                    self.0 = true;
+                    buffer[..4].copy_from_slice(b"data");
+                    Ok(4)
+                }
+            }
+        }
+        let (sender, mut receiver) = mpsc::channel(1);
+        let eof = AtomicBool::new(false);
+        forward_terminal_stdin(&mut std::io::Cursor::new(b"data"), sender, &eof);
+        assert_eq!(receiver.try_recv().unwrap(), b"data");
+        assert!(eof.load(Ordering::Acquire));
+
+        let (sender, mut receiver) = mpsc::channel(1);
+        let eof = AtomicBool::new(false);
+        forward_terminal_stdin(&mut DataThenError(false), sender, &eof);
+        assert_eq!(receiver.try_recv().unwrap(), b"data");
+        assert!(!eof.load(Ordering::Acquire));
+
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let eof = AtomicBool::new(false);
+        forward_terminal_stdin(&mut std::io::Cursor::new(b"data"), sender, &eof);
+        assert!(!eof.load(Ordering::Acquire));
     }
 
     #[cfg(unix)]
@@ -632,7 +1229,7 @@ mod tests {
         let input = format!("{request}\n");
         tokio::time::timeout(
             Duration::from_secs(5),
-            serve(input.as_bytes(), tokio::io::sink()),
+            serve(input.as_bytes(), tokio::io::sink(), None),
         )
         .await
         .unwrap()

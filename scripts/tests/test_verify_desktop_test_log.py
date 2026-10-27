@@ -77,6 +77,22 @@ class VerifyDesktopTestLog(unittest.TestCase):
                     verify.verify_log(log, "sdk"),
                 )
 
+    def test_linux_terminal_native_tests_cannot_be_missing_or_skipped(self) -> None:
+        for name in (
+            "Linux loader resolves one app-owned ORIGIN entry through separator and token characters",
+            "raw Rust broker acknowledges real stdin EOF after terminal cleanup",
+            "raw Rust broker rejects input probe after shell exit",
+        ):
+            self.assertIn(name, verify.REQUIRED["electron"])
+            passed = f"✔ {name} (1.25ms)"
+            for replacement in ("", f"﹣ {name} (0.05ms) # broker unavailable"):
+                with self.subTest(name=name, replacement=replacement):
+                    log = sample_log("electron").replace(passed, replacement)
+                    self.assertIn(
+                        f"required test did not pass exactly once: {name}",
+                        verify.verify_log(log, "electron"),
+                    )
+
     def test_unknown_skip_and_wrong_skip_reason_fail(self) -> None:
         unknown = sample_log("electron") + "\n﹣ unexpected skipped integration (0.1ms) # SKIP\n"
         self.assertTrue(any("unexpected skipped test" in e for e in verify.verify_log(unknown, "electron")))

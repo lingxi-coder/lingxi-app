@@ -62,9 +62,10 @@ jobs:
             platform: linux
             arch: x64
     runs-on: ${{ matrix.runner }}
-    # The Windows release Rust build alone took over 50 minutes on the hosted
-    # runner; leave room for native process regressions and package smoke tests.
-    timeout-minutes: ${{ matrix.platform == 'win32' && 120 || 90 }}
+    # The Windows release Rust build alone took over 50 minutes; the cold Intel
+    # macOS job reached shared SDK tests only at its 90-minute limit. Leave
+    # room for the remaining native, Electron, and packaged smoke tests.
+    timeout-minutes: ${{ matrix.platform == 'darwin' && matrix.arch == 'x64' && 180 || matrix.platform == 'win32' && 120 || 90 }}
     steps:
       - name: Enable Windows long paths and Git symlinks
         if: runner.os == 'Windows'
@@ -212,6 +213,56 @@ jobs:
           runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
           cargo test --locked --manifest-path "${runtime_root}/Cargo.toml" -p platform-posix secure_storage --lib
 
+      - name: Test Windows terminal shell selection
+        if: matrix.platform == 'win32'
+        working-directory: .
+        shell: bash
+        run: |
+          set -o pipefail
+          test_log="$RUNNER_TEMP/windows-terminal-tests.log"
+          cargo test --locked -p bridge-server --lib desktop_terminal::tests -- --test-threads=1 --color never | tee "$test_log"
+          tr -d '\r' < "$test_log" > "$test_log.normalized"
+          for test_name in \
+            unpackaged_windows_shell_search_preserves_drive_relative_paths \
+            unpackaged_windows_shell_search_resolves_current_drive_relative_path \
+            packaged_windows_fallback_resolves_original_cwd_and_user_path \
+            packaged_windows_fallback_preserves_drive_relative_semantics \
+            windows_accepts_only_an_absolute_existing_expected_shell_file \
+            shell_selection_fields_are_rejected_outside_create \
+            shell_path_is_restored_without_native_loader_environment \
+            windows_shell_selection_uses_original_directory_and_safe_fallback \
+            stdin_reader_distinguishes_eof_error_and_receiver_close \
+            eof_ack_requires_confirmed_clean_input_and_not_signal_shutdown; do
+            matches="$(grep -Fxc "test desktop_terminal::tests::${test_name} ... ok" "$test_log.normalized" || true)"
+            if [[ "$matches" != 1 ]]; then
+              printf 'Required Windows terminal test did not pass exactly once: %s\n' "$test_name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Verify Windows terminal EOF after accepted input
+        if: matrix.platform == 'win32'
+        shell: bash
+        working-directory: apps/electron
+        run: |
+          set -o pipefail
+          export LINGXI_TERMINAL_TEST_BIN="$GITHUB_WORKSPACE/target/release/bridge-server.exe"
+          test_log="$RUNNER_TEMP/windows-terminal-eof-node.log"
+          node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs \
+            --test --test-reporter=tap \
+            --test-name-pattern='^raw Rust broker (acknowledges real stdin EOF after terminal cleanup|rejects input probe after shell exit)$' \
+            test/terminal-manager.integration.test.ts | tee "$test_log"
+          tr -d '\r' < "$test_log" > "$test_log.normalized"
+          for test_name in \
+            'raw Rust broker acknowledges real stdin EOF after terminal cleanup' \
+            'raw Rust broker rejects input probe after shell exit'; do
+            matches="$(grep -Ec "^ok [0-9]+ - ${test_name}$" "$test_log.normalized" || true)"
+            if [[ "$matches" != 1 ]]; then
+              printf 'Required Windows terminal test did not pass exactly once: %s\n' "$test_name" >&2
+              exit 1
+            fi
+          done
+
       - name: Test Windows Credential Manager storage
         if: matrix.platform == 'win32'
         working-directory: .
@@ -227,6 +278,26 @@ jobs:
         run: |
           cargo test --locked -p bridge-server --bin bridge-server local_app_process::tests -- --test-threads=1
           cargo test --locked -p bridge-server --test local_app_process_windows
+
+      - name: Test Linux terminal EOF acknowledgement
+        if: matrix.platform == 'linux'
+        working-directory: .
+        shell: bash
+        run: |
+          set -o pipefail
+          test_log="$RUNNER_TEMP/linux-terminal-eof-test.log"
+          cargo test --locked -p bridge-server --lib desktop_terminal::tests -- --test-threads=1 --color never | tee "$test_log"
+          tr -d '\r' < "$test_log" > "$test_log.normalized"
+          for test_name in \
+            stdin_reader_distinguishes_eof_error_and_receiver_close \
+            eof_ack_requires_confirmed_clean_input_and_not_signal_shutdown \
+            eof_closes_real_terminal; do
+            matches="$(grep -Fxc "test desktop_terminal::tests::${test_name} ... ok" "$test_log.normalized" || true)"
+            if [[ "$matches" != 1 ]]; then
+              printf 'Required Linux terminal test did not pass exactly once: %s\n' "$test_name" >&2
+              exit 1
+            fi
+          done
 
       - name: Test Windows MCP cancellation and transport cleanup
         if: matrix.platform == 'win32'
@@ -309,6 +380,24 @@ jobs:
           fi
           npm run build
 
+      - name: Verify native Windows terminal shell discovery
+        if: matrix.platform == 'win32'
+        shell: bash
+        working-directory: apps/electron
+        run: |
+          set -o pipefail
+          test_log="$RUNNER_TEMP/windows-terminal-node.log"
+          node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs \
+            --test --test-reporter=tap \
+            --test-name-pattern='^Windows shell discovery finds a real file in a cwd-relative PATH$' \
+            test/terminal-manager.test.ts | tee "$test_log"
+          tr -d '\r' < "$test_log" > "$test_log.normalized"
+          matches="$(grep -Ec '^ok [0-9]+ - Windows shell discovery finds a real file in a cwd-relative PATH$' "$test_log.normalized" || true)"
+          if [[ "$matches" != 1 ]]; then
+            printf 'Required native Windows shell discovery test did not pass exactly once\n' >&2
+            exit 1
+          fi
+
       - name: Save Linux Desktop test evidence
         if: always() && matrix.platform == 'linux'
         uses: actions/upload-artifact@v4
@@ -340,6 +429,12 @@ jobs:
             for name in "${!DYLD_@}"; do unset "$name"; done
           fi
           node scripts/packaged-sidecar-smoke.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+
+      - name: Packaged terminal broker smoke
+        if: matrix.platform == 'linux' || matrix.platform == 'win32'
+        shell: bash
+        working-directory: apps/electron
+        run: node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs scripts/packaged-terminal-smoke.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
 
       - uses: actions/upload-artifact@v4
         with:

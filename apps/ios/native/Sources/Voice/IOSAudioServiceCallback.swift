@@ -46,7 +46,8 @@ final class IOSAudioServiceCallbackAdapter: IosAudioService, @unchecked Sendable
             },
             timeoutBudgetMs: request.timeoutBudgetMs,
             maxPayloadBytes: request.maxPayloadBytes,
-            operation: localOperation(request.operation)
+            operation: localOperation(request.operation),
+            routePolicy: request.routePolicy == .hostConfiguredLocalOnly ? .hostConfiguredLocalOnly : nil
         )
     }
 

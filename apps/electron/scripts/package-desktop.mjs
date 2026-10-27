@@ -49,6 +49,8 @@ import {
 } from './credential-broker.mjs';
 import { writeProtocolRegistration } from './protocol-registration.mjs';
 import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
+import { prepareMacGStreamerRuntime, signMacGStreamerRuntime, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { bundlePortableGStreamerRuntime, preflightPortableGStreamerRuntime } from './gstreamer-portable.mjs';
 
 function log(message) {
   process.stdout.write(`[package:desktop] ${message}\n`);
@@ -85,7 +87,8 @@ function assertBinaryArchitecture(path, target, label) {
     if (bytes.length < 20 || bytes.subarray(0, 4).toString('hex') !== '7f454c46') {
       throw new Error(`${label} is not an ELF executable`);
     }
-    if (bytes.readUInt16LE(18) !== 0x3e) throw new Error(`${label} is not linux-x64`);
+    const expectedMachine = target.arch === 'arm64' ? 0xb7 : 0x3e;
+    if (bytes.readUInt16LE(18) !== expectedMachine) throw new Error(`${label} is not linux-${target.arch}`);
     return;
   }
   if (bytes.length < 64 || bytes.subarray(0, 2).toString('ascii') !== 'MZ') {
@@ -95,7 +98,8 @@ function assertBinaryArchitecture(path, target, label) {
   if (peOffset + 6 > bytes.length || bytes.subarray(peOffset, peOffset + 4).toString('ascii') !== 'PE\0\0') {
     throw new Error(`${label} has an invalid PE header`);
   }
-  if (bytes.readUInt16LE(peOffset + 4) !== 0x8664) throw new Error(`${label} is not win32-x64`);
+  const expectedMachine = target.arch === 'arm64' ? 0xaa64 : 0x8664;
+  if (bytes.readUInt16LE(peOffset + 4) !== expectedMachine) throw new Error(`${label} is not win32-${target.arch}`);
 }
 
 async function createRuntimeAsar(resources, metadata) {
@@ -159,6 +163,7 @@ async function assembleDarwin(paths, metadata, electronDist, sidecar, modCompile
   cpSync(join(packageRoot, 'browser-extension'), join(resources, 'browser-extension'), { recursive: true });
   copyFileSync(sidecar, packagedSidecar);
   chmodSync(packagedSidecar, 0o755);
+  prepareMacGStreamerRuntime(packagedSidecar, join(contents, 'Frameworks'), paths.arch === 'arm64' ? 'arm64' : 'x86_64');
   const packagedModCompiler = stageModBun(resources, modCompiler);
   const brokerResourceRoot = join(resources, BROKER_RESOURCE_DIRNAME);
   buildCredentialBrokerResources(brokerResourceRoot, {
@@ -175,6 +180,7 @@ async function assembleDarwin(paths, metadata, electronDist, sidecar, modCompile
   assertBinaryArchitecture(packagedSidecar, paths, 'packaged bridge-server sidecar');
   if (!commandAvailable('/usr/bin/codesign')) throw new Error('codesign is required for macOS package tests');
   signBinary(packagedSidecar, '-', BRIDGE_SERVER_IDENTIFIER);
+  signMacGStreamerRuntime(join(contents, 'Frameworks'), '-');
   signBinary(packagedModCompiler, '-', `${BUNDLE_ID}.mod-compiler`);
   sealModBun(resources);
   signBinary(
@@ -189,9 +195,10 @@ async function assembleDarwin(paths, metadata, electronDist, sidecar, modCompile
   execFileSync('/usr/bin/codesign', [
     '--force', '--sign', '-', '--timestamp=none', paths.payloadRoot,
   ], { stdio: 'inherit' });
+  verifyMacGStreamerRuntime(join(contents, 'Frameworks'), packagedSidecar);
 }
 
-async function assemblePortable(paths, metadata, electronDist, sidecar, modCompiler) {
+async function assemblePortable(paths, metadata, electronDist, sidecar, modCompiler, gstreamerPlan) {
   cpSync(electronDist, paths.payloadRoot, { recursive: true });
   const resources = join(paths.payloadRoot, 'resources');
   rmSync(join(resources, 'default_app.asar'), { force: true });
@@ -202,6 +209,7 @@ async function assemblePortable(paths, metadata, electronDist, sidecar, modCompi
   const packagedSidecar = join(binDir, sidecarName);
   cpSync(join(packageRoot, 'browser-extension'), join(resources, 'browser-extension'), { recursive: true });
   copyFileSync(sidecar, packagedSidecar);
+  bundlePortableGStreamerRuntime(gstreamerPlan, resources);
   stageModBun(resources, modCompiler);
   copyFileSync(join(packageRoot, 'INTERNAL_BETA.md'), join(resources, 'INTERNAL_BETA.md'));
   copyFileSync(join(packageRoot, 'assets', 'icons', 'icon.png'), join(resources, 'icon.png'));
@@ -231,6 +239,11 @@ async function main() {
       ?? join(cargoTargetDir, 'release', target.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server'),
   );
   assertBinaryArchitecture(sidecar, target, 'release bridge-server sidecar');
+  // Validate the explicit portable SDK before downloads, artifact resets, or
+  // staging. macOS uses its separately signed runtime bundle below.
+  const portableGStreamerPlan = target.platform === 'darwin'
+    ? null
+    : preflightPortableGStreamerRuntime(sidecar, target.platform, target.arch);
   const modCompiler = await prepareModBun(target);
   assertBinaryArchitecture(modCompiler.executable, target, 'Mod Bun compiler');
   scanTreeForForbiddenContent(sidecar);
@@ -242,7 +255,7 @@ async function main() {
   unlinkIfPresent(paths.metadataPath);
 
   if (target.platform === 'darwin') await assembleDarwin(paths, metadata, electronDist, sidecar, modCompiler);
-  else await assemblePortable(paths, metadata, electronDist, sidecar, modCompiler);
+  else await assemblePortable(paths, metadata, electronDist, sidecar, modCompiler, portableGStreamerPlan);
 
   scanTreeForForbiddenContent(paths.payloadRoot);
   normalizeTimestamps(paths.payloadRoot);

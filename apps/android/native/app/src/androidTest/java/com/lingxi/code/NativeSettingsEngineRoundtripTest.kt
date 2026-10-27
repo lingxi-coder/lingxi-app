@@ -10,8 +10,7 @@ import com.lingxi.code.clipboard.AndroidClipboardAdapter
 import com.lingxi.code.location.AndroidLocationAdapter
 import com.lingxi.code.notify.AndroidNotificationAdapter
 import com.lingxi.code.share.AndroidShareAdapter
-import com.lingxi.code.vision.AndroidCameraAdapter
-import com.lingxi.code.voice.audio.AndroidNativeAudioServiceAdapter
+import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -57,7 +56,7 @@ class NativeSettingsEngineRoundtripTest {
                         }
                         override suspend fun onWorkflowProgress(originSessionId: String, taskId: String, runId: String, progress: WorkflowProgressDto) {}
                     },
-                    camera = AndroidCameraAdapter(), share = AndroidShareAdapter(), audio = AndroidNativeAudioServiceAdapter(context),
+                    mediaHost = AndroidNativeMediaHostProvider.get(context.applicationContext), share = AndroidShareAdapter(),
                     location = AndroidLocationAdapter(), notifications = AndroidNotificationAdapter(), clipboard = AndroidClipboardAdapter(),
                     permissions = object : AndroidPermissionSink { override suspend fun onRequest(request: PermissionRequest) { error("No permission in settings test") } },
                     computerUse = null, shell = null, git = null, gitCredentialProvider = null, secureStorage = null, deviceControl = null)

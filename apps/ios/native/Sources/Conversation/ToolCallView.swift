@@ -342,6 +342,9 @@ enum ToolDisplayText {
     /// Maps the engine's stable tool verb to a compact action glyph. An orphan
     /// or synthetic row without a start header uses the raw tool name.
     static func icon(header: ConversationToolHeader?, tool: String) -> LXIconName {
+        if tool.lowercased().hasPrefix("mcp__"),
+           (header == nil || header?.verb == .generic),
+           (header?.icon == nil || header?.icon == .wrench) { return .mcpFallback }
         if let header {
             return iconName(for: header.icon(for: tool))
         }

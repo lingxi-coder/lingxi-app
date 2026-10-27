@@ -139,7 +139,6 @@ export function normalizeAudioConfiguration(value) {
   if (raw.schemaVersion !== 4) return audioConfigurationDefaults();
   const recognition = normalizePreference(raw.recognition, "recognition");
   const speech = normalizePreference(raw.speech, "speech");
-  if (speech.source === "automatic") speech.voice = null;
   return {
     schemaVersion: 4,
     recognition,

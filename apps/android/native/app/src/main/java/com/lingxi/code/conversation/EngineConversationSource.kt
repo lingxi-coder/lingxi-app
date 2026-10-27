@@ -14,6 +14,7 @@ import com.lingxi.code.bindings.runtime.ProviderConnectionTestDto
 import com.lingxi.code.bindings.client.ProviderCredentialSecretDto
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.runtime.VisualizationHost
+import com.lingxi.code.bindings.android.AndroidNativeMediaHost
 import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.EngineModelState
@@ -28,6 +29,7 @@ import com.lingxi.code.project.ProjectWorkspace
 import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.voice.buildVoiceEngine
+import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
 import com.lingxi.code.voice.resolveEngineEnvironmentOverrides
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -69,8 +71,45 @@ import kotlinx.coroutines.sync.withLock
  * exercised by JVM unit tests. The pure [clientEventToReply] mapper carries the
  * mapping coverage; this wiring is covered by the on-device integration build.
  */
+private class MediaAudioSessionContextBindings(
+    private val mediaHost: AndroidNativeMediaHost,
+) {
+    private val lock = Any()
+    private val generations = mutableMapOf<String, ULong>()
+    private var closed = false
+
+    fun register(sessionId: String, generation: ULong) {
+        val removeImmediately = synchronized(lock) {
+            if (closed) true else {
+                generations[sessionId] = generation
+                false
+            }
+        }
+        if (removeImmediately) {
+            runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
+        }
+    }
+
+    fun remove(sessionId: String) {
+        val generation = synchronized(lock) { generations.remove(sessionId) } ?: return
+        runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
+    }
+
+    fun close() {
+        val registrations = synchronized(lock) {
+            closed = true
+            generations.toList().also { generations.clear() }
+        }
+        registrations.forEach { (sessionId, generation) ->
+            runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
+        }
+    }
+}
+
 class EngineConversationSource private constructor(
     private val handle: MobileEngineHandle,
+    private val mediaHost: AndroidNativeMediaHost,
+    private val mediaContextBindings: MediaAudioSessionContextBindings,
     private val events: SharedFlow<ClientEvent>,
     private val eventRelay: LosslessEventRelay<ClientEvent>,
     private val workflowEvents: SharedFlow<WorkflowProgressUpdate>,
@@ -513,6 +552,7 @@ class EngineConversationSource private constructor(
 
     override fun close() {
         com.lingxi.code.voice.audio.AndroidAudioSessionContext.detach(handle)
+        mediaContextBindings.close()
         ConversationHeadlessRecovery.unregister(recoverySpec.scopeKey, this)
         eventRelay.close()
         workflowRelay.close()
@@ -651,6 +691,9 @@ class EngineConversationSource private constructor(
             // these scalar values remain only as explicit development overrides.
             val environment = resolveEngineEnvironmentOverrides(System.getenv())
             val providerLaunch = ProviderSettingsRepository(context).engineLaunchConfig()
+            val mediaHost = AndroidNativeMediaHostProvider.get(context.applicationContext)
+            val mediaContextBindings = MediaAudioSessionContextBindings(mediaHost)
+            var mediaContextEngine: MobileEngineHandle? = null
             val handle = buildVoiceEngine(
                 context = context,
                 apiBase = environment.apiBase,
@@ -666,6 +709,7 @@ class EngineConversationSource private constructor(
                 projectWorkspace = projectWorkspace,
                 sessionMode = sessionMode,
                 linuxRuntimeMode = linuxRuntimeMode,
+                mediaHost = mediaHost,
                 onEvent = { event ->
                     // The OUT-OF-BAND state paths: fold model catalog + session
                     // catalog + live-resume events into the StateFlows the picker /
@@ -676,8 +720,21 @@ class EngineConversationSource private constructor(
                     // stream; the ViewModel acts on them there).
                     models.value = reduceModelEvent(models.value, event)
                     sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
+                    val previousActiveSessionId = activeSession.value?.sessionId
                     activeSession.update { current ->
                         reduceActivatedSession(current, event, sessionMode, strings)
+                    }
+                    when (event) {
+                        is ClientEvent.SessionStarted,
+                        is ClientEvent.SessionResumed,
+                        is ClientEvent.ModelChanged -> runCatching {
+                            mediaContextEngine?.let { engine ->
+                                val binding = mediaHost.updateAudioSessionContext(engine)
+                                mediaContextBindings.register(binding.sessionId, binding.generation)
+                            }
+                        }
+                        ClientEvent.SessionEnded -> previousActiveSessionId?.let(mediaContextBindings::remove)
+                        else -> Unit
                     }
                     if (event is ClientEvent.WorkspaceChanged) {
                         val value = event.state
@@ -747,7 +804,10 @@ class EngineConversationSource private constructor(
                     context.getString(R.string.chat_engine_build_failed),
                 )
             }
+            mediaContextEngine = handle
             val workspaceRestore = runCatching { kotlinx.coroutines.runBlocking {
+                val binding = mediaHost.updateAudioSessionContext(handle)
+                mediaContextBindings.register(binding.sessionId, binding.generation)
                 val owner = handle.workspaceState().sessionId
                 val userDirectories = com.lingxi.code.project.MobileUserStorage.directories(context)
                 val home = userDirectories.guestHome
@@ -759,6 +819,7 @@ class EngineConversationSource private constructor(
                 }
             } }
             workspaceRestore.exceptionOrNull()?.let { failure ->
+                mediaContextBindings.close()
                 runCatching { handle.destroy() }
                 if (reuseProcessSource) ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.scopeKey)
                 eventRelay.close()
@@ -773,8 +834,8 @@ class EngineConversationSource private constructor(
             // failed ListModels leaves the catalog explicitly empty; it never
             // blocks building the source.
             CoroutineScope(Dispatchers.Default).launch {
-                // The listing carries the cold engine's authoritative session
-                // owner. Bind it independently of optional catalog refreshes.
+                // The initial media context was bound before the source was
+                // returned; this listing only primes session-agent UI state.
                 try {
                     handle.submit(ClientCommand.ListSessionAgents)
                     val value = handle.workspaceState()
@@ -814,6 +875,8 @@ class EngineConversationSource private constructor(
             }
             val source = EngineConversationSource(
                 handle = handle,
+                mediaHost = mediaHost,
+                mediaContextBindings = mediaContextBindings,
                 events = eventRelay.events,
                 eventRelay = eventRelay,
                 workflowEvents = workflowRelay.events,

@@ -30,6 +30,12 @@ import {
   type RemoteSessionSummary,
   type SessionAttachParams,
 } from '@lingxi/bridge-client/remote';
+import type {
+  MediaConnectionRequestDto,
+  MediaConnectionResponseDto,
+  MediaControlRequestDto,
+  MediaControlResponseDto,
+} from '@lingxi/bridge-client';
 
 import type { RemoteObservation, SessionRef } from '../bridgeTypes.js';
 import { isSessionId } from '../sessionIdentity.js';
@@ -43,6 +49,7 @@ import type { RemoteRuntime, RemoteRuntimes, RuntimeLease } from './remoteRuntim
 import { SessionAttachment } from './sessionAttachment.js';
 import type { PromptFileReference, RemoteFileStore } from './fileStore.js';
 import { parseImageRef } from './snapshot.js';
+import { RemoteMediaRoutes } from './mediaRoutes.js';
 
 /** A session stays open this long after its last viewer detached. */
 export const LEASE_GRACE_MS = 2 * 60_000;
@@ -76,6 +83,9 @@ interface SessionLease {
 interface Attached {
   attachment: SessionAttachment;
   lease: SessionLease;
+  runtime: RemoteRuntime;
+  mediaRouteId?: string;
+  stopMediaListeners: Array<() => void>;
 }
 
 interface ViewerState {
@@ -89,11 +99,14 @@ interface ViewerState {
   closed: boolean;
   files: Map<string, { offer: FileOffer; sink: FileSink }>;
   downloads: Map<string, { session: string; controller: AbortController; done: Promise<unknown> }>;
+  mediaRouteId?: string;
+  mediaCleanup: Map<string, Promise<void>>;
 }
 
 type Json = Record<string, unknown>;
 
 export class SessionGateway implements RemoteSessionGateway, PushPresence {
+  private readonly mediaRoutes = new RemoteMediaRoutes();
   private readonly viewers = new Map<string, ViewerState>();
   private readonly leases = new Map<string, SessionLease>();
   private readonly titles = new Map<string, { title: string; at: number }>();
@@ -132,6 +145,9 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         return {};
       case 'session.presence':
         this.presence(state, params);
+        return undefined;
+      case 'media.playback_receipt':
+        this.mediaRoutes.recordPlaybackReceipt(viewer, params);
         return undefined;
       case 'session.history':
         return this.deps.commands.history(this.attachedRuntime(state, params), params);
@@ -285,16 +301,18 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         if (state.downloads.has(id) || state.downloads.size >= 4) throw new Error('file sender busy');
         const controller = new AbortController();
         const done = (async () => {
-          const { offer, source } = await store.source(owner, session, id);
-          authorizeTransfer();
-          return files.send(offer, { size: source.size, read: async (at, size) => {
+          const { offer, source, close } = await store.source(owner, session, id);
+          try {
             authorizeTransfer();
-            const bytes = await source.read(at, size);
-            authorizeTransfer();
-            return bytes;
-          } }, {
-            offer: async () => ({ offset }), commit: async () => { authorizeTransfer(); return offer; }, cancel: async () => undefined,
-          }, undefined, controller.signal);
+            return await files.send(offer, { size: source.size, read: async (at, size) => {
+              authorizeTransfer();
+              const bytes = await source.read(at, size);
+              authorizeTransfer();
+              return bytes;
+            } }, {
+              offer: async () => ({ offset }), commit: async () => { authorizeTransfer(); return offer; }, cancel: async () => undefined,
+            }, undefined, controller.signal);
+          } finally { await close(); }
         })();
         state.downloads.set(id, { session, controller, done });
         try { return await done; } finally { state.downloads.delete(id); }
@@ -311,6 +329,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     for (const download of state.downloads.values()) download.controller.abort();
     this.viewers.delete(viewer.conn_id);
     for (const sessionId of [...state.attached.keys()]) this.dropAttachment(state, sessionId, true);
+    if (state.mediaRouteId !== undefined) void this.mediaRoutes.unregisterViewer(state.mediaRouteId);
     this.viewersChanged();
   }
 
@@ -326,6 +345,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       state.attaching.clear();
       for (const download of state.downloads.values()) download.controller.abort();
       for (const sessionId of [...state.attached.keys()]) this.dropAttachment(state, sessionId, true);
+      if (state.mediaRouteId !== undefined) void this.mediaRoutes.unregisterViewer(state.mediaRouteId);
     }
     this.viewers.clear();
     for (const entry of [...this.leases.values()]) this.releaseNow(entry);
@@ -335,7 +355,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   private stateOf(viewer: RemoteViewer, channel: RemoteViewerChannel): ViewerState {
     let state = this.viewers.get(viewer.conn_id);
     if (state === undefined) {
-      state = { viewer, channel, attached: new Map(), attaching: new Map(), watching: false, closed: false, files: new Map(), downloads: new Map() };
+      state = { viewer, channel, attached: new Map(), attaching: new Map(), watching: false, closed: false, files: new Map(), downloads: new Map(), mediaCleanup: new Map() };
       this.viewers.set(viewer.conn_id, state);
     }
     return state;
@@ -425,14 +445,38 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         throw new RemoteRpcError('invalid_params', 'the session attachment was cancelled');
       }
       // Attaching again replaces the attachment; the session stays leased throughout.
-      this.dropAttachment(state, sessionId, true);
+      const previous = state.attached.get(sessionId);
+      const preserveMediaRoute = previous?.runtime === runtime && previous.mediaRouteId !== undefined;
+      this.dropAttachment(state, sessionId, true, preserveMediaRoute);
+      let mediaRouteId = preserveMediaRoute ? previous?.mediaRouteId : undefined;
+      if (state.viewer.media_capabilities !== undefined && mediaRouteId === undefined) {
+        mediaRouteId = await this.registerMediaRoute(state, sessionId, runtime);
+      }
+      if (state.closed || this.disposed || this.deps.policy.find(sessionId) === undefined
+        || state.attaching.get(sessionId) !== attempt) {
+        if (mediaRouteId !== undefined && !preserveMediaRoute) {
+          this.removeMediaRoute(state, sessionId, runtime, mediaRouteId);
+        }
+        this.release(entry);
+        if (state.closed || this.disposed) throw new RemoteRpcError('internal', 'the connection closed');
+        if (this.deps.policy.find(sessionId) === undefined) throw this.requireEnabledError(sessionId);
+        throw new RemoteRpcError('invalid_params', 'the session attachment was cancelled');
+      }
       const attachment: SessionAttachment = new SessionAttachment({
         runtime,
         channel: state.channel,
         clock: this.deps.clock,
         onEnded: () => this.dropEnded(state, sessionId, attachment),
       });
-      state.attached.set(sessionId, { attachment, lease: entry });
+      const attached: Attached = {
+        attachment,
+        lease: entry,
+        runtime,
+        ...(mediaRouteId === undefined ? {} : { mediaRouteId }),
+        stopMediaListeners: [],
+      };
+      state.attached.set(sessionId, attached);
+      if (mediaRouteId !== undefined) this.subscribeMediaRuntime(state, sessionId, attached, mediaRouteId);
       let result;
       try {
         result = attachment.attach(resume);
@@ -445,6 +489,62 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     } finally {
       if (state.attaching.get(sessionId) === attempt) state.attaching.delete(sessionId);
     }
+  }
+
+  private async registerMediaRoute(
+    state: ViewerState,
+    sessionId: string,
+    runtime: RemoteRuntime,
+  ): Promise<string | undefined> {
+    const capabilities = state.viewer.media_capabilities;
+    if (capabilities === undefined) return undefined;
+    let routeId: string | undefined;
+    try {
+      routeId = state.mediaRouteId ?? await this.mediaRoutes.registerViewer(state.viewer, state.channel);
+      state.mediaRouteId = routeId;
+      await state.mediaCleanup.get(sessionId);
+      const label = state.viewer.device_name.replace(/[\u0000-\u001f\u007f]/gu, '').slice(0, 256) || 'Remote viewer';
+      await runtime.registerMediaConnection(routeId, label, capabilities.modes, capabilities.source_kinds);
+      this.mediaRoutes.allowSession(routeId, sessionId);
+      return routeId;
+    } catch (error) {
+      if (routeId !== undefined) {
+        this.mediaRoutes.disallowSession(routeId, sessionId);
+        await runtime.unregisterMediaConnection(routeId).catch((cleanupError: unknown) => {
+          this.deps.diagnostics('info', `remote media route rollback failed (${describeError(cleanupError)})`);
+        });
+      }
+      this.deps.diagnostics('info', `remote media route registration was unavailable (${describeError(error)})`);
+      return undefined;
+    }
+  }
+
+  private subscribeMediaRuntime(state: ViewerState, sessionId: string, attached: Attached, routeId: string): void {
+    attached.stopMediaListeners.push(attached.runtime.onMediaConnectionRequest((request) => {
+      if (state.closed || state.attached.get(sessionId) !== attached || request.connection_id !== routeId) return;
+      void this.mediaRoutes.handleConnectionRequest(request)
+        .catch(() => ({
+          request_id: request.request_id,
+          connection_id: request.connection_id,
+          media_session_ref: request.media_session_ref,
+          error: { kind: 'native_failure', message: 'media negotiation failed' },
+        } satisfies MediaConnectionResponseDto))
+        .then((response) => attached.runtime.respondToMediaConnection(response))
+        .catch((error: unknown) => this.deps.diagnostics('info', `media offer response could not be delivered (${describeError(error)})`));
+    }));
+    attached.stopMediaListeners.push(attached.runtime.onMediaControlRequest((request) => {
+      if (state.closed || state.attached.get(sessionId) !== attached || request.connection_id !== routeId) return;
+      void this.mediaRoutes.handleControlEvent(request)
+        .catch(() => ({
+          request_id: request.request_id,
+          connection_id: request.connection_id,
+          media_session_ref: request.media_session_ref,
+          generation: request.generation,
+          error: { kind: 'native_failure', message: 'media control failed' },
+        } satisfies MediaControlResponseDto))
+        .then((response) => attached.runtime.respondToMediaControl(response))
+        .catch((error: unknown) => this.deps.diagnostics('info', `media control response could not be delivered (${describeError(error)})`));
+    }));
   }
 
   private requireEnabledError(sessionId: string): RemoteRpcError {
@@ -482,13 +582,28 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   }
 
   /** Remove a viewer's attachment, close it, and give back its share of the session lease. */
-  private dropAttachment(state: ViewerState, sessionId: string, release: boolean): void {
+  private dropAttachment(state: ViewerState, sessionId: string, release: boolean, preserveMediaRoute = false): void {
     const attached = state.attached.get(sessionId);
     if (attached === undefined) return;
     state.attached.delete(sessionId);
     this.releaseAttachmentFiles(state, sessionId);
+    for (const stop of attached.stopMediaListeners) stop();
     attached.attachment.close();
+    if (!preserveMediaRoute && attached.mediaRouteId !== undefined) {
+      this.removeMediaRoute(state, sessionId, attached.runtime, attached.mediaRouteId);
+    }
     if (release) this.release(attached.lease);
+  }
+
+  private removeMediaRoute(state: ViewerState, sessionId: string, runtime: RemoteRuntime, routeId: string): void {
+    this.mediaRoutes.disallowSession(routeId, sessionId);
+    const cleanup = runtime.unregisterMediaConnection(routeId).catch((error: unknown) => {
+      this.deps.diagnostics('info', `remote media route cleanup failed (${describeError(error)})`);
+    });
+    state.mediaCleanup.set(sessionId, cleanup);
+    void cleanup.finally(() => {
+      if (state.mediaCleanup.get(sessionId) === cleanup) state.mediaCleanup.delete(sessionId);
+    });
   }
 
   /** The attachment's runtime was disposed; the viewer has been told. */
@@ -497,6 +612,10 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     if (attached?.attachment !== attachment) return;
     state.attached.delete(sessionId);
     this.releaseAttachmentFiles(state, sessionId);
+    for (const stop of attached.stopMediaListeners) stop();
+    if (attached.mediaRouteId !== undefined) {
+      this.removeMediaRoute(state, sessionId, attached.runtime, attached.mediaRouteId);
+    }
     this.release(attached.lease);
     this.viewersChanged();
   }

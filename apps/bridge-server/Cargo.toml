@@ -21,6 +21,9 @@ path = "src/lib.rs"
 
 [dependencies]
 audio-provider = { path = "../audio-provider" }
+media-api.workspace = true
+media-runtime.workspace = true
+remote-control-client = { path = "../../packages/remote-control-client", features = ["native-media"] }
 # Shared question contracts used by production brokers and test tools.
 tool-api = { workspace = true }
 tool-ui = { workspace = true }
@@ -100,9 +103,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 
 [dev-dependencies]
+bytes.workspace = true
 # Enable the deterministic policy-refusal probe only in Bridge tests.
 harness-runtime = { workspace = true, default-features = true, features = ["desktop", "test-support"] }
+mobile-linux-api = { workspace = true }
 client = { workspace = true, features = ["test-support"] }
+tool-api = { workspace = true, features = ["test-support"] }
 # Codex slot router tests implement the token refresh transport.
 lingxi-llm-client = { workspace = true }
 # F2-06 e2e: drive a REAL streaming turn (mock streaming client + a real tool)

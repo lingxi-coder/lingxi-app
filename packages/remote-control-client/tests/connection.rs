@@ -9,6 +9,11 @@ use remote_control_client::connection::{
 };
 use remote_control_client::device::{MemoryViewerKeys, PinnedHost, TunnelMemory, ViewerKeys};
 use remote_control_client::keys::IdentityKey;
+use remote_control_client::media::{
+    MEDIA_CONTROL_METHOD, RemoteMediaAnswer,
+    RemoteMediaConnection, RemoteMediaControlRequest,
+    RemoteMediaControlResult, RemoteMediaOffer, RemoteMediaOfferHandler,
+};
 use remote_control_client::messages::methods;
 use remote_control_client::rtdb::{MemoryRtdb, Rtdb, RtdbError};
 use remote_control_client::signaling::{
@@ -64,6 +69,52 @@ struct Recorder {
     phases: Mutex<Vec<ConnectionPhase>>,
     ready: Mutex<u32>,
     notifications: Mutex<Vec<(String, Value)>>,
+}
+
+#[derive(Default)]
+struct TestMediaOfferHandler {
+    accepted: Mutex<Vec<(RemoteMediaConnection, RemoteMediaOffer)>>,
+    closed: Mutex<Vec<RemoteMediaConnection>>,
+}
+
+#[async_trait::async_trait]
+impl RemoteMediaOfferHandler for TestMediaOfferHandler {
+    async fn accept_offer(
+        &self,
+        connection: &RemoteMediaConnection,
+        offer: RemoteMediaOffer,
+        _control: Arc<dyn remote_control_client::media::RemoteMediaControlChannel>,
+    ) -> Result<RemoteMediaAnswer, remote_control_client::rpc::RpcError> {
+        self.accepted
+            .lock()
+            .unwrap()
+            .push((connection.clone(), offer.clone()));
+        Ok(RemoteMediaAnswer {
+            v: 1,
+            media_session_ref: offer.media_session_ref,
+            answer_sdp: offer.offer_sdp,
+        })
+    }
+
+    async fn control(
+        &self,
+        _connection: &RemoteMediaConnection,
+        request: RemoteMediaControlRequest,
+    ) -> Result<RemoteMediaControlResult, remote_control_client::rpc::RpcError> {
+        Ok(RemoteMediaControlResult {
+            v: 1,
+            media_session_ref: request.media_session_ref,
+            generation: request.generation,
+            audio_sequence: request.target_audio_sequence,
+            accepted_sample_frames: request.target_sample_frames,
+            played_sample_frames: request.target_sample_frames,
+            rendered_at_unix_ms: Some(1_761_502_000_000),
+        })
+    }
+
+    async fn connection_closed(&self, connection: &RemoteMediaConnection) {
+        self.closed.lock().unwrap().push(connection.clone());
+    }
 }
 
 impl ConnectionListener for Recorder {
@@ -123,6 +174,14 @@ fn make_rig(with_peers: bool) -> Rig {
 }
 
 fn make_rig_with(with_peers: bool, offer_failures: u32) -> Rig {
+    make_rig_with_media_handler(with_peers, offer_failures, None)
+}
+
+fn make_rig_with_media_handler(
+    with_peers: bool,
+    offer_failures: u32,
+    media_offer_handler: Option<Arc<dyn RemoteMediaOfferHandler>>,
+) -> Rig {
     let clock = ManualClock::new(1_800_000_000_000);
     let rtdb = Arc::new(MemoryRtdb::with_clock(Arc::clone(&clock) as _));
     let net = FakePeerNetwork::new();
@@ -136,6 +195,7 @@ fn make_rig_with(with_peers: bool, offer_failures: u32) -> Rig {
     let keys = MemoryViewerKeys::new();
     let memory = Arc::new(TunnelMemory::new(Arc::clone(&clock) as _));
     let mut deps = deps_for((&rtdb, &clock, &keys, &memory), &host.host_id);
+    deps.media_offer_handler = media_offer_handler;
     if offer_failures > 0 {
         deps.rtdb = Arc::new(FlakyOffers {
             inner: Arc::clone(&rtdb),
@@ -282,6 +342,65 @@ async fn first_pairing_over_the_tunnel() {
         1,
         "only the host's own listener is left"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_media_offer_is_denied_before_approval_then_bound_and_stopped_with_its_connection() {
+    let handler = Arc::new(TestMediaOfferHandler::default());
+    let rig = make_rig_with_media_handler(false, 0, Some(handler.clone()));
+    rig.host.publish_presence().await;
+    rig.conn.start();
+    rig.phase(ConnectionPhase::AwaitingApproval).await;
+    let conn_id = rig.host.conns()[0].conn_id.clone();
+    let offer = json!({
+        "v": 1,
+        "media_session_ref": "media_0123456789abcdef",
+        "session_id": "12121212-3434-4567-8899-aaaaaaaaaaaa",
+        "generation": 1,
+        "mode": "audio_video",
+        "intent": "conversation",
+        "offer_sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+    });
+    let denied = rig
+        .host
+        .request(&conn_id, "media.offer", offer.clone())
+        .await
+        .expect_err("a pending pairing cannot negotiate media");
+    assert_eq!(denied.code, remote_control_client::rpc::RemoteErrorCode::NotApproved);
+    assert!(handler.accepted.lock().unwrap().is_empty());
+
+    rig.host.approve(&conn_id).await;
+    rig.phase(ConnectionPhase::Ready).await;
+    let answer = rig
+        .host
+        .request(&conn_id, "media.offer", offer)
+        .await
+        .expect("approved control channel answers the offer");
+    assert_eq!(answer["media_session_ref"], "media_0123456789abcdef");
+    let identity = rig.keys.identity().await.unwrap();
+    let accepted = handler.accepted.lock().unwrap();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0].0.account_uid, UID);
+    assert_eq!(accepted[0].0.host_id, rig.host.host_id);
+    assert_eq!(accepted[0].0.device_id, identity.id);
+    assert_eq!(accepted[0].0.connection_id, conn_id);
+    drop(accepted);
+
+    let control = rig.host.request(&conn_id, MEDIA_CONTROL_METHOD, json!({
+        "v": 1,
+        "media_session_ref": "media_0123456789abcdef",
+        "generation": 1,
+        "action": "flush_audio",
+        "target_audio_sequence": 1,
+        "target_sample_frames": 960
+    })).await.expect("approved session flush waits for the native receipt");
+    assert_eq!(control["played_sample_frames"], 960);
+
+    rig.conn.stop();
+    for _ in 0..10 {
+        settle().await;
+    }
+    assert_eq!(handler.closed.lock().unwrap().len(), 1);
 }
 
 #[tokio::test(start_paused = true)]

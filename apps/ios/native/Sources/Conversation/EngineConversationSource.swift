@@ -31,7 +31,7 @@ final class EngineConversationSource: ConversationSource {
     typealias HandleBuilder = (
         _ config: IosEngineLaunchConfigFfi,
         _ listener: IosEventListener,
-        _ audio: IOSAudioServiceCallbackAdapter,
+        _ mediaHost: IosNativeMediaHost?,
         _ permissions: IosPermissionSink
     ) throws -> MobileEngineHandle
 
@@ -41,12 +41,16 @@ final class EngineConversationSource: ConversationSource {
     private let isRemoteProjection: Bool
     private let config: EngineConfig
     private let handleBuilder: HandleBuilder
+    private let mediaHostComposition: IOSNativeMediaHostComposition?
     private let permissionModeRepository: PermissionModeConfigurationRepository
     private var handle: MobileEngineHandle?
     private let audioContextOwnerID = UUID().uuidString
     private var audioContextGeneration: UInt64 = 0
     private var audioContextTask: Task<Void, Never>?
     private var audioSourceActive = false
+    private var mediaHostContextGeneration: UInt64 = 0
+    private var mediaHostContextTask: Task<Void, Never>?
+    private var mediaHostSessionBinding: MediaAudioSessionBindingFfi?
     /// One shared bootstrap attempt for every entry point that needs the
     /// engine. Access to this property remains main-actor-confined, which
     /// prevents interleaving callers from constructing competing handles;
@@ -197,6 +201,7 @@ final class EngineConversationSource: ConversationSource {
     init(
         config: EngineConfig,
         handleBuilder: @escaping HandleBuilder = EngineConversationSource.buildDefaultHandle,
+        mediaHostComposition: IOSNativeMediaHostComposition? = nil,
         permissionModeRepository: PermissionModeConfigurationRepository? = nil,
         memoryOnly: Bool = false,
         remoteProjection: Bool = false
@@ -204,6 +209,7 @@ final class EngineConversationSource: ConversationSource {
         self.isRemoteProjection = remoteProjection
         self.config = config
         sessionMode = config.sessionMode
+        self.mediaHostComposition = mediaHostComposition
         self.durableTurns = (memoryOnly || remoteProjection) ? nil : DurableConversationTurnClientStore(config: config)
         self.handleBuilder = handleBuilder
         self.permissionModeRepository = permissionModeRepository
@@ -225,10 +231,19 @@ final class EngineConversationSource: ConversationSource {
 
     deinit {
         audioContextTask?.cancel()
+        mediaHostContextTask?.cancel()
         let ownerID = audioContextOwnerID
+        let mediaHostComposition = mediaHostComposition
+        let mediaHostSessionBinding = mediaHostSessionBinding
         Task { @MainActor in
             IOSAudioProviderService.shared.clearSessionContext(ownerID: ownerID)
             IOSRealtimeAudioService.shared.detach(ownerID: ownerID)
+            if let mediaHostSessionBinding {
+                mediaHostComposition?.removeAudioSessionContext(
+                    sessionID: mediaHostSessionBinding.sessionId,
+                    generation: mediaHostSessionBinding.generation
+                )
+            }
         }
     }
 
@@ -1101,7 +1116,11 @@ final class EngineConversationSource: ConversationSource {
 
     func makeSideChat(requestID: String) async throws -> EngineConversationSource {
         let sharedHandle = try await ensureHandle()
-        let child = EngineConversationSource(config: config, memoryOnly: true)
+        let child = EngineConversationSource(
+            config: config,
+            mediaHostComposition: mediaHostComposition,
+            memoryOnly: true,
+        )
         child.model.providerConfigured = model.providerConfigured
         child.handle = sharedHandle
         let listener = EngineListener(source: child)
@@ -1910,6 +1929,7 @@ final class EngineConversationSource: ConversationSource {
     /// an engine merely to discover a cloud route.
     private func refreshAudioSessionContext() {
         guard !isSideChat else { return }
+        refreshMediaHostAudioContext()
         guard audioSourceActive, hasConfirmedSessionState, !model.sessionTransitionPending,
               let handle, !model.activeSessionId.isEmpty else { return }
         audioContextGeneration &+= 1
@@ -1938,6 +1958,53 @@ final class EngineConversationSource: ConversationSource {
                 region: context["region"] as? String, ownerID: self.audioContextOwnerID
             )
             await IOSAudioProviderService.shared.refresh(snapshot: AudioConfigurationStore.shared.snapshot)
+        }
+    }
+
+    private func refreshMediaHostAudioContext() {
+        guard hasConfirmedSessionState, !model.sessionTransitionPending,
+              let handle, !model.activeSessionId.isEmpty else { return }
+        mediaHostContextGeneration &+= 1
+        let generation = mediaHostContextGeneration
+        let sessionID = model.activeSessionId
+        mediaHostContextTask?.cancel()
+        mediaHostContextTask = Task { @MainActor [weak self, handle] in
+            guard let self, self.mediaHostContextGeneration == generation else { return }
+            if let previous = self.mediaHostSessionBinding {
+                self.mediaHostComposition?.removeAudioSessionContext(
+                    sessionID: previous.sessionId,
+                    generation: previous.generation
+                )
+                self.mediaHostSessionBinding = nil
+            }
+            let routeBinding: MediaAudioSessionBindingFfi?
+            do {
+                routeBinding = try await self.mediaHostComposition?.updateAudioSessionContext(for: handle)
+            } catch {
+                guard self.handle === handle,
+                      self.mediaHostContextGeneration == generation else { return }
+                if self.model.error == nil {
+                    self.model.error = ConversationError(
+                        kind: .host,
+                        message: "Media provider routes could not be refreshed for this conversation: \(error.localizedDescription)"
+                    )
+                }
+                return
+            }
+            guard !Task.isCancelled,
+                  self.mediaHostContextGeneration == generation,
+                  self.handle === handle, self.model.activeSessionId == sessionID,
+                  routeBinding?.sessionId == nil || routeBinding?.sessionId == sessionID,
+                  !self.model.sessionTransitionPending else {
+                if let routeBinding {
+                    self.mediaHostComposition?.removeAudioSessionContext(
+                        sessionID: routeBinding.sessionId,
+                        generation: routeBinding.generation
+                    )
+                }
+                return
+            }
+            self.mediaHostSessionBinding = routeBinding
         }
     }
 
@@ -1995,9 +2062,9 @@ final class EngineConversationSource: ConversationSource {
         // bridge, verify the bundled archive, and extract the rootfs on a
         // first launch. A child `Task` would inherit MainActor here and make
         // the entire setup UI unresponsive until that work completed.
-        let audio = IOSAudioServiceCallbackAdapter.shared
+        let mediaHost = mediaHostComposition?.nativeHost
         let buildTask = Task.detached(priority: .userInitiated) {
-            [handleBuilder, launchConfig, listener, audio, permissionSink] in
+            [handleBuilder, launchConfig, listener, mediaHost, permissionSink] in
             // The synchronous FFI constructor block_on's MCP initialization.
             // Its native frames can exhaust a cooperative worker's small stack,
             // and blocking that worker also prevents unrelated tasks progressing.
@@ -2007,7 +2074,7 @@ final class EngineConversationSource: ConversationSource {
                 let thread = Thread {
                     autoreleasepool {
                         continuation.resume(with: Result {
-                            return try handleBuilder(launchConfig, listener, audio, permissionSink)
+                            return try handleBuilder(launchConfig, listener, mediaHost, permissionSink)
                         })
                     }
                 }
@@ -2074,14 +2141,20 @@ final class EngineConversationSource: ConversationSource {
     private nonisolated static func buildDefaultHandle(
         config: IosEngineLaunchConfigFfi,
         listener: IosEventListener,
-        audio: IOSAudioServiceCallbackAdapter,
+        mediaHost: IosNativeMediaHost?,
         permissions: IosPermissionSink
     ) throws -> MobileEngineHandle {
-        try buildIosEngineWithConfig(
+        guard let mediaHost else {
+            throw NSError(
+                domain: "IOSNativeMediaHost",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The app media host was not composed before engine creation."]
+            )
+        }
+        return try buildIosEngineWithConfig(
             config: config,
             listener: listener,
-            audio: audio,
-            camera: CameraImpl(),
+            mediaHost: mediaHost,
             share: ShareImpl(),
             notifications: NotificationImpl(),
             clipboard: ClipboardImpl(),

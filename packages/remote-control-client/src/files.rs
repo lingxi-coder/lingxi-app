@@ -2,6 +2,7 @@
 //! bridge-client/remote/files.ts; file contents never enter JSON or RTDB.
 use crate::connection::ViewerConnection;
 use async_trait::async_trait;
+use bytes::BytesMut;
 use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -11,8 +12,8 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -53,7 +54,7 @@ pub enum FileEvent {
     /// The independent file DataChannel opened.
     Open,
     /// One bounded binary DataChannel message.
-    Message(Vec<u8>),
+    Message(BytesMut),
 }
 /// Native adapter's file-channel sending half.
 #[async_trait]
@@ -150,7 +151,7 @@ impl FileLane {
         self.closed.cancel();
         self.sender.close();
     }
-    async fn receive(&self, bytes: Vec<u8>) -> Result<(), String> {
+    async fn receive(&self, bytes: BytesMut) -> Result<(), String> {
         let (kind, id, offset) = decode(&bytes)?;
         if kind == 4 {
             let ack = self
@@ -197,9 +198,14 @@ impl FileLane {
             })
             .await
             .map_err(err)??;
-            self.sender
-                .send(encode(if kind == 3 { 4 } else { 1 }, &id, next, &[])?)
-                .await?;
+            // Ordinary data frames only append; their durable offset has not
+            // advanced. Acknowledge checkpoints and cancellation barriers
+            // without serializing each write behind a redundant send.
+            if kind != 0 {
+                self.sender
+                    .send(encode(if kind == 3 { 4 } else { 1 }, &id, next, &[])?)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -859,18 +865,24 @@ mod tests {
             .insert(offer.transfer_id.clone(), download.clone());
         tx.send(FileEvent::Open).await.unwrap();
         tx.send(FileEvent::Message(
-            encode(0, &offer.transfer_id, 0, &[7, 8]).unwrap(),
+            encode(0, &offer.transfer_id, 0, &[7, 8])
+                .unwrap()
+                .as_slice()
+                .into(),
         ))
         .await
         .unwrap();
         tx.send(FileEvent::Message(
-            encode(3, &offer.transfer_id, 2, &[]).unwrap(),
+            encode(3, &offer.transfer_id, 2, &[])
+                .unwrap()
+                .as_slice()
+                .into(),
         ))
         .await
         .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if sender.0.lock().unwrap().len() == 2 {
+                if sender.0.lock().unwrap().len() == 1 {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -881,15 +893,100 @@ mod tests {
         let frames = sender.0.lock().unwrap();
         assert_eq!(
             decode(&frames[0]).unwrap(),
-            (1, offer.transfer_id.clone(), 0)
-        );
-        assert_eq!(
-            decode(&frames[1]).unwrap(),
             (4, offer.transfer_id.clone(), 2)
         );
         assert_eq!(download.lock().unwrap().offset, 2);
         download.lock().unwrap().discard().unwrap();
         lane.close();
+    }
+    #[tokio::test]
+    async fn checkpoint_ack_contains_only_persisted_bytes_after_ordinary_frames() {
+        struct Sender(Mutex<Vec<Vec<u8>>>);
+        #[async_trait]
+        impl FileSender for Sender {
+            async fn send(&self, bytes: Vec<u8>) -> Result<(), String> {
+                self.0.lock().unwrap().push(bytes);
+                Ok(())
+            }
+            fn close(&self) {}
+        }
+        let directory =
+            std::env::temp_dir().join(format!("rc-ack-{}", crate::encoding::random_id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("result.bin");
+        let offer = FileOffer {
+            transfer_id: "cd".repeat(16),
+            session_id: "session".into(),
+            name: "result.bin".into(),
+            size: 2,
+            sha256: hex(ring::digest::digest(&ring::digest::SHA256, &[7, 8]).as_ref()),
+        };
+        let sender = Arc::new(Sender(Mutex::new(Vec::new())));
+        let (tx, events) = mpsc::channel(8);
+        let lane = FileLane::start(FilePeer {
+            sender: sender.clone(),
+            events,
+        });
+        let open = || {
+            Download::open(
+                offer.clone(),
+                path.clone(),
+                Arc::new(AtomicU64::new(0)),
+                CancellationToken::new(),
+            )
+        };
+        let download = Arc::new(Mutex::new(open().unwrap()));
+        lane.downloads
+            .lock()
+            .unwrap()
+            .insert(offer.transfer_id.clone(), download.clone());
+        tx.send(FileEvent::Open).await.unwrap();
+        tx.send(FileEvent::Message(
+            encode(0, &offer.transfer_id, 0, &[7])
+                .unwrap()
+                .as_slice()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while download.lock().unwrap().received != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            sender.0.lock().unwrap().is_empty(),
+            "ordinary frames must not acknowledge an uncommitted byte"
+        );
+        tx.send(FileEvent::Message(
+            encode(2, &offer.transfer_id, 1, &[8])
+                .unwrap()
+                .as_slice()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while sender.0.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            decode(&sender.0.lock().unwrap()[0]).unwrap(),
+            (1, offer.transfer_id.clone(), 2)
+        );
+        lane.close();
+        lane.downloads.lock().unwrap().remove(&offer.transfer_id);
+        drop(download);
+        let mut resumed = open().unwrap();
+        assert_eq!(resumed.offset, 2);
+        resumed.finish().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), [7, 8]);
+        fs::remove_dir_all(directory).unwrap();
     }
     #[tokio::test]
     async fn native_staging_resumes_and_checks_original_hash() {

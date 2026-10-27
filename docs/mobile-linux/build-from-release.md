@@ -33,7 +33,13 @@ cd apps/android/native
 构建 Store 变体时，将后两条命令的 `direct` / `DirectDebug` 换为 `play` / `PlayDebug`。
 准备脚本安装原生支持和 installer 的 Maven 包，下载两种 ABI 的 rootfs，并为两个变体暂存资源。
 产品 JNI 由固定 Harness 和 SDK 的 Rust 源码构建，保持 Kotlin/JNI 同源；不链接独立 SDK 的第二份 Rust FFI。
-构建结束会检查最终 APK 的 rootfs、原生库和来源闭包。
+Gradle 会在合并 `Play` / `Direct` 资产前运行官方 rootfs staging，并跟踪双 ABI
+release evidence、SDK 锁定的 producer 输入和当前原生支持 manifest。默认 evidence
+目录为 `apps/android/native/app/build/mobileLinuxRootfs`。使用外部 evidence 目录时，
+可在 Gradle 命令中传入 `-PlingxiRootfsEvidenceDir=<release-evidence-dir>`；缺少 evidence
+时任务会指出准备命令和该属性。原生验证还会确认 `sdk-source.json` 中的 SDK 来源和 revision
+与 Cargo 锁定解析器一致，避免旧 Maven 或 native sidecar 混入新 APK。构建结束会检查最终 APK
+的 rootfs、原生库和来源闭包。
 
 ## iOS
 

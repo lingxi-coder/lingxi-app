@@ -6,6 +6,16 @@ actor LocalAppServiceClient {
     private struct TargetCompatibility: Decodable, Sendable { let compatible: Bool }
     private var handle: MobileLocalAppServiceHandle?
     private var linuxAttached = false
+    private var mediaHostComposition: IOSNativeMediaHostComposition?
+    private var mediaHostInitializationError: String?
+
+    func configureMediaHost(
+        _ mediaHostComposition: IOSNativeMediaHostComposition?,
+        initializationError: String?
+    ) {
+        self.mediaHostComposition = mediaHostComposition
+        mediaHostInitializationError = initializationError
+    }
 
     func request<T: Decodable & Sendable>(_ fields: [String: LocalAppJSON], as type: T.Type = T.self) async throws -> T {
         if handle == nil {
@@ -49,7 +59,13 @@ actor LocalAppServiceClient {
     // Trusted native UI only; page calls use the authenticated external-browser gateway.
     func agentHost(_ request: String) async throws -> LocalAppJSON {
         if LocalAppAgentHostPolicy.requiresModelHost(request) {
-            try await LocalAppAgentModelHost.shared.ensure()
+            guard let mediaHostComposition else {
+                throw LocalAppServiceFailure(
+                    "MEDIA_HOST_UNAVAILABLE",
+                    mediaHostInitializationError ?? "The app media host is not initialized."
+                )
+            }
+            try await LocalAppAgentModelHost.shared.ensure(mediaHostComposition: mediaHostComposition)
         }
         let _: LocalAppJSON = try await self.request(["op": .string("list")])
         guard let handle else { throw LocalAppServiceFailure("SERVICE_UNAVAILABLE", "Local apps are unavailable.") }
@@ -88,6 +104,8 @@ final class UnifiedLocalApps {
     let devicePermissions = LocalAppDevicePermissions()
     @ObservationIgnored let client: LocalAppServiceClient
     @ObservationIgnored private let agentBackground = LocalAppAgentBackgroundController()
+    @ObservationIgnored private var mediaHostComposition: IOSNativeMediaHostComposition?
+    @ObservationIgnored private var mediaHostInitializationError: String?
     var browserReviewAppID: String?
     private(set) var browserAgentWake: LocalAppAgentWakeRequest?
     func consumeBrowserReview(_ id: String) -> Bool {
@@ -110,7 +128,7 @@ final class UnifiedLocalApps {
         guard browserAgentWake == wake else { return }
         browserAgentWake = nil
     }
-    func prepareBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest, returnURL: URL, origin: String) async throws -> URL {
+    func prepareBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest) async throws -> (launch: LocalAppLaunch, readyURL: URL) {
         guard browserAgentWake == wake, let app = record(wake.appID), app.currentRevision == wake.revision else {
             await agentBackground.cancel(wake, client: client)
             clearBrowserAgentWake(wake)
@@ -122,7 +140,36 @@ final class UnifiedLocalApps {
             clearBrowserAgentWake(wake)
             throw LocalAppServiceFailure("AGENT_NOT_DECLARED", "This app version does not declare Agent support.")
         }
-        return try await agentBackground.acquireAndReserve(wake, appName: app.name, returnURL: returnURL, origin: origin, client: client)
+        // A retained SwiftUI view can outlive the gateway run that supplied
+        // its original launch URL. Resolve the serving URL again before
+        // reserving background time; `start` returns the current run when
+        // the same app revision is already running.
+        let launch: LocalAppLaunch
+        do {
+            launch = try await LocalAppAgentHandoffLaunchResolver.resolve(wake) {
+                try await self.openExternalBrowser(wake.appID)
+            }
+        } catch {
+            await agentBackground.cancel(wake, client: client)
+            clearBrowserAgentWake(wake)
+            throw error
+        }
+        guard browserAgentWake == wake else {
+            await agentBackground.cancel(wake, client: client)
+            throw LocalAppServiceFailure("STALE_AGENT_WAKE", "This browser Agent request was replaced before it could start.")
+        }
+        let readyURL = try await agentBackground.acquireAndReserve(
+            wake,
+            appName: app.name,
+            launch: launch,
+            client: client
+        )
+        guard browserAgentWake == wake,
+              record(wake.appID)?.currentRevision == wake.revision else {
+            await agentBackground.cancel(wake, client: client)
+            throw LocalAppServiceFailure("STALE_AGENT_WAKE", "The app version or browser request changed before the handoff completed.")
+        }
+        return (launch, readyURL)
     }
     func cancelBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest) async {
         await agentBackground.cancel(wake, client: client)
@@ -131,11 +178,27 @@ final class UnifiedLocalApps {
     func openExternalBrowser(_ id: String) async throws -> LocalAppLaunch {
         guard let app = record(id) else { throw LocalAppServiceFailure("APP_NOT_FOUND", "The local app was not found.") }
         let release = try await release(id, revision: app.currentRevision)
-        if (release.manifest.capabilities ?? []).contains("agent") { try await LocalAppAgentModelHost.shared.ensure() }
+        if (release.manifest.capabilities ?? []).contains("agent") {
+            guard let mediaHostComposition else {
+                throw LocalAppServiceFailure(
+                    "MEDIA_HOST_UNAVAILABLE",
+                    mediaHostInitializationError ?? "The app media host is not initialized."
+                )
+            }
+            try await LocalAppAgentModelHost.shared.ensure(mediaHostComposition: mediaHostComposition)
+        }
         return try await launch(id)
     }
 
     init(client: LocalAppServiceClient = LocalAppServiceClient()) { self.client = client }
+    func configureMediaHost(
+        _ composition: IOSNativeMediaHostComposition?,
+        initializationError: String?
+    ) async {
+        mediaHostComposition = composition
+        mediaHostInitializationError = initializationError
+        await client.configureMediaHost(composition, initializationError: initializationError)
+    }
     func initialize() async { await refresh(); initialized = true }
     func refresh() async {
         do {

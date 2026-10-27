@@ -1,11 +1,17 @@
 import BackgroundTasks
 import CryptoKit
 import Foundation
+import OSLog
 
 /// A browser request may wake the app, but only this foreground action can
 /// install the iOS 26 continued-processing lease that authorizes that request.
 @MainActor
 final class LocalAppAgentBackgroundController {
+    private static let backgroundLog = Logger(
+        subsystem: "com.lingxi.code",
+        category: "LocalAppAgentBackground"
+    )
+
     private struct Context {
         let wake: LocalAppAgentWakeRequest
         let appName: String
@@ -25,8 +31,7 @@ final class LocalAppAgentBackgroundController {
     func acquireAndReserve(
         _ wake: LocalAppAgentWakeRequest,
         appName: String,
-        returnURL: URL,
-        origin: String,
+        launch: LocalAppLaunch,
         client: LocalAppServiceClient
     ) async throws -> URL {
         guard #available(iOS 26.0, *) else {
@@ -36,16 +41,15 @@ final class LocalAppAgentBackgroundController {
               !wake.runID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             throw LocalAppServiceFailure("INVALID_AGENT_WAKE", "This Agent request has an invalid run id.")
         }
-        guard LocalAppExternalBrowserURL.matches(returnURL, origin: origin) else {
-            throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL is not its registered local origin.")
-        }
+        let readyURL = try LocalAppAgentWakeURL.ready(launch, agentRunID: wake.runID)
         guard let bundleID = Bundle.main.bundleIdentifier else {
             throw LocalAppServiceFailure("BACKGROUND_UNAVAILABLE", "The app identifier is unavailable.")
         }
         let contextKey = wake.contextKey
         if let existing = contexts[contextKey], !existing.finished {
             if tasks[contextKey] != nil, existing.reservationExpiry.map({ $0 > Date() }) == true {
-                return try LocalAppAgentWakeURL.ready(returnURL, origin: origin, runID: wake.runID)
+                Self.logPhase("ready_url_returned", contextKey: contextKey, success: true)
+                return readyURL
             }
             throw LocalAppServiceFailure("AGENT_WAKE_IN_PROGRESS", "This browser request is already being prepared. Wait briefly before returning to it.")
         }
@@ -58,9 +62,11 @@ final class LocalAppAgentBackgroundController {
         catch {
             contexts.removeValue(forKey: contextKey)
             requestIDsByIdentifier.removeValue(forKey: identifier)
+            Self.logFailure(error, contextKey: contextKey)
             throw error
         }
 
+        Self.logPhase("registered", contextKey: contextKey, success: true)
         let request = BGContinuedProcessingTaskRequest(
             identifier: identifier,
             title: String(localized: "Local App Agent · \(appName)"),
@@ -70,6 +76,7 @@ final class LocalAppAgentBackgroundController {
 
         do {
             try await submit(request)
+            Self.logPhase("submitted", contextKey: contextKey, success: true)
             try await waitForAttachment(contextKey: contextKey)
             guard !contexts[contextKey, default: context].finished,
                   tasks[contextKey] != nil else {
@@ -99,9 +106,12 @@ final class LocalAppAgentBackgroundController {
             monitors[contextKey] = Task { @MainActor [weak self] in
                 await self?.monitor(contextKey, client: client)
             }
-            return try LocalAppAgentWakeURL.ready(returnURL, origin: origin, runID: wake.runID)
+            Self.logPhase("wake_reserve", contextKey: contextKey, success: true)
+            Self.logPhase("ready_url_returned", contextKey: contextKey, success: true)
+            return readyURL
         } catch {
             await cancel(wake, client: client)
+            Self.logFailure(error, contextKey: contextKey)
             throw error
         }
     }
@@ -110,6 +120,7 @@ final class LocalAppAgentBackgroundController {
         let contextKey = wake.contextKey
         guard var context = contexts[contextKey], context.wake == wake, !context.finished else {
             try? await clearReservation(wake, client: client)
+            Self.logPhase("cancel_requested", contextKey: contextKey, success: nil)
             return
         }
         context.finished = true
@@ -128,6 +139,7 @@ final class LocalAppAgentBackgroundController {
         finishTask(contextKey: contextKey, success: false)
         contexts.removeValue(forKey: contextKey)
         requestIDsByIdentifier.removeValue(forKey: context.identifier)
+        Self.logPhase("cancel_requested", contextKey: contextKey, success: nil)
     }
 
     private func submit(_ request: BGContinuedProcessingTaskRequest) async throws {
@@ -175,6 +187,7 @@ final class LocalAppAgentBackgroundController {
             return
         }
         tasks[contextKey] = continued
+        Self.logPhase("task_attached", contextKey: contextKey, success: true)
         continued.updateTitle(
             String(localized: "Local App Agent · \(contexts[contextKey]?.appName ?? "")"),
             subtitle: "Waiting for this browser request"
@@ -259,6 +272,7 @@ final class LocalAppAgentBackgroundController {
             } catch is CancellationError {
                 return
             } catch let failure as LocalAppServiceFailure where Self.isPermanentMonitorFailure(failure) {
+                Self.logFailure(failure, contextKey: contextKey)
                 await complete(context.wake, success: false, client: client)
                 return
             } catch {
@@ -305,6 +319,7 @@ final class LocalAppAgentBackgroundController {
 
     private func expire(_ contextKey: String) async {
         guard let context = contexts[contextKey], !context.finished else { return }
+        Self.logPhase("expire", contextKey: contextKey, success: nil)
         await cancel(context.wake, client: context.client)
     }
 
@@ -319,6 +334,7 @@ final class LocalAppAgentBackgroundController {
         finishTask(contextKey: contextKey, success: success)
         contexts.removeValue(forKey: contextKey)
         requestIDsByIdentifier.removeValue(forKey: context.identifier)
+        Self.logPhase("complete", contextKey: contextKey, success: success)
     }
 
     private func clearReservation(_ wake: LocalAppAgentWakeRequest, client: LocalAppServiceClient) async throws {
@@ -335,6 +351,39 @@ final class LocalAppAgentBackgroundController {
         task.expirationHandler = nil
         LocalAppAgentProgressReporting.finish(task.progress, success: success)
         task.setTaskCompleted(success: success)
+    }
+
+    private static func logPhase(_ phase: String, contextKey: String, success: Bool?) {
+        if let success {
+            backgroundLog.log(
+                "phase=\(phase, privacy: .public) keyhash=\(keyHash(contextKey), privacy: .public) success=\(success, privacy: .public)"
+            )
+        } else {
+            backgroundLog.log(
+                "phase=\(phase, privacy: .public) keyhash=\(keyHash(contextKey), privacy: .public)"
+            )
+        }
+    }
+
+    private static func logFailure(_ error: Error, contextKey: String) {
+        let digest = keyHash(contextKey)
+        if let failure = error as? LocalAppServiceFailure {
+            backgroundLog.error(
+                "phase=failure keyhash=\(digest, privacy: .public) success=false failureCode=\(failure.code, privacy: .public)"
+            )
+        } else {
+            let nsError = error as NSError
+            backgroundLog.error(
+                "phase=failure keyhash=\(digest, privacy: .public) success=false errorDomain=\(nsError.domain, privacy: .public) errorCode=\(nsError.code, privacy: .public)"
+            )
+        }
+    }
+
+    private static func keyHash(_ contextKey: String) -> String {
+        SHA256.hash(data: Data(contextKey.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     static func isPermanentMonitorFailure(_ error: Error) -> Bool {
@@ -361,6 +410,23 @@ final class LocalAppAgentBackgroundController {
 
 extension LocalAppAgentWakeRequest {
     var contextKey: String { "\(appID)\u{0}\(revision)\u{0}\(runID)" }
+}
+
+@MainActor
+enum LocalAppAgentHandoffLaunchResolver {
+    static func resolve(
+        _ wake: LocalAppAgentWakeRequest,
+        currentLaunch: () async throws -> LocalAppLaunch
+    ) async throws -> LocalAppLaunch {
+        let launch = try await currentLaunch()
+        guard launch.run.appId == wake.appID,
+              launch.run.revision == wake.revision,
+              launch.run.phase == "running" else {
+            throw LocalAppServiceFailure("STALE_AGENT_WAKE", "The current app run no longer matches this Agent request.")
+        }
+        _ = try LocalAppAgentWakeURL.ready(launch, agentRunID: wake.runID)
+        return launch
+    }
 }
 
 enum LocalAppAgentProgressReporting {
@@ -406,26 +472,41 @@ enum LocalAppAgentProgressReporting {
 }
 
 enum LocalAppAgentWakeURL {
-    static func ready(_ url: URL, origin: String, runID: String) throws -> URL {
+    static func ready(_ launch: LocalAppLaunch, agentRunID: String) throws -> URL {
+        let url = launch.url
+        guard launch.run.phase == "running",
+              hasAppRunPath(url, runID: launch.run.runId) else {
+            throw LocalAppServiceFailure("STALE_APP_RUN_URL", "The app launch URL does not match its current run.")
+        }
         guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               parts.scheme?.lowercased() == "http", parts.host == "127.0.0.1",
               parts.user == nil, parts.password == nil, let port = parts.port, (1...65_535).contains(port),
-              !runID.isEmpty, runID.utf8.count <= 128,
-              !runID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+              !agentRunID.isEmpty, agentRunID.utf8.count <= 128,
+              !agentRunID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL is not a trusted local browser address.")
         }
-        if !LocalAppExternalBrowserURL.matches(url, origin: origin) {
+        if !LocalAppExternalBrowserURL.matches(url, origin: launch.origin) {
             throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app page does not match its registered local origin.")
         }
         var updated = parts
         var query = updated.queryItems ?? []
         query.removeAll { $0.name == "__lingxi_ready" }
-        query.append(URLQueryItem(name: "__lingxi_ready", value: runID))
+        query.append(URLQueryItem(name: "__lingxi_ready", value: agentRunID))
         updated.queryItems = query
         guard let result = updated.url else {
             throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL could not be prepared for return.")
         }
         return result
+    }
+
+    private static func hasAppRunPath(_ url: URL, runID: String) -> Bool {
+        let isValidRunID = !runID.isEmpty && runID.utf8.count <= 128 && runID.utf8.allSatisfy { byte in
+            (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte)
+                || byte == 45 || byte == 95
+        }
+        guard isValidRunID,
+              let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        return parts.percentEncodedPath.hasPrefix("/__run/\(runID)/")
     }
 }
 

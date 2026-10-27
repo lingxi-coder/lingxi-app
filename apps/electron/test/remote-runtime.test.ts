@@ -62,8 +62,9 @@ test('a real runtime: a viewer attaches, prompts as a device, and sees the turn;
   assert.deepEqual(sent, { turn_id: 777 });
   assert.deepEqual(client.prompts, [{ text: 'hello from the phone', opts: { images: [], turnId: 777 } }]);
   assert.equal(runtime.turnActive, true);
-  // Submitted turns do not announce themselves in the real bridge stream.
-  // The submitting host must publish their start for passive viewers.
+  // The bridge announces the admitted turn; passive viewers receive the same
+  // boundary once, ahead of its output.
+  client.emitEvent({ type: 'turn_started', turn_id: 777 });
   client.emitEvent({ type: 'text_delta', text: 'Hi ' });
   client.emitEvent({ type: 'text_delta', text: 'there' });
   client.emitEvent({ type: 'provider_credential_status', secret: 'sk-not-for-viewers' });
@@ -87,17 +88,145 @@ test('a real runtime: a viewer attaches, prompts as a device, and sees the turn;
   await runtime.dispose();
 });
 
-test('a running turn accepts steering without opening a second remote turn', async () => {
+test('submitted and queued turns each publish one correlated remote start before output', async () => {
   const { runtime, client } = connectedRuntime();
   client.emitEvent({ type: 'session_resumed', session_id: SESSION_A, messages: [] });
   const observed: RemoteObservation[] = [];
   runtime.observeRemote((observation) => observed.push(observation));
   await runtime.sendPrompt('first', [], 1);
   await runtime.sendPrompt('steering', [], 2);
-  assert.deepEqual(observed.filter((item) => item.type === 'event').map((item) => item.envelope.event),
-    [{ type: 'turn_started', turn_id: 1 }]);
   assert.deepEqual(runtime.remoteView().turn, { running: true, turn_id: 1 });
-  assert.equal(runtime.remoteView().prompts.length, 2);
+  assert.deepEqual(runtime.remoteView().prompts.map((entry) => [entry.text, entry.turnId]), [
+    ['first', 1], ['steering', 2],
+  ]);
+  client.emitEvent({ type: 'turn_started', turn_id: 1 });
+  client.emitEvent({ type: 'text_delta', text: 'first output' });
+  client.emitEvent({
+    type: 'turn_ended', outcome: 'end_turn', stop_reason: 'end_turn',
+    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '$0' },
+  });
+  client.emitEvent({ type: 'turn_started', turn_id: 2 });
+  client.emitEvent({ type: 'text_delta', text: 'queued output' });
+  assert.deepEqual(observed.filter((item) => item.type === 'event').map((item) => item.envelope.event),
+    [
+      { type: 'turn_started', turn_id: 1 },
+      { type: 'text_delta', text: 'first output' },
+      {
+        type: 'turn_ended', outcome: 'end_turn', stop_reason: 'end_turn',
+        cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '$0' },
+      },
+      { type: 'turn_started', turn_id: 2 },
+      { type: 'text_delta', text: 'queued output' },
+    ]);
+  assert.deepEqual(runtime.remoteView().turn, { running: true, turn_id: 2 });
+  await runtime.dispose();
+});
+
+test('session replay stays ahead of later turn events while old media cleanup is pending', async () => {
+  const { runtime, client } = connectedRuntime();
+  let releaseCleanup!: () => void;
+  const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+  (runtime as any).nativeMediaOwner = 'old-session';
+  (runtime as any).nativeMediaDevices = { dispose: () => cleanup };
+  const events: string[] = [];
+  runtime.observeRemote((observation) => {
+    if (observation.type === 'event') events.push(observation.envelope.event.type);
+  });
+
+  client.emitEvent({ type: 'session_resumed', session_id: SESSION_A, messages: [] });
+  client.emitEvent({ type: 'turn_started', turn_id: 1 });
+  client.emitEvent({ type: 'text_delta', text: 'live output' });
+  assert.deepEqual(events, ['session_resumed', 'turn_started', 'text_delta']);
+  assert.deepEqual(runtime.replaySnapshot().map((entry) => entry.event.type), events);
+  assert.deepEqual(runtime.remoteView().turn, { running: true, turn_id: 1 });
+
+  releaseCleanup();
+  await (runtime as any).nativeMediaDeviceUpdate;
+  await runtime.dispose();
+});
+
+test('media device requests wait for the latest session owner during cleanup', async () => {
+  const { runtime, client } = connectedRuntime();
+  let releaseCleanup!: () => void;
+  let reportCleanupStarted!: () => void;
+  const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+  const cleanupStarted = new Promise<void>((resolve) => { reportCleanupStarted = resolve; });
+  (runtime as any).nativeMediaOwner = SESSION_A;
+  (runtime as any).nativeMediaDevices = {
+    dispose: () => { reportCleanupStarted(); return cleanup; },
+  };
+  const openedOwners: string[] = [];
+  (runtime as any).opts.audioService = {
+    executeMediaDevice: async (request: any) => {
+      if (request.request.type === 'open') {
+        openedOwners.push(request.request.request.owner.session_id);
+        return { request_id: request.request_id, result: { type: 'opened', lease: { lease_id: 'lease-c' } } };
+      }
+      return { request_id: request.request_id, result: { type: 'stopped' } };
+    },
+  };
+  const openFor = (requestId: string, sessionId: string) => ({
+    request_id: requestId,
+    request: { type: 'open', request: {
+      identity: { id: `operation-${requestId}`, generation: 1, service_epoch: 10 },
+      owner: { type: 'session', session_id: sessionId },
+      max_payload_bytes: 1024,
+      request: { mode: 'audio', intent: 'conversation', audio_source: { id: 'microphone' } },
+    } },
+  });
+
+  client.emitEvent({ type: 'session_started', session_id: SESSION_B });
+  await cleanupStarted;
+  client.emit('mediaDeviceRequest', openFor('old', SESSION_B));
+  client.emitEvent({ type: 'session_started', session_id: SESSION_C });
+  client.emit('mediaDeviceRequest', openFor('current', SESSION_C));
+  await Promise.resolve();
+  assert.deepEqual(client.sent, [], 'requests stay pending until owner cleanup settles');
+  assert.deepEqual(openedOwners, []);
+
+  releaseCleanup();
+  await (runtime as any).nativeMediaDeviceUpdate;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const responses = client.sent.filter((item: any) => item.type === 'media_device_response') as any[];
+  assert.equal(responses.length, 2);
+  assert.equal(responses.find((item) => item.response.request_id === 'old').response.result.type, 'error');
+  assert.equal(responses.find((item) => item.response.request_id === 'current').response.result.type, 'opened');
+  assert.deepEqual(openedOwners, [SESSION_C]);
+  await runtime.dispose();
+});
+
+test('a media request waiting for owner cleanup cannot reach a replacement connection', async () => {
+  const { runtime, client } = connectedRuntime();
+  let releaseCleanup!: () => void;
+  let reportCleanupStarted!: () => void;
+  const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+  const cleanupStarted = new Promise<void>((resolve) => { reportCleanupStarted = resolve; });
+  (runtime as any).nativeMediaOwner = SESSION_A;
+  (runtime as any).nativeMediaDevices = {
+    dispose: () => { reportCleanupStarted(); return cleanup; },
+  };
+  let opens = 0;
+  (runtime as any).opts.audioService = {
+    executeMediaDevice: async (request: any) => {
+      opens++;
+      return { request_id: request.request_id, result: { type: 'opened', lease: { lease_id: 'unexpected' } } };
+    },
+  };
+  client.emitEvent({ type: 'session_started', session_id: SESSION_B });
+  await cleanupStarted;
+  client.emit('mediaDeviceRequest', {
+    request_id: 'stale', request: { type: 'open', request: {
+      identity: { id: 'operation-stale', generation: 1, service_epoch: 10 },
+      owner: { type: 'session', session_id: SESSION_B }, max_payload_bytes: 1024,
+      request: { mode: 'audio', intent: 'conversation', audio_source: { id: 'microphone' } },
+    } },
+  });
+  (runtime as any).generation = 2;
+  releaseCleanup();
+  await (runtime as any).nativeMediaDeviceUpdate;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(opens, 0);
+  assert.deepEqual(client.sent, []);
   await runtime.dispose();
 });
 

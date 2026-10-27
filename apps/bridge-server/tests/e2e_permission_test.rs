@@ -481,10 +481,14 @@ async fn reconnect_does_not_receive_stale_frames_from_aborted_first_turn() {
     .await;
 
     match next_frame_with_timeout(&mut second, Duration::from_secs(2)).await {
+        Some(Frame::Event(ClientEvent::TurnStarted { turn_id: None })) => {}
+        other => panic!("expected the second turn's start announcement, got {other:?}"),
+    }
+    match next_frame_with_timeout(&mut second, Duration::from_secs(2)).await {
         Some(Frame::Event(ClientEvent::TextDelta { text })) => {
             assert_eq!(text.display(), "fresh-second-event");
         }
-        other => panic!("expected only the second turn's event after reconnect, got {other:?}"),
+        other => panic!("expected the second turn's event after its start, got {other:?}"),
     }
 
     release_first.notify_waiters();

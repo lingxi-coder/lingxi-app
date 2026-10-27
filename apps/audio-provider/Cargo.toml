@@ -8,6 +8,9 @@ publish = false
 
 [dependencies]
 core.workspace = true
+client.workspace = true
+media-api.workspace = true
+media-runtime.workspace = true
 llm-runtime.workspace = true
 provider-config.workspace = true
 http-client.workspace = true
@@ -18,10 +21,12 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 tokio-util.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
 base64 = "0.22"
+uuid = { version = "1.10", features = ["v4"] }
 
 [dev-dependencies]
-async-trait.workspace = true
 futures.workspace = true
 
 [lints]

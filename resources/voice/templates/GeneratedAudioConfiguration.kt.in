@@ -125,7 +125,6 @@ object AudioConfigurationNormalizer {
         val speechRaw = raw["speech"].asStringMap()
         val recognition = AudioRecognitionPreference(source(recognitionRaw["source"]), modelId(recognitionRaw["offlineModelId"]), cloud(recognitionRaw["cloud"]))
         var speech = AudioSpeechPreference(source(speechRaw["source"]), modelId(speechRaw["offlineModelId"]), voice(speechRaw["voice"]), cloud(speechRaw["cloud"]))
-        if (speech.source == AudioSource.AUTOMATIC) speech = speech.copy(voice = null)
         return AudioConfigurationV4(
             recognition = recognition,
             speech = speech,

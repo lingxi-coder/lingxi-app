@@ -3,7 +3,9 @@ use super::{failure, AudioProviderHost, AudioRequest, SessionContext};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bytes::Bytes;
 use llm_runtime::services::sdk::{self, realtime::*};
-use orchestrator::{ConversationOrchestrator, RealtimeAgentInput, RealtimeAgentLimits};
+use orchestrator::{
+    ConversationOrchestrator, RealtimeAgentContext, RealtimeAgentInput, RealtimeAgentLimits,
+};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -20,13 +22,13 @@ const INPUT_CAPACITY: usize = 32;
 const EVENT_CAPACITY: usize = 32;
 const MAX_PCM_CHUNK_BYTES: usize = 256 * 1024;
 
-struct Registration {
+pub(crate) struct Registration {
     pending: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
     id: String,
     removed: AtomicBool,
 }
 impl Registration {
-    fn unregister(&self) {
+    pub(crate) fn unregister(&self) {
         if !self.removed.swap(true, Ordering::AcqRel) {
             self.pending
                 .lock()
@@ -39,6 +41,26 @@ impl Drop for Registration {
     fn drop(&mut self) {
         self.unregister();
     }
+}
+
+/// A connected provider conversation whose Agent loop remains owned by the
+/// caller. The media attachment consumes this without starting a second Agent.
+pub(crate) struct PreparedRealtimeProvider {
+    pub(crate) request: AudioRequest,
+    pub(crate) prepared: RealtimeAgentContext,
+    pub(crate) control: RealtimeControl,
+    pub(crate) events: RealtimeEvents,
+    pub(crate) driver: RealtimeDriver,
+    pub(crate) inputs: mpsc::Receiver<RealtimeAgentInput>,
+    pub(crate) input: mpsc::Sender<RealtimeAgentInput>,
+    pub(crate) input_format: RealtimeAudioFormat,
+    pub(crate) output_format: RealtimeAudioFormat,
+    pub(crate) max_chunk_bytes: usize,
+    pub(crate) image_input_supported: bool,
+    pub(crate) session_ready: Value,
+    pub(crate) usage_context: Value,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) _registration: Arc<Registration>,
 }
 
 /// Host execution boundary: platforms reserve their ordinary Agent turn owner.
@@ -55,6 +77,8 @@ pub struct NativeRealtimeRun {
     pub output: mpsc::Sender<RealtimeEvent>,
     /// Per-session limits applied to Agent tool execution.
     pub limits: RealtimeAgentLimits,
+    /// Whether the selected provider codec accepts typed image inputs.
+    pub image_input_supported: bool,
     /// Cooperative cancellation token signaled when the host closes or aborts the session.
     pub cancel: CancellationToken,
 }
@@ -99,6 +123,177 @@ pub struct NativeRealtimeSession {
     closing: AtomicBool,
     completion: Arc<Completion>,
 }
+
+/// Prepare the exact trusted provider route and return its transport to an
+/// owner that already owns the Agent continuation. This is shared by the
+/// existing UI realtime path and media Conversation handoff.
+pub(crate) async fn prepare_provider_realtime(
+    host: &AudioProviderHost,
+    mut request: AudioRequest,
+    prepared: RealtimeAgentContext,
+) -> Result<PreparedRealtimeProvider, Value> {
+    if request.kind != "realtime" {
+        return Err(failure(
+            "invalid_request",
+            "native realtime requires realtime audio configuration",
+        ));
+    }
+    bind_session(&mut request, &prepared)?;
+    let route = host.resolve(&request)?;
+    let snapshot = host.client_snapshot();
+    let caps = snapshot
+        .audio()
+        .capabilities(&route)
+        .map_err(|_| failure("unsupported", "selected audio profile is unavailable"))?;
+    if !caps.agent_conversation {
+        return Err(failure(
+            "unsupported",
+            "selected profile lacks the native Agent realtime contract",
+        ));
+    }
+    if request.interaction.as_deref() == Some("interruptible")
+        && !caps
+            .native_realtime_contract
+            .is_some_and(|contract| contract.audio_truncation)
+    {
+        return Err(failure(
+            "unsupported",
+            "this provider requires turn-based capture because audio truncation is unavailable",
+        ));
+    }
+    let model_descriptor = caps
+        .model(
+            sdk::audio::AudioOperation::NativeRealtime,
+            request.cloud.model_id.as_deref(),
+        )
+        .map_err(|_| {
+            failure(
+                "unsupported",
+                "selected native realtime audio model is unavailable",
+            )
+        })?;
+    if let Some(voice) = request.voice.as_deref() {
+        if !model_descriptor
+            .voices
+            .iter()
+            .any(|known| known.id == voice)
+        {
+            return Err(failure(
+                "unsupported",
+                "native realtime voice is not declared for the selected audio model",
+            ));
+        }
+    }
+    request.voice = request
+        .voice
+        .or_else(|| model_descriptor.default_voice.clone());
+    if request
+        .rate
+        .is_some_and(|rate| !rate.is_finite() || rate != 1.0)
+    {
+        return Err(failure(
+            "unsupported",
+            "native realtime does not support a speech rate override",
+        ));
+    }
+    let mut instructions = prepared.instructions.clone();
+    if let Some(locale) = request
+        .language
+        .as_deref()
+        .filter(|value| !matches!(*value, "auto" | "default"))
+    {
+        if locale.is_empty()
+            || locale.len() > 64
+            || !locale
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(failure(
+                "invalid_request",
+                "native realtime language preference must be a locale tag",
+            ));
+        }
+        instructions.push_str(&format!(
+            "\nFor this audio conversation, use {locale} as the requested spoken-language preference."
+        ));
+    }
+    let credential = host.credential_for_profile(&route.profile_name).await?;
+    let tools = prepared
+        .tools
+        .iter()
+        .map(|tool| tool_spec(tool))
+        .collect::<Result<Vec<_>, _>>()?;
+    let cancel = CancellationToken::new();
+    {
+        let mut pending = host
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.contains_key(&request.operation_id) {
+            return Err(failure(
+                "busy",
+                "audio operation identity is already active",
+            ));
+        }
+        pending.insert(request.operation_id.clone(), cancel.clone());
+    }
+    let registration = Arc::new(Registration {
+        pending: host.pending.clone(),
+        id: request.operation_id.clone(),
+        removed: AtomicBool::new(false),
+    });
+    let transport = Arc::new(
+        sdk::HttpTransport::new()
+            .map_err(|_| failure("unavailable", "native realtime transport is unavailable"))?,
+    );
+    let connected = tokio::select! {biased;
+        _=cancel.cancelled()=>return Err(failure("cancelled","native realtime was cancelled")),
+        result=tokio::time::timeout(Duration::from_millis(request.timeout_ms),connect_audio_conversation(
+            &snapshot,&route,AudioRealtimeConfig {model:request.cloud.model_id.clone(),voice:request.voice.clone(),instructions:Some(instructions)},tools,prepared.history.clone(),credential,transport,RealtimeLimits::default()
+        ))=>result.map_err(|_|failure("timeout","native realtime connection deadline exceeded"))?.map_err(|_|failure("provider_error","native realtime connection failed"))?,
+    };
+    let input_format_json = format_json(&connected.input_format)?;
+    let output_format_json = format_json(&connected.output_format)?;
+    let model_id = connected.model.clone();
+    let session_ready = json!({
+        "type":"session_ready",
+        "model":model_id,
+        "inputFormat":input_format_json,
+        "outputFormat":output_format_json,
+        "capabilities":connected.capabilities
+    });
+    let provider_id = caps.provider_id.clone();
+    let image_input_supported = provider_id == "openai";
+    let usage_context = json!({
+        "operationId":request.operation_id.clone(),
+        "profileId":route.profile_name.clone(),
+        "accountScope":route.account_scope.clone(),
+        "modelId":connected.model,
+        "providerId":provider_id
+    });
+    let input_format = connected.input_format.clone();
+    let output_format = connected.output_format.clone();
+    let max_chunk_bytes = request.max_payload_bytes.min(MAX_PCM_CHUNK_BYTES);
+    let (input, inputs) = mpsc::channel(INPUT_CAPACITY);
+    Ok(PreparedRealtimeProvider {
+        request,
+        prepared,
+        control: connected.control,
+        events: connected.events,
+        driver: connected.driver,
+        inputs,
+        input,
+        input_format,
+        output_format,
+        max_chunk_bytes,
+        image_input_supported,
+        session_ready,
+        usage_context,
+        cancel,
+        _registration: registration,
+    })
+}
+
 impl NativeRealtimeSession {
     /// Connect once with an authoritative Agent snapshot. Credentials and profile
     /// configuration remain in the supplied app-scoped audio host.
@@ -117,6 +312,7 @@ impl NativeRealtimeSession {
                     run.inputs,
                     run.output,
                     run.limits,
+                    run.image_input_supported,
                     run.cancel,
                 )
                 .await
@@ -137,165 +333,60 @@ impl NativeRealtimeSession {
             > + Send
             + 'static,
     {
-        let mut request = host.parse(request_json)?;
-        if request.kind != "realtime" {
-            return Err(failure(
-                "invalid_request",
-                "native realtime requires realtime audio configuration",
-            ));
-        }
+        let request = host.parse(request_json)?;
         let prepared = orchestrator.prepare_realtime_agent().await.map_err(|_| {
             failure(
                 "unavailable",
                 "current Agent session cannot prepare native realtime",
             )
         })?;
-        bind_session(&mut request, &prepared)?;
-        let route = host.resolve(&request)?;
-        let snapshot = host.client.snapshot();
-        let caps = snapshot
-            .audio()
-            .capabilities(&route)
-            .map_err(|_| failure("unsupported", "selected audio profile is unavailable"))?;
-        if !caps.agent_conversation {
-            return Err(failure(
-                "unsupported",
-                "selected profile lacks the native Agent realtime contract",
-            ));
-        }
-        if request.interaction.as_deref() == Some("interruptible")
-            && !caps
-                .native_realtime_contract
-                .is_some_and(|contract| contract.audio_truncation)
-        {
-            return Err(failure(
-                "unsupported",
-                "this provider requires turn-based capture because audio truncation is unavailable",
-            ));
-        }
-        let model_descriptor = caps
-            .model(
-                sdk::audio::AudioOperation::NativeRealtime,
-                request.cloud.model_id.as_deref(),
-            )
-            .map_err(|_| {
-                failure(
-                    "unsupported",
-                    "selected native realtime audio model is unavailable",
-                )
-            })?;
-        if let Some(voice) = request.voice.as_deref() {
-            if !model_descriptor
-                .voices
-                .iter()
-                .any(|known| known.id == voice)
-            {
-                return Err(failure(
-                    "unsupported",
-                    "native realtime voice is not declared for the selected audio model",
-                ));
-            }
-        }
-        request.voice = request
-            .voice
-            .or_else(|| model_descriptor.default_voice.clone());
-        if request
-            .rate
-            .is_some_and(|rate| !rate.is_finite() || rate != 1.0)
-        {
-            return Err(failure(
-                "unsupported",
-                "native realtime does not support a speech rate override",
-            ));
-        }
-        let mut instructions = prepared.instructions.clone();
-        if let Some(locale) = request
-            .language
-            .as_deref()
-            .filter(|value| !matches!(*value, "auto" | "default"))
-        {
-            if locale.is_empty()
-                || locale.len() > 64
-                || !locale
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            {
-                return Err(failure(
-                    "invalid_request",
-                    "native realtime language preference must be a locale tag",
-                ));
-            }
-            instructions.push_str(&format!("\nFor this audio conversation, use {locale} as the requested spoken-language preference."));
-        }
-        let credential = host.credential(&route.profile_name).await?;
-        let tools = prepared
-            .tools
-            .iter()
-            .map(|tool| tool_spec(tool))
-            .collect::<Result<Vec<_>, _>>()?;
-        let cancel = CancellationToken::new();
-        {
-            let mut pending = host
-                .pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if pending.contains_key(&request.operation_id) {
-                return Err(failure(
-                    "busy",
-                    "audio operation identity is already active",
-                ));
-            }
-            pending.insert(request.operation_id.clone(), cancel.clone());
-        }
-        let registration = Arc::new(Registration {
-            pending: host.pending.clone(),
-            id: request.operation_id.clone(),
-            removed: AtomicBool::new(false),
-        });
-        let transport = Arc::new(
-            sdk::HttpTransport::new()
-                .map_err(|_| failure("unavailable", "native realtime transport is unavailable"))?,
-        );
-        let connected = tokio::select! {biased;
-            _=cancel.cancelled()=>return Err(failure("cancelled","native realtime was cancelled")),
-            result=tokio::time::timeout(Duration::from_millis(request.timeout_ms),connect_audio_conversation(
-                &snapshot,&route,AudioRealtimeConfig {model:request.cloud.model_id,voice:request.voice,instructions:Some(instructions)},tools,prepared.history.clone(),credential,transport,RealtimeLimits::default()
-            ))=>result.map_err(|_|failure("timeout","native realtime connection deadline exceeded"))?.map_err(|_|failure("provider_error","native realtime connection failed"))?,
-        };
-        let input_format = format_json(&connected.input_format)?;
-        let output_format = format_json(&connected.output_format)?;
-        let session_ready = json!({"type":"session_ready","model":connected.model,"inputFormat":input_format,"outputFormat":output_format,"capabilities":connected.capabilities});
-        let usage_context = json!({"operationId":request.operation_id,"profileId":route.profile_name,
-            "accountScope":route.account_scope,"modelId":connected.model,"providerId":caps.provider_id});
+        let provider = prepare_provider_realtime(host, request, prepared).await?;
+        let PreparedRealtimeProvider {
+            request,
+            prepared,
+            control: provider_control,
+            events: provider_events,
+            driver,
+            inputs: input_rx,
+            input,
+            input_format,
+            output_format: _,
+            max_chunk_bytes,
+            image_input_supported,
+            session_ready,
+            usage_context,
+            cancel,
+            _registration: registration,
+        } = provider;
         let session_id = prepared.session_id.clone();
-        let operation_id = request.operation_id;
-        let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
+        let operation_id = request.operation_id.clone();
         let (events_tx, mut events_rx) = mpsc::channel(EVENT_CAPACITY);
         let (json_tx, json_rx) = mpsc::channel(EVENT_CAPACITY);
         let completion = Arc::new(Completion::default());
         let task_completion = completion.clone();
         let session = Arc::new(Self {
             input,
-            control: connected.control.clone(),
+            control: provider_control.clone(),
             cancel: cancel.clone(),
             registration: registration.clone(),
-            input_format: connected.input_format,
-            max_chunk_bytes: request.max_payload_bytes.min(MAX_PCM_CHUNK_BYTES),
+            input_format,
+            max_chunk_bytes,
             closing: AtomicBool::new(false),
             completion,
         });
-        let control = connected.control.clone();
-        let driver = tokio::spawn(connected.driver.run());
+        let control = provider_control.clone();
+        let driver = tokio::spawn(driver.run());
         let task_cancel = cancel.clone();
         let agent = tokio::spawn(async move {
             let _completion = CompletionGuard(task_completion);
             let result = runner(NativeRealtimeRun {
                 prepared,
-                control: connected.control,
-                events: connected.events,
+                control: provider_control,
+                events: provider_events,
                 inputs: input_rx,
                 output: events_tx,
                 limits: RealtimeAgentLimits::default(),
+                image_input_supported,
                 cancel: task_cancel.clone(),
             })
             .await;
@@ -623,6 +714,7 @@ mod tests {
         orchestrator::RealtimeAgentContext {
             session_id: "current-session".into(),
             profile_name: Some("current-profile".into()),
+            account_scope: Some("profile:current-profile".into()),
             instructions: String::new(),
             history: vec![],
             tools: vec![],

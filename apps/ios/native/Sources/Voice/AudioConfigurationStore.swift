@@ -35,6 +35,7 @@ final class AudioConfigurationStore {
 
     static let storageKey = "voice.audioConfiguration.v4"
     static let didChangeNotification = Notification.Name("LingxiAudioConfigurationStoreDidChange")
+    static let mediaRuntimeStatusDidChangeNotification = Notification.Name("LingxiAudioMediaRuntimeStatusDidChange")
     private static let maximumSafeRevision: UInt64 = 9_007_199_254_740_991
 
     private struct PersistedValue: Codable {
@@ -53,6 +54,7 @@ final class AudioConfigurationStore {
         }
     }
     private(set) var lastError: AudioConfigurationStoreError?
+    private(set) var mediaRuntimeError: String?
 
     init(
         defaults: UserDefaults = .standard,
@@ -89,6 +91,24 @@ final class AudioConfigurationStore {
 
     var snapshot: AudioConfigurationSnapshot {
         AudioConfigurationSnapshot(configuration: configuration, revision: revision)
+    }
+
+    /// Snapshot the current v4 route settings for the shared native media
+    /// runtime. The engine receives the normalized configuration itself, not
+    /// the persistence envelope or its local revision counter.
+    var mediaRuntimeConfigurationJSON: String? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(configuration) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Keep native media-route update failures visible in the Voice settings
+    /// surface. The saved v4 preferences remain available for correction.
+    func setMediaRuntimeError(_ error: String?) {
+        guard mediaRuntimeError != error else { return }
+        mediaRuntimeError = error
+        NotificationCenter.default.post(name: Self.mediaRuntimeStatusDidChangeNotification, object: self)
     }
 
     @discardableResult

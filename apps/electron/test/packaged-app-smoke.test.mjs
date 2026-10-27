@@ -6,11 +6,13 @@ import { afterEach, test } from 'node:test';
 
 import {
   APP_USER_DATA_SUBPATH,
+  assertTemporaryBrokerLaunchdIdentity,
   unregisterCredentialBrokerForColdStart,
   assertCustomProviderTurn,
   assertPackagedLocalAppCatalogSession,
   assertPackagedLocalAppAuthoring,
   assertPackagedLocalAppPendingAuthoring,
+  confirmPackagedLocalAppSourceTrust,
   enterPackagedProjectName,
   createPackagedSettings,
   isExpectedBootstrapPromptPlaceholder,
@@ -143,6 +145,29 @@ test('packaged Local App creation waits for the default folder selection before 
   assert.equal(inputValue, projectName);
 });
 
+test('packaged Local App smoke confirms only its exact generated source folder', async () => {
+  const expected = '/tmp/isolated-home/.lingxi/.apps/Smoke App';
+  const makePage = (actual, clicked) => {
+    const calls = [];
+    return { calls, send: async (method, { expression }) => {
+      assert.equal(method, 'Runtime.evaluate');
+      calls.push(expression);
+      return { result: { value: expression.includes('.trust-folder-dialog .trust-folder-path') ? actual : clicked } };
+    } };
+  };
+  const matching = makePage(expected, true);
+  await confirmPackagedLocalAppSourceTrust(matching, expected);
+  assert.equal(matching.calls.length, 2);
+  assert.match(matching.calls[1], /trust-folder-confirm/);
+
+  const wrongFolder = makePage('/tmp/unrelated', true);
+  await assert.rejects(confirmPackagedLocalAppSourceTrust(wrongFolder, expected), /must never trust a different folder/);
+  assert.equal(wrongFolder.calls.length, 1, 'a mismatched folder must never be confirmed');
+
+  const changedDialog = makePage(expected, false);
+  await assert.rejects(confirmPackagedLocalAppSourceTrust(changedDialog, expected), /must remain available/);
+});
+
 function temporaryDirectory() {
   const path = mkdtempSync(join(tmpdir(), 'lingxi-packaged-smoke-test-'));
   temporaryDirectories.push(path);
@@ -266,4 +291,49 @@ test('cold-start waits for asynchronous launchd removal and refuses unrelated fa
   await unregisterCredentialBrokerForColdStart('development', (_bin, args) => ({ status: args[0] === 'bootout' ? 3 : 113 }));
   await assert.rejects(unregisterCredentialBrokerForColdStart('development', () => ({ status: null })), /bootout failed/);
   await assert.rejects(unregisterCredentialBrokerForColdStart('development', (_bin, args) => ({ status: args[0] === 'bootout' ? 0 : 1 })), /launchctl failed/);
+});
+
+test('temporary Broker guard rejects foreign and replaced launchd identities', {
+  skip: typeof process.getuid !== 'function',
+}, () => {
+  const home = temporaryDirectory();
+  const label = 'com.lingxi.code.credential-broker.development';
+  const target = `gui/${process.getuid()}/${label}`;
+  const plistPath = join(home, 'Library', 'LaunchAgents', `${label}.plist`);
+  const programPath = join(home, 'Library', 'Application Support', 'LingXi', 'CredentialBroker',
+    'development', 'LingXiCredentialBroker.app', 'Contents', 'MacOS', 'LingXiCredentialBroker');
+  const replacementProgramPath = join(home, 'replacement', 'LingXiCredentialBroker');
+  const outsideHome = temporaryDirectory();
+  const outsideProgramPath = join(outsideHome, 'LingXiCredentialBroker');
+  mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });
+  mkdirSync(join(programPath, '..'), { recursive: true });
+  mkdirSync(join(replacementProgramPath, '..'), { recursive: true });
+  writeFileSync(plistPath, 'fixture plist');
+  writeFileSync(programPath, 'expected executable');
+  writeFileSync(replacementProgramPath, 'replacement executable');
+  writeFileSync(outsideProgramPath, 'outside executable');
+
+  const paths = {
+    target,
+    plistPath: realpathSync.native(plistPath),
+    programPath: realpathSync.native(programPath),
+  };
+  const output = (service, plist, program) => `${service} = {\n\tpath = ${plist}\n\tprogram = ${program}\n\tpid = 4242\n}\n`;
+
+  assert.deepEqual(assertTemporaryBrokerLaunchdIdentity(output(target, plistPath, programPath), paths), {
+    plistPath: paths.plistPath,
+    programPath: paths.programPath,
+    pid: 4242,
+  });
+  assert.throws(() => assertTemporaryBrokerLaunchdIdentity(
+    output(target, plistPath, outsideProgramPath), paths,
+  ), /does not match this isolated smoke home/);
+  assert.throws(() => assertTemporaryBrokerLaunchdIdentity(
+    output(target, plistPath, replacementProgramPath), paths,
+  ), /does not match this isolated smoke home/);
+  assert.throws(() => assertTemporaryBrokerLaunchdIdentity(
+    output(`gui/${process.getuid()}/com.lingxi.code.credential-broker`, plistPath, programPath), paths,
+  ), /service label must match/);
+  const invalidPid = output(target, plistPath, programPath).replace('pid = 4242', 'pid = not-a-pid');
+  assert.throws(() => assertTemporaryBrokerLaunchdIdentity(invalidPid, paths), /PID must be valid/);
 });

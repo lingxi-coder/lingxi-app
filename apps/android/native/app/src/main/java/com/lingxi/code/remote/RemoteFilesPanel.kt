@@ -1,5 +1,6 @@
 package com.lingxi.code.remote
 
+import android.content.res.AssetFileDescriptor
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,6 +19,7 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.android.RemoteFileFfi
 import com.lingxi.code.bindings.android.RemoteTransportFfi
 import java.io.File
+import java.nio.channels.Channels
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +29,17 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Translate the timeout emitted by the native file-transfer timer. */
+internal fun remoteFileProblemResource(message: String): Int? = when (message) {
+    "deadline has elapsed" -> R.string.remote_file_timeout
+    else -> null
+}
+
+internal fun remoteFileDownloadProblem(message: String?, incomplete: String, localize: (Int) -> String): String {
+    val detail = message?.let { value -> remoteFileProblemResource(value)?.let(localize) ?: value }
+    return listOfNotNull(detail, incomplete).joinToString("\n")
+}
 
 /** Original-byte transfer is separate from the camera/image-compression picker. */
 @Composable
@@ -95,21 +108,35 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
                 }
                 fileOperation { it.downloadFile(file, output.absolutePath) }
                 withContext(Dispatchers.IO) {
-                    context.contentResolver.openOutputStream(uri, "wt").use { target ->
-                        checkNotNull(target) { "Cannot open destination" }
-                        output.inputStream().use { input ->
-                            val buffer = ByteArray(64 * 1024)
-                            while (true) {
-                                coroutineContext.ensureActive()
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                target.write(buffer, 0, count)
+                    context.contentResolver.openAssetFileDescriptor(uri, "wt").use { descriptor ->
+                        checkNotNull(descriptor) { "Cannot open destination" }
+                        val currentContext = coroutineContext
+                        descriptor.createOutputStream().use { target ->
+                            output.inputStream().use { input ->
+                                // A bounded asset can enforce an offset/length through
+                                // its stream wrapper. Do not bypass that wrapper via
+                                // the underlying channel's direct-transfer path.
+                                val channel = if (descriptor.startOffset == 0L && descriptor.declaredLength == AssetFileDescriptor.UNKNOWN_LENGTH) {
+                                    target.channel
+                                } else {
+                                    Channels.newChannel(target)
+                                }
+                                copyVerifiedRemoteFile(input.channel, channel, ensureActive = { currentContext.ensureActive() })
                             }
                         }
                     }
                 }
-            } catch (error: CancellationException) { throw error }
-            catch (error: Exception) { problem = error.message }
+            } catch (error: CancellationException) {
+                // The system picker may already have created the selected
+                // document, even when no bytes were exported yet. Never
+                // delete it: some providers can return an existing file.
+                problem = context.getString(R.string.remote_file_save_incomplete)
+                throw error
+            } catch (error: Exception) {
+                problem = remoteFileDownloadProblem(error.message, context.getString(R.string.remote_file_save_incomplete)) {
+                    context.getString(it)
+                }
+            }
             finally { busy = false; transfer = null }
         }
     }
@@ -171,7 +198,10 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
                 LinearProgressIndicator(progress = { if (total > 0UL) (committed.toDouble() / total.toDouble()).toFloat() else 0f })
                 Text("$committed / $total B")
             }
-            problem?.let { Text(it) }
+            problem?.let { message ->
+                val resource = remoteFileProblemResource(message)
+                Text(if (resource != null) stringResource(resource) else message)
+            }
             files.forEach { file -> Row {
                 Text(file.name, modifier = Modifier.weight(1f), maxLines = 1)
                 TextButton(enabled = available && !busy, onClick = { if (!busy) {

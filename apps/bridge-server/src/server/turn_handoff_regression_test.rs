@@ -216,6 +216,39 @@ impl ClientEventSink for FirstTextBarrier {
     }
 }
 
+struct IdentityRecordingDriver {
+    inner: crate::driver::OrchestratorTurnDriver,
+    identities: Arc<std::sync::Mutex<Vec<(Option<String>, bool)>>>,
+}
+
+#[async_trait]
+impl TurnDriver for IdentityRecordingDriver {
+    async fn current_session_id(&self) -> Option<String> {
+        self.inner.current_session_id().await
+    }
+
+    async fn run_turn(&self, prompt: Utf16JsonProjection) {
+        self.inner.run_turn(prompt).await;
+    }
+
+    async fn run_identified_turn(
+        &self,
+        prompt: Utf16JsonProjection,
+        images: Vec<ImageRefDto>,
+        cancel: CancellationToken,
+        row_token: Option<String>,
+        queued: bool,
+    ) {
+        self.identities
+            .lock()
+            .unwrap()
+            .push((row_token.clone(), queued));
+        self.inner
+            .run_identified_turn(prompt, images, cancel, row_token, queued)
+            .await;
+    }
+}
+
 #[tokio::test]
 async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
     use client::adapter::AdapterOutputStream;
@@ -268,9 +301,12 @@ async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
                 Arc::new(StaticMemoryProvider::empty()),
                 "/tmp".into(),
             ));
-        let driver = Arc::new(
-            crate::driver::OrchestratorTurnDriver::new(orchestrator).with_message_output(output),
-        );
+        let identities = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let driver = Arc::new(IdentityRecordingDriver {
+            inner: crate::driver::OrchestratorTurnDriver::new(orchestrator)
+                .with_message_output(output),
+            identities: identities.clone(),
+        });
         let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
         let connection = connection.bind(gate, driver);
         let (endpoint, mut socket, sink) = captured_sink().await;
@@ -312,17 +348,41 @@ async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
             .collect::<Vec<_>>();
         assert_eq!(
             starts.len(),
-            1,
-            "queued complete input must announce once: {events:?}"
+            2,
+            "the seed and queued input must each announce once: {events:?}"
         );
-        assert_eq!(starts[0].1, turn_id);
+        assert_eq!(starts[0].1, Some(1));
+        assert_eq!(starts[1].1, turn_id);
+        let seed_output = events
+            .iter()
+            .position(
+                |event| matches!(event, ClientEvent::TextDelta { text } if text.display() == "seed output"),
+            )
+            .unwrap();
         let queued_output = events
             .iter()
             .position(
                 |event| matches!(event, ClientEvent::TextDelta { text } if text.display() == "queued output"),
             )
             .unwrap();
-        assert!(starts[0].0 < queued_output);
+        let ends = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                matches!(event, ClientEvent::TurnEnded { .. }).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ends.len(), 2, "each turn has exactly one terminal");
+        assert!(starts[0].0 < seed_output && seed_output < ends[0]);
+        assert!(ends[0] < starts[1].0 && starts[1].0 < queued_output && queued_output < ends[1]);
+        assert_eq!(
+            *identities.lock().unwrap(),
+            vec![
+                (Some("client-turn:1".into()), false),
+                (turn_id.map(|id| format!("client-turn:{id}")), true),
+            ],
+            "queued prompt identity stays attached to its own turn"
+        );
         let calls = streaming.captured_calls().await;
         assert_eq!(calls.len(), 2);
         let attached = calls[1]
@@ -468,6 +528,10 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
         },
     )
     .await;
+    assert!(matches!(
+        next_frame(&mut socket).await,
+        Frame::Event(ClientEvent::TurnStarted { turn_id: Some(1) })
+    ));
     assert!(matches!(
         next_frame(&mut socket).await,
         Frame::Event(ClientEvent::AskUserQuestion { .. })

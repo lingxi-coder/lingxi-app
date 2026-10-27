@@ -78,7 +78,13 @@ function snapshot() {
     ref = { projectPath: path, sessionId: `22222222-2222-4333-8444-${String(fixture.newSessions.length).padStart(12, '0')}` };
     return snapshot();
   },
-  localApps: { list: async () => [], onChanged: () => () => {} },
+  localApps: {
+    list: async () => [], legacyEntries: async () => [], onChanged: () => () => {},
+    prepareAuthoring: async (session: typeof ref) => ({ workspaceId: 'fixture-workspace', sourceDirectory: session.projectPath,
+      projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId }),
+    bindAuthoring: async (appId: string, session: typeof ref) => ({ appId, workspaceId: 'fixture-workspace', sourceDirectory: session.projectPath,
+      projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId }),
+  },
   command: async () => {},
   listProjectSessions: async (path: string) => ({ projectPath: path, sessions: [] }),
 };

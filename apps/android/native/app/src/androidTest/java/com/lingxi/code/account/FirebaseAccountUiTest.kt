@@ -16,6 +16,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.firebase.auth.FirebaseAuth
+import com.lingxi.code.R
 import com.lingxi.code.theme.LingXiTheme
 import java.io.File
 import kotlinx.coroutines.runBlocking
@@ -77,7 +78,7 @@ class FirebaseAccountUiTest {
             }
             rule.waitUntil(20_000) { !model.state.value.busy }
             assertNull(auth.currentUser)
-            assertEquals("登录已取消。", model.state.value.message)
+            assertEquals(R.string.account_error_cancelled, model.state.value.messageRes)
             return
         }
         if (phase == "register") {
@@ -90,9 +91,9 @@ class FirebaseAccountUiTest {
             rule.waitUntil(20_000) { auth.currentUser == null && !model.state.value.busy }
             rule.onNodeWithTag("account.mode").performScrollTo().performClick()
             credentials(email, "wrong-password-123")
-            rule.waitUntil(30_000) { !model.state.value.busy && model.state.value.message != null }
+            rule.waitUntil(30_000) { !model.state.value.busy && model.state.value.messageRes != null }
             assertNull(auth.currentUser)
-            assertEquals("邮箱或密码不正确。", model.state.value.message)
+            assertEquals(R.string.account_error_credentials, model.state.value.messageRes)
             rule.onNodeWithTag("account.password").performScrollTo().performTextReplacement(password)
             rule.onNodeWithTag("account.submit").performScrollTo().performClick()
             rule.waitUntil(40_000) { auth.currentUser?.email == email && !model.state.value.busy }

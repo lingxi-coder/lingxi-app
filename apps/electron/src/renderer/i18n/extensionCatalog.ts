@@ -1014,6 +1014,202 @@ export const extensionCatalog: Record<string, Record<string, string>> = {
     "ja": "公開",
     "ko": "공개"
   },
+  "desktop_extension_mcp_catalog": {
+    "zh-Hans": "MCP 集成目录",
+    "zh-Hant": "MCP 整合目錄",
+    "en": "MCP integrations",
+    "ja": "MCP インテグレーション",
+    "ko": "MCP 통합"
+  },
+  "desktop_extension_featured_sources": {
+    "zh-Hans": "精选来源",
+    "zh-Hant": "精選來源",
+    "en": "Featured sources",
+    "ja": "おすすめの提供元",
+    "ko": "추천 소스"
+  },
+  "desktop_extension_category_browser": {
+    "zh-Hans": "浏览器",
+    "zh-Hant": "瀏覽器",
+    "en": "Browser",
+    "ja": "ブラウザー",
+    "ko": "브라우저"
+  },
+  "desktop_extension_category_development": {
+    "zh-Hans": "开发",
+    "zh-Hant": "開發",
+    "en": "Development",
+    "ja": "開発",
+    "ko": "개발"
+  },
+  "desktop_extension_category_productivity": {
+    "zh-Hans": "效率",
+    "zh-Hant": "效率",
+    "en": "Productivity",
+    "ja": "生産性",
+    "ko": "생산성"
+  },
+  "desktop_extension_configured": {
+    "zh-Hans": "已配置",
+    "zh-Hant": "已設定",
+    "en": "Configured",
+    "ja": "設定済み",
+    "ko": "구성됨"
+  },
+  "desktop_extension_mcp_status_connected": {
+    "zh-Hans": "已连接",
+    "zh-Hant": "已連線",
+    "en": "Connected",
+    "ja": "接続済み",
+    "ko": "연결됨"
+  },
+  "desktop_extension_mcp_status_disconnected": {
+    "zh-Hans": "已断开",
+    "zh-Hant": "已中斷",
+    "en": "Disconnected",
+    "ja": "未接続",
+    "ko": "연결 끊김"
+  },
+  "desktop_extension_mcp_status_error": {
+    "zh-Hans": "连接错误：%1$s",
+    "zh-Hant": "連線錯誤：%1$s",
+    "en": "Connection error: %1$s",
+    "ja": "接続エラー: %1$s",
+    "ko": "연결 오류: %1$s"
+  },
+  "desktop_extension_mcp_status_error_unknown": {
+    "zh-Hans": "连接错误",
+    "zh-Hant": "連線錯誤",
+    "en": "Connection error",
+    "ja": "接続エラー",
+    "ko": "연결 오류"
+  },
+  "desktop_extension_mcp_status_unknown": {
+    "zh-Hans": "状态未知",
+    "zh-Hant": "狀態未知",
+    "en": "Status unknown",
+    "ja": "状態不明",
+    "ko": "상태 알 수 없음"
+  },
+  "desktop_extension_requirements": {
+    "zh-Hans": "运行要求",
+    "zh-Hant": "執行需求",
+    "en": "Requirements",
+    "ja": "必要条件",
+    "ko": "요구 사항"
+  },
+  "desktop_extension_no_public_mcp": {
+    "zh-Hans": "当前没有适用于桌面平台的公共 MCP 集成。",
+    "zh-Hant": "目前沒有適用於桌面平台的公開 MCP 整合。",
+    "en": "There are no public MCP integrations for desktop yet.",
+    "ja": "デスクトップ向けの公開 MCP インテグレーションはまだありません。",
+    "ko": "아직 데스크톱용 공개 MCP 통합이 없습니다."
+  },
+  "desktop_extension_no_public_mcp_search": {
+    "zh-Hans": "没有匹配的公共 MCP 集成。",
+    "zh-Hant": "沒有相符的公開 MCP 整合。",
+    "en": "No public MCP integrations match your search.",
+    "ja": "検索に一致する公開 MCP インテグレーションはありません。",
+    "ko": "검색과 일치하는 공개 MCP 통합이 없습니다."
+  },
+  "desktop_extension_no_public_plugins_search": {
+    "zh-Hans": "没有匹配的公共插件或来源。",
+    "zh-Hant": "沒有相符的公開外掛或來源。",
+    "en": "No public plugins or sources match your search.",
+    "ja": "検索に一致する公開プラグインや提供元はありません。",
+    "ko": "검색과 일치하는 공개 플러그인 또는 소스가 없습니다."
+  },
+  "desktop_extension_open_documentation": {
+    "zh-Hans": "打开文档",
+    "zh-Hant": "開啟文件",
+    "en": "Open documentation",
+    "ja": "ドキュメントを開く",
+    "ko": "문서 열기"
+  },
+  "desktop_extension_open_documentation_named": {
+    "zh-Hans": "打开 %1$s 的文档",
+    "zh-Hant": "開啟 %1$s 的文件",
+    "en": "Open documentation for %1$s",
+    "ja": "%1$s のドキュメントを開く",
+    "ko": "%1$s 문서 열기"
+  },
+  "desktop_extension_open_source": {
+    "zh-Hans": "打开来源",
+    "zh-Hant": "開啟來源",
+    "en": "Open source",
+    "ja": "ソースを開く",
+    "ko": "소스 열기"
+  },
+  "desktop_extension_open_source_named": {
+    "zh-Hans": "打开 %1$s 的来源",
+    "zh-Hant": "開啟 %1$s 的來源",
+    "en": "Open source for %1$s",
+    "ja": "%1$s のソースを開く",
+    "ko": "%1$s 소스 열기"
+  },
+  "desktop_extension_add_marketplace_named": {
+    "zh-Hans": "添加 %1$s 市场",
+    "zh-Hant": "新增 %1$s 市集",
+    "en": "Add the %1$s marketplace",
+    "ja": "%1$s マーケットを追加",
+    "ko": "%1$s 마켓 추가"
+  },
+  "desktop_extension_browse_marketplace_named": {
+    "zh-Hans": "浏览 %1$s 市场",
+    "zh-Hant": "瀏覽 %1$s 市集",
+    "en": "Browse the %1$s marketplace",
+    "ja": "%1$s マーケットを表示",
+    "ko": "%1$s 마켓 보기"
+  },
+  "desktop_extension_marketplace_added": {
+    "zh-Hans": "市场已添加",
+    "zh-Hant": "市集已新增",
+    "en": "Marketplace added",
+    "ja": "マーケット追加済み",
+    "ko": "마켓 추가됨"
+  },
+  "desktop_extension_marketplace_source_conflict_short": {
+    "zh-Hans": "同名来源冲突",
+    "zh-Hant": "同名來源衝突",
+    "en": "Source conflict",
+    "ja": "提供元が競合",
+    "ko": "소스 충돌"
+  },
+  "desktop_extension_resolve_marketplace_conflict_named": {
+    "zh-Hans": "解决 %1$s 市场来源冲突",
+    "zh-Hant": "解決 %1$s 市集來源衝突",
+    "en": "Resolve the %1$s marketplace source conflict",
+    "ja": "%1$s マーケットの提供元競合を解決",
+    "ko": "%1$s 마켓 소스 충돌 해결"
+  },
+  "desktop_extension_marketplace_source_conflict": {
+    "zh-Hans": "市场“%1$s”当前注册来源为 %2$s，此卡片指向 %3$s。添加操作不会替换现有来源。请先预览并移除现有市场，再返回添加目标来源。",
+    "zh-Hant": "市集「%1$s」目前註冊來源為 %2$s，此卡片指向 %3$s。新增操作不會取代現有來源。請先預覽並移除現有市集，再返回新增目標來源。",
+    "en": "Marketplace %1$s is registered from %2$s, while this card points to %3$s. Adding it will not replace the current source. Preview and remove the existing marketplace, then return to add the requested source.",
+    "ja": "マーケット %1$s は %2$s から登録済みですが、このカードは %3$s を参照しています。追加操作で現在の提供元は置き換わりません。既存マーケットを事前確認して削除し、戻って目的の提供元を追加してください。",
+    "ko": "%1$s 마켓은 현재 %2$s에서 등록되어 있지만 이 카드는 %3$s를 가리킵니다. 추가 작업은 기존 소스를 바꾸지 않습니다. 기존 마켓을 미리 확인하고 제거한 뒤 돌아와 요청한 소스를 추가하세요."
+  },
+  "desktop_extension_mcp_replace_conflict": {
+    "zh-Hans": "%1$s 在“%2$s”中已配置为不同连接。保存会替换该配置；若要保留它，请修改名称或作用域。",
+    "zh-Hant": "%1$s 在「%2$s」中已設定為不同連線。儲存會取代該設定；若要保留它，請修改名稱或範圍。",
+    "en": "%1$s already has a different connection in %2$s. Saving will replace that definition; change the name or scope to keep it.",
+    "ja": "%1$s は %2$s で別の接続として設定済みです。保存するとその設定を置き換えます。残す場合は名前または範囲を変更してください。",
+    "ko": "%1$s은(는) %2$s 범위에 다른 연결로 이미 구성되어 있습니다. 저장하면 기존 정의가 교체됩니다. 유지하려면 이름이나 범위를 변경하세요."
+  },
+  "desktop_extension_mcp_other_scope_conflict": {
+    "zh-Hans": "%1$s 在“%2$s”中使用了不同连接；当前草稿将保存到“%3$s”。",
+    "zh-Hant": "%1$s 在「%2$s」中使用不同連線；目前草稿將儲存至「%3$s」。",
+    "en": "%1$s has a different connection in %2$s; this draft will be saved to %3$s.",
+    "ja": "%1$s は %2$s で別の接続を使用しています。この下書きは %3$s に保存されます。",
+    "ko": "%1$s은(는) %2$s에서 다른 연결을 사용합니다. 이 초안은 %3$s에 저장됩니다."
+  },
+  "desktop_extension_mcp_replace_configuration": {
+    "zh-Hans": "替换 MCP 配置",
+    "zh-Hant": "取代 MCP 設定",
+    "en": "Replace MCP configuration",
+    "ja": "MCP 設定を置き換える",
+    "ko": "MCP 구성 교체"
+  },
   "desktop_extension_installed_plugin": {
     "zh-Hans": "已安装插件",
     "zh-Hant": "已安裝外掛",
@@ -1244,6 +1440,62 @@ export const extensionCatalog: Record<string, Record<string, string>> = {
     "en": "Could not clear sensitive configuration.",
     "ja": "機密設定を消去できませんでした。",
     "ko": "민감한 구성을 지울 수 없습니다."
+  },
+  "desktop_extension_plugin_secret_cleanup_done": {
+    "zh-Hans": "插件已卸载，安全保存的凭据已清理。",
+    "zh-Hant": "外掛已解除安裝，安全儲存的憑據已清理。",
+    "en": "Plugin uninstalled and securely stored credentials cleared.",
+    "ja": "プラグインをアンインストールし、安全に保存された資格情報を消去しました。",
+    "ko": "플러그인을 제거하고 안전하게 저장된 자격 증명을 삭제했습니다."
+  },
+  "desktop_extension_plugin_secret_cleanup_restart": {
+    "zh-Hans": "插件已卸载，凭据已清理；当前有活动回合，重启后生效。",
+    "zh-Hant": "外掛已解除安裝，憑據已清理；目前有進行中的回合，重新啟動後生效。",
+    "en": "Plugin uninstalled and credentials cleared. Restart after the active turn to apply.",
+    "ja": "プラグインをアンインストールし、資格情報を消去しました。現在のターン終了後に再起動すると適用されます。",
+    "ko": "플러그인을 제거하고 자격 증명을 삭제했습니다. 현재 턴이 끝난 후 다시 시작하면 적용됩니다."
+  },
+  "desktop_extension_plugin_secret_cleanup_restart_pending": {
+    "zh-Hans": "已清理的凭据将在活动回合结束并重启后从引擎缓存中移除。",
+    "zh-Hant": "已清理的憑據會在目前回合結束並重新啟動後從引擎快取中移除。",
+    "en": "The engine cache will drop cleared credentials after the active turn and a restart.",
+    "ja": "消去した資格情報は、現在のターン終了後に再起動するとエンジンキャッシュから削除されます。",
+    "ko": "정리된 자격 증명은 현재 턴이 끝난 뒤 다시 시작하면 엔진 캐시에서 제거됩니다."
+  },
+  "desktop_extension_plugin_secret_cleanup_retained": {
+    "zh-Hans": "插件仍安装在其他范围，凭据已保留。",
+    "zh-Hant": "外掛仍安裝在其他範圍，憑據已保留。",
+    "en": "The plugin remains installed in another scope, so its credentials were retained.",
+    "ja": "プラグインは別のスコープにインストールされているため、資格情報を保持しました。",
+    "ko": "플러그인이 다른 범위에 계속 설치되어 있어 자격 증명을 유지했습니다."
+  },
+  "desktop_extension_plugin_secret_cleanup_failed": {
+    "zh-Hans": "插件已卸载，但安全保存的凭据尚未全部清理。请重试清理。",
+    "zh-Hant": "外掛已解除安裝，但安全儲存的憑據尚未全部清理。請重試清理。",
+    "en": "Plugin uninstalled, but its securely stored credentials were not fully cleared. Retry cleanup.",
+    "ja": "プラグインはアンインストールされましたが、安全に保存された資格情報をすべて消去できませんでした。再試行してください。",
+    "ko": "플러그인을 제거했지만 안전하게 저장된 자격 증명을 모두 삭제하지 못했습니다. 정리를 다시 시도하세요."
+  },
+  "desktop_extension_plugin_secret_cleanup_deferred": {
+    "zh-Hans": "插件已卸载，但安装记录发生变化，凭据未清理。请重试清理。",
+    "zh-Hant": "外掛已解除安裝，但安裝記錄已變更，憑據未清理。請重試清理。",
+    "en": "Plugin uninstalled, but its install record changed, so credentials were left untouched. Retry cleanup.",
+    "ja": "プラグインはアンインストールされましたが、インストール記録が変わったため資格情報はそのままです。再試行してください。",
+    "ko": "플러그인을 제거했지만 설치 기록이 변경되어 자격 증명을 그대로 두었습니다. 정리를 다시 시도하세요."
+  },
+  "desktop_extension_plugin_secret_cleanup_unavailable": {
+    "zh-Hans": "插件已卸载，但无法确认凭据清理状态。请刷新后检查插件和凭据。",
+    "zh-Hant": "外掛已解除安裝，但無法確認憑據清理狀態。請重新整理後檢查外掛和憑據。",
+    "en": "Plugin uninstalled, but credential cleanup could not be verified. Refresh and check the plugin and its credentials.",
+    "ja": "プラグインはアンインストールされましたが、資格情報の消去状態を確認できませんでした。更新してプラグインと資格情報を確認してください。",
+    "ko": "플러그인을 제거했지만 자격 증명 정리 상태를 확인할 수 없습니다. 새로 고침한 뒤 플러그인과 자격 증명을 확인하세요."
+  },
+  "desktop_extension_plugin_secret_cleanup_retry": {
+    "zh-Hans": "重试清理凭据",
+    "zh-Hant": "重試清理憑據",
+    "en": "Retry credential cleanup",
+    "ja": "資格情報の消去を再試行",
+    "ko": "자격 증명 정리 다시 시도"
   },
   "desktop_extension_required": {
     "zh-Hans": "必填",

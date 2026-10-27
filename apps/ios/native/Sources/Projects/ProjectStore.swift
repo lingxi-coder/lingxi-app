@@ -45,6 +45,21 @@ final class ProjectStore {
         self.init(repository: repository, synchronizer: synchronizer)
     }
 
+    /// Keep simulated UI-test sessions and projects out of the user's index.
+    static func forRuntime(
+        managedRoot: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ProjectStore {
+        #if DEBUG
+        if environment["LINGXI_UI_TESTING"] == "1" {
+            let testRoot = URL(fileURLWithPath: managedRoot, isDirectory: true)
+                .appendingPathComponent("ui-testing", isDirectory: true).path
+            return ProjectStore(managedRoot: testRoot)
+        }
+        #endif
+        return ProjectStore(managedRoot: managedRoot)
+    }
+
     func reload() {
         Task { await reloadAsync() }
     }

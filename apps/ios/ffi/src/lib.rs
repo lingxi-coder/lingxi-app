@@ -94,13 +94,13 @@ mod linux_runtime;
 #[cfg(feature = "uniffi")]
 mod local_apps;
 #[cfg(feature = "uniffi")]
-pub use local_apps::{build_ios_local_app_service, MobileLocalAppError, MobileLocalAppServiceHandle};
+pub use local_apps::{
+    build_ios_local_app_service, MobileLocalAppError, MobileLocalAppServiceHandle,
+};
 
 mod linux_types;
 #[cfg(feature = "uniffi")]
 mod remote;
-#[cfg(feature = "uniffi")]
-pub use remote::*;
 #[cfg(feature = "uniffi")]
 pub use callbacks::CameraFfiError;
 #[cfg(feature = "uniffi")]
@@ -123,6 +123,8 @@ pub use callbacks::IosDeviceControl;
 pub use callbacks::IosEventListener;
 #[cfg(feature = "uniffi")]
 pub use callbacks::IosLocation;
+#[cfg(feature = "uniffi")]
+pub use callbacks::IosMediaDevicePorts;
 #[cfg(feature = "uniffi")]
 pub use callbacks::IosNotification;
 #[cfg(feature = "uniffi")]
@@ -175,6 +177,10 @@ pub use host::build_ios_engine_with_config;
 pub use host::build_mobile_engine;
 #[cfg(feature = "uniffi")]
 pub use host::create_ios_side_chat;
+#[cfg(feature = "uniffi")]
+pub use host::IosNativeMediaHost;
+#[cfg(feature = "uniffi")]
+pub use host::MediaAudioSessionBindingFfi;
 pub use host::PlatformImpls;
 #[cfg(test)]
 use linux_conversion::event_to_ffi;
@@ -231,6 +237,8 @@ pub use linux_types::MobileLinuxStreamSourceFfi;
 pub use linux_types::MobileLinuxTaskFfi;
 #[cfg(feature = "uniffi")]
 pub use linux_types::MobileLinuxTaskStateFfi;
+#[cfg(feature = "uniffi")]
+pub use remote::*;
 
 #[cfg(feature = "uniffi")]
 mod mobile_linux_sdk;

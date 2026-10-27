@@ -109,6 +109,38 @@ pub trait IosAudioService: Send + Sync {
     ) -> Result<(), IosAudioFfiError>;
 }
 
+/// Swift-owned callback for the app's single native audio/video coordinator.
+/// This typed callback replaces opening a second capture/render path for RTC.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosMediaDevicePorts: Send + Sync {
+    /// Exact session modes the platform's shared media-device lease can open.
+    fn supported_session_modes(&self) -> Vec<client::protocol::media::MediaSessionModeDto>;
+
+    /// Execute one owner-bound device lease request and echo its correlation ID.
+    async fn request(
+        &self,
+        request: client::protocol::media::MediaDeviceRequestEnvelopeDto,
+    ) -> client::protocol::media::MediaDeviceResponseDto;
+}
+
+#[cfg(feature = "uniffi")]
+pub(super) struct IosMediaDevicePortsBridge {
+    pub(super) inner: Box<dyn IosMediaDevicePorts>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl audio_provider::media_native::NativeMediaDeviceCallback for IosMediaDevicePortsBridge {
+    async fn request(
+        &self,
+        request: client::protocol::media::MediaDeviceRequestEnvelopeDto,
+    ) -> client::protocol::media::MediaDeviceResponseDto {
+        self.inner.request(request).await
+    }
+}
+
 #[cfg(feature = "uniffi")]
 pub(super) struct IosAudioServiceBridge {
     pub(super) inner: Box<dyn IosAudioService>,
@@ -150,6 +182,7 @@ impl harness_runtime::mobile::NativeAudioService for IosAudioServiceBridge {
 #[cfg(feature = "uniffi")]
 pub(super) struct IosListenerBridge {
     pub(super) inner: Box<dyn IosEventListener>,
+    pub(super) _media_route_guard: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 #[cfg(feature = "uniffi")]

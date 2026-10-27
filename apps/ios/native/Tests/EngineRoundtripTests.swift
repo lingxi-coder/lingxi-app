@@ -171,7 +171,7 @@ import XCTest
     final class EngineRoundtripTests: XCTestCase {
 
         @MainActor
-        func testOfficialDeepSeekSnapshotBuildsEngineWithoutDuplicateProfile() throws {
+        func testOfficialDeepSeekSnapshotBuildsEngineWithoutDuplicateProfile() async throws {
             let sandbox = FileManager.default.temporaryDirectory
                 .appendingPathComponent("LingxiCodeDeepSeekTest-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
@@ -212,20 +212,22 @@ import XCTest
                 hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
             )
 
-            XCTAssertNoThrow(
-                try buildIosEngineWithConfig(
-                    config: config,
-                    listener: NoopEventListener(),
-                    audio: IOSAudioServiceCallbackAdapter.shared,
-                    camera: CameraImpl(),
-                    share: ShareImpl(),
-                    notifications: NotificationImpl(),
-                    clipboard: ClipboardImpl(),
-                    permissions: NoopPermissionSink(),
-                    secureStorage: nil,
-                    deviceControl: nil
-                )
+            let mediaHost = try IOSNativeMediaHostComposition(
+                audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
+            ).nativeHost
+            let handle = try buildIosEngineWithConfig(
+                config: config,
+                listener: NoopEventListener(),
+                mediaHost: mediaHost,
+                share: ShareImpl(),
+                notifications: NotificationImpl(),
+                clipboard: ClipboardImpl(),
+                permissions: NoopPermissionSink(),
+                secureStorage: nil,
+                deviceControl: nil
             )
+            let binding = try await mediaHost.updateAudioSessionContext(engine: handle)
+            XCTAssertNotNil(binding, "A configured provider must retain its audio route")
         }
 
         func testModelDisplayGroupsOnlyInputByProviderAndPreservesReferences() {
@@ -288,6 +290,7 @@ import XCTest
         ///
         /// This single test exercises every hop of the SwiftUI→UniFFI→engine→
         /// listener path without a network success and without a secret.
+        @MainActor
         func testKeylessSendPromptDeliversTerminalEvent() async throws {
             // The terminal-event expectation: the keyless turn streams a final
             // `.error` (or, defensively, a `.turnEnded`) to the listener.
@@ -307,7 +310,10 @@ import XCTest
             // cannot silently turn this into a credentialed/network-success test.
             let apiKey = ""
             let handle: MobileEngineHandle
-            let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
+            let audioConfigurationJSON = AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON
+            let mediaHostComposition = try IOSNativeMediaHostComposition(
+                audioConfigurationJSON: try XCTUnwrap(audioConfigurationJSON)
+            )
             do {
                 handle = try buildIosEngine(
                     apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
@@ -316,8 +322,7 @@ import XCTest
                     model: "claude-sonnet-4-20250514",
                     appSandboxRoot: sandbox.path,
                     listener: listener,
-                    audio: audio,
-                    camera: CameraImpl(),
+                    mediaHost: mediaHostComposition.nativeHost,
                     share: ShareImpl(),
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
@@ -393,6 +398,7 @@ import XCTest
 
         }
 
+        @MainActor
         func testPersistedMainHistoryUUIDsSurviveNativeResume() async throws {
             let sandbox = FileManager.default.temporaryDirectory
                 .appendingPathComponent("uuid-" + UUID().uuidString.prefix(6), isDirectory: true)
@@ -423,11 +429,14 @@ import XCTest
                 .reduce(into: Data()) { $0.append($1); $0.append(10) }
             try jsonl.write(to: directory.appendingPathComponent("\(sessionID).jsonl"))
             let listener = CollectingListener()
-            let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
+            let audioConfigurationJSON = AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON
+            let mediaHostComposition = try IOSNativeMediaHostComposition(
+                audioConfigurationJSON: try XCTUnwrap(audioConfigurationJSON)
+            )
             let handle = try buildIosEngine(
                 apiBase: "https://api.anthropic.com", apiKey: "", model: "claude-sonnet-4-20250514",
-                appSandboxRoot: sandbox.path, listener: listener, audio: audio,
-                camera: CameraImpl(), share: ShareImpl(), notifications: NotificationImpl(),
+                appSandboxRoot: sandbox.path, listener: listener, mediaHost: mediaHostComposition.nativeHost,
+                share: ShareImpl(), notifications: NotificationImpl(),
                 clipboard: ClipboardImpl(), permissions: NoopPermissionSink(), mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
                 secureStorage: nil, deviceControl: nil)
             try await handle.submit(command: .resumeSession(sessionId: sessionID, cwd: nil))
@@ -448,6 +457,7 @@ import XCTest
         /// The real catalog is readable before a provider is configured, but
         /// changing to an unauthenticated provider must fail without confirming
         /// a model switch. This test never reads developer credentials.
+        @MainActor
         func testModelCatalogAndUnauthenticatedSwitchRoundTripKeyless() async throws {
             let gotList = expectation(description: "engine delivers a ModelList over the listener")
             let gotChanged = expectation(description: "an unauthenticated switch emits no ModelChanged")
@@ -464,7 +474,10 @@ import XCTest
             // branded mock id. `build_ios_engine` only overrides default_model when
             // the passed id is non-empty, so "" exercises exactly that path.
             let handle: MobileEngineHandle
-            let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
+            let audioConfigurationJSON = AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON
+            let mediaHostComposition = try IOSNativeMediaHostComposition(
+                audioConfigurationJSON: try XCTUnwrap(audioConfigurationJSON)
+            )
             do {
                 handle = try buildIosEngine(
                     apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
@@ -473,8 +486,7 @@ import XCTest
                     model: "",
                     appSandboxRoot: sandbox.path,
                     listener: listener,
-                    audio: audio,
-                    camera: CameraImpl(),
+                    mediaHost: mediaHostComposition.nativeHost,
                     share: ShareImpl(),
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),

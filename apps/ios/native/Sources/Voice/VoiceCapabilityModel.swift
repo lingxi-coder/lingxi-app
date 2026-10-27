@@ -186,6 +186,22 @@ struct VoiceConfigurationReadiness: Equatable {
     var message: String? { issues.first?.message }
 }
 
+/// Keeps NotificationCenter cleanup independent of the actor isolation of the
+/// owning model's deinitializer.
+private final class NotificationObserverRegistration {
+    private let center: NotificationCenter
+    private let observer: NSObjectProtocol
+
+    init(center: NotificationCenter, observer: NSObjectProtocol) {
+        self.center = center
+        self.observer = observer
+    }
+
+    deinit {
+        center.removeObserver(observer)
+    }
+}
+
 /// One source of truth for the native speech capability surfaced by onboarding,
 /// settings, and Flow Mode. The engine callbacks read the same persisted keys.
 @Observable
@@ -197,6 +213,7 @@ final class VoiceCapabilityModel {
     private let configurationStore: AudioConfigurationStore
     private let previewPlayback: VoicePreviewPlayback
     private let modelStore: VoiceModelStore
+    private var mediaRuntimeStatusObserver: NotificationObserverRegistration?
 
     var language: String
     var mode: VoiceRecognitionMode
@@ -258,6 +275,26 @@ final class VoiceCapabilityModel {
         speechAuthorization = SFSpeechRecognizer.authorizationStatus()
         microphonePermissionStatus = Self.resolveMicrophonePermissionStatus()
         microphoneGranted = microphonePermissionStatus == .granted
+        let notificationCenter = NotificationCenter.default
+        let observer = notificationCenter.addObserver(
+            forName: AudioConfigurationStore.mediaRuntimeStatusDidChangeNotification,
+            object: configurationStore,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let error = self.configurationStore.mediaRuntimeError {
+                    self.errorMessage = error
+                } else if self.errorMessage?.hasPrefix("Saved audio settings could not be applied") == true
+                            || self.errorMessage?.hasPrefix("Saved audio settings could not be encoded") == true {
+                    self.errorMessage = nil
+                }
+            }
+        }
+        mediaRuntimeStatusObserver = NotificationObserverRegistration(
+            center: notificationCenter,
+            observer: observer
+        )
         refreshCapabilities()
     }
 

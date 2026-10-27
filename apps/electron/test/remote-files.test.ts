@@ -1,7 +1,7 @@
 import { gatewayFixture, FakeRuntime, SESSION_A, SESSION_B, RecordingChannel, viewer } from './remote-session-helpers.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { FileChannel, FILE_CHUNK_BYTES, decodeFileFrame, encodeFileFrame, hashFile, validateFileOffer, type FragmentLink, type FileOffer, type FileSink } from '@lingxi/bridge-client/remote';
@@ -34,7 +34,8 @@ test('17 MiB original file exceeds JSON cap; reverse transfer uses same channel'
       offer: async info => { const sink = await store.accept('owner', info, authorize); b.receive(info.transfer_id, sink); return { offset: sink.offset }; }, commit: id => b.commit(id), cancel: id => b.cancel(id),
     });
     assert.equal(receipt.sha256, metadata.sha256); assert(al.max <= 16384); assert(bl.max <= 16384);
-    const { source } = await store.source('owner', 'session', metadata.transfer_id); assert.equal(await hashFile(source), metadata.sha256);
+    const opened = await store.source('owner', 'session', metadata.transfer_id);
+    try { assert.equal(await hashFile(opened.source), metadata.sha256); } finally { await opened.close(); }
     const second = await offer(31, '34'.repeat(16));
     const reverse = await b.send(second, pattern(31), { offer: async info => { const sink = await store.accept('reverse', info, authorize); a.receive(info.transfer_id, sink); return { offset: 0 }; }, commit: id => a.commit(id), cancel: id => a.cancel(id) });
     assert.equal(reverse.size, 31);
@@ -58,8 +59,42 @@ test('explicit prompt creates an independent named working copy without trusting
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   await writeFile(path, 'model edit');
   const original = await store.source('owner', 'session', info.transfer_id);
-  assert.equal(await hashFile(original.source), info.sha256, 'working copy cannot mutate the verified transfer');
+  try { assert.equal(await hashFile(original.source), info.sha256, 'working copy cannot mutate the verified transfer'); }
+  finally { await original.close(); }
   await ref.discard(); assert.deepEqual(await readdir(workspace), []);
+}));
+test('download source pins a regular file across concurrent reads and reopens a replacement', async () => withStore(async (store, root) => {
+  const info = await offer(FILE_CHUNK_BYTES * 2 + 7);
+  const sink = await store.accept('owner', info, authorize);
+  const bytes = await pattern(info.size).read(0, info.size);
+  await sink.write(0, bytes); await sink.finish();
+  const [scope] = await readdir(root);
+  const path = join(root, scope!, info.transfer_id, 'data');
+  const opened = await store.source('owner', 'session', info.transfer_id);
+  try {
+    await rename(path, `${path}.original`);
+    await writeFile(path, new Uint8Array(info.size).fill(0x7b));
+    const ranges = [[0, FILE_CHUNK_BYTES], [FILE_CHUNK_BYTES, FILE_CHUNK_BYTES], [FILE_CHUNK_BYTES * 2, 7]] as const;
+    const chunks = await Promise.all(ranges.map(([offset, length]) => opened.source.read(offset, length)));
+    for (let i = 0; i < ranges.length; i++) {
+      const [offset, length] = ranges[i]!;
+      assert.deepEqual(chunks[i], bytes.subarray(offset, offset + length));
+    }
+  } finally { await opened.close(); }
+  await opened.close(); // Idempotent close is safe for cleanup paths.
+  await assert.rejects(opened.source.read(0, 1));
+  const replacement = await store.source('owner', 'session', info.transfer_id);
+  try { assert.deepEqual(await replacement.source.read(0, 1), Uint8Array.of(0x7b)); }
+  finally { await replacement.close(); }
+}));
+test('download source rejects a symlink at the receipt path', { skip: process.platform === 'win32' ? 'Creating symlinks requires extra Windows privileges' : false }, async () => withStore(async (store, root) => {
+  const info = await offer(2); const sink = await store.accept('owner', info, authorize);
+  await sink.write(0, Uint8Array.of(0, 1)); await sink.finish();
+  const [scope] = await readdir(root);
+  const path = join(root, scope!, info.transfer_id, 'data');
+  await rename(path, `${path}.original`); await symlink(`${path}.original`, path);
+  await assert.rejects(store.source('owner', 'session', info.transfer_id), /invalid source file/);
+  assert.deepEqual(new Uint8Array(await readFile(`${path}.original`)), Uint8Array.of(0, 1));
 }));
 test('revocation after receipt lookup never leaves an unpublished workspace attachment', async () => withStore(async (store, root) => {
   const workspace = await mkdtemp(join(root, 'workspace-')); const info = await offer(0);
@@ -138,8 +173,87 @@ test('receiver ACK waits for durable storage', async () => {
   const persisted = new Promise<void>(resolve => { release = resolve; });
   const sink: FileSink = { get offset() { return offset; }, write: async (_, data) => { await persisted; offset += data.length; }, finish: async () => ({ ...info, ref: info.transfer_id }), close: async () => undefined, cancel: async () => undefined };
   al.handler = () => undefined;
-  b.receive(info.transfer_id, sink); al.sendFragment(encodeFileFrame(0, info.transfer_id, 0, await pattern(info.size).read(0, info.size)));
+  b.receive(info.transfer_id, sink); al.sendFragment(encodeFileFrame(2, info.transfer_id, 0, await pattern(info.size).read(0, info.size)));
   await new Promise(resolve => setImmediate(resolve)); assert.equal(bl.max, 0); release(); await b.commit(info.transfer_id); assert(bl.max > 0); a.close(); b.close();
+});
+test('ordinary file frames do not acknowledge an uncommitted offset', async () => {
+  const { a, b, al, bl } = pair(); const info = await offer(2); let written = 0; let durable = 0;
+  const replies: Array<{ kind: number; offset: number }> = [];
+  al.handler = bytes => { const { kind, offset } = decodeFileFrame(bytes); replies.push({ kind, offset }); };
+  b.receive(info.transfer_id, {
+    get offset() { return durable; },
+    write: async (at, bytes) => { assert.equal(at, written); written += bytes.length; },
+    checkpoint: async () => { durable = written; },
+    finish: async () => ({ ...info, ref: info.transfer_id }), close: async () => {}, cancel: async () => {},
+  });
+  al.sendFragment(encodeFileFrame(0, info.transfer_id, 0, new Uint8Array([1])));
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(replies, []);
+  al.sendFragment(encodeFileFrame(2, info.transfer_id, 1, new Uint8Array([2])));
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(replies, [{ kind: 1, offset: 2 }]);
+  assert.equal(bl.closed, false); a.close(); b.close();
+});
+test('one transfer pipelines four windows but does not exceed the receiver bound', { timeout: 4000 }, async () => {
+  const { a, b, al } = pair(); const info = await offer(FILE_CHUNK_BYTES * 16 * 5);
+  let unblock!: () => void; let full!: () => void; let sent = 0; let written = 0; let durable = 0;
+  const disk = new Promise<void>(resolve => { unblock = resolve; });
+  const saturated = new Promise<void>(resolve => { full = resolve; });
+  const send = al.sendFragment.bind(al);
+  al.sendFragment = bytes => { send(bytes); if ((bytes[0] === 0 || bytes[0] === 2) && ++sent === 64) full(); };
+  const transfer = a.send(info, pattern(info.size), {
+    offer: async () => {
+      b.receive(info.transfer_id, {
+        get offset() { return durable; },
+        write: async (at, bytes) => { assert.equal(at, written); written += bytes.length; },
+        checkpoint: async () => { await disk; durable = written; },
+        finish: async () => { assert.equal(durable, info.size); return { ...info, ref: info.transfer_id }; },
+        close: async () => {}, cancel: async () => {},
+      });
+      return { offset: 0 };
+    }, commit: id => b.commit(id), cancel: id => b.cancel(id),
+  });
+  try {
+    await saturated; await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sent, 64, 'the fifth window must wait for a durable ACK');
+  } finally { unblock(); }
+  assert.equal((await transfer).size, info.size); assert.equal(sent, 80); a.close(); b.close();
+});
+test('cancel a four-window transfer while another waits for credit, then retry both', { timeout: 5000 }, async () => {
+  const { a, b, al } = pair(); const first = await offer(FILE_CHUNK_BYTES * 16 * 5, '11'.repeat(16));
+  const second = await offer(100, '22'.repeat(16)); const firstAbort = new AbortController();
+  let unblock!: () => void; let full!: () => void; let sent = 0; let barrier = false; let removed = 0;
+  const disk = new Promise<void>(resolve => { unblock = resolve; });
+  const saturated = new Promise<void>(resolve => { full = resolve; });
+  const send = al.sendFragment.bind(al);
+  al.sendFragment = bytes => {
+    send(bytes);
+    if (bytes[0] === 3) barrier = true;
+    if ((bytes[0] === 0 || bytes[0] === 2) && ++sent === 64) full();
+  };
+  const control = {
+    offer: async (info: FileOffer) => {
+      let written = 0; let durable = 0;
+      b.receive(info.transfer_id, {
+        get offset() { return durable; }, write: async (at, bytes) => { assert.equal(at, written); written += bytes.length; },
+        checkpoint: async () => { await disk; durable = written; },
+        finish: async () => ({ ...info, ref: info.transfer_id }), close: async () => {}, cancel: async () => { removed++; },
+      });
+      return { offset: 0 };
+    }, commit: (id: string) => b.commit(id), cancel: (id: string) => b.cancel(id),
+  };
+  const large = a.send(first, pattern(first.size), control, undefined, firstAbort.signal);
+  try {
+    await saturated;
+    const small = a.send(second, pattern(second.size), control);
+    firstAbort.abort();
+    await new Promise(resolve => setImmediate(resolve));
+    assert(barrier, 'all in-flight windows must be drained before cancellation');
+    assert.equal(al.closed, false);
+    unblock();
+    await assert.rejects(large, /cancel|abort/i);
+    assert.equal((await small).size, second.size);
+    assert.equal((await a.send(first, pattern(first.size), control)).size, first.size);
+    assert.equal(removed, 1);
+  } finally { unblock(); a.close(); b.close(); }
 });
 test('disk failure promptly rejects transfer', async () => {
   const { a, b } = pair(); const info = await offer(100);
@@ -228,7 +342,8 @@ test('withdrawal during a disk read cannot send its late bytes under a replaceme
   let release!: (bytes: Uint8Array) => void;
   let started!: () => void; const reading = new Promise<void>(resolve => { started = resolve; });
   const info = { ...await offer(2), session_id: SESSION_A };
-  store.source = async () => ({ offer: info, source: { size: 2, read: () => { started(); return new Promise(resolve => { release = resolve; }); } } });
+  let closed = 0;
+  store.source = async () => ({ offer: { ...info, ref: info.transfer_id }, source: { size: 2, read: () => { started(); return new Promise(resolve => { release = resolve; }); } }, close: async () => { closed++; } });
   try {
     await f.call('session.attach', { session_id: SESSION_A }, who);
     const pending = f.call('file.download', { session_id: SESSION_A, transfer_id: info.transfer_id, offset: 0 }, who);
@@ -237,8 +352,95 @@ test('withdrawal during a disk read cannot send its late bytes under a replaceme
     await f.call('session.attach', { session_id: SESSION_A }, who);
     release(Uint8Array.of(0, 1));
     await assert.rejects(pending, /attachment|abort|cancel/i);
+    assert.equal(closed, 1);
     assert.equal(bl.max, 0, 'no file bytes leave after the attachment was withdrawn');
   } finally { a.close(); b.close(); f.gateway.dispose(); }
+}));
+
+for (const outcome of ['complete', 'read failure', 'cancel', 'peer close', 'detach', 'viewer close', 'dispose', 'withdraw while opening'] as const) {
+  test(`gateway releases its download source on ${outcome}`, async () => withStore(async store => {
+    const f = gatewayFixture({ files: store }); f.enable(SESSION_A);
+    f.runtimes.add(new FakeRuntime(SESSION_A)).resume();
+    const { a, b } = pair();
+    const who = { viewer: viewer({ account_uid: 'account' }), channel: Object.assign(new RecordingChannel(), { files: b }) };
+    const info = { ...await offer(2), session_id: SESSION_A };
+    const params = { session_id: SESSION_A, transfer_id: info.transfer_id };
+    const sink = await store.accept('account\0device-1', info, authorize);
+    await sink.write(0, Uint8Array.of(0, 1)); await sink.finish();
+    let released!: () => void; const held = new Promise<void>(resolve => { released = resolve; });
+    let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+    let closes = 0;
+    const openSource = store.source.bind(store);
+    store.source = async (...args) => {
+      const opened = await openSource(...args);
+      if (outcome === 'withdraw while opening') { entered(); await held; }
+      return { ...opened, source: { size: opened.source.size, read: async (at, length) => {
+        entered();
+        if (outcome === 'read failure') throw new Error('injected read failure');
+        if (outcome !== 'complete') await held;
+        return opened.source.read(at, length);
+      } }, close: async () => { closes++; await opened.close(); } };
+    };
+    let received = 0;
+    a.receive(info.transfer_id, { get offset() { return received; },
+      write: async (at, bytes) => { assert.equal(at, received); received += bytes.length; },
+      finish: async () => ({ ...info, ref: info.transfer_id }), close: async () => undefined, cancel: async () => undefined });
+    try {
+      await f.call('session.attach', { session_id: SESSION_A }, who);
+      const result = f.call('file.download', { ...params, offset: 0 }, who).then(
+        value => ({ ok: true as const, value }), error => ({ ok: false as const, error }),
+      );
+      await started;
+      if (outcome === 'cancel') await f.call('file.cancel', params, who);
+      if (outcome === 'peer close') a.close();
+      if (outcome === 'detach' || outcome === 'withdraw while opening') await f.call('session.detach', { session_id: SESSION_A }, who);
+      if (outcome === 'viewer close') f.gateway.viewerClosed(who.viewer);
+      if (outcome === 'dispose') f.gateway.dispose();
+      if (outcome === 'withdraw while opening') released();
+      const settled = await result;
+      assert.equal(settled.ok, outcome === 'complete');
+      assert.equal(closes, 1, 'the acquired source is closed exactly once');
+      if (outcome === 'complete') assert.equal(received, info.size);
+    } finally { released(); a.close(); b.close(); f.gateway.dispose(); }
+  }));
+}
+
+test('downloads reserve at most four source handles and can reopen an id after cancellation', async () => withStore(async store => {
+  const f = gatewayFixture({ files: store }); f.enable(SESSION_A);
+  f.runtimes.add(new FakeRuntime(SESSION_A)).resume();
+  const { a, b } = pair();
+  const who = { viewer: viewer({ account_uid: 'account' }), channel: Object.assign(new RecordingChannel(), { files: b }) };
+  const infos = await Promise.all(Array.from({ length: 5 }, (_, i) => offer(2, String(i + 1).repeat(32)).then(info => ({ ...info, session_id: SESSION_A }))));
+  let unblock!: () => void; const held = new Promise<void>(resolve => { unblock = resolve; });
+  let signalFour!: () => void; const fourStarted = new Promise<void>(resolve => { signalFour = resolve; });
+  let started = 0, opened = 0, closed = 0, block = true;
+  store.source = async (_owner, _session, id) => {
+    const info = infos.find(item => item.transfer_id === id)!; opened++;
+    return { offer: { ...info, ref: id }, source: { size: info.size, read: async () => {
+      if (block) { if (++started === 4) signalFour(); await held; }
+      return Uint8Array.of(0, 1);
+    } }, close: async () => { closed++; } };
+  };
+  const params = (i: number) => ({ session_id: SESSION_A, transfer_id: infos[i]!.transfer_id });
+  try {
+    await f.call('session.attach', { session_id: SESSION_A }, who);
+    const downloads = infos.slice(0, 4).map((_, i) => f.call('file.download', { ...params(i), offset: 0 }, who).then(
+      () => 'resolved', () => 'rejected',
+    ));
+    await fourStarted;
+    await assert.rejects(f.call('file.download', { ...params(4), offset: 0 }, who), /busy/);
+    await assert.rejects(f.call('file.download', { ...params(0), offset: 0 }, who), /busy/);
+    assert.equal(opened, 4);
+    await Promise.all(infos.slice(0, 4).map((_, i) => f.call('file.cancel', params(i), who)));
+    assert.deepEqual(await Promise.all(downloads), ['rejected', 'rejected', 'rejected', 'rejected']);
+    assert.equal(closed, 4);
+    block = false; unblock();
+    let received = 0;
+    a.receive(infos[0]!.transfer_id, { get offset() { return received; }, write: async (_, bytes) => { received += bytes.length; },
+      finish: async () => ({ ...infos[0]!, ref: infos[0]!.transfer_id }), close: async () => undefined, cancel: async () => undefined });
+    await f.call('file.download', { ...params(0), offset: 0 }, who);
+    assert.equal(received, 2); assert.equal(opened, 5); assert.equal(closed, 5);
+  } finally { unblock(); a.close(); b.close(); f.gateway.dispose(); }
 }));
 
 for (const method of ['file.commit', 'prompt.send']) {

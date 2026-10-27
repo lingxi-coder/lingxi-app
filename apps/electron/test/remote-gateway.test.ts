@@ -32,6 +32,61 @@ async function attached(options: Parameters<typeof gatewayFixture>[0] = {}, sess
   return { f, runtime };
 }
 
+test('only a declared native media handler registers a route and receives correlated offer/control replies', async () => {
+  const f = gatewayFixture();
+  f.phone = viewer({
+    account_uid: 'account-1',
+    media_capabilities: {
+      version: 1,
+      modes: ['audio', 'video', 'audio_video'],
+      source_kinds: ['microphone', 'camera'],
+    },
+  });
+  f.enable(SESSION_A);
+  const runtime = f.runtimes.add(new FakeRuntime(SESSION_A));
+  runtime.resume();
+  await f.gateway.handle(f.phone, 'session.attach', { session_id: SESSION_A }, f.channel);
+
+  const registration = runtime.callsOf('registerMediaConnection')[0];
+  assert.ok(registration);
+  const routeId = registration[0] as string;
+  assert.match(routeId, /^[0-9a-f-]{36}$/iu);
+  assert.deepEqual(registration[3], ['microphone', 'camera'], 'the route does not infer screen sharing');
+
+  const mediaSessionRef = 'media_session_gateway_test';
+  runtime.emitMediaConnectionRequest({
+    request_id: 'AAAAAAAAAAAAAAAAAAAAAA',
+    connection_id: routeId,
+    session_id: SESSION_A,
+    media_session_ref: { id: mediaSessionRef },
+    operation_id: { id: 'operation-gateway-1', generation: 7, service_epoch: 1 },
+    owner: { type: 'session', session_id: SESSION_A },
+    mode: 'audio',
+    intent: 'conversation',
+    audio_source: { id: `remote_${routeId}_microphone` },
+    video_source: null,
+    description: { kind: 'offer', sdp: 'v=0\r\ns=-\r\nt=0 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n' },
+  });
+  await flush();
+  assert.equal(runtime.mediaConnectionResponses[0]?.description?.kind, 'answer');
+  assert.equal(runtime.mediaConnectionResponses[0]?.error, undefined);
+
+  runtime.emitMediaControlRequest({
+    request_id: 'BBBBBBBBBBBBBBBBBBBBBB',
+    connection_id: routeId,
+    media_session_ref: { id: mediaSessionRef },
+    generation: 7,
+    action: { type: 'flush_audio', target_sequence: 2, target_sample_frames: 1_920 },
+  });
+  await flush();
+  assert.equal(runtime.mediaControlResponses[0]?.receipt?.accepted_sample_frames, 0);
+  assert.equal(runtime.mediaControlResponses[0]?.receipt?.played_sample_frames, 1_920);
+
+  await f.gateway.handle(f.phone, 'session.detach', { session_id: SESSION_A }, f.channel);
+  assert.deepEqual(runtime.callsOf('unregisterMediaConnection').map(([id]) => id), [routeId]);
+  f.gateway.dispose();
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Which sessions, and the error codes
 // ─────────────────────────────────────────────────────────────────────────────

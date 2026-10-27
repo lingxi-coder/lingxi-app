@@ -1,6 +1,58 @@
 import AVFoundation
 import Foundation
 
+func isSupportedMediaPcmSampleRate(_ sampleRateHz: UInt32) -> Bool {
+    (8_000 ... 192_000).contains(sampleRateHz)
+}
+
+struct IOSMediaPlaybackReceiptLedger {
+    private struct GenerationReceipt {
+        var acceptedSampleFrames: UInt64 = 0
+        var playedSampleFrames: UInt64 = 0
+        var renderedAtUnixMs: UInt64?
+    }
+
+    private var receipts: [UInt64: GenerationReceipt] = [:]
+    private(set) var lastClaimedGeneration: UInt64?
+
+    mutating func accept(_ sampleFrames: UInt32, generation: UInt64) {
+        let current = receipts[generation]?.acceptedSampleFrames ?? 0
+        var receipt = receipts[generation] ?? GenerationReceipt()
+        receipt.acceptedSampleFrames = current.addingReportingOverflow(UInt64(sampleFrames)).overflow
+            ? UInt64.max
+            : current + UInt64(sampleFrames)
+        receipts[generation] = receipt
+    }
+
+    mutating func recordPlayed(_ sampleFrames: UInt64, generation: UInt64, renderedAtUnixMs: UInt64?) {
+        var receipt = receipts[generation] ?? GenerationReceipt()
+        receipt.playedSampleFrames = receipt.playedSampleFrames.addingReportingOverflow(sampleFrames).overflow
+            ? UInt64.max
+            : receipt.playedSampleFrames + sampleFrames
+        if let renderedAtUnixMs { receipt.renderedAtUnixMs = renderedAtUnixMs }
+        receipts[generation] = receipt
+    }
+
+    mutating func take(generation: UInt64) -> MediaRenderReceiptDto {
+        if let lastClaimedGeneration, generation <= lastClaimedGeneration {
+            return MediaRenderReceiptDto(acceptedSampleFrames: 0, playedSampleFrames: 0, renderedAtUnixMs: nil)
+        }
+        lastClaimedGeneration = generation
+        let generationReceipt = receipts.removeValue(forKey: generation) ?? GenerationReceipt()
+        let receipt = MediaRenderReceiptDto(
+            acceptedSampleFrames: 0,
+            playedSampleFrames: UInt32(clamping: min(generationReceipt.playedSampleFrames, generationReceipt.acceptedSampleFrames)),
+            renderedAtUnixMs: generationReceipt.playedSampleFrames > 0 ? generationReceipt.renderedAtUnixMs : nil
+        )
+        return receipt
+    }
+}
+
+struct IOSRealtimeAudioInputFrame: Sendable {
+    let pcm16le: Data
+    let capturedAtUnixMs: UInt64
+}
+
 /// A single voice-processing engine owns microphone and speaker under the
 /// same device lease. Its bounded input stream fails on overflow rather than
 /// silently losing audio that the provider could turn into another transcript.
@@ -17,13 +69,25 @@ final class IOSRealtimeAudioDevice {
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
     private var lease: VoiceAudioSessionCoordinator.Lease?
-    private var inputContinuation: AsyncThrowingStream<Data, Error>.Continuation?
+    private var inputContinuation: AsyncThrowingStream<IOSRealtimeAudioInputFrame, Error>.Continuation?
     private var queuedOutputBytes = 0
     private var scheduledOutputMs: UInt64 = 0
     private var itemStartPositionMs: [String: UInt64] = [:]
     private var outputItems: [String: OutputItem] = [:]
     private var playbackGeneration: UInt64 = 0
     private var outputSampleRateHz: UInt32 = 24_000
+    private struct MediaWrite {
+        let acceptedSampleFrames: UInt32
+        let outputStartFrame: UInt64
+        let outputFrameCount: UInt32
+        let generation: UInt64
+    }
+    private var mediaWrites: [UUID: MediaWrite] = [:]
+    private var mediaWriteOrder: [UUID] = []
+    private var scheduledMediaOutputFrames: UInt64 = 0
+    private var mediaReceiptLedger = IOSMediaPlaybackReceiptLedger()
+    private var activeFlushGeneration: UInt64?
+    private var playbackEnabled = true
     var onPlaybackCompleted: ((String?) -> Void)?
 
     init(coordinator: VoiceAudioSessionCoordinator = .shared) { self.coordinator = coordinator }
@@ -45,29 +109,70 @@ final class IOSRealtimeAudioDevice {
     }
 
     func start(inputSampleRateHz: UInt32 = 24_000, outputSampleRateHz: UInt32 = 24_000) async throws -> AsyncThrowingStream<Data, Error> {
+        let frames = try await startTimestamped(inputSampleRateHz: inputSampleRateHz, outputSampleRateHz: outputSampleRateHz)
+        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(32)) { continuation in
+            let relay = Task {
+                do {
+                    for try await frame in frames {
+                        if case .dropped = continuation.yield(frame.pcm16le) {
+                            continuation.finish(throwing: AudioServiceFailure.mediaTooLarge)
+                            return
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in relay.cancel() }
+        }
+    }
+
+    func startTimestamped(
+        inputSampleRateHz: UInt32 = 24_000,
+        outputSampleRateHz: UInt32 = 24_000,
+        audioSessionPurpose: VoiceAudioSessionCoordinator.Purpose = .flowDuplex
+    ) async throws -> AsyncThrowingStream<IOSRealtimeAudioInputFrame, Error> {
+        guard audioSessionPurpose == .flowDuplex || audioSessionPurpose == .recognition else {
+            throw AudioServiceFailure.unsupported
+        }
+        let playbackEnabled = audioSessionPurpose == .flowDuplex
         guard engine == nil, lease == nil else { throw AudioServiceFailure.busy }
-        guard [16_000, 24_000, 48_000].contains(inputSampleRateHz), [16_000, 24_000, 48_000].contains(outputSampleRateHz) else {
+        guard [16_000, 24_000, 48_000].contains(inputSampleRateHz),
+              !playbackEnabled || [16_000, 24_000, 48_000].contains(outputSampleRateHz) else {
             throw AudioServiceFailure.unsupported
         }
         guard await AVAudioApplication.requestRecordPermission() else { throw AudioServiceFailure.permissionDenied }
         try Task.checkCancellation()
-        let acquired = try await coordinator.acquire(.flowDuplex)
+        let acquired = try await coordinator.acquire(audioSessionPurpose)
         lease = acquired
         do {
             try Task.checkCancellation()
             let audio = AVAudioEngine()
             let input = audio.inputNode
-            try input.setVoiceProcessingEnabled(true)
+            if playbackEnabled { try input.setVoiceProcessingEnabled(true) }
             let inputFormat = input.outputFormat(forBus: 0)
             guard inputFormat.sampleRate > 0,
                   let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(inputSampleRateHz), channels: 1, interleaved: true),
-                  let converter = AVAudioConverter(from: inputFormat, to: target),
-                  let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Double(outputSampleRateHz), channels: 1, interleaved: false)
+                  let converter = AVAudioConverter(from: inputFormat, to: target)
             else { throw AudioServiceFailure.unavailable }
-            let pair = AsyncThrowingStream<Data, Error>.makeStream(bufferingPolicy: .bufferingNewest(32))
+            let outputFormat: AVAudioFormat?
+            if playbackEnabled {
+                guard let format = AVAudioFormat(
+                    commonFormat: .pcmFormatFloat32,
+                    sampleRate: Double(outputSampleRateHz),
+                    channels: 1,
+                    interleaved: false
+                ) else { throw AudioServiceFailure.unavailable }
+                outputFormat = format
+            } else {
+                outputFormat = nil
+            }
+            let pair = AsyncThrowingStream<IOSRealtimeAudioInputFrame, Error>.makeStream(bufferingPolicy: .bufferingNewest(32))
             let continuation = pair.continuation
             inputContinuation = continuation
-            input.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { buffer, _ in
+            let unixEpochAtHostClockZero = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
+            input.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { buffer, when in
                 // AVAudioEngine serializes this node's tap. The converter is
                 // confined to that callback; only immutable Data crosses out.
                 let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * target.sampleRate / inputFormat.sampleRate) + 32)
@@ -89,19 +194,33 @@ final class IOSRealtimeAudioDevice {
                 }
                 guard converted.frameLength > 0 else { return }
                 let bytes = Data(bytes: samples, count: Int(converted.frameLength) * 2)
-                if case .dropped = continuation.yield(bytes) {
+                let captureTime = when.isHostTimeValid
+                    ? AVAudioTime.seconds(forHostTime: when.hostTime) + unixEpochAtHostClockZero
+                    : Date().timeIntervalSince1970
+                let capturedAtUnixMs = UInt64(max(0, captureTime * 1_000))
+                if case .dropped = continuation.yield(IOSRealtimeAudioInputFrame(
+                    pcm16le: bytes,
+                    capturedAtUnixMs: capturedAtUnixMs
+                )) {
                     continuation.finish(throwing: AudioServiceFailure.mediaTooLarge)
                 }
             }
-            let speaker = AVAudioPlayerNode()
-            audio.attach(speaker)
-            audio.connect(speaker, to: audio.mainMixerNode, format: outputFormat)
+            let speaker: AVAudioPlayerNode?
+            if let outputFormat {
+                let playerNode = AVAudioPlayerNode()
+                audio.attach(playerNode)
+                audio.connect(playerNode, to: audio.mainMixerNode, format: outputFormat)
+                speaker = playerNode
+            } else {
+                speaker = nil
+            }
             self.outputSampleRateHz = outputSampleRateHz
+            self.playbackEnabled = playbackEnabled
             engine = audio
             player = speaker
             audio.prepare()
             try audio.start()
-            speaker.play()
+            speaker?.play()
             return pair.stream
         } catch {
             await stop()
@@ -110,7 +229,7 @@ final class IOSRealtimeAudioDevice {
     }
 
     func enqueueOutput(pcm: Data, sampleRateHz: UInt32, itemID: String?) throws {
-        guard let player, let engine, engine.isRunning else { throw AudioServiceFailure.unavailable }
+        guard playbackEnabled, let player, let engine, engine.isRunning else { throw AudioServiceFailure.unavailable }
         guard sampleRateHz == outputSampleRateHz, !pcm.isEmpty, pcm.count.isMultiple(of: 2) else { throw AudioServiceFailure.unsupported }
         guard pcm.count <= 1_024 * 1_024, queuedOutputBytes + pcm.count <= 4 * 1_024 * 1_024 else { throw AudioServiceFailure.mediaTooLarge }
         let frameCount = pcm.count / 2
@@ -149,6 +268,155 @@ final class IOSRealtimeAudioDevice {
         }
     }
 
+    /// Queue one PCM16LE frame for a native media session. The immediate
+    /// receipt reports acceptance only; `flushMediaOutput` or
+    /// `interruptMediaOutput` reports frames that reached AVAudioPlayerNode's
+    /// render timeline.
+    func enqueueMediaOutput(pcm16le: Data, sampleRateHz: UInt32, channels: UInt16) throws -> MediaRenderReceiptDto {
+        guard activeFlushGeneration != playbackGeneration else { throw AudioServiceFailure.busy }
+        guard playbackEnabled, let player, let engine, engine.isRunning else { throw AudioServiceFailure.unavailable }
+        guard isSupportedMediaPcmSampleRate(sampleRateHz), (1 ... 2).contains(channels),
+              !pcm16le.isEmpty, pcm16le.count.isMultiple(of: Int(channels) * 2) else {
+            throw AudioServiceFailure.unsupported
+        }
+        guard pcm16le.count <= 1_024 * 1_024, queuedOutputBytes + pcm16le.count <= 4 * 1_024 * 1_024 else {
+            throw AudioServiceFailure.mediaTooLarge
+        }
+
+        let inputFrames = pcm16le.count / (Int(channels) * 2)
+        let outputFrames = max(1, Int(ceil(Double(inputFrames) * Double(outputSampleRateHz) / Double(sampleRateHz))))
+        guard outputFrames <= 2_097_152,
+              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Double(outputSampleRateHz), channels: 1, interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(outputFrames)),
+              let samples = buffer.floatChannelData?[0] else { throw AudioServiceFailure.unavailable }
+        buffer.frameLength = AVAudioFrameCount(outputFrames)
+
+        // Convert packed PCM16LE to the mono float format used by the shared
+        // voice-processing engine. Linear resampling keeps this bounded and
+        // preserves the exact accepted frame count for the receipt.
+        pcm16le.withUnsafeBytes { rawBytes in
+            for outputIndex in 0 ..< outputFrames {
+                let sourcePosition = Double(outputIndex) * Double(sampleRateHz) / Double(outputSampleRateHz)
+                let lowerIndex = min(Int(sourcePosition), inputFrames - 1)
+                let upperIndex = min(lowerIndex + 1, inputFrames - 1)
+                let fraction = Float(sourcePosition - Double(lowerIndex))
+                func monoSample(at frame: Int) -> Float {
+                    var total: Float = 0
+                    for channel in 0 ..< Int(channels) {
+                        let offset = (frame * Int(channels) + channel) * 2
+                        let encoded = rawBytes.loadUnaligned(fromByteOffset: offset, as: Int16.self)
+                        total += Float(Int16(littleEndian: encoded)) / 32_768
+                    }
+                    return total / Float(channels)
+                }
+                let lower = monoSample(at: lowerIndex)
+                let upper = monoSample(at: upperIndex)
+                samples[outputIndex] = lower + (upper - lower) * fraction
+            }
+        }
+
+        guard mediaWrites.count < 128 else { throw AudioServiceFailure.mediaTooLarge }
+        let identifier = UUID()
+        let generation = playbackGeneration
+        let outputStartFrame = scheduledMediaOutputFrames
+        let outputFrameCount = UInt32(outputFrames)
+        scheduledMediaOutputFrames += UInt64(outputFrameCount)
+        let acceptedFrames = UInt32(clamping: inputFrames)
+        mediaWrites[identifier] = MediaWrite(
+            acceptedSampleFrames: acceptedFrames,
+            outputStartFrame: outputStartFrame,
+            outputFrameCount: outputFrameCount,
+            generation: generation
+        )
+        mediaWriteOrder.append(identifier)
+        mediaReceiptLedger.accept(acceptedFrames, generation: generation)
+        queuedOutputBytes += pcm16le.count
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.playbackGeneration == generation,
+                      let write = self.mediaWrites.removeValue(forKey: identifier) else { return }
+                self.mediaWriteOrder.removeAll { $0 == identifier }
+                self.queuedOutputBytes = max(0, self.queuedOutputBytes - pcm16le.count)
+                self.mediaReceiptLedger.recordPlayed(
+                    UInt64(write.acceptedSampleFrames),
+                    generation: write.generation,
+                    renderedAtUnixMs: Self.unixMillisecondsNow()
+                )
+            }
+        }
+        return MediaRenderReceiptDto(
+            acceptedSampleFrames: acceptedFrames,
+            playedSampleFrames: 0,
+            renderedAtUnixMs: nil
+        )
+    }
+
+    /// Wait until all queued media audio has actually completed in the native
+    /// player, then return its measured completion receipt.
+    func flushMediaOutput() async throws -> MediaRenderReceiptDto {
+        guard playbackEnabled, player != nil else { throw AudioServiceFailure.unsupported }
+        guard activeFlushGeneration == nil else { throw AudioServiceFailure.busy }
+        let generation = playbackGeneration
+        let targetWrites = Set(mediaWriteOrder.filter { mediaWrites[$0]?.generation == generation })
+        activeFlushGeneration = generation
+        defer {
+            if activeFlushGeneration == generation { activeFlushGeneration = nil }
+        }
+        try Task.checkCancellation()
+        while targetWrites.contains(where: { mediaWrites[$0] != nil }) {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let receipt = takeMediaReceipt(generation: generation)
+        if playbackGeneration == generation { playbackGeneration &+= 1 }
+        return receipt
+    }
+
+    /// Interrupt queued media audio and report the portion already consumed
+    /// according to the player's render time. No wall-clock duration is used.
+    /// Interrupt synchronously on the main actor so it can preempt a flush
+    /// that is suspended waiting for scheduled buffers to finish.
+    func interruptMediaOutput() -> MediaRenderReceiptDto {
+        let generation = playbackGeneration
+        let interruptedWrites = mediaWriteOrder.filter { mediaWrites[$0]?.generation == generation }
+        let renderedFrame = currentOutputSampleFrame
+        playbackGeneration &+= 1
+        player?.stop()
+        player?.play()
+
+        for identifier in interruptedWrites {
+            guard let write = mediaWrites[identifier] else { continue }
+            let playedOutputFrames: UInt64
+            if renderedFrame <= write.outputStartFrame {
+                playedOutputFrames = 0
+            } else {
+                playedOutputFrames = min(
+                    renderedFrame - write.outputStartFrame,
+                    UInt64(write.outputFrameCount)
+                )
+            }
+            let ratio = Double(playedOutputFrames) / Double(max(1, write.outputFrameCount))
+            mediaReceiptLedger.recordPlayed(
+                UInt64((Double(write.acceptedSampleFrames) * ratio).rounded(.down)),
+                generation: write.generation,
+                renderedAtUnixMs: Self.unixMillisecondsNow()
+            )
+            mediaWrites.removeValue(forKey: identifier)
+        }
+        mediaWriteOrder.removeAll { interruptedWrites.contains($0) }
+        queuedOutputBytes = 0
+        scheduledMediaOutputFrames = 0
+        outputItems.removeAll()
+        itemStartPositionMs.removeAll()
+        scheduledOutputMs = 0
+        return takeMediaReceipt(generation: generation)
+    }
+
+    func setMediaPlaybackGain(_ gain: Float) throws {
+        guard playbackEnabled, gain.isFinite, (0 ... 1).contains(gain), let engine else { throw AudioServiceFailure.invalidRequest }
+        engine.mainMixerNode.outputVolume = gain
+    }
+
     var hasPendingOutput: Bool { queuedOutputBytes > 0 || !outputItems.isEmpty }
 
     func markAllOutputCompleted() {
@@ -166,6 +434,10 @@ final class IOSRealtimeAudioDevice {
         let start = itemStartPositionMs[itemID ?? "__output__"] ?? 0
         let duration = outputItems[itemID ?? "__output__"]?.durationMs ?? 0
         let position = min(current > start ? current - start : 0, duration)
+        if !mediaWrites.isEmpty {
+            _ = interruptMediaOutput()
+            return position
+        }
         playbackGeneration &+= 1
         player?.stop()
         player?.play()
@@ -177,6 +449,11 @@ final class IOSRealtimeAudioDevice {
     }
 
     func stop() async {
+        if mediaWrites.isEmpty {
+            _ = takeMediaReceipt(generation: playbackGeneration)
+        } else {
+            _ = interruptMediaOutput()
+        }
         playbackGeneration &+= 1
         inputContinuation?.finish()
         inputContinuation = nil
@@ -189,8 +466,24 @@ final class IOSRealtimeAudioDevice {
         scheduledOutputMs = 0
         outputItems.removeAll()
         itemStartPositionMs.removeAll()
+        scheduledMediaOutputFrames = 0
         if let lease { await coordinator.release(lease) }
         lease = nil
+    }
+
+    private var currentOutputSampleFrame: UInt64 {
+        guard let player, let nodeTime = player.lastRenderTime,
+              let playerTime = player.playerTime(forNodeTime: nodeTime),
+              playerTime.sampleTime >= 0 else { return 0 }
+        return UInt64(playerTime.sampleTime)
+    }
+
+    private func takeMediaReceipt(generation: UInt64) -> MediaRenderReceiptDto {
+        mediaReceiptLedger.take(generation: generation)
+    }
+
+    private static func unixMillisecondsNow() -> UInt64 {
+        UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
     }
 
     private func completeIfPlayed(_ key: String) {

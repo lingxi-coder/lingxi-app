@@ -135,6 +135,7 @@ fn initialize_shapes() {
         app: RemoteAppInfo {
             version: "1.0".into(),
             platform: DevicePlatform::Ios,
+            media_capabilities: None,
         },
         push_installation_id: None,
     };

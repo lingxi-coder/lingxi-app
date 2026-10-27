@@ -55,7 +55,13 @@ class AudioConfigurationFixtureTest {
                 offlineModelId = preference["offlineModelId"] as? String,
                 voice = voice,
                 language = input["language"] as String,
-                systemStatus = AudioReadiness.valueOf((input["systemStatus"] as String).uppercase()),
+                systemStatus = when (val status = input["systemStatus"]) {
+                    "available" -> AudioReadiness.AVAILABLE
+                    "permissionRequired" -> AudioReadiness.PERMISSION_REQUIRED
+                    "denied" -> AudioReadiness.DENIED
+                    "unavailable" -> AudioReadiness.UNAVAILABLE
+                    else -> error("Unknown shared system readiness: $status")
+                },
                 offlineModels = models,
                 systemVoiceIds = input["systemVoiceIds"] as? List<String>,
                 cloud = (preference["cloud"] as? Map<String, Any?>)?.let {

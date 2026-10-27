@@ -201,10 +201,41 @@ struct RootView: View {
 
     private let appSandboxRoot: String
     private let scopedPreferences: ProjectScopedPreferences
+    #if canImport(harness_runtimeFFI)
+    private let mediaHostComposition: IOSNativeMediaHostComposition?
+    private let mediaHostInitializationError: String?
+    #endif
 
+    #if canImport(harness_runtimeFFI)
+    init(
+        voiceCapability: VoiceCapabilityModel,
+        mediaHostComposition: IOSNativeMediaHostComposition?,
+        mediaHostInitializationError: String?
+    ) {
+        self.init(
+            voiceCapability: voiceCapability,
+            mediaHostObject: mediaHostComposition,
+            mediaHostInitializationError: mediaHostInitializationError
+        )
+    }
+    #else
     init(voiceCapability: VoiceCapabilityModel) {
+        self.init(voiceCapability: voiceCapability, mediaHostObject: nil, mediaHostInitializationError: nil)
+    }
+    #endif
+
+    private init(
+        voiceCapability: VoiceCapabilityModel,
+        mediaHostObject: AnyObject?,
+        mediaHostInitializationError: String?
+    ) {
+        #if canImport(harness_runtimeFFI)
+        let mediaHostComposition = mediaHostObject as? IOSNativeMediaHostComposition
+        self.mediaHostComposition = mediaHostComposition
+        self.mediaHostInitializationError = mediaHostInitializationError
+        #endif
         let root = ConversationSourceFactory.appSandboxRoot()
-        let projects = ProjectStore(managedRoot: LXISHDefaultWorkspace.managedRootPath())
+        let projects = ProjectStore.forRuntime(managedRoot: LXISHDefaultWorkspace.managedRootPath())
         let settings = SettingsStore()
         let providers = ProviderRepository.shared
         settings.llmProviders = providers.legacyProviders()
@@ -229,7 +260,7 @@ struct RootView: View {
             project: activeProject,
             linuxRuntime: settings.linuxRuntime
         ).config
-        let conversation = ConversationSourceFactory.make(
+        var launchOptions = ConversationSourceFactory.LaunchOptions(
             projectCwd: activeProject?.workspace.hostURL.path,
             additionalWorkspaceDirectories: activeProject?.record.additionalDirectories ?? [],
             sessionMode: initialMode,
@@ -241,6 +272,15 @@ struct RootView: View {
             mobileLinux: runtime,
             projectMountGrants: initialProjectMountGrants
         )
+        #if canImport(harness_runtimeFFI)
+        launchOptions.mediaHostComposition = mediaHostComposition
+        #endif
+        let conversation = ConversationSourceFactory.make(options: launchOptions)
+        #if canImport(harness_runtimeFFI)
+        if let mediaHostInitializationError {
+            conversation.model.error = ConversationError(kind: .host, message: mediaHostInitializationError)
+        }
+        #endif
 
         #if canImport(harness_runtimeFFI)
             let scopes = ProjectCronScopeProvider {
@@ -248,6 +288,7 @@ struct RootView: View {
             }
             let executor = FfiCronExecutor(
                 appSandboxRoot: root,
+                mediaHostComposition: mediaHostComposition,
                 launchSnapshot: { providers.makeLaunchSnapshot() },
                 terminalConfig: { scope in
                     let project = scope.projectID.flatMap { id in
@@ -285,7 +326,7 @@ struct RootView: View {
             try await cron.pauseTasksForArchivedSession(projectID: projectID, sessionID: sessionID)
         }
         cron.defaultModel = snapshot.defaultModelID
-        let preferences = ProjectScopedPreferences()
+        let preferences = ProjectScopedPreferences.forRuntime()
         if preferences.cronResultsSeenAt() == nil {
             preferences.setCronResultsSeenAt(Date())
         }
@@ -362,6 +403,14 @@ struct RootView: View {
         )
         appSandboxRoot = root
         scopedPreferences = preferences
+        #if canImport(harness_runtimeFFI)
+        Task {
+            await LocalApps.library.configureMediaHost(
+                mediaHostComposition,
+                initializationError: mediaHostInitializationError
+            )
+        }
+        #endif
     }
 
     private var session: SessionRef {
@@ -687,7 +736,12 @@ struct RootView: View {
         content
             .fullScreenCover(item: $remoteDestination) { destination in
                 #if canImport(harness_runtimeFFI)
-                RemoteControlView(destination: destination, openAccount: { navigation.showSettings(.account) })
+                RemoteControlView(
+                    destination: destination,
+                    openAccount: { navigation.showSettings(.account) },
+                    mediaHostComposition: mediaHostComposition,
+                    mediaHostInitializationError: mediaHostInitializationError
+                )
                     .id(destination.id)
                 #endif
             }
@@ -1329,7 +1383,9 @@ struct RootView: View {
         case let .remote(hostID, sessionID):
             #if canImport(harness_runtimeFFI)
             return RemoteConversationSource(hostID: hostID, sessionID: sessionID,
-                uid: FirebaseAccount.shared.user?.uid ?? "")
+                uid: FirebaseAccount.shared.user?.uid ?? "",
+                mediaHostComposition: mediaHostComposition,
+                mediaHostInitializationError: mediaHostInitializationError)
             #else
             return MockConversationSource()
             #endif
@@ -1350,7 +1406,7 @@ struct RootView: View {
         let projectMountGrants = try project.map {
             try MobileUserStorage.projectMountGrantPaths(for: $0)
         } ?? []
-        return ConversationSourceFactory.make(
+        var launchOptions = ConversationSourceFactory.LaunchOptions(
             projectCwd: projectCwd,
             additionalWorkspaceDirectories: project?.record.additionalDirectories ?? [],
             sessionMode: mode,
@@ -1362,6 +1418,10 @@ struct RootView: View {
             mobileLinux: runtime,
             projectMountGrants: projectMountGrants
         )
+        #if canImport(harness_runtimeFFI)
+        launchOptions.mediaHostComposition = mediaHostComposition
+        #endif
+        return ConversationSourceFactory.make(options: launchOptions)
     }
 
     private func rebuildSource(

@@ -23,6 +23,7 @@ import com.lingxi.code.device.AndroidDeviceControlController
 import com.lingxi.code.device.DeviceReadPermissionController
 import com.lingxi.code.location.LocationController
 import com.lingxi.code.offload.NativeOffloadRuntime
+import com.lingxi.code.voice.audio.AndroidMediaPermissionCoordinator
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
@@ -71,6 +72,7 @@ import kotlinx.coroutines.launch
  */
 class MainActivity : ComponentActivity() {
     private val cameraOwner = Any()
+    private val mediaPermissionOwner = Any()
     private val locationOwner = Any()
     private val cameraResultKey = java.util.UUID.randomUUID().toString()
     private val locationResultKey = java.util.UUID.randomUUID().toString()
@@ -115,6 +117,9 @@ class MainActivity : ComponentActivity() {
         val cameraPermLauncher = activityResultRegistry.register(
             "$cameraResultKey:permission", this, ActivityResultContracts.RequestPermission(),
         ) { granted -> CameraController.onCameraPermission(cameraOwner, granted) }
+        val mediaPermissionLauncher = activityResultRegistry.register(
+            "$cameraResultKey:media-permissions", this, ActivityResultContracts.RequestMultiplePermissions(),
+        ) { grants -> AndroidMediaPermissionCoordinator.shared.onPermissionResult(mediaPermissionOwner, grants) }
         val takePictureLauncher = activityResultRegistry.register(
             "$cameraResultKey:picture", this, ActivityResultContracts.TakePicturePreview(),
         ) { bitmap -> CameraController.onPictureTaken(cameraOwner, bitmap) }
@@ -151,6 +156,14 @@ class MainActivity : ComponentActivity() {
                 takePicture = takePictureLauncher,
                 pickMedia = pickMediaLauncher,
             ),
+        )
+        AndroidMediaPermissionCoordinator.shared.attach(
+            owner = mediaPermissionOwner,
+            isGranted = { permission ->
+                ContextCompat.checkSelfPermission(applicationContext, permission) == PackageManager.PERMISSION_GRANTED
+            },
+            isForeground = { lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) },
+            requestPermissions = { permissions -> mediaPermissionLauncher.launch(permissions) },
         )
         // Device-share: hand the application Context to the process-global
         // ShareController, which the UniFFI AndroidShare adapter drives across
@@ -569,6 +582,7 @@ class MainActivity : ComponentActivity() {
         // Drop the launcher references so a finishing Activity can't be leaked by
         // the process-global controller and any in-flight capture is cancelled.
         CameraController.detach(cameraOwner)
+        AndroidMediaPermissionCoordinator.shared.detach(mediaPermissionOwner)
         ShareController.detach()
         NotificationController.detach()
         ClipboardController.detach()

@@ -71,6 +71,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use audio_provider::media_cloud::AudioProviderCloudRegistry;
 pub(crate) use client::adapter::controls::decode_reasoning_selection;
 use client::adapter::lowering::{
     lower_provider_model_catalog_entry, lower_status_snapshot, lower_task_output_chunk,
@@ -589,6 +590,7 @@ pub struct EngineCommandRouter {
     catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
     credentials: Option<Arc<secret::CredentialManager>>,
     realtime_audio: Option<Arc<crate::realtime_audio::RealtimeAudioController>>,
+    media_cloud_audio: Option<Arc<AudioProviderCloudRegistry>>,
     /// Settings-visible provider model directory assembled from the full
     /// provider config, including providers not currently routable.
     provider_model_catalog_listings: Vec<lingxi_core::host::ModelListing>,
@@ -819,6 +821,7 @@ impl EngineCommandRouter {
         presence_warning: Option<String>,
         sink: Arc<dyn ClientEventSink>,
     ) {
+        self.refresh_media_cloud_audio_binding().await;
         sink.emit(ClientEvent::SessionResumed {
             session_id: uuid.to_string(),
             mode: SessionModeDto::Code,
@@ -939,6 +942,7 @@ impl EngineCommandRouter {
             catalog_registry: harness_runtime::desktop::FusionCatalogRegistry::default(),
             credentials: None,
             realtime_audio: None,
+            media_cloud_audio: None,
             provider_model_catalog_listings: Vec::new(),
             provider_credentials_ephemeral: false,
             openai_host_session: None,
@@ -980,6 +984,48 @@ impl EngineCommandRouter {
     ) -> Self {
         self.realtime_audio = Some(controller);
         self
+    }
+
+    /// Bind the same cloud route registry used by AppMediaHost so follow-session
+    /// operations track the current trusted profile after model/session changes.
+    pub fn with_media_cloud_audio_registry(
+        mut self,
+        registry: Arc<AudioProviderCloudRegistry>,
+    ) -> Self {
+        self.media_cloud_audio = Some(registry);
+        self
+    }
+
+    async fn refresh_media_cloud_audio_binding(&self) {
+        let Some(registry) = self.media_cloud_audio.as_ref() else {
+            return;
+        };
+        let session_id = self.handle.current_session_id().await.as_uuid().to_string();
+        let Some(controller) = self.realtime_audio.as_ref() else {
+            registry.unregister_session(&session_id);
+            return;
+        };
+        match controller.session_context().await {
+            Ok((bound_session_id, profile_name)) if bound_session_id == session_id => {
+                if let Err(error) = registry.bind_session_to_profile(
+                    session_id,
+                    profile_name.clone(),
+                    format!("profile:{profile_name}"),
+                ) {
+                    tracing::debug!(%error, "current session has no configured media audio profile");
+                }
+            }
+            Ok(_) => {
+                registry.unregister_session(&session_id);
+                tracing::warn!(
+                    "realtime audio context returned a different active session identity"
+                );
+            }
+            Err(message) => {
+                registry.unregister_session(&session_id);
+                tracing::debug!(%message, "current session has no authoritative media audio profile");
+            }
+        }
     }
 
     pub fn with_credentials(mut self, credentials: Arc<secret::CredentialManager>) -> Self {
@@ -2053,6 +2099,15 @@ impl CommandRouter for EngineCommandRouter {
                 };
                 match context {
                     Ok((session_id, profile)) => {
+                        if let Some(registry) = self.media_cloud_audio.as_ref() {
+                            if let Err(error) = registry.bind_session_to_profile(
+                                session_id.clone(),
+                                profile.clone(),
+                                format!("profile:{profile}"),
+                            ) {
+                                tracing::debug!(%error, "desktop media audio route is unavailable for the selected profile");
+                            }
+                        }
                         sink.emit(ClientEvent::AudioSessionContext {
                             session_id,
                             account_scope: format!("profile:{profile}"),
@@ -2066,6 +2121,11 @@ impl CommandRouter for EngineCommandRouter {
                         // audio unconfigured; it must not reject the text session.
                         // Actual audio operations still validate their own route.
                         tracing::debug!(%message, "audio session context unavailable");
+                        if let Some(registry) = self.media_cloud_audio.as_ref() {
+                            let session_id =
+                                self.handle.current_session_id().await.as_uuid().to_string();
+                            registry.unregister_session(&session_id);
+                        }
                     }
                 }
             }
@@ -2086,6 +2146,7 @@ impl CommandRouter for EngineCommandRouter {
                 {
                     Ok(()) => {
                         let current = self.handle.get_status_snapshot().await;
+                        self.refresh_media_cloud_audio_binding().await;
                         let selected = lingxi_core::host::qualified_model_ref(
                             &current.model,
                             current.model_profile.as_deref(),
@@ -2510,6 +2571,7 @@ impl CommandRouter for EngineCommandRouter {
                 }
                 let _ = self.restore_persisted_reasoning_selection().await;
 
+                self.refresh_media_cloud_audio_binding().await;
                 let session_id = self.handle.current_session_id().await.to_string();
                 sink.emit(ClientEvent::SessionStarted {
                     session_id,

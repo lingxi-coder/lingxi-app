@@ -51,9 +51,23 @@ function snapshot(overrides: Partial<NativeAudioSnapshot> = {}): NativeAudioSnap
     activeModelReferenceCount: 0,
     voices: [],
     models: [],
+    mediaSessionModes: [],
     ...overrides,
   };
 }
+
+test('native audio snapshot media modes are bounded, known, and empty when absent', () => {
+  assert.deepEqual(defaultNativeAudioSnapshot().mediaSessionModes, []);
+  const { mediaSessionModes: _omitted, ...legacySnapshot } = snapshot();
+  assert.deepEqual(validateNativeAudioSnapshot(legacySnapshot).mediaSessionModes, []);
+  assert.deepEqual(
+    validateNativeAudioSnapshot(snapshot({ mediaSessionModes: ['audio', 'video', 'audio_video'] })).mediaSessionModes,
+    ['audio', 'video', 'audio_video'],
+  );
+  assert.throws(() => validateNativeAudioSnapshot({ ...snapshot(), mediaSessionModes: ['screen'] }), /audio media session mode/);
+  assert.throws(() => validateNativeAudioSnapshot(snapshot({ mediaSessionModes: ['audio', 'audio'] })), /audio media session mode/);
+  assert.throws(() => validateNativeAudioSnapshot({ ...snapshot(), mediaSessionModes: ['audio', 'video', 'audio_video', 'audio'] }), /invalid audio media session modes/);
+});
 
 test('input level events carry only a bounded real microphone amplitude', () => {
   const owner = { kind: 'dictation', id: 'dictation-1' } as const;
@@ -171,6 +185,43 @@ test('snapshot requests start the helper and return its real capabilities', asyn
     assert.equal(response.type, 'snapshot');
     assert.equal(response.snapshot.recognizerAvailable, true);
   } finally {
+    await manager.dispose();
+    helper.stdin.end();
+    helper.stdout.end();
+    helper.stderr.end();
+  }
+});
+
+test('media session modes follow the native helper snapshot independently of legacy audio operations', async () => {
+  const helper = new FakeHelperProcess();
+  const manager = new NativeAudioManager({
+    isPackaged: false,
+    resourcesPath: '/resources',
+    userDataPath: '/tmp/lingxi-audio-tests',
+    helperPath: '/tmp/LingXiAudioHelper',
+    diagnostics: new DiagnosticBuffer(),
+    spawnHelper: () => helper as any,
+  });
+  const observed: string[][] = [];
+  const unsubscribe = manager.onEvent((event) => {
+    if (event.type === 'snapshot_changed' && event.snapshot) {
+      observed.push(event.snapshot.mediaSessionModes);
+    }
+  });
+  try {
+    assert.deepEqual(manager.getMediaSessionModes(), []);
+    const pending = manager.request({ type: 'get_snapshot' });
+    const envelope = await nextEnvelope(helper);
+    helper.stdout.write(`${JSON.stringify({
+      id: envelope.id,
+      type: 'response',
+      result: { type: 'snapshot', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES, mediaSessionModes: ['audio'] }) },
+    })}\n`);
+    await pending;
+    assert.deepEqual(manager.getMediaSessionModes(), ['audio']);
+    assert.deepEqual(observed.at(-1), ['audio']);
+  } finally {
+    unsubscribe();
     await manager.dispose();
     helper.stdin.end();
     helper.stdout.end();
@@ -2597,6 +2648,109 @@ test('cloud synthesis pins config and exact session without calling the device s
   const promise = manager.executeAudioRequest({ identity: { id: '00000000-0000-4000-8000-000000000099', generation: 1, service_epoch: 0 }, owner: { type: 'ui', instance_id: 'preview' }, operation: { type: 'synthesize', text: 'hello' }, max_payload_bytes: 1024 });
   await admitted.promise; config.speech.cloud.modelId = 'later-edit'; finish.resolve();
   assert.equal((await promise).type, 'synthesized'); assert.equal(received?.speech.cloud.modelId, 'audio-model');
+});
+
+test('host-local policy rejects Provider and Automatic-plus-Provider-voice snapshots before dispatch', async () => {
+  for (const configuration of [
+    { ...audioConfigurationDefaults(), speech: { ...audioConfigurationDefaults().speech, source: 'provider' } },
+    { ...audioConfigurationDefaults(), speech: {
+      ...audioConfigurationDefaults().speech,
+      source: 'automatic',
+      voice: { source: 'provider', id: 'provider-voice', profileId: 'profile-a', modelId: 'tts-1' },
+    } },
+  ]) {
+    const helper = new FakeHelperProcess();
+    const manager = new NativeAudioManager({
+      isPackaged: false,
+      resourcesPath: '/unused',
+      userDataPath: '/tmp',
+      diagnostics: new DiagnosticBuffer(),
+      helperPath: '/unused-helper',
+      spawnHelper: () => helper as any,
+      getAudioConfiguration: () => configuration as any,
+      providerAudio: { execute: async () => assert.fail('host-local operation must not call cloud') } as any,
+    });
+    try {
+      const result = await manager.executeAudioRequest({
+        identity: { id: '00000000-0000-4000-8000-000000000078', generation: 1, service_epoch: 0 },
+        owner: { type: 'ui', instance_id: 'preview' },
+        route_policy: 'host_configured_local_only',
+        operation: { type: 'synthesize', text: 'hello' },
+        max_payload_bytes: 1024,
+      });
+      assert.equal(result.type, 'failed');
+      if (result.type === 'failed') assert.equal(result.error.kind, 'invalid_request');
+      assert.equal(helper.writes.length, 0);
+    } finally {
+      await manager.dispose();
+      helper.stdin.end();
+      helper.stdout.end();
+      helper.stderr.end();
+    }
+  }
+});
+
+test('host-local policy validates and executes against one frozen native settings snapshot', async () => {
+  const helper = new FakeHelperProcess();
+  const config = { ...audioConfigurationDefaults(), speech: { ...audioConfigurationDefaults().speech, source: 'system' } };
+  const manager = new NativeAudioManager({
+    isPackaged: false,
+    resourcesPath: '/unused',
+    userDataPath: '/tmp',
+    diagnostics: new DiagnosticBuffer(),
+    helperPath: '/unused-helper',
+    spawnHelper: () => helper as any,
+    getAudioConfiguration: () => config as any,
+    providerAudio: { execute: async () => assert.fail('host-local operation must not call cloud') } as any,
+  });
+  try {
+    const request = {
+      identity: { id: '00000000-0000-4000-8000-000000000077', generation: 1, service_epoch: 9 },
+      owner: { type: 'session', session_id: 's' },
+      route_policy: 'host_configured_local_only',
+      operation: { type: 'synthesize', text: 'hello' },
+      max_payload_bytes: 1024,
+    } as const;
+    const operation = manager.executeAudioRequest(request);
+    const capabilityEnvelope = await envelopeAt(helper, 0);
+    config.speech.source = 'provider';
+    helper.stdout.write(`${JSON.stringify({
+      id: capabilityEnvelope.id,
+      type: 'response',
+      result: { type: 'snapshot', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }) },
+    })}\n`);
+
+    const operationEnvelope = await envelopeAt(helper, 1) as {
+      id: string;
+      kind: string;
+      request?: { route_policy?: string; identity?: unknown; owner?: unknown };
+      configuration?: { speech: { source: string } };
+    };
+    assert.equal(operationEnvelope.kind, 'engine_request');
+    assert.equal(operationEnvelope.request?.route_policy, 'host_configured_local_only');
+    assert.equal(operationEnvelope.configuration?.speech.source, 'system');
+    helper.stdout.write(`${JSON.stringify({
+      id: operationEnvelope.id,
+      type: 'response',
+      result: {
+        type: 'engine_result',
+        snapshot: snapshot({
+          capabilities: AUDIO_CAPABILITIES,
+          currentOperation: {
+            identity: operationEnvelope.request!.identity as any,
+            owner: operationEnvelope.request!.owner as any,
+          },
+        }),
+        result: { type: 'synthesized', pcm_base64: 'AQI=', sample_rate_hz: 24_000 },
+      },
+    })}\n`);
+    assert.equal((await operation).type, 'synthesized');
+  } finally {
+    await manager.dispose();
+    helper.stdin.end();
+    helper.stdout.end();
+    helper.stderr.end();
+  }
 });
 
 test('cloud cancellation aborts the same host operation and cannot fall through to device synthesis', async () => {

@@ -133,15 +133,18 @@ struct ProjectCronScopeProvider: CronScopeProviding, @unchecked Sendable {
 
 final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
     private let appSandboxRoot: String
+    private let mediaHostComposition: IOSNativeMediaHostComposition?
     private let launchSnapshot: @MainActor @Sendable () -> ProviderLaunchSnapshot
     private let terminalConfig: @MainActor @Sendable (CronScope) -> TerminalRuntimeConfig?
 
     init(
         appSandboxRoot: String,
+        mediaHostComposition: IOSNativeMediaHostComposition?,
         launchSnapshot: @escaping @MainActor @Sendable () -> ProviderLaunchSnapshot,
         terminalConfig: @escaping @MainActor @Sendable (CronScope) -> TerminalRuntimeConfig?
     ) {
         self.appSandboxRoot = appSandboxRoot
+        self.mediaHostComposition = mediaHostComposition
         self.launchSnapshot = launchSnapshot
         self.terminalConfig = terminalConfig
     }
@@ -214,12 +217,18 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
                 makeIosHostEnvironment(launchMode: .scheduledHeadless)
             }
         )
-        let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
+        guard let mediaHostComposition else {
+            throw NSError(
+                domain: "IOSNativeMediaHost",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The app media host was not composed before cron engine creation."]
+            )
+        }
+        let mediaHost = await MainActor.run { mediaHostComposition.nativeHost }
         let handle = try buildIosEngineWithConfig(
             config: config,
             listener: listener,
-            audio: audio,
-            camera: CameraImpl(),
+            mediaHost: mediaHost,
             share: ShareImpl(),
             notifications: NotificationImpl(),
             clipboard: ClipboardImpl(),

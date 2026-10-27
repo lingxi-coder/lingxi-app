@@ -62,10 +62,13 @@ final class ProviderCredentialReadOnlyTests: XCTestCase {
             await MainActor.run { repository.handle(event: event) }
             listed.fulfill()
         })
+        let mediaHostComposition = try IOSNativeMediaHostComposition(
+            audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
+        )
         let handle = try buildIosEngine(
             apiBase: "https://api.anthropic.com", apiKey: "", model: "",
             appSandboxRoot: sandbox.path, listener: listener,
-            audio: IOSAudioServiceCallbackAdapter.shared, camera: CameraImpl(), share: ShareImpl(),
+            mediaHost: mediaHostComposition.nativeHost, share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: CredentialReadOnlyPermissionSink(), mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
             secureStorage: SecureStorageImpl(backend: backend), deviceControl: nil

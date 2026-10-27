@@ -35,6 +35,11 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use crate::HostFileSystem;
+use audio_provider::{
+    media_cloud::AudioProviderCloudRegistry, media_host::AppMediaHost,
+    media_native::CallbackMediaDevicePorts, media_store::BoundedMediaResourceStore,
+    AppMediaConversationAttachment, AudioProviderHost,
+};
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
 use harness_runtime::desktop::{DesktopAudio, DesktopConfig, DesktopRuntime};
@@ -45,12 +50,15 @@ use lingxi_core::host::{
 use crate::audio_bridge::{new_audio_bridge, AudioBridge};
 use crate::driver::OrchestratorTurnDriver;
 use crate::mcp_bridge::McpPaths;
+use crate::media_bridge::{new_media_device_callback, DesktopRemoteMediaConfigProvider};
+use crate::media_service_rpc::MediaServiceRpc;
 use crate::router::{EngineCommandRouter, SessionStoreContext};
 use crate::server::{BridgeConnection, TurnDriver};
 use crate::settings_bridge::{
     active_settings_baseline, empty_settings_source, settings_error_message, SettingsContext,
     SettingsPaths,
 };
+use media_api::MediaOwner;
 
 #[cfg(all(test, unix))]
 #[path = "boot/workspace_resume_tests.rs"]
@@ -1109,6 +1117,13 @@ pub struct BoundServer {
     /// rather than only implied by the order of two statements inside
     /// [`assemble_with_provider_keys`].
     audio: Arc<AudioBridge>,
+    /// The single shared media facade used by Desktop tools, UI/Remote RPC,
+    /// and the legacy audio-only service projection.
+    media_host: Arc<AppMediaHost>,
+    /// Host-control transport handles retained by the product Remote media
+    /// connector for this authenticated Bridge connection.
+    media_connection_channel: Arc<crate::media_bridge::BridgeMediaConnectionChannel>,
+    media_control_channel: Arc<crate::media_bridge::BridgeMediaControlChannel>,
     /// Keeps the cross-session live identity and inbox registered for the
     /// lifetime of this bridge process.
     #[allow(dead_code)]
@@ -1135,6 +1150,26 @@ impl BoundServer {
     #[must_use]
     pub fn audio(&self) -> &Arc<AudioBridge> {
         &self.audio
+    }
+
+    /// Return the exact app-scoped media host injected into this runtime.
+    #[must_use]
+    pub fn media_host(&self) -> &Arc<AppMediaHost> {
+        &self.media_host
+    }
+
+    /// Authenticated route negotiation channel for the product connector.
+    #[must_use]
+    pub fn media_connection_channel(
+        &self,
+    ) -> &Arc<crate::media_bridge::BridgeMediaConnectionChannel> {
+        &self.media_connection_channel
+    }
+
+    /// Authenticated render-barrier channel for the product connector.
+    #[must_use]
+    pub fn media_control_channel(&self) -> &Arc<crate::media_bridge::BridgeMediaControlChannel> {
+        &self.media_control_channel
     }
 
     /// Capture the ordered session lifecycle owner before the connection is
@@ -1930,6 +1965,9 @@ pub async fn assemble_with_credentials(
     provider_keys: BTreeMap<String, String>,
     openai_oauth: Option<client::protocol::events::OpenAiOAuthSessionDto>,
 ) -> Result<BoundServer, String> {
+    let media_handoffs =
+        Arc::new(harness_runtime::desktop::DesktopMediaAgentHandoffQueue::default());
+    cfg.media_agent_handoffs = Some(media_handoffs.clone());
     prepare_selected_boot_session(&mut cfg).await?;
     let cold_resume = crate::workspace_commands::ColdBootResume::capture(&cfg)?;
     let provider_credentials_ephemeral = matches!(
@@ -2064,7 +2102,8 @@ pub async fn assemble_with_credentials(
         ),
     );
     cfg.session_agent_observer = Some(session_agent_observer.clone());
-    let message_output = client::adapter::AdapterOutputStream::new(event_sink.clone());
+    let message_output = client::adapter::AdapterOutputStream::new(event_sink.clone())
+        .with_turn_terminal_deferrer(media_handoffs.clone());
     let output: Arc<dyn OutputStream> = Arc::new(message_output.clone());
     let permission_sink = connection.permission_sink();
 
@@ -2083,28 +2122,51 @@ pub async fn assemble_with_credentials(
     let computer_access_broker = Arc::new(client::adapter::ComputerAccessBroker::new(
         connection.computer_access_sink(),
     ));
-    // Device audio (capture / live listen / synthesis / playback). The devices
-    // belong to the Electron client, so one `AudioBridge` over THIS connection's
-    // sink implements the shared `AudioService`: each operation becomes an
-    // identity-scoped `ClientEvent::AudioRequest` until its result returns.
-    //
-    // Both halves are connection-scoped ON PURPOSE, and this is the only place
-    // that can make that true: the bridge parks into a table the responder
-    // resolves out of, and BOTH are created here, per `assemble`, per
-    // `BridgeConnection`. A later connection gets a fresh pair, so its response
-    // cannot resolve a request this one parked; `on_close` drains pending calls
-    // and invalidates the cached client capability snapshot.
-    //
-    // The bridge starts with an unknown snapshot. `ClientHello` supplies the
-    // initial operation support/revision and later capability updates replace
-    // it. Until a client connects, tools are not advertised; direct execution
-    // still fails immediately if no transport is attached.
-    //
-    // Any capability the caller put on `cfg` is REPLACED, not honored: it could
-    // only have been built over some other connection, and the engine's audio
-    // calls must reach THIS one.
+    // Native audio and media-device ports are both projected over this one
+    // authenticated Bridge connection. The shared MediaService owns routing,
+    // owner-bound sessions and storage; its low-level audio backend and media
+    // device callback both reach the same Electron-native coordinator.
     let (audio_bridge, audio_responder) = new_audio_bridge(connection.audio_sink());
-    cfg.audio = Some(DesktopAudio::from_single(audio_bridge.clone()));
+    let (media_device_callback, media_device_responder) =
+        new_media_device_callback(connection.audio_sink());
+    let media_ports = Arc::new(CallbackMediaDevicePorts::new(media_device_callback));
+    let media_resources = Arc::new(BoundedMediaResourceStore::default());
+    let cloud_audio = Arc::new(AudioProviderCloudRegistry::new("wav"));
+    let media_host = AppMediaHost::new(
+        media_resources,
+        audio_bridge.clone(),
+        None,
+        media_ports,
+        Vec::new(),
+        cloud_audio.clone(),
+        Vec::new(),
+        media_runtime::AudioRoutingSettings::default(),
+        1,
+        client::protocol::media::MAX_MEDIA_DEVICE_FRAME_BYTES as u64,
+    )
+    .map_err(|error| format!("could not compose the app-scoped media host: {error}"))?;
+    let media_configuration_host = media_host.clone();
+    let media_configuration_snapshot: audio_provider::AudioConfigurationSnapshot =
+        Arc::new(move || media_configuration_host.audio_configuration_json());
+    cfg.media_conversation_attachment = Some(AppMediaConversationAttachment::new(
+        media_host.cloud_audio_registry(),
+        media_host.media_service(),
+        media_configuration_snapshot,
+    ));
+    cfg.media_service = Some(media_host.media_service());
+    // Computer Use and public media tools share the same routed service object.
+    cfg.audio = Some(DesktopAudio {
+        service: media_host.audio_service(),
+    });
+    let (media_connection_channel, media_connection_responder) =
+        connection.media_connection_channel();
+    let (media_control_channel, media_control_responder) = connection.media_control_channel();
+    let remote_media_connector = remote_control_client::host_media::RemoteMediaConnector::new(
+        Arc::new(DesktopRemoteMediaConfigProvider::from_process_environment()),
+        media_host.resource_store(),
+    );
+    remote_media_connector.bind_media_service(media_host.media_service());
+    media_host.install_connector(remote_media_connector.clone(), []);
     let (ask_user_question_tx, ask_user_question_rx) =
         tokio::sync::mpsc::channel::<tool_api::ask_user_question::AskUserQuestionExchange>(8);
     cfg.ask_user_question_tx = Some(ask_user_question_tx);
@@ -2361,6 +2423,7 @@ pub async fn assemble_with_credentials(
     // terminal frames arrive in 41ms with no retry backoff.
     let driver: Arc<dyn TurnDriver> = Arc::new(
         OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
+            .with_desktop_runtime(runtime.clone())
             .with_workspace_session_facts(workspace_commands.session_facts())
             .with_message_output(message_output)
             .with_queue(queue, cancel_reason)
@@ -2375,14 +2438,21 @@ pub async fn assemble_with_credentials(
     }
 
     let (audio_services, audio_credential_ids, _) = runtime.audio_provider_services();
-    let host = audio_provider::AudioProviderHost::from_provider_services(
+    let audio_provider = Arc::new(AudioProviderHost::from_provider_services(
         audio_services,
-        audio_credential_ids,
-    );
+        audio_credential_ids.clone(),
+    ));
+    for profile_name in audio_credential_ids.keys() {
+        if let Err(error) =
+            cloud_audio.register_profile(profile_name.clone(), audio_provider.clone())
+        {
+            tracing::warn!(%error, "could not register a configured provider profile for media audio");
+        }
+    }
     let realtime_audio = Arc::new(
         crate::realtime_audio::RealtimeAudioController::new(
             runtime.orchestrator.clone(),
-            Arc::new(host),
+            audio_provider.clone(),
         )
         .with_execution_owners(connection.realtime_execution_owners(
             gate.clone(),
@@ -2390,6 +2460,16 @@ pub async fn assemble_with_credentials(
             ask_user_question_broker.clone(),
         )),
     );
+    if let Ok((session_id, profile_name)) = realtime_audio.session_context().await {
+        if let Err(error) = cloud_audio.register_session(
+            session_id,
+            profile_name.clone(),
+            format!("profile:{profile_name}"),
+            audio_provider,
+        ) {
+            tracing::warn!(%error, "could not register the current desktop session for media audio");
+        }
+    }
 
     // The full command-routing seam over the real engine handles.
     let handle: Arc<dyn OrchestratorHandle> = runtime.orchestrator.clone();
@@ -2430,7 +2510,9 @@ pub async fn assemble_with_credentials(
     .with_hook_registry(runtime.hook_registry.clone())
     .with_repo_root_reloader(runtime.repo_root_reloader.clone())
     .with_file_changed_watcher(runtime.file_changed_watcher.controller());
-    router = router.with_realtime_audio(realtime_audio);
+    router = router
+        .with_realtime_audio(realtime_audio)
+        .with_media_cloud_audio_registry(cloud_audio.clone());
     let router = Arc::new(router);
     spawn_mcp_startup_publisher(
         runtime.watch_mcp_startup(),
@@ -2438,6 +2520,21 @@ pub async fn assemble_with_credentials(
         connection.loop_wakeup_event_sink(),
     );
 
+    let media_owner = MediaOwner::Session {
+        session_id: runtime
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string(),
+    };
+    let media_service_rpc = MediaServiceRpc::for_app_host_with_remote_connector(
+        media_host.clone(),
+        media_owner,
+        remote_media_connector,
+        media_connection_channel.clone(),
+        media_control_channel.clone(),
+    );
     let connection = connection
         .with_policy_helper_refusal(runtime.policy_helper_refusal.clone())
         .bind(gate, driver)
@@ -2448,7 +2545,11 @@ pub async fn assemble_with_credentials(
         // `cfg.audio` above — this is what makes an inbound `AudioResponse` on
         // this connection resolve a call the engine parked on this connection,
         // and a disconnect drain them.
-        .bind_audio(audio_responder);
+        .bind_audio(audio_responder)
+        .bind_media_device(media_device_responder)
+        .bind_media_connection(media_connection_responder)
+        .bind_media_control(media_control_responder)
+        .bind_media_service(media_service_rpc);
     let connection = connection
         .with_task_notification_registry(runtime.task_registry.clone())
         .with_queue_wakeup();
@@ -2456,6 +2557,9 @@ pub async fn assemble_with_credentials(
         connection,
         runtime,
         audio: audio_bridge,
+        media_host,
+        media_connection_channel,
+        media_control_channel,
         live_session,
     })
 }

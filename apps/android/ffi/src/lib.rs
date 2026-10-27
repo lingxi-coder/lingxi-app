@@ -104,8 +104,6 @@ mod probes;
 #[cfg(feature = "uniffi")]
 mod remote;
 #[cfg(feature = "uniffi")]
-pub use remote::*;
-#[cfg(feature = "uniffi")]
 pub use callbacks::AndroidAudioFfiError;
 #[cfg(feature = "uniffi")]
 pub use callbacks::AndroidAudioService;
@@ -159,6 +157,10 @@ pub use callbacks::SecureStorageFfiError;
 pub use callbacks::ShareFfiError;
 #[cfg(feature = "uniffi")]
 pub use callbacks::ShareResultFfi;
+#[cfg(feature = "uniffi")]
+pub use callbacks::{
+    AndroidMediaDeviceCapabilities, AndroidMediaDevicePorts, AndroidMediaDeviceResponse,
+};
 #[cfg(test)]
 use configuration::android_project_cwd;
 pub use configuration::AndroidDeviceClassFfi;
@@ -186,6 +188,10 @@ pub use host::build_android_engine;
 pub use host::build_mobile_engine;
 #[cfg(feature = "uniffi")]
 pub use host::create_android_side_chat;
+#[cfg(feature = "uniffi")]
+pub use host::AndroidNativeMediaHost;
+#[cfg(feature = "uniffi")]
+pub use host::MediaAudioSessionBindingFfi;
 pub use host::PlatformImpls;
 #[cfg(feature = "uniffi")]
 pub use linux_runtime::build_android_mobile_linux_runtime_handle;
@@ -239,6 +245,8 @@ pub use linux_types::MobileLinuxTaskStateFfi;
 pub use probes::android_git_probe;
 #[cfg(feature = "uniffi")]
 pub use probes::android_git_probe_authed;
+#[cfg(feature = "uniffi")]
+pub use remote::*;
 // F3-04: the shared session host + its error type are DEFINED ONCE in
 // `harness-runtime::mobile` and re-exported here. Both FFI packager crates re-export the
 // SAME types so iOS and Android cannot drift (plan F3-04).

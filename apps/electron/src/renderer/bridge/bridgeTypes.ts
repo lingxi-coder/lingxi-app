@@ -48,6 +48,7 @@ import type {
   BootstrapState,
   ConnectionState,
   DiagnosticEntry,
+  PluginSecretCleanupResult,
   PluginSecretMetadata,
   ProjectSessionCatalogState,
   ProviderConnectionTestResult,
@@ -227,6 +228,7 @@ export interface UseBridge {
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
   clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
+  cleanupPluginSecretsAfterUninstall?(pluginId: string, lastScopeRemoved: true): Promise<PluginSecretCleanupResult>;
   setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
   setCollapseThoughtsByDefault(collapseThoughtsByDefault: boolean): Promise<void>;
   /**

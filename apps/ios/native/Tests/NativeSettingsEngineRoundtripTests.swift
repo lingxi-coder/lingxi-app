@@ -27,6 +27,40 @@ private actor SettingsRoundtripListener: IosEventListener {
 
 /// Real Swift ABI -> engine -> distinct user/project/local files, with no keychain or provider.
 final class NativeSettingsEngineRoundtripTests: XCTestCase {
+    @MainActor
+    func testEmptyProviderConfigurationDoesNotPreventEngineStartup() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-empty-provider-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let listener = SettingsRoundtripListener()
+        let mediaHost = try IOSNativeMediaHostComposition(
+            audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
+        ).nativeHost
+        let directories = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime", isDirectory: true).path)
+        let handle = try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
+            appVersion: nil, appAgentHost: false,
+            brandId: directories.brandId, linuxUser: directories.linuxUser,
+            configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
+            apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code,
+            visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: nil,
+            projectAdditionalDirectories: [], projectMountGrants: [],
+            providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
+            mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: root),
+            physicalMemoryBytes: 0, hostEnvironment: nil),
+            listener: listener, mediaHost: mediaHost, share: ShareImpl(),
+            notifications: NotificationImpl(), clipboard: ClipboardImpl(),
+            permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
+
+        let audio = try object(await handle.audioSessionContext())
+        XCTAssertEqual((audio["error"] as? [String: Any])?["kind"] as? String, "needs_configuration")
+        let binding = try await mediaHost.updateAudioSessionContext(engine: handle)
+        XCTAssertNil(binding, "No audio route may be registered without a provider profile")
+        let workspace = await handle.workspaceState()
+        XCTAssertNotNil(UUID(uuidString: workspace.sessionId), "The engine must expose a usable session")
+    }
+
     func testKeylessLayerWritesReadBackAndSurviveEngineRebuild() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("native-settings-\(UUID().uuidString)", isDirectory: true)
         let workspace = root.appendingPathComponent("Projects/\(UUID().uuidString.lowercased())/workspace", isDirectory: true)
@@ -48,7 +82,11 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
     private func exercise(root: URL, workspace: URL,
                           layers: [(WritableScopeDto, String, URL, String)], write: Bool) async throws {
         let listener = SettingsRoundtripListener()
-        let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
+        let mediaHost = try await MainActor.run {
+            try IOSNativeMediaHostComposition(
+                audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
+            ).nativeHost
+        }
         let directories = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime", isDirectory: true).path)
         let handle = try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
             appVersion: nil,
@@ -62,7 +100,7 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
             mobileLinux: nil,
             physicalMemoryBytes: 0, hostEnvironment: nil),
-            listener: listener, audio: audio, camera: CameraImpl(), share: ShareImpl(),
+            listener: listener, mediaHost: mediaHost, share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
         try await handle.submit(command: .refreshListings(which: [.settings]))

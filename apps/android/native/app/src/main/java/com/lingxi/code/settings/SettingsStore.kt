@@ -101,6 +101,7 @@ class SettingsStore(
     private val voiceRepo: AudioConfigurationRepository? = null,
     private val notifRepo: NotificationPrefsStore? = null,
     private val permissionModeRepo: PermissionModeSettingsRepository? = null,
+    private val onVoiceConfigurationSaved: (AudioConfigurationV4) -> Unit = {},
     /**
      * Resolves a string resource id to its localized text. The production
      * factory wires the application context's `getString`; unit tests keep the
@@ -307,13 +308,19 @@ class SettingsStore(
                     repository.save(updatedVoice, expectedRevision = current.voiceRevision)
                 }
                 when (result) {
-                    is AudioConfigurationSaveResult.Saved -> _state.update {
-                        it.copy(
-                            voice = result.snapshot.configuration,
-                            voiceRevision = result.snapshot.revision,
-                            voiceSaving = false,
-                            voiceSaveError = null,
-                        )
+                    is AudioConfigurationSaveResult.Saved -> {
+                        val mediaSettingsError = runCatching {
+                            onVoiceConfigurationSaved(result.snapshot.configuration)
+                        }.exceptionOrNull()
+                        _state.update {
+                            it.copy(
+                                voice = result.snapshot.configuration,
+                                voiceRevision = result.snapshot.revision,
+                                voiceSaving = false,
+                                voiceSaveError = mediaSettingsError?.message
+                                    ?: mediaSettingsError?.javaClass?.simpleName,
+                            )
+                        }
                     }
                     is AudioConfigurationSaveResult.Conflict -> _state.update {
                         it.copy(
@@ -809,6 +816,10 @@ class SettingsStore(
                         voiceRepo = AudioConfigurationRepository(appContext),
                         notifRepo = NotificationPrefsStore(appContext),
                         permissionModeRepo = PermissionModeSettingsRepository(appContext),
+                        onVoiceConfigurationSaved = { configuration ->
+                            com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
+                                .updateAudioSettings(configuration)
+                        },
                         resolveString = { id -> com.lingxi.code.theme.LocaleWrapper.getString(appContext, id) },
                     ) as T
                 }

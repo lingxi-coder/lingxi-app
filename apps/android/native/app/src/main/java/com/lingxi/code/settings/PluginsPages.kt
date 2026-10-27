@@ -18,6 +18,8 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -177,11 +179,18 @@ private fun NoteRow(text: String) {
 internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Unit, onAdvanced: () -> Unit) {
     val t = LingXiTheme.palette
     val state by bridge.state.collectAsState()
+    val context = LocalContext.current
     val catalogJson = state.catalogs["plugins"]
     val catalog = remember(catalogJson) { PluginCatalog.parse(catalogJson) }
+    val mcpCatalogJson = state.catalogs["mcp"]
+    val configuredMcps = remember(mcpCatalogJson) { configuredMcpEntries(mcpCatalogJson) }
+    val publicDirectory = remember(context) { runCatching { readPublicExtensionDirectory(context) } }
     val coroutine = rememberCoroutineScope()
+    var selectedDirectoryTab by remember(state.generation) { mutableStateOf(0) }
+    var mcpEditor by remember(state.generation) { mutableStateOf<McpEditorTarget?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var marketplaceConflictNotice by remember(state.generation) { mutableStateOf<String?>(null) }
     var confirmation by remember { mutableStateOf<PluginConfirmation?>(null) }
     var menuFor by remember { mutableStateOf<String?>(null) }
     var addingMarketplace by remember { mutableStateOf(false) }
@@ -192,14 +201,20 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
             }.toMap()
         }
     }
-    LaunchedEffect(state.connected) { if (state.connected) runCatching { bridge.admin("plugins", "get_catalog") } }
+    LaunchedEffect(state.connected) {
+        if (state.connected) {
+            runCatching { bridge.admin("plugins", "get_catalog") }
+            runCatching { bridge.admin("mcp", "get_snapshot") }
+        }
+    }
 
-    fun run(key: String, payload: JSONObject) {
+    fun run(key: String, payload: JSONObject, onSuccess: () -> Unit = {}) {
         coroutine.launch {
             busy = key
             error = null
             try {
                 bridge.applyPluginOperation(payload)
+                onSuccess()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -214,139 +229,278 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
     val installTitle = stringResource(R.string.plugins_install_title_fmt)
     val installBody = stringResource(R.string.plugins_install_body)
     val installLabel = stringResource(R.string.plugins_action_install)
+    val marketplaceConfirmTitleFmt = stringResource(R.string.extension_directory_marketplace_title_fmt)
+    val marketplaceConfirmBody = stringResource(R.string.extension_directory_marketplace_body)
+    val marketplaceConfirmLabel = stringResource(R.string.extension_directory_add_marketplace)
+    val marketplaceNameConflictFmt = stringResource(R.string.extension_directory_marketplace_name_conflict)
     val removeTitle = stringResource(R.string.plugins_marketplace_remove_title_fmt)
     val removeBody = stringResource(R.string.plugins_marketplace_remove_body)
     val removeLabel = stringResource(R.string.plugins_marketplace_remove)
     Column(Modifier.fillMaxWidth()) {
-        Blurb(stringResource(R.string.plugins_blurb))
-        if (!state.connected) {
-            Text(settingsLabel("Connect an engine to view and edit its configuration. Device settings remain available."), color = t.text3)
-            return@Column
+        TabRow(selectedTabIndex = selectedDirectoryTab) {
+            Tab(
+                selected = selectedDirectoryTab == 0,
+                onClick = { selectedDirectoryTab = 0; mcpEditor = null },
+                text = { Text(stringResource(R.string.extension_directory_public)) },
+                modifier = Modifier.testTag("settings.extensions.tab.public"),
+            )
+            Tab(
+                selected = selectedDirectoryTab == 1,
+                onClick = { selectedDirectoryTab = 1; mcpEditor = null },
+                text = { Text(settingsLabel("Personal")) },
+                modifier = Modifier.testTag("settings.extensions.tab.personal"),
+            )
         }
-        if (catalogJson == null) {
-            Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { Busy() }
-            return@Column
-        }
-        error?.let { Text(String.format(failedFmt, it), color = t.danger, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 12.dp)) }
-
-        SettingsSection(label = stringResource(R.string.plugins_section_installed)) {
-            if (catalog.installed.isEmpty()) NoteRow(stringResource(R.string.plugins_installed_empty))
-            catalog.installed.forEachIndexed { index, plugin ->
-                SettingsRow(
-                    label = plugin.displayName,
-                    modifier = Modifier.testTag("settings.plugins.installed.${plugin.id}"),
-                    icon = pluginIcon(plugin.id),
-                    sub = pluginSubtitle(vendors[plugin.id], plugin.version),
-                    chevron = false,
-                    isLast = index == catalog.installed.lastIndex,
-                    onTap = { onDetail(plugin.id) },
-                    trailing = {
-                        if (busy == plugin.id) Busy()
-                        else LXToggle(
-                            checked = catalog.isEnabled(plugin),
-                            enabled = busy == null,
-                            onCheckedChange = { on ->
-                                run(plugin.id, JSONObject().put("action", if (on) "enable" else "disable").put("plugin", plugin.id))
-                            },
-                        )
-                    },
-                )
-            }
-        }
-
-        val installable = catalog.installable
-        SettingsSection(label = stringResource(R.string.plugins_section_available)) {
-            if (installable.isEmpty()) {
-                NoteRow(stringResource(if (catalog.marketplaces.isEmpty()) R.string.plugins_marketplaces_empty else R.string.plugins_available_empty))
-            }
-            installable.forEachIndexed { index, plugin ->
-                SettingsRow(
-                    label = plugin.name,
-                    modifier = Modifier.testTag("settings.plugins.available.${plugin.id}"),
-                    icon = pluginIcon(plugin.id),
-                    sub = listOf(plugin.marketplace, plugin.description).filter(String::isNotBlank).joinToString(" · "),
-                    chevron = false,
-                    isLast = index == installable.lastIndex,
-                    trailing = {
-                        if (busy == plugin.id) Busy()
-                        else Pill(installLabel, enabled = busy == null) {
-                            confirmation = PluginConfirmation(
-                                title = String.format(installTitle, plugin.name),
-                                body = installBody,
-                                confirm = installLabel,
-                                destructive = false,
-                            ) { run(plugin.id, JSONObject().put("action", "install").put("plugin", plugin.id)) }
-                        }
-                    },
-                )
-            }
-        }
-
-        SettingsSection(label = stringResource(R.string.plugins_section_marketplaces)) {
-            catalog.marketplaces.forEach { marketplace ->
-                val key = "marketplace:${marketplace.name}"
-                SettingsRow(
-                    label = marketplace.name,
-                    modifier = Modifier.testTag("settings.plugins.marketplace.${marketplace.name}"),
-                    icon = LXIconName.Apps,
-                    sub = marketplace.sourceLocation.ifBlank { null },
-                    chevron = false,
-                    trailing = {
-                        if (busy == key) Busy()
-                        else Box {
-                            Text(
-                                "⋯",
-                                color = if (busy == null) t.text2 else t.text4,
-                                style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .then(if (busy == null) Modifier.clickable { menuFor = marketplace.name } else Modifier)
-                                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                            )
-                            DropdownMenu(expanded = menuFor == marketplace.name, onDismissRequest = { menuFor = null }) {
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.plugins_marketplace_update)) },
-                                    onClick = {
-                                        menuFor = null
-                                        run(key, JSONObject().put("action", "marketplace_update").put("name", marketplace.name))
-                                    },
+        if (mcpEditor != null) {
+            TextButton(onClick = { mcpEditor = null }) { Text(stringResource(R.string.extension_directory_back)) }
+            McpConfigurationPage(
+                bridge = bridge,
+                initialName = mcpEditor?.name,
+                initialScope = mcpEditor?.scope,
+                initialConfigJson = mcpEditor?.initialConfigJson,
+                directoryConfigJson = mcpEditor?.directoryConfigJson,
+            )
+        } else if (selectedDirectoryTab == 0) {
+            error?.let { Text(String.format(failedFmt, it), color = t.danger, style = androidx.compose.material3.MaterialTheme.typography.bodySmall) }
+            val entries = publicDirectory.getOrNull()
+            if (entries == null) {
+                Text(stringResource(R.string.extension_directory_load_failed), color = t.text3)
+            } else {
+                PublicExtensionDirectory(
+                    entries = entries,
+                    configuredMcpServers = configuredMcps,
+                    registeredMarketplaces = catalog.marketplaces,
+                    canConfigureMcp = state.connected && mcpCatalogJson != null,
+                    canAddMarketplace = state.connected && catalogJson != null && busy == null,
+                    onConfigureMcp = { entry ->
+                        entry.mcpName?.let { serverName ->
+                            val existing = configuredMcps.firstOrNull {
+                                it.name == serverName && mcpConfigurationMatches(entry.mcpConfigJson, it.configJson)
+                            }
+                            mcpEditor = if (existing == null) {
+                                McpEditorTarget(
+                                    serverName,
+                                    initialConfigJson = entry.mcpConfigJson ?: "{}",
+                                    directoryConfigJson = entry.mcpConfigJson ?: "{}",
                                 )
-                                DropdownMenuItem(
-                                    text = { Text(removeLabel, color = t.danger) },
-                                    onClick = {
-                                        menuFor = null
-                                        confirmation = PluginConfirmation(
-                                            title = String.format(removeTitle, marketplace.name),
-                                            body = removeBody,
-                                            confirm = removeLabel,
-                                            destructive = true,
-                                        ) { run(key, JSONObject().put("action", "marketplace_remove").put("name", marketplace.name)) }
-                                    },
-                                )
+                            } else {
+                                McpEditorTarget(serverName, scope = existing.scope, directoryConfigJson = entry.mcpConfigJson ?: "{}")
                             }
                         }
                     },
+                    onAddMarketplace = { entry ->
+                        entry.marketplace?.let { marketplace ->
+                            val sourceAlreadyRegistered = catalog.marketplaces.any { marketplaceSourceMatches(marketplace.source, it) }
+                            val sameNameDifferentSource = catalog.marketplaces.any {
+                                it.name == marketplace.name && !marketplaceSourceMatches(marketplace.source, it)
+                            }
+                            if (sameNameDifferentSource) {
+                                selectedDirectoryTab = 1
+                                marketplaceConflictNotice = String.format(marketplaceNameConflictFmt, marketplace.name)
+                            } else if (sourceAlreadyRegistered) {
+                                selectedDirectoryTab = 1
+                            } else {
+                                confirmation = PluginConfirmation(
+                                    title = String.format(marketplaceConfirmTitleFmt, marketplace.name),
+                                    body = marketplaceConfirmBody,
+                                    confirm = marketplaceConfirmLabel,
+                                    destructive = false,
+                                ) {
+                                    val latestCatalog = PluginCatalog.parse(bridge.state.value.catalogs["plugins"])
+                                    val latestConflict = latestCatalog.marketplaces.any {
+                                        it.name == marketplace.name && !marketplaceSourceMatches(marketplace.source, it)
+                                    }
+                                    when {
+                                        latestConflict -> {
+                                            marketplaceConflictNotice = String.format(marketplaceNameConflictFmt, marketplace.name)
+                                            selectedDirectoryTab = 1
+                                        }
+                                        latestCatalog.marketplaces.any { marketplaceSourceMatches(marketplace.source, it) } -> {
+                                            marketplaceConflictNotice = null
+                                            selectedDirectoryTab = 1
+                                        }
+                                        else -> run(
+                                            "marketplace:add:${entry.id}",
+                                            JSONObject().put("action", "marketplace_add").put("source", marketplace.source),
+                                        ) {
+                                            marketplaceConflictNotice = null
+                                            selectedDirectoryTab = 1
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    onOpenPersonal = { entry ->
+                        entry.marketplace?.let { marketplace ->
+                            marketplaceConflictNotice = String.format(marketplaceNameConflictFmt, marketplace.name)
+                        }
+                        selectedDirectoryTab = 1
+                    },
                 )
             }
-            SettingsRow(
-                label = stringResource(R.string.plugins_marketplace_add),
-                modifier = Modifier.testTag("settings.plugins.marketplace.add"),
-                icon = LXIconName.Plus,
-                isLast = true,
-                onTap = if (busy == null) ({ addingMarketplace = true }) else null,
-                trailing = { if (busy == "marketplace:add") Busy() },
-            )
-        }
+        } else {
+            Column(Modifier.fillMaxWidth()) {
+                Blurb(stringResource(R.string.plugins_blurb))
+                marketplaceConflictNotice?.let {
+                    Text(it, color = t.danger, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                }
+                if (!state.connected) {
+                    Text(settingsLabel("Connect an engine to view and edit its configuration. Device settings remain available."), color = t.text3)
+                    return@Column
+                }
+                if (catalogJson == null) {
+                    Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { Busy() }
+                    return@Column
+                }
+                error?.let { Text(String.format(failedFmt, it), color = t.danger, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 12.dp)) }
 
-        SettingsSection {
-            SettingsRow(
-                label = stringResource(R.string.plugins_advanced),
-                modifier = Modifier.testTag("settings.plugins.advanced"),
-                icon = LXIconName.Cog,
-                sub = stringResource(R.string.plugins_advanced_sub),
-                isLast = true,
-                onTap = onAdvanced,
-            )
+                SettingsSection(label = stringResource(R.string.settings_mcp_servers)) {
+                    if (mcpCatalogJson == null) {
+                        NoteRow(stringResource(R.string.settings_mcp_wait_scope))
+                    } else if (configuredMcps.isEmpty()) {
+                        NoteRow(stringResource(R.string.extension_directory_no_configured_mcp))
+                    } else {
+                        configuredMcps.forEachIndexed { index, server ->
+                            SettingsRow(
+                                label = server.name,
+                                modifier = Modifier.testTag("settings.extensions.personal.mcp.${server.scope}.${server.name}"),
+                                icon = LXIconName.Plug,
+                                sub = "${settingsLabel(server.scope)} · ${stringResource(R.string.extension_directory_configured)}",
+                                isLast = index == configuredMcps.lastIndex,
+                                onTap = { mcpEditor = McpEditorTarget(server.name, scope = server.scope) },
+                            )
+                        }
+                    }
+                    SettingsRow(
+                        label = stringResource(R.string.extension_directory_add_mcp),
+                        icon = LXIconName.Plus,
+                        isLast = true,
+                        onTap = if (mcpCatalogJson != null) ({ mcpEditor = McpEditorTarget(name = null) }) else null,
+                    )
+                }
+                Text(stringResource(R.string.extension_directory_configured_note), color = t.text3, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+
+                SettingsSection(label = stringResource(R.string.plugins_section_installed)) {
+                    if (catalog.installed.isEmpty()) NoteRow(stringResource(R.string.plugins_installed_empty))
+                    catalog.installed.forEachIndexed { index, plugin ->
+                        SettingsRow(
+                            label = plugin.displayName,
+                            modifier = Modifier.testTag("settings.plugins.installed.${plugin.id}"),
+                            icon = pluginIcon(plugin.id),
+                            sub = pluginSubtitle(vendors[plugin.id], plugin.version),
+                            chevron = false,
+                            isLast = index == catalog.installed.lastIndex,
+                            onTap = { onDetail(plugin.id) },
+                            trailing = {
+                                if (busy == plugin.id) Busy()
+                                else LXToggle(
+                                    checked = catalog.isEnabled(plugin),
+                                    enabled = busy == null,
+                                    onCheckedChange = { on ->
+                                        run(plugin.id, JSONObject().put("action", if (on) "enable" else "disable").put("plugin", plugin.id))
+                                    },
+                                )
+                            },
+                        )
+                    }
+                }
+
+                val installable = catalog.installable
+                SettingsSection(label = stringResource(R.string.plugins_section_available)) {
+                    if (installable.isEmpty()) {
+                        NoteRow(stringResource(if (catalog.marketplaces.isEmpty()) R.string.plugins_marketplaces_empty else R.string.plugins_available_empty))
+                    }
+                    installable.forEachIndexed { index, plugin ->
+                        SettingsRow(
+                            label = plugin.name,
+                            modifier = Modifier.testTag("settings.plugins.available.${plugin.id}"),
+                            icon = pluginIcon(plugin.id),
+                            sub = listOf(plugin.marketplace, plugin.description).filter(String::isNotBlank).joinToString(" · "),
+                            chevron = false,
+                            isLast = index == installable.lastIndex,
+                            trailing = {
+                                if (busy == plugin.id) Busy()
+                                else Pill(installLabel, enabled = busy == null) {
+                                    confirmation = PluginConfirmation(
+                                        title = String.format(installTitle, plugin.name),
+                                        body = installBody,
+                                        confirm = installLabel,
+                                        destructive = false,
+                                    ) { run(plugin.id, JSONObject().put("action", "install").put("plugin", plugin.id)) }
+                                }
+                            },
+                        )
+                    }
+                }
+
+                SettingsSection(label = stringResource(R.string.plugins_section_marketplaces)) {
+                    catalog.marketplaces.forEach { marketplace ->
+                        val key = "marketplace:${marketplace.name}"
+                        SettingsRow(
+                            label = marketplace.name,
+                            modifier = Modifier.testTag("settings.plugins.marketplace.${marketplace.name}"),
+                            icon = LXIconName.Apps,
+                            sub = marketplace.sourceLocation.ifBlank { null },
+                            chevron = false,
+                            trailing = {
+                                if (busy == key) Busy()
+                                else Box {
+                                    Text(
+                                        "⋯",
+                                        color = if (busy == null) t.text2 else t.text4,
+                                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .then(if (busy == null) Modifier.clickable { menuFor = marketplace.name } else Modifier)
+                                            .padding(horizontal = 8.dp, vertical = 2.dp),
+                                    )
+                                    DropdownMenu(expanded = menuFor == marketplace.name, onDismissRequest = { menuFor = null }) {
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.plugins_marketplace_update)) },
+                                            onClick = {
+                                                menuFor = null
+                                                run(key, JSONObject().put("action", "marketplace_update").put("name", marketplace.name))
+                                            },
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(removeLabel, color = t.danger) },
+                                            onClick = {
+                                                menuFor = null
+                                                confirmation = PluginConfirmation(
+                                                    title = String.format(removeTitle, marketplace.name),
+                                                    body = removeBody,
+                                                    confirm = removeLabel,
+                                                    destructive = true,
+                                                ) { run(key, JSONObject().put("action", "marketplace_remove").put("name", marketplace.name)) }
+                                            },
+                                        )
+                                    }
+                                }
+                            },
+                        )
+                    }
+                    SettingsRow(
+                        label = stringResource(R.string.plugins_marketplace_add),
+                        modifier = Modifier.testTag("settings.plugins.marketplace.add"),
+                        icon = LXIconName.Plus,
+                        isLast = true,
+                        onTap = if (busy == null) ({ addingMarketplace = true }) else null,
+                        trailing = { if (busy == "marketplace:add") Busy() },
+                    )
+                }
+
+                SettingsSection {
+                    SettingsRow(
+                        label = stringResource(R.string.plugins_advanced),
+                        modifier = Modifier.testTag("settings.plugins.advanced"),
+                        icon = LXIconName.Cog,
+                        sub = stringResource(R.string.plugins_advanced_sub),
+                        isLast = true,
+                        onTap = onAdvanced,
+                    )
+                }
+            }
         }
     }
 

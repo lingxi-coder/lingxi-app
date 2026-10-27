@@ -17,9 +17,23 @@ struct RemoteControlView: View {
     let destination: RemoteControlDestination
     let openAccount: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var manager = RemoteControlManager()
+    @State private var manager: RemoteControlManager
     @State private var path: [RemoteRoute] = []
     @State private var configuredUID: String?
+
+    init(
+        destination: RemoteControlDestination,
+        openAccount: @escaping () -> Void,
+        mediaHostComposition: IOSNativeMediaHostComposition?,
+        mediaHostInitializationError: String?
+    ) {
+        self.destination = destination
+        self.openAccount = openAccount
+        _manager = State(initialValue: RemoteControlManager(
+            mediaHostComposition: mediaHostComposition,
+            mediaHostInitializationError: mediaHostInitializationError
+        ))
+    }
 
     var body: some View {
         NavigationStack(path: $path) {

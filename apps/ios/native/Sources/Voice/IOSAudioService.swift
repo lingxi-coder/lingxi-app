@@ -877,6 +877,12 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     ) async -> IOSAudioOperationResult {
         do {
             try Task.checkCancellation()
+            if request.routePolicy == .hostConfiguredLocalOnly {
+                let snapshot = pinnedSnapshot ?? configurationStore.snapshot
+                guard !routeResolvesToProvider(request.operation, snapshot: snapshot) else {
+                    throw AudioServiceFailure.invalidRequest
+                }
+            }
             switch request.operation {
             case let .startRecording(sampleRateHz, format):
                 let handle = try await recorder.startRecordingOwned(
@@ -1466,6 +1472,39 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         case .synthesize, .speak: snapshot.configuration.speech.source
         case .startRecording, .stopRecording, .capture, .play, .status, .endOwner: nil
         }
+    }
+
+    private func routeResolvesToProvider(
+        _ operation: IOSAudioOperation,
+        snapshot: AudioConfigurationSnapshot
+    ) -> Bool {
+        let route: AudioRouteResolution
+        switch operation {
+        case let .listen(language):
+            route = AudioConfigurationRuntime.route(
+                kind: .recognition,
+                snapshot: snapshot,
+                languageOverride: language
+            )
+        case let .transcribe(_, _, language):
+            route = AudioConfigurationRuntime.route(
+                kind: .recognition,
+                snapshot: snapshot,
+                languageOverride: language
+            )
+        case let .synthesize(_, language, _, voice), let .speak(_, language, _, voice):
+            route = AudioConfigurationRuntime.route(
+                kind: .speech,
+                snapshot: snapshot,
+                languageOverride: language,
+                voiceOverride: voice
+            )
+        case .startRecording, .stopRecording, .capture, .play, .status, .endOwner:
+            return false
+        }
+        return route.requested.source == .provider
+            || route.requested.voice?.source == .provider
+            || route.effective?.source == .provider
     }
 
     private static func diagnosticPhase(for result: IOSAudioOperationResult) -> String {

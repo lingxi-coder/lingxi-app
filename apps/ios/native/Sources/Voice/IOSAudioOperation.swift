@@ -33,6 +33,29 @@ struct IOSAudioOperationRequest: Sendable {
     let timeoutBudgetMs: UInt64?
     let maxPayloadBytes: UInt64
     let operation: IOSAudioOperation
+    let routePolicy: IOSAudioOperationRoutePolicy?
+
+    init(
+        identity: IOSAudioOperationIdentity,
+        owner: IOSAudioOwner,
+        initiator: IOSAudioInitiator?,
+        timeoutBudgetMs: UInt64?,
+        maxPayloadBytes: UInt64,
+        operation: IOSAudioOperation,
+        routePolicy: IOSAudioOperationRoutePolicy? = nil
+    ) {
+        self.identity = identity
+        self.owner = owner
+        self.initiator = initiator
+        self.timeoutBudgetMs = timeoutBudgetMs
+        self.maxPayloadBytes = maxPayloadBytes
+        self.operation = operation
+        self.routePolicy = routePolicy
+    }
+}
+
+enum IOSAudioOperationRoutePolicy: Equatable, Sendable {
+    case hostConfiguredLocalOnly
 }
 
 enum IOSAudioOperation: Sendable {

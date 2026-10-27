@@ -424,6 +424,7 @@ export interface InitializeOptions {
   client?: number;
   push?: unknown;
   appPlatform?: string;
+  mediaCapabilities?: unknown;
   /** Replace the whole params object. */
   params?: unknown;
 }
@@ -545,7 +546,11 @@ export class SimViewer {
     return {
       protocol: options.protocol ?? REMOTE_PROTOCOL_MAJOR,
       client_protocol_version: options.client ?? CLIENT_PROTOCOL_MAJOR,
-      app: { version: '1.0.0', platform: options.appPlatform ?? this.platform },
+      app: {
+        version: '1.0.0',
+        platform: options.appPlatform ?? this.platform,
+        ...(options.mediaCapabilities === undefined ? {} : { media_capabilities: options.mediaCapabilities }),
+      },
       ...(options.push === undefined ? {} : { push_installation_id: options.push }),
     };
   }

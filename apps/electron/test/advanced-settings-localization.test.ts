@@ -11,6 +11,9 @@ import { Fusion } from '../src/renderer/components/settings/pages/Fusion';
 import { Permissions } from '../src/renderer/components/settings/pages/Permissions';
 import { ToolsAgent } from '../src/renderer/components/settings/pages/ToolsAgent';
 import { Diagnostics } from '../src/renderer/components/settings/pages/Diagnostics';
+import { McpServers } from '../src/renderer/components/settings/pages/McpServers';
+import { Plugins } from '../src/renderer/components/settings/pages/Plugins';
+import { publicExtensionItems } from '../src/shared/publicExtensionDirectory';
 import { DESKTOP_LOCALES, LANGUAGE_STORAGE_KEY, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
@@ -60,5 +63,39 @@ test('advanced settings render all supported languages while preserving profile 
       if (page.type === ProviderEditorFields) assert.ok(html.includes('User-Profile-用户'));
       if (page.type === ToolsAgent) assert.ok(html.includes('Keep original 用户说明'));
     }
+  }
+});
+
+test('MCP and plugin public directories render localized tabs and curated entries on Desktop', () => {
+  const snapshot = { files: [], effective: {}, active: {}, provenance: {}, locked: [], layers: { user: {} }, mergedKeys: [] };
+  const props: any = {
+    bridge: {
+      mcpConfigurationSnapshotEvent: { snapshot_json: JSON.stringify({ scopes: [], runtime_servers: [], approval: {} }) },
+      mcpServersEvent: { servers: [] },
+      pluginCatalogEvent: { catalog_json: JSON.stringify({ installed: [], available: [], marketplaces: [] }) },
+      skillCatalogEvent: { catalog_json: JSON.stringify({ entries: [] }) },
+      configurationOperations: {},
+      async refreshMcpServers() {},
+    },
+    snapshot, editingLayer: 'user', theme: 'dark', onTheme() {}, onNavigate() {}, onClose() {},
+  };
+  const publicMcp = publicExtensionItems.find((item) => item.kind === 'mcp' && item.platforms.some((platform) => ['macos', 'windows', 'linux'].includes(platform)));
+  const publicPlugin = publicExtensionItems.find((item) => item.kind === 'plugin' && item.platforms.some((platform) => ['macos', 'windows', 'linux'].includes(platform)));
+  assert.ok(publicMcp, 'the bundled directory should include a Desktop MCP entry');
+  assert.ok(publicPlugin, 'the bundled directory should include a Desktop plugin or marketplace entry');
+
+  for (const locale of DESKTOP_LOCALES) {
+    const mcpHtml = renderInLocale(locale, React.createElement(McpServers, props));
+    assert.ok(mcpHtml.includes(translate('desktop_extension_mcp_catalog', locale)), `MCP tabs: ${locale}`);
+    assert.ok(mcpHtml.includes(translate('desktop_extension_public', locale)), `MCP Public tab: ${locale}`);
+    assert.ok(mcpHtml.includes(publicMcp.name), `MCP directory entry: ${locale}`);
+    assert.doesNotMatch(mcpHtml, /desktop_extension_[a-z0-9_]+/);
+
+    const pluginHtml = renderInLocale(locale, React.createElement(Plugins, props));
+    assert.ok(pluginHtml.includes(translate('desktop_extension_public', locale)), `plugin Public tab: ${locale}`);
+    assert.ok(pluginHtml.includes(translate('desktop_personal', locale)), `plugin Personal tab: ${locale}`);
+    assert.ok(pluginHtml.includes(publicPlugin.name), `plugin directory entry: ${locale}`);
+    assert.doesNotMatch(pluginHtml, /desktop_extension_[a-z0-9_]+/);
+    assert.ok(!pluginHtml.includes(translate('apps_installed', locale)), 'Public search state must not fall back to the installed list');
   }
 });

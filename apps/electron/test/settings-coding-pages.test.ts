@@ -18,7 +18,16 @@ import {
   stringMapFromLayer,
 } from '../src/renderer/components/settings/pages/ToolsAgent';
 import { skillsPageModel } from '../src/renderer/components/settings/pages/Skills';
-import { pluginDependencyCaveat } from '../src/renderer/components/settings/pages/Plugins';
+import {
+  decidePublicMarketplaceSourceAction,
+  findConflictingPublicMarketplace,
+  findRegisteredPublicMarketplace,
+  pluginDependencyCaveat,
+  pluginCredentialCleanupFromOperation,
+  publicMarketplacePluginTargetId,
+} from '../src/renderer/components/settings/pages/Plugins';
+import { decidePublicMcpDirectoryAction, matchesPublicMcpDirectoryEntry, mcpRuntimeStatusLabel } from '../src/renderer/components/settings/pages/McpServers';
+import { publicExtensionItems } from '../src/shared/publicExtensionDirectory';
 import { adminRecordCommand } from '../src/renderer/components/settings/pages/configurationAdmin';
 import { parseJsonObjectInput } from '../src/renderer/components/settings/jsonInput';
 import { hooksPageModel } from '../src/renderer/components/settings/pages/Hooks';
@@ -205,6 +214,113 @@ test('parseJsonObjectInput names what kind of config failed, when a caller says 
   assert.match((plugin as { error: string }).error, /^插件配置 must be a JSON object/);
 });
 
+test('public MCP configured state matches both the catalog name and endpoint identity', () => {
+  const devtools = publicExtensionItems.find((item) => item.id === 'chrome-devtools');
+  const context7 = publicExtensionItems.find((item) => item.id === 'context7');
+  assert.ok(devtools?.mcp);
+  assert.ok(context7?.mcp);
+  assert.equal(matchesPublicMcpDirectoryEntry({ name: 'chrome-devtools', config: devtools.mcp.config }, devtools), true);
+  assert.equal(matchesPublicMcpDirectoryEntry({ name: 'chrome-devtools', config: { command: 'other-command', args: devtools.mcp.config.args } }, devtools), false);
+  assert.equal(matchesPublicMcpDirectoryEntry({ name: 'chrome-devtools', config: { ...devtools.mcp.config, url: 'https://different.example/mcp' } }, devtools), false);
+  assert.equal(matchesPublicMcpDirectoryEntry({ name: 'context7', config: { ...context7.mcp.config, url: 'https://other.example/mcp' } }, context7), false);
+  assert.equal(matchesPublicMcpDirectoryEntry({ name: 'renamed', config: devtools.mcp.config }, devtools), false);
+
+  const sameNameDifferentEndpoint = { id: 'custom-devtools', scope: 'user' as const, name: 'chrome-devtools', config: { command: 'other-command' }, path: '/user', revision_sha256: 'r' };
+  assert.equal(decidePublicMcpDirectoryAction(devtools, [sameNameDifferentEndpoint], 'user').kind, 'configure');
+  const matchingPreset = { ...sameNameDifferentEndpoint, config: devtools.mcp.config };
+  assert.equal(decidePublicMcpDirectoryAction(devtools, [matchingPreset], 'user').kind, 'configured');
+});
+
+test('MCP runtime status labels preserve disconnected and error DTOs without an available fallback', () => {
+  assert.equal(mcpRuntimeStatusLabel('connected'), 'Connected');
+  assert.equal(mcpRuntimeStatusLabel({ type: 'connected' }), 'Connected');
+  assert.equal(mcpRuntimeStatusLabel({ type: 'disconnected' }), 'Disconnected');
+  assert.equal(mcpRuntimeStatusLabel({ type: 'error', reason: 'connection refused' }), 'Connection error: connection refused');
+  assert.equal(mcpRuntimeStatusLabel({ type: 'unrecognized', reason: 'future status' }), null);
+});
+
+test('a curated marketplace matches exact root source identity across aliases and formats', () => {
+  const curated = publicExtensionItems.find((item) => item.id === 'ora-webmcp');
+  assert.ok(curated?.marketplace);
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'github', repo: 'ora/webmcp' }) },
+  ])?.name, 'ora');
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'git', url: 'https://github.com/ora/webmcp.git' }) },
+  ])?.name, 'ora');
+  const registeredUnderAnotherAlias = [
+    { name: 'ora-alt', source_json: JSON.stringify({ source: 'github', repo: 'ORA/WebMCP' }) },
+  ];
+  const sameSourceAction = decidePublicMarketplaceSourceAction(curated.marketplace, registeredUnderAnotherAlias);
+  assert.equal(sameSourceAction.kind, 'registered');
+  assert.equal(sameSourceAction.kind === 'registered' ? sameSourceAction.marketplace.name : '', 'ora-alt');
+  assert.equal(publicMarketplacePluginTargetId(curated.marketplace, sameSourceAction), 'webmcp@ora-alt');
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora-ssh', source_json: JSON.stringify({ source: 'git', url: 'ssh://git@github.com/ora/webmcp.git' }) },
+  ])?.name, 'ora-ssh');
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora-scp', source_json: JSON.stringify({ source: 'git', url: 'git@github.com:ora/webmcp.git' }) },
+  ])?.name, 'ora-scp');
+  const wrongSourceRegistry = [
+    { name: 'ora', source_json: JSON.stringify({ source: 'github', repo: 'another/webmcp' }) },
+  ];
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, wrongSourceRegistry), undefined);
+  assert.equal(findConflictingPublicMarketplace(curated.marketplace, wrongSourceRegistry)?.name, 'ora');
+  assert.equal(decidePublicMarketplaceSourceAction(curated.marketplace, wrongSourceRegistry).kind, 'source-conflict');
+  assert.equal(decidePublicMarketplaceSourceAction(curated.marketplace, [
+    ...wrongSourceRegistry,
+    ...registeredUnderAnotherAlias,
+  ]).kind, 'source-conflict');
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'url', url: 'https://github.com/ora/webmcp/custom/marketplace.json' }) },
+  ]), undefined);
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'directory', path: 'ora/webmcp' }) },
+  ]), undefined);
+  assert.equal(decidePublicMarketplaceSourceAction(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'directory', path: 'ora/webmcp' }) },
+  ]).kind, 'source-conflict');
+  assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+    { name: 'ora', source_json: JSON.stringify({ source: 'github', repo: 'ora/webmcp', ref: 'stable' }) },
+  ]), undefined);
+  for (const source_json of [
+    { source: 'github', repo: 'ora/webmcp', ref: null },
+    { source: 'github', repo: 'ora/webmcp', path: 'plugins/webmcp' },
+    { source: 'github', repo: 'ora/webmcp', sparsePaths: ['plugins/webmcp'] },
+    { source: 'github', repo: 'https://github.com/ora/webmcp' },
+    { source: 'git', url: 'ora/webmcp' },
+    { source: 'git', url: 'https://github.com/ora/webmcp.git', path: 'plugins/webmcp' },
+    { source: 'git', url: 'https://github.com/ora/webmcp.git', extra: true },
+  ]) {
+    assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+      { name: 'ora', source_json: JSON.stringify(source_json) },
+    ]), undefined, JSON.stringify(source_json));
+  }
+  for (const url of [
+    'https://user@github.com/ora/webmcp',
+    'https://@github.com/ora/webmcp',
+    'https://github.com/ora/webmcp?ref=stable',
+    'https://github.com/ora/webmcp?',
+    'https://github.com/ora/webmcp#readme',
+    'https://github.com/ora/webmcp#',
+    'https://github.com:444/ora/webmcp',
+    'https://github.com/ora/webmcp/tree/stable',
+    'https://github.com/ora/./webmcp',
+    'https://github.com/ora/x/../webmcp',
+    'https://github.com/ora%2Fwebmcp',
+    'https://github.com\\ora\\webmcp',
+    'ssh://user:password@github.com/ora/webmcp.git',
+    'ssh://@github.com/ora/webmcp.git',
+    'ssh://git:@github.com/ora/webmcp.git',
+    'ssh://git@github.com:2222/ora/webmcp.git',
+    'ssh://git@github.com/ora/webmcp.git?ref=stable',
+  ]) {
+    assert.equal(findRegisteredPublicMarketplace(curated.marketplace, [
+      { name: 'ora', source_json: JSON.stringify({ source: 'git', url }) },
+    ]), undefined, url);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Registration: all six pages must be reachable via the nav, and `nav.ts`'s
 // own `layered`/`needsEngine` data properties must match what each page
@@ -247,6 +363,17 @@ test('the plugins lifecycle explains its preflight confirmation boundary', () =>
   const caveat = pluginDependencyCaveat('zh-Hans');
   assert.match(caveat, /预检/);
   assert.match(caveat, /确认执行/);
+});
+
+test('plugin credential cleanup metadata is read only from the successful operation details', () => {
+  assert.deepEqual(pluginCredentialCleanupFromOperation({
+    details_json: JSON.stringify({ credentialCleanup: { pluginId: 'secure@acme', lastScopeRemoved: true }, reloadErrors: [] }),
+  }), { pluginId: 'secure@acme', lastScopeRemoved: true });
+  assert.deepEqual(pluginCredentialCleanupFromOperation({
+    details_json: JSON.stringify({ credentialCleanup: { pluginId: 'secure@acme', lastScopeRemoved: false }, reloadErrors: [] }),
+  }), { pluginId: 'secure@acme', lastScopeRemoved: false });
+  assert.equal(pluginCredentialCleanupFromOperation({ message: 'uninstall failed' }), undefined);
+  assert.equal(pluginCredentialCleanupFromOperation({ details_json: '{invalid' }), undefined);
 });
 
 test('configuration admin commands contain only protocol fields that were supplied', () => {

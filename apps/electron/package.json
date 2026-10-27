@@ -13,6 +13,7 @@
     "preview": "electron-vite preview",
     "test": "node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 test/*.test.ts test/*.test.mjs",
     "sync:local-app-agui": "node scripts/sync-local-app-agui.mjs",
+    "sync:local-app-webmcp": "node scripts/sync-local-app-webmcp.mjs",
     "typecheck:local-app-agui": "tsc --noEmit --strict --skipLibCheck false --target ES2022 --module ESNext --moduleResolution Bundler --types node scripts/check-local-app-agui-types.ts",
     "package:mac": "node scripts/package-mac.mjs",
     "package:mac:flare": "bash scripts/package-macos-flare.sh",

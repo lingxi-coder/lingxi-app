@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ProjectFolderSelection } from '../../shared/projectCreation';
 import { DesktopDialog } from './DesktopDialog';
 import { Icon } from './Icon';
+import { TrustFolderDialog } from './TrustFolderDialog';
 import './CreateProjectDialog.css';
 
 export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickFolder, onCreate, onClose }: {
@@ -21,6 +22,7 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
   const [directoryName, setDirectoryName] = useState('');
   const [busy, setBusy] = useState<'loading' | 'selecting' | 'creating' | null>(null);
   const [error, setError] = useState('');
+  const [reviewingTrust, setReviewingTrust] = useState(false);
   const newDirectory = Boolean(selection?.createDirectory);
   const canClose = !busy || busy === 'loading';
   const windows = window.lingxi?.platform === 'win32';
@@ -59,6 +61,14 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
   useEffect(() => {
     if (localApp) void pickFolder(onDefaultFolder, 'loading');
   }, [localApp, onDefaultFolder, pickFolder]);
+  useEffect(() => {
+    const panel = dialog.current;
+    if (!panel || !reviewingTrust) return;
+    panel.setAttribute('inert', '');
+    panel.removeAttribute('aria-modal');
+    return () => { panel.removeAttribute('inert'); panel.setAttribute('aria-modal', 'true'); };
+  }, [reviewingTrust]);
+
   const create = async () => {
     if (!selection || busyRef.current || (newDirectory && !directoryName.trim())) return;
     busyRef.current = true;
@@ -72,7 +82,7 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
     }
   };
 
-  return <DesktopDialog ref={dialog} tabIndex={-1} title={tr('desktop_create_project')} ariaLabel={tr('desktop_create_project')}
+  return <><DesktopDialog ref={dialog} tabIndex={-1} title={tr('desktop_create_project')} ariaLabel={tr('desktop_create_project')}
     className="create-project-dialog" onEscape={() => { if (canClose) onClose(); }}
     onKeyDown={(event) => {
       event.stopPropagation();
@@ -86,7 +96,7 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }}>
     <button className="create-project-close" type="button" aria-label={tr('desktop_create_project_close')} disabled={!canClose} onClick={onClose}><Icon name="x" size={17} stroke={1.6} /></button>
-    <form onSubmit={(event) => { event.preventDefault(); void create(); }} aria-busy={Boolean(busy)}>
+    <form onSubmit={(event) => { event.preventDefault(); if (selection && !busyRef.current && (!newDirectory || directoryName.trim())) setReviewingTrust(true); }} aria-busy={Boolean(busy)}>
       <label className="create-project-name">
         <span className="create-project-name-icon" aria-hidden="true"><Icon name="folder" size={17} stroke={1.7} /></span>
         <input ref={nameInput} aria-label={tr('desktop_project_name')} title={newDirectory ? tr('desktop_project_create_folder') : tr('desktop_project_use_folder_name')} placeholder={tr('desktop_project_name')}
@@ -113,5 +123,9 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
         <button type="submit" className="create-project-submit" disabled={!selection || Boolean(busy) || (newDirectory && !directoryName.trim())}>{busy === 'creating' ? tr('desktop_project_creating') : tr('desktop_create_project')}</button>
       </div>
     </form>
-  </DesktopDialog>;
+  </DesktopDialog>
+    {reviewingTrust && path && <TrustFolderDialog path={path}
+      onClose={() => { setReviewingTrust(false); requestAnimationFrame(() => dialog.current?.querySelector<HTMLButtonElement>('.create-project-submit')?.focus()); }}
+      onConfirm={() => { setReviewingTrust(false); void create(); }} />}
+  </>;
 }

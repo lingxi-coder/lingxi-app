@@ -8,6 +8,8 @@ description = "Viewer-side client of the LingXi Remote Control protocol (lingxi-
 
 [features]
 webrtc = ["dep:lingxi-webrtc-core", "dep:webrtc"]
+native-media = ["webrtc", "dep:media-api", "dep:media-runtime", "dep:lingxi-webrtc-media", "lingxi-webrtc-media/gstreamer-media"]
+static-media = ["native-media", "lingxi-webrtc-media/static-plugins"]
 
 [dependencies]
 # DTOs and `ClientEvent` come from the pinned runtime's client protocol; default
@@ -17,6 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "fs", "io-util"] }
 tokio-util.workspace = true
@@ -27,7 +30,15 @@ zeroize = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 eventsource-stream = "0.2"
 lingxi-webrtc-core = { workspace = true, optional = true }
+media-api = { workspace = true, optional = true }
+media-runtime = { workspace = true, optional = true }
+lingxi-webrtc-media = { workspace = true, optional = true }
 webrtc = { version = "=0.20.3", optional = true }
+
+# Mobile applications link the explicit static SDK selected by their build
+# toolchain. Host-side contract checks use the native GStreamer SDK instead.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+lingxi-webrtc-media = { workspace = true, optional = true, features = ["static-plugins"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros", "test-util", "net", "io-util"] }

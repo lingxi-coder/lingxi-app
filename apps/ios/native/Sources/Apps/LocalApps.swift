@@ -97,6 +97,20 @@ enum LocalAppAgentHostPolicy {
 }
 
 enum LocalAppAgentHandoffCancellationPolicy {
+    static func shouldCancelPreparation(
+        wake: LocalAppAgentWakeRequest,
+        token: UUID,
+        currentWake: LocalAppAgentWakeRequest?,
+        currentToken: UUID?,
+        currentRevision: UInt64?
+    ) -> Bool {
+        // Removal or a release change revokes the old task even if an equal
+        // public run ID has since been queued again.
+        guard currentRevision == wake.revision else { return true }
+        if currentWake == wake, let currentToken, currentToken != token { return false }
+        return true
+    }
+
     static func staleReason(
         wake: LocalAppAgentWakeRequest,
         currentWake: LocalAppAgentWakeRequest?,
@@ -105,6 +119,52 @@ enum LocalAppAgentHandoffCancellationPolicy {
         if let currentWake, currentWake != wake { return .requestReplaced }
         if let currentRevision, currentRevision != wake.revision { return .releaseChanged }
         return .acquireFailure
+    }
+}
+
+/// Owns each browser handoff until preparation fails or the browser-open
+/// callback finishes. A second caller must never clean up the first caller's
+/// reservation while it is being prepared or handed to the browser.
+@MainActor
+final class LocalAppAgentHandoffPreparations {
+    private enum State { case preparing, ready }
+    private struct Entry { let token: UUID; var state: State }
+    private var states: [String: Entry] = [:]
+
+    func prepare<Value>(
+        _ wake: LocalAppAgentWakeRequest,
+        token: UUID,
+        operation: () async throws -> Value
+    ) async throws -> Value {
+        let key = wake.contextKey
+        guard states[key] == nil else {
+            throw LocalAppServiceFailure("AGENT_WAKE_IN_PROGRESS", "This browser request is already being prepared. Wait briefly before returning to it.")
+        }
+        states[key] = Entry(token: token, state: .preparing)
+        do {
+            let value = try await operation()
+            states[key]?.state = .ready
+            return value
+        } catch {
+            if states[key]?.token == token { states.removeValue(forKey: key) }
+            throw error
+        }
+    }
+
+    func isReady(_ wake: LocalAppAgentWakeRequest, token: UUID) -> Bool {
+        guard let entry = states[wake.contextKey], entry.token == token else { return false }
+        if case .ready = entry.state { return true }
+        return false
+    }
+
+    @discardableResult
+    func finish(_ wake: LocalAppAgentWakeRequest, token: UUID) -> Bool {
+        let key = wake.contextKey
+        // An in-progress owner must retain its slot until it unwinds, even if
+        // cancellation or replacement arrives during an awaited operation.
+        guard isReady(wake, token: token) else { return false }
+        states.removeValue(forKey: key)
+        return true
     }
 }
 
@@ -121,8 +181,11 @@ final class UnifiedLocalApps {
     let devicePermissions = LocalAppDevicePermissions()
     @ObservationIgnored let client: LocalAppServiceClient
     @ObservationIgnored private let agentBackground = LocalAppAgentBackgroundController()
+    @ObservationIgnored private let handoffPreparations = LocalAppAgentHandoffPreparations()
     var browserReviewAppID: String?
     private(set) var browserAgentWake: LocalAppAgentWakeRequest?
+    @ObservationIgnored private var browserAgentWakeToken: UUID?
+    @ObservationIgnored private var latestBrowserAgentWakeToken: UUID?
     func consumeBrowserReview(_ id: String) -> Bool {
         guard browserReviewAppID == id else { return false }
         browserReviewAppID = nil
@@ -130,18 +193,50 @@ final class UnifiedLocalApps {
     }
     func queueBrowserAgentWake(appID: String, revision: UInt64, runID: String) {
         let next = LocalAppAgentWakeRequest(appID: appID, revision: revision, runID: runID)
+        if browserAgentWake == next { return }
         if let previous = browserAgentWake, previous != next {
-            Task { await agentBackground.cancel(previous, client: client, reason: .requestReplaced) }
+            let previousToken = browserAgentWakeToken
+            Task {
+                // A later handoff can requeue the same public run before this
+                // asynchronous cleanup starts. Do not clear its reservation.
+                if let previousToken, !LocalAppAgentHandoffCancellationPolicy.shouldCancelPreparation(
+                    wake: previous, token: previousToken, currentWake: browserAgentWake,
+                    currentToken: browserAgentWakeToken, currentRevision: record(previous.appID)?.currentRevision
+                ) {
+                    handoffPreparations.finish(previous, token: previousToken)
+                    return
+                }
+                await agentBackground.cancel(previous, client: client, reason: .requestReplaced)
+                if let previousToken { handoffPreparations.finish(previous, token: previousToken) }
+            }
         }
         browserAgentWake = next
+        let token = UUID()
+        browserAgentWakeToken = token
+        latestBrowserAgentWakeToken = token
     }
     func browserAgentWake(for appID: String) -> LocalAppAgentWakeRequest? {
         guard browserAgentWake?.appID == appID else { return nil }
         return browserAgentWake
     }
-    func clearBrowserAgentWake(_ wake: LocalAppAgentWakeRequest) {
-        guard browserAgentWake == wake else { return }
+    func browserAgentWakeToken(for wake: LocalAppAgentWakeRequest) -> UUID? {
+        browserAgentWake == wake ? browserAgentWakeToken : nil
+    }
+    func isBrowserAgentHandoffReady(_ wake: LocalAppAgentWakeRequest, token: UUID) -> Bool {
+        browserAgentWake == wake && browserAgentWakeToken == token
+            && record(wake.appID)?.currentRevision == wake.revision
+            && handoffPreparations.isReady(wake, token: token)
+    }
+    private func clearBrowserAgentWake(_ wake: LocalAppAgentWakeRequest, token: UUID) {
+        handoffPreparations.finish(wake, token: token)
+        _ = detachBrowserAgentWake(wake, token: token)
+    }
+    @discardableResult
+    private func detachBrowserAgentWake(_ wake: LocalAppAgentWakeRequest, token: UUID) -> Bool {
+        guard browserAgentWake == wake, browserAgentWakeToken == token else { return false }
         browserAgentWake = nil
+        browserAgentWakeToken = nil
+        return true
     }
     func openBrowserPage(
         scope: LocalAppBrowserDeliveryScope,
@@ -153,22 +248,37 @@ final class UnifiedLocalApps {
         agentBackground.endBrowserDelivery(scope)
     }
     func cancelBrowserAgentScope(appID: String, revision: UInt64) async {
+        let wake = browserAgentWake
+        let token = browserAgentWakeToken
         if let wake = browserAgentWake,
            wake.appID == appID, wake.revision == revision {
             browserAgentWake = nil
+            browserAgentWakeToken = nil
         }
         await agentBackground.cancel(appID: appID, revision: revision, client: client)
+        if let wake, let token, wake.appID == appID, wake.revision == revision {
+            handoffPreparations.finish(wake, token: token)
+        }
     }
-    func prepareBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest) async throws -> (launch: LocalAppLaunch, readyURL: URL) {
-        guard browserAgentWake == wake, let app = record(wake.appID), app.currentRevision == wake.revision else {
+    func prepareBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest, token: UUID) async throws -> (launch: LocalAppLaunch, readyURL: URL, token: UUID) {
+        guard browserAgentWake == wake, browserAgentWakeToken == token else {
+            throw LocalAppServiceFailure("STALE_AGENT_WAKE", "The app version changed before this Agent request could start.")
+        }
+        let result = try await handoffPreparations.prepare(wake, token: token) {
+            try await self.prepareOwnedBrowserAgentHandoff(wake, token: token)
+        }
+        return (result.launch, result.readyURL, token)
+    }
+    private func prepareOwnedBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest, token: UUID) async throws -> (launch: LocalAppLaunch, readyURL: URL) {
+        guard let app = record(wake.appID), app.currentRevision == wake.revision else {
             await agentBackground.cancel(wake, client: client, reason: staleWakeCancellationReason(wake))
-            clearBrowserAgentWake(wake)
+            clearBrowserAgentWake(wake, token: token)
             throw LocalAppServiceFailure("STALE_AGENT_WAKE", "The app version changed before this Agent request could start.")
         }
         let release = try await release(wake.appID, revision: wake.revision)
         guard (release.manifest.capabilities ?? []).contains("agent") else {
             await agentBackground.cancel(wake, client: client, reason: .acquireFailure)
-            clearBrowserAgentWake(wake)
+            clearBrowserAgentWake(wake, token: token)
             throw LocalAppServiceFailure("AGENT_NOT_DECLARED", "This app version does not declare Agent support.")
         }
         // A retained SwiftUI view can outlive the gateway run that supplied
@@ -181,12 +291,12 @@ final class UnifiedLocalApps {
                 try await self.openExternalBrowser(wake.appID)
             }
         } catch {
-            await agentBackground.cancel(wake, client: client, reason: .acquireFailure)
-            clearBrowserAgentWake(wake)
+            await cancelPreparationIfNeeded(wake, token: token, reason: .acquireFailure)
+            clearBrowserAgentWake(wake, token: token)
             throw error
         }
-        guard browserAgentWake == wake else {
-            await agentBackground.cancel(wake, client: client, reason: staleWakeCancellationReason(wake))
+        guard browserAgentWake == wake, browserAgentWakeToken == token else {
+            await cancelPreparationIfNeeded(wake, token: token, reason: staleWakeCancellationReason(wake))
             throw LocalAppServiceFailure("STALE_AGENT_WAKE", "This browser Agent request was replaced before it could start.")
         }
         let readyURL = try await agentBackground.acquireAndReserve(
@@ -195,12 +305,23 @@ final class UnifiedLocalApps {
             launch: launch,
             client: client
         )
-        guard browserAgentWake == wake,
+        guard browserAgentWake == wake, browserAgentWakeToken == token,
               record(wake.appID)?.currentRevision == wake.revision else {
-            await agentBackground.cancel(wake, client: client, reason: staleWakeCancellationReason(wake))
+            await cancelPreparationIfNeeded(wake, token: token, reason: staleWakeCancellationReason(wake))
             throw LocalAppServiceFailure("STALE_AGENT_WAKE", "The app version or browser request changed before the handoff completed.")
         }
         return (launch, readyURL)
+    }
+    private func cancelPreparationIfNeeded(
+        _ wake: LocalAppAgentWakeRequest,
+        token: UUID,
+        reason: LocalAppAgentCancellationReason
+    ) async {
+        guard LocalAppAgentHandoffCancellationPolicy.shouldCancelPreparation(
+            wake: wake, token: token, currentWake: browserAgentWake,
+            currentToken: browserAgentWakeToken, currentRevision: record(wake.appID)?.currentRevision
+        ) else { return }
+        await agentBackground.cancel(wake, client: client, reason: reason)
     }
     private func staleWakeCancellationReason(_ wake: LocalAppAgentWakeRequest) -> LocalAppAgentCancellationReason {
         LocalAppAgentHandoffCancellationPolicy.staleReason(
@@ -211,10 +332,25 @@ final class UnifiedLocalApps {
     }
     func cancelBrowserAgentHandoff(
         _ wake: LocalAppAgentWakeRequest,
+        token: UUID,
         reason: LocalAppAgentCancellationReason = .explicit
     ) async {
+        guard detachBrowserAgentWake(wake, token: token) else { return }
         await agentBackground.cancel(wake, client: client, reason: reason)
-        clearBrowserAgentWake(wake)
+        handoffPreparations.finish(wake, token: token)
+    }
+    func finishBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest, token: UUID, accepted: Bool) async -> Bool {
+        guard browserAgentWake == wake, browserAgentWakeToken == token,
+              handoffPreparations.isReady(wake, token: token) else { return false }
+        if !accepted {
+            guard detachBrowserAgentWake(wake, token: token) else { return false }
+            await agentBackground.cancel(wake, client: client, reason: .acquireFailure)
+            handoffPreparations.finish(wake, token: token)
+            return latestBrowserAgentWakeToken == token
+        }
+        guard browserAgentWake == wake, browserAgentWakeToken == token else { return false }
+        clearBrowserAgentWake(wake, token: token)
+        return true
     }
     func openExternalBrowser(_ id: String) async throws -> LocalAppLaunch {
         guard let app = record(id) else { throw LocalAppServiceFailure("APP_NOT_FOUND", "The local app was not found.") }
@@ -354,10 +490,14 @@ final class UnifiedLocalApps {
         _ appID: String,
         reason: LocalAppAgentCancellationReason = .explicit
     ) async {
+        let wake = browserAgentWake
+        let token = browserAgentWakeToken
         if let wake = browserAgentWake, wake.appID == appID {
             browserAgentWake = nil
+            browserAgentWakeToken = nil
         }
         await agentBackground.cancel(appID: appID, client: client, reason: reason)
+        if let wake, let token, wake.appID == appID { handoffPreparations.finish(wake, token: token) }
     }
     /// Native-only pending binding for a newly-created app. This uses the
     /// trusted App Agent host channel; it is not part of the browser API.

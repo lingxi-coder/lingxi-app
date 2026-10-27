@@ -8,11 +8,37 @@ enum LocalAppAgentCancellationReason: String, Sendable {
     case requestReplaced
     case releaseChanged
     case monitorDeadline
-    case monitorCancelled
     case systemExpiration
     case acquireFailure
     case intentCancellation
     case intentDeadline
+}
+
+enum LocalAppAgentContextAdmission: Equatable {
+    case create, reuse, wait
+
+    static func decide(
+        contextExists: Bool,
+        finished: Bool,
+        taskAttached: Bool,
+        reservationExpiry: Date?,
+        untrackedCleanupRunning: Bool = false,
+        reservationRequestInFlight: Bool = false,
+        now: Date
+    ) -> Self {
+        guard !untrackedCleanupRunning, !reservationRequestInFlight else { return .wait }
+        guard contextExists else { return .create }
+        guard !finished, taskAttached, reservationExpiry.map({ $0 > now }) == true else { return .wait }
+        return .reuse
+    }
+
+    static func cleanupAlreadyRunning(contextMatches: Bool, finished: Bool) -> Bool {
+        contextMatches && finished
+    }
+
+    static func isCurrent(expectedIdentifier: String, actualIdentifier: String?, finished: Bool) -> Bool {
+        actualIdentifier == expectedIdentifier && !finished
+    }
 }
 
 /// A browser request may wake the app, but only this foreground action can
@@ -37,6 +63,8 @@ final class LocalAppAgentBackgroundController {
     private var requestIDsByIdentifier: [String: String] = [:]
     private var attachmentWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var attachmentTimeouts: [String: Task<Void, Never>] = [:]
+    private var untrackedCleanups = Set<String>()
+    private var reservationsInFlight = Set<String>()
     private var tasks: [String: BGContinuedProcessingTask] = [:]
     private var monitors: [String: Task<Void, Never>] = [:]
     private let browserDelivery = LocalAppBrowserDeliveryController.live()
@@ -114,12 +142,23 @@ final class LocalAppAgentBackgroundController {
             throw LocalAppServiceFailure("BACKGROUND_UNAVAILABLE", "The app identifier is unavailable.")
         }
         let contextKey = wake.contextKey
-        if let existing = contexts[contextKey], !existing.finished {
-            if tasks[contextKey] != nil, existing.reservationExpiry.map({ $0 > Date() }) == true {
-                Self.logPhase("ready_url_returned", contextKey: contextKey, success: true)
-                return readyURL
-            }
+        let existing = contexts[contextKey]
+        switch LocalAppAgentContextAdmission.decide(
+            contextExists: existing != nil,
+            finished: existing?.finished ?? false,
+            taskAttached: tasks[contextKey] != nil,
+            reservationExpiry: existing?.reservationExpiry,
+            untrackedCleanupRunning: untrackedCleanups.contains(contextKey),
+            reservationRequestInFlight: reservationsInFlight.contains(contextKey),
+            now: Date()
+        ) {
+        case .reuse:
+            Self.logPhase("ready_url_returned", contextKey: contextKey, success: true)
+            return readyURL
+        case .wait:
             throw LocalAppServiceFailure("AGENT_WAKE_IN_PROGRESS", "This browser request is already being prepared. Wait briefly before returning to it.")
+        case .create:
+            break
         }
 
         let identifier = Self.backgroundIdentifier(bundleID: bundleID, wake: wake)
@@ -142,14 +181,19 @@ final class LocalAppAgentBackgroundController {
         )
         request.strategy = .fail
 
+        var reservationAttempted = false
+        var reservationCleared = false
+        defer { if reservationAttempted { reservationsInFlight.remove(contextKey) } }
         do {
             try await submit(request)
             Self.logPhase("submitted", contextKey: contextKey, success: true)
-            try await waitForAttachment(contextKey: contextKey)
-            guard !contexts[contextKey, default: context].finished,
+            try await waitForAttachment(contextKey: contextKey, identifier: identifier)
+            guard isCurrentContext(contextKey, identifier: identifier),
                   tasks[contextKey] != nil else {
                 throw LocalAppServiceFailure("BACKGROUND_LEASE_EXPIRED", "iOS ended this Agent handoff before it was ready.")
             }
+            reservationsInFlight.insert(contextKey)
+            reservationAttempted = true
             let reservation = try await client.agentHost([
                 "op": .string("wake.reserve"),
                 "appId": .string(wake.appID),
@@ -163,12 +207,15 @@ final class LocalAppAgentBackgroundController {
                   reservation.expiresAtMs > UInt64(Date().timeIntervalSince1970 * 1_000) else {
                 throw LocalAppServiceFailure("INVALID_AGENT_WAKE", "The host did not confirm this app request.")
             }
-            guard !contexts[contextKey, default: context].finished,
+            guard isCurrentContext(contextKey, identifier: identifier),
                   tasks[contextKey] != nil else {
-                do {
-                    try await clearReservation(wake, client: client)
-                } catch {
-                    Self.logFailure(error, contextKey: contextKey)
+                if contexts[contextKey] == nil || contexts[contextKey]?.identifier == identifier {
+                    do {
+                        try await clearReservation(wake, client: client)
+                        reservationCleared = true
+                    } catch {
+                        Self.logFailure(error, contextKey: contextKey)
+                    }
                 }
                 throw LocalAppServiceFailure("BACKGROUND_LEASE_EXPIRED", "iOS ended this Agent handoff before it was ready.")
             }
@@ -176,13 +223,19 @@ final class LocalAppAgentBackgroundController {
                 timeIntervalSince1970: TimeInterval(reservation.expiresAtMs) / 1_000
             )
             monitors[contextKey] = Task { @MainActor [weak self] in
-                await self?.monitor(contextKey, client: client)
+                await self?.monitor(contextKey, identifier: identifier, client: client)
             }
             Self.logPhase("wake_reserve", contextKey: contextKey, success: true)
             Self.logPhase("ready_url_returned", contextKey: contextKey, success: true)
             return readyURL
         } catch {
-            await cancel(wake, client: client, reason: .acquireFailure)
+            let current = contexts[contextKey]
+            if reservationAttempted, !reservationCleared,
+               current == nil || (current?.identifier == identifier && current?.finished == true) {
+                do { try await clearReservation(wake, client: client) }
+                catch { Self.logFailure(error, contextKey: contextKey) }
+            }
+            await cancel(wake, client: client, reason: .acquireFailure, expectedIdentifier: identifier)
             Self.logFailure(error, contextKey: contextKey)
             throw error
         }
@@ -191,11 +244,26 @@ final class LocalAppAgentBackgroundController {
     func cancel(
         _ wake: LocalAppAgentWakeRequest,
         client: LocalAppServiceClient,
-        reason: LocalAppAgentCancellationReason = .explicit
+        reason: LocalAppAgentCancellationReason = .explicit,
+        expectedIdentifier: String? = nil
     ) async {
         let contextKey = wake.contextKey
+        if let expectedIdentifier, contexts[contextKey]?.identifier != expectedIdentifier { return }
         browserDelivery.end(wake.deliveryScope)
         guard var context = contexts[contextKey], context.wake == wake, !context.finished else {
+            let existing = contexts[contextKey]
+            if LocalAppAgentContextAdmission.cleanupAlreadyRunning(
+                contextMatches: existing?.wake == wake,
+                finished: existing?.finished ?? false
+            ) {
+                Self.logPhase("cleanup_requested", contextKey: contextKey, success: nil)
+                return
+            }
+            guard untrackedCleanups.insert(contextKey).inserted else {
+                Self.logPhase("cleanup_requested", contextKey: contextKey, success: nil)
+                return
+            }
+            defer { untrackedCleanups.remove(contextKey) }
             do {
                 try await clearReservation(wake, client: client)
             } catch {
@@ -252,16 +320,18 @@ final class LocalAppAgentBackgroundController {
         }
     }
 
-    private func waitForAttachment(contextKey: String) async throws {
+    private func waitForAttachment(contextKey: String, identifier: String) async throws {
+        guard isCurrentContext(contextKey, identifier: identifier) else {
+            throw LocalAppServiceFailure("BACKGROUND_LEASE_EXPIRED", "iOS ended this Agent handoff before it was ready.")
+        }
         if tasks[contextKey] != nil { return }
         try await withCheckedThrowingContinuation { continuation in
             attachmentWaiters[contextKey] = continuation
             attachmentTimeouts[contextKey] = Task { @MainActor [weak self] in
                 do { try await Task.sleep(for: .seconds(12)) } catch { return }
-                guard let self, let waiter = self.attachmentWaiters.removeValue(forKey: contextKey) else { return }
-                if let identifier = self.contexts[contextKey]?.identifier {
-                    BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
-                }
+                guard let self, self.isCurrentContext(contextKey, identifier: identifier),
+                      let waiter = self.attachmentWaiters.removeValue(forKey: contextKey) else { return }
+                BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
                 waiter.resume(throwing: LocalAppServiceFailure(
                     "BACKGROUND_LEASE_UNAVAILABLE",
                     "iOS could not start this Agent task immediately. Return to the app and try again."
@@ -272,7 +342,7 @@ final class LocalAppAgentBackgroundController {
 
     private func receive(_ task: BGTask) {
         guard let contextKey = requestIDsByIdentifier[task.identifier],
-              contexts[contextKey] != nil,
+              isCurrentContext(contextKey, identifier: task.identifier),
               let continued = task as? BGContinuedProcessingTask else {
             task.setTaskCompleted(success: false)
             return
@@ -288,23 +358,25 @@ final class LocalAppAgentBackgroundController {
             String(localized: "Local App Agent · \(contexts[contextKey]?.appName ?? "")"),
             subtitle: "Waiting for this browser request"
         )
+        let identifier = task.identifier
         continued.expirationHandler = { [weak self] in
             Task { @MainActor [weak self] in
-                await self?.expire(contextKey)
+                await self?.expire(contextKey, identifier: identifier)
             }
         }
         attachmentTimeouts.removeValue(forKey: contextKey)?.cancel()
         attachmentWaiters.removeValue(forKey: contextKey)?.resume()
     }
 
-    private func monitor(_ contextKey: String, client: LocalAppServiceClient) async {
-        guard let context = contexts[contextKey], !context.finished,
+    private func monitor(_ contextKey: String, identifier: String, client: LocalAppServiceClient) async {
+        guard isCurrentContext(contextKey, identifier: identifier), let context = contexts[contextKey],
               let receiveDeadline = context.reservationExpiry else { return }
         let runID = context.wake.runID
         var runDeadline: Date?
         var outputProgress = LocalAppAgentOutputProgress()
 
         while !Task.isCancelled, Date() < (runDeadline ?? receiveDeadline) {
+            guard isCurrentContext(contextKey, identifier: identifier) else { return }
             do {
                 let response = try await client.agentHost([
                     "op": .string("tasks.list"),
@@ -312,6 +384,7 @@ final class LocalAppAgentBackgroundController {
                     "revision": .number(Double(context.wake.revision)),
                     "requestId": .string(runID)
                 ], as: LocalAppAgentTaskListResponse.self)
+                guard !Task.isCancelled, isCurrentContext(contextKey, identifier: identifier) else { return }
                 guard response.appId == context.wake.appID,
                       response.revision == context.wake.revision else {
                     throw LocalAppServiceFailure("INVALID_AGENT_TASK", "The host returned a task for another app version.")
@@ -343,10 +416,12 @@ final class LocalAppAgentBackgroundController {
                         ], as: LocalAppAgentNativeEvents.self)
                     },
                     onOutput: { bytes in
+                        guard !Task.isCancelled, self.isCurrentContext(contextKey, identifier: identifier) else { return }
                         self.report(agentTask, outputBytes: bytes, appName: context.appName, contextKey: contextKey)
                         Self.logObservedOutput(contextKey: contextKey, outputBytes: bytes)
                     }
                 )
+                guard !Task.isCancelled, isCurrentContext(contextKey, identifier: identifier) else { return }
                 if let terminalEvent,
                    let type = LocalAppAgentRunEvent.type(terminalEvent) {
                     if type == "RUN_FINISHED" {
@@ -360,6 +435,7 @@ final class LocalAppAgentBackgroundController {
                         )
                         await complete(
                             context.wake,
+                            identifier: identifier,
                             success: success,
                             deliverResult: LocalAppBrowserResultDeliveryPolicy.shouldDeliver(
                                 taskState: agentTask?.state,
@@ -372,6 +448,7 @@ final class LocalAppAgentBackgroundController {
                     if type == "RUN_ERROR" {
                         await complete(
                             context.wake,
+                            identifier: identifier,
                             success: false,
                             deliverResult: LocalAppBrowserResultDeliveryPolicy.shouldDeliver(
                                 taskState: agentTask?.state,
@@ -383,13 +460,15 @@ final class LocalAppAgentBackgroundController {
                     }
                 }
             } catch LocalAppAgentEventPageError.deadline {
-                await cancel(context.wake, client: client, reason: .monitorDeadline)
+                guard !Task.isCancelled, isCurrentContext(contextKey, identifier: identifier) else { return }
+                await cancel(context.wake, client: client, reason: .monitorDeadline, expectedIdentifier: identifier)
                 return
             } catch is CancellationError {
                 return
             } catch let failure as LocalAppServiceFailure where Self.isPermanentMonitorFailure(failure) {
+                guard !Task.isCancelled, isCurrentContext(contextKey, identifier: identifier) else { return }
                 Self.logFailure(failure, contextKey: contextKey)
-                await complete(context.wake, success: false, deliverResult: false, client: client)
+                await complete(context.wake, identifier: identifier, success: false, deliverResult: false, client: client)
                 return
             } catch {
                 // Transient local transport failures remain bounded by the
@@ -398,10 +477,12 @@ final class LocalAppAgentBackgroundController {
             do { try await Task.sleep(for: .milliseconds(750)) } catch { return }
         }
 
+        guard !Task.isCancelled, isCurrentContext(contextKey, identifier: identifier) else { return }
         await cancel(
             context.wake,
             client: client,
-            reason: Task.isCancelled ? .monitorCancelled : .monitorDeadline
+            reason: .monitorDeadline,
+            expectedIdentifier: identifier
         )
     }
 
@@ -426,20 +507,30 @@ final class LocalAppAgentBackgroundController {
         task.updateTitle(String(localized: "Local App Agent · \(appName)"), subtitle: subtitle)
     }
 
-    private func expire(_ contextKey: String) async {
-        guard let context = contexts[contextKey], !context.finished else { return }
+    private func isCurrentContext(_ contextKey: String, identifier: String) -> Bool {
+        let context = contexts[contextKey]
+        return LocalAppAgentContextAdmission.isCurrent(
+            expectedIdentifier: identifier, actualIdentifier: context?.identifier,
+            finished: context?.finished ?? true
+        )
+    }
+
+    private func expire(_ contextKey: String, identifier: String) async {
+        guard isCurrentContext(contextKey, identifier: identifier), let context = contexts[contextKey] else { return }
         Self.logPhase("expire", contextKey: contextKey, success: nil)
-        await cancel(context.wake, client: context.client, reason: .systemExpiration)
+        await cancel(context.wake, client: context.client, reason: .systemExpiration, expectedIdentifier: identifier)
     }
 
     private func complete(
         _ wake: LocalAppAgentWakeRequest,
+        identifier: String,
         success: Bool,
         deliverResult: Bool,
         client: LocalAppServiceClient
     ) async {
         let contextKey = wake.contextKey
-        guard var context = contexts[contextKey], context.wake == wake, !context.finished else { return }
+        guard var context = contexts[contextKey], context.wake == wake,
+              context.identifier == identifier, !context.finished else { return }
         context.finished = true
         contexts[contextKey] = context
         monitors.removeValue(forKey: contextKey)?.cancel()

@@ -376,10 +376,17 @@ struct AppRuntimeView: View {
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                     Button("开始 Agent 并返回应用") {
-                        Task { await returnToBrowser(wake) }
+                        guard !busy, let token = library.browserAgentWakeToken(for: wake) else { return }
+                        busy = true
+                        Task { await returnToBrowser(wake, token: token) }
                     }.disabled(busy)
                     Button("取消此次 Agent 请求", role: .cancel) {
-                        Task { await library.cancelBrowserAgentHandoff(wake) }
+                        guard !busy, let token = library.browserAgentWakeToken(for: wake) else { return }
+                        busy = true
+                        Task {
+                            await library.cancelBrowserAgentHandoff(wake, token: token)
+                            busy = false
+                        }
                     }.disabled(busy)
                 } else {
                     Button(launch == nil ? "启动并在默认浏览器打开" : "返回默认浏览器") {
@@ -424,8 +431,9 @@ struct AppRuntimeView: View {
             let release = try await library.release(appId, revision: app.currentRevision)
             hasAgent = (release.manifest.capabilities ?? []).contains("agent")
             if release.manifest.executesCode && !app.executionGrants.contains(release.digest) { consent = release; return }
-            if openBrowser, let wake = library.browserAgentWake(for: appId) {
-                await returnToBrowser(wake)
+            if openBrowser, let wake = library.browserAgentWake(for: appId),
+               let token = library.browserAgentWakeToken(for: wake) {
+                await prepareAndReturnToBrowser(wake, token: token)
                 return
             }
             let value = try await library.openExternalBrowser(appId)
@@ -453,21 +461,27 @@ struct AppRuntimeView: View {
             }
         } catch { self.error = error.localizedDescription }
     }
-    private func returnToBrowser(_ wake: LocalAppAgentWakeRequest) async {
-        let wasBusy = busy
-        busy = true
-        defer { busy = wasBusy }
+    private func returnToBrowser(_ wake: LocalAppAgentWakeRequest, token: UUID) async {
+        defer { busy = false }
+        await prepareAndReturnToBrowser(wake, token: token)
+    }
+    private func prepareAndReturnToBrowser(_ wake: LocalAppAgentWakeRequest, token: UUID) async {
         do {
-            let handoff = try await library.prepareBrowserAgentHandoff(wake)
+            let handoff = try await library.prepareBrowserAgentHandoff(wake, token: token)
+            guard library.isBrowserAgentHandoffReady(wake, token: handoff.token) else {
+                await library.cancelBrowserAgentHandoff(wake, token: handoff.token, reason: .acquireFailure)
+                return
+            }
             launch = handoff.launch
             if let app = library.record(appId) { info.markOpened(app) }
             opened = true
             openURL(handoff.readyURL) { accepted in
                 Task { @MainActor in
-                    if accepted { library.clearBrowserAgentWake(wake) }
-                    else {
+                    let handled = await library.finishBrowserAgentHandoff(
+                        wake, token: handoff.token, accepted: accepted
+                    )
+                    if !accepted && handled {
                         self.error = "iOS could not return to the app page in the system default browser."
-                        await library.cancelBrowserAgentHandoff(wake, reason: .acquireFailure)
                     }
                 }
             }

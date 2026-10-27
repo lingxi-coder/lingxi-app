@@ -18,6 +18,7 @@ struct TasksStatusPanel: View {
         case failed
         case paused
         case cancelled
+        case exitedUnknown
 
         var label: String {
             switch self {
@@ -27,6 +28,7 @@ struct TasksStatusPanel: View {
             case .failed: return String(localized: "chat_status_failed")
             case .paused: return String(localized: "settings_status_paused")
             case .cancelled: return String(localized: "chat_status_cancelled")
+            case .exitedUnknown: return String(localized: "chat_status_exited_unknown")
             }
         }
     }
@@ -46,6 +48,7 @@ struct TasksStatusPanel: View {
         let failed: Int
         let paused: Int
         let cancelled: Int
+        let exitedUnknown: Int
     }
 
     static func taskCounts(_ tasks: [BackgroundTaskSnapshot]) -> TaskCounts {
@@ -56,7 +59,8 @@ struct TasksStatusPanel: View {
             succeeded: tasks.filter { $0.status == .completed }.count,
             failed: tasks.filter { $0.status == .failed }.count,
             paused: tasks.filter { $0.status == .paused }.count,
-            cancelled: tasks.filter { $0.status == .cancelled }.count
+            cancelled: tasks.filter { $0.status == .cancelled }.count,
+            exitedUnknown: tasks.filter { $0.status == .exitedUnknown }.count
         )
     }
 
@@ -99,6 +103,7 @@ struct TasksStatusPanel: View {
             case .completed: .completed
             case .failed: .failed
             case .cancelled: .cancelled
+            case .exitedUnknown: .exitedUnknown
             }
             return [WorkflowStep(
                 id: "workflow-\(task.id)-fallback",
@@ -182,6 +187,7 @@ struct TasksStatusPanel: View {
             case .paused: return .paused
             case .failed: return .failed
             case .cancelled: return .cancelled
+            case .exitedUnknown: return .exitedUnknown
             case .pending, .running, .completed: break
             }
         }
@@ -207,6 +213,8 @@ struct TasksStatusPanel: View {
             return phasePosition < terminalPosition ? .completed : phasePosition == terminalPosition ? .failed : .pending
         case .cancelled:
             return phasePosition < terminalPosition ? .completed : phasePosition == terminalPosition ? .cancelled : .pending
+        case .exitedUnknown:
+            return phasePosition < terminalPosition ? .completed : phasePosition == terminalPosition ? .exitedUnknown : .pending
         }
     }
 
@@ -219,6 +227,7 @@ struct TasksStatusPanel: View {
         case .completed: return .completed
         case .failed: return .failed
         case .cancelled: return .cancelled
+        case .exitedUnknown: return .exitedUnknown
         case .pending, .running: break
         }
         if workflow.failedAgents > 0 { return .failed }
@@ -231,6 +240,7 @@ struct TasksStatusPanel: View {
         case .completed: return .completed
         case .failed: return .failed
         case .cancelled: return .cancelled
+        case .exitedUnknown: return .exitedUnknown
         }
     }
 
@@ -410,6 +420,10 @@ struct TasksStatusPanel: View {
             Image(systemName: "minus.circle")
                 .font(.caption2)
                 .foregroundStyle(theme.text4)
+        case .exitedUnknown:
+            Image(systemName: "questionmark.circle")
+                .font(.caption2)
+                .foregroundStyle(theme.text3)
         }
     }
 
@@ -420,6 +434,7 @@ struct TasksStatusPanel: View {
         case .failed: return theme.danger
         case .pending, .paused: return theme.text3
         case .cancelled: return theme.text4
+        case .exitedUnknown: return theme.text3
         }
     }
 
@@ -583,6 +598,7 @@ private extension BackgroundTaskSnapshot.Status {
         case .completed: return String(localized: "chat_status_completed")
         case .failed: return String(localized: "chat_status_failed")
         case .cancelled: return String(localized: "chat_status_cancelled")
+        case .exitedUnknown: return String(localized: "chat_status_exited_unknown")
         }
     }
 }

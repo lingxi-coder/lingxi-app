@@ -26,11 +26,13 @@ use mcp::connection::ConfigScope;
 use mcp::oauth;
 use platform_posix::{self, PosixClock, PosixHttp};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::task::Poll;
 use telemetry::{AnalyticsValue, LogEventMetadata};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::sync::Mutex;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -501,12 +503,235 @@ fn print_family_help() {
 // ──────────────────────────────────────────────────────────────────────────
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MAX_PENDING_CATALOGS: usize = 16;
 type ProtocolJson = lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 fn parse_protocol_message(
     line: &str,
 ) -> Result<ProtocolJson, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
     ProtocolJson::parse(line)
+}
+
+// The projection intentionally follows JavaScript's binary64 number model.
+// JSON-RPC IDs have a different contract: integer identities and echoes must
+// remain exact even when they exceed the JavaScript safe-integer range.
+#[derive(Clone)]
+struct ProtocolId {
+    value: ProtocolJson,
+    raw: String,
+    key: String,
+}
+
+impl ProtocolId {
+    fn from_raw(raw: &str, value: ProtocolJson) -> Self {
+        let key = if raw.starts_with('-') || raw.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        {
+            format!("number:{}", exact_number_key(raw))
+        } else {
+            format!(
+                "value:{}",
+                value.to_json_string().unwrap_or_else(|_| "null".into())
+            )
+        };
+        Self {
+            value,
+            raw: raw.to_owned(),
+            key,
+        }
+    }
+
+    fn null() -> Self {
+        Self::from_raw("null", source_null())
+    }
+}
+
+// This scanner runs only after the complete JSON document has been validated
+// by ProtocolJson::parse. It preserves the last matching member, matching the
+// projection's handling of duplicate JSON object keys, without reparsing or
+// changing any of the other fields.
+fn raw_object_member<'a>(object: &'a str, wanted: &str) -> Option<&'a str> {
+    fn whitespace(bytes: &[u8], index: &mut usize) {
+        while bytes.get(*index).is_some_and(u8::is_ascii_whitespace) {
+            *index += 1;
+        }
+    }
+    fn string_end(bytes: &[u8], index: &mut usize) -> Option<()> {
+        if bytes.get(*index) != Some(&b'"') {
+            return None;
+        }
+        *index += 1;
+        while let Some(&byte) = bytes.get(*index) {
+            *index += 1;
+            match byte {
+                b'"' => return Some(()),
+                b'\\' => *index += 1,
+                _ => {}
+            }
+        }
+        None
+    }
+    fn value_end(bytes: &[u8], index: &mut usize) -> Option<()> {
+        match *bytes.get(*index)? {
+            b'"' => string_end(bytes, index),
+            b'{' | b'[' => {
+                let mut depth = 0usize;
+                while let Some(&byte) = bytes.get(*index) {
+                    match byte {
+                        b'"' => string_end(bytes, index)?,
+                        b'{' | b'[' => {
+                            depth += 1;
+                            *index += 1;
+                        }
+                        b'}' | b']' => {
+                            depth = depth.checked_sub(1)?;
+                            *index += 1;
+                            if depth == 0 {
+                                return Some(());
+                            }
+                        }
+                        _ => *index += 1,
+                    }
+                }
+                None
+            }
+            _ => {
+                while bytes.get(*index).is_some_and(|byte| {
+                    !byte.is_ascii_whitespace() && !matches!(byte, b',' | b'}' | b']')
+                }) {
+                    *index += 1;
+                }
+                Some(())
+            }
+        }
+    }
+    let bytes = object.as_bytes();
+    let mut index = 0;
+    whitespace(bytes, &mut index);
+    if bytes.get(index) != Some(&b'{') {
+        return None;
+    }
+    index += 1;
+    let mut found = None;
+    loop {
+        whitespace(bytes, &mut index);
+        if bytes.get(index) == Some(&b'}') {
+            return found;
+        }
+        let key_start = index;
+        string_end(bytes, &mut index)?;
+        let key = ProtocolJson::parse(&object[key_start..index]).ok()?;
+        whitespace(bytes, &mut index);
+        if bytes.get(index) != Some(&b':') {
+            return None;
+        }
+        index += 1;
+        whitespace(bytes, &mut index);
+        let start = index;
+        value_end(bytes, &mut index)?;
+        if key.string_units("") == Some(wanted.encode_utf16().collect()) {
+            found = Some(&object[start..index]);
+        }
+        whitespace(bytes, &mut index);
+        match bytes.get(index) {
+            Some(b',') => index += 1,
+            Some(b'}') => return found,
+            _ => return None,
+        }
+    }
+}
+
+// Canonicalize a validated JSON number as signed significant digits times a
+// power of ten. The exponent is decimal text too, so even huge exponents do
+// not overflow or collide. Numerically equal spellings such as -0/0 and
+// 1000/1e3 have the same key.
+fn exact_number_key(raw: &str) -> String {
+    fn strip_zeroes(value: &str) -> &str {
+        let value = value.trim_start_matches('0');
+        if value.is_empty() {
+            "0"
+        } else {
+            value
+        }
+    }
+    fn add_unsigned(a: &str, b: &str) -> String {
+        let mut carry = 0u8;
+        let mut digits = Vec::new();
+        let mut a = a.bytes().rev();
+        let mut b = b.bytes().rev();
+        loop {
+            let left = a.next().map(|x| x - b'0');
+            let right = b.next().map(|x| x - b'0');
+            if left.is_none() && right.is_none() && carry == 0 {
+                break;
+            }
+            let sum = left.unwrap_or(0) + right.unwrap_or(0) + carry;
+            digits.push(b'0' + sum % 10);
+            carry = sum / 10;
+        }
+        digits.reverse();
+        String::from_utf8(digits).expect("decimal digits are UTF-8")
+    }
+    fn subtract_unsigned(a: &str, b: &str) -> String {
+        let mut borrow = 0i8;
+        let mut result = Vec::new();
+        let mut right = b.bytes().rev();
+        for left in a.bytes().rev() {
+            let mut digit =
+                (left - b'0') as i8 - borrow - right.next().map_or(0, |x| (x - b'0') as i8);
+            borrow = i8::from(digit < 0);
+            if borrow != 0 {
+                digit += 10;
+            }
+            result.push(b'0' + digit as u8);
+        }
+        while result.len() > 1 && result.last() == Some(&b'0') {
+            result.pop();
+        }
+        result.reverse();
+        String::from_utf8(result).expect("decimal digits are UTF-8")
+    }
+    fn add_exponent(exponent: &str, adjustment: i128) -> String {
+        let negative = exponent.starts_with('-');
+        let magnitude = strip_zeroes(exponent.trim_start_matches(['-', '+']));
+        let other = adjustment.unsigned_abs().to_string();
+        let other_negative = adjustment < 0;
+        let (sign, magnitude) = if negative == other_negative {
+            (negative, add_unsigned(magnitude, &other))
+        } else {
+            match magnitude
+                .len()
+                .cmp(&other.len())
+                .then_with(|| magnitude.cmp(&other))
+            {
+                std::cmp::Ordering::Greater => (negative, subtract_unsigned(magnitude, &other)),
+                std::cmp::Ordering::Less => (other_negative, subtract_unsigned(&other, magnitude)),
+                std::cmp::Ordering::Equal => (false, "0".into()),
+            }
+        };
+        if sign && magnitude != "0" {
+            format!("-{magnitude}")
+        } else {
+            magnitude
+        }
+    }
+    let (negative, raw) = raw
+        .strip_prefix('-')
+        .map_or((false, raw), |raw| (true, raw));
+    let (mantissa, exponent) = raw.split_once(['e', 'E']).unwrap_or((raw, "0"));
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    let without_leading = digits.trim_start_matches('0');
+    if without_leading.is_empty() {
+        return "0".into();
+    }
+    let significant = without_leading.trim_end_matches('0');
+    let trailing = without_leading.len() - significant.len();
+    let adjustment = trailing as i128 - fraction.len() as i128;
+    let exponent = add_exponent(exponent, adjustment);
+    format!(
+        "{}{significant}e{exponent}",
+        if negative { "-" } else { "" }
+    )
 }
 
 fn source_json(value: &serde_json::Value) -> ProtocolJson {
@@ -542,13 +767,438 @@ fn tool_arguments(params: &ProtocolJson) -> Option<ProtocolJson> {
     arguments.object_entries().is_some().then_some(arguments)
 }
 
-type ProtocolWriter = Arc<Mutex<BufWriter<tokio::io::Stdout>>>;
+// Only Bash currently supports a managed explicit background handoff. Other
+// tools can use the same input field with different lifecycle semantics.
+fn expects_managed_shell_handoff(params: &ProtocolJson, supports_handoff: bool) -> bool {
+    supports_handoff
+        && params
+            .at_pointer("/arguments/run_in_background")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestPhase {
+    Running,
+    Responding,
+    Cancelled,
+    Completed,
+}
+
+struct RequestStatus {
+    phase: RequestPhase,
+    cleanup_started: bool,
+    cleanup_finished: bool,
+    handoff_tail_pending: bool,
+    tail_interrupt_requested: bool,
+}
+
+struct ProtocolRequest {
+    status: StdMutex<RequestStatus>,
+    cancel: CancellationToken,
+    host: Arc<tool_api::context::HostToolRequest>,
+    managed_shell: bool,
+    drain_on_eof: bool,
+    is_catalog: bool,
+    wire_id: Option<ProtocolId>,
+}
+
+impl ProtocolRequest {
+    fn new(managed_shell: bool) -> Self {
+        Self {
+            status: StdMutex::new(RequestStatus {
+                phase: RequestPhase::Running,
+                cleanup_started: false,
+                cleanup_finished: false,
+                handoff_tail_pending: false,
+                tail_interrupt_requested: false,
+            }),
+            cancel: CancellationToken::new(),
+            host: Arc::new(tool_api::context::HostToolRequest::default()),
+            managed_shell,
+            drain_on_eof: false,
+            is_catalog: false,
+            wire_id: None,
+        }
+    }
+
+    fn for_protocol(managed_shell: bool, id: ProtocolId) -> Self {
+        Self {
+            wire_id: Some(id),
+            drain_on_eof: !managed_shell,
+            ..Self::new(managed_shell)
+        }
+    }
+
+    fn catalog(id: ProtocolId) -> Self {
+        Self {
+            drain_on_eof: true,
+            is_catalog: true,
+            ..Self::for_protocol(false, id)
+        }
+    }
+
+    // MCP permits the receiver to ignore cancellation for operations without a
+    // verified owned-process lifecycle. They continue through normal response.
+    fn cancel_from_client(&self) -> bool {
+        self.managed_shell && self.cancel()
+    }
+
+    fn status(&self) -> std::sync::MutexGuard<'_, RequestStatus> {
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    // Returns whether the caller must start the one tracked cleanup.
+    fn cancel(&self) -> bool {
+        let mut status = self.status();
+        if matches!(
+            status.phase,
+            RequestPhase::Cancelled | RequestPhase::Completed
+        ) {
+            return false;
+        }
+        // The last byte may already be visible to the peer even if the
+        // blocking I/O worker has not reported completion yet. Do not reap a
+        // sealed handoff until that exact write is resolved.
+        if status.handoff_tail_pending {
+            return false;
+        }
+        status.phase = RequestPhase::Cancelled;
+        self.cancel.cancel();
+        self.host.cancel();
+        if status.cleanup_started {
+            false
+        } else {
+            status.cleanup_started = true;
+            true
+        }
+    }
+
+    fn request_tail_interrupt(&self) -> bool {
+        let mut status = self.status();
+        if !status.handoff_tail_pending || status.tail_interrupt_requested {
+            return false;
+        }
+        status.tail_interrupt_requested = true;
+        true
+    }
+
+    fn tail_delivery_pending(&self) -> bool {
+        self.status().handoff_tail_pending
+    }
+
+    // A completed foreground/error result has no handle to hand off. Clean it
+    // without treating it as a client cancellation or suppressing its reply.
+    fn begin_cleanup(&self) -> bool {
+        let mut status = self.status();
+        if status.cleanup_started || status.phase != RequestPhase::Running {
+            return false;
+        }
+        status.cleanup_started = true;
+        self.host.cancel();
+        true
+    }
+}
+
+enum ProtocolFrameKind {
+    Ordinary,
+    Progress(Arc<ProtocolRequest>),
+    Response {
+        key: String,
+        request: Arc<ProtocolRequest>,
+        handoff: bool,
+    },
+}
+
+enum ProtocolWrite {
+    Frame(Vec<u8>, ProtocolFrameKind),
+    Finish,
+}
+
+enum ProtocolWriterEvent {
+    Delivered(String, Arc<ProtocolRequest>),
+    Failed(String),
+}
+
+#[derive(Clone)]
+struct ProtocolWriter {
+    frames: mpsc::Sender<ProtocolWrite>,
+    events: mpsc::UnboundedSender<ProtocolWriterEvent>,
+}
+
+impl ProtocolWriter {
+    fn enqueue(&self, bytes: Vec<u8>, kind: ProtocolFrameKind) -> Result<(), String> {
+        self.frames
+            .try_send(ProtocolWrite::Frame(bytes, kind))
+            .map_err(|error| format!("queue stdout frame: {error}"))
+    }
+
+    fn encode(frame: &ProtocolJson) -> Result<Vec<u8>, String> {
+        let mut bytes = frame
+            .to_json_string()
+            .map_err(|error| error.to_string())?
+            .into_bytes();
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    fn encode_response(frame: &ProtocolJson, id: &ProtocolId) -> Result<Vec<u8>, String> {
+        let (name, payload) = if let Ok(result) = frame.subprojection("/result") {
+            ("result", result)
+        } else {
+            (
+                "error",
+                frame
+                    .subprojection("/error")
+                    .map_err(|error| error.to_string())?,
+            )
+        };
+        let payload = payload
+            .to_json_string()
+            .map_err(|error| error.to_string())?;
+        Ok(format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{},\"{name}\":{payload}}}\n",
+            id.raw
+        )
+        .into_bytes())
+    }
+
+    fn frame(&self, frame: &ProtocolJson, kind: ProtocolFrameKind) -> Result<(), String> {
+        self.enqueue(Self::encode(frame)?, kind)
+    }
+
+    fn frame_with_id(&self, frame: &ProtocolJson, id: &ProtocolId) -> Result<(), String> {
+        self.enqueue(
+            Self::encode_response(frame, id)?,
+            ProtocolFrameKind::Ordinary,
+        )
+    }
+
+    fn response(
+        &self,
+        key: String,
+        request: Arc<ProtocolRequest>,
+        frame: &ProtocolJson,
+        handoff: bool,
+    ) -> Result<(), String> {
+        let bytes = match &request.wire_id {
+            Some(id) => Self::encode_response(frame, id)?,
+            None => Self::encode(frame)?,
+        };
+        let mut status = request.status();
+        if status.phase != RequestPhase::Running {
+            return Ok(());
+        }
+        // Queueing progress and the final response use the same short lock.
+        // Progress admitted before this transition precedes the response; a
+        // heartbeat arriving afterward is discarded.
+        status.phase = RequestPhase::Responding;
+        self.enqueue(
+            bytes,
+            ProtocolFrameKind::Response {
+                key,
+                request: request.clone(),
+                handoff,
+            },
+        )
+    }
+}
+
+async fn run_protocol_writer(
+    stdout: harness_runtime::headless::io::Output,
+    mut frames: mpsc::Receiver<ProtocolWrite>,
+    events: mpsc::UnboundedSender<ProtocolWriterEvent>,
+) -> Result<(), String> {
+    let result = async {
+        while let Some(frame) = frames.recv().await {
+            let ProtocolWrite::Frame(bytes, kind) = frame else {
+                return Ok(());
+            };
+            match kind {
+                ProtocolFrameKind::Ordinary => stdout
+                    .write_record(&bytes)
+                    .await
+                    .map_err(|error| format!("write stdout: {error}"))?,
+                ProtocolFrameKind::Progress(request) => {
+                    write_request_frame(&stdout, &bytes, &request, false, false).await?;
+                }
+                ProtocolFrameKind::Response {
+                    key,
+                    request,
+                    handoff,
+                } => {
+                    if write_request_frame(&stdout, &bytes, &request, true, handoff).await? {
+                        let _ = events.send(ProtocolWriterEvent::Delivered(key, request));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = &result {
+        let _ = events.send(ProtocolWriterEvent::Failed(error.clone()));
+    }
+    result
+}
+
+// Hold only the per-request lock for one synchronous poll. If the final flush
+// is ready, commit while holding that same lock; cancellation can win during
+// any Pending poll without waiting for stdout. A partially written cancelled
+// frame closes the transport because a later JSON line would be ambiguous.
+async fn write_request_frame(
+    stdout: &harness_runtime::headless::io::Output,
+    bytes: &[u8],
+    request: &ProtocolRequest,
+    response: bool,
+    handoff: bool,
+) -> Result<bool, String> {
+    if handoff {
+        return write_handoff_frame(stdout, bytes, request).await;
+    }
+    let write = stdout.write_record(bytes);
+    tokio::pin!(write);
+    let cancelled = request.cancel.cancelled();
+    tokio::pin!(cancelled);
+    let mut started = false;
+    std::future::poll_fn(|cx| {
+        let mut status = request.status();
+        if status.phase == RequestPhase::Cancelled {
+            return Poll::Ready(if started {
+                Err("stdout frame cancelled after writing began".to_owned())
+            } else {
+                Ok(false)
+            });
+        }
+        if status.phase == RequestPhase::Completed {
+            return Poll::Ready(Ok(false));
+        }
+        // Register the waker while cancellation is excluded by the status
+        // lock, so a cancellation between polls cannot be missed.
+        let _ = cancelled.as_mut().poll(cx);
+        started = true;
+        match write.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(format!("write stdout: {error}"))),
+            Poll::Ready(Ok(())) => {
+                if response {
+                    status.phase = RequestPhase::Completed;
+                }
+                Poll::Ready(Ok(true))
+            }
+        }
+    })
+    .await
+}
+
+// JSON strings escape embedded newlines, so the final byte is the only byte
+// that completes a response line. A cancellation racing this particular write
+// must wait for its actual result: a successful write commits even if the
+// worker's wakeup is delayed, while an unresolved/error result stays sealed.
+async fn write_handoff_frame(
+    stdout: &harness_runtime::headless::io::Output,
+    bytes: &[u8],
+    request: &ProtocolRequest,
+) -> Result<bool, String> {
+    write_handoff_frame_with_transport(stdout, bytes, request, !cfg!(unix)).await
+}
+
+async fn write_handoff_frame_with_transport(
+    stdout: &harness_runtime::headless::io::Output,
+    bytes: &[u8],
+    request: &ProtocolRequest,
+    pending_may_complete_independently: bool,
+) -> Result<bool, String> {
+    if bytes.last() != Some(&b'\n') {
+        return Err("handoff response has no line terminator".into());
+    }
+    let write = stdout.write_record_with_tail(bytes, |mut writer, cx, tail| {
+        let mut status = request.status();
+        if status.phase != RequestPhase::Responding {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "handoff cancelled before its final byte",
+            )));
+        }
+        status.handoff_tail_pending = true;
+        match writer.as_mut().poll_write(cx, &[tail]) {
+            Poll::Pending => {
+                // The Unix adapter does not leave an OS write in flight when
+                // its nonblocking syscall returns Pending.
+                if !pending_may_complete_independently {
+                    status.handoff_tail_pending = false;
+                }
+                Poll::Pending
+            }
+            Poll::Ready(Ok(1)) => {
+                if !request.host.commit() {
+                    return Poll::Ready(Err(std::io::Error::other(
+                        "visible handoff could not be committed",
+                    )));
+                }
+                status.handoff_tail_pending = false;
+                status.phase = RequestPhase::Completed;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Ok(0)) => {
+                status.handoff_tail_pending = false;
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "final-byte write accepted no bytes",
+                )))
+            }
+            Poll::Ready(Ok(_)) => Poll::Ready(Err(std::io::Error::other(
+                "final-byte writer reported an invalid byte count",
+            ))),
+            Poll::Ready(Err(error)) => {
+                #[cfg(windows)]
+                let not_started =
+                    platform_windows::stdio_cancel::stdout_write_was_not_started(&error);
+                #[cfg(not(windows))]
+                let not_started = false;
+                if !pending_may_complete_independently || not_started {
+                    status.handoff_tail_pending = false;
+                }
+                Poll::Ready(Err(error))
+            }
+        }
+    });
+    tokio::pin!(write);
+    let cancelled = request.cancel.cancelled();
+    tokio::pin!(cancelled);
+    let mut started = false;
+    std::future::poll_fn(|cx| {
+        {
+            let status = request.status();
+            if status.phase == RequestPhase::Cancelled {
+                return Poll::Ready(if started {
+                    Err("stdout frame cancelled after writing began".to_owned())
+                } else {
+                    Ok(false)
+                });
+            }
+            let _ = cancelled.as_mut().poll(cx);
+        }
+        started = true;
+        match write.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(true)),
+            Poll::Ready(Err(error)) if request.tail_delivery_pending() => Poll::Ready(Err(
+                format!("handoff final-byte delivery unverified: {error}"),
+            )),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(format!("write stdout: {error}"))),
+        }
+    })
+    .await
+}
 
 /// MCP stdio output adapter. Normal turn text/tool events stay silent; only
 /// protocol-authorized progress notifications are written to stdout.
 struct McpProtocolOutput {
     writer: ProtocolWriter,
-    progress_tokens: Mutex<HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+    progress_tokens: Mutex<HashMap<String, (ProtocolJson, Arc<ProtocolRequest>)>>,
 }
 
 impl McpProtocolOutput {
@@ -562,13 +1212,14 @@ impl McpProtocolOutput {
     async fn register_progress(
         &self,
         tool_use_id: &lingxi_core::types::ToolUseId,
-        token: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        token: Option<ProtocolJson>,
+        request: Arc<ProtocolRequest>,
     ) {
         if let Some(token) = token {
             self.progress_tokens
                 .lock()
                 .await
-                .insert(tool_use_id.as_str().to_string(), token);
+                .insert(tool_use_id.as_str().to_string(), (token, request));
         }
     }
 
@@ -609,7 +1260,7 @@ impl lingxi_core::host::OutputStream for McpProtocolOutput {
         elapsed_ms: u64,
     ) {
         let token = self.progress_tokens.lock().await.get(id.as_str()).cloned();
-        if let Some(token) = token {
+        if let Some((token, request)) = token {
             let params = source_object(vec![
                 ("progressToken", token),
                 ("progress", source_json(&serde_json::json!(elapsed_ms))),
@@ -633,7 +1284,22 @@ impl lingxi_core::host::OutputStream for McpProtocolOutput {
                 ),
                 ("params", params),
             ]);
-            let _ = write_protocol_frame(&self.writer, &frame).await;
+            let bytes = match ProtocolWriter::encode(&frame) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = self.writer.events.send(ProtocolWriterEvent::Failed(error));
+                    return;
+                }
+            };
+            let status = request.status();
+            if status.phase == RequestPhase::Running {
+                if let Err(error) = self
+                    .writer
+                    .enqueue(bytes, ProtocolFrameKind::Progress(request.clone()))
+                {
+                    let _ = self.writer.events.send(ProtocolWriterEvent::Failed(error));
+                }
+            }
         }
     }
 
@@ -641,6 +1307,143 @@ impl lingxi_core::host::OutputStream for McpProtocolOutput {
 }
 
 struct McpServePermissionSink;
+
+struct ToolCompletion {
+    key: String,
+    request: Arc<ProtocolRequest>,
+    response: ProtocolJson,
+    succeeded: bool,
+    expected_handoff: bool,
+}
+
+struct CatalogCompletion {
+    key: String,
+    request: Arc<ProtocolRequest>,
+    response: Result<ProtocolJson, String>,
+}
+
+fn finish_catalog(
+    writer: &ProtocolWriter,
+    joined: Result<CatalogCompletion, tokio::task::JoinError>,
+) -> Result<(), String> {
+    let completion = joined.map_err(|error| format!("MCP tool catalog task failed: {error}"))?;
+    writer.response(
+        completion.key,
+        completion.request,
+        &completion.response?,
+        false,
+    )
+}
+
+// A completed response may already be visible even if its writer notification
+// is still queued. Preserve the old request until then, but do not block reuse.
+fn admit_request(
+    active: &mut HashMap<String, Arc<ProtocolRequest>>,
+    key: &str,
+    request: Arc<ProtocolRequest>,
+) -> bool {
+    if active
+        .get(key)
+        .is_some_and(|existing| existing.status().phase == RequestPhase::Completed)
+    {
+        active.remove(key);
+    }
+    match active.entry(key.to_owned()) {
+        Entry::Occupied(_) => false,
+        Entry::Vacant(entry) => {
+            entry.insert(request);
+            true
+        }
+    }
+}
+
+fn queue_immediate_response(
+    active: &mut HashMap<String, Arc<ProtocolRequest>>,
+    writer: &ProtocolWriter,
+    id: ProtocolId,
+    response: &ProtocolJson,
+) -> Result<(), String> {
+    let key = id.key.clone();
+    let request = Arc::new(ProtocolRequest::for_protocol(false, id.clone()));
+    if !admit_request(active, &key, request.clone()) {
+        let duplicate = jsonrpc_error(id.value.clone(), -32600, "Duplicate request id", None);
+        return writer.frame_with_id(&duplicate, &id);
+    }
+    writer.response(key, request, response, false)
+}
+
+struct CleanupCompletion {
+    key: String,
+    request: Arc<ProtocolRequest>,
+    response: Option<ProtocolJson>,
+    result: Result<(), String>,
+}
+
+async fn abort_join_set<T: Send + 'static>(
+    tasks: &mut JoinSet<T>,
+    timeout: std::time::Duration,
+    name: &str,
+) -> Result<(), String> {
+    tasks.abort_all();
+    tokio::time::timeout(timeout, async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await
+    .map_err(|_| format!("{name} tasks did not stop; teardown is unverified"))
+}
+
+type StdoutInterrupt = Arc<dyn Fn(Arc<ProtocolRequest>) + Send + Sync>;
+
+fn interrupt_pending_handoff(
+    request: Arc<ProtocolRequest>,
+    interrupt: Option<&StdoutInterrupt>,
+    events: mpsc::UnboundedSender<ProtocolWriterEvent>,
+) {
+    if !request.request_tail_interrupt() {
+        return;
+    }
+    if let Some(interrupt) = interrupt {
+        interrupt(request.clone());
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if request.tail_delivery_pending() {
+            let _ = events.send(ProtocolWriterEvent::Failed(
+                "handoff final-byte delivery unverified after interruption".into(),
+            ));
+        }
+    });
+}
+
+fn start_request_cleanup(
+    cleanups: &mut JoinSet<CleanupCompletion>,
+    key: String,
+    request: Arc<ProtocolRequest>,
+    response: Option<ProtocolJson>,
+) {
+    cleanups.spawn(async move {
+        let result = request.host.cancel_and_reap().await;
+        CleanupCompletion {
+            key,
+            request,
+            response,
+            result,
+        }
+    });
+}
+
+fn remove_request(
+    active: &mut HashMap<String, Arc<ProtocolRequest>>,
+    key: &str,
+    request: &Arc<ProtocolRequest>,
+) {
+    if active
+        .get(key)
+        .is_some_and(|current| Arc::ptr_eq(current, request))
+    {
+        active.remove(key);
+    }
+}
 
 #[async_trait::async_trait]
 impl client::adapter::PermissionRequestSink for McpServePermissionSink {
@@ -652,7 +1455,63 @@ impl client::adapter::PermissionRequestSink for McpServePermissionSink {
 /// Implement `mcp serve` as a newline-delimited JSON-RPC 2.0 MCP server over
 /// stdin/stdout. Runtime diagnostics are intentionally restricted to stderr.
 async fn run_serve(a: &ServeArgs) -> i32 {
-    let writer = Arc::new(Mutex::new(BufWriter::new(tokio::io::stdout())));
+    #[cfg(unix)]
+    let (input, stdout) = match crate::headless_process_io::open_mcp() {
+        Ok(io) => (io.input, io.stdout),
+        Err(error) => {
+            eprintln!("Failed to open MCP stdio: {error}");
+            return RUNTIME_ERROR;
+        }
+    };
+    #[cfg(windows)]
+    let (input, stdout, mut shutdown) = match platform_windows::stdio_cancel::open() {
+        Ok((input, stdout, shutdown)) => (
+            Box::pin(input) as harness_runtime::headless::io::Input,
+            harness_runtime::headless::io::Output::new(stdout),
+            shutdown,
+        ),
+        Err(error) => {
+            eprintln!("Failed to open MCP stdio: {error}");
+            return RUNTIME_ERROR;
+        }
+    };
+    #[cfg(windows)]
+    let interrupt_stdout: Option<StdoutInterrupt> = match shutdown.stdout_interrupt() {
+        Ok(control) => Some(Arc::new(move |request| {
+            let control = control.clone();
+            tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    {
+                        let status = request.status();
+                        if !status.handoff_tail_pending {
+                            break;
+                        }
+                        let _ = control.request_stop();
+                    }
+                    if control.has_left_io_loop() || tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            });
+        })),
+        Err(error) => {
+            let cleanup = shutdown.shutdown(std::time::Duration::from_secs(5)).await;
+            eprintln!("Failed to prepare MCP stdout interruption: {error}; shutdown: {cleanup:?}");
+            return RUNTIME_ERROR;
+        }
+    };
+    #[cfg(not(windows))]
+    let interrupt_stdout: Option<StdoutInterrupt> = None;
+    #[cfg(not(any(unix, windows)))]
+    let (input, stdout) = (
+        Box::pin(tokio::io::stdin()) as harness_runtime::headless::io::Input,
+        crate::headless_host::process_stdout(),
+    );
+    let (frames, frame_rx) = mpsc::channel(256);
+    let (events, event_rx) = mpsc::unbounded_channel();
+    let writer = ProtocolWriter { frames, events };
     let output = Arc::new(McpProtocolOutput::new(writer.clone()));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut cfg = harness_runtime::desktop::DesktopConfig::default();
@@ -670,25 +1529,45 @@ async fn run_serve(a: &ServeArgs) -> i32 {
 
     let permission_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(McpServePermissionSink);
-    let runtime = match harness_runtime::desktop::build(
+    let result = match harness_runtime::desktop::build(
         cfg,
         output.clone() as Arc<dyn lingxi_core::host::OutputStream>,
         permission_sink,
     )
     .await
     {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("Failed to initialize LingXi MCP server: {error}");
-            return RUNTIME_ERROR;
+        Ok(runtime) => {
+            if a.debug || a.verbose {
+                eprintln!("LingXi MCP stdio server initialized.");
+            }
+            emit_mcp_start_after_runtime_init(Some(&runtime.analytics_bus)).await;
+            serve_stdio(
+                runtime.orchestrator,
+                output,
+                writer,
+                input,
+                stdout,
+                frame_rx,
+                event_rx,
+                interrupt_stdout,
+            )
+            .await
+        }
+        Err(error) => Err(format!("initialize LingXi MCP server: {error}")),
+    };
+    #[cfg(windows)]
+    let result = match (
+        result,
+        shutdown.shutdown(std::time::Duration::from_secs(5)).await,
+    ) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(format!("MCP stdio shutdown failed: {error}")),
+        (Err(error), Err(shutdown)) => {
+            Err(format!("{error}; MCP stdio shutdown failed: {shutdown}"))
         }
     };
-    if a.debug || a.verbose {
-        eprintln!("LingXi MCP stdio server initialized.");
-    }
-    emit_mcp_start_after_runtime_init(Some(&runtime.analytics_bus)).await;
-
-    match serve_stdio(runtime.orchestrator, output, writer).await {
+    match result {
         Ok(()) => SUCCESS,
         Err(error) => {
             eprintln!("LingXi MCP stdio server failed: {error}");
@@ -726,23 +1605,135 @@ async fn serve_stdio(
     orchestrator: Arc<orchestrator::ConversationOrchestrator>,
     output: Arc<McpProtocolOutput>,
     writer: ProtocolWriter,
+    input: harness_runtime::headless::io::Input,
+    stdout: harness_runtime::headless::io::Output,
+    frame_rx: mpsc::Receiver<ProtocolWrite>,
+    mut events: mpsc::UnboundedReceiver<ProtocolWriterEvent>,
+    interrupt_stdout: Option<StdoutInterrupt>,
 ) -> Result<(), String> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let active = Arc::new(Mutex::new(HashMap::<String, CancellationToken>::new()));
-    let mut calls = JoinSet::new();
+    let mut lines = BufReader::new(input).lines();
+    let mut writer_task = tokio::spawn(run_protocol_writer(
+        stdout.clone(),
+        frame_rx,
+        writer.events.clone(),
+    ));
+    let mut active = HashMap::<String, Arc<ProtocolRequest>>::new();
+    let mut calls = JoinSet::<ToolCompletion>::new();
+    let mut catalogs = JoinSet::<CatalogCompletion>::new();
+    let mut cleanups = JoinSet::<CleanupCompletion>::new();
     let mut initialize_seen = false;
     let mut client_initialized = false;
+    let mut writer_joined = false;
 
-    loop {
+    let mut primary = 'serve: loop {
         tokio::select! {
+            biased;
+            joined = &mut writer_task => {
+                writer_joined = true;
+                break 'serve Err(match joined {
+                    Ok(Ok(())) => "stdout writer stopped before EOF".into(),
+                    Ok(Err(error)) => error,
+                    Err(error) => format!("stdout writer task failed: {error}"),
+                });
+            }
+            event = events.recv() => {
+                match event {
+                    Some(ProtocolWriterEvent::Delivered(key, request)) => {
+                        remove_request(&mut active, &key, &request);
+                    }
+                    Some(ProtocolWriterEvent::Failed(error)) => break 'serve Err(error),
+                    None => break 'serve Err("stdout writer event channel closed".into()),
+                }
+            }
+            joined = cleanups.join_next(), if !cleanups.is_empty() => {
+                match joined {
+                    Some(Ok(cleanup)) => {
+                        cleanup.request.status().cleanup_finished = true;
+                        if let Err(error) = cleanup.result {
+                            break 'serve Err(format!("background cleanup failed: {error}"));
+                        }
+                        if let Some(response) = cleanup.response {
+                            if let Err(error) = writer.response(
+                                cleanup.key.clone(), cleanup.request.clone(), &response, false,
+                            ) {
+                                break 'serve Err(error);
+                            }
+                        }
+                        if cleanup.request.status().phase == RequestPhase::Cancelled {
+                            remove_request(&mut active, &cleanup.key, &cleanup.request);
+                        }
+                    }
+                    Some(Err(error)) => break 'serve Err(format!("background cleanup task failed: {error}")),
+                    None => {}
+                }
+            }
+            joined = catalogs.join_next(), if !catalogs.is_empty() => {
+                if let Some(joined) = joined {
+                    if let Err(error) = finish_catalog(&writer, joined) {
+                        break 'serve Err(error);
+                    }
+                }
+            }
             joined = calls.join_next(), if !calls.is_empty() => {
-                if let Some(Err(error)) = joined {
-                    eprintln!("MCP tool task failed: {error}");
+                match joined {
+                    Some(Ok(completion)) => {
+                        if completion.request.status().phase != RequestPhase::Running {
+                            continue;
+                        }
+                        if !completion.request.managed_shell {
+                            if let Err(error) = writer.response(
+                                completion.key, completion.request, &completion.response, false,
+                            ) {
+                                break 'serve Err(error);
+                            }
+                            continue;
+                        }
+                        let mut response = completion.response;
+                        let handoff = if completion.succeeded {
+                            match completion.request.host.handoff_task_ids() {
+                                Ok(ids) if !ids.is_empty() => match add_background_handoff(&response, &ids) {
+                                    Ok(frame) => { response = frame; true }
+                                    Err(error) => {
+                                        let id = response.subprojection("/id").unwrap_or_else(|_| source_null());
+                                        response = jsonrpc_error(id, -32603, "Background handoff failed", Some(serde_json::json!({ "detail": error })));
+                                        false
+                                    }
+                                },
+                                Ok(_) if completion.expected_handoff => {
+                                    let id = response.subprojection("/id").unwrap_or_else(|_| source_null());
+                                    response = jsonrpc_error(id, -32603, "Background handoff failed", Some(serde_json::json!({ "detail": "background request returned no managed task identity" })));
+                                    false
+                                }
+                                Ok(_) => false,
+                                Err(error) => {
+                                    let id = response.subprojection("/id").unwrap_or_else(|_| source_null());
+                                    response = jsonrpc_error(id, -32603, "Background handoff failed", Some(serde_json::json!({ "detail": error })));
+                                    false
+                                }
+                            }
+                        } else {
+                            false
+                        };
+                        if handoff {
+                            if let Err(error) = writer.response(completion.key, completion.request, &response, true) {
+                                break 'serve Err(error);
+                            }
+                        } else if completion.request.begin_cleanup() {
+                            start_request_cleanup(
+                                &mut cleanups, completion.key, completion.request, Some(response),
+                            );
+                        }
+                    }
+                    Some(Err(error)) => break 'serve Err(format!("MCP tool task failed: {error}")),
+                    None => {}
                 }
             }
             line = lines.next_line() => {
-                let line = line.map_err(|e| format!("read stdin: {e}"))?;
-                let Some(line) = line else { break };
+                let line = match line {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break 'serve Ok(()),
+                    Err(error) => break 'serve Err(format!("read stdin: {error}")),
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -750,37 +1741,55 @@ async fn serve_stdio(
                     Ok(value) => value,
                     Err(error) => {
                         let response = jsonrpc_error(
-                            source_null(),
-                            -32700,
-                            "Parse error",
+                            source_null(), -32700, "Parse error",
                             Some(serde_json::json!({ "detail": error.to_string() })),
                         );
-                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                        if let Err(error) = writer.frame(&response, ProtocolFrameKind::Ordinary) {
+                            break 'serve Err(error);
+                        }
                         continue;
                     }
                 };
                 if message.object_entries().is_none() {
                     let response = jsonrpc_error(source_null(), -32600, "Invalid Request", None);
-                    write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                    if let Err(error) = writer.frame(&response, ProtocolFrameKind::Ordinary) {
+                        break 'serve Err(error);
+                    }
                     continue;
                 }
-                let request_id = message.subprojection("/id").ok();
+                let request_id = match message.subprojection("/id") {
+                    Ok(value) => match raw_object_member(&line, "id") {
+                        Some(raw) => Some(ProtocolId::from_raw(raw, value)),
+                        None => break 'serve Err("unable to preserve MCP request id".into()),
+                    },
+                    Err(_) => None,
+                };
                 let method = source_string_at(&message, "/method");
                 if source_string_at(&message, "/jsonrpc").as_deref() != Some("2.0")
                     || method.is_none()
                 {
-                    if request_id.is_some() {
-                        let response = jsonrpc_error(
-                            request_id.unwrap_or_else(source_null),
-                            -32600,
-                            "Invalid Request",
-                            None,
-                        );
-                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                    if let Some(id) = request_id {
+                        let response = jsonrpc_error(id.value.clone(), -32600, "Invalid Request", None);
+                        if let Err(error) = queue_immediate_response(&mut active, &writer, id, &response) {
+                            break 'serve Err(error);
+                        }
                     }
                     continue;
                 }
                 let method = method.unwrap_or_default();
+                if let Some(id) = &request_id {
+                    if !method.starts_with("notifications/")
+                        && active.get(&id.key).is_some_and(|request| {
+                            request.status().phase != RequestPhase::Completed
+                        })
+                    {
+                        let response = jsonrpc_error(id.value.clone(), -32600, "Duplicate request id", None);
+                        if let Err(error) = writer.frame_with_id(&response, id) {
+                            break 'serve Err(error);
+                        }
+                        continue;
+                    }
+                }
                 let params = message
                     .subprojection("/params")
                     .unwrap_or_else(|_| source_object(Vec::new()));
@@ -792,138 +1801,343 @@ async fn serve_stdio(
                         }
                     }
                     "notifications/cancelled" => {
-                        if let Ok(id) = params.subprojection("/requestId") {
-                            if let Some(cancel) = active.lock().await.get(&request_id_key(&id)).cloned() {
-                                cancel.cancel();
+                        if let Ok(value) = params.subprojection("/requestId") {
+                            let Some(raw) = raw_object_member(&line, "params")
+                                .and_then(|params| raw_object_member(params, "requestId"))
+                            else {
+                                break 'serve Err("unable to preserve MCP cancellation id".into());
+                            };
+                            let key = ProtocolId::from_raw(raw, value).key;
+                            if let Some(request) = active.get(&key).cloned() {
+                                if request.cancel_from_client() {
+                                    start_request_cleanup(&mut cleanups, key, request, None);
+                                } else {
+                                    interrupt_pending_handoff(
+                                        request.clone(), interrupt_stdout.as_ref(), writer.events.clone(),
+                                    );
+                                    let status = request.status();
+                                    let remove = status.phase == RequestPhase::Cancelled && status.cleanup_finished;
+                                    drop(status);
+                                    if remove {
+                                        remove_request(&mut active, &key, &request);
+                                    }
+                                }
                             }
                         }
                     }
                     _ if request_id.is_none() => {}
                     "initialize" => {
-                        let id = request_id.unwrap_or_else(source_null);
+                        let id = request_id.unwrap_or_else(ProtocolId::null);
                         let requested = source_string_at(&params, "/protocolVersion");
                         let response = if initialize_seen {
-                            jsonrpc_error(id, -32600, "Server is already initialized", None)
-                        } else if requested.as_deref() != Some(MCP_PROTOCOL_VERSION) {
-                            jsonrpc_error(
-                                id,
-                                -32602,
-                                "Unsupported protocol version",
-                                Some(serde_json::json!({
-                                    "supported": [MCP_PROTOCOL_VERSION],
-                                    "requested": requested,
-                                })),
-                            )
+                            jsonrpc_error(id.value.clone(), -32600, "Server is already initialized", None)
+                        } else if requested.is_none() {
+                            jsonrpc_error(id.value.clone(), -32602, "Missing or invalid protocol version", None)
                         } else {
+                            // A version we do not support is an offer, not a
+                            // failed handshake. The client decides whether it
+                            // can continue with the version we return.
                             initialize_seen = true;
-                            initialize_response(id)
+                            initialize_response(id.value.clone())
                         };
-                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                        if let Err(error) = queue_immediate_response(&mut active, &writer, id, &response) {
+                            break 'serve Err(error);
+                        }
                     }
                     "ping" => {
-                        let response = jsonrpc_result(
-                            request_id.unwrap_or_else(source_null),
-                            source_object(Vec::new()),
-                        );
-                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                        let id = request_id.unwrap_or_else(ProtocolId::null);
+                        let response = jsonrpc_result(id.value.clone(), source_object(Vec::new()));
+                        if let Err(error) = queue_immediate_response(&mut active, &writer, id, &response) {
+                            break 'serve Err(error);
+                        }
                     }
                     _ if !client_initialized => {
-                        let response = jsonrpc_error(
-                            request_id.unwrap_or_else(source_null),
-                            -32002,
-                            "Server is not initialized",
-                            None,
-                        );
-                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                        let id = request_id.unwrap_or_else(ProtocolId::null);
+                        let response = jsonrpc_error(id.value.clone(), -32002, "Server is not initialized", None);
+                        if let Err(error) = queue_immediate_response(&mut active, &writer, id, &response) {
+                            break 'serve Err(error);
+                        }
                     }
                     "tools/list" => {
-                        let id = request_id.unwrap_or_else(source_null);
-                        match orchestrator.mcp_tool_definitions().await {
-                            Ok(tools) => {
-                                let response = tools_list_response(id, tools)?;
-                                write_protocol_bytes(&writer, response.into_bytes())
-                                    .await
-                                    .map_err(|e| e.to_string())?;
+                        let id = request_id.unwrap_or_else(ProtocolId::null);
+                        let key = id.key.clone();
+                        if catalogs.len() >= MAX_PENDING_CATALOGS {
+                            let response = jsonrpc_error(id.value.clone(), -32000, "Too many pending tools/list requests", None);
+                            if let Err(error) = queue_immediate_response(&mut active, &writer, id, &response) {
+                                break 'serve Err(error);
                             }
-                            Err(error) => {
-                                let response = jsonrpc_error_with_source_data(
-                                    id,
-                                    -32603,
-                                    "Failed to list tools",
-                                    Some(error.diagnostic_projection()),
-                                );
-                                write_protocol_frame(&writer, &response)
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                            }
-                        }
-                    }
-                    "tools/call" => {
-                        let id = request_id.unwrap_or_else(source_null);
-                        let key = request_id_key(&id);
-                        let cancel = CancellationToken::new();
-                        let duplicate = {
-                            let mut active = active.lock().await;
-                            match active.entry(key.clone()) {
-                                Entry::Occupied(_) => true,
-                                Entry::Vacant(entry) => {
-                                    entry.insert(cancel.clone());
-                                    false
-                                }
-                            }
-                        };
-                        if duplicate {
-                            let response = jsonrpc_error(id, -32600, "Duplicate request id", None);
-                            write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
                             continue;
                         }
-                        let progress_token = params
-                            .subprojection("/_meta/progressToken")
-                            .ok();
+                        let request = Arc::new(ProtocolRequest::catalog(id.clone()));
+                        if !admit_request(&mut active, &key, request.clone()) {
+                            let response = jsonrpc_error(id.value.clone(), -32600, "Duplicate request id", None);
+                            if let Err(error) = writer.frame_with_id(&response, &id) {
+                                break 'serve Err(error);
+                            }
+                            continue;
+                        }
+                        let orchestrator = orchestrator.clone();
+                        catalogs.spawn(async move {
+                            let response = match orchestrator.mcp_tool_definitions().await {
+                                Ok(tools) => tools_list_response(id.value, tools),
+                                Err(error) => Ok(jsonrpc_error_with_source_data(
+                                    id.value, -32603, "Failed to list tools", Some(error.diagnostic_projection()),
+                                )),
+                            };
+                            CatalogCompletion { key, request, response }
+                        });
+                    }
+                    "tools/call" => {
+                        let id = request_id.unwrap_or_else(ProtocolId::null);
+                        let key = id.key.clone();
+                        let prepared = source_string_at(&params, "/name")
+                            .and_then(|name| orchestrator.prepare_host_tool_call(&name));
+                        let managed_shell = prepared.as_ref().is_some_and(|tool| {
+                            tool.supports_owned_process_cancellation()
+                        });
+                        let expected_handoff = expects_managed_shell_handoff(
+                            &params,
+                            prepared.as_ref().is_some_and(|tool| tool.supports_explicit_background_handoff()),
+                        );
+                        let request = Arc::new(ProtocolRequest::for_protocol(managed_shell, id.clone()));
+                        if !admit_request(&mut active, &key, request.clone()) {
+                            let response = jsonrpc_error(id.value.clone(), -32600, "Duplicate request id", None);
+                            if let Err(error) = writer.frame_with_id(&response, &id) {
+                                break 'serve Err(error);
+                            }
+                            continue;
+                        }
+                        let progress_token = params.subprojection("/_meta/progressToken").ok();
                         let orchestrator = orchestrator.clone();
                         let output = output.clone();
-                        let writer = writer.clone();
-                        let active = active.clone();
                         calls.spawn(async move {
-                            let response = call_tool_response(
-                                orchestrator,
-                                output,
-                                id,
-                                params,
-                                progress_token,
-                                cancel,
-                            )
-                            .await;
-                            active.lock().await.remove(&key);
-                            let _ = write_protocol_frame(&writer, &response).await;
+                            let (response, succeeded) = call_tool_response(
+                                orchestrator, output, id.value, params, prepared, progress_token, request.clone(),
+                            ).await;
+                            ToolCompletion { key, request, response, succeeded, expected_handoff }
                         });
                     }
                     _ => {
+                        let id = request_id.unwrap_or_else(ProtocolId::null);
                         let response = jsonrpc_error(
-                            request_id.unwrap_or_else(source_null),
-                            -32601,
-                            "Method not found",
+                            id.value.clone(), -32601, "Method not found",
                             Some(serde_json::json!({ "method": method })),
                         );
-                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                        if let Err(error) = queue_immediate_response(&mut active, &writer, id, &response) {
+                            break 'serve Err(error);
+                        }
                     }
                 }
             }
         }
-    }
+    };
 
-    for cancel in active.lock().await.values() {
-        cancel.cancel();
+    // No exit path bypasses cancellation and the verified background reaper.
+    for (key, request) in &active {
+        if primary.is_ok() && request.drain_on_eof {
+            continue;
+        }
+        if request.cancel() {
+            start_request_cleanup(&mut cleanups, key.clone(), request.clone(), None);
+        } else {
+            interrupt_pending_handoff(
+                request.clone(),
+                interrupt_stdout.as_ref(),
+                writer.events.clone(),
+            );
+        }
     }
+    if primary.is_ok() {
+        // Drain accepted ordinary work for a bounded period while owned shell
+        // cleanup runs independently. Missing replies become explicit errors.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !catalogs.is_empty() || !calls.is_empty() {
+                tokio::select! {
+                    Some(joined) = catalogs.join_next(), if !catalogs.is_empty() => {
+                        finish_catalog(&writer, joined)?;
+                    }
+                    Some(joined) = calls.join_next(), if !calls.is_empty() => {
+                        let completion = joined.map_err(|error| format!("MCP tool task failed: {error}"))?;
+                        if !completion.request.managed_shell && completion.request.status().phase == RequestPhase::Running {
+                            writer.response(completion.key, completion.request, &completion.response, false)?;
+                        }
+                    }
+                }
+            }
+            Ok::<(), String>(())
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => primary = Err(error),
+            Err(_) => {
+                catalogs.abort_all();
+                calls.abort_all();
+                for error in [
+                    abort_join_set(&mut catalogs, std::time::Duration::from_secs(2), "catalog").await,
+                    abort_join_set(&mut calls, std::time::Duration::from_secs(2), "tool").await,
+                ].into_iter().filter_map(Result::err) {
+                    primary = Err(match primary {
+                        Ok(()) => error,
+                        Err(previous) => format!("{previous}; {error}"),
+                    });
+                }
+                // Accepted requests that cannot finish after input closes
+                // still receive a response with their original identity.
+                for (key, request) in &active {
+                    if !request.drain_on_eof || request.status().phase != RequestPhase::Running {
+                        continue;
+                    }
+                    let Some(id) = request.wire_id.as_ref() else {
+                        primary = Err("ordinary request lost its identity".into());
+                        break;
+                    };
+                    let response = jsonrpc_error(
+                        id.value.clone(),
+                        -32603,
+                        if request.is_catalog {
+                            "Tool catalog did not finish before EOF"
+                        } else {
+                            "Tool request did not finish before EOF"
+                        },
+                        None,
+                    );
+                    if let Err(error) =
+                        writer.response(key.clone(), request.clone(), &response, false)
+                    {
+                        primary = Err(error);
+                        break;
+                    }
+                }
+            }
+        }
+    } else if let Err(error) =
+        abort_join_set(&mut catalogs, std::time::Duration::from_secs(2), "catalog").await
+    {
+        primary = Err(format!("{}; {error}", primary.unwrap_err()));
+    }
+    if primary.is_ok() {
+        if let Err(error) = writer.frames.try_send(ProtocolWrite::Finish) {
+            primary = Err(format!("finish stdout queue: {error}"));
+        }
+    }
+    if primary.is_err()
+        && !writer_joined
+        && active
+            .values()
+            .any(|request| request.tail_delivery_pending())
+    {
+        // Keep polling the same final-byte write after requesting interruption.
+        // Aborting this future early would discard the worker's real result.
+        if let Ok(joined) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut writer_task).await
+        {
+            writer_joined = true;
+            let error = match joined {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(error) => Some(format!("stdout writer task failed: {error}")),
+            };
+            if let Some(error) = error {
+                primary = Err(format!("{}; {error}", primary.unwrap_err()));
+            }
+        }
+    }
+    if primary.is_err() {
+        stdout.abort_delivery("MCP transport is closing");
+        if !writer_joined {
+            writer_task.abort();
+        }
+    }
+    let mut cleanup_errors = Vec::new();
     if tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while calls.join_next().await.is_some() {}
     })
     .await
     .is_err()
     {
-        calls.shutdown().await;
+        if let Err(error) =
+            abort_join_set(&mut calls, std::time::Duration::from_secs(2), "tool").await
+        {
+            cleanup_errors.push(error);
+        }
     }
-    Ok(())
+    if primary.is_ok() {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), &mut writer_task).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => primary = Err(error),
+            Ok(Err(error)) => primary = Err(format!("stdout writer task failed: {error}")),
+            Err(_) => {
+                stdout.abort_delivery("MCP stdout did not drain after EOF");
+                writer_task.abort();
+                let stopped =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), &mut writer_task).await;
+                primary = Err(if stopped.is_err() {
+                    "stdout did not drain after EOF; writer teardown is unverified".into()
+                } else {
+                    "stdout did not drain after EOF".into()
+                });
+            }
+        }
+    } else if !writer_joined {
+        if tokio::time::timeout(std::time::Duration::from_secs(2), &mut writer_task)
+            .await
+            .is_err()
+        {
+            primary = Err(format!(
+                "{}; writer teardown is unverified",
+                primary.unwrap_err()
+            ));
+        }
+    }
+    // A tail write may have returned a receipt proving it never started after
+    // the first sweep. Such a sealed owner can now be safely cancelled.
+    if primary.is_err() {
+        for (key, request) in &active {
+            if request.cancel() {
+                start_request_cleanup(&mut cleanups, key.clone(), request.clone(), None);
+            }
+        }
+    }
+    if active
+        .values()
+        .any(|request| request.tail_delivery_pending())
+    {
+        primary = Err(match primary {
+            Ok(()) => "handoff final-byte delivery unverified".into(),
+            Err(error) => format!("{error}; handoff final-byte delivery unverified"),
+        });
+    }
+    if tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        while let Some(joined) = cleanups.join_next().await {
+            match joined {
+                Ok(cleanup) => {
+                    if let Err(error) = cleanup.result {
+                        cleanup_errors.push(error);
+                    }
+                }
+                Err(error) => cleanup_errors.push(error.to_string()),
+            }
+        }
+    })
+    .await
+    .is_err()
+    {
+        cleanups.abort_all();
+        cleanup_errors.push("owned cleanup did not finish; termination is unverified".into());
+    }
+    match (primary, cleanup_errors.is_empty()) {
+        (Ok(()), true) => Ok(()),
+        (Ok(()), false) => Err(format!(
+            "background cleanup failed: {}",
+            cleanup_errors.join("; ")
+        )),
+        (Err(error), true) => Err(error),
+        (Err(error), false) => Err(format!(
+            "{error}; background cleanup failed: {}",
+            cleanup_errors.join("; ")
+        )),
+    }
 }
 
 async fn call_tool_response(
@@ -931,42 +2145,121 @@ async fn call_tool_response(
     output: Arc<McpProtocolOutput>,
     request_id: ProtocolJson,
     params: ProtocolJson,
+    prepared: Option<orchestrator::conversation::PreparedHostToolCall>,
     progress_token: Option<ProtocolJson>,
-    cancel: CancellationToken,
-) -> ProtocolJson {
+    request: Arc<ProtocolRequest>,
+) -> (ProtocolJson, bool) {
     let Some(name) = source_string_at(&params, "/name") else {
-        return jsonrpc_error(request_id, -32602, "Missing tool name", None);
+        return (
+            jsonrpc_error(request_id, -32602, "Missing tool name", None),
+            false,
+        );
     };
     let Some(arguments) = tool_arguments(&params) else {
-        return jsonrpc_error(request_id, -32602, "Tool arguments must be an object", None);
+        return (
+            jsonrpc_error(request_id, -32602, "Tool arguments must be an object", None),
+            false,
+        );
+    };
+    let Some(prepared) = prepared else {
+        return (
+            jsonrpc_error(request_id, -32602, &format!("Unknown tool: {name}"), None),
+            false,
+        );
     };
 
     let tool_use_id = lingxi_core::types::ToolUseId::new();
-    output.register_progress(&tool_use_id, progress_token).await;
+    output
+        .register_progress(&tool_use_id, progress_token, request.clone())
+        .await;
+    let cancellation = if request.managed_shell {
+        tool_api::context::HostToolCancellation::TerminateOwnedProcess(request.host.clone())
+    } else {
+        tool_api::context::HostToolCancellation::Ordinary
+    };
+    let cancel = request.managed_shell.then(|| request.cancel.clone());
     let result = orchestrator
-        .call_tool_from_host(tool_use_id.clone(), name.clone(), arguments, Some(cancel))
+        .call_prepared_tool_from_host(
+            prepared,
+            tool_use_id.clone(),
+            arguments,
+            cancel,
+            cancellation,
+        )
         .await;
     output.unregister_progress(&tool_use_id).await;
 
     match result {
-        Ok(None) => jsonrpc_error(request_id, -32602, &format!("Unknown tool: {name}"), None),
+        Ok(None) => (
+            jsonrpc_error(request_id, -32602, &format!("Unknown tool: {name}"), None),
+            false,
+        ),
         Ok(Some(lingxi_core::types::ContentBlock::ToolResult {
             content,
             is_error,
             content_blocks,
             ..
-        })) => tool_result_response(request_id, content, content_blocks, is_error),
-        Ok(Some(_)) => text_tool_result_response(
-            request_id,
-            "Tool returned an unsupported result".into(),
-            Some(true),
+        })) => (
+            tool_result_response(request_id, content, content_blocks, is_error),
+            !is_error.unwrap_or(false),
         ),
-        Err(error) => text_tool_result_response(
-            request_id,
-            format!("Tool execution failed: {error}").into(),
-            Some(true),
+        Ok(Some(_)) => (
+            text_tool_result_response(
+                request_id,
+                "Tool returned an unsupported result".into(),
+                Some(true),
+            ),
+            false,
+        ),
+        Err(error) => (
+            text_tool_result_response(
+                request_id,
+                format!("Tool execution failed: {error}").into(),
+                Some(true),
+            ),
+            false,
         ),
     }
+}
+
+// The only trusted handoff is generated from the host's verified handles, not
+// from tool output or hook text. Mirror it as TextContent for clients that do
+// not consume MCP structuredContent, preserving the original content blocks.
+fn add_background_handoff(response: &ProtocolJson, ids: &[String]) -> Result<ProtocolJson, String> {
+    let mut unique = HashSet::new();
+    if ids.is_empty() || ids.iter().any(|id| id.is_empty() || !unique.insert(id)) {
+        return Err("background task identities are empty or duplicated".into());
+    }
+    let payload = serde_json::json!({ "backgroundTaskIds": ids });
+    let count = response
+        .array_len("/result/content")
+        .ok_or("tool content is not an array")?;
+    let mut blocks = Vec::with_capacity(count + 1);
+    for index in 0..count {
+        blocks.push(
+            response
+                .subprojection(&format!("/result/content/{index}"))
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    blocks.push(source_object(vec![
+        ("type", ProtocolJson::from("text")),
+        ("text", ProtocolJson::from(payload.to_string())),
+    ]));
+    let mut result = response
+        .subprojection("/result")
+        .map_err(|error| error.to_string())?;
+    result
+        .set_field("content", source_array(blocks))
+        .map_err(|error| error.to_string())?;
+    result
+        .set_field("structuredContent", source_json(&payload))
+        .map_err(|error| error.to_string())?;
+    let mut response = response.clone();
+    response
+        .set_field("result", result)
+        .map_err(|error| error.to_string())?;
+    Ok(response)
 }
 
 fn tool_result_response(
@@ -981,13 +2274,13 @@ fn tool_result_response(
             ("text", content),
         ])])
     });
-    jsonrpc_result(
-        id,
-        source_object(vec![
-            ("content", content),
-            ("isError", source_json(&serde_json::json!(is_error))),
-        ]),
-    )
+    let mut result = source_object(vec![("content", content)]);
+    if let Some(is_error) = is_error {
+        result
+            .set_field("isError", source_json(&serde_json::json!(is_error)))
+            .expect("isError is a valid field");
+    }
+    jsonrpc_result(id, result)
 }
 
 fn text_tool_result_response(
@@ -1051,36 +2344,774 @@ fn jsonrpc_error_with_source_data(
     ])
 }
 
-fn request_id_key(id: &ProtocolJson) -> String {
-    id.to_json_string().unwrap_or_else(|_| "null".into())
-}
-
-async fn write_protocol_frame(
-    writer: &ProtocolWriter,
-    frame: &ProtocolJson,
-) -> std::io::Result<()> {
-    let bytes = frame
-        .to_json_string()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    write_protocol_bytes(writer, bytes.into_bytes()).await
-}
-
-fn tools_list_response(id: ProtocolJson, tools: Vec<ProtocolJson>) -> Result<String, String> {
+fn tools_list_response(id: ProtocolJson, tools: Vec<ProtocolJson>) -> Result<ProtocolJson, String> {
     let tools = ProtocolJson::array(tools).map_err(|error| error.to_string())?;
     let mut result = source_object(Vec::new());
     result
         .set_field("tools", tools)
         .map_err(|error| error.to_string())?;
-    jsonrpc_result(id, result)
-        .to_json_string()
-        .map_err(|error| error.to_string())
+    Ok(jsonrpc_result(id, result))
 }
 
-async fn write_protocol_bytes(writer: &ProtocolWriter, mut bytes: Vec<u8>) -> std::io::Result<()> {
-    bytes.push(b'\n');
-    let mut stdout = writer.lock().await;
-    stdout.write_all(&bytes).await?;
-    stdout.flush().await
+#[cfg(test)]
+mod mcp_stdio_state_tests {
+    use super::*;
+    use lingxi_core::host::OutputStream;
+    use std::pin::Pin;
+    use std::task::Context;
+    use tokio::io::{AsyncReadExt, AsyncWrite};
+    use tokio::sync::oneshot;
+
+    #[test]
+    fn non_cooperative_task_abort_is_bounded_and_unverified() {
+        const CHILD_ENV: &str = "LINGXI_TEST_MCP_STUCK_TASK_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(async {
+                let (entered, observed) = oneshot::channel();
+                let mut tasks = JoinSet::new();
+                tasks.spawn(async move {
+                    let _ = entered.send(());
+                    std::thread::park();
+                });
+                if observed.await.is_err() {
+                    return false;
+                }
+                abort_join_set(&mut tasks, std::time::Duration::from_millis(100), "test")
+                    .await
+                    .is_err_and(|error| error.contains("teardown is unverified"))
+            });
+            // The isolated child exits without dropping a runtime whose worker
+            // intentionally never returns from poll. The parent is time-bounded.
+            if result {
+                use std::io::Write as _;
+                println!("MCP_STUCK_ABORT_CONFIRMED");
+                let _ = std::io::stdout().flush();
+            }
+            std::process::exit(if result { 0 } else { 1 });
+        }
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, tail)| tail);
+        let test_name = format!("{module}::non_cooperative_task_abort_is_bounded_and_unverified");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test_name, "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "isolated non-cooperative test failed: {status}"
+                );
+                let output = child.wait_with_output().unwrap();
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("MCP_STUCK_ABORT_CONFIRMED"),
+                    "isolated fixture did not run"
+                );
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("non-cooperative task blocked the bounded shutdown fixture");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn protocol_ids_preserve_exact_numeric_identity_and_escaped_strings() {
+        fn id(raw: &str) -> ProtocolId {
+            ProtocolId::from_raw(raw, ProtocolJson::parse(raw).unwrap())
+        }
+        for (left, right) in [
+            ("0", "-0"),
+            ("1000", "1e3"),
+            ("-1.20e2", "-120"),
+            ("10e99999999999999999999", "1e100000000000000000000"),
+            (r#""a\ud834\udd1e""#, r#""\u0061𝄞""#),
+        ] {
+            assert_eq!(id(left).key, id(right).key, "{left} vs {right}");
+        }
+        for (left, right) in [
+            ("9007199254740992", "9007199254740993"),
+            ("-184467440737095516160", "-184467440737095516161"),
+            ("1e99999999999999999999", "1e100000000000000000000"),
+            ("1", r#""1""#),
+        ] {
+            assert_ne!(id(left).key, id(right).key, "{left} vs {right}");
+        }
+        let numeric = id("9007199254740993");
+        let response = jsonrpc_result(numeric.value.clone(), source_object(Vec::new()));
+        assert_eq!(
+            String::from_utf8(ProtocolWriter::encode_response(&response, &numeric).unwrap())
+                .unwrap(),
+            "{\"jsonrpc\":\"2.0\",\"id\":9007199254740993,\"result\":{}}\n"
+        );
+    }
+
+    #[test]
+    fn raw_id_lookup_tracks_escaped_duplicate_keys_without_changing_arguments() {
+        let source = r#"{"id":4,"\u0069d":9007199254740993,"params":{"nested":[{"id":5}],"requestId":-184467440737095516161,"arguments":{"n":9007199254740993}}}"#;
+        let projection = ProtocolJson::parse(source).unwrap();
+        assert_eq!(raw_object_member(source, "id"), Some("9007199254740993"));
+        let params = raw_object_member(source, "params").unwrap();
+        assert_eq!(
+            raw_object_member(params, "requestId"),
+            Some("-184467440737095516161")
+        );
+        assert_eq!(
+            projection
+                .subprojection("/params/arguments/n")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            "9007199254740992"
+        );
+    }
+
+    #[test]
+    fn explicit_shell_handoff_does_not_claim_other_tools_background_parameters() {
+        for (name, flag, supports_handoff, expected) in [
+            ("Bash", true, true, true),
+            ("Bash", false, true, false),
+            ("Bash", true, false, false), // A dynamic tool with the same name.
+            ("PowerShell", true, false, false),
+            ("Agent", true, false, false),
+            ("custom", true, false, false),
+        ] {
+            let params = source_json(&serde_json::json!({
+                "name": name,
+                "arguments": {"run_in_background": flag}
+            }));
+            assert_eq!(
+                expects_managed_shell_handoff(&params, supports_handoff),
+                expected,
+                "{name}"
+            );
+        }
+        assert!(!expects_managed_shell_handoff(
+            &source_json(&serde_json::json!({"name":"Bash","arguments":{}})),
+            true
+        ));
+    }
+
+    #[tokio::test]
+    async fn unsupported_client_cancellation_keeps_ordinary_response() {
+        let request = Arc::new(ProtocolRequest::new(false));
+        assert!(!request.cancel_from_client());
+        assert!(!request.cancel.is_cancelled());
+        assert!(matches!(request.status().phase, RequestPhase::Running));
+
+        let (frames, frame_rx) = mpsc::channel(8);
+        let (events, _) = mpsc::unbounded_channel();
+        let writer = ProtocolWriter {
+            frames,
+            events: events.clone(),
+        };
+        writer
+            .response(
+                "1".into(),
+                request,
+                &jsonrpc_result(
+                    source_json(&serde_json::json!(1)),
+                    ProtocolJson::from("done"),
+                ),
+                false,
+            )
+            .unwrap();
+        assert!(writer.frames.try_send(ProtocolWrite::Finish).is_ok());
+        let (output, mut reader) = tokio::io::duplex(1024);
+        run_protocol_writer(
+            harness_runtime::headless::io::Output::new(output),
+            frame_rx,
+            events,
+        )
+        .await
+        .unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"], "done");
+    }
+
+    struct GatedFlush {
+        entered: Option<oneshot::Sender<()>>,
+        release: oneshot::Receiver<()>,
+        bytes: Arc<StdMutex<Vec<u8>>>,
+    }
+
+    impl AsyncWrite for GatedFlush {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+            }
+            match Pin::new(&mut self.release).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+                Poll::Ready(Err(_)) => {
+                    Poll::Ready(Err(std::io::Error::other("flush gate dropped")))
+                }
+            }
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn gated_output() -> (
+        harness_runtime::headless::io::Output,
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        Arc<StdMutex<Vec<u8>>>,
+    ) {
+        let (entered_tx, entered) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        (
+            harness_runtime::headless::io::Output::new(GatedFlush {
+                entered: Some(entered_tx),
+                release: release_rx,
+                bytes: bytes.clone(),
+            }),
+            entered,
+            release,
+            bytes,
+        )
+    }
+
+    #[tokio::test]
+    async fn visible_handoff_is_committed_before_pending_flush_and_cancellation() {
+        let (output, entered, release, bytes) = gated_output();
+        let request = Arc::new(ProtocolRequest::new(true));
+        assert!(request.host.handoff_task_ids().unwrap().is_empty());
+        request.status().phase = RequestPhase::Responding;
+        let task = tokio::spawn({
+            let request = request.clone();
+            async move { write_request_frame(&output, b"{}\n", &request, true, true).await }
+        });
+        entered.await.unwrap();
+        assert_eq!(&*bytes.lock().unwrap(), b"{}\n");
+        assert!(!request.cancel(), "a complete visible response wins");
+        assert!(
+            request.host.handoff_task_ids().is_err(),
+            "handoff must already be committed"
+        );
+        release.send(()).unwrap();
+        assert!(task.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn successful_flush_commits_before_late_cancellation() {
+        let (output, entered, release, _) = gated_output();
+        let request = Arc::new(ProtocolRequest::new(true));
+        assert!(request.host.handoff_task_ids().unwrap().is_empty());
+        request.status().phase = RequestPhase::Responding;
+        let task = tokio::spawn({
+            let request = request.clone();
+            async move { write_request_frame(&output, b"{}\n", &request, true, true).await }
+        });
+        entered.await.unwrap();
+        release.send(()).unwrap();
+        assert!(task.await.unwrap().unwrap());
+        assert!(!request.cancel());
+        assert!(request.host.handoff_task_ids().is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_flush_after_visible_handoff_does_not_reap_it() {
+        let (output, entered, release, bytes) = gated_output();
+        let request = Arc::new(ProtocolRequest::new(true));
+        assert!(request.host.handoff_task_ids().unwrap().is_empty());
+        request.status().phase = RequestPhase::Responding;
+        let task = tokio::spawn({
+            let request = request.clone();
+            async move { write_request_frame(&output, b"{}\n", &request, true, true).await }
+        });
+        entered.await.unwrap();
+        assert_eq!(&*bytes.lock().unwrap(), b"{}\n");
+        drop(release);
+        assert!(task
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("flush gate dropped"));
+        assert!(!request.cancel());
+        assert!(!request.host.commit());
+    }
+
+    struct GatedTail {
+        bytes: Arc<StdMutex<Vec<u8>>>,
+        submitted: bool,
+        entered: Option<oneshot::Sender<()>>,
+        release: oneshot::Receiver<()>,
+    }
+
+    impl AsyncWrite for GatedTail {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if bytes != b"\n" {
+                self.bytes.lock().unwrap().extend_from_slice(bytes);
+                return Poll::Ready(Ok(bytes.len()));
+            }
+            if !self.submitted {
+                self.bytes.lock().unwrap().extend_from_slice(bytes);
+                self.submitted = true;
+                if let Some(entered) = self.entered.take() {
+                    let _ = entered.send(());
+                }
+            }
+            match Pin::new(&mut self.release).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(1)),
+                Poll::Ready(Err(_)) => {
+                    Poll::Ready(Err(std::io::Error::other("tail result unknown")))
+                }
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn gated_tail() -> (
+        harness_runtime::headless::io::Output,
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        Arc<StdMutex<Vec<u8>>>,
+    ) {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let (entered, observed) = oneshot::channel();
+        let (release, gate) = oneshot::channel();
+        (
+            harness_runtime::headless::io::Output::new(GatedTail {
+                bytes: bytes.clone(),
+                submitted: false,
+                entered: Some(entered),
+                release: gate,
+            }),
+            observed,
+            release,
+            bytes,
+        )
+    }
+
+    #[tokio::test]
+    async fn written_tail_wins_over_cancel_and_eof_before_notification() {
+        for _event in ["cancel", "eof"] {
+            let (output, entered, release, bytes) = gated_tail();
+            let request = Arc::new(ProtocolRequest::new(true));
+            request.host.handoff_task_ids().unwrap();
+            request.status().phase = RequestPhase::Responding;
+            let task = tokio::spawn({
+                let request = request.clone();
+                async move { write_handoff_frame_with_transport(&output, b"{}\n", &request, true).await }
+            });
+            entered.await.unwrap();
+            assert_eq!(&*bytes.lock().unwrap(), b"{}\n");
+            assert!(request.tail_delivery_pending());
+            assert!(!request.cancel(), "reaping must wait for the write receipt");
+            assert!(
+                request.host.handoff_task_ids().is_ok(),
+                "request remains sealed"
+            );
+            release.send(()).unwrap();
+            assert!(task.await.unwrap().unwrap());
+            assert!(!request.cancel());
+            assert!(
+                request.host.handoff_task_ids().is_err(),
+                "the visible handoff was committed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_tail_failure_retains_the_sealed_handoff() {
+        let (output, entered, release, bytes) = gated_tail();
+        let request = Arc::new(ProtocolRequest::new(true));
+        request.host.handoff_task_ids().unwrap();
+        request.status().phase = RequestPhase::Responding;
+        let task = tokio::spawn({
+            let request = request.clone();
+            async move { write_handoff_frame_with_transport(&output, b"{}\n", &request, true).await }
+        });
+        entered.await.unwrap();
+        assert_eq!(&*bytes.lock().unwrap(), b"{}\n");
+        drop(release);
+        assert!(task
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("delivery unverified"));
+        assert!(!request.cancel());
+        assert!(request.host.handoff_task_ids().is_ok());
+        // This fixture has no real process; explicitly release its sealed test owner.
+        request.host.cancel_and_reap().await.unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_not_started_tail_allows_owner_cleanup() {
+        struct RejectedTail {
+            entered: Option<oneshot::Sender<()>>,
+            release: oneshot::Receiver<()>,
+        }
+        impl AsyncWrite for RejectedTail {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                if bytes == b"\n" {
+                    if let Some(entered) = self.entered.take() {
+                        let _ = entered.send(());
+                    }
+                    return match Pin::new(&mut self.release).poll(cx) {
+                        Poll::Pending => Poll::Pending,
+                        Poll::Ready(_) => Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            platform_windows::stdio_cancel::StdoutWriteNotStarted,
+                        ))),
+                    };
+                }
+                Poll::Ready(Ok(bytes.len()))
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+        let (entered, observed) = oneshot::channel();
+        let (release, gate) = oneshot::channel();
+        let output = harness_runtime::headless::io::Output::new(RejectedTail {
+            entered: Some(entered),
+            release: gate,
+        });
+        let request = Arc::new(ProtocolRequest::new(true));
+        request.host.handoff_task_ids().unwrap();
+        request.status().phase = RequestPhase::Responding;
+        let task = tokio::spawn({
+            let request = request.clone();
+            async move { write_handoff_frame_with_transport(&output, b"{}\n", &request, true).await }
+        });
+        observed.await.unwrap();
+        assert!(request.tail_delivery_pending());
+        assert!(!request.cancel());
+        release.send(()).unwrap();
+        assert!(task.await.unwrap().is_err());
+        assert!(!request.tail_delivery_pending());
+        assert!(request.cancel());
+        request.host.cancel_and_reap().await.unwrap();
+    }
+
+    struct GatedPrefix {
+        bytes: Arc<StdMutex<Vec<u8>>>,
+        entered: Option<oneshot::Sender<()>>,
+    }
+
+    impl AsyncWrite for GatedPrefix {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.bytes.lock().unwrap().is_empty() {
+                self.bytes.lock().unwrap().push(bytes[0]);
+                return Poll::Ready(Ok(1));
+            }
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+            }
+            Poll::Pending
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_of_incomplete_prefix_reaps_without_a_visible_frame() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let (entered, observed) = oneshot::channel();
+        let output = harness_runtime::headless::io::Output::new(GatedPrefix {
+            bytes: bytes.clone(),
+            entered: Some(entered),
+        });
+        let request = Arc::new(ProtocolRequest::new(true));
+        request.host.handoff_task_ids().unwrap();
+        request.status().phase = RequestPhase::Responding;
+        let task = tokio::spawn({
+            let request = request.clone();
+            async move { write_request_frame(&output, b"{}\n", &request, true, true).await }
+        });
+        observed.await.unwrap();
+        assert_eq!(&*bytes.lock().unwrap(), b"{");
+        assert!(request.cancel());
+        assert!(task.await.unwrap().unwrap_err().contains("cancelled"));
+        request.host.cancel_and_reap().await.unwrap();
+        assert!(!bytes.lock().unwrap().contains(&b'\n'));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_pipe_tail_backpressure_allows_cancellation_before_delivery() {
+        use std::io::{Read as _, Write as _};
+        use std::os::fd::AsFd as _;
+
+        struct FullAfterPrefix {
+            writer: std::io::PipeWriter,
+            entered: Option<oneshot::Sender<()>>,
+        }
+        impl AsyncWrite for FullAfterPrefix {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                if bytes != b"\n" {
+                    return Poll::Ready(self.writer.write(bytes));
+                }
+                // Controlled fixture: after the real prefix, fill the same
+                // nonblocking pipe before attempting its final byte.
+                for chunk in [&[b'x'; 4096][..], &[b'x'][..]] {
+                    loop {
+                        match self.writer.write(chunk) {
+                            Ok(0) => break,
+                            Ok(_) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(error) => return Poll::Ready(Err(error)),
+                        }
+                    }
+                }
+                match self.writer.write(bytes) {
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if let Some(entered) = self.entered.take() {
+                            let _ = entered.send(());
+                        }
+                        Poll::Pending
+                    }
+                    result => Poll::Ready(result),
+                }
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+        struct StopOnDrop(CancellationToken);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.cancel();
+            }
+        }
+
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let flags = rustix::fs::fcntl_getfl(writer.as_fd()).unwrap();
+        rustix::fs::fcntl_setfl(writer.as_fd(), flags | rustix::fs::OFlags::NONBLOCK).unwrap();
+        let (entered, observed) = oneshot::channel();
+        let output = harness_runtime::headless::io::Output::new(FullAfterPrefix {
+            writer,
+            entered: Some(entered),
+        });
+        let request = Arc::new(ProtocolRequest::new(true));
+        request.host.handoff_task_ids().unwrap();
+        request.status().phase = RequestPhase::Responding;
+        let token = request.host.cancellation_token();
+        let _stop_on_drop = StopOnDrop(token.clone());
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let reaper = tokio::task::spawn_blocking(move || {
+            while !token.is_cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            child.kill().unwrap();
+            child.wait().unwrap()
+        });
+        let task = tokio::spawn({
+            let request = request.clone();
+            async move { write_handoff_frame_with_transport(&output, b"{}\n", &request, false).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !request.tail_delivery_pending(),
+            "Unix Pending has no write in flight"
+        );
+        assert!(request.cancel());
+        assert!(task.await.unwrap().unwrap_err().contains("cancelled"));
+        request.host.cancel_and_reap().await.unwrap();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), reaper)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "test-owned child must be killed and waited"
+        );
+        let mut emitted = Vec::new();
+        reader.read_to_end(&mut emitted).unwrap();
+        assert!(emitted.starts_with(b"{}"));
+        assert!(!emitted.contains(&b'\n'));
+    }
+
+    #[tokio::test]
+    async fn progress_is_admitted_before_response_and_rejected_after_queueing() {
+        let (frames, mut frame_rx) = mpsc::channel(8);
+        let (events, _event_rx) = mpsc::unbounded_channel();
+        let writer = ProtocolWriter { frames, events };
+        let output = McpProtocolOutput::new(writer.clone());
+        let request = Arc::new(ProtocolRequest::new(true));
+        let id = lingxi_core::types::ToolUseId::new();
+        output
+            .register_progress(&id, Some(ProtocolJson::from("token")), request.clone())
+            .await;
+        output.emit_tool_heartbeat(&id, "Bash", 1).await;
+        writer
+            .response(
+                "1".into(),
+                request.clone(),
+                &jsonrpc_result(
+                    source_json(&serde_json::json!(1)),
+                    source_object(Vec::new()),
+                ),
+                false,
+            )
+            .unwrap();
+        output.emit_tool_heartbeat(&id, "Bash", 2).await;
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ProtocolWrite::Frame(_, ProtocolFrameKind::Progress(_)))
+        ));
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ProtocolWrite::Frame(_, ProtocolFrameKind::Response { .. }))
+        ));
+        assert!(frame_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_progress_and_response_do_not_reach_the_stream() {
+        let (frames, frame_rx) = mpsc::channel(8);
+        let (events, _event_rx) = mpsc::unbounded_channel();
+        let writer = ProtocolWriter {
+            frames,
+            events: events.clone(),
+        };
+        let request = Arc::new(ProtocolRequest::new(true));
+        assert!(request.host.handoff_task_ids().unwrap().is_empty());
+        writer
+            .frame(
+                &ProtocolJson::from("progress"),
+                ProtocolFrameKind::Progress(request.clone()),
+            )
+            .unwrap();
+        writer
+            .response(
+                "1".into(),
+                request.clone(),
+                &ProtocolJson::from("response"),
+                true,
+            )
+            .unwrap();
+        assert!(request.cancel());
+        writer
+            .frame(&ProtocolJson::from("next"), ProtocolFrameKind::Ordinary)
+            .unwrap();
+        assert!(writer.frames.try_send(ProtocolWrite::Finish).is_ok());
+        let (output, mut reader) = tokio::io::duplex(1024);
+        run_protocol_writer(
+            harness_runtime::headless::io::Output::new(output),
+            frame_rx,
+            events,
+        )
+        .await
+        .unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, b"\"next\"\n");
+        request.host.cancel_and_reap().await.unwrap();
+    }
+
+    #[test]
+    fn handoff_uses_verified_ids_and_preserves_original_content() {
+        let response = text_tool_result_response(
+            ProtocolJson::from("id"),
+            ProtocolJson::from("untrusted text"),
+            Some(false),
+        );
+        let result = add_background_handoff(&response, &["b123".into()]).unwrap();
+        assert_eq!(
+            result.string_at("/result/content/0/text"),
+            Some("untrusted text")
+        );
+        assert_eq!(
+            result.string_at("/result/structuredContent/backgroundTaskIds/0"),
+            Some("b123")
+        );
+        let text = result.string_at("/result/content/1/text").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(text).unwrap(),
+            serde_json::json!({"backgroundTaskIds": ["b123"]})
+        );
+        assert!(add_background_handoff(&response, &[]).is_err());
+        assert!(add_background_handoff(&response, &["b123".into(), "b123".into()]).is_err());
+        let exact = text_tool_result_response(
+            ProtocolJson::from("id"),
+            ProtocolJson::parse(r#""\ud800""#).unwrap(),
+            Some(false),
+        );
+        let exact = add_background_handoff(&exact, &["b123".into()]).unwrap();
+        assert_eq!(
+            exact.string_units("/result/content/0/text"),
+            Some(vec![0xd800])
+        );
+        let absent_error =
+            text_tool_result_response(ProtocolJson::from("id"), ProtocolJson::from("ok"), None);
+        assert!(absent_error.subprojection("/result/isError").is_err());
+    }
 }
 
 fn open_native_browser(url: &str) -> bool {
@@ -3973,7 +6004,10 @@ mod serve_protocol_tests {
         let tool = Utf16JsonProjection::parse(
             r#"{"name":"exact","inputSchema":{"type":"object","properties":{"\ud800":{"description":"\udc00"}}}}"#,
         ).unwrap();
-        let frame = tools_list_response(Utf16JsonProjection::from("list-1"), vec![tool]).unwrap();
+        let frame = tools_list_response(Utf16JsonProjection::from("list-1"), vec![tool])
+            .unwrap()
+            .to_json_string()
+            .unwrap();
         assert!(
             frame.contains(r#""\ud800":{"description":"\udc00"}"#),
             "{frame}"

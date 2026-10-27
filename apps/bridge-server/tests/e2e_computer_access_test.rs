@@ -254,6 +254,7 @@ async fn computer_access_request_event_then_approve_resolves_resolver() {
     send_command(
         &mut ws,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "grant access".into(),
             prompt_mode: None,
             images: Vec::new(),
@@ -359,6 +360,7 @@ async fn disconnect_mid_computer_access_denies() {
     send_command(
         &mut ws,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "grant access".into(),
             prompt_mode: None,
             images: Vec::new(),

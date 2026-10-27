@@ -1441,12 +1441,17 @@ struct RootView: View {
         try await replacement.prepare()
         try requireSourceReplacementAllowed(old)
         try await old.cancelAndWait()
-        try requireSourceReplacementAllowed(old)
-        activeSession = confirmedSession
-        pendingSessionRestoreID = confirmedSession.isEmpty ? nil : confirmedSession
-        source.setSettingsActive(false)
-        source = replacement
-        source.setSettingsActive(true)
+        try ConversationSourceReplacementPolicy.commitReplacement(
+            previous: old,
+            replacement: replacement,
+            recoveryDisposition: .retire,
+            validate: { try requireSourceReplacementAllowed(old) },
+            install: {
+                activeSession = confirmedSession
+                pendingSessionRestoreID = confirmedSession.isEmpty ? nil : confirmedSession
+                source = replacement
+            }
+        )
         // The catalog belongs to the engine build, not to a single source
         // instance. Keep it across normal reconnects so changing a provider
         // cannot trigger a second catalog bootstrap/rebuild loop.
@@ -1631,7 +1636,13 @@ struct RootView: View {
             var rollback: ProjectActiveSelectionRollback?
             do {
                 try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
-                if allowRecoveryRouting && previousSource.model.hasInactiveDurableRecovery {
+                // Preserve the decision made before suspending: an inactive
+                // recovery can change state while the new source prepares.
+                let recoveryDisposition = ConversationSourceReplacementPolicy.scopeSwitchRecoveryDisposition(
+                    allowRecoveryRouting: allowRecoveryRouting,
+                    hasInactiveDurableRecovery: previousSource.model.hasInactiveDurableRecovery
+                )
+                if recoveryDisposition == .preserve {
                     previousSource.handleBackground()
                 } else {
                     try await previousSource.cancelAndWait()
@@ -1650,17 +1661,36 @@ struct RootView: View {
                     installExternalEventHandler(on: replacement)
                 #endif
                 try await replacement.prepare()
-                try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
-                activeScope = scope
-                activeMode = targetMode
-                draft = scopedPreferences.draft(scope: scope, mode: targetMode)
-                let restoredSession = restoredSessionID(scope: scope, mode: targetMode)
-                confirmedSession = restoredSession
-                activeSession = resumeSessionID ?? restoredSession
-                pendingSessionRestoreID = activeSession.isEmpty ? nil : activeSession
-                source.setSettingsActive(false)
-                source = replacement
-                source.setSettingsActive(true)
+                let committedRecoveryDisposition = ConversationSourceReplacementPolicy.scopeSwitchRecoveryDisposition(
+                    allowRecoveryRouting: allowRecoveryRouting,
+                    hasInactiveDurableRecovery: previousSource.model.hasInactiveDurableRecovery,
+                    previouslyPreserved: recoveryDisposition == .preserve
+                )
+                try ConversationSourceReplacementPolicy.commitReplacement(
+                    previous: previousSource,
+                    replacement: replacement,
+                    recoveryDisposition: committedRecoveryDisposition,
+                    validate: {
+                        try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
+                        guard ConversationSourceReplacementPolicy.allowsScopeSwitchCommit(
+                            of: previousSource.model,
+                            allowRecoveryRouting: allowRecoveryRouting
+                        ) else {
+                            throw NSError(domain: "ConversationSourceReplacement", code: 1,
+                                userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_error_finish_background_turn_first")])
+                        }
+                    },
+                    install: {
+                        activeScope = scope
+                        activeMode = targetMode
+                        draft = scopedPreferences.draft(scope: scope, mode: targetMode)
+                        let restoredSession = restoredSessionID(scope: scope, mode: targetMode)
+                        confirmedSession = restoredSession
+                        activeSession = resumeSessionID ?? restoredSession
+                        pendingSessionRestoreID = activeSession.isEmpty ? nil : activeSession
+                        source = replacement
+                    }
+                )
                 sourceGeneration = UUID()
                 if startNew {
                     pendingSessionRestoreID = nil
@@ -2582,6 +2612,70 @@ enum ConversationSessionMutationPolicy {
 /// foreground turn can be explicitly cancelled first, but detached work and
 /// its interactive requests must keep their original source until settled.
 enum ConversationSourceReplacementPolicy {
+    enum RecoveryDisposition: Equatable {
+        case retire
+        case preserve
+    }
+
+    static func scopeSwitchRecoveryDisposition(
+        allowRecoveryRouting: Bool,
+        hasInactiveDurableRecovery: Bool,
+        previouslyPreserved: Bool = false
+    ) -> RecoveryDisposition {
+        previouslyPreserved || (allowRecoveryRouting && hasInactiveDurableRecovery) ? .preserve : .retire
+    }
+
+    @MainActor
+    static func allowsScopeSwitchCommit(
+        of model: ConversationModel,
+        allowRecoveryRouting: Bool
+    ) -> Bool {
+        allowRecoveryRouting || ConversationSessionMutationPolicy.allowsCallerMutation(
+            hasInactiveDurableRecovery: model.hasInactiveDurableRecovery,
+            hasUnresolvedTurnRecovery: model.hasUnresolvedTurnRecovery,
+            isCancelling: model.isCancelling
+        )
+    }
+
+    @MainActor
+    static func allowsRetiringRecoveryIngress(of model: ConversationModel) -> Bool {
+        !model.streaming && !model.slashCommandPending
+            && ConversationSessionMutationPolicy.allowsCallerMutation(
+                hasInactiveDurableRecovery: model.hasInactiveDurableRecovery,
+                hasUnresolvedTurnRecovery: model.hasUnresolvedTurnRecovery,
+                isCancelling: model.isCancelling
+            )
+    }
+
+    /// Commit only after the caller's final ownership check. No suspension is
+    /// allowed between revoking the old recovery ingress and installing the
+    /// replacement: a failed check must leave the old owner usable.
+    @MainActor
+    static func commitReplacement(
+        previous: any ConversationSource,
+        replacement: any ConversationSource,
+        recoveryDisposition: RecoveryDisposition,
+        validate: () throws -> Void,
+        install: () -> Void
+    ) throws {
+        try validate()
+        if recoveryDisposition == .retire {
+            // `allowsReplacement` permits a live foreground turn because the
+            // caller cancels it. A new turn may arrive while that cancellation
+            // or preparation suspends, so recheck immediately before retiring.
+            guard allowsRetiringRecoveryIngress(of: previous.model) else {
+                throw NSError(domain: "ConversationSourceReplacement", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_error_finish_background_turn_first")])
+            }
+            #if canImport(harness_runtimeFFI)
+                (previous as? EngineConversationSource)?.retireRecoveryIngress()
+            #endif
+        }
+        previous.setSettingsActive(false)
+        install()
+        replacement.setSettingsActive(true)
+    }
+
     static func shouldRollbackSelection(
         previousSourceIsCurrent: Bool,
         currentProjectID: String?,

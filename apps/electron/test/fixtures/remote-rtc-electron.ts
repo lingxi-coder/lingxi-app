@@ -20,6 +20,10 @@ import { PeerHost } from '../../src/main/remoteControl/peerHost';
 import { createRtcWindow } from '../../src/main/remoteControl/rtcWindow';
 
 const root = process.env['LINGXI_TEST_ROOT']!;
+// Hosted machines may have no physical camera or microphone. Synthetic
+// devices let the permission-denial assertions exercise the real Electron
+// handler rather than succeeding only because no device exists.
+app.commandLine.appendSwitch('use-fake-device-for-media-stream');
 const trace = (message: string): void => { process.stderr.write(`remote-rtc fixture: ${message}\n`); };
 process.on('uncaughtException', (error) => { process.stderr.write(`Uncaught: ${error.stack}\n`); app.exit(1); });
 process.on('unhandledRejection', (error) => { process.stderr.write(`Unhandled: ${String(error)}\n`); app.exit(1); });
@@ -80,6 +84,7 @@ async function fakeDatabase() {
 async function main(): Promise<void> {
   await app.whenReady();
   process.stdout.write('READY\n');
+  assert.equal(app.commandLine.hasSwitch('use-fake-ui-for-media-stream'), false, 'capture permission must not be bypassed');
 
   const database = await fakeDatabase();
   let rtcWindow: BrowserWindow | undefined;
@@ -92,8 +97,18 @@ async function main(): Promise<void> {
     diagnostics: (level, message) => trace(`${level}: ${message}`),
   });
   const viewerWindow = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  // This separate test session allows capture to establish that the fake
+  // devices actually exist. The production RTC partition continues to deny it.
+  viewerWindow.webContents.session.setPermissionRequestHandler((_contents, permission, callback) => callback(permission === 'media'));
   await viewerWindow.loadFile(join(root, 'viewer.html'));
   const run = <T>(code: string): Promise<T> => viewerWindow.webContents.executeJavaScript(code) as Promise<T>;
+  const captureKinds = await run<string[]>(`(async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    const kinds = stream.getTracks().map((track) => track.kind).sort();
+    stream.getTracks().forEach((track) => track.stop());
+    return kinds;
+  })()`);
+  assert.deepEqual(captureKinds, ['audio', 'video'], 'synthetic devices must be available before testing permission denial');
   type ViewerStatus = { opened: boolean; closed: boolean; received: Array<{ length: number; ok: boolean }> };
   const status = (name: string): Promise<ViewerStatus> => run<ViewerStatus>(`window.viewer.status(${JSON.stringify(name)})`);
 

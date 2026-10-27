@@ -154,6 +154,7 @@ internal fun sideChatSendPromptCommand(
     visualizationContext: VisualizationRef?,
     promptMode: PromptModeDto?,
 ): ClientCommand.SendPrompt = ClientCommand.SendPrompt(
+    sessionId = null,
     text = text.toClientTextDto(),
     promptMode = promptMode,
     images = images,
@@ -162,7 +163,7 @@ internal fun sideChatSendPromptCommand(
 )
 
 internal fun sideChatCancelCommand(turnId: Long?): ClientCommand =
-    ClientCommand.Cancel(turnId?.toULong())
+    ClientCommand.Cancel(sessionId = null, turnId = turnId?.toULong())
 
 /** Exact command boundary: /sideways is an ordinary prompt. */
 internal fun sideChatInput(text: String): String? {

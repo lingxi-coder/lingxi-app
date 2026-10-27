@@ -183,6 +183,7 @@ mod tests {
             command: None,
             stage: None,
             error: None,
+            observation_error: None,
         }]);
         let b = a.clone();
         assert_eq!(a, b);

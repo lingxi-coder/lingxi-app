@@ -1,14 +1,16 @@
 import { app, BrowserWindow } from 'electron';
 import { writeFileSync } from 'node:fs';
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 const url = process.argv.find((argument) => argument.startsWith('http://'));
 if (!url || !process.env.LINGXI_TEST_USER_DATA) throw new Error('fixture URL and isolated user data required');
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: false, width: 1100, height: 800, webPreferences: { sandbox: true } });
+  const window = new BrowserWindow({ show: false, width: 1100, height: 800, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
     const run = (script) => window.webContents.executeJavaScript(script);
     const wait = async (expression) => {
       const deadline = Date.now() + 6000;
@@ -28,8 +30,10 @@ async function main() {
     await run(`[...document.querySelectorAll('button')].find(button => button.textContent.trim() === '取消').click()`); await delay(60);
     await run(`[...document.querySelectorAll('button')].find(button => button.textContent.includes('新建策略')).click()`);
     await wait(`Boolean(${trigger})`);
-    await run(`${trigger}.scrollIntoView({block: 'center'})`);
-    await delay(100);
+    // The popup dismisses when its outside scroll container moves. Complete
+    // the scroll and its queued scroll events before opening the popup.
+    await run(`${trigger}.scrollIntoView({block: 'center', behavior: 'instant'})`);
+    await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     await run(`${trigger}.click()`);
     await wait('document.querySelectorAll("[role=option]").length === 73');
     const result = await run(`(() => { const list = document.querySelector('[role=listbox]'); return {
@@ -38,10 +42,8 @@ async function main() {
       overflow: getComputedStyle(list).overflowY, scrollable: list.scrollHeight > list.clientHeight,
     }; })()`);
     result.excludedLabel = excludedLabel; result.excludedEditable = excludedEditable;
-    await delay(100);
-    writeFileSync('/tmp/fusion-scroll.png', (await window.webContents.capturePage()).toPNG());
     await run(`document.querySelector('[role=listbox]').scrollTop = 99999`);
-    await delay(100);
+    await wait(`document.querySelector('[role=listbox]')?.scrollTop > 0`);
     await run(`document.querySelector('[role=option]:last-child').click()`);
     await wait('!document.querySelector("[role=listbox]")');
     result.clicked = await run(`${trigger}.textContent`);
@@ -70,6 +72,12 @@ async function main() {
     await key('Escape');
     result.escapeClosed = await run('!document.querySelector("[role=listbox]") && Boolean(document.querySelector("[data-nav-page=fusion]"))');
     result.focusReturned = await run(`document.activeElement === ${trigger}`);
+    // Capture the open menu independently of the click/keyboard assertions;
+    // native capture can trigger resize/visibility events that dismiss it.
+    await run(`${trigger}.click()`);
+    await wait('Boolean(document.querySelector("[role=listbox]"))');
+    writeFileSync('/tmp/fusion-scroll.png', (await window.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
+    if (await run('Boolean(document.querySelector("[role=listbox]"))')) await key('Escape');
     const analyst = `document.querySelector('button[aria-label="选择 analyst…"]')`;
     await run(`${analyst}.scrollIntoView({block:'center', behavior:'instant'})`);
     const analystBottom = await run(`${analyst}.getBoundingClientRect().bottom`);
@@ -137,11 +145,11 @@ async function main() {
     await clickText('项目'); result.scopeFilter = await run(`document.querySelectorAll('.extension-hub-row-open').length === 1`);
     await input('[aria-label="搜索 Fusion 策略"]', ''); await clickText('全部');
     await run(`document.querySelector('.settings-content-scroll').scrollTop = 0`); await delay(70);
-    writeFileSync('/tmp/fusion-strategies-light.png', (await window.webContents.capturePage()).toPNG());
+    writeFileSync('/tmp/fusion-strategies-light.png', (await window.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
     await run(`window.fusionFixture.setDark(true)`); await delay(70);
     window.setContentSize(760, 800); await delay(100);
     result.narrowOverflow = await run(`document.documentElement.scrollWidth > innerWidth`);
-    writeFileSync('/tmp/fusion-strategies-dark-narrow.png', (await window.webContents.capturePage()).toPNG());
+    writeFileSync('/tmp/fusion-strategies-dark-narrow.png', (await window.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
     process.stderr.write('fixture: narrow\n');
     result.scopeLabelsVisible = await run(`[...document.querySelectorAll('.extension-hub-row-scope')].every(element => getComputedStyle(element).display !== 'none')`);
     await run('window.fusionFixture.invalidateNamedStrategy()'); await delay(60);
@@ -165,7 +173,7 @@ async function main() {
     await openNamed('Review renamed');
     await run(`document.querySelector('.settings-content-scroll').scrollTop = 0`); await delay(70);
     result.narrowEditorOverflow = await run(`document.querySelector('.settings-content-scroll').scrollWidth > document.querySelector('.settings-content-scroll').clientWidth`);
-    writeFileSync('/tmp/fusion-editor-dark-narrow.png', (await window.webContents.capturePage()).toPNG());
+    writeFileSync('/tmp/fusion-editor-dark-narrow.png', (await window.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
     window.setContentSize(1100, 800);
     await input('[aria-label="策略名称"]', 'Uncommitted rename');
     await run(`window.fusionFixture.concurrentEdit()`); await delay(60); await clickText('保存');

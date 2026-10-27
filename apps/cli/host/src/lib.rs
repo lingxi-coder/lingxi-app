@@ -92,6 +92,12 @@ mod headless_host;
 mod headless_oauth;
 #[cfg(unix)]
 mod headless_process_io;
+#[cfg(unix)]
+#[doc(hidden)]
+pub use headless_process_io::begin_mcp_stdio as begin_mcp_process_io;
+#[cfg(unix)]
+#[doc(hidden)]
+pub use headless_process_io::stop_and_restore_mcp as stop_and_restore_mcp_process_io;
 pub mod idle_notify;
 pub mod init;
 pub mod logging;

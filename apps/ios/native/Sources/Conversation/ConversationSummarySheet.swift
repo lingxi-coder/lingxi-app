@@ -387,6 +387,7 @@ struct ConversationSummarySheet: View {
         case .failed: return t.danger
         case .paused: return t.text3
         case .cancelled: return t.text4
+        case .exitedUnknown: return t.text3
         }
     }
 
@@ -482,6 +483,7 @@ struct ConversationSummarySheet: View {
         case .completed: return String(localized: "chat_status_completed")
         case .failed: return String(localized: "chat_status_failed")
         case .cancelled: return String(localized: "chat_status_cancelled")
+        case .exitedUnknown: return String(localized: "chat_status_exited_unknown")
         }
     }
 }

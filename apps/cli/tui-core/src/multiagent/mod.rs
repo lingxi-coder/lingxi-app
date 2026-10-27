@@ -6,6 +6,7 @@
 //! `AppState` mutation seam (`apply`) and the iocraft color styling (`style`)
 //! remain in `tui` until their own dependencies are extracted.
 pub mod adapter;
+pub mod background_uncertainty;
 pub mod event;
 pub mod fixture;
 pub mod poller;

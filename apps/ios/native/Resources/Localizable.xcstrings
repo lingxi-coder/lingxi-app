@@ -2,6 +2,123 @@
   "sourceLanguage": "zh-Hans",
   "version": "1.0",
   "strings": {
+    "chat_recovery_warning_count %@": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%@ 条恢复提醒需要检查。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "%@ 筆復原提醒需要檢查。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "%@ recovery notice(s) need review." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "%@ 件の復元に関する通知を確認してください。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "복구 알림 %@개를 확인해 주세요." } }
+      }
+    },
+    "chat_recovery_review_button": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已检查" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "已檢查" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Reviewed" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "確認済み" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "확인했어요" } }
+      }
+    },
+    "chat_recovery_review_title": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "确认已检查？" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "確認已檢查？" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Confirm review?" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "確認済みにしますか？" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "확인을 완료했나요?" } }
+      }
+    },
+    "chat_recovery_review_message %@": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "将关闭此会话当前显示的 %@ 条恢复提醒。之后出现的新提醒会保留。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "將關閉此工作階段目前顯示的 %@ 筆復原提醒。之後出現的新提醒會保留。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "This clears the %@ recovery warning(s) shown for this conversation. New warnings will remain." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "この会話に表示された %@ 件の復元に関する通知を閉じます。新しい通知は残ります。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "이 대화에 표시된 복구 알림 %@개를 닫습니다. 새 알림은 유지됩니다." } }
+      }
+    },
+    "chat_recovery_review_confirm": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "确认已检查" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "確認已檢查" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Confirm review" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "確認を完了" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "확인 완료" } }
+      }
+    },
+    "chat_queued_cancelled": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "队列中的消息已取消。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "佇列中的訊息已取消。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "The queued message was cancelled." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "待機中のメッセージはキャンセルされました。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "대기 중인 메시지가 취소되었습니다." } }
+      }
+    },
+    "chat_turn_id_exhausted": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "无法分配新的消息标识，请重新打开会话。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "無法配置新的訊息識別碼，請重新開啟工作階段。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "A new message identifier could not be allocated. Please reopen the session." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "新しいメッセージ識別子を割り当てられません。セッションを開き直してください。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "새 메시지 식별자를 할당할 수 없습니다. 세션을 다시 열어 주세요." } }
+      }
+    },
+    "chat_submission_outcome_unknown": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "消息是否送达尚不确定，请先检查此会话。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "訊息是否送達尚不確定，請先檢查此工作階段。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Message delivery is uncertain. Please check this session before sending again." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "メッセージが送信されたか確認できません。再送信する前にセッションを確認してください。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "메시지 전송 여부가 불확실합니다. 다시 보내기 전에 세션을 확인해 주세요." } }
+      }
+    },
+    "chat_submission_not_found_unknown": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "未找到此消息的恢复记录，结果仍不确定。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "找不到此訊息的復原記錄，結果仍不確定。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "No recovery record was found for this message; its outcome remains unknown." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "このメッセージの復元記録が見つかりません。結果は不明です。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "이 메시지의 복구 기록을 찾지 못했습니다. 결과는 여전히 알 수 없습니다." } }
+      }
+    },
+    "chat_submission_storage_failed": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "无法保存消息状态，消息未发送。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "無法儲存訊息狀態，訊息未傳送。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "The message status could not be saved. The message was not sent." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "メッセージの状態を保存できませんでした。メッセージは送信されていません。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "메시지 상태를 저장할 수 없어 전송하지 않았습니다." } }
+      }
+    },
+    "chat_recovery_session_unknown": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "会话尚未准备好，请稍后重试。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "工作階段尚未準備好，請稍後重試。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "The session is not ready yet. Please try again shortly." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "セッションの準備ができていません。しばらくしてから再試行してください。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "세션이 아직 준비되지 않았습니다. 잠시 후 다시 시도해 주세요." } }
+      }
+    },
+    "chat_recovery_projection_uncertain": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "部分运行内容可能未恢复，请检查后继续。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "部分執行內容可能未恢復，請檢查後繼續。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Some run content may not have been restored. Please review it before continuing." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "実行内容の一部が復元されていない可能性があります。確認してから続行してください。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "일부 실행 내용이 복원되지 않았을 수 있습니다. 확인한 후 계속해 주세요." } }
+      }
+    },
+    "chat_recovery_replay_gap": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "对话恢复不完整，请重新打开对话。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "對話恢復不完整，請重新開啟對話。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "The conversation could not be fully restored. Please reopen it." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "会話を完全に復元できませんでした。会話を開き直してください。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "대화를 완전히 복원하지 못했습니다. 대화를 다시 열어 주세요." } }
+      }
+    },
     "CFBundleDisplayName": {
       "localizations": {
         "zh-Hans": {
@@ -13206,6 +13323,40 @@
         }
       }
     },
+    "chat_status_exited_unknown": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已结束，结果未知"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已結束，結果未知"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Exited; result unknown"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "終了（結果不明）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "종료됨(결과 알 수 없음)"
+          }
+        }
+      }
+    },
     "chat_status_failed": {
       "localizations": {
         "zh-Hans": {
@@ -14120,6 +14271,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "백그라운드 작업 %@ 완료"
+          }
+        }
+      }
+    },
+    "chat_task_exited_unknown %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台任务 %@ 已结束，结果未知"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "背景任務 %@ 已結束，結果未知"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background task %@ exited; result unknown"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "バックグラウンドタスク %@ は終了しました（結果不明）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "백그라운드 작업 %@이(가) 종료됨(결과 알 수 없음)"
+          }
+        }
+      }
+    },
+    "chat_task_exited_unknown_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台任务 %1$s 已结束，结果未知"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "背景任務 %1$s 已結束，結果未知"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background task %1$s exited; result unknown"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "バックグラウンドタスク %1$s は終了しました（結果不明）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "백그라운드 작업 %1$s이(가) 종료됨(결과 알 수 없음)"
           }
         }
       }

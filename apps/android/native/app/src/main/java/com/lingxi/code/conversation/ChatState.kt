@@ -75,6 +75,8 @@ data class ChatState(
     val agentRunsByMessageId: Map<String, AgentRunState> = emptyMap(),
     /** Out-of-band tasks that remain alive after their initiating turn ended. */
     val activeBackgroundTaskIds: Set<String> = emptySet(),
+    /** Unknown exits are absorbing, even if an older task row arrives later. */
+    val exitedUnknownTaskIds: Set<String> = emptySet(),
     /** Full task rows retained for the unified execution card. */
     val backgroundTasks: Map<String, BackgroundTaskUi> = emptyMap(),
     /** Session agent roster shown alongside workflows and tasks. */
@@ -114,6 +116,14 @@ data class ChatState(
      * must not count as active work for the foreground-service lease.
      */
     val durableRecoveryBlocked: Boolean = false,
+    /** An uncertain submission can be checked again without starting a turn. */
+    val recoveryRetryAvailable: Boolean = false,
+    /** A previously finished run may need review after a restart or reattach. */
+    val terminalRecoveryReviewAvailable: Boolean = false,
+    val terminalRecoveryUncertain: Boolean = false,
+    val queuedCancellationNotice: Boolean = false,
+    val queuedRecoveryWarning: Boolean = false,
+    val recoveryStorageFailed: Boolean = false,
     /** A live local executor is parked at WaitingForUser; Stop still cancels it. */
     val liveTurnWaitingForUser: Boolean = false,
     /**

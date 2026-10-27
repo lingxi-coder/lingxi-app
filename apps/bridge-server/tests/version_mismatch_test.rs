@@ -323,6 +323,7 @@ async fn refused_connection_does_not_route_commands() {
     send_command(
         &mut ws,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "drive a turn".into(),
             prompt_mode: None,
             images: Vec::new(),
@@ -352,6 +353,7 @@ async fn command_before_hello_is_rejected() {
     send_command(
         &mut ws,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "too early".into(),
             prompt_mode: None,
             images: Vec::new(),
@@ -413,6 +415,7 @@ async fn second_client_is_rejected_while_first_remains_active() {
     send_command(
         &mut first,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "first still owns connection".into(),
             prompt_mode: None,
             images: Vec::new(),

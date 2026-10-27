@@ -350,7 +350,7 @@ bridgePages[0].sections.push(
     id: 'wire-handshake',
     title: text('Wire contract and version handshake', '传输契约与版本握手'),
     paragraphs: [
-      text('The current working-tree constants are BRIDGE_PROTOCOL_VERSION = 0.2.0 and CLIENT_PROTOCOL_VERSION = 29.0.0. Rust is the contract source; the TypeScript DTO file mirrors it. The envelope and DTO contract are checked independently, each requiring the same numeric major version. Malformed or mismatched versions refuse hello and bar later commands; server hello rejection uses wire error code -32600.', '当前工作树常量为 BRIDGE_PROTOCOL_VERSION = 0.2.0、CLIENT_PROTOCOL_VERSION = 29.0.0。Rust 是契约来源，TypeScript DTO 文件镜像该契约。传输包与 DTO 分别校验，双方数字主版本须各自相同。格式错误或版本不匹配会拒绝 hello 并阻止后续命令；服务端 hello 拒绝使用传输错误码 -32600。'),
+      text('The current working-tree constants are BRIDGE_PROTOCOL_VERSION = 0.2.0 and CLIENT_PROTOCOL_VERSION = 30.0.0. Rust is the contract source; the TypeScript DTO file mirrors it. The envelope and DTO contract are checked independently, each requiring the same numeric major version. Malformed or mismatched versions refuse hello and bar later commands; server hello rejection uses wire error code -32600.', '当前工作树常量为 BRIDGE_PROTOCOL_VERSION = 0.2.0、CLIENT_PROTOCOL_VERSION = 30.0.0。Rust 是契约来源，TypeScript DTO 文件镜像该契约。传输包与 DTO 分别校验，双方数字主版本须各自相同。格式错误或版本不匹配会拒绝 hello 并阻止后续命令；服务端 hello 拒绝使用传输错误码 -32600。'),
       text('Frame is adjacent-tagged as type/payload; ClientCommand and ClientEvent are internally tagged with snake_case type values. Optional fields may be absent. Tool input_json/result_json payloads remain JSON strings, so clients must parse the contents deliberately and must not change their wire representation to objects. The mcp path/subprotocol names do not make product commands ordinary MCP tools/list or tools/call requests.', 'Frame 使用 type/payload 邻接标签；ClientCommand 与 ClientEvent 使用内部 type 标签及 snake_case 值。可选字段可能不存在。工具 input_json/result_json 保持 JSON 字符串形式，客户端须显式解析内容，不能把传输表示改成对象。mcp 路径／子协议名称不表示产品命令就是普通 MCP tools/list 或 tools/call 请求。'),
     ],
     steps: [
@@ -361,7 +361,7 @@ bridgePages[0].sections.push(
     ],
     code: [{
       label: text('Current hello request shape', '当前 hello 请求形状'), language: 'json', verification: 'excerpt',
-      code: '{\n  "type": "request",\n  "payload": {\n    "id": 1,\n    "method": "hello",\n    "params": {\n      "protocol_version": "0.2.0",\n      "client_name": "documentation-example",\n      "capabilities": {\n        "supports_streaming": true,\n        "supports_tools": true,\n        "supports_skills": true,\n        "supports_commands": true,\n        "client_protocol_version": "29.0.0"\n      }\n    }\n  }\n}',
+      code: '{\n  "type": "request",\n  "payload": {\n    "id": 1,\n    "method": "hello",\n    "params": {\n      "protocol_version": "0.2.0",\n      "client_name": "documentation-example",\n      "capabilities": {\n        "supports_streaming": true,\n        "supports_tools": true,\n        "supports_skills": true,\n        "supports_commands": true,\n        "client_protocol_version": "30.0.0"\n      }\n    }\n  }\n}',
     }],
     diagram: { src: '/docs-assets/platform-host-transports.svg', alt: text('Electron uses authenticated WebSocket Bridge, native hosts use in-process UniFFI, both reach Harness.', 'Electron 使用已认证 WebSocket Bridge，原生宿主使用进程内 UniFFI，二者进入 Harness。'), caption: text('Transport framing is separate from the shared ClientCommand / ClientEvent contract.', '传输分帧与共享 ClientCommand／ClientEvent 契约分离。') },
   },

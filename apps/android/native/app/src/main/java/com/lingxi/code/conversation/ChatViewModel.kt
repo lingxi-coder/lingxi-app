@@ -7,10 +7,14 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.client.AskUserQuestionAnswersDto
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientException
 import com.lingxi.code.bindings.client.ClientTextDto
+import com.lingxi.code.bindings.client.AttachmentDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.PromptModeDto
+import com.lingxi.code.bindings.client.QueuedTurnStatusDto
 import com.lingxi.code.bindings.client.ListingKindDto
+import com.lingxi.code.bindings.client.ModSessionEventPayload
 import com.lingxi.code.bindings.android.MobileLinuxEventFfi
 import com.lingxi.code.bindings.android.MobileLinuxEventKindFfi
 import com.lingxi.code.bindings.android.MobileLinuxTaskSnapshotFfi
@@ -18,6 +22,7 @@ import com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi
 import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.bindings.client.TaskStatusDto
 import com.lingxi.code.bindings.client.TurnRecoveryStateDto
+import com.lingxi.code.bindings.client.TurnRecoverySnapshotDto
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.EngineModelState
@@ -34,6 +39,7 @@ import java.security.SecureRandom
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
@@ -41,7 +47,10 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -56,17 +65,54 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val ANDROID_COMPUTER_USE_TOOL = "android_use"
 
-private object DurableConversationTurnIds {
-    private val next = AtomicLong(
+internal class DurableTurnIdAllocator(initial: Long, private val reserved: () -> Set<Long>,
+    private val persist: (Long) -> Boolean = { true }) {
+    private val counter = AtomicLong(initial)
+    @Synchronized fun advanceAtLeast(value: Long) {
+        if (value > counter.get()) counter.set(value)
+    }
+    @Synchronized fun next(): Long? {
+        val existing = reserved()
+        while (counter.get() < Long.MAX_VALUE) {
+            val candidate = counter.get() + 1
+            if (candidate !in existing && !persist(candidate)) return null
+            counter.set(candidate)
+            if (candidate !in existing) return candidate
+        }
+        return null
+    }
+}
+
+internal object DurableConversationTurnIds {
+    private var recoveryPreferences: android.content.SharedPreferences? = null
+    private var idPreferences: android.content.SharedPreferences? = null
+    private val allocator = DurableTurnIdAllocator(
         SecureRandom().nextLong().and(Long.MAX_VALUE).coerceAtLeast(1L),
+        reserved = {
+            recoveryPreferences?.all?.asSequence()?.mapNotNull { (key, value) ->
+                when {
+                    (key == "turn_id" || key.endsWith("_turn_id")) && value is Long -> value
+                    value is String && (key.contains("_queued_") || key.contains("_parked_") || key.contains("_terminal_")) ->
+                        key.substringAfterLast('_').toLongOrNull()
+                    else -> null
+                }
+            }?.toSet().orEmpty()
+        },
+        persist = { candidate -> idPreferences?.edit()?.putLong("allocated_turn_counter", candidate)?.commit() ?: true },
     )
 
-    fun next(): Long = next.updateAndGet { current ->
-        if (current == Long.MAX_VALUE) 1L else current + 1L
+    @Synchronized fun initialize(context: android.content.Context) {
+        recoveryPreferences = context.applicationContext.getSharedPreferences("durable_conversation_turn", android.content.Context.MODE_PRIVATE)
+        val ids = context.applicationContext.getSharedPreferences("durable_conversation_turn_ids", android.content.Context.MODE_PRIVATE)
+        idPreferences = ids
+        allocator.advanceAtLeast(ids.getLong("allocated_turn_counter", 0L))
     }
+    @Synchronized fun next(): Long? = allocator.next()
 }
 
 private fun formatByteCount(bytes: Long): String = when {
@@ -210,6 +256,13 @@ class ChatViewModel(
 
     /** Collector for the active reply stream. */
     private var turnJob: Job? = null
+    private data class ActiveSubmission(
+        val source: ConversationSource,
+        val turnId: Long,
+        val admission: TurnSubmissionAdmission,
+        var sessionId: String?,
+    )
+    private var activeSubmission: ActiveSubmission? = null
     private var backgroundTurnActive = false
 
     /** Best-effort explicit Stop operation that a later session switch must await. */
@@ -241,16 +294,55 @@ class ChatViewModel(
     private val assistantReasoningByIdentity = mutableMapOf<String, Pair<String, String>>()
     private var assistantIdentityTurnToken: Long = -1L
     private var durableTurnId: Long? = null
+    private data class DurableAttachInterest(
+        val sessionId: String,
+        val turnId: Long,
+        val expectsResume: Boolean,
+        val requestId: String?,
+        var attaching: Boolean = true,
+        var sawSnapshot: Boolean = false,
+        var terminalSnapshot: TurnRecoverySnapshotDto? = null,
+    )
+    private var durableAttachInterest: DurableAttachInterest? = null
+    private data class CancellingProjection(
+        val sessionId: String, val turnId: Long, val generation: Int, var terminalObserved: Boolean = false,
+        val finished: CompletableDeferred<Boolean> = CompletableDeferred(),
+    )
+    private var cancellingProjection: CancellingProjection? = null
+    private data class PendingAdmissionRecovery(val source: ConversationSource, val sessionId: String,
+        val turnId: Long, val generation: Int, val requiresResumeActivation: Boolean = false,
+        val trustNotFound: Boolean = true)
+    private var pendingAdmissionRecovery: PendingAdmissionRecovery? = null
+    private var admissionRecoveryJob: Job? = null
+    private data class TerminalRecoveryReview(val source: ConversationSource, val sessionId: String,
+        val generation: Int, val turns: List<Long>)
+    private var terminalRecoveryReview: TerminalRecoveryReview? = null
+    private data class QueuedStatusRequest(val source: ConversationSource, val sessionId: String,
+        val turnId: Long, val generation: Int, val visibleUuids: Set<String>,
+        val completed: CompletableDeferred<Unit> = CompletableDeferred())
+    private val queuedStatusRequests = mutableMapOf<String, QueuedStatusRequest>()
+    private var queuedStatusJob: Job? = null
+    private data class TransitionCancellation(val sessionId: String, val turnId: Long,
+        val consumed: CompletableDeferred<Boolean> = CompletableDeferred())
+    private var transitionCancellation: TransitionCancellation? = null
+    private data class QueuedTurnInterest(val sessionId: String, val generation: Int)
+    private val queuedTurnInterests = mutableMapOf<Long, QueuedTurnInterest>()
+    // The source shares leased watermarks across consumers. This reducer keeps
+    // only its current main-turn version after identity fencing.
+    private val recoveryRevisions = ActiveRecoveryRevisionGuard()
     /** Token used when a durable turn is attached without a local submit collector. */
     private var recoveredTurnToken: Long? = null
     /** Non-null only while AttachTurn is replaying retained history. */
     private var recoveryReplayTurnId: Long? = null
     /** UI-owner-local durable replay cursor. */
     private var durableTurnUiSequence: Long = 0L
+    private var durableReplayDegraded = false
+    private val pendingDurableEvents = mutableMapOf<ULong, ConversationDelivery.TurnEvent>()
     /** A recovered live event has rendered and awaits its replay envelope. */
     private var pendingRecoveredReplayAckTurnId: Long? = null
     /** Session whose SessionResumed transcript is currently authoritative. */
     private var restoredTranscriptSessionId: String? = null
+    private var restoredTranscriptHasContent = false
     /**
      * A recovered checkpoint parked for user input while no local executor owns
      * it. Keep its durable identity until the host confirms a terminal state;
@@ -355,9 +447,47 @@ class ChatViewModel(
                     if (sourceGeneration == generation) {
                         activated?.let {
                             applyActivatedSession(it)
+                            if (!boundSource.recoveryStorageAvailable()) {
+                                markRecoveryStorageFailed()
+                                return@collect
+                            }
+                            val session = canonicalSessionId(it.sessionId)
+                            val receipts = boundSource.terminalRecoveryReceipts(session)
+                            val cancelled = boundSource.cancelledQueuedReceipts(session).toSet()
+                            val pendingQueue = boundSource.pendingQueuedRecoveryTurns(session)
+                            if (sourceGeneration != generation || source !== boundSource || !isVisibleSession(session)) return@collect
+                            pendingQueue.forEach { turn -> queuedTurnInterests[turn] = QueuedTurnInterest(session, generation) }
+                            if (pendingQueue.isNotEmpty()) _state.update { state -> state.copy(queuedRecoveryWarning = true) }
+                            terminalRecoveryReview = if (receipts.isEmpty()) null else TerminalRecoveryReview(boundSource, session, generation, receipts)
+                            val uncertain = receipts.any { it !in cancelled }
+                            _state.update { state -> state.copy(terminalRecoveryReviewAvailable = receipts.isNotEmpty(),
+                                terminalRecoveryUncertain = uncertain, queuedCancellationNotice = receipts.any { it in cancelled }) }
+                            if (it.kind == SessionActivationKind.Resumed && pendingQueue.isNotEmpty()) {
+                                queryQueuedRecoveries(boundSource, generation, session, pendingQueue, it.fullyVisibleUserUuids)
+                            }
+                            val pending = pendingAdmissionRecovery
+                            if (pending != null && pending.source === boundSource && pending.generation == generation &&
+                                canonicalSessionId(it.sessionId) == pending.sessionId
+                            ) {
+                                if (pending.requiresResumeActivation && it.kind != SessionActivationKind.Resumed) return@collect
+                                if (pending.requiresResumeActivation) {
+                                    pendingAdmissionRecovery = pending.copy(requiresResumeActivation = false)
+                                }
+                                durableTurnId = pending.turnId
+                                inactiveWaitingTurnId = pending.turnId
+                                _state.update { state -> state.copy(durableRecoveryBlocked = true, recoveryRetryAvailable = true) }
+                                retryDurableRecovery()
+                                return@collect
+                            }
                             runCatching {
-                                boundSource.attachDurableTurnForUi(afterSequence = durableTurnUiSequence)
-                            }.onFailure(::preserveDurableRecoveryAfterAttachFailure)
+                                boundSource.attachDurableTurnForUi(afterSequence = durableTurnUiSequence) { sessionId, turnId, expectsResume, requestId ->
+                                    if (sourceGeneration == generation) noteDurableAttach(sessionId, turnId, expectsResume, requestId)
+                                }
+                            }.onFailure { error ->
+                                if (sourceGeneration == generation && (error as? DurableAttachFailure)?.orderedDelivery != true) {
+                                    preserveDurableRecoveryAfterAttachFailure(error)
+                                }
+                            }
                         }
                     }
                 }
@@ -416,8 +546,139 @@ class ChatViewModel(
                 // and background-task transitions ride here, NOT the per-turn
                 // reply stream — a question can outlive its turn's stream and
                 // a task can finish with no turn in flight at all.
-                boundSource.clientEvents.collect { event ->
-                    if (sourceGeneration == generation) reduceClientEvent(event)
+                boundSource.conversationDeliveries.collect { delivery ->
+                    if (sourceGeneration != generation) return@collect
+                    when (delivery) {
+                        is ConversationDelivery.Event -> {
+                            // Ownerless connection notices cannot be attached to
+                            // whichever turn happens to be visible now.
+                            if ((boundSource !is EngineConversationSource && boundSource !is RecoveringConversationSource) ||
+                                delivery.event !is ClientEvent.SystemNotice
+                            ) {
+                                reduceClientEvent(delivery.event)
+                            }
+                        }
+                        is ConversationDelivery.RecoveryState -> if (delivery.isActive()) {
+                            reduceClientEvent(ClientEvent.TurnRecoveryState(delivery.snapshot))
+                        }
+                        is ConversationDelivery.TurnEvent -> reduceDurableTurnDelivery(delivery)
+                        is ConversationDelivery.TurnEventDecodeFailed -> {
+                            if (delivery.isActive() && ownsDurableDelivery(delivery.sessionId, delivery.turnId) &&
+                                (delivery.attachRequestId == null || durableAttachInterest?.requestId == delivery.attachRequestId)
+                            ) markDurableReplayIncomplete()
+                        }
+                        is ConversationDelivery.QueuedTurnIncomplete -> {
+                            if (matchesQueuedTurn(delivery.sessionId, delivery.turnId)) {
+                                queuedTurnInterests.remove(delivery.turnId.toLong())
+                                showDurableRecoveryWarning()
+                            }
+                        }
+                        is ConversationDelivery.QueuedTurnRegistered -> {
+                            if (delivery.turnId <= Long.MAX_VALUE.toULong() && isVisibleSession(delivery.sessionId)) {
+                                queuedTurnInterests[delivery.turnId.toLong()] = QueuedTurnInterest(
+                                    canonicalSessionId(delivery.sessionId), sourceGeneration,
+                                )
+                            }
+                        }
+                        is ConversationDelivery.QueuedTurnSettled -> {
+                            if (matchesQueuedTurn(delivery.sessionId, delivery.turnId)) {
+                                queuedTurnInterests.remove(delivery.turnId.toLong())
+                                val session = canonicalSessionId(delivery.sessionId)
+                                if (queuedTurnInterests.values.none { it.sessionId == session && it.generation == generation }) {
+                                    _state.update { state -> state.copy(queuedRecoveryWarning = false) }
+                                }
+                                if (delivery.reviewRequired) {
+                                    launch {
+                                        val receipts = boundSource.terminalRecoveryReceipts(session)
+                                        val cancelled = boundSource.cancelledQueuedReceipts(session).toSet()
+                                        if (sourceGeneration == generation && source === boundSource && isVisibleSession(session) && receipts.isNotEmpty()) {
+                                            terminalRecoveryReview = TerminalRecoveryReview(boundSource, session, generation, receipts)
+                                            val uncertain = receipts.any { it !in cancelled }
+                                            _state.update { state -> state.copy(terminalRecoveryReviewAvailable = true,
+                                                terminalRecoveryUncertain = uncertain, queuedCancellationNotice = receipts.any { it in cancelled }) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        is ConversationDelivery.CancellationDrained -> {
+                            finishCancelledProjection(delivery)
+                            transitionCancellation?.takeIf { it.turnId == delivery.turnId && it.sessionId == canonicalSessionId(delivery.sessionId) }
+                                ?.consumed?.complete(delivery.terminalObserved)
+                        }
+                        is ConversationDelivery.CancellationAborted -> {
+                            abortCancelledProjection(delivery)
+                            transitionCancellation?.takeIf { it.turnId == delivery.turnId && it.sessionId == canonicalSessionId(delivery.sessionId) }
+                                ?.consumed?.complete(false)
+                        }
+                        is ConversationDelivery.AttachStarted -> {
+                            val interest = durableAttachInterest
+                            if (delivery.isActive() && interest?.requestId == delivery.requestId &&
+                                interest.sessionId == canonicalSessionId(delivery.snapshot.sessionId) &&
+                                interest.turnId == delivery.snapshot.turnId.toLong()
+                            ) {
+                                if (delivery.admissionPending) {
+                                    if (pendingAdmissionRecovery?.let { it.source === boundSource && it.sessionId == interest.sessionId &&
+                                            it.turnId == interest.turnId } != true) {
+                                        pendingAdmissionRecovery = PendingAdmissionRecovery(boundSource, interest.sessionId,
+                                            interest.turnId, generation, trustNotFound = false)
+                                    }
+                                    _state.update { state -> state.copy(recoveryRetryAvailable = false,
+                                        error = ChatError(strings.resolve(R.string.chat_recovery_unknown,
+                                            "暂时无法确认操作状态，请重试。"), ChatErrorKind.GENERIC)) }
+                                }
+                                reduceClientEvent(ClientEvent.TurnRecoveryState(delivery.snapshot), delivery.requestId)
+                            }
+                        }
+                        is ConversationDelivery.AdmissionPending -> {
+                            val interest = durableAttachInterest
+                            if (delivery.isActive() && interest?.requestId == delivery.requestId &&
+                                interest.sessionId == canonicalSessionId(delivery.sessionId) && interest.turnId == delivery.turnId
+                            ) {
+                                if (pendingAdmissionRecovery?.let { it.source === boundSource && it.sessionId == interest.sessionId &&
+                                        it.turnId == interest.turnId } != true) {
+                                    pendingAdmissionRecovery = PendingAdmissionRecovery(boundSource, interest.sessionId,
+                                        interest.turnId, generation, trustNotFound = false)
+                                }
+                                durableTurnId = interest.turnId
+                                inactiveWaitingTurnId = interest.turnId
+                                _state.update { state -> state.copy(durableRecoveryBlocked = true, recoveryRetryAvailable = false,
+                                    error = ChatError(strings.resolve(R.string.chat_recovery_unknown,
+                                        "暂时无法确认操作状态，请重试。"), ChatErrorKind.GENERIC)) }
+                            }
+                        }
+                        is ConversationDelivery.AttachReplayEnded -> {
+                            try {
+                                val accepted = finishDurableAttachReplay(delivery)
+                                delivery.acknowledged?.complete(accepted)
+                            }
+                            catch (error: Throwable) { delivery.acknowledged?.completeExceptionally(error); throw error }
+                        }
+                        is ConversationDelivery.AttachFailed -> {
+                            if (canonicalSessionId(delivery.sessionId) == canonicalSessionId(_state.value.session.id) &&
+                                durableAttachInterest?.let { it.turnId == delivery.turnId && it.requestId == delivery.requestId } == true
+                            ) preserveDurableRecoveryAfterAttachFailure(delivery.error)
+                        }
+                        is ConversationDelivery.ReconciliationNotFound -> {
+                            val interest = durableAttachInterest
+                            val matching = interest != null && interest.requestId == delivery.requestId &&
+                                interest.sessionId == canonicalSessionId(delivery.sessionId) && interest.turnId == delivery.turnId
+                            val accepted = when {
+                                !delivery.isActive() -> false
+                                !matching -> null
+                                else -> {
+                                    clearDurableRecoveryAfterTerminal(delivery.turnId, hadMatchingDurableIdentity = true)
+                                    _state.update { it.copy(streaming = false, cancellationInFlight = false,
+                                        error = ChatError(strings.resolve(R.string.chat_recovery_not_found,
+                                            "无法找到该运行记录，请检查对话后继续。"), ChatErrorKind.GENERIC)) }
+                                    true
+                                }
+                            }
+                            delivery.acknowledged?.complete(accepted)
+                        }
+                        ConversationDelivery.RecoveryStorageFailed -> markRecoveryStorageFailed()
+                        is ConversationDelivery.RecoveryInterestEnded -> Unit // consumed by the tracked flow
+                    }
                 }
             }
             launch {
@@ -449,7 +710,40 @@ class ChatViewModel(
      *    list clears it). It rides here, not the per-turn reply stream, because
      *    the plan outlives the turn that rewrote it.
      */
-    internal fun reduceClientEvent(event: ClientEvent) {
+    internal fun reduceClientEvent(event: ClientEvent, correlatedAttachRequest: String? = null) {
+        if (event is ClientEvent.QueuedTurnStatus) {
+            handleQueuedStatus(event)
+            return
+        }
+        if (event is ClientEvent.TurnRecoveryState) {
+            val snapshot = event.snapshot
+            if (!isVisibleSession(snapshot.sessionId)) return
+            val ownedTurn = durableTurnId ?: inactiveWaitingTurnId ?: liveWaitingTurnId
+            val interest = durableAttachInterest
+            if (interest != null && interest.requestId != null && interest.attaching && !interest.sawSnapshot &&
+                interest.sessionId == canonicalSessionId(snapshot.sessionId) && interest.turnId == snapshot.turnId.toLong() &&
+                correlatedAttachRequest != interest.requestId
+            ) return
+            val interested = interest != null && interest.sessionId == canonicalSessionId(snapshot.sessionId) &&
+                interest.turnId == snapshot.turnId.toLong()
+            val queuedStart = ownedTurn == null && snapshot.state == TurnRecoveryStateDto.RUNNING &&
+                matchesQueuedTurn(snapshot.sessionId, snapshot.turnId)
+            if (ownedTurn != null && ownedTurn != snapshot.turnId.toLong()) return
+            if (ownedTurn == null && !interested && !queuedStart) return
+            if (!recoveryRevisions.accept(snapshot)) return
+            bindVerifiedInitialSession(snapshot.sessionId)
+            if (queuedStart) adoptQueuedTurn(snapshot.sessionId, snapshot.turnId)
+            if (cancellingProjection?.let {
+                    it.generation == sourceGeneration && it.sessionId == canonicalSessionId(snapshot.sessionId) &&
+                        it.turnId == snapshot.turnId.toLong()
+                } == true && snapshot.state in setOf(
+                    TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED,
+                )
+            ) {
+                cancellingProjection?.terminalObserved = true
+                return
+            }
+        }
         if (event is ClientEvent.Error && isCompactTurnRejection(event.message.displayText())) {
             showCompactRejection()
             return
@@ -473,12 +767,31 @@ class ChatViewModel(
         when (event) {
             is ClientEvent.UserTranscriptRowIdentity -> {
                 if (!event.rowToken.startsWith("client-turn:")) return
+                event.rowToken.removePrefix("client-turn:").split(',').forEach { value ->
+                    value.toLongOrNull()?.let(queuedTurnInterests::remove)
+                }
                 val rowIds = event.rowToken.removePrefix("client-turn:").split(',')
                     .mapNotNull { id -> id.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }?.let { optimisticRowsByToken.remove("client-turn:$it") } }.toSet()
                 if (rowIds.isEmpty()) return
                 _state.update { state -> state.copy(messages = state.messages.map { message ->
                     if (message.id in rowIds) message.copy(transcriptUuid = event.uuid) else message
                 }) }
+            }
+            is ClientEvent.ModSessionEvent -> {
+                if (_state.value.sessionTransitioning ||
+                    !isVisibleSession(event.sessionId)
+                ) return
+                bindVerifiedInitialSession(event.sessionId)
+                when (val payload = event.payload) {
+                    is ModSessionEventPayload.Notice -> if (payload.isError) {
+                        val text = payload.message.displayText()
+                        _state.update { it.copy(error = ChatError(text, classifyError(text))) }
+                    } else _state.update { it.copy(statusLine = payload.message.displayText()) }
+                    is ModSessionEventPayload.Log -> _state.update { it.copy(statusLine = "${payload.plugin}: ${payload.text.displayText()}") }
+                    is ModSessionEventPayload.Toast -> _state.update { it.copy(statusLine = "${payload.plugin}: ${payload.text.displayText()}") }
+                    is ModSessionEventPayload.Notify -> _state.update { it.copy(statusLine = "${payload.plugin}: ${payload.text.displayText()}") }
+                    is ModSessionEventPayload.Status -> _state.update { it.copy(statusLine = payload.text?.displayText()) }
+                }
             }
             is ClientEvent.AssistantBlockIdentity -> {
                 pendingAssistantTranscriptUuids.add(event.messageUuid)
@@ -597,9 +910,13 @@ class ChatViewModel(
                 }
             }
                 is ClientEvent.TaskRow -> _state.update {
-                    val task = event.task.toBackgroundTaskUi()
+                    val incoming = event.task.toBackgroundTaskUi()
+                    val exitedUnknown = incoming.status == TaskStatusDto.EXITED_UNKNOWN ||
+                        incoming.taskId in it.exitedUnknownTaskIds
+                    val task = if (exitedUnknown) incoming.copy(status = TaskStatusDto.EXITED_UNKNOWN) else incoming
                     it.copy(
                         backgroundTasks = it.backgroundTasks + (task.taskId to task),
+                        exitedUnknownTaskIds = if (exitedUnknown) it.exitedUnknownTaskIds + task.taskId else it.exitedUnknownTaskIds,
                         activeBackgroundTaskIds = it.activeBackgroundTaskIds.withTaskStatus(
                             task.taskId,
                             task.status,
@@ -635,10 +952,22 @@ class ChatViewModel(
                 }
             }
             is ClientEvent.TaskStatusChanged -> {
+                val current = _state.value
+                val belongsToVisibleSession = event.originSessionId
+                    ?.let(::canonicalSessionId)
+                    ?.let { origin -> origin == canonicalSessionId(current.session.id) }
+                    ?: true
+                val knownUnknownInOrigin = event.originSessionId
+                    ?.let(::canonicalSessionId)
+                    ?.let { workflowStatusesBySession[it]?.get(event.taskId) == TaskStatusDto.EXITED_UNKNOWN }
+                    ?: false
+                // An observed unknown exit cannot transition to another state.
+                // Only compare against evidence for the event's own origin.
+                if (knownUnknownInOrigin || (belongsToVisibleSession && event.taskId in current.exitedUnknownTaskIds)) return
                 // `TaskStatusDto` is a UniFFI-generated Kotlin ENUM, not a
                 // sealed class — `is` would not compile.
                 val terminal = event.status == TaskStatusDto.COMPLETED || event.status == TaskStatusDto.FAILED
-                if (terminal) {
+                if (terminal && belongsToVisibleSession) {
                     val sessionId = _state.value.session.id
                     if (sessionId.isNotBlank() && sessionId != "new") {
                         backgroundExecution.notifyTaskFinished(
@@ -661,6 +990,11 @@ class ChatViewModel(
                         ?: true
                     if (!belongsToVisibleSession) return@update it
                     it.copy(
+                        exitedUnknownTaskIds = if (event.status == TaskStatusDto.EXITED_UNKNOWN) {
+                            it.exitedUnknownTaskIds + event.taskId
+                        } else {
+                            it.exitedUnknownTaskIds
+                        },
                         statusLine = if (belongsToVisibleSession) {
                             // Name the task by its human description when the
                             // row list already supplied one; the bare id is the
@@ -705,6 +1039,33 @@ class ChatViewModel(
                     return
                 }
                 val recoveredId = snapshot.turnId.toLong()
+                val interest = durableAttachInterest?.takeIf {
+                    it.sessionId == canonicalSessionId(snapshot.sessionId) && it.turnId == recoveredId
+                }
+                val firstAttachSnapshot = interest != null && !interest.sawSnapshot
+                if (firstAttachSnapshot) interest?.sawSnapshot = true
+                if (firstAttachSnapshot && durableTurnUiSequence == 0L && snapshot.projectionUncertain) {
+                    showDurableRecoveryWarning(
+                        strings.resolve(R.string.chat_recovery_projection_uncertain, "部分运行内容可能未恢复，请检查后继续。"),
+                    )
+                }
+                if (firstAttachSnapshot && durableTurnUiSequence == 0L && snapshot.firstSequence > 1uL) {
+                    markDurableReplayIncomplete()
+                }
+                if (firstAttachSnapshot && snapshot.reason in setOf("replay_history_truncated", "replay_cursor_ahead")) {
+                    markDurableReplayIncomplete()
+                }
+                val terminal = snapshot.state in setOf(
+                    TurnRecoveryStateDto.COMPLETED,
+                    TurnRecoveryStateDto.FAILED,
+                    TurnRecoveryStateDto.CANCELLED,
+                )
+                // Equal terminal snapshots received before the Attach boundary
+                // are repeats, not the later Resume confirmation.
+                if (interest?.attaching == true && terminal && interest.terminalSnapshot?.let {
+                        it.revision == snapshot.revision && it.state == snapshot.state
+                    } == true
+                ) return
                 // Capture this before assigning the event's id below.  A
                 // failed cold Resume clears the render token but deliberately
                 // keeps the durable id/blocked marker so a matching terminal
@@ -718,17 +1079,19 @@ class ChatViewModel(
                 val startsRecoveredAttach = recoveredTurnToken == null &&
                     turnJob == null &&
                     !_state.value.streaming &&
-                    durableTurnId != recoveredId
+                    (durableTurnId != recoveredId || inactiveWaitingTurnId == recoveredId) &&
+                    firstAttachSnapshot
                 if (startsRecoveredAttach) {
                     turnToken++
                     recoveredTurnToken = turnToken
                     recoveryReplayTurnId = recoveredId
-                    durableTurnUiSequence = 0L
+                    if (durableTurnId != recoveredId) durableTurnUiSequence = 0L
                     pendingRecoveredReplayAckTurnId = null
                     currentTurnOrigin = ConversationTurnOrigin.Ordinary
                 } else if (
                     recoveredTurnToken != null &&
-                    recoveryReplayTurnId == recoveredId
+                    recoveryReplayTurnId == recoveredId &&
+                    interest?.attaching != true
                 ) {
                     // AttachTurn has returned and ResumeTurn has now emitted its
                     // own state. Subsequent sequenced envelopes are live copies;
@@ -737,13 +1100,11 @@ class ChatViewModel(
                 }
                 durableTurnId = recoveredId
 
-                val terminal = snapshot.state in setOf(
-                    TurnRecoveryStateDto.COMPLETED,
-                    TurnRecoveryStateDto.FAILED,
-                    TurnRecoveryStateDto.CANCELLED,
-                )
+                if (interest != null && !interest.attaching && interest.expectsResume) {
+                    durableAttachInterest = null
+                }
                 val hasAuthoritativeRestoredTranscript =
-                    restoredTranscriptSessionId == canonicalSessionId(snapshot.sessionId)
+                    restoredTranscriptHasContent && restoredTranscriptSessionId == canonicalSessionId(snapshot.sessionId)
                 val isInactiveRecoveredCheckpoint = recoveredTurnToken != null &&
                     turnJob == null &&
                     !_state.value.streaming
@@ -751,6 +1112,7 @@ class ChatViewModel(
                 // immediately afterwards. Defer settling until ResumeTurn emits
                 // the authoritative terminal state a second time.
                 if (startsRecoveredAttach && terminal) {
+                    interest?.terminalSnapshot = snapshot
                     if (hasAuthoritativeRestoredTranscript) {
                         // SessionResumed is the complete, persisted transcript
                         // for a terminal turn.  Do not create a synthetic live
@@ -949,7 +1311,10 @@ class ChatViewModel(
                             }
                         }
                     }
-                } else if (pendingRecoveredReplayAckTurnId == event.turnId.toLong()) {
+                } else if (
+                    canonicalSessionId(event.sessionId) == canonicalSessionId(_state.value.session.id) &&
+                    pendingRecoveredReplayAckTurnId == event.turnId.toLong()
+                ) {
                     durableTurnUiSequence = maxOf(durableTurnUiSequence, event.sequence.toLong())
                     pendingRecoveredReplayAckTurnId = null
                 }
@@ -1163,6 +1528,8 @@ class ChatViewModel(
     /** Keep a failed cold resume actionable instead of reopening the composer. */
     private fun preserveDurableRecoveryAfterAttachFailure(error: Throwable) {
         val failure = error as? DurableAttachFailure ?: return
+        val uncertainAdmission = pendingAdmissionRecovery?.turnId == failure.turnId
+        durableAttachInterest = null
         durableTurnId = failure.turnId
         recoveredTurnToken = null
         recoveryReplayTurnId = null
@@ -1175,7 +1542,8 @@ class ChatViewModel(
                 streaming = false,
                 liveTurnWaitingForUser = false,
                 durableRecoveryBlocked = true,
-                statusLine = strings.resolve(
+                recoveryRetryAvailable = uncertainAdmission,
+                statusLine = if (uncertainAdmission) null else strings.resolve(
                     R.string.chat_background_paused_text,
                     // The fallback must be the resource's OWN zh-Hans copy —
                     // `DefaultConversationStrings` returns it verbatim, so a
@@ -1183,7 +1551,8 @@ class ChatViewModel(
                     // device never renders.
                     "后台时间已结束，打开对话即可安全恢复",
                 ),
-                error = ChatError(
+                error = if (uncertainAdmission) ChatError(strings.resolve(R.string.chat_recovery_unknown,
+                    "暂时无法确认操作状态，请重试。"), ChatErrorKind.GENERIC) else ChatError(
                     strings.resolve(
                         // Was `chat_error_session_switch_failed` — whose real
                         // copy is "会话切换失败"/"Failed to switch session", which
@@ -1246,6 +1615,426 @@ class ChatViewModel(
         )
     }
 
+    private fun ownsDurableDelivery(sessionId: String, turnId: ULong): Boolean {
+        if (turnId > Long.MAX_VALUE.toULong()) return false
+        val session = canonicalSessionId(sessionId)
+        val visible = canonicalSessionId(_state.value.session.id)
+        val confirmed = source.activeSessionState.value?.sessionId?.let(::canonicalSessionId)
+        if (session != visible && !(visible == "new" && session == confirmed)) return false
+        val owned = durableTurnId ?: inactiveWaitingTurnId ?: liveWaitingTurnId
+        val interest = durableAttachInterest
+        if (owned != null) return owned == turnId.toLong()
+        return interest != null && interest.sessionId == session && interest.turnId == turnId.toLong()
+    }
+
+    private fun isVisibleSession(sessionId: String): Boolean {
+        val session = canonicalSessionId(sessionId)
+        val visible = canonicalSessionId(_state.value.session.id)
+        if (session == visible) return true
+        return visible == "new" && !_state.value.sessionTransitioning &&
+            source.activeSessionState.value?.sessionId?.let(::canonicalSessionId) == session
+    }
+
+    private fun bindVerifiedInitialSession(sessionId: String) {
+        if (_state.value.session.id != "new" || !isVisibleSession(sessionId)) return
+        _state.update { it.copy(session = it.session.copy(id = sessionId), sessionReady = true) }
+    }
+
+    private fun markDurableReplayIncomplete() {
+        durableReplayDegraded = true
+        pendingDurableEvents.clear()
+        showDurableRecoveryWarning()
+    }
+
+    private fun showDurableRecoveryWarning() {
+        val message = strings.resolve(R.string.chat_recovery_replay_gap, "对话恢复不完整，请重新打开对话。")
+        showDurableRecoveryWarning(message)
+    }
+
+    private fun showDurableRecoveryWarning(message: String) {
+        _state.update { state ->
+            if (state.error == null) state.copy(error = ChatError(message, ChatErrorKind.GENERIC))
+            else state.copy(statusLine = message)
+        }
+    }
+
+    private fun queryQueuedRecoveries(owner: ConversationSource, generation: Int, session: String,
+        turns: List<Long>, visibleUuids: Set<String>) {
+        queuedStatusJob?.cancel()
+        queuedStatusRequests.clear()
+        queuedStatusJob = viewModelScope.launch {
+            for (batch in turns.distinct().chunked(32)) {
+                if (source !== owner || sourceGeneration != generation || !isVisibleSession(session)) return@launch
+                coroutineScope {
+                    val requests = batch.map { turn ->
+                        val id = java.util.UUID.randomUUID().toString()
+                        val request = QueuedStatusRequest(owner, session, turn, generation, visibleUuids)
+                        queuedStatusRequests[id] = request
+                        id to request
+                    }
+                    val submissions = requests.map { (id, request) -> async {
+                        runCatching { owner.queryQueuedRecovery(session, request.turnId, id) }.onFailure {
+                            if (queuedStatusRequests[id] === request) queuedStatusRequests.remove(id)
+                            request.completed.complete(Unit)
+                        }
+                    } }
+                    withTimeoutOrNull(10_000) { requests.map { it.second.completed }.awaitAll() }
+                    submissions.forEach { it.cancel() }
+                    requests.forEach { (id, request) ->
+                        if (queuedStatusRequests[id] === request) queuedStatusRequests.remove(id)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun handleQueuedStatus(event: ClientEvent.QueuedTurnStatus) {
+        val request = queuedStatusRequests[event.requestId] ?: return
+        if (source !== request.source || sourceGeneration != request.generation || !isVisibleSession(request.sessionId) ||
+            canonicalSessionId(event.sessionId) != request.sessionId || event.turnId != request.turnId.toULong()
+        ) return
+        queuedStatusRequests.remove(event.requestId)
+        request.completed.complete(Unit)
+        val resolution: QueuedRecoveryResolution
+        val turns = when (val status = event.status) {
+            is QueuedTurnStatusDto.Delivered -> {
+                resolution = QueuedRecoveryResolution.Delivered
+                confirmedQueuedMembers(event.turnId, status, request.visibleUuids, _state.value.messages).filter {
+                    queuedTurnInterests[it]?.let { interest ->
+                        interest.generation == request.generation && interest.sessionId == request.sessionId
+                    } == true
+                }
+            }
+            is QueuedTurnStatusDto.Cancelled -> { resolution = QueuedRecoveryResolution.CancelledBeforeStart; listOf(request.turnId) }
+            is QueuedTurnStatusDto.Terminal -> {
+                if (status.state !in setOf(TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED)) return
+                resolution = QueuedRecoveryResolution.Terminal
+                listOf(request.turnId)
+            }
+            else -> return
+        }
+        if (turns.isEmpty()) return
+        viewModelScope.launch {
+            if (source === request.source && sourceGeneration == request.generation && isVisibleSession(request.sessionId)) {
+                if (!request.source.resolveQueuedRecovery(request.sessionId, turns, resolution)) {
+                    showDurableRecoveryWarning(strings.resolve(R.string.chat_recovery_unknown, "暂时无法确认操作状态，请重试。"))
+                }
+            }
+        }
+    }
+
+    internal fun reduceDurableTurnDelivery(delivery: ConversationDelivery.TurnEvent) {
+        if (!delivery.isActive()) return
+        val attach = durableAttachInterest
+        if (delivery.excludedAttachRequestId != null && attach?.requestId == delivery.excludedAttachRequestId) return
+        if (attach?.attaching == true && attach.requestId != null &&
+            attach.sessionId == canonicalSessionId(delivery.sessionId) && attach.turnId == delivery.turnId.toLong() &&
+            delivery.attachRequestId != attach.requestId
+        ) return
+        if (delivery.attachRequestId != null && attach?.requestId != delivery.attachRequestId &&
+            !(ownsDurableDelivery(delivery.sessionId, delivery.turnId) && attach?.attaching != true &&
+                (turnJob != null || recoveredTurnToken != null) && _state.value.streaming)
+        ) return
+        val cancellation = cancellingProjection
+        if (cancellation != null && cancellation.generation == sourceGeneration &&
+            cancellation.sessionId == canonicalSessionId(delivery.sessionId) && cancellation.turnId == delivery.turnId.toLong()
+        ) {
+            if (delivery.sequence == null) {
+                if (cancellation.terminalObserved && delivery.event is ClientEvent.ToolUseResult) {
+                    showDurableRecoveryWarning(strings.resolve(R.string.chat_recovery_projection_uncertain,
+                        "部分运行内容可能未恢复，请检查后继续。"))
+                } else if (!cancellation.terminalObserved) markDurableReplayIncomplete()
+            }
+            if (delivery.event is ClientEvent.ToolUseResult) {
+                val reply = clientEventToReply(delivery.event, strings)
+                if (reply is ReplyEvent.ToolActivity || reply is ReplyEvent.ShellTool) {
+                    reduce(reply, turnToken)
+                    _state.update { it.copy(streaming = false, statusLine = strings.resolve(R.string.chat_stopping, "正在停止…")) }
+                }
+            }
+            return
+        }
+        if (durableTurnId == null && matchesQueuedTurn(delivery.sessionId, delivery.turnId) &&
+            delivery.event is ClientEvent.TurnStarted &&
+            (delivery.event.turnId == null || delivery.event.turnId == delivery.turnId) &&
+            (delivery.sequence == null || delivery.sequence == 1uL)
+        ) adoptQueuedTurn(delivery.sessionId, delivery.turnId)
+        if (!ownsDurableDelivery(delivery.sessionId, delivery.turnId)) return
+        // A failed attempt has no projected live owner. Its retry must begin
+        // at the last actually consumed cursor, even while another UI keeps
+        // receiving this source's live deliveries.
+        if (inactiveWaitingTurnId == delivery.turnId.toLong() && recoveredTurnToken == null &&
+            durableAttachInterest?.attaching != true
+        ) return
+        bindVerifiedInitialSession(delivery.sessionId)
+        val attaching = durableAttachInterest?.let {
+            it.attaching && it.turnId == delivery.turnId.toLong() && it.sessionId == canonicalSessionId(delivery.sessionId)
+        } == true
+        val sequence = delivery.sequence
+        if (sequence == null) {
+            markDurableReplayIncomplete()
+            projectDurableTurnEvent(delivery, retained = false)
+            return
+        }
+        if (durableReplayDegraded) {
+            if (!attaching) projectDurableTurnEvent(delivery, retained = false)
+            return
+        }
+        if (sequence > Long.MAX_VALUE.toULong()) {
+            markDurableReplayIncomplete()
+            return
+        }
+        val projected = durableTurnUiSequence.toULong()
+        if (sequence <= projected || pendingDurableEvents.containsKey(sequence)) return
+        if (sequence != projected + 1uL) {
+            if (pendingDurableEvents.size >= 512) markDurableReplayIncomplete()
+            else pendingDurableEvents[sequence] = delivery
+            return
+        }
+        var nextSequence = sequence
+        var next = delivery
+        while (true) {
+            if (!projectDurableTurnEvent(next, retained = attaching)) return
+            durableTurnUiSequence = nextSequence.toLong()
+            if (nextSequence == Long.MAX_VALUE.toULong()) return
+            val buffered = pendingDurableEvents.remove(nextSequence + 1uL) ?: return
+            nextSequence += 1uL
+            next = buffered
+        }
+    }
+
+    private fun projectDurableTurnEvent(delivery: ConversationDelivery.TurnEvent, retained: Boolean): Boolean {
+        val event = delivery.event
+        if (retained && event is ClientEvent.TurnStarted) return true
+        if (retained && (event is ClientEvent.TurnEnded || event is ClientEvent.Error)) {
+            markDurableReplayIncomplete()
+            return false
+        }
+        if (retained && restoredTranscriptHasContent &&
+            restoredTranscriptSessionId == canonicalSessionId(delivery.sessionId)
+        ) {
+            markDurableReplayIncomplete()
+            return false
+        }
+        val reply = clientEventToReply(event, strings)
+        val sessionOnly = when (event) {
+            is ClientEvent.UiLog -> {
+                _state.update { it.copy(statusLine = "${event.plugin}: ${event.text.displayText()}") }
+                true
+            }
+            is ClientEvent.UiToast -> {
+                _state.update { it.copy(statusLine = "${event.plugin}: ${event.text.displayText()}") }
+                true
+            }
+            is ClientEvent.UiStatus -> {
+                _state.update { it.copy(statusLine = event.text?.displayText()) }
+                true
+            }
+            is ClientEvent.Attachment -> when (val attachment = event.attachment) {
+                is AttachmentDto.NestedMemory -> {
+                    _state.update { it.copy(statusLine = attachment.displayPath) }
+                    true
+                }
+                else -> false
+            }
+            is ClientEvent.CoordinatorWorker -> {
+                val worker = event.worker
+                _state.update { state ->
+                    val entry = SessionAgentUi(worker.agentId, worker.name, worker.agentType, null, worker.status, null)
+                    state.copy(sessionAgents = state.sessionAgents.filterNot { it.agentId == worker.agentId } + entry)
+                }
+                true
+            }
+            else -> false
+        }
+        val auxiliary = event is ClientEvent.AskUserQuestion || event is ClientEvent.AskUserQuestionResolved ||
+            event is ClientEvent.PermissionRequestResolved || event is ClientEvent.PlanUpdated || sessionOnly
+        if (reply == null && !auxiliary) {
+            markDurableReplayIncomplete()
+            return false
+        }
+        val liveSubmission = recoveredTurnToken == null && durableTurnId == delivery.turnId.toLong() &&
+            (turnJob != null || _state.value.streaming)
+        if (liveSubmission && event is ClientEvent.TextDelta && !_state.value.streaming) {
+            markDurableReplayIncomplete()
+            return false
+        }
+        val token = turnToken
+        reduceClientEvent(event)
+        if (liveSubmission && reply != null) reduce(reply, token)
+        return true
+    }
+
+    internal fun noteDurableAttach(sessionId: String, turnId: Long, expectsResume: Boolean, requestId: String? = null) {
+        val session = canonicalSessionId(sessionId)
+        if (session != canonicalSessionId(_state.value.session.id)) return
+        durableAttachInterest = DurableAttachInterest(session, turnId, expectsResume, requestId?.takeIf(String::isNotBlank))
+    }
+
+    private fun matchesQueuedTurn(sessionId: String, turnId: ULong): Boolean {
+        val interest = queuedTurnInterests[turnId.toLong()] ?: return false
+        val session = canonicalSessionId(sessionId)
+        return interest.generation == sourceGeneration && interest.sessionId == session && isVisibleSession(session)
+    }
+
+    private fun adoptQueuedTurn(sessionId: String, turnId: ULong) {
+        if (durableTurnId != null || !matchesQueuedTurn(sessionId, turnId)) return
+        queuedTurnInterests.remove(turnId.toLong())
+        turnToken++
+        durableTurnId = turnId.toLong()
+        recoveredTurnToken = turnToken
+        recoveryReplayTurnId = null
+        durableTurnUiSequence = 0L
+        durableReplayDegraded = false
+        pendingDurableEvents.clear()
+        currentTurnOrigin = ConversationTurnOrigin.Ordinary
+        _state.update {
+            it.copy(streaming = true, durableRecoveryBlocked = false, liveTurnWaitingForUser = false,
+                statusLine = null, agentRun = AgentRunState(turnId = turnToken))
+        }
+        reportBackgroundTurnState()
+    }
+
+    private fun finishCancelledProjection(delivery: ConversationDelivery.CancellationDrained) {
+        val cancellation = cancellingProjection ?: return
+        if (cancellation.generation != sourceGeneration || cancellation.turnId != delivery.turnId ||
+            cancellation.sessionId != canonicalSessionId(delivery.sessionId)
+        ) return
+        cancellingProjection = null
+        if (!delivery.terminalObserved) {
+            cancellation.finished.complete(false)
+            preserveUncertainAdmission(source, delivery.sessionId, delivery.turnId, cancellation.generation)
+            return
+        }
+        clearDurableRecoveryAfterTerminal(delivery.turnId, hadMatchingDurableIdentity = true)
+        _state.update { state ->
+            val settled = state.settleTurn(state.agentRun?.finish(AgentRunOutcome.Cancelled),
+                state.streamingMessage?.withoutPendingVisualizations())
+            state.copy(streaming = false, cancellationInFlight = false, statusLine = null,
+                messages = settled.messages, streamingMessage = null, agentRun = settled.run,
+                agentRunsByMessageId = settled.agentRunsByMessageId)
+        }
+        reportBackgroundTurnState()
+        cancellation.finished.complete(true)
+    }
+
+    private fun preserveUncertainAdmission(owner: ConversationSource, sessionId: String, turnId: Long, generation: Int) {
+        if (source !== owner || sourceGeneration != generation || !isVisibleSession(sessionId)) return
+        if (_state.value.recoveryStorageFailed) return
+        pendingAdmissionRecovery = PendingAdmissionRecovery(owner, canonicalSessionId(sessionId), turnId, generation)
+        turnJob = null
+        durableTurnId = turnId
+        inactiveWaitingTurnId = turnId
+        recoveredTurnToken = null
+        recoveryReplayTurnId = null
+        _state.update { it.copy(streaming = false, cancellationInFlight = false, durableRecoveryBlocked = true,
+            recoveryRetryAvailable = true, statusLine = null,
+            error = ChatError(strings.resolve(R.string.chat_recovery_unknown,
+                "暂时无法确认操作状态，请重试。"), ChatErrorKind.GENERIC)) }
+        retryDurableRecovery()
+    }
+
+    private fun markRecoveryStorageFailed() {
+        _state.update { it.copy(recoveryStorageFailed = true, durableRecoveryBlocked = true,
+            recoveryRetryAvailable = false, statusLine = null,
+            error = ChatError(strings.resolve(R.string.chat_recovery_storage_failed,
+                "无法保存对话恢复状态，请重新启动应用后检查对话。"), ChatErrorKind.GENERIC)) }
+    }
+
+    /** Retry a bounded, non-resuming query for the original owner. */
+    fun retryDurableRecovery() {
+        val pending = pendingAdmissionRecovery ?: return
+        if (admissionRecoveryJob?.isActive == true || source !== pending.source ||
+            sourceGeneration != pending.generation || !isVisibleSession(pending.sessionId)) return
+        _state.update { it.copy(recoveryRetryAvailable = false,
+            statusLine = strings.resolve(R.string.chat_status_resuming_session, "正在恢复会话…")) }
+        admissionRecoveryJob = viewModelScope.launch {
+            var began = false
+            try {
+                withTimeout(25_000) {
+                    pending.source.reconcileDurableTurnForUi(pending.sessionId, pending.turnId, durableTurnUiSequence, pending.trustNotFound) {
+                            session, turn, expectsResume, request ->
+                        began = true
+                        if (source === pending.source && sourceGeneration == pending.generation) {
+                            noteDurableAttach(session, turn, expectsResume, request)
+                        }
+                    }
+                }
+                check(began) { "Recovery query was not started" }
+                if (pendingAdmissionRecovery === pending) {
+                    pendingAdmissionRecovery = null
+                    _state.update { it.copy(recoveryRetryAvailable = false, statusLine = null) }
+                }
+            } catch (cancelled: CancellationException) {
+                if (!kotlinx.coroutines.currentCoroutineContext().isActive) throw cancelled
+                if (pendingAdmissionRecovery === pending) _state.update { it.copy(recoveryRetryAvailable = true, statusLine = null) }
+            } catch (_: Throwable) {
+                if (pendingAdmissionRecovery === pending) _state.update { it.copy(recoveryRetryAvailable = true, statusLine = null,
+                    durableRecoveryBlocked = true,
+                    error = ChatError(strings.resolve(R.string.chat_recovery_unknown,
+                        "暂时无法确认操作状态，请重试。"), ChatErrorKind.GENERIC)) }
+            }
+        }
+    }
+
+    fun acknowledgeTerminalRecovery() {
+        val review = terminalRecoveryReview ?: return
+        if (source !== review.source || sourceGeneration != review.generation || !isVisibleSession(review.sessionId)) return
+        viewModelScope.launch {
+            val saved = runCatching { review.source.acknowledgeTerminalRecovery(review.sessionId, review.turns) }.getOrDefault(false)
+            if (source !== review.source || sourceGeneration != review.generation || !isVisibleSession(review.sessionId)) return@launch
+            if (!saved) {
+                reportHostError(strings.resolve(R.string.chat_recovery_unknown, "暂时无法确认操作状态，请重试。"))
+                return@launch
+            }
+            val remaining = review.source.terminalRecoveryReceipts(review.sessionId)
+            val cancelled = review.source.cancelledQueuedReceipts(review.sessionId).toSet()
+            if (source !== review.source || sourceGeneration != review.generation || !isVisibleSession(review.sessionId)) return@launch
+            terminalRecoveryReview = if (remaining.isEmpty()) null else review.copy(turns = remaining)
+            _state.update { it.copy(terminalRecoveryReviewAvailable = remaining.isNotEmpty(),
+                terminalRecoveryUncertain = remaining.any { turn -> turn !in cancelled },
+                queuedCancellationNotice = remaining.any { turn -> turn in cancelled }) }
+        }
+    }
+
+    private fun abortCancelledProjection(delivery: ConversationDelivery.CancellationAborted) {
+        val cancellation = cancellingProjection ?: return
+        if (cancellation.generation != sourceGeneration || cancellation.turnId != delivery.turnId ||
+            cancellation.sessionId != canonicalSessionId(delivery.sessionId)
+        ) return
+        if (delivery.terminalObserved) {
+            cancellation.terminalObserved = true
+            return // The source will publish the final boundary after TurnEnded.
+        }
+        cancellingProjection = null
+        recoveredTurnToken = turnToken
+        _state.update { it.copy(streaming = true, cancellationInFlight = false, statusLine = null) }
+        cancellation.finished.complete(false)
+    }
+
+    internal fun finishDurableAttachReplay(delivery: ConversationDelivery.AttachReplayEnded): Boolean? {
+        if (!delivery.isActive()) return false
+        val interest = durableAttachInterest ?: return null
+        if (interest.sessionId != canonicalSessionId(delivery.sessionId) ||
+            interest.turnId != delivery.turnId || interest.expectsResume != delivery.expectsResume ||
+            interest.requestId != delivery.requestId || !interest.attaching
+        ) return null
+        if (pendingDurableEvents.isNotEmpty()) markDurableReplayIncomplete()
+        interest.attaching = false
+        if (!durableReplayDegraded && !interest.expectsResume &&
+            pendingAdmissionRecovery?.let { it.sessionId == interest.sessionId && it.turnId == interest.turnId } == true
+        ) {
+            pendingAdmissionRecovery = null
+            _state.update { it.copy(recoveryRetryAvailable = false) }
+        }
+        if (recoveryReplayTurnId == interest.turnId) recoveryReplayTurnId = null
+        if (!interest.expectsResume) {
+            durableAttachInterest = null
+            interest.terminalSnapshot?.let { reduceClientEvent(ClientEvent.TurnRecoveryState(it)) }
+        }
+        return !durableReplayDegraded
+    }
+
     /**
      * Release durable recovery ownership after a terminal event even when a
      * failed Attach/Resume left no render token. The event id is correlated
@@ -1257,6 +2046,8 @@ class ChatViewModel(
         hadMatchingDurableIdentity: Boolean,
     ) {
         if (!hadMatchingDurableIdentity) return
+        if (pendingAdmissionRecovery?.turnId == recoveredId) pendingAdmissionRecovery = null
+        if (durableAttachInterest?.turnId == recoveredId) durableAttachInterest = null
         val clearsInactive = inactiveWaitingTurnId == recoveredId
         val clearsLive = liveWaitingTurnId == recoveredId
         if (clearsInactive) {
@@ -1270,6 +2061,7 @@ class ChatViewModel(
             state.copy(
                 streaming = if (clearsLive) false else state.streaming,
                 durableRecoveryBlocked = false,
+                recoveryRetryAvailable = false,
                 liveTurnWaitingForUser = if (clearsLive) false else state.liveTurnWaitingForUser,
                 statusLine = if (clearsInactive || clearsLive) null else state.statusLine,
             )
@@ -1285,11 +2077,13 @@ class ChatViewModel(
     ) {
         val origin = canonicalSessionId(originSessionId)
         if (origin.isBlank()) return
+        val previous = workflowStatusesBySession[origin]?.get(taskId)
+        val effectiveStatus = if (previous == TaskStatusDto.EXITED_UNKNOWN) TaskStatusDto.EXITED_UNKNOWN else status
         workflowStatusesBySession[origin] =
-            workflowStatusesBySession[origin].orEmpty() + (taskId to status)
+            workflowStatusesBySession[origin].orEmpty() + (taskId to effectiveStatus)
         val sessionRuns = workflowRunsBySession[origin] ?: return
         val run = sessionRuns[taskId] ?: return
-        val nextRuns = sessionRuns + (taskId to run.copy(status = status))
+        val nextRuns = sessionRuns + (taskId to run.copy(status = effectiveStatus))
         workflowRunsBySession[origin] = nextRuns
         if (canonicalSessionId(_state.value.session.id) == origin) {
             _state.update { it.copy(workflowRuns = nextRuns) }
@@ -1387,6 +2181,8 @@ class ChatViewModel(
      */
     fun discardRecoveredTurn() {
         val turnId = inactiveWaitingTurnId ?: return
+        val discardSource = source
+        val discardSession = _state.value.session.id
         if (durableDiscardInFlightTurnId == turnId) return
         durableDiscardInFlightTurnId = turnId
         _state.update {
@@ -1402,7 +2198,7 @@ class ChatViewModel(
         }
         armDurableDiscardWatchdog(turnId)
         viewModelScope.launch {
-            runCatching { source.discardDurableTurn(turnId) }
+            runCatching { discardSource.discardDurableTurnForSession(discardSession, turnId) }
                 .onFailure { error ->
                     if (inactiveWaitingTurnId == turnId) {
                         durableDiscardInFlightTurnId = null
@@ -1434,11 +2230,9 @@ class ChatViewModel(
     /**
      * Bound the wait for a submitted discard's terminal confirmation.
      *
-     * The host can accept a discard and emit no `TurnRecoveryState` at all (see
-     * [discardRecoveredTurn]). When the wait expires, release the recovery
-     * ownership the same way a real terminal state would — the engine ACCEPTED
-     * the discard, so it is not going to run this checkpoint — and say so, so
-     * the composer never stays blocked on a confirmation that is never coming.
+     * The host can accept a discard without emitting a terminal snapshot.
+     * Bound the wait while keeping ownership until an authoritative query or
+     * terminal callback confirms the result, then allow the user to retry.
      *
      * A correlated terminal state that does arrive first cancels this job
      * through [cancelDurableDiscardWatchdog]; the identity check makes a late
@@ -1451,20 +2245,23 @@ class ChatViewModel(
             if (durableDiscardInFlightTurnId != turnId) return@launch
             if (inactiveWaitingTurnId != turnId) return@launch
             durableDiscardWatchdogJob = null
-            clearDurableRecoveryAfterTerminal(
-                recoveredId = turnId,
-                hadMatchingDurableIdentity = true,
-            )
+            durableDiscardInFlightTurnId = null
             _state.update {
                 it.copy(
+                    statusLine = null,
                     error = ChatError(
                         strings.resolve(
                             R.string.chat_error_discard_unconfirmed,
-                            "后台对话的丢弃未获确认，已解除该对话的锁定。",
+                            "暂时无法确认后台对话已停止，请重试。",
                         ),
                         ChatErrorKind.GENERIC,
                     ),
                 )
+            }
+            val owner = source
+            val session = _state.value.session.id
+            if (owner.supportsSubmissionAdmission && session != "new" && session.isNotBlank()) {
+                preserveUncertainAdmission(owner, session, turnId, sourceGeneration)
             }
         }
     }
@@ -1589,8 +2386,15 @@ class ChatViewModel(
             return
         }
         val previous = source
+        val pendingBeforeReconnect = pendingAdmissionRecovery
+        pendingAdmissionRecovery = null
+        admissionRecoveryJob?.cancel()
+        admissionRecoveryJob = null
         reconnectGeneration = generation
         sourceGeneration++
+        queuedTurnInterests.clear()
+        cancellingProjection?.finished?.complete(false)
+        cancellingProjection = null
 
         abandonLocalTurn()?.cancel()
         explicitCancellation?.cancel()
@@ -1602,6 +2406,12 @@ class ChatViewModel(
 
         sideChats.release()
         source = replacement
+        if (pendingBeforeReconnect != null) {
+            pendingAdmissionRecovery = pendingBeforeReconnect.copy(source = replacement, generation = sourceGeneration,
+                requiresResumeActivation = true, trustNotFound = false)
+            durableTurnId = null
+            inactiveWaitingTurnId = null
+        }
         _engineSource.value = replacement
         _sessions.value = EngineSessionState.loading()
         _pendingPermission.value = null
@@ -1614,6 +2424,7 @@ class ChatViewModel(
             it.copy(
                 pendingQuestions = emptyList(),
                 activeBackgroundTaskIds = emptySet(),
+                exitedUnknownTaskIds = emptySet(),
                 backgroundTasks = emptyMap(),
                 sessionAgents = emptyList(),
                 workflowResumeState = WorkflowResumeUiState.Idle,
@@ -1666,18 +2477,45 @@ class ChatViewModel(
         rollbackSelection: suspend () -> Unit = {},
         onCommitted: () -> Unit = {},
     ): Boolean = workspaceSwitchMutex.withLock {
+        if (pendingAdmissionRecovery != null) {
+            _state.update { it.copy(recoveryRetryAvailable = admissionRecoveryJob?.isActive != true) }
+            return@withLock false
+        }
         if (sideChats.hasLiveChats) {
             reportHostError(strings.resolve(R.string.side_chat_end_before_workspace, "请先结束旁聊，再切换工作区。"))
             return@withLock false
         }
         if (!allowInactiveWaitingRecovery && refuseWhileDurableTurnParked()) return@withLock false
         val previous = source
-        fun replacementIsBlocked(): Boolean = sideChats.hasLiveChats || source !== previous ||
-            _state.value.blocksWorkspaceReplacement(
+        val previousGeneration = sourceGeneration
+        suspend fun replacementIsBlocked(): Boolean {
+            // A failed preference commit can precede delivery of its UI marker.
+            // Recheck the owning store as well as local state after every await.
+            val healthy = try {
+                previous.recoveryStorageAvailable()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                return true
+            }
+            if (!healthy && source === previous && sourceGeneration == previousGeneration) markRecoveryStorageFailed()
+            return !healthy || pendingAdmissionRecovery != null || _state.value.recoveryStorageFailed ||
+                liveWaitingTurnId != null || (_state.value.durableRecoveryBlocked &&
+                    (!allowInactiveWaitingRecovery || inactiveWaitingTurnId == null)) ||
+                (!allowInactiveWaitingRecovery && inactiveWaitingTurnId != null) ||
+                sideChats.hasLiveChats || source !== previous || sourceGeneration != previousGeneration ||
+                _state.value.blocksWorkspaceReplacement(
                 hasPendingPermission = _pendingPermission.value != null,
                 replacePendingTransition = replacePendingTransition,
             )
+        }
         fun reportBlockedReplacement() {
+            if (pendingAdmissionRecovery != null) {
+                _state.update { it.copy(recoveryRetryAvailable = admissionRecoveryJob?.isActive != true) }
+                return
+            }
+            if (_state.value.recoveryStorageFailed) return
+            if (!allowInactiveWaitingRecovery && refuseWhileDurableTurnParked()) return
             _state.update {
                 it.copy(
                     error = ChatError(
@@ -1780,6 +2618,9 @@ class ChatViewModel(
         }
 
         sourceGeneration++
+        queuedTurnInterests.clear()
+        cancellingProjection?.finished?.complete(false)
+        cancellingProjection = null
         sourceBindingJob?.cancel()
         sideChats.release()
         source = replacement
@@ -1796,6 +2637,7 @@ class ChatViewModel(
             it.copy(
                 pendingQuestions = emptyList(),
                 activeBackgroundTaskIds = emptySet(),
+                exitedUnknownTaskIds = emptySet(),
                 backgroundTasks = emptyMap(),
                 sessionAgents = emptyList(),
                 workflowResumeState = WorkflowResumeUiState.Idle,
@@ -1928,6 +2770,9 @@ class ChatViewModel(
             ) return
         }
         abandonLocalTurn()
+        queuedTurnInterests.clear()
+        cancellingProjection?.finished?.complete(false)
+        cancellingProjection = null
         pendingResumeId = null
         pendingNewSession = false
         // The previous local/recovered turn belongs to the session being
@@ -1938,6 +2783,7 @@ class ChatViewModel(
         restoredTranscriptSessionId = restored.sessionId
             .takeIf { restored.kind == SessionActivationKind.Resumed }
             ?.let(::canonicalSessionId)
+        restoredTranscriptHasContent = restored.kind == SessionActivationKind.Resumed && restored.transcript.isNotEmpty()
         val title = _sessions.value.rows.firstOrNull { canonicalSessionId(it.uuid) == canonicalSessionId(restored.sessionId) }?.title
             ?: _state.value.session.takeIf { canonicalSessionId(it.id) == canonicalSessionId(restored.sessionId) }?.title
             ?: _state.value.session.title
@@ -1961,6 +2807,7 @@ class ChatViewModel(
                 agentRunsByMessageId = reconstructTerminalAgentRuns(restored.transcript),
                 error = null,
                 activeBackgroundTaskIds = emptySet(),
+                exitedUnknownTaskIds = emptySet(),
                 backgroundTasks = emptyMap(),
                 sessionAgents = emptyList(),
                 workflowResumeState = WorkflowResumeUiState.Idle,
@@ -2046,6 +2893,10 @@ class ChatViewModel(
         if (canonicalRef.id.isBlank() || canonicalRef.id == "new") return false
         val onAnnouncedSession =
             canonicalSessionId(_state.value.session.id) == canonicalRef.id
+        if (!onAnnouncedSession && pendingAdmissionRecovery != null) {
+            _state.update { it.copy(recoveryRetryAvailable = admissionRecoveryJob?.isActive != true) }
+            return false
+        }
         val holdingAnnouncedTurn = turnId != null && (
             turnId == inactiveWaitingTurnId ||
                 turnId == liveWaitingTurnId ||
@@ -2128,6 +2979,9 @@ class ChatViewModel(
      */
     private fun abandonLocalTurn(): Job? {
         turnToken++
+        durableAttachInterest = null
+        durableReplayDegraded = false
+        pendingDurableEvents.clear()
         recoveredTurnToken = null
         recoveryReplayTurnId = null
         durableTurnUiSequence = 0L
@@ -2145,13 +2999,49 @@ class ChatViewModel(
      * unsubscribing first could hide the terminal event while the engine keeps
      * running.
      */
-    private suspend fun cancelEngineTurn(job: Job?, turnId: Long? = null) {
+    private suspend fun cancelEngineTurn(
+        job: Job?, turnId: Long? = null, sessionId: String? = null,
+        targetSource: ConversationSource = source,
+    ) {
         if (job == null && turnId == null) return
         try {
-            source.cancel(turnId)
+            if (sessionId != null) targetSource.cancelForSession(sessionId, turnId) else targetSource.cancel(turnId)
         } finally {
             job?.cancelAndJoin()
         }
+    }
+
+    private data class CancellationSubmission(val sent: Boolean, val uncertainAdmission: Boolean)
+
+    /** The absence of a terminal callback is not proof of successful cancellation. */
+    private suspend fun cancelSubmittedTurn(
+        targetSource: ConversationSource, job: Job?, turnId: Long?, sessionId: String?,
+        submission: ActiveSubmission?,
+    ): CancellationSubmission = withContext(NonCancellable) {
+        val completion = submission?.admission?.cancelAndAwait()
+        if (submission != null && (completion == null || completion.outcome == TurnSubmissionAdmission.Outcome.NotAdmitted)) {
+            job?.cancelAndJoin()
+            targetSource.abandonUnsubmittedTurn(submission.sessionId ?: sessionId, submission.turnId)
+            CancellationSubmission(sent = false, uncertainAdmission = false)
+        } else {
+            cancelEngineTurn(job, turnId, completion?.sessionId ?: sessionId, targetSource)
+            CancellationSubmission(sent = true, uncertainAdmission = completion?.outcome == TurnSubmissionAdmission.Outcome.Unknown)
+        }
+    }
+
+    private suspend fun resolveSubmissionOwner(
+        targetSource: ConversationSource, capturedSession: String?, sourceEpoch: Int, sessionEpoch: Long,
+    ): String {
+        if (!capturedSession.isNullOrBlank()) return capturedSession
+        // A newly constructed source has not yet published its workspace
+        // session. Resolve that initial owner only while the initiating action
+        // still belongs to the same source and session transition.
+        val initial = targetSource.submissionSession()?.takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("Cannot start a turn without a session owner")
+        check(source === targetSource && sourceGeneration == sourceEpoch && sessionToken == sessionEpoch &&
+            (_state.value.session.id == "new" || canonicalSessionId(_state.value.session.id) == canonicalSessionId(initial))
+        ) { "Session changed before the turn was submitted" }
+        return initial
     }
 
     /**
@@ -2168,6 +3058,16 @@ class ChatViewModel(
         status: String,
         allowInactiveWaitingRecovery: Boolean = false,
     ) {
+        val pendingCancellation = cancellingProjection
+        if (_state.value.cancellationInFlight && pendingCancellation != null) {
+            val waitingToken = ++sessionToken
+            viewModelScope.launch {
+                if (pendingCancellation.finished.await() && waitingToken == sessionToken &&
+                    pendingCancellation.generation == sourceGeneration
+                ) beginSessionTransition(target, newSession, newSessionDirectory, resumeEmpty, status, allowInactiveWaitingRecovery)
+            }
+            return
+        }
         if (!allowInactiveWaitingRecovery && refuseWhileDurableTurnParked()) return
         // Do not enqueue a second ambiguous Resume/New while the first command
         // is accepted but its SessionResumed/SessionStarted event is still in
@@ -2175,8 +3075,22 @@ class ChatViewModel(
         if (_state.value.sessionTransitioning && sessionTransitionJob != null) return
         sessionToken++
         val token = sessionToken
+        val previousState = _state.value
+        terminalRecoveryReview = null
+        queuedStatusRequests.clear()
+        queuedStatusJob?.cancel()
+        queuedStatusJob = null
         pendingResumeId = target.id.takeUnless { newSession }
         pendingNewSession = newSession
+        val previousSession = _state.value.session.id.takeUnless { it == "new" }
+            ?: source.activeSessionState.value?.sessionId
+        val previousTurn = durableTurnId
+        val previousSource = source
+        val previousSubmission = activeSubmission?.takeIf { it.source === previousSource && it.turnId == previousTurn }
+        val transitionWaiter = if (previousSession != null && previousTurn != null) {
+            TransitionCancellation(canonicalSessionId(previousSession), previousTurn).also { transitionCancellation = it }
+        } else null
+        activeSubmission = null
         val detachedTurn = abandonLocalTurn()
         _state.update {
             it.copy(
@@ -2191,6 +3105,10 @@ class ChatViewModel(
                 liveTurnWaitingForUser = false,
                 sessionTransitioning = true,
                 sessionReady = false,
+                terminalRecoveryReviewAvailable = false,
+                terminalRecoveryUncertain = false,
+                queuedCancellationNotice = false,
+                queuedRecoveryWarning = false,
                 statusLine = status,
                 compaction = null,
                 shellTools = emptyList(),
@@ -2209,7 +3127,21 @@ class ChatViewModel(
                 explicitCancellation?.await()?.getOrThrow()
                 explicitCancellation = null
                 _state.update { it.copy(cancellationInFlight = false) }
-                cancelEngineTurn(detachedTurn)
+                val cancellation = cancelSubmittedTurn(previousSource, detachedTurn, previousTurn, previousSession, previousSubmission)
+                if (cancellation.uncertainAdmission) {
+                    val confirmed = if (cancellation.sent && previousSource.orderedCancellationBoundaries && transitionWaiter != null) {
+                        withTimeoutOrNull(10_000) { transitionWaiter.consumed.await() } == true
+                    } else false
+                    if (!confirmed && token == sessionToken && source === previousSource && previousTurn != null && previousSession != null) {
+                        pendingResumeId = null
+                        pendingNewSession = false
+                        if (transitionCancellation === transitionWaiter) transitionCancellation = null
+                        _state.value = previousState.copy(sessionTransitioning = false, sessionReady = true, streaming = false)
+                        preserveUncertainAdmission(previousSource, previousSession, previousTurn, sourceGeneration)
+                        return@launch
+                    }
+                }
+                if (transitionCancellation === transitionWaiter) transitionCancellation = null
                 when {
                     newSession && newSessionDirectory != null -> source.newSession(newSessionDirectory)
                     newSession -> source.newSession()
@@ -2378,6 +3310,8 @@ class ChatViewModel(
         }
         if (refuseWhileDurableTurnParked()) return
         if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
+        if (_state.value.recoveryStorageFailed) return
+        if (_state.value.cancellationInFlight) return
         if (explicitCancellation?.isActive == true) return
         if (_state.value.compaction?.status == CompactionProgressStatus.Running) return
 
@@ -2418,9 +3352,21 @@ class ChatViewModel(
 
         // The widget this prompt follows up on rides with it exactly once.
         val visualizationChip = _state.value.visualizationChip
+        val actionSource = source
+        val actionSourceGeneration = sourceGeneration
+        val actionSessionToken = sessionToken
+        val actionSession = (_state.value.session.id.takeUnless { it == "new" }
+            ?: actionSource.activeSessionState.value?.sessionId)?.takeIf(String::isNotBlank)
 
         if (_state.value.streaming) {
-            val queuedTurnId = DurableConversationTurnIds.next()
+            val queuedTurnId = DurableConversationTurnIds.next() ?: run {
+                reportHostError(strings.resolve(R.string.chat_engine_unavailable, "移动端引擎当前不可用"))
+                return
+            }
+            val queuedSource = actionSource
+            val queuedGeneration = actionSourceGeneration
+            var queuedSession = actionSession?.let(::canonicalSessionId).orEmpty()
+            if (queuedSession.isNotBlank()) queuedTurnInterests[queuedTurnId] = QueuedTurnInterest(queuedSession, queuedGeneration)
             val queuedUserMessage = Message(role = Role.User, sentAtMs = System.currentTimeMillis(), text = trimmed, images = images, visualizationContext = visualizationChip)
             optimisticRowsByToken["client-turn:$queuedTurnId"] = queuedUserMessage.id
             savedState?.set(KEY_DRAFT, "")
@@ -2434,8 +3380,17 @@ class ChatViewModel(
             }
             viewModelScope.launch {
                 runCatching {
-                    source.submitClientCommand(
+                    if (queuedSource.supportsSubmissionAdmission) {
+                        queuedSession = canonicalSessionId(resolveSubmissionOwner(
+                            queuedSource, actionSession, queuedGeneration, actionSessionToken,
+                        ))
+                        if (source === queuedSource && sourceGeneration == queuedGeneration && sessionToken == actionSessionToken) {
+                            queuedTurnInterests[queuedTurnId] = QueuedTurnInterest(queuedSession, queuedGeneration)
+                        }
+                    }
+                    queuedSource.submitClientCommand(
                         ClientCommand.SendPrompt(
+                            sessionId = queuedSession.takeIf(String::isNotBlank),
                             text = submittedText.toClientTextDto(),
                             promptMode = promptMode,
                             images = images,
@@ -2444,6 +3399,10 @@ class ChatViewModel(
                         ),
                     )
                 }.onFailure { failure ->
+                    if (failure is ClientException.SubmissionNotAdmitted) queuedTurnInterests.remove(queuedTurnId)
+                    if (sourceGeneration != queuedGeneration || source !== queuedSource ||
+                        (queuedSession.isNotBlank() && canonicalSessionId(_state.value.session.id) != queuedSession)
+                    ) return@onFailure
                     _state.update {
                         it.copy(
                             error = ChatError(
@@ -2462,13 +3421,18 @@ class ChatViewModel(
         // capture this turn's token so its own events are accepted.
         turnToken++
         val token = turnToken
-        val submittedTurnId = DurableConversationTurnIds.next()
+        val submittedTurnId = DurableConversationTurnIds.next() ?: run {
+            reportHostError(strings.resolve(R.string.chat_engine_unavailable, "移动端引擎当前不可用"))
+            return
+        }
         val userMessage = Message(role = Role.User, sentAtMs = System.currentTimeMillis(), text = trimmed, images = images, visualizationContext = visualizationChip)
         optimisticRowsByToken["client-turn:$submittedTurnId"] = userMessage.id
         durableTurnId = submittedTurnId
         recoveredTurnToken = null
         recoveryReplayTurnId = null
         durableTurnUiSequence = 0L
+        durableReplayDegraded = false
+        pendingDurableEvents.clear()
         pendingRecoveredReplayAckTurnId = null
         currentTurnOrigin = origin
         // The draft was just sent — clear the persisted copy.
@@ -2493,27 +3457,72 @@ class ChatViewModel(
         // process has already crossed into the background.
         setBackgroundTurnActive(true)
 
-        val turnSource = source
+        val turnSource = actionSource
         val slashCommandSource = turnSource as? SlashCommandConversationSource
+        val submission = if (turnSource.supportsSubmissionAdmission) {
+            ActiveSubmission(turnSource, submittedTurnId, TurnSubmissionAdmission(), actionSession)
+        } else null
+        activeSubmission = submission
         turnJob = viewModelScope.launch {
-            val replyStream = if (
-                !isBashInput && isSlashCommandLine(text) && slashCommandSource != null
-            ) {
-                slashCommandSource.submitSlashCommand(text.toClientTextDto(), images, submittedTurnId)
-            } else {
-                turnSource.submit(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode)
+            val replyStream = try {
+                val owner = submission?.let {
+                    resolveSubmissionOwner(turnSource, it.sessionId, actionSourceGeneration, actionSessionToken).also { resolved ->
+                        it.sessionId = resolved
+                        if (source === turnSource && sourceGeneration == actionSourceGeneration &&
+                            sessionToken == actionSessionToken && _state.value.session.id == "new"
+                        ) _state.update { state -> state.copy(session = state.session.copy(id = resolved), sessionReady = true) }
+                    }
+                }
+                if (!isBashInput && isSlashCommandLine(text) && slashCommandSource != null) {
+                    if (submission != null && owner != null) {
+                        slashCommandSource.submitSlashCommand(text.toClientTextDto(), images, submittedTurnId, owner, submission.admission)
+                    } else slashCommandSource.submitSlashCommand(text.toClientTextDto(), images, submittedTurnId)
+                } else {
+                    if (submission != null && owner != null) {
+                        turnSource.submit(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode, owner, submission.admission)
+                    } else turnSource.submit(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                reduce(ReplyEvent.Error(failure.message ?: failure.toString()), token)
+                reduce(ReplyEvent.End, token)
+                return@launch
             }
+            var uncertainSubmission = false
             replyStream.collect { event ->
+                if (uncertainSubmission) return@collect
+                if (event is ReplyEvent.DurableTurnStreamEnded) return@collect
+                if (event is ReplyEvent.Error && token == turnToken && submission != null) {
+                    when (submission.admission.outcome) {
+                        TurnSubmissionAdmission.Outcome.Unknown -> {
+                            uncertainSubmission = true
+                            submission.sessionId?.let { preserveUncertainAdmission(turnSource, it, submittedTurnId, actionSourceGeneration) }
+                            return@collect
+                        }
+                        TurnSubmissionAdmission.Outcome.NotAdmitted -> {
+                            if (durableTurnId == submittedTurnId) durableTurnId = null
+                        }
+                        else -> Unit
+                    }
+                }
                 reduce(event, token)
                 if (
                     event is ReplyEvent.DurableTurnReplayAcknowledged &&
                     token == turnToken &&
-                    durableTurnId == submittedTurnId
+                    source === turnSource &&
+                    durableTurnId == submittedTurnId &&
+                    event.turnId == submittedTurnId &&
+                    (canonicalSessionId(event.sessionId) == canonicalSessionId(_state.value.session.id) ||
+                        (_state.value.session.id == "new" && turnSource.activeSessionState.value?.sessionId?.let {
+                            canonicalSessionId(event.sessionId) == canonicalSessionId(it)
+                        } == true))
                 ) {
                     durableTurnUiSequence = maxOf(durableTurnUiSequence, event.sequence)
                 }
             }
         }
+        turnJob?.invokeOnCompletion { if (activeSubmission === submission) activeSubmission = null }
     }
 
     /**
@@ -2537,45 +3546,70 @@ class ChatViewModel(
         if (!_state.value.streaming && !_state.value.liveTurnWaitingForUser) return
         val cancelledToken = turnToken
         val cancelledText = _state.value.streamingMessage?.text.orEmpty()
+        val cancelledTurn = durableTurnId
+        val cancelledSource = source
+        val submission = activeSubmission?.takeIf { it.source === cancelledSource && it.turnId == cancelledTurn }
+        val cancelledSession = canonicalSessionId(
+            submission?.sessionId ?: if (_state.value.session.id == "new") cancelledSource.activeSessionState.value?.sessionId ?: "new"
+            else _state.value.session.id,
+        )
+        var orderedCancellation = cancelledSource.orderedCancellationBoundaries
+        var uncertainAdmission = false
+        cancellingProjection = cancelledTurn?.let { CancellingProjection(cancelledSession, it, sourceGeneration) }
         // Supersede the turn: a late event arriving after the engine's Cancel
         // round-trip must not re-open streaming on the now-idle transcript.
         val job = abandonLocalTurn()
         _state.update {
-            val settled = it.settleTurn(
-                run = it.agentRun?.finish(AgentRunOutcome.Cancelled),
-                settling = it.streamingMessage?.withoutPendingVisualizations(),
-            )
             it.copy(
                 streaming = false,
                 cancellationInFlight = true,
                 liveTurnWaitingForUser = false,
-                messages = settled.messages,
-                streamingMessage = null,
                 statusLine = strings.resolve(R.string.chat_stopping, "正在停止…"),
-                agentRun = settled.run,
-                agentRunsByMessageId = settled.agentRunsByMessageId,
             )
         }
         emitTurnCompletion(cancelledToken, ConversationTurnOutcome.Cancelled, cancelledText)
         val cancellation = viewModelScope.async {
-            runCatching { cancelEngineTurn(job, durableTurnId) }
+            runCatching {
+                try {
+                    val result = cancelSubmittedTurn(cancelledSource, job, cancelledTurn, cancelledSession, submission)
+                    orderedCancellation = result.sent && cancelledSource.orderedCancellationBoundaries
+                    uncertainAdmission = result.uncertainAdmission
+                } catch (error: Throwable) {
+                    orderedCancellation = cancelledSource.orderedCancellationBoundaries
+                    uncertainAdmission = submission?.admission?.outcome == TurnSubmissionAdmission.Outcome.Unknown
+                    throw error
+                }
+            }
         }
         explicitCancellation = cancellation
         viewModelScope.launch {
             val result = cancellation.await()
             if (explicitCancellation === cancellation) {
                 explicitCancellation = null
-                _state.update { it.copy(cancellationInFlight = false) }
+                if (!orderedCancellation) _state.update { it.copy(cancellationInFlight = false) }
             }
             result.fold(
                 onSuccess = {
+                    if (!orderedCancellation && cancelledTurn != null) {
+                        finishCancelledProjection(ConversationDelivery.CancellationDrained(cancelledSession, cancelledTurn, !uncertainAdmission))
+                    }
                     if (!_state.value.sessionTransitioning) {
-                        _state.update { it.copy(statusLine = null) }
+                        if (!orderedCancellation) _state.update { it.copy(statusLine = null) }
                     }
                 },
                 onFailure = { t ->
+                    if (uncertainAdmission && cancelledTurn != null) {
+                        cancellingProjection?.finished?.complete(false)
+                        cancellingProjection = null
+                        preserveUncertainAdmission(cancelledSource, cancelledSession, cancelledTurn, sourceGeneration)
+                        return@fold
+                    }
+                    if (!orderedCancellation && cancelledTurn != null) {
+                        abortCancelledProjection(ConversationDelivery.CancellationAborted(cancelledSession, cancelledTurn, false))
+                    }
                     _state.update {
                         it.copy(
+                            cancellationInFlight = if (orderedCancellation && cancellingProjection != null) true else false,
                             statusLine = null,
                             error = ChatError(
                                 strings.resolve(
@@ -2625,7 +3659,7 @@ class ChatViewModel(
 
     /** Dismiss the persistent error banner (its × affordance). */
     fun dismissError() {
-        _state.update { it.copy(error = null) }
+        _state.update { if (it.recoveryStorageFailed) it else it.copy(error = null) }
     }
 
     /**
@@ -2982,6 +4016,7 @@ class ChatViewModel(
                 }
             }
             is ReplyEvent.DurableTurnReplayAcknowledged -> Unit
+            is ReplyEvent.DurableTurnStreamEnded -> Unit
 
             is ReplyEvent.Error -> {
                 turnJob = null
@@ -3277,8 +4312,11 @@ class ChatViewModel(
             cancel()
             return
         }
+        val targetSource = source
+        val targetSession = _state.value.session.id.takeUnless { it == "new" }
+            ?: targetSource.activeSessionState.value?.sessionId ?: return
         viewModelScope.launch {
-            runCatching { source.cancel(turnId) }
+            runCatching { targetSource.cancelForSession(targetSession, turnId) }
         }
     }
 

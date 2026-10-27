@@ -37,7 +37,14 @@ async function main() {
       })()`);
       throw new Error(`Timed out: ${expression}\n${JSON.stringify(diagnostic)}\n${await run('document.body.innerText')}`);
     };
+    await wait(`window.__modUiClientFixture?.initialMountsHeld()`);
+    const rendersBeforeResize = await run(`window.__modUiClientFixture.calls.filter(call => call.kind === 'control' && call.request.subtype === 'ui_render' && call.request.component === 'AbovePrompt').length`);
+    await run(`(() => { const site = document.querySelector('.mod-ui-above-prompt'); site.style.height = (Math.ceil(site.getBoundingClientRect().height) + 120) + 'px'; })()`);
+    await wait(`window.__modUiClientFixture.calls.filter(call => call.kind === 'control' && call.request.subtype === 'ui_render' && call.request.component === 'AbovePrompt').length > ${rendersBeforeResize}`);
+    await run(`window.__modUiClientFixture.releaseInitialMounts()`);
+    await wait(`['runtime-status', 'runtime-sibling-1'].every(runtimeId => window.__modUiClientFixture.calls.some(call => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === runtimeId))`);
     await wait(`Boolean(document.querySelector('.mod-ui-client-button')) && document.querySelector('[data-client="sibling"]')?.textContent.includes('Sibling Alive')`);
+    const initialStatusMountSuperseded = await run(`window.__modUiClientFixture.debugSnapshot().currentStatusRuntimeId !== 'runtime-status'`);
 
     const parentElementsRendered = await run(`Boolean(document.querySelector('.mod-ui-parent-button'))
       && Boolean(document.querySelector('.mod-ui-parent-input input'))
@@ -122,7 +129,21 @@ async function main() {
     await wait(`document.querySelector('.mod-ui-client-surface')?.textContent.includes('Scheduled final frame')`);
     const preRegistrationFrameReplayed = await run(`document.querySelector('.mod-ui-client-surface')?.textContent.includes('Scheduled final frame') && !document.querySelector('.mod-ui-client-surface')?.textContent.includes('Mount response frame') && !document.querySelector('.mod-ui-client-surface')?.textContent.includes('Stale buffered frame')`);
     await run(`window.__modUiClientFixture.releaseHeldFrameOperations()`);
-    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'resize' && call.request.runtimeId === 'runtime-status')`);
+    // A viewport update can supersede an in-flight first mount. Track the
+    // actual accepted runtime instead of assuming its first generated id.
+    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'resize' && call.request.runtimeId === window.__modUiClientFixture.debugSnapshot().currentStatusRuntimeId)`);
+    const activeRuntime = async (client, epoch) => {
+      const expression = `(() => {
+        const calls = window.__modUiClientFixture.calls;
+        const mount = [...calls].reverse().find(call => call.kind === 'operation' && call.request.type === 'mount'
+          && call.request.client === ${JSON.stringify(client)} && call.returnedClientEnvironmentEpoch === ${epoch});
+        return mount?.returnedRuntimeId && !calls.some(call => call.kind === 'operation' && call.request.type === 'unmount'
+          && call.request.runtimeId === mount.returnedRuntimeId) ? mount.returnedRuntimeId : null;
+      })()`;
+      await wait(expression);
+      return run(expression);
+    };
+    const initialStatusRuntime = await activeRuntime('status', 1);
 
     await run(`(() => {
       const button = document.querySelector('.mod-ui-client-button');
@@ -201,14 +222,18 @@ async function main() {
     await delay(80);
     const staleFrameIgnored = await run(`!document.querySelector('.mod-ui-client-surface')?.textContent.includes('Stale revision frame') && !document.querySelector('.mod-ui-client-surface')?.textContent.includes('Old session frame')`);
 
+    const initialSiblingRuntime = await activeRuntime('sibling', 1);
+    const initialSiblingMountSuperseded = initialSiblingRuntime !== 'runtime-sibling-1';
+    const siblingMountCountBeforeFault = await run(`window.__modUiClientFixture.calls.filter(call => call.kind === 'operation' && call.request.type === 'mount' && call.request.client === 'sibling').length`);
     await run(`window.__modUiClientFixture.failNextRunInWorker(); document.querySelector('.mod-ui-client-button').click()`);
-    await wait(`document.querySelector('.mod-ui-client-fallback') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.workerFault === true && call.request.type === 'runHeld' && call.request.handle === 17 && call.request.runtimeId === 'runtime-status')`);
-    await run(`window.__modUiClientFixture.emitHighSequenceFrameForFailedRuntime('runtime-status')`);
+    await wait(`document.querySelector('.mod-ui-client-fallback') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.workerFault === true && call.request.type === 'runHeld' && call.request.handle === 17 && call.request.runtimeId === ${JSON.stringify(initialStatusRuntime)})`);
+    await run(`window.__modUiClientFixture.emitHighSequenceFrameForFailedRuntime(${JSON.stringify(initialStatusRuntime)})`);
     await delay(100);
     const workerFaultDiagnostics = await run(`(() => {
       const calls = window.__modUiClientFixture.calls;
       const faultIndex = calls.findIndex((call) => call.kind === 'operation' && call.workerFault === true);
       const postFaultRuntimeOperations = faultIndex < 0 ? [] : calls.slice(faultIndex + 1).filter((call) => call.kind === 'operation'
+        && call.request.runtimeId === ${JSON.stringify(initialStatusRuntime)}
         && ['render', 'setProps', 'resize', 'pointer', 'key', 'runHeld'].includes(call.request.type));
       const duplicateFaultReports = calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_client_fault');
       return {
@@ -227,12 +252,12 @@ async function main() {
     const workerFaultLeavesSiblingVisible = await run(`(() => {
       const calls = window.__modUiClientFixture.calls;
       const siblingMounts = calls.filter((call) => call.kind === 'operation' && call.request.type === 'mount' && call.request.client === 'sibling');
-      const siblingUnmounts = calls.filter((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === 'runtime-sibling-1');
+      const siblingUnmounts = calls.filter((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === ${JSON.stringify(initialSiblingRuntime)});
       return Boolean(document.querySelector('[data-client="sibling"]'))
         && document.querySelector('[data-client="sibling"]').textContent.includes('Sibling Alive')
-        && siblingMounts.length === 1
-        && siblingMounts[0].returnedRuntimeId === 'runtime-sibling-1'
-        && siblingMounts[0].returnedClientEnvironmentEpoch === 1
+        && siblingMounts.length === ${siblingMountCountBeforeFault}
+        && siblingMounts.at(-1)?.returnedRuntimeId === ${JSON.stringify(initialSiblingRuntime)}
+        && siblingMounts.at(-1)?.returnedClientEnvironmentEpoch === 1
         && siblingUnmounts.length === 0;
     })()`);
 
@@ -244,7 +269,7 @@ async function main() {
       const calls = window.__modUiClientFixture.calls;
       const faultIndex = calls.findIndex((call) => call.kind === 'operation' && call.workerFault === true);
       const sameRuntimeCalls = faultIndex < 0 ? [] : calls.slice(faultIndex + 1).filter((call) => call.kind === 'operation'
-        && call.request.runtimeId === 'runtime-status'
+        && call.request.runtimeId === ${JSON.stringify(initialStatusRuntime)}
         && ['render', 'setProps', 'resize', 'pointer', 'key', 'runHeld'].includes(call.request.type));
       const statusMounts = calls.filter((call) => call.kind === 'operation' && call.request.type === 'mount' && call.request.client === 'status');
       return document.querySelector('.mod-ui-client-fallback') !== null
@@ -253,40 +278,45 @@ async function main() {
     })()`);
 
     await run(`window.__modUiClientFixture.reloadStatusPluginEnvironment()`);
-    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'mount' && call.returnedRuntimeId === 'runtime-status-epoch-2')`);
     await wait(`document.querySelector('.mod-ui-client-surface')?.textContent.includes('Recovered after environment remount')`);
-    const workerFaultRecoveredFromEnvironmentRemount = await run(`!document.querySelector('.mod-ui-client-fallback') && document.querySelector('.mod-ui-client-surface')?.textContent.includes('Recovered after environment remount') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'mount' && call.returnedRuntimeId === 'runtime-status-epoch-2')`);
+    const statusEpoch2Runtime = await activeRuntime('status', 2);
+    const siblingEpoch2Runtime = await activeRuntime('sibling', 2);
+    const siblingMountCountBeforeAsyncFault = await run(`window.__modUiClientFixture.calls.filter(call => call.kind === 'operation' && call.request.type === 'mount' && call.request.client === 'sibling').length`);
+    const workerFaultRecoveredFromEnvironmentRemount = await run(`!document.querySelector('.mod-ui-client-fallback') && document.querySelector('.mod-ui-client-surface')?.textContent.includes('Recovered after environment remount') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === ${JSON.stringify(initialStatusRuntime)})`);
 
     await run(`window.__modUiClientFixture.emitAsyncWorkerFault()`);
     await wait(`document.querySelector('.mod-ui-client-fallback') !== null`);
-    await run(`window.__modUiClientFixture.emitHighSequenceFrameForFailedRuntime('runtime-status-epoch-2')`);
+    await run(`window.__modUiClientFixture.emitHighSequenceFrameForFailedRuntime(${JSON.stringify(statusEpoch2Runtime)})`);
     await delay(80);
     const asyncWorkerFaultRenderedWithoutDuplicateReport = await run(`(() => {
       const calls = window.__modUiClientFixture.calls;
       const siblingMounts = calls.filter((call) => call.kind === 'operation' && call.request.type === 'mount' && call.request.client === 'sibling');
-      const currentSiblingUnmounts = calls.filter((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === 'runtime-sibling-2');
+      const currentSiblingUnmounts = calls.filter((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === ${JSON.stringify(siblingEpoch2Runtime)});
       return document.querySelector('.mod-ui-client-fallback') !== null
         && document.querySelector('[data-client="sibling"]')?.textContent.includes('Sibling Alive')
-        && siblingMounts.length === 2
-        && siblingMounts[1].returnedRuntimeId === 'runtime-sibling-2'
-        && siblingMounts[1].returnedClientEnvironmentEpoch === 2
+        && siblingMounts.length === ${siblingMountCountBeforeAsyncFault}
+        && siblingMounts.at(-1)?.returnedRuntimeId === ${JSON.stringify(siblingEpoch2Runtime)}
+        && siblingMounts.at(-1)?.returnedClientEnvironmentEpoch === 2
         && currentSiblingUnmounts.length === 0
         && calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_client_fault').length === 0;
     })()`);
 
     await run(`window.__modUiClientFixture.reloadStatusPluginEnvironment()`);
-    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'mount' && call.returnedRuntimeId === 'runtime-status-epoch-3')`);
     await wait(`document.querySelector('.mod-ui-client-surface')?.textContent.includes('Recovered after environment remount')`);
+    const statusEpoch3Runtime = await activeRuntime('status', 3);
+    const siblingEpoch3Runtime = await activeRuntime('sibling', 3);
 
     await run(`window.__modUiClientFixture.enableAsyncFaultClient()`);
     await wait(`document.querySelector('[data-client="async-fault"] .mod-ui-client-fallback') !== null`);
+    const asyncFaultRuntime = await activeRuntime('async-fault', 3);
     const bufferedAsyncWorkerFaultIsLeafLocal = await run(`document.querySelector('[data-client="async-fault"] .mod-ui-client-fallback') !== null
       && document.querySelector('[data-client="status"] .mod-ui-client-fallback') === null
       && document.querySelector('[data-client="sibling"]')?.textContent.includes('Sibling Alive')
       && !document.querySelector('[data-client="async-fault"] .mod-ui-client-surface')?.textContent.includes('Buffered pre-fault frame')
       && window.__modUiClientFixture.calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_client_fault').length === 0`);
     await run(`window.__modUiClientFixture.disableAsyncFaultClient()`);
-    await wait(`!document.querySelector('[data-client="async-fault"]') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === 'runtime-async-fault')`);
+    await wait(`!document.querySelector('[data-client="async-fault"]') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === ${JSON.stringify(asyncFaultRuntime)})`);
+    const statusRuntimeAfterAsyncRemoval = await activeRuntime('status', 3);
     const statusReadyAfterAsyncClientRemovalExpression = `(() => {
       const calls = window.__modUiClientFixture.calls;
       const latestRender = [...calls].reverse().find((call) => call.kind === 'control'
@@ -296,7 +326,7 @@ async function main() {
         && call.returnedRevision !== undefined);
       return latestRender !== undefined && calls.some((call) => call.kind === 'operation'
         && call.request.type === 'render'
-        && call.request.runtimeId === 'runtime-status-epoch-3'
+        && call.request.runtimeId === ${JSON.stringify(statusRuntimeAfterAsyncRemoval)}
         && call.request.render_revision === latestRender.returnedRevision);
     })()`;
     const statusReadinessTimelineExpression = `(() => {
@@ -313,7 +343,7 @@ async function main() {
           && call.request.component === 'AbovePrompt'
           && call.returnedRevision === latestRender.returnedRevision)
         || (call.kind === 'operation'
-          && (call.request.type === 'draw_commit' || (call.request.type === 'render' && call.request.runtimeId === 'runtime-status-epoch-3'))
+          && (call.request.type === 'draw_commit' || (call.request.type === 'render' && call.request.runtimeId === ${JSON.stringify(statusRuntimeAfterAsyncRemoval)}))
           && call.request.render_revision === latestRender.returnedRevision))
         .map((call) => ({ kind: call.kind, type: call.kind === 'control' ? call.request.subtype : call.request.type,
           requestedRevision: call.kind === 'control' ? call.returnedRevision : call.request.render_revision,
@@ -326,7 +356,7 @@ async function main() {
       const timeline = await run(statusReadinessTimelineExpression);
       throw new Error(`Status Client did not become ready after async Client removal. ${error instanceof Error ? error.message : String(error)}\nStatus call timeline: ${JSON.stringify(timeline)}`, { cause: error });
     }
-    const statusReadyAfterAsyncClientRemoval = await run(statusReadyAfterAsyncClientRemovalExpression);
+    const statusReadyAfterAsyncClientRemoval = statusRuntimeAfterAsyncRemoval === statusEpoch3Runtime && await run(statusReadyAfterAsyncClientRemovalExpression);
     const statusReadinessTimeline = await run(statusReadinessTimelineExpression);
 
     await run(`window.__modUiClientFixture.rejectNextRunAtAdapter(); document.querySelector('.mod-ui-client-button').click()`);
@@ -357,16 +387,17 @@ async function main() {
     await run(`window.__modUiClientFixture.rejectNextRunAtAdapter(); document.querySelector('[data-client="status"] .mod-ui-client-button').click()`);
     await wait(`document.querySelector('[data-client="status"] .mod-ui-client-fallback') !== null && window.__modUiClientFixture.calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_client_fault' && call.request.phase === 'run' && call.request.client === 'status').length === 2`);
 
+    const statusRuntimeBeforeUnload = await activeRuntime('status', 3);
     await run(`window.__modUiClientFixture.unloadStatusPlugin()`);
-    await wait(`!document.querySelector('.mod-ui-client-instance[data-client="status"]') && document.querySelector('[data-client="sibling"]')?.textContent.includes('Sibling Alive') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === 'runtime-status-epoch-3')`);
+    await wait(`!document.querySelector('.mod-ui-client-instance[data-client="status"]') && document.querySelector('[data-client="sibling"]')?.textContent.includes('Sibling Alive') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === ${JSON.stringify(statusRuntimeBeforeUnload)})`);
     await run(`window.__modUiClientFixture.loadStatusPlugin()`);
-    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'mount' && call.returnedRuntimeId === 'runtime-status-epoch-3-mount-2')`);
     await wait(`document.querySelector('[data-client="status"] .mod-ui-client-surface')?.textContent.includes('Recovered after environment remount')`);
-    const adapterRunFaultRecoveredAfterClientRemount = await run(`document.querySelector('[data-client="status"] .mod-ui-client-fallback') === null && document.querySelector('[data-client="status"] .mod-ui-client-surface')?.textContent.includes('Recovered after environment remount')`);
+    const reloadedStatusRuntime = await activeRuntime('status', 3);
+    const adapterRunFaultRecoveredAfterClientRemount = statusRuntimeBeforeUnload === statusEpoch3Runtime && reloadedStatusRuntime !== statusRuntimeBeforeUnload && await run(`document.querySelector('[data-client="status"] .mod-ui-client-fallback') === null && document.querySelector('[data-client="status"] .mod-ui-client-surface')?.textContent.includes('Recovered after environment remount')`);
 
     await run(`window.__modUiClientFixture.unloadStatusPlugin()`);
-    await wait(`!document.querySelector('.mod-ui-client-instance[data-client="status"]') && document.querySelector('[data-client="sibling"]')?.textContent.includes('Sibling Alive') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === 'runtime-status-epoch-3-mount-2')`);
-    const pluginUnloadInvalidationRendered = await run(`!document.querySelector('.mod-ui-client-instance[data-client="status"]') && Boolean(document.querySelector('[data-client="sibling"]')) && document.querySelector('[data-client="sibling"]').textContent.includes('Sibling Alive') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === 'runtime-status-epoch-3-mount-2')`);
+    await wait(`!document.querySelector('.mod-ui-client-instance[data-client="status"]') && document.querySelector('[data-client="sibling"]')?.textContent.includes('Sibling Alive') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === ${JSON.stringify(reloadedStatusRuntime)})`);
+    const pluginUnloadInvalidationRendered = await run(`!document.querySelector('.mod-ui-client-instance[data-client="status"]') && Boolean(document.querySelector('[data-client="sibling"]')) && document.querySelector('[data-client="sibling"]').textContent.includes('Sibling Alive') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'unmount' && call.request.runtimeId === ${JSON.stringify(reloadedStatusRuntime)})`);
 
     await run(`window.__modUiClientFixture.showNoMods()`);
     await wait(`!document.querySelector('.mod-ui-client-instance') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'draw_unmount')`);
@@ -375,11 +406,24 @@ async function main() {
     await run(`window.__modUiClientFixture.disable()`);
     await wait(`!document.querySelector('.mod-ui-above-prompt')`);
     await delay(80);
+    const expectedMounts = [
+      { reason: 'status superseded by the initial viewport update', client: 'status', epoch: 1, runtimeId: 'runtime-status' },
+      { reason: 'status after the initial viewport update', client: 'status', epoch: 1, runtimeId: initialStatusRuntime },
+      { reason: 'sibling superseded by the initial viewport update', client: 'sibling', epoch: 1, runtimeId: 'runtime-sibling-1' },
+      { reason: 'sibling after the initial viewport update', client: 'sibling', epoch: 1, runtimeId: initialSiblingRuntime },
+      { reason: 'status after first environment reload', client: 'status', epoch: 2, runtimeId: statusEpoch2Runtime },
+      { reason: 'sibling after first environment reload', client: 'sibling', epoch: 2, runtimeId: siblingEpoch2Runtime },
+      { reason: 'status after second environment reload', client: 'status', epoch: 3, runtimeId: statusEpoch3Runtime },
+      { reason: 'sibling after second environment reload', client: 'sibling', epoch: 3, runtimeId: siblingEpoch3Runtime },
+      { reason: 'explicit async fault client', client: 'async-fault', epoch: 3, runtimeId: asyncFaultRuntime },
+      { reason: 'status after plugin unload and reload', client: 'status', epoch: 3, runtimeId: reloadedStatusRuntime },
+    ];
     const runtimeLifecycleSnapshot = await run(`(() => {
       const calls = window.__modUiClientFixture.calls.filter((call) => call.sessionId === 'mod-ui-client-fixture-session');
-      const mounts = calls.filter((call) => call.kind === 'operation' && call.request.type === 'mount').map((call) => call.returnedRuntimeId);
+      const mountCalls = calls.filter((call) => call.kind === 'operation' && call.request.type === 'mount');
+      const mounts = mountCalls.map((call) => call.returnedRuntimeId);
       const unmounts = calls.filter((call) => call.kind === 'operation' && call.request.type === 'unmount').map((call) => call.request.runtimeId);
-      const expected = ['runtime-status', 'runtime-status-epoch-2', 'runtime-status-epoch-3', 'runtime-status-epoch-3-mount-2', 'runtime-async-fault', 'runtime-sibling-1', 'runtime-sibling-2', 'runtime-sibling-3'];
+      const expected = ${JSON.stringify(expectedMounts)};
       const counts = (items) => items.reduce((result, value) => {
         result[value] = (result[value] ?? 0) + 1;
         return result;
@@ -392,26 +436,34 @@ async function main() {
           revision: call.request.render_revision, handled: call.handled }));
       const primaryDrawUnmounts = drawUnmounts.filter((call) => call.component === 'AbovePrompt');
       return {
-        expectedRuntimeIds: expected,
+        expectedMounts: expected,
         mountedRuntimeIds: mounts,
         unmountedRuntimeIds: unmounts,
         mountCounts,
         unmountCounts,
-        missingExpectedMounts: expected.filter((runtimeId) => mountCounts[runtimeId] !== 1),
-        unexpectedMountIds: mounts.filter((runtimeId) => !expected.includes(runtimeId)),
-        missingOrRepeatedUnmounts: expected.filter((runtimeId) => unmountCounts[runtimeId] !== 1),
+        duplicateExpectedRuntimeIds: expected.filter((item, index) => !item.runtimeId
+          || expected.findIndex((other) => other.runtimeId === item.runtimeId) !== index).map((item) => item.runtimeId),
+        missingExpectedMounts: expected.filter((item) => mountCounts[item.runtimeId] !== 1
+          || !mountCalls.some((call) => call.returnedRuntimeId === item.runtimeId
+            && call.request.client === item.client && call.request.plugin === 'fixture-plugin'
+            && call.returnedClientEnvironmentEpoch === item.epoch)),
+        unexpectedMountIds: mountCalls.filter((call) => !expected.some((item) => call.returnedRuntimeId === item.runtimeId
+          && call.request.client === item.client && call.request.plugin === 'fixture-plugin'
+          && call.returnedClientEnvironmentEpoch === item.epoch)).map((call) => call.returnedRuntimeId),
+        missingOrRepeatedUnmounts: expected.filter((item) => unmountCounts[item.runtimeId] !== 1).map((item) => item.runtimeId),
         unmountsWithoutMount: unmounts.filter((runtimeId) => mountCounts[runtimeId] !== 1),
         siblingMountsByPluginEpoch: siblingMounts.map((call) => ({ plugin: call.request.plugin, runtimeId: call.returnedRuntimeId, epoch: call.returnedClientEnvironmentEpoch })),
-        pluginEnvironmentRemountsAllClients: siblingMounts.length === 3
+        pluginEnvironmentRemountsAllClients: siblingMounts.length === 4
           && siblingMounts.every((call, index) => call.request.plugin === 'fixture-plugin'
-            && call.returnedRuntimeId === 'runtime-sibling-' + (index + 1)
-            && call.returnedClientEnvironmentEpoch === index + 1),
+            && call.returnedRuntimeId === ${JSON.stringify(['runtime-sibling-1', initialSiblingRuntime, siblingEpoch2Runtime, siblingEpoch3Runtime])}[index]
+            && call.returnedClientEnvironmentEpoch === [1, 1, 2, 3][index]),
         drawUnmounts,
         drawUnmountExactlyOnce: primaryDrawUnmounts.length === 1 && primaryDrawUnmounts[0].handled === true,
       };
     })()`);
     const rootReleased = await run(`!document.querySelector('.mod-ui-above-prompt')`);
     const unmountReleasedRuntimeAndDrawIdentity = rootReleased
+      && runtimeLifecycleSnapshot.duplicateExpectedRuntimeIds.length === 0
       && runtimeLifecycleSnapshot.missingExpectedMounts.length === 0
       && runtimeLifecycleSnapshot.unexpectedMountIds.length === 0
       && runtimeLifecycleSnapshot.missingOrRepeatedUnmounts.length === 0
@@ -558,7 +610,7 @@ async function main() {
     await run(`window.__modUiClientFixture.emitRapidExternalValue('external-after-stale')`);
     await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === 'external-after-stale'`, 'external props apply after a stale dispatch');
 
-    process.stdout.write(`${JSON.stringify({ parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, inputSubmitUsesHookReachedValue, inputRunHeldEvents, selectUsesHookReachedValue, selectRunHeldEvents, markdownExternalLinkUsesNormalNavigation, markdownOpenLinkUsesNormalNavigation, markdownLinksDoNotDispatchClientCallbacks, contextMentionHref, contextMentionClickPreventedNavigation, contextMentionOpenEvents, ordinaryMentionClickPreventedNavigation, ordinaryMentionOpenEvents, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp, rapidBeforeRelease: rapidBeforeRelease, rapidAfterFirstAck, rapidInputRegression, focusDiagnostics: { beforeActivation: documentFocusedBeforeActivation, afterActivation: documentFocusedAfterActivation } })}\n`);
+    process.stdout.write(`${JSON.stringify({ initialStatusMountSuperseded, initialSiblingMountSuperseded, parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, inputSubmitUsesHookReachedValue, inputRunHeldEvents, selectUsesHookReachedValue, selectRunHeldEvents, markdownExternalLinkUsesNormalNavigation, markdownOpenLinkUsesNormalNavigation, markdownLinksDoNotDispatchClientCallbacks, contextMentionHref, contextMentionClickPreventedNavigation, contextMentionOpenEvents, ordinaryMentionClickPreventedNavigation, ordinaryMentionOpenEvents, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp, rapidBeforeRelease: rapidBeforeRelease, rapidAfterFirstAck, rapidInputRegression, focusDiagnostics: { beforeActivation: documentFocusedBeforeActivation, afterActivation: documentFocusedAfterActivation } })}\n`);
   } finally {
     window.destroy();
     app.quit();

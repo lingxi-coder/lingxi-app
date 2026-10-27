@@ -67,6 +67,8 @@ protocol ConversationSource: AnyObject {
     func cancelAndWait() async throws
     /// Dismiss the persistent error banner (PR-4 item 4).
     func dismissError()
+    /// Explicitly acknowledge only the recovery evidence shown to the user.
+    func acknowledgeRecoveryEvidence(_ reviewed: [ConversationRecoveryEvidence])
     /// Switch the active model (SHIP-BLOCKER #2). The engine source submits
     /// `ClientCommand.setModel(id)` with a REAL model id and reflects the
     /// confirming `ModelChanged`; the mock just swaps the chip. `id` is a real
@@ -187,6 +189,7 @@ protocol ConversationSource: AnyObject {
 /// hooks are no-ops by default; the engine source may override foregrounding to
 /// refresh state, but backgrounding never implies cancellation.
 extension ConversationSource {
+    func acknowledgeRecoveryEvidence(_ reviewed: [ConversationRecoveryEvidence]) { }
     func setWorkspaceDirectory(_ path: String, expectedSessionID: String) async throws {
         throw WorkspaceDirectoryError.unavailable
     }

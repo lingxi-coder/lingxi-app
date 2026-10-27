@@ -2,15 +2,18 @@ package com.lingxi.code.conversation
 
 import androidx.lifecycle.SavedStateHandle
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientException
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.SessionAgentSummaryDto
 import com.lingxi.code.bindings.client.PromptModeDto
+import com.lingxi.code.bindings.client.QueuedTurnStatusDto
 import com.lingxi.code.bindings.client.CostDto
 import com.lingxi.code.bindings.client.HeadlineKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.MessageBlockDto
 import com.lingxi.code.bindings.client.MessageDto
+import com.lingxi.code.bindings.client.ModSessionEventPayload
 import com.lingxi.code.bindings.client.PlanTaskDto
 import com.lingxi.code.bindings.client.PlanTaskStateDto
 import com.lingxi.code.bindings.client.TaskStatusDto
@@ -30,7 +33,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -242,7 +248,7 @@ class ChatViewModelReducerTest {
         }
     }
 
-    private class DurableAttachSource : ConversationSource {
+    private class DurableAttachSource(private val turnId: Long = 88L) : ConversationSource {
         val active = MutableStateFlow<ActivatedSession?>(null)
         val attachRequests = mutableListOf<Long>()
         val submitted = mutableListOf<String>()
@@ -254,8 +260,9 @@ class ChatViewModelReducerTest {
             return emptyFlow()
         }
 
-        override suspend fun attachDurableTurnForUi(afterSequence: Long) {
+        override suspend fun attachDurableTurnForUi(afterSequence: Long, onAttach: (String, Long, Boolean, String) -> Unit) {
             attachRequests += afterSequence
+            active.value?.let { onAttach(it.sessionId, turnId, true, "") }
         }
 
         override suspend fun discardDurableTurn(turnId: Long) {
@@ -265,42 +272,49 @@ class ChatViewModelReducerTest {
 
     private class FailingDurableAttachSource : ConversationSource {
         val active = MutableStateFlow<ActivatedSession?>(null)
-        val events = MutableSharedFlow<ClientEvent>(extraBufferCapacity = 16)
+        val deliveries = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 16)
         val discarded = mutableListOf<Long>()
         val submitted = mutableListOf<String>()
         val sessionOperations = mutableListOf<String>()
 
         override val activeSessionState = active.asStateFlow()
-        override val clientEvents: Flow<ClientEvent> = events.asSharedFlow()
+        override val conversationDeliveries: Flow<ConversationDelivery> = deliveries.asSharedFlow()
         override fun submit(text: String): Flow<ReplyEvent> {
             submitted += text
             return emptyFlow()
         }
 
-        override suspend fun attachDurableTurnForUi(afterSequence: Long) {
+        override suspend fun attachDurableTurnForUi(afterSequence: Long, onAttach: (String, Long, Boolean, String) -> Unit) {
+            onAttach("session-a", 94L, true, "")
             val paused = TurnRecoverySnapshotDto(
                 sessionId = "session-a",
                 turnId = 94u,
+                revision = 1uL,
                 state = TurnRecoveryStateDto.PAUSED_RECOVERABLE,
                 firstSequence = 0u,
                 lastSequence = 1u,
                 safeToResume = true,
+                projectionUncertain= false,
                 reason = "paused",
             )
-            events.tryEmit(ClientEvent.TurnRecoveryState(paused))
-            events.tryEmit(
-                ClientEvent.TurnEventReplay(
+            deliveries.tryEmit(ConversationDelivery.Event(ClientEvent.TurnRecoveryState(paused)))
+            deliveries.tryEmit(
+                ConversationDelivery.TurnEvent(
                     sessionId = "session-a",
                     turnId = 94u,
                     sequence = 1u,
-                    eventJson = """{"type":"tool_use_started","id":"read-1","tool":"Read","input_json":"{}"}""",
+                    event = ClientEvent.TextDelta("retained before failure".toClientTextDto()),
                 ),
             )
-            throw DurableAttachFailure(
+            deliveries.tryEmit(ConversationDelivery.AttachReplayEnded("session-a", 94L, true))
+            val failure = DurableAttachFailure(
                 turnId = 94L,
                 phase = "resume",
                 cause = IllegalStateException("resume failed"),
             )
+            failure.orderedDelivery = true
+            deliveries.tryEmit(ConversationDelivery.AttachFailed("session-a", 94L, failure))
+            throw failure
         }
 
         override suspend fun discardDurableTurn(turnId: Long) {
@@ -588,8 +602,9 @@ class ChatViewModelReducerTest {
     fun runSlashCommandClientCommand_preservesUtf16ImagesAndTurnIdentity() {
         val raw = "/custom arg \uD800".toClientTextDto()
         val images = listOf(ImageRefDto("image/png", "AQID"), ImageRefDto("image/jpeg", "BAUG"))
-        val command = runSlashCommandClientCommand(raw, images, 73L)
+        val command = runSlashCommandClientCommand("session-a", raw, images, 73L)
 
+        assertEquals("session-a", command.sessionId)
         assertEquals(raw.codeUnits, command.raw.codeUnits)
         assertEquals(images, command.images)
         assertEquals(73uL, command.turnId)
@@ -673,6 +688,27 @@ class ChatViewModelReducerTest {
     }
 
     @Test
+    fun unknownExitCannotBeReopenedOrReportedAsSuccessByLateEvents() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(source = RecordingSource(), backgroundExecution = execution)
+        vm.applyActivatedSession(
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+        )
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.EXITED_UNKNOWN, null, null))
+        vm.reduceClientEvent(
+            ClientEvent.TaskRow(
+                TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "npm test".toClientTextDto(), false, null, null),
+            ),
+        )
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null, null))
+        runCurrent()
+
+        assertEquals(TaskStatusDto.EXITED_UNKNOWN, vm.state.value.backgroundTasks["task-1"]?.status)
+        assertTrue(vm.state.value.activeBackgroundTaskIds.isEmpty())
+        assertEquals(emptyList<Triple<String, String?, Boolean>>(), execution.finishedTasks)
+    }
+
+    @Test
     fun aFailedBackgroundTaskFallsBackToItsIdWhenNoRowNamedIt() = runTest(dispatcher) {
         val execution = RecordingBackgroundExecution()
         val vm = ChatViewModel(source = RecordingSource(), backgroundExecution = execution)
@@ -713,40 +749,30 @@ class ChatViewModelReducerTest {
         val vm = ChatViewModel(source)
         source.active.value = ActivatedSession(
             "session-a",
-            listOf(Message(Role.User, "prior"), Message(Role.Ai, "prior answer")),
+            emptyList(),
             SessionActivationKind.Resumed,
         )
         runCurrent()
         val running = TurnRecoverySnapshotDto(
             sessionId = "session-a",
             turnId = 88u,
+            revision = 1uL,
             state = TurnRecoveryStateDto.RUNNING,
             firstSequence = 1u,
             lastSequence = 1u,
             safeToResume = true,
+            projectionUncertain= false,
             reason = null,
         )
 
         vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
-        vm.reduceClientEvent(
-            ClientEvent.TurnEventReplay(
-                sessionId = "session-a",
-                turnId = 88u,
-                sequence = 1u,
-                eventJson = """{"type":"text_delta","text":"history"}""",
-            ),
-        )
+        vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", 88uL, 1uL,
+            ClientEvent.TextDelta("history".toClientTextDto())))
         // ResumeTurn emits its own state and closes the attach replay window.
+        vm.finishDurableAttachReplay(ConversationDelivery.AttachReplayEnded("session-a", 88L, true))
         vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
-        vm.reduceClientEvent(ClientEvent.TextDelta("live".toClientTextDto()))
-        vm.reduceClientEvent(
-            ClientEvent.TurnEventReplay(
-                sessionId = "session-a",
-                turnId = 88u,
-                sequence = 2u,
-                eventJson = """{"type":"text_delta","text":"live"}""",
-            ),
-        )
+        vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", 88uL, 2uL,
+            ClientEvent.TextDelta("live".toClientTextDto())))
 
         assertEquals(listOf(0L), source.attachRequests)
         assertEquals("historylive", vm.state.value.streamingMessage?.text)
@@ -771,40 +797,23 @@ class ChatViewModelReducerTest {
             val terminal = TurnRecoverySnapshotDto(
                 sessionId = "session-a",
                 turnId = 88u,
+                revision = 1uL,
                 state = TurnRecoveryStateDto.COMPLETED,
                 firstSequence = 1u,
                 lastSequence = 3u,
                 safeToResume = false,
+                projectionUncertain= false,
                 reason = null,
             )
             vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal))
             // These are the retained terminal checkpoints that can race past
             // the source-side replay gate after a process restart.  Neither
             // assistant prose nor a tool payload may be projected again.
-            vm.reduceClientEvent(
-                ClientEvent.TurnEventReplay(
-                    sessionId = "session-a",
-                    turnId = 88u,
-                    sequence = 1u,
-                    eventJson = """{"type":"text_delta","text":"duplicate assistant"}""",
-                ),
-            )
-            vm.reduceClientEvent(
-                ClientEvent.TurnEventReplay(
-                    sessionId = "session-a",
-                    turnId = 88u,
-                    sequence = 2u,
-                    eventJson = """{"type":"tool_use_started","id":"tool-1","tool":"Read","input_json":"{}"}""",
-                ),
-            )
-            vm.reduceClientEvent(
-                ClientEvent.TurnEventReplay(
-                    sessionId = "session-a",
-                    turnId = 88u,
-                    sequence = 3u,
-                    eventJson = """{"type":"tool_use_result","id":"tool-1","tool":"Read","result_json":"{}","is_error":false}""",
-                ),
-            )
+            vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", 88uL, 1uL,
+                ClientEvent.TextDelta("duplicate assistant".toClientTextDto())))
+            vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", 88uL, 2uL,
+                ClientEvent.ToolUseStarted("tool-1", "Read", "{}", wireHeader())))
+            vm.finishDurableAttachReplay(ConversationDelivery.AttachReplayEnded("session-a", 88L, true))
             vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal))
 
             assertEquals(restored, vm.state.value.messages)
@@ -812,6 +821,7 @@ class ChatViewModelReducerTest {
             assertFalse(vm.state.value.streaming)
             assertNull(vm.state.value.agentRun)
             assertEquals(0L, vm.durableReplayCursorForTesting())
+            assertNotNull(vm.state.value.error)
         }
 
     @Test
@@ -827,32 +837,22 @@ class ChatViewModelReducerTest {
         val running = TurnRecoverySnapshotDto(
             sessionId = "session-a",
             turnId = 88u,
+            revision = 1uL,
             state = TurnRecoveryStateDto.RUNNING,
             firstSequence = 1u,
             lastSequence = 1u,
             safeToResume = true,
+            projectionUncertain= false,
             reason = null,
         )
 
         vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
-        vm.reduceClientEvent(
-            ClientEvent.TurnEventReplay(
-                sessionId = "session-a",
-                turnId = 88u,
-                sequence = 1u,
-                eventJson = """{"type":"text_delta","text":"history"}""",
-            ),
-        )
+        vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", 88uL, 1uL,
+            ClientEvent.TextDelta("history".toClientTextDto())))
+        vm.finishDurableAttachReplay(ConversationDelivery.AttachReplayEnded("session-a", 88L, true))
         vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
-        vm.reduceClientEvent(ClientEvent.TextDelta("live".toClientTextDto()))
-        vm.reduceClientEvent(
-            ClientEvent.TurnEventReplay(
-                sessionId = "session-a",
-                turnId = 88u,
-                sequence = 2u,
-                eventJson = """{"type":"text_delta","text":"live"}""",
-            ),
-        )
+        vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", 88uL, 2uL,
+            ClientEvent.TextDelta("live".toClientTextDto())))
         val replacementVm = ChatViewModel(source)
         runCurrent()
 
@@ -861,6 +861,912 @@ class ChatViewModelReducerTest {
         assertEquals(listOf(0L, 0L), source.attachRequests)
         assertEquals("historylive", vm.state.value.streamingMessage?.text)
         assertNull(replacementVm.state.value.streamingMessage)
+    }
+
+    @Test
+    fun duplicateTerminalCannotCreateAnotherRecoveredTurnOrRenderLateRaw() = runTest(dispatcher) {
+        val source = DurableAttachSource()
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        vm.noteDurableAttach("session-a", 88L, true)
+        val terminal = TurnRecoverySnapshotDto(
+            sessionId = "session-a", turnId = 88uL, revision = 4uL,
+            state = TurnRecoveryStateDto.CANCELLED, firstSequence = 1uL, lastSequence = 1uL,
+            safeToResume = false, projectionUncertain = false, reason = "attach",
+        )
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal))
+        vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", 88uL, 1uL,
+            ClientEvent.TextDelta("retained".toClientTextDto())))
+        vm.finishDurableAttachReplay(ConversationDelivery.AttachReplayEnded("session-a", 88L, true))
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal.copy(reason = "resume")))
+        val messages = vm.state.value.messages
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal.copy(reason = "duplicate")))
+        vm.reduceClientEvent(ClientEvent.TextDelta("late raw".toClientTextDto()))
+
+        assertEquals(messages, vm.state.value.messages)
+        assertNull(vm.state.value.streamingMessage)
+        assertFalse(vm.state.value.streaming)
+        assertFalse(vm.state.value.durableRecoveryBlocked)
+    }
+
+    @Test
+    fun singleAttachSettlesTerminalAfterReplayBoundaryWithoutResume() = runTest(dispatcher) {
+        val vm = ChatViewModel(DurableAttachSource())
+        vm.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        vm.noteDurableAttach("session-a", 88L, false)
+        val terminal = TurnRecoverySnapshotDto(
+            sessionId = "session-a", turnId = 88uL, revision = 1uL,
+            state = TurnRecoveryStateDto.COMPLETED, firstSequence = 1uL, lastSequence = 1uL,
+            safeToResume = false, projectionUncertain = false, reason = "attach",
+        )
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal))
+        vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", 88uL, 1uL,
+            ClientEvent.TextDelta("retained".toClientTextDto())))
+        vm.finishDurableAttachReplay(ConversationDelivery.AttachReplayEnded("session-a", 88L, false))
+        val messages = vm.state.value.messages
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal))
+        vm.reduceClientEvent(ClientEvent.TextDelta("late raw".toClientTextDto()))
+        assertEquals(messages, vm.state.value.messages)
+        assertTrue(messages.any { it.text.contains("retained") })
+        assertNull(vm.state.value.streamingMessage)
+        assertFalse(vm.state.value.streaming)
+    }
+
+    @Test
+    fun explicitlyQueuedPromptAndBashOwnOnlyTheirNextTurn() = runTest(dispatcher) {
+        for (queuedText in listOf("queued prompt", "!printf hi")) {
+            val source = RecordingSource()
+            val vm = ChatViewModel(source)
+            vm.applyActivatedSession(ActivatedSession("queue-session", emptyList(), SessionActivationKind.Started))
+            vm.send("first")
+            val first = source.submittedTurnId!!
+            vm.send(queuedText)
+            runCurrent()
+            val queued = source.commands.filterIsInstance<ClientCommand.SendPrompt>().last().turnId!!
+            vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("queue-session", first.toULong(), 1uL,
+                ClientEvent.TurnStarted(first.toULong())))
+            vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("queue-session", first.toULong(), 2uL,
+                ClientEvent.TurnEnded(TurnOutcomeDto.END_TURN, null, cost())))
+            val terminal = TurnRecoverySnapshotDto("queue-session", first.toULong(), 2uL,
+                TurnRecoveryStateDto.COMPLETED, 1uL, 2uL, false, false, null)
+            vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal))
+            val next = TurnRecoverySnapshotDto("queue-session", queued, 1uL,
+                TurnRecoveryStateDto.RUNNING, 1uL, 1uL, false, false, null)
+            vm.reduceClientEvent(ClientEvent.TurnRecoveryState(next.copy(sessionId = "other-session")))
+            vm.reduceClientEvent(ClientEvent.TurnRecoveryState(next.copy(turnId = queued + 1uL)))
+            assertFalse(vm.state.value.streaming)
+            vm.reduceClientEvent(ClientEvent.TurnRecoveryState(next))
+            vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal)) // late A cannot settle B
+            vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("queue-session", queued, 1uL,
+                ClientEvent.TurnStarted(queued)))
+            vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("queue-session", queued, 2uL,
+                ClientEvent.TextDelta("queued output".toClientTextDto())))
+            assertEquals(2L, vm.durableReplayCursorForTesting())
+            assertEquals("queued output", vm.state.value.streamingMessage?.text)
+            vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("queue-session", queued, 3uL,
+                ClientEvent.TurnEnded(TurnOutcomeDto.END_TURN, null, cost())))
+            assertFalse(vm.state.value.streaming)
+        }
+    }
+
+    @Test
+    fun queuedTurnTimeoutWarnsWithoutReassigningTheActiveTurn() = runTest(dispatcher) {
+        val deliveries = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 8)
+        val commands = mutableListOf<ClientCommand>()
+        var first = 0L
+        val source = object : ConversationSource {
+            val never = MutableSharedFlow<ReplyEvent>()
+            override val conversationDeliveries: Flow<ConversationDelivery> = deliveries.asSharedFlow()
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?): Flow<ReplyEvent> {
+                first = turnId
+                return never.asSharedFlow()
+            }
+            override suspend fun submitClientCommand(command: ClientCommand) { commands += command }
+        }
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        vm.send("first")
+        vm.send("!next")
+        runCurrent()
+        val queued = commands.filterIsInstance<ClientCommand.SendPrompt>().last().turnId!!
+        deliveries.emit(ConversationDelivery.QueuedTurnIncomplete("session-a", queued))
+        runCurrent()
+        assertNotNull(vm.state.value.error)
+        vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", first.toULong(), 1uL,
+            ClientEvent.TextDelta("original still active".toClientTextDto())))
+        assertEquals("original still active", vm.state.value.streamingMessage?.text)
+        assertEquals(1L, vm.durableReplayCursorForTesting())
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(TurnRecoverySnapshotDto(
+            "session-a", queued, 1uL, TurnRecoveryStateDto.RUNNING, 1uL, 1uL, false, false, null,
+        )))
+        assertEquals("original still active", vm.state.value.streamingMessage?.text)
+    }
+
+    @Test
+    fun durableUnretainedCrashReopenUsesPersistedUncertaintyAndKeepsTranscript() = runTest(dispatcher) {
+        val firstSource = RecordingSource()
+        val first = ChatViewModel(firstSource)
+        first.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        first.send("question")
+        val turn = firstSource.submittedTurnId!!.toULong()
+        first.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", turn, 1uL,
+            ClientEvent.TurnStarted(turn)))
+        first.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", turn, null,
+            ClientEvent.TextDelta("visible before crash".toClientTextDto())))
+        assertEquals("visible before crash", first.state.value.streamingMessage?.text)
+        assertEquals(1L, first.durableReplayCursorForTesting())
+
+        val reopened = ChatViewModel(DurableAttachSource(turn.toLong()))
+        reopened.applyActivatedSession(ActivatedSession("session-a", listOf(Message(Role.Ai, "authoritative")),
+            SessionActivationKind.Resumed))
+        reopened.noteDurableAttach("session-a", turn.toLong(), true)
+        reopened.reduceClientEvent(ClientEvent.TurnRecoveryState(TurnRecoverySnapshotDto(
+            "session-a", turn, 2uL, TurnRecoveryStateDto.PAUSED_RECOVERABLE, 1uL, 1uL, false, true, null,
+        )))
+        reopened.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", turn, 1uL,
+            ClientEvent.TurnStarted(turn)))
+        assertNotNull(reopened.state.value.error)
+        assertEquals(listOf("authoritative"), reopened.state.value.messages.map { it.text })
+        assertEquals(1L, reopened.durableReplayCursorForTesting())
+    }
+
+    @Test
+    fun detachedModEventsStayInTheirOriginSessionAndOutOfTheActiveRun() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("session-b", emptyList(), SessionActivationKind.Started))
+        vm.send("active")
+        val before = vm.state.value.agentRun
+        vm.reduceClientEvent(ClientEvent.ModSessionEvent("session-a", "opaque-mod-turn",
+            ModSessionEventPayload.Notice("old notice".toClientTextDto(), false)))
+        assertNull(vm.state.value.statusLine)
+        vm.reduceClientEvent(ClientEvent.ModSessionEvent("session-b", "opaque-mod-turn",
+            ModSessionEventPayload.Notify("plugin", "notification".toClientTextDto())))
+        assertEquals("plugin: notification", vm.state.value.statusLine)
+        assertEquals(before, vm.state.value.agentRun)
+    }
+
+    @Test
+    fun healthyLiveUncertaintyDoesNotShowRecoveryWarning() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("live-session", emptyList(), SessionActivationKind.Started))
+        vm.send("hello")
+        val turn = source.submittedTurnId!!.toULong()
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(TurnRecoverySnapshotDto(
+            "live-session", turn, 1uL, TurnRecoveryStateDto.RUNNING, 1uL, 1uL, false, true, null,
+        )))
+        vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("live-session", turn, 1uL,
+            ClientEvent.TextDelta("live output".toClientTextDto())))
+        assertNull(vm.state.value.error)
+        assertEquals("live output", vm.state.value.streamingMessage?.text)
+    }
+
+    @Test
+    fun cancellationWaitsForLateBlockResultBeforeSettlingRun() = runTest(dispatcher) {
+        val release = CompletableDeferred<Unit>()
+        val deliveries = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 8)
+        var turn = 0L
+        val source = object : ConversationSource {
+            val never = MutableSharedFlow<ReplyEvent>()
+            override val orderedCancellationBoundaries = true
+            override val conversationDeliveries: Flow<ConversationDelivery> = deliveries.asSharedFlow()
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?): Flow<ReplyEvent> {
+                turn = turnId
+                return never.asSharedFlow()
+            }
+            override suspend fun cancel(turnId: Long?) {
+                release.await()
+                deliveries.emit(ConversationDelivery.CancellationDrained("session-a", turn, true))
+            }
+        }
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        vm.send("start")
+        vm.reduceDurableTurnDelivery(ConversationDelivery.TurnEvent("session-a", turn.toULong(), 1uL,
+            ClientEvent.ToolUseStarted("block-1", "Read", "{}", wireHeader())))
+        vm.cancel()
+        runCurrent()
+        deliveries.emit(ConversationDelivery.Event(ClientEvent.TurnRecoveryState(TurnRecoverySnapshotDto(
+            "session-a", turn.toULong(), 2uL, TurnRecoveryStateDto.CANCELLED, 1uL, 1uL, false, false, null,
+        ))))
+        deliveries.emit(ConversationDelivery.TurnEvent("session-a", turn.toULong(), null,
+            ClientEvent.ToolUseResult("block-1", "Read", "{}", false, wireDisplay())))
+        runCurrent()
+        assertEquals(AgentToolStatus.Completed, vm.state.value.agentRun?.tools?.first { it.id == "block-1" }?.status)
+        assertTrue(vm.state.value.cancellationInFlight)
+        assertNotNull(vm.state.value.error) // the live-only result may not survive reopening
+        release.complete(Unit)
+        runCurrent()
+        assertFalse(vm.state.value.streaming)
+        assertFalse(vm.state.value.cancellationInFlight)
+    }
+
+    @Test
+    fun failedCancellationRestoresOwnerBeforeTerminalAndQueuedTurn() = runTest(dispatcher) {
+        val deliveries = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 16)
+        val commands = mutableListOf<ClientCommand>()
+        var first = 0L
+        val source = object : ConversationSource {
+            val never = MutableSharedFlow<ReplyEvent>()
+            override val orderedCancellationBoundaries = true
+            override val conversationDeliveries: Flow<ConversationDelivery> = deliveries.asSharedFlow()
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?): Flow<ReplyEvent> {
+                first = turnId
+                return never.asSharedFlow()
+            }
+            override suspend fun submitClientCommand(command: ClientCommand) { commands += command }
+            override suspend fun cancel(turnId: Long?) {
+                deliveries.emit(ConversationDelivery.CancellationAborted("session-a", first, false))
+                throw IllegalStateException("cancel failed")
+            }
+        }
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        vm.send("first")
+        vm.send("!next")
+        runCurrent()
+        val next = commands.filterIsInstance<ClientCommand.SendPrompt>().last().turnId!!
+        vm.cancel()
+        runCurrent()
+        assertTrue(vm.state.value.streaming)
+        assertNotNull(vm.state.value.error)
+        deliveries.emit(ConversationDelivery.TurnEvent("session-a", first.toULong(), 1uL,
+            ClientEvent.TurnEnded(TurnOutcomeDto.END_TURN, null, cost())))
+        deliveries.emit(ConversationDelivery.Event(ClientEvent.TurnRecoveryState(TurnRecoverySnapshotDto(
+            "session-a", first.toULong(), 1uL, TurnRecoveryStateDto.COMPLETED, 1uL, 1uL, false, false, null,
+        ))))
+        deliveries.emit(ConversationDelivery.Event(ClientEvent.TurnRecoveryState(TurnRecoverySnapshotDto(
+            "session-a", next, 1uL, TurnRecoveryStateDto.RUNNING, 1uL, 1uL, false, false, null,
+        ))))
+        deliveries.emit(ConversationDelivery.TurnEvent("session-a", next, 1uL,
+            ClientEvent.TextDelta("next".toClientTextDto())))
+        runCurrent()
+        assertEquals("next", vm.state.value.streamingMessage?.text)
+        assertEquals(1L, vm.durableReplayCursorForTesting())
+    }
+
+    @Test
+    fun liveReplayAcknowledgementRequiresTheSubmittedSessionAndTurn() = runTest(dispatcher) {
+        val wire = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 16)
+        var submittedTurn = 0L
+        val source = object : ConversationSource {
+            override val conversationDeliveries: Flow<ConversationDelivery> = wire.asSharedFlow()
+            override fun submit(
+                text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?,
+            ): Flow<ReplyEvent> {
+                submittedTurn = turnId
+                return mapDeliveryReplyStream(wire, acceptsTurn = { session, turn ->
+                    session == "session-a" && turn == turnId.toULong()
+                })
+            }
+        }
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        vm.send("question")
+        runCurrent()
+        wire.emit(ConversationDelivery.TurnEvent("session-a", (submittedTurn + 1).toULong(), 100uL,
+            ClientEvent.TextDelta("wrong turn".toClientTextDto())))
+        wire.emit(ConversationDelivery.TurnEvent("session-b", submittedTurn.toULong(), 200uL,
+            ClientEvent.TextDelta("wrong session".toClientTextDto())))
+        runCurrent()
+        assertEquals(0L, vm.durableReplayCursorForTesting())
+
+        wire.emit(ConversationDelivery.TurnEvent("session-a", submittedTurn.toULong(), 1uL,
+            ClientEvent.TextDelta("live".toClientTextDto())))
+        runCurrent()
+        assertEquals(1L, vm.durableReplayCursorForTesting())
+        assertEquals("live", vm.state.value.streamingMessage?.text)
+    }
+
+    @Test
+    fun overlappingUiOwnersReplayByTheirOwnCursorsAndDrainEveryConsumer() = runTest(dispatcher) {
+        val relay = LosslessEventRelay<ConversationDelivery>(backgroundScope)
+        val consumers = AttachConsumerRegistry()
+        val ingress = DurableRecoveryIngress().newSource("store")
+        var submittedTurn = 0L
+        var subscriberCount = 0
+        val holdFirst = CompletableDeferred<Unit>()
+        val source = object : ConversationSource {
+            val never = MutableSharedFlow<ReplyEvent>()
+            override val conversationDeliveries: Flow<ConversationDelivery> get() = flow {
+                val index = subscriberCount++
+                consumers.track(relay.events).collect { delivery ->
+                    if (index == 0 && delivery is ConversationDelivery.TurnEvent && delivery.sequence == 2uL &&
+                        delivery.excludedAttachRequestId == "r2") holdFirst.await()
+                    emit(delivery)
+                }
+            }
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?): Flow<ReplyEvent> {
+                submittedTurn = turnId
+                return never.asSharedFlow()
+            }
+        }
+        val first = ChatViewModel(source)
+        first.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        first.send("first")
+        runCurrent()
+        val turn = submittedTurn.toULong()
+        ingress.acquireInterest("session-a", turn)
+        val oldFence = ingress.fence("session-a", turn)
+        relay.offer(ConversationDelivery.TurnEvent("session-a", turn, 1uL, ClientEvent.TurnStarted(turn), isActive = oldFence))
+        runCurrent()
+
+        val second = ChatViewModel(source)
+        second.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        second.noteDurableAttach("session-a", submittedTurn, expectsResume = true, requestId = "r2")
+        runCurrent()
+        relay.offer(ConversationDelivery.TurnEvent("session-a", turn, 2uL,
+            ClientEvent.TextDelta("middle".toClientTextDto()), excludedAttachRequestId = "r2", isActive = oldFence))
+        val oldLease = ingress.detachInterest("session-a", turn)!!
+        val retirement = consumers.retirement { ingress.releaseInterest(oldLease) }!!
+        relay.offer(ConversationDelivery.RecoveryInterestEnded(retirement))
+        ingress.acquireInterest("session-a", turn)
+        val newFence = ingress.fence("session-a", turn)
+        val snapshot = TurnRecoverySnapshotDto("session-a", turn, 1uL, TurnRecoveryStateDto.RUNNING,
+            1uL, 2uL, false, false, null)
+        relay.offer(ConversationDelivery.AttachStarted("r2", snapshot, newFence))
+        relay.offer(ConversationDelivery.TurnEvent("session-a", turn, 1uL,
+            ClientEvent.TurnStarted(turn), attachRequestId = "r2", isActive = newFence))
+        relay.offer(ConversationDelivery.TurnEvent("session-a", turn, 2uL,
+            ClientEvent.TextDelta("middle".toClientTextDto()), attachRequestId = "r2", isActive = newFence))
+        val finished = CompletableDeferred<Boolean>()
+        val barrier = consumers.barrier(finished)
+        relay.offer(ConversationDelivery.AttachReplayEnded("session-a", submittedTurn, true, "r2",
+            barrier = barrier, isActive = newFence))
+        runCurrent()
+        assertFalse(finished.isCompleted)
+        assertTrue(oldFence())
+        holdFirst.complete(Unit)
+        runCurrent()
+        assertTrue(finished.await())
+        assertFalse(oldFence())
+        relay.offer(ConversationDelivery.TurnEvent("session-a", turn, 3uL,
+            ClientEvent.TextDelta(" end".toClientTextDto()), isActive = newFence))
+        runCurrent()
+        assertEquals("middle end", first.state.value.streamingMessage?.text)
+        assertEquals("middle end", second.state.value.streamingMessage?.text)
+        assertEquals(3L, first.durableReplayCursorForTesting())
+        assertEquals(3L, second.durableReplayCursorForTesting())
+    }
+
+    @Test
+    fun failedSecondAttachDoesNotStopTheExistingUi() = runTest(dispatcher) {
+        val relay = LosslessEventRelay<ConversationDelivery>(backgroundScope)
+        val consumers = AttachConsumerRegistry()
+        var turn = 0L
+        val source = object : ConversationSource {
+            val never = MutableSharedFlow<ReplyEvent>()
+            override val conversationDeliveries: Flow<ConversationDelivery> get() = consumers.track(relay.events)
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?): Flow<ReplyEvent> {
+                turn = turnId
+                return never.asSharedFlow()
+            }
+        }
+        val first = ChatViewModel(source)
+        first.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        first.send("question")
+        val second = ChatViewModel(source)
+        second.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        second.noteDurableAttach("session-a", turn, expectsResume = false, requestId = "r2")
+        runCurrent()
+        val failure = DurableAttachFailure(turn, "attach", IllegalStateException("timeout"))
+        relay.offer(ConversationDelivery.AttachFailed("session-a", turn, failure, "r2"))
+        relay.offer(ConversationDelivery.TurnEvent("session-a", turn.toULong(), 1uL,
+            ClientEvent.TextDelta("still live".toClientTextDto())))
+        relay.offer(ConversationDelivery.TurnEvent("session-a", turn.toULong(), null,
+            ClientEvent.TextDelta(" unretained".toClientTextDto())))
+        runCurrent()
+        assertEquals("still live unretained", first.state.value.streamingMessage?.text)
+        assertTrue(first.state.value.streaming)
+        assertNotNull(first.state.value.error)
+        assertTrue(second.state.value.durableRecoveryBlocked)
+        assertEquals(0L, second.durableReplayCursorForTesting())
+        relay.offer(ConversationDelivery.TurnEvent("session-a", turn.toULong(), 2uL,
+            ClientEvent.TurnEnded(TurnOutcomeDto.END_TURN, null, cost())))
+        runCurrent()
+        assertFalse(first.state.value.streaming)
+    }
+
+    @Test
+    fun retirementWaitsForTheReplyCollectorToConsumeItsTerminal() = runTest(dispatcher) {
+        val relay = LosslessEventRelay<ConversationDelivery>(backgroundScope)
+        val consumers = AttachConsumerRegistry()
+        val ingress = DurableRecoveryIngress().newSource("store")
+        ingress.acquireInterest("session-a", 1uL)
+        val fence = ingress.fence("session-a", 1uL)
+        val holdingReply = CompletableDeferred<Unit>()
+        val received = mutableListOf<ReplyEvent>()
+        val ui = backgroundScope.launch { consumers.track(relay.events).collect {} }
+        val reply = backgroundScope.launch {
+            val delayed = flow {
+                consumers.track(relay.events, ui = false).collect { item ->
+                    if (item is ConversationDelivery.TurnEvent) holdingReply.await()
+                    emit(item)
+                }
+            }
+            mapDeliveryReplyStream(delayed, acceptsTurn = { session, turn -> session == "session-a" && turn == 1uL })
+                .collect { received += it }
+        }
+        runCurrent()
+        relay.offer(ConversationDelivery.TurnEvent("session-a", 1uL, 1uL,
+            ClientEvent.TurnEnded(TurnOutcomeDto.END_TURN, null, cost()), isActive = fence))
+        val old = ingress.detachInterest("session-a", 1uL)!!
+        val barrier = consumers.retirement { ingress.releaseInterest(old) }!!
+        relay.offer(ConversationDelivery.RecoveryInterestEnded(barrier))
+        runCurrent()
+        assertTrue(fence())
+        assertFalse(reply.isCompleted)
+        holdingReply.complete(Unit)
+        runCurrent()
+        assertEquals(1, received.count { it is ReplyEvent.DurableTurnStreamEnded })
+        assertTrue(reply.isCompleted)
+        assertFalse(fence())
+        ui.cancel()
+    }
+
+    @Test
+    fun stopWaitsForPendingHostReservationAndUsesTheOriginalSession() = runTest(dispatcher) {
+        val reservation = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        val calls = mutableListOf<String>()
+        val source = object : ConversationSource {
+            override val supportsSubmissionAdmission = true
+            override val activeSessionState = MutableStateFlow<ActivatedSession?>(
+                ActivatedSession("session-a", emptyList(), SessionActivationKind.Bootstrap))
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, sessionId: String,
+                admission: TurnSubmissionAdmission): Flow<ReplyEvent> = flow {
+                assertTrue(admission.begin(sessionId))
+                entered.complete(Unit)
+                reservation.await()
+                calls += "reserved:$sessionId:$turnId"
+                admission.finished()
+                kotlinx.coroutines.awaitCancellation()
+            }
+            override suspend fun cancelForSession(sessionId: String, turnId: Long?) {
+                calls += "cancel:$sessionId:$turnId"
+            }
+        }
+        val vm = ChatViewModel(source)
+        vm.send("first")
+        entered.await()
+        vm.cancel()
+        runCurrent()
+        assertTrue(calls.isEmpty())
+        assertTrue(vm.state.value.cancellationInFlight)
+        reservation.complete(Unit)
+        runCurrent()
+        assertEquals(2, calls.size)
+        assertTrue(calls[0].startsWith("reserved:session-a:"))
+        assertEquals(calls[0].replace("reserved:", "cancel:"), calls[1])
+        assertFalse(vm.state.value.cancellationInFlight)
+    }
+
+    @Test
+    fun freshPromptWaitsForItsWorkspaceOwnerBeforeProjectingEnvelopes() = runTest(dispatcher) {
+        val owner = CompletableDeferred<String>()
+        val deliveries = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 8)
+        var checkpoint: Pair<String, Long>? = null
+        val source = object : ConversationSource {
+            val active = MutableStateFlow<ActivatedSession?>(null)
+            override val activeSessionState = active.asStateFlow()
+            override val conversationDeliveries = deliveries.asSharedFlow()
+            override val supportsSubmissionAdmission = true
+            override suspend fun submissionSession(): String = owner.await()
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, sessionId: String,
+                admission: TurnSubmissionAdmission): Flow<ReplyEvent> = flow {
+                assertTrue(admission.begin(sessionId))
+                checkpoint = sessionId to turnId
+                admission.finished()
+                kotlinx.coroutines.awaitCancellation()
+            }
+        }
+        val vm = ChatViewModel(source)
+        vm.send("first")
+        runCurrent()
+        assertNull(checkpoint)
+        source.active.value = ActivatedSession("session-a", emptyList(), SessionActivationKind.Bootstrap)
+        owner.complete("session-a")
+        runCurrent()
+        val (session, turn) = checkpoint!!
+        assertEquals("session-a", session)
+        deliveries.emit(ConversationDelivery.TurnEvent(session, turn.toULong(), 1uL, ClientEvent.TurnStarted(turn.toULong())))
+        deliveries.emit(ConversationDelivery.TurnEvent(session, turn.toULong(), 2uL,
+            ClientEvent.TextDelta("first answer".toClientTextDto())))
+        runCurrent()
+        assertEquals("first answer", vm.state.value.streamingMessage?.text)
+        assertEquals(2L, vm.durableReplayCursorForTesting())
+    }
+
+    @Test
+    fun stopBeforeWorkspaceBootstrapPreventsTheHostSubmission() = runTest(dispatcher) {
+        val owner = CompletableDeferred<String>()
+        var submissions = 0
+        val abandoned = mutableListOf<Long>()
+        val source = object : ConversationSource {
+            override val supportsSubmissionAdmission = true
+            override suspend fun submissionSession(): String = owner.await()
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, sessionId: String,
+                admission: TurnSubmissionAdmission): Flow<ReplyEvent> {
+                submissions++
+                return emptyFlow()
+            }
+            override suspend fun abandonUnsubmittedTurn(sessionId: String?, turnId: Long) { abandoned += turnId }
+        }
+        val vm = ChatViewModel(source)
+        vm.send("first")
+        runCurrent()
+        vm.cancel()
+        runCurrent()
+        owner.complete("session-a")
+        runCurrent()
+        assertEquals(0, submissions)
+        assertEquals(1, abandoned.size)
+        assertFalse(vm.state.value.streaming)
+        assertFalse(vm.state.value.cancellationInFlight)
+    }
+
+    @Test
+    fun confirmedNotAdmittedSubmissionIsAbandonedWithoutHostCancel() = runTest(dispatcher) {
+        val result = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        val calls = mutableListOf<String>()
+        val source = object : ConversationSource {
+            override val supportsSubmissionAdmission = true
+            override val activeSessionState = MutableStateFlow<ActivatedSession?>(
+                ActivatedSession("session-a", emptyList(), SessionActivationKind.Bootstrap))
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, sessionId: String,
+                admission: TurnSubmissionAdmission): Flow<ReplyEvent> = flow {
+                assertTrue(admission.begin(sessionId))
+                entered.complete(Unit)
+                result.await()
+                admission.finished(ClientException.SubmissionNotAdmitted("rejected"))
+                kotlinx.coroutines.awaitCancellation()
+            }
+            override suspend fun abandonUnsubmittedTurn(sessionId: String?, turnId: Long) { calls += "abandon:$sessionId:$turnId" }
+            override suspend fun cancelForSession(sessionId: String, turnId: Long?) { calls += "cancel:$sessionId:$turnId" }
+        }
+        val vm = ChatViewModel(source)
+        vm.send("first")
+        entered.await()
+        vm.cancel()
+        result.complete(Unit)
+        runCurrent()
+        assertEquals(1, calls.size)
+        assertTrue(calls.single().startsWith("abandon:session-a:"))
+        assertFalse(vm.state.value.durableRecoveryBlocked)
+    }
+
+    @Test
+    fun unknownSubmissionNeverCompletesAndCanRetryTheOriginalOwner() = runTest(dispatcher) {
+        val relay = LosslessEventRelay<ConversationDelivery>(backgroundScope)
+        val consumers = AttachConsumerRegistry()
+        val queries = mutableListOf<Pair<String, Long>>()
+        val source = object : ConversationSource {
+            override val supportsSubmissionAdmission = true
+            override val activeSessionState = MutableStateFlow<ActivatedSession?>(
+                ActivatedSession("session-a", emptyList(), SessionActivationKind.Bootstrap))
+            override val conversationDeliveries: Flow<ConversationDelivery> get() = consumers.track(relay.events)
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, sessionId: String,
+                admission: TurnSubmissionAdmission): Flow<ReplyEvent> = flow {
+                assertTrue(admission.begin(sessionId))
+                admission.finished(ClientException.Rejected("uncertain"))
+                emit(ReplyEvent.Error("request failed"))
+                emit(ReplyEvent.End)
+            }
+            override suspend fun reconcileDurableTurnForUi(sessionId: String, turnId: Long, afterSequence: Long, trustNotFound: Boolean,
+                onAttach: (String, Long, Boolean, String) -> Unit) {
+                queries += sessionId to turnId
+                onAttach(sessionId, turnId, false, "query-${queries.size}")
+                if (queries.size == 1) throw IllegalStateException("offline")
+                val completion = CompletableDeferred<Boolean>()
+                val barrier = consumers.barrier(completion)
+                relay.offer(ConversationDelivery.ReconciliationNotFound(sessionId, turnId, "query-2", barrier))
+                assertTrue(completion.await())
+            }
+        }
+        val vm = ChatViewModel(source)
+        val completions = mutableListOf<ConversationTurnCompletion>()
+        backgroundScope.launch { vm.turnCompletions.collect { completions += it } }
+        runCurrent()
+        vm.send("first")
+        runCurrent()
+        assertTrue(completions.isEmpty())
+        assertTrue(vm.state.value.durableRecoveryBlocked)
+        assertTrue(vm.state.value.recoveryRetryAvailable)
+        assertEquals("session-a", queries.single().first)
+        assertFalse(vm.openSessionFromNotification(SessionRef("session-b", "B")))
+        assertEquals("session-a", vm.state.value.session.id)
+        vm.retryDurableRecovery()
+        runCurrent()
+        assertEquals(2, queries.size)
+        assertEquals(queries[0], queries[1])
+        assertFalse(vm.state.value.durableRecoveryBlocked)
+        assertFalse(vm.state.value.recoveryRetryAvailable)
+        assertTrue(completions.isEmpty())
+    }
+
+    @Test
+    fun restoredQueuedIdentityCanStartAfterTheEarlierTurnEnds() = runTest(dispatcher) {
+        val deliveries = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 8)
+        val source = object : ConversationSource {
+            override val conversationDeliveries: Flow<ConversationDelivery> = deliveries.asSharedFlow()
+        }
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed))
+        runCurrent()
+        deliveries.emit(ConversationDelivery.QueuedTurnRegistered("session-a", 72uL))
+        deliveries.emit(ConversationDelivery.RecoveryState(TurnRecoverySnapshotDto(
+            "session-a", 72uL, 1uL, TurnRecoveryStateDto.RUNNING, 1uL, 1uL, false, false, null,
+        )))
+        deliveries.emit(ConversationDelivery.TurnEvent("session-a", 72uL, 1uL, ClientEvent.TurnStarted(72uL)))
+        deliveries.emit(ConversationDelivery.TurnEvent("session-a", 72uL, 2uL,
+            ClientEvent.TextDelta("queued bash result".toClientTextDto())))
+        runCurrent()
+        assertEquals("queued bash result", vm.state.value.streamingMessage?.text)
+        assertEquals(2L, vm.durableReplayCursorForTesting())
+    }
+
+    @Test
+    fun terminalReceiptsWarnAfterReopenUntilTheUserReviewsThem() = runTest(dispatcher) {
+        val source = object : ConversationSource {
+            val active = MutableStateFlow<ActivatedSession?>(ActivatedSession("session-a", emptyList(), SessionActivationKind.Bootstrap))
+            val receipts = mutableListOf(10L)
+            override val activeSessionState = active.asStateFlow()
+            override suspend fun terminalRecoveryReceipts(sessionId: String): List<Long> =
+                if (sessionId == "session-a") receipts.toList() else emptyList()
+            override suspend fun acknowledgeTerminalRecovery(sessionId: String, turns: List<Long>): Boolean {
+                if (sessionId == "session-a") receipts.removeAll(turns.toSet())
+                return true
+            }
+        }
+        val vm = ChatViewModel(source)
+        runCurrent()
+        assertTrue(vm.state.value.terminalRecoveryReviewAvailable)
+        assertTrue(vm.state.value.terminalRecoveryUncertain)
+        vm.acknowledgeTerminalRecovery()
+        runCurrent()
+        assertFalse(vm.state.value.terminalRecoveryReviewAvailable)
+        assertTrue(source.receipts.isEmpty())
+    }
+
+    @Test
+    fun cancelledQueuedInputIsShownNowAndAfterReopenUntilReviewed() = runTest(dispatcher) {
+        val preferences = FakeSharedPreferences()
+        assertTrue(DurableConversationTurnClientStore(preferences, "scope-a").enqueue("session-a", 11L))
+        class Source : ConversationSource {
+            val store = DurableConversationTurnClientStore(preferences, "scope-a")
+            val deliveries = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 8)
+            val queries = mutableListOf<String>()
+            override val activeSessionState = MutableStateFlow<ActivatedSession?>(
+                ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed))
+            override val conversationDeliveries = deliveries.asSharedFlow()
+            override suspend fun pendingQueuedRecoveryTurns(sessionId: String) = store.queued(sessionId).map { it.turnId }
+            override suspend fun terminalRecoveryReceipts(sessionId: String) = store.terminalReceipts(sessionId).map { it.turnId }
+            override suspend fun cancelledQueuedReceipts(sessionId: String) =
+                store.terminalReceipts(sessionId).filter { it.cancelledBeforeStart }.map { it.turnId }
+            override suspend fun acknowledgeTerminalRecovery(sessionId: String, turns: List<Long>) =
+                store.acknowledgeTerminals(sessionId, turns)
+            override suspend fun queryQueuedRecovery(sessionId: String, turnId: Long, requestId: String) { queries += requestId }
+            override suspend fun resolveQueuedRecovery(sessionId: String, turns: List<Long>, resolution: QueuedRecoveryResolution): Boolean {
+                assertEquals(QueuedRecoveryResolution.CancelledBeforeStart, resolution)
+                val saved = turns.all { store.finishQueued(sessionId, it, cancelledBeforeStart = true) }
+                if (saved) turns.forEach { deliveries.emit(ConversationDelivery.QueuedTurnSettled(
+                    sessionId, it.toULong(), reviewRequired = true, cancelledBeforeStart = true)) }
+                return saved
+            }
+        }
+        val original = Source()
+        val vm = ChatViewModel(original)
+        runCurrent()
+        original.deliveries.emit(ConversationDelivery.Event(ClientEvent.QueuedTurnStatus(
+            "session-a", 11uL, original.queries.single(), QueuedTurnStatusDto.Cancelled)))
+        runCurrent()
+        assertTrue(vm.state.value.queuedCancellationNotice)
+        assertTrue(vm.state.value.terminalRecoveryReviewAvailable)
+        assertFalse(vm.state.value.terminalRecoveryUncertain)
+        assertFalse(vm.state.value.queuedRecoveryWarning)
+        assertNull(vm.state.value.error)
+        assertTrue(original.store.queued("session-a").isEmpty())
+
+        // Recreate the source before any review, as after a process restart.
+        val reopened = Source()
+        val restored = ChatViewModel(reopened)
+        runCurrent()
+        assertTrue(restored.state.value.queuedCancellationNotice)
+        assertTrue(restored.state.value.terminalRecoveryReviewAvailable)
+        assertFalse(restored.state.value.terminalRecoveryUncertain)
+        restored.acknowledgeTerminalRecovery()
+        runCurrent()
+        assertFalse(restored.state.value.queuedCancellationNotice)
+        assertFalse(restored.state.value.terminalRecoveryReviewAvailable)
+        assertTrue(reopened.store.terminalReceipts("session-a").isEmpty())
+    }
+
+    @Test
+    fun recoveryStorageFailureBlocksNewTurnsUntilTheAppRestarts() = runTest(dispatcher) {
+        val deliveries = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 8)
+        var submissions = 0
+        val source = object : ConversationSource {
+            override val conversationDeliveries = deliveries.asSharedFlow()
+            override fun submit(text: String): Flow<ReplyEvent> { submissions++; return emptyFlow() }
+        }
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        runCurrent()
+        deliveries.emit(ConversationDelivery.RecoveryStorageFailed)
+        runCurrent()
+        assertTrue(vm.state.value.recoveryStorageFailed)
+        assertNotNull(vm.state.value.error)
+        vm.dismissError()
+        vm.send("must not start")
+        runCurrent()
+        assertEquals(0, submissions)
+        assertNotNull(vm.state.value.error)
+    }
+
+    @Test
+    fun queuedStatusRequiresRequestSessionTurnAndTheProjectedAggregateUuid() = runTest(dispatcher) {
+        val deliveries = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 8)
+        val queries = mutableListOf<Pair<Long, String>>()
+        val settled = mutableListOf<List<Long>>()
+        val row = Message(Role.User, "same text", transcriptUuid = "aggregate-a")
+        val source = object : ConversationSource {
+            override val activeSessionState = MutableStateFlow<ActivatedSession?>(ActivatedSession(
+                "session-a", listOf(row), SessionActivationKind.Resumed,
+                fullyVisibleUserUuids = setOf("aggregate-a")))
+            override val conversationDeliveries = deliveries.asSharedFlow()
+            override suspend fun pendingQueuedRecoveryTurns(sessionId: String) = listOf(11L, 12L)
+            override suspend fun queryQueuedRecovery(sessionId: String, turnId: Long, requestId: String) {
+                queries += turnId to requestId
+            }
+            override suspend fun resolveQueuedRecovery(sessionId: String, turns: List<Long>, resolution: QueuedRecoveryResolution): Boolean {
+                assertEquals("session-a", sessionId)
+                assertEquals(QueuedRecoveryResolution.Delivered, resolution)
+                settled += turns
+                return true
+            }
+        }
+        val vm = ChatViewModel(source)
+        runCurrent()
+        val request = queries.first { it.first == 11L }.second
+        val status = QueuedTurnStatusDto.Delivered(11uL, listOf(11uL, 12uL), "aggregate-a")
+        deliveries.emit(ConversationDelivery.Event(ClientEvent.QueuedTurnStatus("session-b", 11uL, request, status)))
+        deliveries.emit(ConversationDelivery.Event(ClientEvent.QueuedTurnStatus("session-a", 12uL, request, status)))
+        runCurrent()
+        assertTrue(settled.isEmpty())
+        deliveries.emit(ConversationDelivery.Event(ClientEvent.QueuedTurnStatus("session-a", 11uL, request, status)))
+        runCurrent()
+        assertEquals(listOf(listOf(11L, 12L)), settled)
+    }
+
+    @Test
+    fun overlappingDeliveredResponsesForOneBatchDoNotReportAFalseFailure() = runTest(dispatcher) {
+        val preferences = FakeSharedPreferences()
+        val store = DurableConversationTurnClientStore(preferences, "scope-a")
+        assertTrue(store.enqueue("session-a", 11L))
+        assertTrue(store.enqueue("session-a", 12L))
+        val deliveries = MutableSharedFlow<ConversationDelivery>(extraBufferCapacity = 8)
+        val queries = mutableListOf<Pair<Long, String>>()
+        val results = mutableListOf<Boolean>()
+        val row = Message(Role.User, "both", transcriptUuid = "aggregate-a")
+        val source = object : ConversationSource {
+            override val activeSessionState = MutableStateFlow<ActivatedSession?>(ActivatedSession(
+                "session-a", listOf(row), SessionActivationKind.Resumed, fullyVisibleUserUuids = setOf("aggregate-a")))
+            override val conversationDeliveries = deliveries.asSharedFlow()
+            override suspend fun pendingQueuedRecoveryTurns(sessionId: String) = store.queued(sessionId).map { it.turnId }
+            override suspend fun queryQueuedRecovery(sessionId: String, turnId: Long, requestId: String) { queries += turnId to requestId }
+            override suspend fun resolveQueuedRecovery(sessionId: String, turns: List<Long>, resolution: QueuedRecoveryResolution): Boolean {
+                assertEquals(QueuedRecoveryResolution.Delivered, resolution)
+                val saved = turns.all { store.removeDeliveredQueued(sessionId, it) }
+                results += saved
+                // Intentionally hold the settled relay marker until both responses arrive.
+                return saved
+            }
+        }
+        val vm = ChatViewModel(source)
+        runCurrent()
+        val status = QueuedTurnStatusDto.Delivered(11uL, listOf(11uL, 12uL), "aggregate-a")
+        queries.forEach { (turn, request) ->
+            deliveries.emit(ConversationDelivery.Event(ClientEvent.QueuedTurnStatus("session-a", turn.toULong(), request, status)))
+        }
+        runCurrent()
+        assertEquals(listOf(true, true), results)
+        assertTrue(store.queued("session-a").isEmpty())
+        assertTrue(store.isHealthy())
+        assertFalse(vm.state.value.statusLine?.contains("暂时无法确认") == true)
+    }
+
+    @Test
+    fun queuedStatusQueriesAdvancePastTheFirst512PendingItems() = runTest(dispatcher) {
+        for (respondToPending in listOf(true, false)) {
+            val relay = LosslessEventRelay<ConversationDelivery>(backgroundScope)
+            val consumers = AttachConsumerRegistry()
+            val seen = mutableListOf<Long>()
+            val settled = mutableListOf<Long>()
+            val row = Message(Role.User, "last", transcriptUuid = "aggregate-last")
+            val source = object : ConversationSource {
+                override val activeSessionState = MutableStateFlow<ActivatedSession?>(ActivatedSession(
+                    "session-a", listOf(row), SessionActivationKind.Resumed,
+                    fullyVisibleUserUuids = setOf("aggregate-last")))
+                override val conversationDeliveries: Flow<ConversationDelivery> get() = consumers.track(relay.events)
+                override suspend fun pendingQueuedRecoveryTurns(sessionId: String) = (1L..513L).toList()
+                override suspend fun queryQueuedRecovery(sessionId: String, turnId: Long, requestId: String) {
+                    consumers.awaitSubscriber()
+                    seen += turnId
+                    val status = if (turnId == 513L) {
+                        QueuedTurnStatusDto.Delivered(513uL, listOf(513uL), "aggregate-last")
+                    } else QueuedTurnStatusDto.Pending
+                    if (respondToPending || turnId == 513L) {
+                        relay.offer(ConversationDelivery.Event(ClientEvent.QueuedTurnStatus(sessionId, turnId.toULong(), requestId, status)))
+                    }
+                }
+                override suspend fun resolveQueuedRecovery(sessionId: String, turns: List<Long>, resolution: QueuedRecoveryResolution): Boolean {
+                    settled += turns
+                    return true
+                }
+            }
+            ChatViewModel(source)
+            runCurrent()
+            if (!respondToPending) {
+                testScheduler.advanceTimeBy(160_001)
+                runCurrent()
+            }
+            assertEquals(513, seen.size)
+            assertEquals(listOf(513L), settled)
+        }
+    }
+    @Test
+    fun queuedPromptKeepsActionSessionWhenNotificationSwitchesBeforeDelivery() = runTest(dispatcher) {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val commands = mutableListOf<ClientCommand.SendPrompt>()
+        val accepted = mutableListOf<String>()
+        val source = object : ConversationSource {
+            val active = MutableStateFlow<ActivatedSession?>(ActivatedSession("session-a", emptyList(), SessionActivationKind.Bootstrap))
+            override val activeSessionState = active.asStateFlow()
+            override val supportsSubmissionAdmission = true
+            override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, sessionId: String,
+                admission: TurnSubmissionAdmission): Flow<ReplyEvent> = flow {
+                assertTrue(admission.begin(sessionId))
+                admission.finished()
+                kotlinx.coroutines.awaitCancellation()
+            }
+            override suspend fun cancelForSession(sessionId: String, turnId: Long?) = Unit
+            override suspend fun resumeSession(uuid: String) {
+                active.value = ActivatedSession(uuid, emptyList(), SessionActivationKind.Resumed)
+            }
+            override suspend fun submitClientCommand(command: ClientCommand) {
+                if (command !is ClientCommand.SendPrompt) return
+                commands += command
+                entered.complete(Unit)
+                release.await()
+                if (command.sessionId == active.value?.sessionId) accepted += command.sessionId!!
+            }
+        }
+        val vm = ChatViewModel(source)
+        vm.send("first")
+        vm.send("!queued")
+        entered.await()
+        assertTrue(vm.openSessionFromNotification(SessionRef("session-b", "B")))
+        runCurrent()
+        assertEquals("session-b", vm.state.value.session.id)
+        release.complete(Unit)
+        runCurrent()
+        assertEquals("session-a", commands.single().sessionId)
+        assertTrue(accepted.isEmpty())
     }
 
     @Test
@@ -881,15 +1787,18 @@ class ChatViewModelReducerTest {
             SessionActivationKind.Resumed,
         )
         runCurrent()
+        vm.noteDurableAttach("session-a", 91L, true)
         vm.reduceClientEvent(
             ClientEvent.TurnRecoveryState(
                 TurnRecoverySnapshotDto(
                     sessionId = "session-a",
                     turnId = 91u,
+                    revision = 1uL,
                     state = TurnRecoveryStateDto.RUNNING,
                     firstSequence = 0u,
                     lastSequence = 0u,
                     safeToResume = true,
+                    projectionUncertain= false,
                     reason = null,
                 ),
             ),
@@ -905,7 +1814,7 @@ class ChatViewModelReducerTest {
     @Test
     fun inactiveWaitingCheckpointBlocksNewTurnsAndSessionsUntilCorrelatedDiscardTerminal() =
         runTest(dispatcher) {
-            val source = DurableAttachSource()
+            val source = DurableAttachSource(turnId = 92L)
             val vm = ChatViewModel(source)
             source.active.value = ActivatedSession(
                 "session-a",
@@ -917,10 +1826,12 @@ class ChatViewModelReducerTest {
             val waiting = TurnRecoverySnapshotDto(
                 sessionId = "session-a",
                 turnId = 92u,
+                revision = 1uL,
                 state = TurnRecoveryStateDto.WAITING_FOR_USER,
                 firstSequence = 0u,
                 lastSequence = 0u,
                 safeToResume = false,
+                projectionUncertain= false,
                 reason = "waiting_for_user",
             )
             vm.reduceClientEvent(ClientEvent.TurnRecoveryState(waiting))
@@ -946,7 +1857,7 @@ class ChatViewModelReducerTest {
 
             vm.reduceClientEvent(
                 ClientEvent.TurnRecoveryState(
-                    waiting.copy(state = TurnRecoveryStateDto.CANCELLED),
+                    waiting.copy(revision = 2uL, state = TurnRecoveryStateDto.CANCELLED),
                 ),
             )
             vm.send("after discard")
@@ -972,10 +1883,12 @@ class ChatViewModelReducerTest {
                     TurnRecoverySnapshotDto(
                         sessionId = "session-a",
                         turnId = liveTurnId.toULong(),
+                        revision = 1uL,
                         state = TurnRecoveryStateDto.WAITING_FOR_USER,
                         firstSequence = 0u,
                         lastSequence = 0u,
                         safeToResume = false,
+                        projectionUncertain= false,
                         reason = "waiting_for_user",
                     ),
                 ),
@@ -1018,12 +1931,15 @@ class ChatViewModelReducerTest {
         val waiting = TurnRecoverySnapshotDto(
             sessionId = "session-a",
             turnId = 93u,
+            revision = 1uL,
             state = TurnRecoveryStateDto.WAITING_FOR_USER,
             firstSequence = 0u,
             lastSequence = 1u,
             safeToResume = false,
+            projectionUncertain= false,
             reason = "waiting_for_user",
         )
+        vm.noteDurableAttach("session-a", 93L, true)
         vm.reduceClientEvent(ClientEvent.TurnRecoveryState(waiting))
         vm.reduceClientEvent(
             ClientEvent.TurnEventReplay(
@@ -1037,6 +1953,7 @@ class ChatViewModelReducerTest {
 
         // ResumeTurn's state closes the retained replay window. It must settle
         // the recovered main run/tool, but keep an unrelated workflow lease.
+        vm.finishDurableAttachReplay(ConversationDelivery.AttachReplayEnded("session-a", 93L, true))
         vm.reduceClientEvent(ClientEvent.TurnRecoveryState(waiting))
 
         assertTrue(vm.state.value.durableRecoveryBlocked)
@@ -1091,10 +2008,12 @@ class ChatViewModelReducerTest {
                 TurnRecoverySnapshotDto(
                     sessionId = "session-a",
                     turnId = 94u,
+                    revision = 2uL,
                     state = TurnRecoveryStateDto.CANCELLED,
                     firstSequence = 0u,
                     lastSequence = 1u,
                     safeToResume = false,
+                    projectionUncertain= false,
                     reason = null,
                 ),
             ),
@@ -1103,6 +2022,31 @@ class ChatViewModelReducerTest {
         vm.send("after discard")
         runCurrent()
         assertEquals(listOf("after discard"), source.submitted)
+    }
+
+    @Test
+    fun retryAfterOrderedResumeFailureKeepsProjectedCursorAndResumes() = runTest(dispatcher) {
+        val source = FailingDurableAttachSource()
+        val vm = ChatViewModel(source)
+        source.active.value = ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed)
+        runCurrent()
+        assertTrue(vm.state.value.durableRecoveryBlocked)
+        assertEquals(1L, vm.durableReplayCursorForTesting())
+
+        vm.noteDurableAttach("session-a", 94L, true)
+        val paused = TurnRecoverySnapshotDto(
+            sessionId = "session-a", turnId = 94uL, revision = 1uL,
+            state = TurnRecoveryStateDto.PAUSED_RECOVERABLE, firstSequence = 0uL, lastSequence = 1uL,
+            safeToResume = true, projectionUncertain = false, reason = "retry attach",
+        )
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(paused))
+        vm.finishDurableAttachReplay(ConversationDelivery.AttachReplayEnded("session-a", 94L, true))
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(paused.copy(
+            revision = 2uL, state = TurnRecoveryStateDto.RUNNING, reason = "resumed",
+        )))
+        assertEquals(1L, vm.durableReplayCursorForTesting())
+        assertTrue(vm.state.value.streaming)
+        assertFalse(vm.state.value.durableRecoveryBlocked)
     }
 
     @Test
@@ -1129,10 +2073,12 @@ class ChatViewModelReducerTest {
                     TurnRecoverySnapshotDto(
                         sessionId = "session-a",
                         turnId = 94u,
+                        revision = 2uL,
                         state = terminalState,
                         firstSequence = 0u,
                         lastSequence = 1u,
                         safeToResume = false,
+                        projectionUncertain= false,
                         reason = "terminal",
                     ),
                 ),
@@ -1199,6 +2145,25 @@ class ChatViewModelReducerTest {
             ),
         )
         assertEquals("后台任务 task-a 运行中", vm.state.value.statusLine)
+    }
+
+    @Test
+    fun lateTaskCompletionDoesNotNotifyForAnotherSessionOrSuppressItsTask() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(source = RecordingSource(), backgroundExecution = execution)
+        vm.applyActivatedSession(ActivatedSession("session-a", emptyList(), SessionActivationKind.Started))
+        vm.reduceClientEvent(ClientEvent.TaskRow(
+            TaskRowDto("task-1", "shell", TaskStatusDto.EXITED_UNKNOWN, "A".toClientTextDto(), false, null, null),
+        ))
+        vm.applyActivatedSession(ActivatedSession("session-b", emptyList(), SessionActivationKind.Resumed))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, "session-a", null))
+        assertTrue(execution.finishedTasks.isEmpty())
+
+        vm.reduceClientEvent(ClientEvent.TaskRow(
+            TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "B".toClientTextDto(), false, null, null),
+        ))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, "session-b", null))
+        assertEquals(listOf(Triple("task-1", "B", false)), execution.finishedTasks)
     }
 
     @Test
@@ -1829,6 +2794,98 @@ class ChatViewModelReducerTest {
         assertTrue(replacement.closed)
         assertTrue(vm.state.value.activeBackgroundTaskIds.contains("background"))
         assertSame(original, vm.engineSource.value)
+    }
+
+    @Test
+    fun unknownAdmissionDuringWorkspaceBuildOrPersistenceKeepsTheOriginalOwner() = runTest(dispatcher) {
+        for (pauseDuringPersistence in listOf(false, true)) {
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val queried = mutableListOf<Pair<String, Long>>()
+            val original = object : ConversationSource {
+                var closed = false
+                override val supportsSubmissionAdmission = true
+                override val activeSessionState = MutableStateFlow<ActivatedSession?>(
+                    ActivatedSession("session-a", emptyList(), SessionActivationKind.Bootstrap))
+                override fun submit(text: String, images: List<ImageRefDto>, turnId: Long,
+                    visualizationContext: VisualizationRef?, promptMode: PromptModeDto?, sessionId: String,
+                    admission: TurnSubmissionAdmission): Flow<ReplyEvent> = flow {
+                    assertTrue(admission.begin(sessionId))
+                    admission.finished(ClientException.Rejected("unknown admission"))
+                    emit(ReplyEvent.Error("unknown admission"))
+                    emit(ReplyEvent.End)
+                }
+                override suspend fun reconcileDurableTurnForUi(sessionId: String, turnId: Long, afterSequence: Long,
+                    trustNotFound: Boolean, onAttach: (String, Long, Boolean, String) -> Unit) {
+                    queried += sessionId to turnId
+                    throw IllegalStateException("offline")
+                }
+                override fun close() { closed = true }
+            }
+            val replacement = SessionControlSource()
+            val vm = ChatViewModel(original)
+            runCurrent()
+            var selection = "global"
+            var rollbacks = 0
+            val switching = async(start = CoroutineStart.UNDISPATCHED) {
+                vm.switchWorkspaceSource(projectId = "project-b", allowInactiveWaitingRecovery = true,
+                    createSource = {
+                        if (!pauseDuringPersistence) { entered.complete(Unit); release.await() }
+                        replacement
+                    },
+                    persistSelection = {
+                        selection = "project-b"
+                        if (pauseDuringPersistence) { entered.complete(Unit); release.await() }
+                    },
+                    rollbackSelection = { selection = "global"; rollbacks++ })
+            }
+            entered.await()
+            vm.send("send while switching")
+            runCurrent()
+            assertTrue(vm.state.value.recoveryRetryAvailable)
+            assertEquals("session-a", queried.single().first)
+            release.complete(Unit)
+            assertFalse(switching.await())
+            assertSame(original, vm.engineSource.value)
+            assertFalse(original.closed)
+            assertTrue(replacement.closed)
+            assertEquals("global", selection)
+            assertEquals(if (pauseDuringPersistence) 1 else 0, rollbacks)
+            vm.retryDurableRecovery()
+            runCurrent()
+            assertEquals(2, queried.size)
+            assertEquals(queried.first(), queried.last())
+        }
+    }
+
+    @Test
+    fun recoveryStorageFailureDuringWorkspacePersistenceRollsBackSelection() = runTest(dispatcher) {
+        val original = object : ConversationSource {
+            var closed = false
+            var healthy = true
+            override suspend fun recoveryStorageAvailable() = healthy
+            override fun close() { closed = true }
+        }
+        val replacement = SessionControlSource()
+        val vm = ChatViewModel(original)
+        runCurrent()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var selection = "global"
+        val switching = async(start = CoroutineStart.UNDISPATCHED) {
+            vm.switchWorkspaceSource(projectId = "project-b", createSource = { replacement },
+                persistSelection = { selection = "project-b"; entered.complete(Unit); release.await() },
+                rollbackSelection = { selection = "global" })
+        }
+        entered.await()
+        original.healthy = false // The relay has not delivered its failure marker yet.
+        release.complete(Unit)
+        assertFalse(switching.await())
+        assertEquals("global", selection)
+        assertSame(original, vm.engineSource.value)
+        assertFalse(original.closed)
+        assertTrue(replacement.closed)
+        assertTrue(vm.state.value.recoveryStorageFailed)
     }
 
     @Test

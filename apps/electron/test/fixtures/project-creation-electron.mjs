@@ -95,7 +95,9 @@ async function main() {
     await wait(`!!document.querySelector('[aria-label="Add project"]') && !document.querySelector('[aria-label="Add project"]').closest('[inert]')`);
     const openAppProject = async (ready = true) => {
       await run(`document.querySelector('button[aria-label="Apps"]').click(); document.querySelector('.local-app-library-header button').click()`);
-      await wait(`!!document.querySelector('[aria-label="Create project"]')${ready ? " && !document.querySelector('form[aria-busy=true]')" : ''}`);
+      // aria-busy is initially false before the effect starts the lookup. Wait
+      // for its success or error, not that transient idle render.
+      await wait(`!!document.querySelector('[aria-label="Create project"]')${ready ? ` && !document.querySelector('form[aria-busy=true]') && (Boolean(document.querySelector('.create-project-error')) || (document.querySelector('[aria-label="Project name"]')?.readOnly === false && Boolean(document.querySelector('.create-project-folder-copy > span'))))` : ''}`);
     };
     const nameApp = async (name, separator = '/') => {
       await run(`(() => { const input=document.querySelector('[aria-label="Project name"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(name)}); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
@@ -109,7 +111,15 @@ async function main() {
     await wait(`!document.querySelector('[aria-label="Create project"]')`);
     await run(`window.projectCreationFixture.holdDefaults=false; window.projectCreationFixture.defaultWaiters.splice(0).forEach(resolve => resolve())`);
     await check(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.creates.length === 0 && window.projectCreationFixture.newSessions.length === 0`, 'A canceled lookup must not reopen the dialog or create an app');
-    await openAppProject();
+    // Reopen while the successful lookup is held as well: the initial render
+    // has aria-busy=false before the loading effect has run.
+    await run(`window.projectCreationFixture.holdDefaults=true`);
+    let readyBeforeDefault = false;
+    const openingApp = openAppProject().then(() => { readyBeforeDefault = true; });
+    await wait(`window.projectCreationFixture.defaultWaiters.length > 0`);
+    if (readyBeforeDefault) throw new Error('App dialog reported ready before the default folder resolved');
+    await run(`window.projectCreationFixture.holdDefaults=false; window.projectCreationFixture.defaultWaiters.splice(0).forEach(resolve => resolve())`);
+    await openingApp;
     await check(`!document.querySelector('[aria-label="Project name"]').readOnly && document.querySelector('.create-project-folder-copy > span').textContent.startsWith('/fixture/.current-product/.apps/')`, 'Apps must use the product-provided default root with a named child project');
     await check(`window.projectCreationFixture.newSessions.length === 0 && window.projectCreationFixture.projects.length === 1`, 'Opening an app project dialog must preserve the selected repository and chat');
     await nameApp('Canceled app');
@@ -137,13 +147,13 @@ async function main() {
     const editRequest = { id: 'a12345678901234567890', name: 'Recovered reader', authoring: { sourceDirectory: '/fixture/Removed project' }, authoringSourceMissing: true, authoringAction: 'sourceMissing' };
     const previousDraft = await run(`document.querySelector('[contenteditable=true]').textContent`);
     await run(`window.projectCreationFixture.requestEdit(${JSON.stringify(editRequest)})`);
-    await wait(`!!document.querySelector('[aria-label="Create project"]') && !document.querySelector('form[aria-busy=true]')`);
+    await wait(`!!document.querySelector('[aria-label="Create project"]') && !document.querySelector('form[aria-busy=true]') && document.querySelector('[aria-label="Project name"]')?.readOnly === false && Boolean(document.querySelector('.create-project-folder-copy > span'))`);
     await check(`window.projectCreationFixture.newSessions.length === 2`, 'Modifying an app with a removed source must first confirm its authoring workspace');
     await run(`document.querySelector('.create-project-cancel').click()`);
     await wait(`!document.querySelector('[aria-label="Create project"]')`);
     await check(`window.projectCreationFixture.newSessions.length === 2 && document.querySelector('[contenteditable=true]').textContent === ${JSON.stringify(previousDraft)}`, 'Canceling source recovery must preserve the unrelated chat and its draft');
     await run(`window.projectCreationFixture.requestEdit(${JSON.stringify(editRequest)})`);
-    await wait(`!!document.querySelector('[aria-label="Create project"]') && !document.querySelector('form[aria-busy=true]')`);
+    await wait(`!!document.querySelector('[aria-label="Create project"]') && !document.querySelector('form[aria-busy=true]') && document.querySelector('[aria-label="Project name"]')?.readOnly === false && Boolean(document.querySelector('.create-project-folder-copy > span'))`);
     await nameApp('Recovered reader');
     await run(`document.querySelector('.create-project-submit').click()`);
     await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 3 && document.querySelector('[contenteditable=true]')?.textContent.includes('修改本地应用「Recovered reader」')`);

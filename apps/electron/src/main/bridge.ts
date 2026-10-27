@@ -1004,6 +1004,10 @@ export class SessionRuntime {
         break;
       case 'task_status_changed': {
         const status = event.status.type;
+        if (this.gitActivity.hasExitedUnknown(event.task_id)) {
+          this.taskLabels.delete(event.task_id);
+          break;
+        }
         if (status !== 'completed' && status !== 'failed') break;
         notifier.taskFinished(
           this.sessionId, event.task_id, this.taskLabels.get(event.task_id),

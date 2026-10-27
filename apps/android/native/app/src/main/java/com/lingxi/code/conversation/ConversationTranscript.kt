@@ -81,6 +81,28 @@ fun transcriptFromDtos(
     return messages
 }
 
+/** Conservative proof that a persisted user row survives projection completely. */
+internal fun fullyVisibleUserTranscriptUuids(dtos: List<MessageDto>, projected: List<Message>): Set<String> {
+    val folded = projected.flatMap { it.loopFoldedItemIds }.toSet()
+    val counts = dtos.mapNotNull { it.transcriptUuid }.groupingBy { it }.eachCount()
+    return dtos.mapNotNull { dto ->
+        val uuid = dto.transcriptUuid?.takeIf { it.isNotBlank() && counts[it] == 1 } ?: return@mapNotNull null
+        if (!dto.role.equals("user", ignoreCase = true) || dto.images.isNotEmpty() || dto.loopWakeup != null ||
+            dto.visualizationContext != null || dto.blocks.isEmpty() || dto.blocks.any { it !is MessageBlockDto.Text }
+        ) return@mapNotNull null
+        val parts = dto.blocks.map { block ->
+            val source = (block as MessageBlockDto.Text).text
+            val displayed = source.displayText()
+            if (displayed.map { it.code.toUShort() } != source.codeUnits) return@mapNotNull null
+            displayed
+        }
+        if (parts.any { it.isBlank() }) return@mapNotNull null
+        val row = projected.singleOrNull { it.transcriptUuid == uuid && it.role == Role.User } ?: return@mapNotNull null
+        if (row.id in folded || row.text != parts.joinToString("\n\n")) return@mapNotNull null
+        uuid
+    }.toSet()
+}
+
 /**
  * Which build an ORPHAN `ToolResult` — one whose `ToolUse` fell outside a torn
  * or compacted transcript window — is folded into.

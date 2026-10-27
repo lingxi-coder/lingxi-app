@@ -81,7 +81,7 @@ export type {
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '29.0.0';
+export const CLIENT_PROTOCOL_VERSION = '30.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -667,6 +667,8 @@ export type ClientCommand =
   // ── Turn driving ──────────────────────────────────────────────────────────
   | {
       type: 'send_prompt';
+      /** Mobile binds the prompt to the session selected when it was submitted. */
+      session_id?: string;
       text: string;
       prompt_mode?: PromptModeDto;
       images: ImageRefDto[];
@@ -674,22 +676,25 @@ export type ClientCommand =
       /** Widget the user follows up on; the engine attaches its saved model state. */
       visualization_context?: VisualizationRefDto;
     }
-  | { type: 'cancel'; turn_id?: number }
+  /** Mobile cancellation specifies the session captured when the action began. */
+  | { type: 'cancel'; session_id?: string; turn_id?: number }
   /**
-   * Reattach a mobile client to a durable turn on the connection's active
-   * session; the engine emits the current recovery snapshot and replays
-   * events whose sequence is greater than `after_sequence`
+   * Reattach a mobile client to a durable turn in the specified session.
+   * A unique request ID correlates the snapshot and replay boundaries; the
+   * engine replays events whose sequence is greater than `after_sequence`
    * (commands.rs `ClientCommand::AttachTurn`).
    */
-  | { type: 'attach_turn'; turn_id: number; after_sequence?: number }
+  | { type: 'attach_turn'; session_id: string; turn_id: number; after_sequence?: number; request_id: string }
+  /** Query the durable outcome and projected transcript identity of a queued turn. */
+  | { type: 'query_queued_turn'; session_id: string; turn_id: number; request_id: string }
   /** Resume a checkpointed durable turn when its recovery policy allows it (commands.rs `ClientCommand::ResumeTurn`). */
-  | { type: 'resume_turn'; turn_id: number }
+  | { type: 'resume_turn'; session_id: string; turn_id: number }
   /**
    * Persist a platform-lease expiration without converting it to cancel.
    * `reason` is a machine-readable platform reason such as
    * `background_time_expired` (commands.rs `ClientCommand::PauseTurn`).
    */
-  | { type: 'pause_turn'; turn_id: number; reason: string }
+  | { type: 'pause_turn'; session_id: string; turn_id: number; reason: string }
   // ── Permission resolution ───────────────────────────────────────────────────
   | { type: 'approve_permission'; request_id: number; response: PermissionResponseDto }
   | { type: 'deny_permission'; request_id: number }
@@ -722,7 +727,7 @@ export type ClientCommand =
   | { type: 'set_reasoning_selection'; selection: ReasoningSelectionDto }
   | { type: 'set_fast_mode'; enabled: boolean }
   // ── Slash commands ──────────────────────────────────────────────────────────
-  | { type: 'run_slash_command'; raw: string; images: ImageRefDto[]; turn_id?: number }
+  | { type: 'run_slash_command'; session_id?: string; raw: string; images: ImageRefDto[]; turn_id?: number }
   // ── Listings ────────────────────────────────────────────────────────────────
   | { type: 'refresh_listings'; which: ListingKindDto[] }
   | { type: 'list_session_agents' }
@@ -1563,6 +1568,7 @@ export type TaskStatusDto =
   | { type: 'paused' }
   | { type: 'completed' }
   | { type: 'failed' }
+  | { type: 'exited_unknown' }
   | { type: 'cancelled' };
 
 /** One task row (listings.rs `TaskRowDto`). */
@@ -1640,12 +1646,33 @@ export type TurnRecoveryStateDto =
 export interface TurnRecoverySnapshotDto {
   session_id: string;
   turn_id: number;
+  /** Durable state revision for this session and turn; event cursors advance independently. */
+  revision: number;
   state: TurnRecoveryStateDto;
   first_sequence: number;
   last_sequence: number;
   safe_to_resume: boolean;
+  /** Previously displayed output may be missing from the durable journal. */
+  projection_uncertain: boolean;
   reason?: string;
 }
+
+/** A connection-scoped Mod notification captured for a particular session. */
+export type ModSessionEventPayload =
+  | { type: 'notice'; message: string; is_error: boolean }
+  | { type: 'log'; plugin: string; text: string }
+  | { type: 'notify'; plugin: string; text: string }
+  | { type: 'toast'; plugin: string; text: string; timeout_ms: number }
+  | { type: 'status'; plugin: string; text: string | null };
+
+/** Durable status of a queued turn, correlated to one query. */
+export type QueuedTurnStatusDto =
+  | { type: 'pending' }
+  | { type: 'claimed_uncertain' }
+  | { type: 'delivered'; batch_owner_turn_id: number; member_turn_ids: number[]; transcript_uuid: string }
+  | { type: 'cancelled' }
+  | { type: 'running' }
+  | { type: 'terminal'; state: TurnRecoveryStateDto };
 
 /** Cumulative cost snapshot carried by `turn_ended` (events.rs `CostDto`). */
 export interface CostDto {
@@ -1758,18 +1785,34 @@ export type ClientEvent =
   | { type: 'prompt_suggestion'; suggestion: string; uuid: string; session_id: string }
   | { type: 'prompt_suggestion_state'; enabled: boolean; notice: string | null }
   /**
-   * Authoritative durable state for one mobile turn. Emitted on attach,
-   * resume, recovery gating, and every terminal transition
+   * Authoritative durable state for one mobile turn. Emitted on resume,
+   * recovery gating, and every terminal transition. Attach provides its own
+   * correlated snapshot in `turn_attach_started`
    * (events.rs `ClientEvent::TurnRecoveryState`).
    */
   | { type: 'turn_recovery_state'; snapshot: TurnRecoverySnapshotDto }
+  /** The authoritative state and end boundary for one correlated Attach request. */
+  | { type: 'turn_attach_started'; request_id: string; snapshot: TurnRecoverySnapshotDto }
+  | { type: 'turn_attach_finished'; request_id: string; session_id: string; turn_id: number }
+  | { type: 'queued_turn_status'; request_id: string; session_id: string; turn_id: number; status: QueuedTurnStatusDto }
   /**
-   * Sequenced retained copy of a turn event, emitted beside live delivery and
-   * replayed after `attach_turn`. `event_json` is the original serialized
-   * {@link ClientEvent}, kept as a string to avoid a recursive shape
-   * (events.rs `ClientEvent::TurnEventReplay`).
+   * Sequenced turn event delivered live or replayed after `attach_turn`.
+   * `event_json` is the original serialized {@link ClientEvent}, kept opaque
+   * so transport preserves the envelope and its sequence even if the payload
+   * cannot be decoded. A recovery consumer must decode and validate the
+   * payload, treat invalid or unknown events as incomplete projection, and
+   * avoid advancing its cursor past them (events.rs `ClientEvent::TurnEventReplay`).
    */
   | { type: 'turn_event_replay'; session_id: string; turn_id: number; sequence: number; event_json: string }
+  /**
+   * Live turn event without a confirmed durable sequence. The write might
+   * have reached storage, so consumers must not advance a replay cursor or
+   * assume the event will be absent from a later replay. The payload remains
+   * opaque and requires the same decoding and failure handling as a replay.
+   */
+  | { type: 'turn_event_live_unretained'; session_id: string; turn_id: number; event_json: string }
+  /** mod_turn_id is an opaque Mod identifier, not a client turn ID. */
+  | { type: 'mod_session_event'; session_id: string; mod_turn_id: string | null; payload: ModSessionEventPayload }
   | {
       type: 'cost_update';
       total_usd: number;
@@ -2021,7 +2064,9 @@ export type ClientError =
   | { type: 'protocol'; message: string }
   | { type: 'rejected'; message: string }
   | { type: 'not_found'; message: string }
-  | { type: 'internal'; message: string };
+  | { type: 'internal'; message: string }
+  /** The host guarantees this submission was rejected before any side effect. */
+  | { type: 'submission_not_admitted'; message: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // wire.rs — handshake + framing envelope

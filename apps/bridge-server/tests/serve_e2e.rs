@@ -242,6 +242,7 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
     send_frame(
         &mut ws,
         &submit(&ClientCommand::SendPrompt {
+            session_id: None,
             text: "ping".into(),
             prompt_mode: None,
             images: Vec::new(),

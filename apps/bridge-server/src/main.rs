@@ -30,8 +30,15 @@ use bridge::McpEndpoint;
 use bridge_server::boot::{self, BridgeArgs};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 
+#[cfg(windows)]
+mod local_app_process;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--local-app-process") {
+        return local_app_process::run().await;
+    }
     if std::env::args().nth(1).as_deref() == Some("--local-app-service-json") {
         return bridge_server::local_app_service::run().await;
     }

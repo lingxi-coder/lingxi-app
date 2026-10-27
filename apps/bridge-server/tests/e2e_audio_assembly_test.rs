@@ -3,15 +3,14 @@
 //!
 //! `tests/e2e_audio_test.rs` proves the `AudioBridge` works when a test wires it
 //! by hand. This file proves the PRODUCTION wiring: that `assemble` builds a
-//! bridge over the connection it is assembling, hands it to the engine through
-//! `DesktopConfig::audio`, and binds the responder half to that same connection.
+//! bridge over the connection it is assembling, supplies the shared media host
+//! to the engine, and binds the responder half to that same connection.
 //!
 //! Three properties, each of which was unprovable while nothing constructed a
 //! bridge in production:
 //!
 //! 1. **It is wired at all** — an assembled runtime carries the capability, and
-//!    the tools that depend on it are in the registry the orchestrator
-//!    dispatches through.
+//!    the media tools are in the registry the orchestrator dispatches through.
 //! 2. **It is per-connection** — a request parked by one connection's engine can
 //!    NOT be resolved by a response arriving on a different connection, even
 //!    with the same `request_id`. The bridge and the responder are created as a
@@ -24,9 +23,9 @@
 //! No orchestrator is needed: unlike the computer-access prompt, the audio
 //! traits are called directly, so the test IS the engine task. It calls
 //! `BoundServer::audio()` — the request half `assemble` built, the same object
-//! it put on `DesktopConfig::audio`. That the engine got THAT object is what
-//! property 1 asserts, through the registry: the two tools are registered only
-//! when the tool context carries the capability.
+//! used as the audio backend of the shared media host. Property 1 also checks
+//! that the media tool context received a media service: media tools are only
+//! registered when that service exists.
 
 #![allow(clippy::unwrap_used)]
 
@@ -268,35 +267,54 @@ async fn barrier(
     }
 }
 
-/// Property 1: assembly wires the capability AND the tools that need it.
+/// Property 1: assembly wires the shared media capability and its tools.
 ///
 /// The registry assertion is what proves the bridge reached the ENGINE:
-/// `register_desktop_tools` registers these two only when the tool context
-/// carries the capability, so their presence means `DesktopConfig::audio`
-/// survived the whole way from `assemble` into the tool context.
+/// media tools are registered only when the tool context carries a media
+/// service. The full catalog remains registered even when individual tools
+/// are temporarily unavailable; live capability checks decide availability.
 #[tokio::test]
-async fn assemble_gives_the_engine_an_audio_capability_and_its_two_tools() {
+async fn assemble_gives_the_engine_a_media_capability_and_its_tools() {
     let _serial = ASSEMBLE_SERIAL.lock().await;
     let (_tmp, cfg) = sandbox_config();
     assert!(
         cfg.audio.is_none(),
         "the capability must come from assembly, not from the caller's config"
     );
+    assert!(cfg.media_service.is_none());
     let bound = Box::pin(boot::assemble(cfg))
         .await
         .expect("assemble must succeed");
 
-    // The registry is the assertion that matters: registration is gated on the
-    // tool context carrying the capability, so these two names are present only
-    // if the bridge `assemble` built travelled config → `build` → tool context.
+    // The registry is the assertion that matters: register_all only inserts
+    // these tools when assembly supplied a media service to the tool context.
     let names = bound.registered_tool_names();
+    let media_names = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| name.starts_with("media_"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = [
+        "media_sources",
+        "media_status",
+        "media_capture",
+        "media_record",
+        "media_transcribe",
+        "media_synthesize",
+        "media_play",
+        "media_speak",
+        "media_session_start",
+        "media_session_update",
+        "media_observe",
+        "media_wait",
+        "media_stop",
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(media_names, expected, "registered tools: {names:?}");
     assert!(
-        names.contains(&"voice".to_string()),
-        "the injected capability must register the voice tool; registered: {names:?}"
-    );
-    assert!(
-        names.contains(&"speech".to_string()),
-        "the injected capability must register the speech tool; registered: {names:?}"
+        !names.iter().any(|name| name == "voice" || name == "speech"),
+        "legacy audio tools must not be registered alongside the media catalog"
     );
 }
 

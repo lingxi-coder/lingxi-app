@@ -37,6 +37,32 @@ function snapshot(tasks: ClientEvent[] = []): ClientEvent[] {
   ];
 }
 
+test('an unknown exit releases ownership and stale events cannot reacquire it', () => {
+  const tracker = new GitActivityTracker();
+  tracker.accept(taskRow('shell'));
+  assert.equal(tracker.active, true);
+  tracker.accept({ type: 'task_status_changed', task_id: 'shell', status: { type: 'exited_unknown' } });
+  assert.equal(tracker.active, false);
+  tracker.accept(taskRow('shell'));
+  tracker.accept(lifecycle('shell', 'task_started'));
+  tracker.accept(lifecycle('shell', 'task_updated', { patch: { status: 'running' } }));
+  assert.equal(tracker.active, false);
+  tracker.replaceSnapshot(snapshot([taskRow('shell')]));
+  assert.equal(tracker.active, false, 'an older full snapshot cannot revive a terminal identity');
+  tracker.accept(taskRow('another'));
+  assert.equal(tracker.active, true);
+  tracker.accept(taskRow('another', 'local_bash', 'exited_unknown'));
+  assert.equal(tracker.active, false);
+});
+
+test('agents and workers with unknown exits do not hold the worktree', () => {
+  const tracker = new GitActivityTracker();
+  tracker.accept({ type: 'session_agent_updated', session_id: 's', agent: {
+    agent_id: 'a', name: 'Agent', agent_type: 'task', status: 'exited_unknown',
+  } });
+  assert.equal(tracker.active, false);
+});
+
 for (const type of ['local_bash', 'local_workflow', 'local_fusion', 'local_agent']) {
   test(`${type} guards survive foreground completion and release on terminal task status`, () => {
     const tracker = new GitActivityTracker();

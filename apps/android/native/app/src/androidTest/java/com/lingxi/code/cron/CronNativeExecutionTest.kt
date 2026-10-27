@@ -145,6 +145,7 @@ class CronNativeExecutionTest {
                     val humanTurn = async {
                         engine.submit(
                             ClientCommand.SendPrompt(
+                                sessionId = engine.workspaceState().sessionId,
                                 text = ClientTextDto(
                                     codeUnits = "Human busy fixture".map { it.code.toUShort() },
                                 ),

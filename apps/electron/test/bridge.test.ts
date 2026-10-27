@@ -52,6 +52,30 @@ function fakeWebContents(sent: Array<{ channel: string; payload: unknown }> = []
   return webContents;
 }
 
+test('unknown task exit cannot produce a later false completion notification', () => {
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const notifications: unknown[][] = [];
+  const notifier = {
+    taskFinished: (...args: unknown[]) => notifications.push(args),
+    setDialogsOnScreen: () => {},
+  };
+  const client = audioContextEventClient();
+  const runtime = new SessionRuntime({
+    sessionId, projectPath: '/workspace', notifier: notifier as any,
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+  });
+  (runtime as any).generation = 1;
+  (runtime as any).wireClient(client, 1);
+  client.emit('event', { type: 'task_row', task: {
+    task_id: 'shell', task_type: 'local_bash', status: { type: 'running' }, description: 'Build',
+  } });
+  client.emit('event', { type: 'task_status_changed', task_id: 'shell', status: { type: 'exited_unknown' } });
+  client.emit('event', { type: 'task_status_changed', task_id: 'shell', status: { type: 'completed' } });
+  client.emit('event', { type: 'task_status_changed', task_id: 'other', status: { type: 'completed' } });
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0]?.[1], 'other');
+});
+
 test('SessionRuntimeManager owns one destroyed listener for all session runtimes', async () => {
   const manager = new SessionRuntimeManager({
     launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),

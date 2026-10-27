@@ -120,7 +120,7 @@
     <string name="chat_error_connect_failed">モデルサービスに接続できません。現在のネットワークまたは VPN を確認してから再試行してください。</string>
     <string name="chat_error_connect_timeout">モデルサービスへの接続がタイムアウトしました。現在のネットワークまたは VPN を確認してから再試行してください。</string>
     <string name="chat_error_discard_background_failed">バックグラウンドの会話を破棄できませんでした: %1$s</string>
-    <string name="chat_error_discard_unconfirmed">破棄が確認されませんでした。この会話のロックを解除しました。</string>
+    <string name="chat_error_discard_unconfirmed">バックグラウンドの会話が停止したことを確認できません。もう一度お試しください。</string>
     <string name="chat_error_dns">モデルサービスのアドレスを解決できません。VPN、プライベート DNS、現在のネットワークを確認してから再試行してください。</string>
     <string name="chat_error_engine_reconnect_failed">エンジンの再接続に失敗しました：%1$s</string>
     <string name="chat_error_engine_submit_failed">エンジンエラー：%1$s</string>
@@ -231,6 +231,7 @@
     <string name="chat_status_cancelled">キャンセル済み</string>
     <string name="chat_status_completed">完了</string>
     <string name="chat_status_failed">失敗</string>
+    <string name="chat_status_exited_unknown">終了（結果不明）</string>
     <string name="chat_status_max_turns">上限に到達</string>
     <string name="chat_status_new_project_session">プロジェクトの会話を新規作成しています…</string>
     <string name="chat_status_new_session">新しい会話を作成しています…</string>
@@ -240,6 +241,7 @@
     <string name="chat_status_resuming_project_session">プロジェクトの会話を再開しています…</string>
     <string name="chat_status_resuming_session">会話を再開しています…</string>
     <string name="chat_status_running">実行中</string>
+    <string name="chat_task_exited_unknown_fmt">バックグラウンドタスク %1$s は終了しました（結果不明）</string>
     <string name="chat_status_timed_out">タイムアウト</string>
     <string name="chat_status_unknown">不明</string>
     <string name="chat_stopping">停止中…</string>
@@ -2488,4 +2490,11 @@
     <string name="remote_file_upload">元のファイルをアップロード</string>
     <string name="remote_file_uploading">コンピューターに送信しています…</string>
     <string name="remote_files">ファイル</string>
+    <string name="chat_recovery_replay_gap">会話を完全に復元できませんでした。会話を開き直してください。</string>
+    <string name="chat_recovery_projection_uncertain">実行内容の一部が復元されていない可能性があります。確認してから続行してください。</string>
+    <string name="chat_recovery_unknown">操作の状態を確認できません。もう一度お試しください。</string>
+    <string name="chat_recovery_not_found">実行記録が見つかりません。会話を確認してから続行してください。</string>
+    <string name="chat_recovery_reviewed">確認しました</string>
+    <string name="chat_queued_cancelled">待機中の入力がキャンセルされました。会話を確認してください。</string>
+    <string name="chat_recovery_storage_failed">会話の復元状態を保存できません。アプリを再起動して会話を確認してください。</string>
 </resources>

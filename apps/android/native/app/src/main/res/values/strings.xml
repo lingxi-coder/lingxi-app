@@ -120,7 +120,7 @@
     <string name="chat_error_connect_failed">无法连接模型服务。请检查当前网络或 VPN 后重试。</string>
     <string name="chat_error_connect_timeout">连接模型服务超时。请检查当前网络或 VPN 后重试。</string>
     <string name="chat_error_discard_background_failed">丢弃后台对话失败：%1$s</string>
-    <string name="chat_error_discard_unconfirmed">后台对话的丢弃未获确认，已解除该对话的锁定。</string>
+    <string name="chat_error_discard_unconfirmed">暂时无法确认后台对话已停止，请重试。</string>
     <string name="chat_error_dns">无法解析模型服务地址。请检查 VPN、私人 DNS 或当前网络后重试。</string>
     <string name="chat_error_engine_reconnect_failed">引擎重连失败：%1$s</string>
     <string name="chat_error_engine_submit_failed">引擎错误：%1$s</string>
@@ -231,6 +231,7 @@
     <string name="chat_status_cancelled">已取消</string>
     <string name="chat_status_completed">已完成</string>
     <string name="chat_status_failed">失败</string>
+    <string name="chat_status_exited_unknown">已结束，结果未知</string>
     <string name="chat_status_max_turns">达到上限</string>
     <string name="chat_status_new_project_session">正在新建项目会话…</string>
     <string name="chat_status_new_session">正在新建会话…</string>
@@ -240,6 +241,7 @@
     <string name="chat_status_resuming_project_session">正在恢复项目会话…</string>
     <string name="chat_status_resuming_session">正在恢复会话…</string>
     <string name="chat_status_running">运行中</string>
+    <string name="chat_task_exited_unknown_fmt">后台任务 %1$s 已结束，结果未知</string>
     <string name="chat_status_timed_out">超时</string>
     <string name="chat_status_unknown">未知</string>
     <string name="chat_stopping">正在停止…</string>
@@ -2488,4 +2490,11 @@
     <string name="remote_file_upload">上传原文件</string>
     <string name="remote_file_uploading">正在上传到电脑…</string>
     <string name="remote_files">文件</string>
+    <string name="chat_recovery_replay_gap">对话恢复不完整，请重新打开对话。</string>
+    <string name="chat_recovery_projection_uncertain">部分运行内容可能未恢复，请检查后继续。</string>
+    <string name="chat_recovery_unknown">暂时无法确认操作状态，请重试。</string>
+    <string name="chat_recovery_not_found">无法找到该运行记录，请检查对话后继续。</string>
+    <string name="chat_recovery_reviewed">我已检查</string>
+    <string name="chat_queued_cancelled">一条排队输入已取消，请检查对话。</string>
+    <string name="chat_recovery_storage_failed">无法保存对话恢复状态，请重新启动应用后检查对话。</string>
 </resources>

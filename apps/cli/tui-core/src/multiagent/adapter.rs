@@ -67,6 +67,7 @@ mod tests {
             command: None,
             stage: None,
             error: None,
+            observation_error: None,
         }])]]);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sent = pump_once(&feed, &tx).await;

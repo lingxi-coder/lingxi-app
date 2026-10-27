@@ -475,7 +475,7 @@ export function resourcesFromRestoredMessages(
   return resources;
 }
 
-const terminalAgentStatuses = new Set(['completed', 'failed', 'killed', 'cancelled']);
+const terminalAgentStatuses = new Set(['completed', 'failed', 'killed', 'cancelled', 'exited_unknown']);
 
 function mergeCoordinatorWorker(state: RuntimeCenterState, agent: SessionAgentSummaryDto): SessionAgentSummaryDto {
   const worker = state.coordinatorWorkers[agent.agent_id];

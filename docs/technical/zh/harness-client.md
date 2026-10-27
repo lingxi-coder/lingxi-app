@@ -50,7 +50,7 @@ SendPrompt 携带 text、可选 prompt_mode 与 turn_id，以及 images 数组�
 ### CLIENT_PROTOCOL_VERSION
 
 ```text
-pub const CLIENT_PROTOCOL_VERSION: &str = "29.0.0";
+pub const CLIENT_PROTOCOL_VERSION: &str = "30.0.0";
 ```
 
 此检查源码树声明的协议版本。原生客户端生成绑定的布局应与实际构建的宿主版本一致。
@@ -148,7 +148,7 @@ cargo test --locked -p client --features test-support
 
 验证方式: 需环境验证
 
-本次检查的客户端协议常量为 29.0.0。连接独立客户端前，始终查看基线与宿主固定依赖版本。设备回调、断线时顺序及重放展示仍需目标宿主检查。
+本次检查的客户端协议常量为 30.0.0。连接独立客户端前，始终查看基线与宿主固定依赖版本。设备回调、断线时顺序及重放展示仍需目标宿主检查。
 
 <a id="event-consumer"></a>
 

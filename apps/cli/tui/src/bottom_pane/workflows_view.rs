@@ -169,7 +169,8 @@ fn list_glyph(status: &str) -> &'static str {
         "completed" => "\u{2714}",         // ✔
         "failed" | "killed" => "\u{2718}", // ✘
         "paused" => "\u{2161}",            // Ⅱ
-        _ => "\u{27f3}",                   // ⟳
+        "exited_unknown" => "?",
+        _ => "\u{27f3}", // ⟳
     }
 }
 
@@ -182,7 +183,10 @@ fn workflow_started_agents(row: &WorkflowRow) -> usize {
         .count();
     if from_phases > 0 {
         from_phases
-    } else if matches!(row.status.as_str(), "completed" | "failed" | "killed") {
+    } else if matches!(
+        row.status.as_str(),
+        "completed" | "failed" | "killed" | "exited_unknown"
+    ) {
         row.agent_count
     } else {
         0

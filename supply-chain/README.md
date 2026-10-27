@@ -1,16 +1,20 @@
 # Product dependency source review
 
 `cargo vet check --locked` is a hard CI gate, separate from cargo-audit and
-cargo-deny. It imports official Mozilla, Google and Bytecode Alliance audit
-records. The imports lock pins the evidence used for this product dependency
-graph. There are no exemptions, publisher-trust rules or fabricated local reviews.
+cargo-deny. It imports published audit records from Mozilla, Google, Bytecode
+Alliance, ISRG, Zcash and Embark Studios. The source URLs pin specific upstream
+commits, and the imports lock pins the evidence used for this dependency graph.
+Imported records retain the original auditor and notes, including named wildcard
+audits that attest to a publisher's release process for a specified period.
+There are no exemptions, publisher-trust rules or claimed local reviews.
 
-On 2026-10-26, the locked check reports 763 unvetted package versions: 754 need
+On 2026-10-27, the locked check reports 708 unvetted package versions: 699 need
 `safe-to-deploy` and 9 need `safe-to-run`, for Cargo.lock SHA-256
-`6ecb41acdd3711df056d58bbb2a4e992a257f82423bc4360b5066cd3c71d1dd8`.
+`79b632ad4ba6874de2d2eca683262f010a5fe84bfdef95ed928235de4acac934`.
 The configured policies also require review of the crates.io baselines and
 specific Git revisions of patched dependencies. Closing the gate requires
 actual source reviews (including justified version deltas) or existing
 trustworthy audit records. Zero known vulnerabilities does not certify source
-review. Run `cargo vet regenerate imports` when intentionally updating imported
-records, then `cargo vet check --locked` to verify exact version coverage.
+review. To update a source, review and change its pinned commit first, then run
+`cargo vet regenerate imports` and `cargo vet check --locked` to verify exact
+version coverage.

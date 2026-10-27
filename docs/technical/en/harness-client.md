@@ -50,7 +50,7 @@ SendPrompt carries text, optional prompt_mode and turn_id, and an images vector.
 ### CLIENT_PROTOCOL_VERSION
 
 ```text
-pub const CLIENT_PROTOCOL_VERSION: &str = "29.0.0";
+pub const CLIENT_PROTOCOL_VERSION: &str = "30.0.0";
 ```
 
 Protocol version declared in this inspected source tree. Native clients must version-lock generated binding layouts with the host they actually build.
@@ -148,7 +148,7 @@ cargo test --locked -p client --features test-support
 
 Verification method: Environment validation
 
-The inspected client protocol constant is 29.0.0. Always read the baseline and the host pin before connecting a separate client. Device callbacks, ordering under disconnect and replay presentation remain target-host checks.
+The inspected client protocol constant is 30.0.0. Always read the baseline and the host pin before connecting a separate client. Device callbacks, ordering under disconnect and replay presentation remain target-host checks.
 
 <a id="event-consumer"></a>
 

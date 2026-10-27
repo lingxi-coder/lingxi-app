@@ -28,6 +28,33 @@ final class EngineConversationSource: ConversationSource {
     /// iOS must override the host's five-row default with the full u32 range.
     private static let completeSessionListLimit = UInt32.max
 
+    private struct RecoveryIdentity: Hashable {
+        let storeRoot: String
+        let sessionID: String
+        let turnID: UInt64
+    }
+
+    private final class WeakRecoveryOwner {
+        weak var source: EngineConversationSource?
+        init(_ source: EngineConversationSource) { self.source = source }
+    }
+    private struct RecoveryWatermark {
+        var revision: UInt64?
+        var state: TurnRecoveryStateDto?
+        var owners: [UUID: WeakRecoveryOwner] = [:]
+    }
+    // Keep a watermark only while a source can still receive this turn's
+    // events. Overlapping foreground and headless sources share the same
+    // entry, even when their UI checkpoint scopes differ.
+    private static var recoveryRevisions: [RecoveryIdentity: RecoveryWatermark] = [:]
+    private static var liveSubmissionAttempts: [RecoveryIdentity: Set<String>] = [:]
+    private let recoveryOwnerID = UUID()
+    private var recoveryInterests: Set<RecoveryIdentity> = []
+    // Recovery versions are shared across sources, so synchronous callbacks
+    // must also drain across sources rather than reenter another source.
+    private static var pendingApplyEvents: [() -> Void] = []
+    private static var applyingEvent = false
+
     typealias HandleBuilder = (
         _ config: IosEngineLaunchConfigFfi,
         _ listener: IosEventListener,
@@ -40,6 +67,8 @@ final class EngineConversationSource: ConversationSource {
 
     private let isRemoteProjection: Bool
     private let config: EngineConfig
+    private let nativeUserDirectories: MobileUserDirectories
+    private let recoveryStoreRoot: String
     private let handleBuilder: HandleBuilder
     private let mediaHostComposition: IOSNativeMediaHostComposition?
     private let permissionModeRepository: PermissionModeConfigurationRepository
@@ -96,6 +125,7 @@ final class EngineConversationSource: ConversationSource {
     /// `nil` between turns.
     private var currentTurnId: UInt64?
     private var nextTurnId: UInt64 = UInt64.random(in: 1..<UInt64.max)
+    private var turnIDExhausted = false
     /// Session-scoped event guard. Increment whenever the visible session
     /// changes so late events from an abandoned session/turn are ignored.
     private var sessionEpoch: UInt64 = 1
@@ -111,12 +141,60 @@ final class EngineConversationSource: ConversationSource {
     /// Original user spelling for a slash command awaiting dispatch.
     private var pendingSlashRaw: String?
     private var testCommandSubmitter: ((ClientCommand) async throws -> Void)?
+    private var testWorkspaceOwnerResolver: (() async throws -> String)?
     private var testBypassPermissionsConfirmer: (() async throws -> Void)?
     private var testEmptySessionResumer: ((String, String) async throws -> Void)?
     private var cancellationOperation: CancellationOperation?
     private var nextCancellationOperationID: UInt64 = 1
     private var activeSessionTransitionOperationID: UInt64?
     private var nextSessionTransitionOperationID: UInt64 = 1
+    private final class TurnSubmission {
+        let turnID: UInt64
+        let attemptID = UUID().uuidString
+        let epoch: UInt64
+        let expectedSessionID: String
+        let kind: DurableSubmissionKind
+        let queued: Bool
+        var owner: String?
+        var failure: Error?
+        var dispatchAttempted = false
+        var ledgerRegistered = false
+        var observedServerEvidence = false
+        var observedSlashResult = false
+        var liveIdentity: RecoveryIdentity?
+        var task: Task<Void, Never>?
+
+        init(turnID: UInt64, epoch: UInt64, expectedSessionID: String, kind: DurableSubmissionKind, queued: Bool) {
+            self.turnID = turnID
+            self.epoch = epoch
+            self.expectedSessionID = expectedSessionID
+            self.kind = kind
+            self.queued = queued
+        }
+    }
+    private var turnSubmissions: [UInt64: TurnSubmission] = [:]
+    private struct SubmissionIdentity: Hashable {
+        let sessionID: String
+        let turnID: UInt64
+    }
+    private struct QueuedStatusRequest {
+        let requestID: String
+        let attemptID: String
+        let epoch: UInt64
+    }
+    private struct ProjectedQueuedUserRow {
+        let rowID: UUID
+        let blocks: [ConversationMessageBlock]
+    }
+    private var queuedStatusRequests: [SubmissionIdentity: QueuedStatusRequest] = [:]
+    private var attemptedQueuedStatuses: Set<SubmissionIdentity> = []
+    private var projectedQueuedUserRows: [UUID: ProjectedQueuedUserRow] = [:]
+    private var uncertainSubmissions: Set<SubmissionIdentity> = []
+    private var terminalEvidenceFailures: Set<SubmissionIdentity> = []
+    private var pendingSlashEvidence: Set<SubmissionIdentity> = []
+    private var attemptedUnknownProbes: Set<SubmissionIdentity> = []
+    private var probingUnknownSubmission: SubmissionIdentity?
+    private var latestProbeSnapshot: TurnRecoverySnapshotDto?
     private let durableTurns: DurableConversationTurnClientStore?
     private(set) var sideID: String?
     private var sideEnded = false
@@ -145,7 +223,61 @@ final class EngineConversationSource: ConversationSource {
     /// rebuilds its scene; the task is the idempotency barrier for those
     /// callbacks.
     private var durableRecoveryTask: Task<Void, Never>?
+    private var durableRecoveryAttemptID: String?
+    private struct AttachAttempt {
+        let requestID: String
+        let sessionID: String
+        let turnID: UInt64
+        var started = false
+        var finished = false
+        var continuation: CheckedContinuation<Void, Error>?
+    }
+    private var attachAttempt: AttachAttempt?
+    private var attachTimeout: Task<Void, Never>?
+    private struct AttachWireIdentity: Hashable {
+        let sessionID: String
+        let turnID: UInt64
+    }
+    private struct AttachWireBatch {
+        let requestID: String
+        var acceptsReplay: Bool
+    }
+    // An abandoned attempt remains a wire boundary until its Finished is
+    // consumed. Otherwise its late replay could masquerade as live output.
+    private var attachWireBatches: [AttachWireIdentity: AttachWireBatch] = [:]
+    private var attachWireTrackingExhausted = false
+    private struct RecoveryBootstrap {
+        let sessionID: String
+        let turnID: UInt64
+        var bufferedStates: [TurnRecoverySnapshotDto] = []
+        var overflowed = false
+    }
+    // This outlives a timed-out request. Ordinary snapshots are not an
+    // authoritative initial revision until a matching Started seeds it.
+    private var recoveryBootstrap: RecoveryBootstrap?
     private var replayingTurnID: UInt64?
+    private var projectingRetainedTurnEvent = false
+    private var projectingJournalEvent = false
+    private struct JournalIdentity: Equatable {
+        let sessionID: String
+        let turnID: UInt64
+        let epoch: UInt64
+    }
+    private struct PendingJournalEvent {
+        let event: ClientEvent
+        let retained: Bool
+    }
+    private var journalIdentity: JournalIdentity?
+    private var pendingJournalEvents: [UInt64: PendingJournalEvent] = [:]
+    private var pendingTerminalRecovery: JournalIdentity?
+    private var queuedTurnInterests: [UInt64: JournalIdentity] = [:]
+    private var incompleteQueuedTurns: Set<UInt64> = []
+    private var deferredQueuedEvents: [ClientEvent] = []
+    private var deferredQueuedTimeout: Task<Void, Never>?
+    private var recoveryIngressActive = true
+    private var restoredTranscriptIsAuthoritative = false
+    private var replayCursorFailed = false
+    private var replayGapErrorID: UUID?
     /// AttachTurn and ResumeTurn both emit recovery snapshots. A Running
     /// snapshot from Attach is not a Resume acknowledgement: the source
     /// still has to submit ResumeTurn before it can expose an active
@@ -163,7 +295,6 @@ final class EngineConversationSource: ConversationSource {
     /// Cancel's command acknowledgement only means the host accepted the
     /// request. Keep ownership until the FIFO listener observes a terminal
     /// recovery snapshot for the same session/turn.
-    private var terminalRecoveryStates: [UInt64: TurnRecoveryStateDto] = [:]
 
     private enum PendingSessionTransition: Equatable {
         case new
@@ -191,11 +322,27 @@ final class EngineConversationSource: ConversationSource {
         var visualizationContext: VisualizationContextChip? = nil
     }
 
-    private struct CancellationOperation {
+    private final class CancellationOperation {
         let id: UInt64
+        let initialSessionID: String
+        let submission: TurnSubmission?
+        var sessionID: String { submission?.owner ?? initialSessionID }
         let turnId: UInt64
         let epoch: UInt64
         let task: Task<Void, Error>
+        var terminalState: TurnRecoveryStateDto?
+        var observedTurnOutcome: TurnOutcomeDto?
+        var observedSlashResult = false
+
+        init(id: UInt64, initialSessionID: String, submission: TurnSubmission?, turnId: UInt64,
+             epoch: UInt64, task: Task<Void, Error>) {
+            self.id = id
+            self.initialSessionID = initialSessionID
+            self.submission = submission
+            self.turnId = turnId
+            self.epoch = epoch
+            self.task = task
+        }
     }
 
     init(
@@ -204,10 +351,14 @@ final class EngineConversationSource: ConversationSource {
         mediaHostComposition: IOSNativeMediaHostComposition? = nil,
         permissionModeRepository: PermissionModeConfigurationRepository? = nil,
         memoryOnly: Bool = false,
-        remoteProjection: Bool = false
+        remoteProjection: Bool = false,
+        recoveryStoreRootForTesting: String? = nil
     ) {
         self.isRemoteProjection = remoteProjection
         self.config = config
+        let directories = MobileUserStorage.directories()
+        self.nativeUserDirectories = directories
+        self.recoveryStoreRoot = recoveryStoreRootForTesting ?? directories.configHome
         sessionMode = config.sessionMode
         self.mediaHostComposition = mediaHostComposition
         self.durableTurns = (memoryOnly || remoteProjection) ? nil : DurableConversationTurnClientStore(config: config)
@@ -233,9 +384,12 @@ final class EngineConversationSource: ConversationSource {
         audioContextTask?.cancel()
         mediaHostContextTask?.cancel()
         let ownerID = audioContextOwnerID
+        let recoveryOwnerID = recoveryOwnerID
+        let recoveryInterests = recoveryInterests
         let mediaHostComposition = mediaHostComposition
         let mediaHostSessionBinding = mediaHostSessionBinding
         Task { @MainActor in
+            Self.releaseRecoveryInterests(recoveryInterests, ownerID: recoveryOwnerID)
             IOSAudioProviderService.shared.clearSessionContext(ownerID: ownerID)
             IOSRealtimeAudioService.shared.detach(ownerID: ownerID)
             if let mediaHostSessionBinding {
@@ -245,6 +399,421 @@ final class EngineConversationSource: ConversationSource {
                 )
             }
         }
+    }
+
+    private func recoveryIdentity(sessionID: String, turnID: UInt64) -> RecoveryIdentity {
+        // This is the very same native config home passed to the FFI launch
+        // config. The host rejects a Linux runtime whose derived home differs.
+        return RecoveryIdentity(
+            storeRoot: URL(fileURLWithPath: recoveryStoreRoot, isDirectory: true)
+                .resolvingSymlinksInPath().standardizedFileURL.path,
+            sessionID: sessionID,
+            turnID: turnID
+        )
+    }
+
+    private func retainRecoveryInterest(sessionID: String, turnID: UInt64) {
+        guard recoveryIngressActive, !sessionID.isEmpty else { return }
+        let key = recoveryIdentity(sessionID: sessionID, turnID: turnID)
+        var entry = Self.recoveryRevisions[key] ?? RecoveryWatermark()
+        entry.owners = entry.owners.filter { $0.value.source != nil }
+        if entry.owners.isEmpty {
+            entry.revision = nil
+            entry.state = nil
+        }
+        entry.owners[recoveryOwnerID] = WeakRecoveryOwner(self)
+        Self.recoveryRevisions[key] = entry
+        recoveryInterests.insert(key)
+    }
+
+    private static func releaseRecoveryInterests(_ keys: Set<RecoveryIdentity>, ownerID: UUID) {
+        for key in keys {
+            guard var entry = recoveryRevisions[key] else { continue }
+            entry.owners.removeValue(forKey: ownerID)
+            entry.owners = entry.owners.filter { $0.value.source != nil }
+            if entry.owners.isEmpty { recoveryRevisions.removeValue(forKey: key) }
+            else { recoveryRevisions[key] = entry }
+        }
+    }
+
+    private func releaseRecoveryInterests(except retained: Set<RecoveryIdentity> = []) {
+        let released = recoveryInterests.subtracting(retained)
+        Self.releaseRecoveryInterests(released, ownerID: recoveryOwnerID)
+        recoveryInterests.subtract(released)
+    }
+
+    private func retainOnlyCurrentAndQueuedRecoveryInterests() {
+        var retained = Set(queuedTurnInterests.compactMap { turnID, queued -> RecoveryIdentity? in
+            let session = queued.sessionID.isEmpty ? model.activeSessionId : queued.sessionID
+            return session.isEmpty ? nil : recoveryIdentity(sessionID: session, turnID: turnID)
+        })
+        if let turnID = currentTurnId, !model.activeSessionId.isEmpty {
+            retained.insert(recoveryIdentity(sessionID: model.activeSessionId, turnID: turnID))
+        }
+        if let pendingTerminalRecovery {
+            retained.insert(recoveryIdentity(sessionID: pendingTerminalRecovery.sessionID, turnID: pendingTerminalRecovery.turnID))
+        }
+        if let durableTurns {
+            do {
+                for pending in try durableTurns.pendingSubmissions() where submissionIsUncertain(pending) || pending.admittedQueued == true {
+                    retained.insert(recoveryIdentity(sessionID: pending.sessionID, turnID: pending.turnID))
+                }
+            } catch {
+                showSubmissionWarning()
+                return
+            }
+        }
+        releaseRecoveryInterests(except: retained)
+    }
+
+    private func submissionIsUncertain(_ record: DurableSubmissionRecord) -> Bool {
+        let identity = SubmissionIdentity(sessionID: record.sessionID, turnID: record.turnID)
+        if uncertainSubmissions.contains(identity) { return true }
+        if record.projectionIncomplete == true { return true }
+        if record.admittedQueued == true { return false }
+        if record.kind == .slash, record.sessionID == model.activeSessionId,
+           record.turnID == currentTurnId, activeTurnEpoch == sessionEpoch, model.slashCommandPending {
+            return false
+        }
+        guard let local = turnSubmissions[record.turnID], local.epoch == sessionEpoch else { return true }
+        return local.owner != record.sessionID
+    }
+
+    private func hasUncertainSubmissions() -> Bool {
+        guard let durableTurns else { return false }
+        do { return try durableTurns.pendingSubmissions().contains(where: submissionIsUncertain) }
+        catch {
+            showSubmissionWarning()
+            return true
+        }
+    }
+
+    private func hasAdmittedQueuedSubmissions() -> Bool {
+        guard let durableTurns else { return false }
+        do { return try durableTurns.pendingSubmissions().contains { $0.admittedQueued == true } }
+        catch { showSubmissionWarning(); return true }
+    }
+
+    private func restoreAdmittedQueuedInterests(sessionID: String) {
+        guard let durableTurns else { return }
+        do {
+            for record in try durableTurns.pendingSubmissions()
+            where record.sessionID == sessionID && record.admittedQueued == true {
+                queuedTurnInterests[record.turnID] = JournalIdentity(
+                    sessionID: sessionID, turnID: record.turnID, epoch: sessionEpoch
+                )
+                if record.projectionIncomplete == true { incompleteQueuedTurns.insert(record.turnID) }
+                retainRecoveryInterest(sessionID: sessionID, turnID: record.turnID)
+            }
+        } catch { showSubmissionWarning() }
+    }
+
+    /// Remember only user rows whose entire DTO was actually projected. A
+    /// filtered block, unsupported attachment or lossy UTF-16 leaves the
+    /// queued submission unresolved instead of using a partial row as proof.
+    private func indexProjectedQueuedUserRows(_ messages: [MessageDto], restored: RestoredTranscript) {
+        projectedQueuedUserRows.removeAll()
+        var counts: [UUID: Int] = [:]
+        for dto in messages {
+            if let uuid = dto.transcriptUuid.flatMap(UUID.init(uuidString:)) { counts[uuid, default: 0] += 1 }
+        }
+        for dto in messages {
+            guard dto.role == "user", dto.images.isEmpty, dto.loopWakeup == nil, dto.visualizationContext == nil,
+                  let uuid = dto.transcriptUuid.flatMap(UUID.init(uuidString:)), counts[uuid] == 1,
+                  !dto.blocks.isEmpty else { continue }
+            var blocks: [ConversationMessageBlock] = []
+            var complete = true
+            for block in dto.blocks {
+                guard case let .text(text) = block else { complete = false; break }
+                let displayed = text.displayText
+                guard !displayed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      Array(displayed.utf16) == text.codeUnits else { complete = false; break }
+                blocks.append(.text(displayed))
+            }
+            guard complete else { continue }
+            let rows = restored.messages.filter { $0.role == .user && $0.transcriptUUID == uuid }
+            guard rows.count == 1, let row = rows.first, restored.details[row.id]?.blocks == blocks,
+                  !restored.messages.contains(where: { $0.loopFoldedItemIDs.contains("message:\(row.id.uuidString)") }),
+                  restored.items.contains(where: {
+                      if case let .message(item) = $0 { return item.id == row.id }
+                      return false
+                  }) else { continue }
+            projectedQueuedUserRows[uuid] = ProjectedQueuedUserRow(rowID: row.id, blocks: blocks)
+        }
+    }
+
+    private func queuedUserRowIsStillProjected(_ uuid: UUID) -> Bool {
+        guard let projected = projectedQueuedUserRows[uuid],
+              model.messageDetails[projected.rowID]?.blocks == projected.blocks,
+              !model.messages.contains(where: { $0.loopFoldedItemIDs.contains("message:\(projected.rowID.uuidString)") }),
+              model.messages.contains(where: { $0.id == projected.rowID && $0.role == .user && $0.transcriptUUID == uuid })
+        else { return false }
+        return model.items.contains {
+            if case let .message(message) = $0 { return message.id == projected.rowID && message.transcriptUUID == uuid }
+            return false
+        }
+    }
+
+    /// Bound outstanding requests and never reissue one in a tight loop.
+    /// A foreground retry invalidates old request IDs; late replies cannot
+    /// mutate the new session or another submission of the same turn number.
+    private func queryQueuedStatuses(retry: Bool = false) {
+        guard recoveryIngressActive, !model.sessionTransitionPending, !model.activeSessionId.isEmpty,
+              let durableTurns else { return }
+        if retry {
+            queuedStatusRequests.removeAll()
+            attemptedQueuedStatuses.removeAll()
+        }
+        let entries: [DurableSubmissionRecord]
+        do { entries = try durableTurns.pendingSubmissions() }
+        catch { showSubmissionWarning(); return }
+        for entry in entries where entry.sessionID == model.activeSessionId && entry.admittedQueued == true {
+            guard queuedStatusRequests.count < 16 else { break }
+            let identity = SubmissionIdentity(sessionID: entry.sessionID, turnID: entry.turnID)
+            guard !attemptedQueuedStatuses.contains(identity) else { continue }
+            attemptedQueuedStatuses.insert(identity)
+            guard let attemptID = entry.attemptID else { showSubmissionWarning(); continue }
+            let request = QueuedStatusRequest(requestID: UUID().uuidString, attemptID: attemptID, epoch: sessionEpoch)
+            queuedStatusRequests[identity] = request
+            Task { @MainActor [weak self] in
+                guard let self, self.recoveryIngressActive, self.sessionEpoch == request.epoch,
+                      self.queuedStatusRequests[identity]?.requestID == request.requestID else { return }
+                do {
+                    try await self.submitCommand(.queryQueuedTurn(sessionId: identity.sessionID,
+                        turnId: identity.turnID, requestId: request.requestID))
+                } catch {
+                    guard self.queuedStatusRequests[identity]?.requestID == request.requestID else { return }
+                    self.queuedStatusRequests.removeValue(forKey: identity)
+                    self.showSubmissionWarning()
+                    self.queryQueuedStatuses()
+                }
+            }
+        }
+    }
+
+    private func consumeQueuedStatus(sessionID: String, turnID: UInt64, requestID: String,
+                                     status: QueuedTurnStatusDto) {
+        let identity = SubmissionIdentity(sessionID: sessionID, turnID: turnID)
+        guard recoveryIngressActive, sessionID == model.activeSessionId, !model.sessionTransitionPending,
+              let request = queuedStatusRequests[identity], request.requestID == requestID,
+              request.epoch == sessionEpoch, let durableTurns else { return }
+        queuedStatusRequests.removeValue(forKey: identity)
+        defer { queryQueuedStatuses() }
+        let record: DurableSubmissionRecord
+        do {
+            guard let found = try durableTurns.pendingSubmissions().first(where: {
+                $0.sessionID == sessionID && $0.turnID == turnID && $0.attemptID == request.attemptID && $0.admittedQueued == true
+            }) else { return }
+            record = found
+        } catch { showSubmissionWarning(); return }
+        switch status {
+        case let .delivered(batchOwnerTurnId, memberTurnIds, transcriptUuid):
+            guard record.projectionIncomplete != true, currentTurnId != turnID,
+                  memberTurnIds.first == batchOwnerTurnId, memberTurnIds.contains(turnID),
+                  Set(memberTurnIds).count == memberTurnIds.count,
+                  let uuid = UUID(uuidString: transcriptUuid), queuedUserRowIsStillProjected(uuid) else {
+                showRecoveryWarning()
+                return
+            }
+            clearAdmittedQueuedSubmission(identity, attemptID: request.attemptID)
+        case .running, .terminal:
+            // Another handle may own this turn. Observe its journal and
+            // terminal receipt with Attach, but never auto-resume it.
+            do { try durableTurns.markSubmissionIncomplete(sessionID: sessionID, turnID: turnID) }
+            catch { showSubmissionWarning(); return }
+            uncertainSubmissions.insert(identity)
+            attemptedUnknownProbes.remove(identity)
+            showRecoveryWarning()
+            Task { @MainActor [weak self] in self?.probeUnknownSubmissionIfReady() }
+        case .cancelled:
+            // Host only returns this for a durably cancelled, never-claimed
+            // private queue entry. Persist and project its outcome before
+            // releasing the ledger: a crash must not hide that cancellation.
+            guard record.projectionIncomplete != true, currentTurnId != turnID else { showRecoveryWarning(); return }
+            guard saveTerminalEvidence(sessionID: sessionID, turnID: turnID, projectionUncertain: false,
+                                       liveOnlyOutput: false, queuedCancelled: true) else { return }
+            model.items.append(.notice(ConversationExecutionNotice(
+                id: "queued-cancelled-\(sessionEpoch)-\(turnID)", kind: .info,
+                text: String(localized: "chat_queued_cancelled")
+            )))
+            clearAdmittedQueuedSubmission(identity, attemptID: request.attemptID)
+        case .claimedUncertain:
+            showRecoveryWarning()
+        case .pending:
+            break
+        @unknown default:
+            showRecoveryWarning()
+        }
+    }
+
+    private func clearAdmittedQueuedSubmission(_ identity: SubmissionIdentity, attemptID: String) {
+        guard let durableTurns else { return }
+        do {
+            try durableTurns.clearSubmission(sessionID: identity.sessionID, turnID: identity.turnID, attemptID: attemptID)
+            guard !(try durableTurns.pendingSubmissions().contains(where: {
+                $0.sessionID == identity.sessionID && $0.turnID == identity.turnID
+            })) else { showSubmissionWarning(); return }
+            queuedTurnInterests.removeValue(forKey: identity.turnID)
+            uncertainSubmissions.remove(identity)
+            attemptedUnknownProbes.remove(identity)
+            retainOnlyCurrentAndQueuedRecoveryInterests()
+        } catch { showSubmissionWarning() }
+    }
+
+    private func isUncertainSubmission(sessionID: String, turnID: UInt64) -> Bool {
+        guard let durableTurns else { return false }
+        do {
+            return try durableTurns.pendingSubmissions().contains {
+                $0.sessionID == sessionID && $0.turnID == turnID && submissionIsUncertain($0)
+            }
+        } catch { return true }
+    }
+
+    private func showSubmissionWarning(notFound: Bool = false) {
+        let message = notFound ? String(localized: "chat_submission_not_found_unknown")
+            : String(localized: "chat_submission_outcome_unknown")
+        if model.error == nil { model.error = ConversationError(kind: .host, message: message) }
+        else { model.statusLine = message }
+    }
+
+    private func clearSubmissionAfterTerminal(sessionID: String, turnID: UInt64) {
+        guard let durableTurns else { return }
+        do {
+            try durableTurns.clearSubmission(sessionID: sessionID, turnID: turnID)
+            let identity = SubmissionIdentity(sessionID: sessionID, turnID: turnID)
+            uncertainSubmissions.remove(identity)
+            attemptedUnknownProbes.remove(identity)
+        } catch {
+            showSubmissionWarning()
+        }
+    }
+
+    private func submissionRemainsPending(sessionID: String, turnID: UInt64) -> Bool {
+        guard let durableTurns else { return false }
+        do {
+            return try durableTurns.pendingSubmissions().contains { $0.sessionID == sessionID && $0.turnID == turnID }
+        } catch {
+            return true
+        }
+    }
+
+    @discardableResult
+    private func saveTerminalEvidence(sessionID: String, turnID: UInt64,
+                                      projectionUncertain: Bool, liveOnlyOutput: Bool,
+                                      queuedCancelled: Bool = false) -> Bool {
+        guard let durableTurns else { return true }
+        let identity = SubmissionIdentity(sessionID: sessionID, turnID: turnID)
+        do {
+            try durableTurns.recordTerminalEvidence(sessionID: sessionID, turnID: turnID,
+                projectionUncertain: projectionUncertain, liveOnlyOutput: liveOnlyOutput,
+                queuedCancelled: queuedCancelled)
+            terminalEvidenceFailures.remove(identity)
+            if model.activeSessionId == sessionID { refreshRecoveryEvidenceForReview(sessionID: sessionID) }
+            return true
+        } catch {
+            terminalEvidenceFailures.insert(identity)
+            showRecoveryWarning(String(localized: "chat_recovery_projection_uncertain"))
+            return false
+        }
+    }
+
+    private func showPersistedTerminalEvidence(sessionID: String) {
+        refreshRecoveryEvidenceForReview(sessionID: sessionID)
+        if model.recoveryEvidenceForReview.contains(where: { $0.projectionUncertain || $0.liveOnlyOutput }) {
+            showRecoveryWarning(String(localized: "chat_recovery_projection_uncertain"))
+        } else if model.recoveryEvidenceForReview.contains(where: { $0.queuedCancelled == true }) {
+            showRecoveryWarning(String(localized: "chat_queued_cancelled"))
+        }
+    }
+
+    private func refreshRecoveryEvidenceForReview(sessionID: String) {
+        guard model.activeSessionId == sessionID, let durableTurns else { return }
+        do {
+            model.recoveryEvidenceForReview = try durableTurns.terminalEvidence(sessionID: sessionID).map {
+                ConversationRecoveryEvidence(sessionID: $0.sessionID, turnID: $0.turnID,
+                    projectionUncertain: $0.projectionUncertain, liveOnlyOutput: $0.liveOnlyOutput,
+                    queuedCancelled: $0.queuedCancelled, version: $0.version)
+            }
+        } catch { showRecoveryWarning(String(localized: "chat_recovery_projection_uncertain")) }
+    }
+
+    func acknowledgeRecoveryEvidence(_ reviewed: [ConversationRecoveryEvidence]) {
+        let sessionID = model.activeSessionId
+        guard !sessionID.isEmpty, !reviewed.isEmpty, let durableTurns else { return }
+        let exact = reviewed.filter { $0.sessionID == sessionID }.map {
+            TerminalProjectionEvidence(sessionID: $0.sessionID, turnID: $0.turnID,
+                projectionUncertain: $0.projectionUncertain, liveOnlyOutput: $0.liveOnlyOutput,
+                queuedCancelled: $0.queuedCancelled, version: $0.version)
+        }
+        guard !exact.isEmpty else { return }
+        do {
+            try durableTurns.acknowledgeTerminalEvidence(exact, sessionID: sessionID)
+            refreshRecoveryEvidenceForReview(sessionID: sessionID)
+            if model.recoveryEvidenceForReview.isEmpty, model.error?.id == replayGapErrorID,
+               (model.error?.message == String(localized: "chat_recovery_projection_uncertain")
+                || model.error?.message == String(localized: "chat_queued_cancelled")) {
+                model.error = nil
+            }
+        } catch { showRecoveryWarning(String(localized: "chat_recovery_projection_uncertain")) }
+    }
+
+    private func retryPendingSlashEvidence() {
+        guard let durableTurns else { return }
+        for identity in pendingSlashEvidence where identity.sessionID == model.activeSessionId {
+            guard saveTerminalEvidence(sessionID: identity.sessionID, turnID: identity.turnID,
+                                       projectionUncertain: true, liveOnlyOutput: true) else { continue }
+            clearSubmissionAfterTerminal(sessionID: identity.sessionID, turnID: identity.turnID)
+            durableTurns.clear(turnID: identity.turnID, sessionID: identity.sessionID)
+            guard !submissionRemainsPending(sessionID: identity.sessionID, turnID: identity.turnID),
+                  !(durableTurns.load().map { $0.sessionID == identity.sessionID && $0.turnID == identity.turnID } ?? false)
+            else { showSubmissionWarning(); continue }
+            pendingSlashEvidence.remove(identity)
+            if probingUnknownSubmission == identity {
+                durableRecoveryTask?.cancel()
+                durableRecoveryTask = nil
+                durableRecoveryAttemptID = nil
+                cancelAttachAttempt()
+                recoveryBootstrap = nil
+                probingUnknownSubmission = nil
+                latestProbeSnapshot = nil
+                replayingTurnID = nil
+                durableRecoveryPhase = nil
+                if currentTurnId == identity.turnID { clearTurnPointers(keepEpoch: false) }
+            }
+            reattachedTurnIDs.remove(identity.turnID)
+            if pendingTerminalRecovery == JournalIdentity(sessionID: identity.sessionID, turnID: identity.turnID, epoch: sessionEpoch) {
+                pendingTerminalRecovery = nil
+            }
+            if unresolvedRecoveryTurnID == identity.turnID {
+                unresolvedRecoveryTurnID = nil
+                needsDurableForegroundRecoveryTurnID = nil
+                model.hasUnresolvedTurnRecovery = hasUncertainSubmissions()
+                model.hasInactiveDurableRecovery = false
+            }
+        }
+    }
+
+    private static func submissionWasNotAdmitted(_ error: Error) -> Bool {
+        guard let clientError = error as? ClientError else { return false }
+        if case .SubmissionNotAdmitted = clientError { return true }
+        return false
+    }
+
+    private func recordUnknownSubmission(_ submission: TurnSubmission) {
+        guard let owner = submission.owner else { return }
+        let identity = SubmissionIdentity(sessionID: owner, turnID: submission.turnID)
+        uncertainSubmissions.insert(identity)
+        guard model.activeSessionId == owner, submission.epoch == sessionEpoch else { return }
+        model.hasUnresolvedTurnRecovery = true
+        if currentTurnId == submission.turnID {
+            unresolvedRecoveryTurnID = submission.turnID
+            needsDurableForegroundRecoveryTurnID = submission.turnID
+            model.hasInactiveDurableRecovery = true
+            model.streaming = false
+            model.slashCommandPending = false
+        }
+        showSubmissionWarning()
+        Task { @MainActor [weak self] in self?.probeUnknownSubmissionIfReady() }
     }
 
     // The remote source owns transport and commands. These methods share only
@@ -276,7 +845,8 @@ final class EngineConversationSource: ConversationSource {
         // Desktop lifecycle is already represented by the snapshot. Never let
         // its local session IDs/configuration drive the phone's engine.
         switch event {
-        case .sessionStarted, .sessionResumed, .sessionEnded, .turnRecoveryState:
+        case .sessionStarted, .sessionResumed, .sessionEnded, .turnRecoveryState,
+             .turnAttachStarted, .turnAttachFinished:
             return
         case let .slashCommandResult(turnID, display, isError):
             // Configuration commands can finish while a different desktop turn
@@ -345,6 +915,8 @@ final class EngineConversationSource: ConversationSource {
 
     func startNewConversation() {
         guard !isSideChat else { return }
+        guard !hasUncertainSubmissions() else { showSubmissionWarning(); return }
+        guard !hasAdmittedQueuedSubmissions() else { showSubmissionWarning(); return }
         // A paused/waiting durable turn is still owned by the engine even
         // though `model.streaming` is false. Do not clear its checkpoint or
         // replace the session until recovery reaches Running or a terminal
@@ -352,8 +924,12 @@ final class EngineConversationSource: ConversationSource {
         guard unresolvedRecoveryTurnID == nil,
               pauseAcknowledgements.isEmpty
         else { return }
-        durableTurns?.clear()
         let turnIdToCancel = inFlightTurnForSessionSwitch()
+        if let record = durableTurns?.load(),
+           record.sessionID != model.activeSessionId || record.turnID != turnIdToCancel {
+            showRecoveryWarning()
+            return
+        }
         model.sessionRestoreRecovery = nil
         model.sessionTransitionFailure = nil
         let transitionOperationID = beginSessionTransition(.new)
@@ -373,11 +949,24 @@ final class EngineConversationSource: ConversationSource {
     /// Creates an ordinary authoring session with an explicit guest cwd. The
     /// local app service owns the application; this session only owns its work.
     func startLocalAppAuthoringSession(cwd: String) async throws -> String {
-        guard !isSideChat, unresolvedRecoveryTurnID == nil, pauseAcknowledgements.isEmpty,
-              !model.streaming, !model.sessionTransitionPending else {
-            throw LocalAppServiceFailure("CONVERSATION_BUSY", "Finish the active conversation before opening app development.")
+        func requireAvailableConversation() throws {
+            guard !isSideChat, unresolvedRecoveryTurnID == nil, pauseAcknowledgements.isEmpty,
+                  !model.streaming, !model.slashCommandPending, !model.isCancelling,
+                  !model.sessionTransitionPending, durableTurns?.load() == nil,
+                  !hasUncertainSubmissions(), !hasAdmittedQueuedSubmissions() else {
+                throw LocalAppServiceFailure("CONVERSATION_BUSY", "Finish the active conversation before opening app development.")
+            }
         }
+        try requireAvailableConversation()
+        let expectedSession = model.activeSessionId
+        let expectedEpoch = sessionEpoch
+        let expectedTransitionGeneration = nextSessionTransitionOperationID
         _ = try await ensureHandle()
+        guard recoveryIngressActive, nextSessionTransitionOperationID == expectedTransitionGeneration,
+              expectedSession.isEmpty || (sessionEpoch == expectedEpoch && model.activeSessionId == expectedSession) else {
+            throw LocalAppServiceFailure("CONVERSATION_BUSY", "The conversation changed before app development could start.")
+        }
+        try requireAvailableConversation()
         let prior = model.activeSessionId
         model.sessionRestoreRecovery = nil; model.sessionTransitionFailure = nil
         let operation = beginSessionTransition(.new)
@@ -399,7 +988,7 @@ final class EngineConversationSource: ConversationSource {
     /// retryable Stop state instead of discarding the old transcript.
     private func inFlightTurnForSessionSwitch() -> UInt64? {
         if let cancellationOperation { return cancellationOperation.turnId }
-        guard model.streaming else { return nil }
+        guard model.streaming || model.slashCommandPending else { return nil }
         return currentTurnId
     }
 
@@ -535,7 +1124,7 @@ final class EngineConversationSource: ConversationSource {
             return normalized.contains("was not found")
                 || normalized.contains("session not found")
                 || normalized.contains("sessionnotfound")
-        case .Transport, .Protocol, .Internal:
+        case .Transport, .Protocol, .Internal, .SubmissionNotAdmitted:
             return false
         @unknown default:
             return false
@@ -547,6 +1136,16 @@ final class EngineConversationSource: ConversationSource {
         model.sessionTransitionPending = transition != nil
         if transition == nil {
             activeSessionTransitionOperationID = nil
+            if !uncertainSubmissions.isEmpty {
+                Task { @MainActor [weak self] in self?.probeUnknownSubmissionIfReady() }
+            }
+            Task { @MainActor [weak self] in self?.queryQueuedStatuses() }
+        } else {
+            // A response while transitioning is not allowed to mutate the
+            // old session. Invalidate its slot so a failed transition can
+            // retry against the still-visible transcript.
+            queuedStatusRequests.removeAll()
+            attemptedQueuedStatuses.removeAll()
         }
     }
 
@@ -632,10 +1231,25 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func invalidateTurnContext() {
+        resetProjectedLiveEvents(clearError: true)
+        model.recoveryEvidenceForReview.removeAll()
+        queuedStatusRequests.removeAll()
+        attemptedQueuedStatuses.removeAll()
+        projectedQueuedUserRows.removeAll()
+        pendingTerminalRecovery = nil
+        queuedTurnInterests.removeAll()
+        incompleteQueuedTurns.removeAll()
+        deferredQueuedEvents.removeAll()
+        deferredQueuedTimeout?.cancel()
+        deferredQueuedTimeout = nil
+        restoredTranscriptIsAuthoritative = false
         durableRecoveryTask?.cancel()
         durableRecoveryTask = nil
+        durableRecoveryAttemptID = nil
+        cancelAttachAttempt()
+        recoveryBootstrap = nil
+        releaseRecoveryInterests()
         durableRecoveryPhase = nil
-        terminalRecoveryStates.removeAll()
         unresolvedRecoveryTurnID = nil
         needsDurableForegroundRecoveryTurnID = nil
         reattachedTurnIDs.removeAll()
@@ -662,6 +1276,7 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func clearTurnPointers(keepEpoch: Bool = true) {
+        resetProjectedLiveEvents()
         streamingIndex = nil
         streamingItemIndex = nil
         currentResponseMessageIDs = []
@@ -1171,34 +1786,89 @@ final class EngineConversationSource: ConversationSource {
         onSideSubmissionFailure = nil
     }
 
+    private func bindSubmissionOwner(_ owner: String, to submission: TurnSubmission) throws {
+        guard !owner.isEmpty, submission.epoch == sessionEpoch,
+              submission.expectedSessionID.isEmpty || submission.expectedSessionID == owner,
+              model.activeSessionId.isEmpty || model.activeSessionId == owner else {
+            throw CancellationError()
+        }
+        submission.owner = owner
+        bindInitialWorkspaceOwner(owner)
+    }
+
+    private func submissionOwner(_ submission: TurnSubmission) async throws -> String? {
+        guard !isSideChat else { return nil }
+        let owner: String
+        if testCommandSubmitter != nil {
+            owner = try await testWorkspaceOwnerResolver?() ?? model.activeSessionId
+        } else {
+            let handle = try await ensureHandle()
+            try Task.checkCancellation()
+            owner = await handle.workspaceState().sessionId
+        }
+        try Task.checkCancellation()
+        guard recoveryIngressActive else { throw CancellationError() }
+        // Test submitters may model a not-yet-established workspace. Real
+        // main-conversation sends must always carry a concrete owner.
+        if owner.isEmpty, testCommandSubmitter != nil { return nil }
+        try bindSubmissionOwner(owner, to: submission)
+        return owner
+    }
+
     private func submitCommand(_ command: ClientCommand) async throws {
         try Task.checkCancellation()
+        if !isSideChat && !recoveryIngressActive { throw CancellationError() }
         if let testCommandSubmitter {
             try await testCommandSubmitter(command)
-            return
+        } else {
+            let handle = try await ensureHandle()
+            try Task.checkCancellation()
+            if !isSideChat && !recoveryIngressActive { throw CancellationError() }
+            if !isSideChat, case let .sendPrompt(_, _, _, _, turnID, _) = command {
+                let owner = await handle.workspaceState().sessionId
+                try Task.checkCancellation()
+                guard recoveryIngressActive else { throw CancellationError() }
+                bindInitialWorkspaceOwner(owner)
+                guard maySubmitPrompt(owner: owner, turnID: turnID)
+                else {
+                    throw NSError(domain: "ConversationRecovery", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_recovery_replay_gap")])
+                }
+            } else if !isSideChat, case .runSlashCommand = command {
+                let owner = await handle.workspaceState().sessionId
+                try Task.checkCancellation()
+                guard recoveryIngressActive else { throw CancellationError() }
+                bindInitialWorkspaceOwner(owner)
+            }
+            do {
+                if let sideID {
+                    guard !sideEnded else { throw CancellationError() }
+                    try await handle.submitSideChat(sideId: sideID, command: command)
+                } else {
+                    try await handle.submit(command: command)
+                }
+            } catch {
+                if isSideChat {
+                    Self.turnLog.error("side command submission failed")
+                } else {
+                    // Commands may carry API keys or other settings secrets.
+                    // Log the failure category without serializing their payload.
+                    let errorType = String(reflecting: type(of: error))
+                    Self.turnLog.error(
+                        "submit command failed errorType=\(errorType, privacy: .public)"
+                    )
+                }
+                throw error
+            }
         }
-        let handle = try await ensureHandle()
+        try checkCommandSubmissionAfterAwait()
+    }
+
+    /// Both native and injected submitters pass through this fence after the
+    /// host call returns. A retired source cannot settle shared identities.
+    private func checkCommandSubmissionAfterAwait() throws {
         try Task.checkCancellation()
-        do {
-            if let sideID {
-                guard !sideEnded else { throw CancellationError() }
-                try await handle.submitSideChat(sideId: sideID, command: command)
-            } else {
-                try await handle.submit(command: command)
-            }
-        } catch {
-            if isSideChat {
-                Self.turnLog.error("side command submission failed")
-            } else {
-                // Commands may carry API keys or other settings secrets.
-                // Log the failure category without serializing their payload.
-                let errorType = String(reflecting: type(of: error))
-                Self.turnLog.error(
-                    "submit command failed errorType=\(errorType, privacy: .public)"
-                )
-            }
-            throw error
-        }
+        if !isSideChat && !recoveryIngressActive { throw CancellationError() }
     }
 
     private func confirmBypassPermissionsForCurrentSession() async throws {
@@ -1212,18 +1882,36 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func operationForCancelling(turnId: UInt64) -> CancellationOperation {
-        if let operation = cancellationOperation, operation.turnId == turnId {
+        let sessionID = model.activeSessionId
+        if let operation = cancellationOperation, operation.turnId == turnId,
+           operation.sessionID == sessionID, operation.epoch == sessionEpoch {
             return operation
         }
         let operationID = nextCancellationOperationID
         nextCancellationOperationID &+= 1
         let epoch = activeTurnEpoch ?? sessionEpoch
+        let submission = turnSubmissions[turnId].flatMap { $0.epoch == epoch ? $0 : nil }
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            try await self.submitCommand(.cancel(turnId: turnId))
+            // SendPrompt/RunSlash can still be waiting for workspace owner or
+            // host admission. Wait for that exact submission before Cancel so
+            // a successful no-op cannot be followed by a newly started turn.
+            if let submission {
+                await submission.task?.value
+                if let error = submission.failure { throw error }
+                if submission.observedSlashResult { return }
+            }
+            let owner = submission?.owner ?? sessionID
+            guard !owner.isEmpty else {
+                throw NSError(domain: "ConversationRecovery", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_recovery_session_unknown")])
+            }
+            try await self.submitCommand(.cancel(sessionId: owner, turnId: turnId))
         }
         let operation = CancellationOperation(
             id: operationID,
+            initialSessionID: sessionID,
+            submission: submission,
             turnId: turnId,
             epoch: epoch,
             task: task
@@ -1232,17 +1920,23 @@ final class EngineConversationSource: ConversationSource {
         return operation
     }
 
+    private func cancellationMatches(sessionID: String, turnID: UInt64) -> Bool {
+        guard let operation = cancellationOperation else { return false }
+        return operation.sessionID == sessionID && operation.turnId == turnID && operation.epoch == sessionEpoch
+    }
+
     private func finishCancellation(
         _ operation: CancellationOperation,
         error: Error?
     ) {
+        guard recoveryIngressActive else { return }
         guard cancellationOperation?.id == operation.id else { return }
         cancellationOperation = nil
-        terminalRecoveryStates.removeValue(forKey: operation.turnId)
 
         let stillOwnsVisibleTurn = currentTurnId == operation.turnId
             && activeTurnEpoch == operation.epoch
             && operation.epoch == sessionEpoch
+            && model.activeSessionId == operation.sessionID
         model.isCancelling = false
 
         if let error {
@@ -1260,16 +1954,31 @@ final class EngineConversationSource: ConversationSource {
             Self.turnLog.error(
                 "cancel failed turn=\(operation.turnId, privacy: .public) error=\(String(describing: error), privacy: .private(mask: .hash))"
             )
+            if !uncertainSubmissions.isEmpty {
+                Task { @MainActor [weak self] in self?.probeUnknownSubmissionIfReady() }
+            }
             return
         }
 
         if stillOwnsVisibleTurn {
-            durableTurns?.clear(turnID: operation.turnId)
-            if unresolvedRecoveryTurnID == operation.turnId {
+            let identity = SubmissionIdentity(sessionID: operation.sessionID, turnID: operation.turnId)
+            let evidenceSafe = !terminalEvidenceFailures.contains(identity) || saveTerminalEvidence(
+                sessionID: operation.sessionID, turnID: operation.turnId,
+                projectionUncertain: true, liveOnlyOutput: true
+            )
+            if evidenceSafe {
+                clearSubmissionAfterTerminal(sessionID: operation.sessionID, turnID: operation.turnId)
+                durableTurns?.clear(turnID: operation.turnId, sessionID: operation.sessionID)
+                if pendingTerminalRecovery == JournalIdentity(sessionID: operation.sessionID, turnID: operation.turnId, epoch: sessionEpoch) {
+                    pendingTerminalRecovery = nil
+                }
+            }
+            if evidenceSafe, unresolvedRecoveryTurnID == operation.turnId {
                 unresolvedRecoveryTurnID = nil
                 needsDurableForegroundRecoveryTurnID = nil
                 reattachedTurnIDs.remove(operation.turnId)
                 model.hasInactiveDurableRecovery = false
+                model.hasUnresolvedTurnRecovery = hasUncertainSubmissions()
             }
             // The host only returns after all event producers have joined and
             // the single-turn slot is released. This is also a fallback for a
@@ -1280,6 +1989,14 @@ final class EngineConversationSource: ConversationSource {
             finishActiveRun(.cancelled)
             publishActiveTurnCompletion(.cancelled)
             clearTurnPointers(keepEpoch: false)
+            if !evidenceSafe {
+                pendingTerminalRecovery = JournalIdentity(sessionID: operation.sessionID, turnID: operation.turnId, epoch: sessionEpoch)
+                unresolvedRecoveryTurnID = operation.turnId
+                needsDurableForegroundRecoveryTurnID = operation.turnId
+                model.hasUnresolvedTurnRecovery = true
+                model.hasInactiveDurableRecovery = true
+            }
+            drainDeferredQueuedEventsIfReady()
         } else if model.statusLine == String(localized: "chat_stopping") {
             model.statusLine = nil
         }
@@ -1291,13 +2008,17 @@ final class EngineConversationSource: ConversationSource {
 
     private func awaitCancellation(_ turnId: UInt64) async throws {
         let operation = operationForCancelling(turnId: turnId)
+        try await awaitCancellation(operation)
+    }
+
+    private func awaitCancellation(_ operation: CancellationOperation) async throws {
         do {
             try await operation.task.value
             // Command Ok is only submission acknowledgement. First drain
             // the listener FIFO, then wait for the correlated terminal
             // TurnRecoveryState before releasing any visible ownership.
             await listener?.waitUntilIdle()
-            try await waitForCancellationAcknowledgement(turnID: operation.turnId)
+            try await waitForCancellationAcknowledgement(operation)
             finishCancellation(operation, error: nil)
         } catch {
             finishCancellation(operation, error: error)
@@ -1305,7 +2026,123 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
+    private enum SubmissionPreparationError: LocalizedError {
+        case storage
+        var errorDescription: String? { String(localized: "chat_submission_storage_failed") }
+    }
+
+    private func submitTurnCommand(_ makeCommand: @escaping (String?) -> ClientCommand, turnID: UInt64,
+                                   kind: DurableSubmissionKind, queued: Bool = false,
+                                   onFailure: @escaping (Error, Bool) -> Void) {
+        let submission = TurnSubmission(turnID: turnID, epoch: sessionEpoch,
+                                        expectedSessionID: model.activeSessionId, kind: kind, queued: queued)
+        turnSubmissions[turnID] = submission
+        let task = Task { @MainActor [weak self, submission] in
+            guard let self else { submission.failure = CancellationError(); return }
+            defer {
+                if self.turnSubmissions[turnID] === submission {
+                    self.turnSubmissions.removeValue(forKey: turnID)
+                }
+                if let identity = submission.liveIdentity {
+                    Self.liveSubmissionAttempts[identity]?.remove(submission.attemptID)
+                    if Self.liveSubmissionAttempts[identity]?.isEmpty == true {
+                        Self.liveSubmissionAttempts.removeValue(forKey: identity)
+                    }
+                }
+            }
+            do {
+                let owner = try await self.submissionOwner(submission)
+                if let owner, let durableTurns = self.durableTurns {
+                    let identity = self.recoveryIdentity(sessionID: owner, turnID: turnID)
+                    submission.liveIdentity = identity
+                    Self.liveSubmissionAttempts[identity, default: []].insert(submission.attemptID)
+                    do { try durableTurns.beginSubmission(sessionID: owner, turnID: turnID, kind: kind, attemptID: submission.attemptID) }
+                    catch { throw SubmissionPreparationError.storage }
+                    submission.ledgerRegistered = true
+                }
+                submission.dispatchAttempted = true
+                try await self.submitCommand(makeCommand(owner))
+                if let owner, let durableTurns = self.durableTurns {
+                    do {
+                        let remains = try durableTurns.pendingSubmissions().contains {
+                            $0.sessionID == owner && $0.turnID == turnID && $0.attemptID == submission.attemptID
+                        }
+                        if remains && submission.queued {
+                            try durableTurns.markQueuedAdmitted(sessionID: owner, turnID: turnID, attemptID: submission.attemptID)
+                        } else if remains && durableTurns.ensureDurable(sessionID: owner, turnID: turnID) {
+                            try durableTurns.clearSubmission(sessionID: owner, turnID: turnID, attemptID: submission.attemptID)
+                        } else if remains && submission.kind == .slash && self.currentTurnId == turnID
+                                    && self.activeTurnEpoch == submission.epoch && self.model.slashCommandPending {
+                            // A local slash has no checkpoint; keep its ledger
+                            // until the result, while its live UI still owns it.
+                        } else if remains {
+                            self.recordUnknownSubmission(submission)
+                        }
+                    }
+                    catch { self.recordUnknownSubmission(submission) }
+                }
+            }
+            catch {
+                submission.failure = error
+                if self.isSideChat { onFailure(error, !submission.dispatchAttempted); return }
+                let definitelyNotAdmitted = !submission.dispatchAttempted || Self.submissionWasNotAdmitted(error)
+                if let owner = submission.owner, let durableTurns = self.durableTurns {
+                    if definitelyNotAdmitted, submission.dispatchAttempted, submission.observedServerEvidence {
+                        do {
+                            if try durableTurns.pendingSubmissions().contains(where: {
+                                $0.sessionID == owner && $0.turnID == turnID
+                            }) { self.recordUnknownSubmission(submission) }
+                        } catch { self.recordUnknownSubmission(submission) }
+                        return
+                    }
+                    if definitelyNotAdmitted {
+                        if submission.ledgerRegistered {
+                            do { try durableTurns.clearSubmission(sessionID: owner, turnID: turnID, attemptID: submission.attemptID) }
+                            catch { self.recordUnknownSubmission(submission); return }
+                        } else {
+                            do {
+                                let existing = try durableTurns.pendingSubmissions().first {
+                                    $0.sessionID == owner && $0.turnID == turnID
+                                }
+                                if existing?.attemptID == submission.attemptID {
+                                    // Atomic publication can precede a failed
+                                    // sync; this attempt never reached Host.
+                                    try durableTurns.clearSubmission(sessionID: owner, turnID: turnID, attemptID: submission.attemptID)
+                                } else if existing != nil {
+                                    self.recordUnknownSubmission(submission)
+                                    return
+                                }
+                            } catch { self.recordUnknownSubmission(submission); return }
+                        }
+                        if self.submissionRemainsPending(sessionID: owner, turnID: turnID) {
+                            self.recordUnknownSubmission(submission)
+                            return
+                        }
+                        durableTurns.clear(turnID: turnID, sessionID: owner)
+                    } else {
+                        do {
+                            let stillPending = try durableTurns.pendingSubmissions().contains {
+                                $0.sessionID == owner && $0.turnID == turnID
+                            }
+                            if stillPending { self.recordUnknownSubmission(submission) }
+                        } catch { self.recordUnknownSubmission(submission) }
+                        return
+                    }
+                }
+                onFailure(error, definitelyNotAdmitted)
+            }
+        }
+        submission.task = task
+    }
+
     private func startPrompt(_ prompt: TurnPrompt) -> ConversationTurnToken {
+        currentTurnId = nil
+        pendingTerminalRecovery = nil
+        retainOnlyCurrentAndQueuedRecoveryInterests()
+        retainRecoveryInterest(sessionID: model.activeSessionId, turnID: prompt.turnId)
+        resetProjectedLiveEvents(clearError: true)
+        pendingTerminalRecovery = nil
+        restoredTranscriptIsAuthoritative = false
         model.notice = nil
         model.streaming = true
         model.hasInactiveDurableRecovery = false
@@ -1333,21 +2170,14 @@ final class EngineConversationSource: ConversationSource {
             "prompt submit turn=\(prompt.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
         )
 
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.submitCommand(.sendPrompt(
-                    text: ClientTextDto(codeUnits: prompt.sourceCodeUnits),
-                    promptMode: prompt.promptMode,
-                    images: prompt.images,
-                    turnId: prompt.turnId,
-                    visualizationContext: prompt.visualizationContext.map {
-                        VisualizationRefDto(id: $0.id, revision: $0.revision)
-                    }))
-            } catch {
-                guard self.activeConversationTurnToken == token else { return }
-                self.fail(.host, "\(error)")
-            }
+        submitTurnCommand({ owner in .sendPrompt(
+            sessionId: owner, text: ClientTextDto(codeUnits: prompt.sourceCodeUnits),
+            promptMode: prompt.promptMode, images: prompt.images, turnId: prompt.turnId,
+            visualizationContext: prompt.visualizationContext.map {
+                VisualizationRefDto(id: $0.id, revision: $0.revision)
+            }) }, turnID: prompt.turnId, kind: .prompt) { [weak self] error, notAdmitted in
+            guard let self, self.activeConversationTurnToken == token else { return }
+            self.fail(.host, error.localizedDescription, provenNotAdmitted: notAdmitted)
         }
         return token
     }
@@ -1363,6 +2193,13 @@ final class EngineConversationSource: ConversationSource {
         images: [ImageRefDto],
         turnId: UInt64
     ) -> ConversationTurnToken {
+        currentTurnId = nil
+        pendingTerminalRecovery = nil
+        retainOnlyCurrentAndQueuedRecoveryInterests()
+        retainRecoveryInterest(sessionID: model.activeSessionId, turnID: turnId)
+        resetProjectedLiveEvents(clearError: true)
+        pendingTerminalRecovery = nil
+        restoredTranscriptIsAuthoritative = false
         model.notice = nil
         model.streaming = false
         model.isCancelling = false
@@ -1383,14 +2220,9 @@ final class EngineConversationSource: ConversationSource {
         let token = ConversationTurnToken(clientTurnId: turnId, sessionEpoch: sessionEpoch)
         model.activeTurnToken = token
 
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.submitCommand(.runSlashCommand(raw: raw, images: images, turnId: turnId))
-            } catch {
-                guard self.activeConversationTurnToken == token else { return }
-                self.fail(.host, "\(error)")
-            }
+        submitTurnCommand({ owner in .runSlashCommand(sessionId: owner, raw: raw, images: images, turnId: turnId) }, turnID: turnId, kind: .slash) { [weak self] error, notAdmitted in
+            guard let self, self.activeConversationTurnToken == token else { return }
+            self.fail(.host, error.localizedDescription, provenNotAdmitted: notAdmitted)
         }
         return token
     }
@@ -1404,6 +2236,39 @@ final class EngineConversationSource: ConversationSource {
             !model.sessionTransitionPending
         else { return }
         model.sessionRefreshRevision &+= 1
+    }
+
+    private func allocateTurnID() -> UInt64? {
+        guard !turnIDExhausted else {
+            model.error = ConversationError(kind: .host, message: String(localized: "chat_turn_id_exhausted"))
+            return nil
+        }
+        let entries: [DurableSubmissionRecord]
+        do { entries = try durableTurns?.pendingSubmissions() ?? [] }
+        catch { showSubmissionWarning(); return nil }
+        let session = model.activeSessionId
+        var reserved = Set(entries.filter { session.isEmpty || $0.sessionID == session }.map(\.turnID))
+        reserved.formUnion(turnSubmissions.keys)
+        reserved.formUnion(queuedTurnInterests.keys)
+        if let currentTurnId { reserved.insert(currentTurnId) }
+        let storeRoot = recoveryIdentity(sessionID: "", turnID: 0).storeRoot
+        for (identity, entry) in Self.recoveryRevisions where identity.storeRoot == storeRoot
+            && (session.isEmpty || identity.sessionID == session)
+            && entry.owners.values.contains(where: { $0.source != nil }) {
+            reserved.insert(identity.turnID)
+        }
+        for (identity, attempts) in Self.liveSubmissionAttempts where identity.storeRoot == storeRoot
+            && (session.isEmpty || identity.sessionID == session) && !attempts.isEmpty {
+            reserved.insert(identity.turnID)
+        }
+        while !turnIDExhausted {
+            let candidate = nextTurnId
+            if candidate == UInt64.max { turnIDExhausted = true }
+            else { nextTurnId = candidate + 1 }
+            if !reserved.contains(candidate) { return candidate }
+        }
+        model.error = ConversationError(kind: .host, message: String(localized: "chat_turn_id_exhausted"))
+        return nil
     }
 
     @discardableResult
@@ -1437,6 +2302,17 @@ final class EngineConversationSource: ConversationSource {
             unresolvedRecoveryTurnID == nil,
             !model.isSelectedAgentReadOnly
         else { return nil }
+        guard !hasUncertainSubmissions() else { showSubmissionWarning(); return nil }
+        if !model.streaming, currentTurnId == nil, hasAdmittedQueuedSubmissions() {
+            showSubmissionWarning()
+            return nil
+        }
+        // A cold source must not replace a checkpoint before its owner has
+        // been restored, even when the workspace has not yet been bound.
+        if !isSideChat, !model.streaming, currentTurnId == nil, durableTurns?.load() != nil {
+            model.error = ConversationError(kind: .host, message: String(localized: "chat_recovery_replay_gap"))
+            return nil
+        }
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let sourceUnits = sourceCodeUnits ?? Array(text.utf16)
@@ -1468,6 +2344,7 @@ final class EngineConversationSource: ConversationSource {
         if isSideChat { pendingSideInput = (text, sourceCodeUnits, images) }
         if model.streaming {
             guard exactSlashCommand == nil, let token = activeConversationTurnToken else { return nil }
+            guard let queuedTurnID = allocateTurnID() else { return nil }
             model.isNew = false
             model.notice = nil
             let chip = takeVisualizationChip()
@@ -1475,26 +2352,31 @@ final class EngineConversationSource: ConversationSource {
             queued.sentAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
             queued.visualizationContext = chip
             appendMessage(queued)
-            let queuedTurnID = nextTurnId
-            nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
             pendingUserRowsByToken["client-turn:\(queuedTurnID)"] = queued.id
-            Task { [weak self] in
+            let queuedEpoch = sessionEpoch
+            let queuedSessionID = model.activeSessionId
+            queuedTurnInterests[queuedTurnID] = JournalIdentity(
+                sessionID: model.activeSessionId, turnID: queuedTurnID, epoch: sessionEpoch
+            )
+            retainRecoveryInterest(sessionID: model.activeSessionId, turnID: queuedTurnID)
+            submitTurnCommand({ owner in .sendPrompt(
+                sessionId: owner, text: ClientTextDto(codeUnits: promptSourceCodeUnits),
+                promptMode: promptMode,
+                images: images,
+                turnId: queuedTurnID,
+                visualizationContext: chip.map { VisualizationRefDto(id: $0.id, revision: $0.revision) }
+            ) }, turnID: queuedTurnID, kind: .prompt, queued: true) { [weak self] error, _ in
                 guard let self else { return }
-                do {
-                    try await self.submitCommand(.sendPrompt(
-                        text: ClientTextDto(codeUnits: promptSourceCodeUnits),
-                        promptMode: promptMode,
-                        images: images,
-                        turnId: queuedTurnID,
-                        visualizationContext: chip.map { VisualizationRefDto(id: $0.id, revision: $0.revision) }))
-                } catch {
-                    guard self.activeConversationTurnToken == token else { return }
-                    self.model.error = ConversationError(kind: .host, message: "\(error)")
-                }
+                self.queuedTurnInterests.removeValue(forKey: queuedTurnID)
+                self.retainOnlyCurrentAndQueuedRecoveryInterests()
+                guard self.sessionEpoch == queuedEpoch,
+                      queuedSessionID.isEmpty || self.model.activeSessionId == queuedSessionID else { return }
+                self.model.error = ConversationError(kind: .host, message: error.localizedDescription)
             }
             return token
         }
 
+        guard let turnId = allocateTurnID() else { return nil }
         model.isNew = false
         model.notice = nil
         let chip = exactSlashCommand == nil ? takeVisualizationChip() : nil
@@ -1503,8 +2385,6 @@ final class EngineConversationSource: ConversationSource {
         prompt.visualizationContext = chip
         appendMessage(prompt)
 
-        let turnId = nextTurnId
-        nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
         if exactSlashCommand == nil { pendingUserRowsByToken["client-turn:\(turnId)"] = prompt.id }
         if let exactSlashCommand {
             let token = SlashCommandMatcher.commandToken(in: trimmed) ?? ""
@@ -1540,14 +2420,25 @@ final class EngineConversationSource: ConversationSource {
             // Atomic creation may return before its first TurnStarted reaches
             // Swift. A side-scoped Cancel(nil) still stops that admitted work.
             guard currentTurnId != nil || sideID != nil else { return }
+            let capturedSideID = sideID
+            let capturedTurnID = currentTurnId
+            let submission = capturedTurnID.flatMap { turnSubmissions[$0] }
             model.isCancelling = true
             defer { model.isCancelling = false }
-            try await submitCommand(.cancel(turnId: currentTurnId))
+            if let submission {
+                await submission.task?.value
+                if let error = submission.failure { throw error }
+            }
+            guard sideID == capturedSideID else { throw CancellationError() }
+            try await submitCommand(.cancel(sessionId: nil, turnId: capturedTurnID))
             await listener?.waitUntilIdle()
             return
         }
         let operation: CancellationOperation
-        if let currentOperation = cancellationOperation {
+        if let currentOperation = cancellationOperation,
+           currentOperation.turnId == currentTurnId,
+           currentOperation.epoch == sessionEpoch,
+           currentOperation.sessionID == model.activeSessionId {
             operation = currentOperation
         } else {
             // A WaitingForUser recovery is inactive in the UI (`streaming`
@@ -1556,7 +2447,7 @@ final class EngineConversationSource: ConversationSource {
             // that exact correlated turn; unrelated idle sources remain a
             // no-op.
             guard let turnId = currentTurnId,
-                  model.streaming || unresolvedRecoveryTurnID == turnId
+                  model.streaming || model.slashCommandPending || unresolvedRecoveryTurnID == turnId
             else { return }
             operation = operationForCancelling(turnId: turnId)
         }
@@ -1565,24 +2456,30 @@ final class EngineConversationSource: ConversationSource {
         )
         model.isCancelling = true
         model.statusLine = String(localized: "chat_stopping")
-        do {
-            try await operation.task.value
-            // Do not treat a successful Cancel command as terminal. The
-            // host may return Ok for a stale/missing turn; only the
-            // listener's matching terminal recovery snapshot proves that
-            // this source may clear its durable checkpoint and gates.
-            await listener?.waitUntilIdle()
-            try await waitForCancellationAcknowledgement(turnID: operation.turnId)
-            finishCancellation(operation, error: nil)
-        } catch {
-            finishCancellation(operation, error: error)
-            throw error
-        }
+        try await awaitCancellation(operation)
     }
 
     func cancel() {
+        if !isSideChat {
+            guard let turnID = currentTurnId,
+                  model.streaming || model.slashCommandPending || unresolvedRecoveryTurnID == turnID else { return }
+            let operation = operationForCancelling(turnId: turnID)
+            model.isCancelling = true
+            model.statusLine = String(localized: "chat_stopping")
+            Task { [weak self] in
+                guard let self else { return }
+                try? await self.awaitCancellation(operation)
+            }
+            return
+        }
+        let sessionID = model.activeSessionId
+        let epoch = sessionEpoch
+        let turnID = currentTurnId
+        let sideID = sideID
         Task { [weak self] in
             guard let self else { return }
+            guard self.sessionEpoch == epoch, self.model.activeSessionId == sessionID,
+                  self.currentTurnId == turnID, self.sideID == sideID else { return }
             try? await self.cancelAndWait()
         }
     }
@@ -1624,6 +2521,12 @@ final class EngineConversationSource: ConversationSource {
         guard !isSideChat else { return }
         guard let token, activeConversationTurnToken == token else { return }
         guard model.streaming || pauseAcknowledgements[token] != nil else { return }
+        let sessionID = model.activeSessionId
+        let submission = turnSubmissions[token.clientTurnId].flatMap { $0.epoch == token.sessionEpoch ? $0 : nil }
+        guard !sessionID.isEmpty || submission != nil else {
+            throw NSError(domain: "ConversationRecovery", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_recovery_session_unknown")])
+        }
 
         let shouldSubmit = pauseAcknowledgements[token] == nil
         try await withCheckedThrowingContinuation { continuation in
@@ -1633,7 +2536,19 @@ final class EngineConversationSource: ConversationSource {
             Task { [weak self] in
                 guard let self else { return }
                 do {
+                    if let submission {
+                        await submission.task?.value
+                        if let error = submission.failure { throw error }
+                    }
+                    guard self.pauseAcknowledgements[token] != nil,
+                          self.activeConversationTurnToken == token else { return }
+                    let owner = submission?.owner ?? sessionID
+                    guard !owner.isEmpty else {
+                        throw NSError(domain: "ConversationRecovery", code: 2,
+                                      userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_recovery_session_unknown")])
+                    }
                     try await self.submitCommand(.pauseTurn(
+                        sessionId: owner,
                         turnId: token.clientTurnId,
                         reason: "background_time_expired"
                     ))
@@ -1691,18 +2606,27 @@ final class EngineConversationSource: ConversationSource {
         guard !isSideChat else { return }
         refreshBackgroundTasks()
         listSessionAgents()
+        retryPendingSlashEvidence()
+        queryQueuedStatuses(retry: true)
         // A warm source keeps the durable checkpoint and listener alive,
         // but the engine may have parked the turn when the background lease
         // expired. Reattach from the latest in-memory client cursor before
         // asking the engine to resume it. Cold sources enter this same path
         // from SessionResumed below.
-        guard let recoveryTurnID = needsDurableForegroundRecoveryTurnID,
-              unresolvedRecoveryTurnID == recoveryTurnID,
-              let record = durableTurns?.load(),
-              record.turnID == recoveryTurnID,
-              record.sessionID == model.activeSessionId
-        else { return }
-        reattachDurableTurnIfNeeded(sessionID: record.sessionID)
+        if let recoveryTurnID = needsDurableForegroundRecoveryTurnID,
+           unresolvedRecoveryTurnID == recoveryTurnID,
+           let record = durableTurns?.load(), record.turnID == recoveryTurnID,
+           record.sessionID == model.activeSessionId {
+            do {
+                let entries = try durableTurns?.pendingSubmissions() ?? []
+                if entries.contains(where: {
+                    $0.sessionID == record.sessionID && $0.turnID == record.turnID && submissionIsUncertain($0)
+                }) { probeUnknownSubmissionIfReady(retry: true) }
+                else { reattachDurableTurnIfNeeded(sessionID: record.sessionID) }
+            } catch { showSubmissionWarning() }
+            return
+        }
+        probeUnknownSubmissionIfReady(retry: true)
     }
 
     func testProviderConnection(
@@ -1879,6 +2803,25 @@ final class EngineConversationSource: ConversationSource {
         externalEventHandler = handler
     }
 
+    /// Revoke durable-event ownership when a source is actually replaced.
+    /// Workflow, task and permission events retain their separate lifecycle.
+    func retireRecoveryIngress() {
+        recoveryIngressActive = false
+        queuedStatusRequests.removeAll()
+        attemptedQueuedStatuses.removeAll()
+        projectedQueuedUserRows.removeAll()
+        durableRecoveryTask?.cancel()
+        durableRecoveryAttemptID = nil
+        cancelAttachAttempt()
+        recoveryBootstrap = nil
+        attachWireBatches.removeAll()
+        deferredQueuedTimeout?.cancel()
+        deferredQueuedTimeout = nil
+        deferredQueuedEvents.removeAll()
+        queuedTurnInterests.removeAll()
+        releaseRecoveryInterests()
+    }
+
     func setSettingsActive(_ active: Bool) {
         guard !isSideChat else { return }
         audioSourceActive = active
@@ -2012,6 +2955,24 @@ final class EngineConversationSource: ConversationSource {
 
     /// Build the engine handle once (lazily). Registers the listener so the
     /// adapter can stream events the moment the first turn runs.
+    private func bindInitialWorkspaceOwner(_ owner: String) {
+        guard !owner.isEmpty, pendingSessionTransition == nil, !model.sessionTransitionPending else { return }
+        if model.activeSessionId.isEmpty {
+            model.activeSessionId = owner
+            hasConfirmedSessionState = true
+        }
+        if model.activeSessionId == owner, durableTurns != nil {
+            if let currentTurnId { retainRecoveryInterest(sessionID: owner, turnID: currentTurnId) }
+            for (turnID, queued) in queuedTurnInterests where queued.sessionID.isEmpty || queued.sessionID == owner {
+                retainRecoveryInterest(sessionID: owner, turnID: turnID)
+            }
+        }
+        guard model.activeSessionId == owner, let currentTurnId,
+              !model.slashCommandPending, let durableTurns,
+              durableTurns.load() == nil else { return }
+        durableTurns.begin(sessionID: owner, turnID: currentTurnId)
+    }
+
     private func ensureHandle() async throws -> MobileEngineHandle {
         guard !isRemoteProjection else { throw RemoteFfiError.NotConnected }
         if let handle { return handle }
@@ -2029,7 +2990,7 @@ final class EngineConversationSource: ConversationSource {
                 routingJson: config.providerRoutingJson
             )
         }
-        let userDirectories = MobileUserStorage.directories()
+        let userDirectories = nativeUserDirectories
         let launchConfig = IosEngineLaunchConfigFfi(
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
             appAgentHost: false,
@@ -2123,6 +3084,7 @@ final class EngineConversationSource: ConversationSource {
                 let workspace = await builtHandle.workspaceState()
                 model.workspaceState = SessionWorkspaceState(sessionId: workspace.sessionId, cwd: workspace.cwd,
                     projectRoot: workspace.projectRoot, additionalDirectories: workspace.additionalDirectories, transcriptPath: workspace.transcriptPath)
+                bindInitialWorkspaceOwner(workspace.sessionId)
                 refreshAudioSessionContext()
                 VisualizationWebHost.shared.attach(builtHandle.visualizationHost(origin: VisualizationWebHost.origin))
                 self.listener = listener
@@ -2239,7 +3201,7 @@ final class EngineConversationSource: ConversationSource {
         if let index = model.backgroundTasks.firstIndex(where: { $0.id == id }) {
             if let taskType { model.backgroundTasks[index].taskType = taskType }
             let previousStatus = model.backgroundTasks[index].status
-            if !(model.backgroundTasks[index].status.isTerminal && !status.isTerminal) {
+            if previousStatus != .exitedUnknown && !(previousStatus.isTerminal && !status.isTerminal) {
                 model.backgroundTasks[index].status = status
             }
             if let description, !description.isEmpty {
@@ -2564,6 +3526,7 @@ final class EngineConversationSource: ConversationSource {
         case .completed: return .completed
         case .failed: return .failed
         case .cancelled: return .cancelled
+        case .exitedUnknown: return .exitedUnknown
         @unknown default: return nil
         }
     }
@@ -3147,18 +4110,18 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
-    private func waitForCancellationAcknowledgement(turnID: UInt64) async throws {
-        if terminalRecoveryStates[turnID].map(Self.isTerminalRecoveryState) == true {
+    private func waitForCancellationAcknowledgement(_ operation: CancellationOperation) async throws {
+        if operation.observedSlashResult || operation.terminalState.map(Self.isTerminalRecoveryState) == true {
             return
         }
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             try await Task.sleep(nanoseconds: 10_000_000)
-            if terminalRecoveryStates[turnID].map(Self.isTerminalRecoveryState) == true {
+            if operation.observedSlashResult || operation.terminalState.map(Self.isTerminalRecoveryState) == true {
                 return
             }
         }
-        throw CancellationAcknowledgementError.timedOut(turnID: turnID)
+        throw CancellationAcknowledgementError.timedOut(turnID: operation.turnId)
     }
 
     private static func reasoningID(_ selection: ReasoningSelectionDto) -> String {
@@ -3247,17 +4210,198 @@ final class EngineConversationSource: ConversationSource {
 
     /// Map one inbound `ClientEvent` onto the published state.
     func apply(_ event: ClientEvent) {
+        Self.pendingApplyEvents.append { [weak self] in self?.applyOne(event) }
+        guard !Self.applyingEvent else { return }
+        Self.applyingEvent = true
+        defer {
+            Self.pendingApplyEvents.removeAll(keepingCapacity: true)
+            Self.applyingEvent = false
+        }
+        var next = 0
+        while next < Self.pendingApplyEvents.count {
+            let queued = Self.pendingApplyEvents[next]
+            next += 1
+            queued()
+        }
+    }
+
+    private func recoverySnapshotIsAcceptable(_ snapshot: TurnRecoverySnapshotDto) -> Bool {
+        let queuedStart = currentTurnId == nil && snapshot.state == .running &&
+            matchesQueuedTurn(sessionID: snapshot.sessionId, turnID: snapshot.turnId)
+        guard snapshot.sessionId == model.activeSessionId,
+              snapshot.turnId == currentTurnId || snapshot.turnId == unresolvedRecoveryTurnID
+                || snapshot.turnId == replayingTurnID || queuedStart
+                || (Self.isTerminalRecoveryState(snapshot.state) && pendingTerminalRecovery == JournalIdentity(
+                    sessionID: snapshot.sessionId, turnID: snapshot.turnId, epoch: sessionEpoch
+                )) else { return false }
+        let key = recoveryIdentity(sessionID: snapshot.sessionId, turnID: snapshot.turnId)
+        guard let previous = Self.recoveryRevisions[key],
+              previous.owners.values.contains(where: { $0.source != nil }),
+              let revision = previous.revision else { return true }
+        guard snapshot.revision >= revision else { return false }
+        return snapshot.revision != revision || snapshot.state == previous.state
+    }
+
+    private func applyOne(_ event: ClientEvent) {
         guard !sideEnded else { return }
+        if !recoveryIngressActive {
+            switch event {
+            case .turnRecoveryState, .turnEventReplay, .turnEventLiveUnretained,
+                 .turnAttachStarted, .turnAttachFinished, .queuedTurnStatus, .slashCommandResult: return
+            default: break
+            }
+        }
+        if case let .queuedTurnStatus(sessionID, turnID, requestID, status) = event {
+            consumeQueuedStatus(sessionID: sessionID, turnID: turnID, requestID: requestID, status: status)
+            return
+        }
+        if case let .modSessionEvent(sessionID, _, _) = event {
+            guard sessionID == model.activeSessionId, !model.sessionTransitionPending else { return }
+        }
+        if deferQueuedEventIfNeeded(event) { return }
+        defer {
+            drainDeferredQueuedEventsIfReady()
+            if currentTurnId == nil, !uncertainSubmissions.isEmpty {
+                Task { @MainActor [weak self] in self?.probeUnknownSubmissionIfReady() }
+            }
+        }
+        switch event {
+        case let .turnAttachStarted(requestID, snapshot):
+            let wire = AttachWireIdentity(sessionID: snapshot.sessionId, turnID: snapshot.turnId)
+            guard !attachWireTrackingExhausted else { return }
+            if var existing = attachWireBatches[wire] {
+                // Two starts without an intervening finish violate the gate.
+                // Do not guess which batch subsequent untagged replay belongs to.
+                existing.acceptsReplay = false
+                attachWireBatches[wire] = existing
+                showRecoveryWarning()
+                return
+            }
+            guard attachWireBatches.count < 512 else {
+                attachWireTrackingExhausted = true
+                showRecoveryWarning()
+                return
+            }
+            let matchesAttempt = attachAttempt.map {
+                !$0.started && !$0.finished && $0.requestID == requestID
+                    && $0.sessionID == snapshot.sessionId && $0.turnID == snapshot.turnId
+            } ?? false
+            attachWireBatches[wire] = AttachWireBatch(requestID: requestID, acceptsReplay: matchesAttempt)
+            guard matchesAttempt, var attempt = attachAttempt else { return }
+            guard recoverySnapshotIsAcceptable(snapshot) else {
+                // Another owner has already observed a newer or conflicting
+                // revision. Do not project replay from this stale snapshot.
+                failAttachAttempt(requestID: requestID)
+                showRecoveryWarning()
+                return
+            }
+            attempt.started = true
+            attachAttempt = attempt
+            let bootstrap = recoveryBootstrap
+            recoveryBootstrap = nil
+            // Keep existing recovery-state consumers on the same serial pump.
+            applyOne(.turnRecoveryState(snapshot: snapshot))
+            for state in bootstrap?.bufferedStates ?? [] { applyOne(.turnRecoveryState(snapshot: state)) }
+            if bootstrap?.overflowed == true {
+                replayCursorFailed = true
+                pendingJournalEvents.removeAll()
+                showRecoveryWarning()
+            }
+            if snapshot.reason == "replay_cursor_ahead" || snapshot.reason == "replay_history_truncated" {
+                replayCursorFailed = true
+                pendingJournalEvents.removeAll()
+                showRecoveryWarning()
+            } else if snapshot.projectionUncertain {
+                showRecoveryWarning(String(localized: "chat_recovery_projection_uncertain"))
+            }
+            return
+        case let .turnAttachFinished(requestID, sessionID, turnID):
+            let wire = AttachWireIdentity(sessionID: sessionID, turnID: turnID)
+            guard let batch = attachWireBatches[wire], batch.requestID == requestID else { return }
+            attachWireBatches.removeValue(forKey: wire)
+            guard batch.acceptsReplay, var attempt = attachAttempt, attempt.started, !attempt.finished,
+                  attempt.requestID == requestID, attempt.sessionID == sessionID,
+                  attempt.turnID == turnID else { return }
+            attempt.finished = true
+            let continuation = attempt.continuation
+            attempt.continuation = nil
+            attachAttempt = attempt
+            attachTimeout?.cancel()
+            attachTimeout = nil
+            continuation?.resume()
+            return
+        case let .turnEventReplay(sessionID, turnID, _, _):
+            guard !attachWireTrackingExhausted else { return }
+            if let batch = attachWireBatches[AttachWireIdentity(sessionID: sessionID, turnID: turnID)] {
+                guard batch.acceptsReplay, attachAttempt?.requestID == batch.requestID else { return }
+            }
+            if case .attaching = durableRecoveryPhase,
+               let attempt = attachAttempt, !attempt.started { return }
+            applyJournalEnvelope(event)
+            return
+        case .turnEventLiveUnretained:
+            applyJournalEnvelope(event)
+            return
+        default:
+            break
+        }
+        if case let .turnRecoveryState(snapshot) = event {
+            if var bootstrap = recoveryBootstrap,
+               bootstrap.sessionID == snapshot.sessionId, bootstrap.turnID == snapshot.turnId {
+                if !bootstrap.overflowed, bootstrap.bufferedStates.count < 512 {
+                    bootstrap.bufferedStates.append(snapshot)
+                    recoveryBootstrap = bootstrap
+                } else if !bootstrap.overflowed {
+                    // Without the seed snapshot no buffered state can be
+                    // trusted; fail closed instead of dropping an arbitrary one.
+                    bootstrap.overflowed = true
+                    recoveryBootstrap = bootstrap
+                    cancelAttachAttempt()
+                    showRecoveryWarning()
+                }
+                return
+            }
+            // Check correlation and revision before external consumers, pause
+            // continuations, replay projection, or checkpoint mutations.
+            guard recoverySnapshotIsAcceptable(snapshot) else { return }
+            let queuedStart = currentTurnId == nil && snapshot.state == .running &&
+                matchesQueuedTurn(sessionID: snapshot.sessionId, turnID: snapshot.turnId)
+            retainRecoveryInterest(sessionID: snapshot.sessionId, turnID: snapshot.turnId)
+            let key = recoveryIdentity(sessionID: snapshot.sessionId, turnID: snapshot.turnId)
+            Self.recoveryRevisions[key]?.revision = snapshot.revision
+            Self.recoveryRevisions[key]?.state = snapshot.state
+            if let submission = turnSubmissions[snapshot.turnId], submission.owner == snapshot.sessionId {
+                submission.observedServerEvidence = true
+            }
+            if probingUnknownSubmission == SubmissionIdentity(sessionID: snapshot.sessionId, turnID: snapshot.turnId) {
+                latestProbeSnapshot = snapshot
+            }
+            if queuedStart && !adoptQueuedTurn(sessionID: snapshot.sessionId, turnID: snapshot.turnId) { return }
+            if case let .attaching(turnID) = durableRecoveryPhase,
+               turnID == snapshot.turnId, durableTurns?.load()?.lastSequence == 0,
+               snapshot.projectionUncertain {
+                showRecoveryWarning(String(localized: "chat_recovery_projection_uncertain"))
+            }
+            // Equal versions can be separate Attach/Resume acknowledgements
+            // and may have a different replay-window reason.
+        }
         if case let .sideChatEnded(sideID) = event {
             sideChats.removeEnded(sideID)
             return
         }
         if isSideChat, currentTurnId == nil, case let .turnStarted(reportedTurnID) = event {
-            let turnID = reportedTurnID ?? nextTurnId
+            let turnID: UInt64
+            if let reportedTurnID {
+                turnID = reportedTurnID
+                if reportedTurnID == UInt64.max { turnIDExhausted = true }
+                else if !turnIDExhausted { nextTurnId = max(nextTurnId, reportedTurnID + 1) }
+            } else {
+                guard let allocated = allocateTurnID() else { return }
+                turnID = allocated
+            }
             currentTurnId = turnID
             activeTurnEpoch = sessionEpoch
             model.activeTurnToken = ConversationTurnToken(clientTurnId: turnID, sessionEpoch: sessionEpoch)
-            nextTurnId = turnID == UInt64.max ? 1 : turnID + 1
         }
         if Self.settingsOwner === self {
             DesktopSettingsRepository.shared.consume(event)
@@ -3296,8 +4440,29 @@ final class EngineConversationSource: ConversationSource {
         case let .slashCommandResult(turnId, display, isError):
             let displayText = display.displayText
             guard let token = activeConversationTurnToken,
-                  turnId == nil || turnId == token.clientTurnId
+                  turnId == token.clientTurnId
             else { return }
+            let sessionID = model.activeSessionId
+            let evidenceSafe = isSideChat || (!sessionID.isEmpty && saveTerminalEvidence(
+                sessionID: sessionID, turnID: token.clientTurnId, projectionUncertain: true, liveOnlyOutput: true
+            ))
+            if let submission = turnSubmissions[token.clientTurnId], submission.owner == model.activeSessionId {
+                submission.observedServerEvidence = true
+                submission.observedSlashResult = true
+            }
+            if cancellationMatches(sessionID: model.activeSessionId, turnID: token.clientTurnId) {
+                cancellationOperation?.observedSlashResult = true
+            }
+            if !isSideChat, !sessionID.isEmpty, evidenceSafe {
+                clearSubmissionAfterTerminal(sessionID: model.activeSessionId, turnID: token.clientTurnId)
+                durableTurns?.clear(turnID: token.clientTurnId, sessionID: model.activeSessionId)
+                if unresolvedRecoveryTurnID == token.clientTurnId {
+                    unresolvedRecoveryTurnID = nil
+                    needsDurableForegroundRecoveryTurnID = nil
+                    model.hasInactiveDurableRecovery = false
+                    model.hasUnresolvedTurnRecovery = hasUncertainSubmissions()
+                }
+            }
             let raw = pendingSlashRaw ?? "/"
             if isError { restoreFailedSideSubmission() }
             else { pendingSideInput = nil }
@@ -3347,12 +4512,21 @@ final class EngineConversationSource: ConversationSource {
             }
             publishActiveTurnCompletion(isError ? .failed : .completed)
             clearTurnPointers(keepEpoch: false)
+            if !evidenceSafe, !isSideChat, !sessionID.isEmpty {
+                let identity = SubmissionIdentity(sessionID: sessionID, turnID: token.clientTurnId)
+                pendingSlashEvidence.insert(identity)
+                pendingTerminalRecovery = JournalIdentity(sessionID: sessionID, turnID: token.clientTurnId, epoch: sessionEpoch)
+                unresolvedRecoveryTurnID = token.clientTurnId
+                needsDurableForegroundRecoveryTurnID = token.clientTurnId
+                model.hasUnresolvedTurnRecovery = true
+                model.hasInactiveDurableRecovery = true
+            }
             requestSessionCatalogRefreshAfterSettledTurn()
 
         case let .textDelta(text):
             guard acceptTurnEvent(event) else { return }
             let displayText = text.displayText
-            if let messageID = appendDelta(displayText) {
+            if let messageID = appendDelta(displayText, allowInactiveRecovery: projectingRetainedTurnEvent) {
                 appendTextBoundaryActivity(messageID: messageID)
             }
             let activity = displayText
@@ -3399,6 +4573,9 @@ final class EngineConversationSource: ConversationSource {
             if let companion { appendMessage(Message(role: .ai, text: companion)) }
 
         case let .systemNotice(message, isError):
+            // A raw connection-scoped notice has no turn owner. Global
+            // observers may consume it, but it cannot be attached to this run.
+            guard projectingJournalEvent || isSideChat || isRemoteProjection else { return }
             guard acceptTurnEvent(event) else { return }
             let displayMessage = message.displayText
             let notice = ConversationExecutionNotice(
@@ -3409,6 +4586,45 @@ final class EngineConversationSource: ConversationSource {
             updateActiveRun { $0.notices.append(notice) }
             appendNoticeActivity(id: notice.id)
             model.statusLine = displayMessage
+
+        case let .modSessionEvent(_, _, payload):
+            // Detached Mod output belongs to the session, not its current run.
+            switch payload {
+            case let .notice(message, isError):
+                model.items.append(.notice(ConversationExecutionNotice(
+                    id: "mod-\(UUID().uuidString)", kind: isError ? .error : .info, text: message.displayText
+                )))
+            case let .log(plugin, text), let .toast(plugin, text, _), let .notify(plugin, text):
+                model.items.append(.notice(ConversationExecutionNotice(
+                    id: "mod-\(UUID().uuidString)", kind: .info, text: "\(plugin): \(text.displayText)"
+                )))
+            case let .status(_, text):
+                model.statusLine = text?.displayText
+            @unknown default:
+                break
+            }
+
+        case let .uiLog(plugin, text), let .uiToast(plugin, text, _):
+            guard projectingJournalEvent else { return }
+            model.items.append(.notice(ConversationExecutionNotice(
+                id: "mod-\(UUID().uuidString)", kind: .info,
+                text: "\(plugin): \(text.displayText)"
+            )))
+
+        case let .uiStatus(_, text):
+            guard projectingJournalEvent else { return }
+            model.statusLine = text?.displayText
+
+        case let .attachment(attachment):
+            guard projectingJournalEvent else { return }
+            switch attachment {
+            case let .nestedMemory(displayPath):
+                model.items.append(.notice(ConversationExecutionNotice(
+                    id: "memory-\(UUID().uuidString)", kind: .info, text: displayPath
+                )))
+            @unknown default:
+                reportRecoveryReplayGap()
+            }
 
         case let .askUserQuestion(request):
             // Passes the turn gate via the allowlist in `acceptTurnEvent`:
@@ -3499,6 +4715,11 @@ final class EngineConversationSource: ConversationSource {
                       !model.sessionTransitionPending
                 else { return }
             }
+            // The registry does not reopen an unknown-exit identity. In
+            // particular, an older completion push must not report success.
+            if model.backgroundTasks.contains(where: { $0.id == taskId && $0.status == .exitedUnknown }) {
+                break
+            }
             if let mapped = Self.backgroundTaskStatus(status) {
                 let known = model.backgroundTasks.contains { $0.id == taskId }
                 let becameFailed = mapped == .failed
@@ -3534,6 +4755,7 @@ final class EngineConversationSource: ConversationSource {
                 text = reason.map { String(localized: "chat_task_failed_reason \(label) \($0)") }
                     ?? String(localized: "chat_task_failed \(label)")
             case .cancelled: text = String(localized: "chat_task_cancelled \(label)")
+            case .exitedUnknown: text = String(localized: "chat_task_exited_unknown \(label)")
             case .pending, .running, .paused: text = nil
             @unknown default: text = nil
             }
@@ -3893,19 +5115,34 @@ final class EngineConversationSource: ConversationSource {
             )
             guard accepted else { return }
             pendingSideInput = nil
-            let awaitingCancellationTerminal = cancellationOperation.map {
-                $0.turnId == currentTurnId
+            let awaitingCancellationTerminal = currentTurnId.map {
+                cancellationMatches(sessionID: model.activeSessionId, turnID: $0)
             } ?? false
             if let currentTurnId {
                 if !awaitingCancellationTerminal {
-                    durableTurns?.clear(turnID: currentTurnId)
-                    if unresolvedRecoveryTurnID == currentTurnId {
+                    let awaitingDurableTerminal = projectingJournalEvent && pendingTerminalRecovery != nil && durableTurns != nil
+                    if replayCursorFailed {
+                        _ = saveTerminalEvidence(sessionID: model.activeSessionId, turnID: currentTurnId,
+                                                 projectionUncertain: true, liveOnlyOutput: false)
+                    }
+                    // The sequenced terminal payload can precede the durable
+                    // lifecycle snapshot. Keep its checkpoint across a crash
+                    // until the matching snapshot is actually consumed.
+                    if !awaitingDurableTerminal {
+                        durableTurns?.clear(turnID: currentTurnId, sessionID: model.activeSessionId)
+                    }
+                    if awaitingDurableTerminal {
+                        unresolvedRecoveryTurnID = currentTurnId
+                        needsDurableForegroundRecoveryTurnID = currentTurnId
+                        model.hasUnresolvedTurnRecovery = true
+                        model.hasInactiveDurableRecovery = true
+                    } else if unresolvedRecoveryTurnID == currentTurnId {
                         unresolvedRecoveryTurnID = nil
                         needsDurableForegroundRecoveryTurnID = nil
                         model.hasUnresolvedTurnRecovery = false
                     }
                     reattachedTurnIDs.remove(currentTurnId)
-                    model.hasInactiveDurableRecovery = false
+                    if !awaitingDurableTerminal { model.hasInactiveDurableRecovery = false }
                 }
             }
             // PR-4 item 3: don't treat every outcome as a clean end. A normal
@@ -3918,7 +5155,13 @@ final class EngineConversationSource: ConversationSource {
                 // correlated run for rendering, but retain its durable
                 // owner, pointers, and cancellation gate until the FIFO
                 // observes TurnRecoveryState.cancelled.
-                finishActiveRun(.cancelled)
+                cancellationOperation?.observedTurnOutcome = outcome
+                switch outcome {
+                case .endTurn: finishActiveRun(.completed)
+                case .maxTurns: finishActiveRun(.maxTurns)
+                case .cancelled: finishActiveRun(.cancelled)
+                @unknown default: break
+                }
                 model.updateMainAgent(status: "cancelling", latestActivity: String(localized: "chat_stopping"))
                 return
             }
@@ -3955,10 +5198,46 @@ final class EngineConversationSource: ConversationSource {
             let isCorrelated = snapshot.turnId == currentTurnId
                 || snapshot.turnId == unresolvedRecoveryTurnID
                 || snapshot.turnId == replayingTurnID
+                || (Self.isTerminalRecoveryState(snapshot.state) && pendingTerminalRecovery == JournalIdentity(
+                    sessionID: snapshot.sessionId, turnID: snapshot.turnId, epoch: sessionEpoch
+                ))
+            let attachIsInProgress: Bool
+            if case let .attaching(turnID) = durableRecoveryPhase {
+                attachIsInProgress = turnID == snapshot.turnId
+            } else { attachIsInProgress = false }
+            let deferAttachTerminal = isCorrelated && attachIsInProgress &&
+                Self.isTerminalRecoveryState(snapshot.state) && !cancellationMatches(sessionID: snapshot.sessionId, turnID: snapshot.turnId)
             if isCorrelated {
                 replayProjectionState = snapshot.state
-                if Self.isTerminalRecoveryState(snapshot.state) {
+                if Self.isTerminalRecoveryState(snapshot.state) && !deferAttachTerminal {
                     model.hasUnresolvedTurnRecovery = false
+                }
+            }
+            // Attach's terminal snapshot precedes its replay batch. Keep the
+            // identity until the following Resume acknowledgement settles it.
+            if deferAttachTerminal { return }
+            var terminalEvidenceSafe = true
+            defer {
+                // If publishing the uncertainty evidence failed, UI state
+                // must not make the still-durable checkpoint discardable.
+                if isCorrelated && Self.isTerminalRecoveryState(snapshot.state) && !terminalEvidenceSafe {
+                    pendingTerminalRecovery = JournalIdentity(sessionID: snapshot.sessionId, turnID: snapshot.turnId, epoch: sessionEpoch)
+                    unresolvedRecoveryTurnID = snapshot.turnId
+                    needsDurableForegroundRecoveryTurnID = snapshot.turnId
+                    model.hasUnresolvedTurnRecovery = true
+                    model.hasInactiveDurableRecovery = true
+                }
+            }
+            if isCorrelated && Self.isTerminalRecoveryState(snapshot.state) {
+                let identity = SubmissionIdentity(sessionID: snapshot.sessionId, turnID: snapshot.turnId)
+                if snapshot.projectionUncertain || replayCursorFailed || terminalEvidenceFailures.contains(identity) {
+                    terminalEvidenceSafe = saveTerminalEvidence(sessionID: snapshot.sessionId, turnID: snapshot.turnId,
+                        projectionUncertain: snapshot.projectionUncertain || replayCursorFailed,
+                        liveOnlyOutput: terminalEvidenceFailures.contains(identity))
+                }
+                if terminalEvidenceSafe {
+                    pendingTerminalRecovery = nil
+                    clearSubmissionAfterTerminal(sessionID: snapshot.sessionId, turnID: snapshot.turnId)
                 }
             }
             switch snapshot.state {
@@ -3991,10 +5270,17 @@ final class EngineConversationSource: ConversationSource {
                     durableRecoveryPhase = nil
                 }
                 if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
-                    unresolvedRecoveryTurnID = nil
-                    needsDurableForegroundRecoveryTurnID = nil
-                    model.hasInactiveDurableRecovery = false
-                    model.hasUnresolvedTurnRecovery = false
+                    if isUncertainSubmission(sessionID: snapshot.sessionId, turnID: snapshot.turnId) {
+                        unresolvedRecoveryTurnID = snapshot.turnId
+                        needsDurableForegroundRecoveryTurnID = snapshot.turnId
+                        model.hasInactiveDurableRecovery = false
+                        model.hasUnresolvedTurnRecovery = true
+                    } else {
+                        unresolvedRecoveryTurnID = nil
+                        needsDurableForegroundRecoveryTurnID = nil
+                        model.hasInactiveDurableRecovery = false
+                        model.hasUnresolvedTurnRecovery = false
+                    }
                 }
                 executorOwnedTurnID = snapshot.turnId
                 currentTurnId = snapshot.turnId
@@ -4063,8 +5349,17 @@ final class EngineConversationSource: ConversationSource {
                 }
             case .completed:
                 guard isCorrelated else { return }
-                if cancellationOperation?.turnId == snapshot.turnId {
-                    terminalRecoveryStates[snapshot.turnId] = snapshot.state
+                if cancellationMatches(sessionID: snapshot.sessionId, turnID: snapshot.turnId), let operation = cancellationOperation {
+                    operation.terminalState = snapshot.state
+                    if operation.observedTurnOutcome == .maxTurns {
+                        model.notice = .maxTurns
+                        finishActiveRun(.maxTurns)
+                        publishActiveTurnCompletion(.maxTurns)
+                    } else {
+                        model.notice = nil
+                        finishActiveRun(.completed)
+                        publishActiveTurnCompletion(.completed)
+                    }
                 }
                 if snapshot.turnId == unresolvedRecoveryTurnID
                     || snapshot.turnId == currentTurnId
@@ -4085,15 +5380,25 @@ final class EngineConversationSource: ConversationSource {
                     model.hasUnresolvedTurnRecovery = false
                 }
                 model.streaming = false
-                durableTurns?.clear(turnID: snapshot.turnId)
+                if terminalEvidenceSafe { durableTurns?.clear(turnID: snapshot.turnId, sessionID: snapshot.sessionId) }
                 reattachedTurnIDs.remove(snapshot.turnId)
                 if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
                     clearTurnPointers(keepEpoch: false)
                 }
             case .failed:
                 guard isCorrelated else { return }
-                if cancellationOperation?.turnId == snapshot.turnId {
-                    terminalRecoveryStates[snapshot.turnId] = snapshot.state
+                let reachedTurnLimit = snapshot.reason == "max_turns"
+                if cancellationMatches(sessionID: snapshot.sessionId, turnID: snapshot.turnId), let operation = cancellationOperation {
+                    operation.terminalState = snapshot.state
+                    if !reachedTurnLimit {
+                        finishActiveRun(.failed)
+                        publishActiveTurnCompletion(.failed)
+                    }
+                }
+                if reachedTurnLimit {
+                    model.notice = .maxTurns
+                    if activeRunItemIndex != nil { finishActiveRun(.maxTurns) }
+                    publishActiveTurnCompletion(.maxTurns)
                 }
                 if snapshot.turnId == unresolvedRecoveryTurnID
                     || snapshot.turnId == currentTurnId
@@ -4114,19 +5419,28 @@ final class EngineConversationSource: ConversationSource {
                     model.hasUnresolvedTurnRecovery = false
                 }
                 model.streaming = false
-                durableTurns?.clear(turnID: snapshot.turnId)
+                if terminalEvidenceSafe { durableTurns?.clear(turnID: snapshot.turnId, sessionID: snapshot.sessionId) }
                 reattachedTurnIDs.remove(snapshot.turnId)
-                model.error = ConversationError(
-                    kind: .host,
-                    message: snapshot.reason ?? String(localized: "chat_background_failed_text")
-                )
+                if !reachedTurnLimit {
+                    model.error = ConversationError(
+                        kind: .host,
+                        message: snapshot.reason ?? String(localized: "chat_background_failed_text")
+                    )
+                }
                 if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
                     clearTurnPointers(keepEpoch: false)
                 }
             case .cancelled:
                 guard isCorrelated else { return }
-                if cancellationOperation?.turnId == snapshot.turnId {
-                    terminalRecoveryStates[snapshot.turnId] = snapshot.state
+                if cancellationMatches(sessionID: snapshot.sessionId, turnID: snapshot.turnId), let operation = cancellationOperation {
+                    operation.terminalState = snapshot.state
+                    // The durable terminal is published before a Block tool
+                    // finishes unwinding. Keep this owner until Cancel returns
+                    // and its listener queue is drained so the tool result can
+                    // update the original run.
+                    model.notice = .cancelled
+                    model.streaming = false
+                    return
                 }
                 if snapshot.turnId == unresolvedRecoveryTurnID
                     || snapshot.turnId == currentTurnId
@@ -4152,7 +5466,7 @@ final class EngineConversationSource: ConversationSource {
                     finishActiveRun(.cancelled)
                     publishActiveTurnCompletion(.cancelled)
                 }
-                durableTurns?.clear(turnID: snapshot.turnId)
+                if terminalEvidenceSafe { durableTurns?.clear(turnID: snapshot.turnId, sessionID: snapshot.sessionId) }
                 reattachedTurnIDs.remove(snapshot.turnId)
                 if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
                     clearTurnPointers(keepEpoch: false)
@@ -4160,19 +5474,6 @@ final class EngineConversationSource: ConversationSource {
             @unknown default:
                 break
             }
-
-        case let .turnEventReplay(sessionId, turnId, sequence, eventJson):
-            guard sessionId == model.activeSessionId else { return }
-            // SessionResumed carries the authoritative terminal transcript.
-            // Attach still replays from cursor zero after a cold launch, but
-            // terminal envelopes must not project that same assistant/tool
-            // content a second time. Nonterminal recovery keeps the retained
-            // suffix so partial work remains visible.
-            if replayingTurnID == turnId,
-               replayProjectionState.map({ !Self.isTerminalRecoveryState($0) }) ?? true {
-                applyRetainedTurnEvent(eventJson, turnID: turnId)
-            }
-            durableTurns?.updateSequence(turnID: turnId, sequence: sequence)
 
         case let .error(kind, message):
             let displayMessage = message.displayText
@@ -4367,6 +5668,7 @@ final class EngineConversationSource: ConversationSource {
                 resetTranscriptForSessionSwitch(isNew: true)
             }
             model.activeSessionId = sessionId
+            bindInitialWorkspaceOwner(sessionId)
             hasConfirmedSessionState = true
             setPendingSessionTransition(nil)
             refreshAudioSessionContext()
@@ -4392,11 +5694,13 @@ final class EngineConversationSource: ConversationSource {
             // session-state sibling of `SessionList` / `SessionStarted`.
             guard pendingSessionTransition == .resume(sessionId) else { return }
             invalidateTurnContext()
+            restoredTranscriptIsAuthoritative = !messages.isEmpty
             replayProjectionState = nil
             model.clearAgentState()
             model.activeSessionId = sessionId
             hasConfirmedSessionState = true
             setPendingSessionTransition(nil)
+            restoreAdmittedQueuedInterests(sessionID: sessionId)
             refreshAudioSessionContext()
             // BUG FIX: a restored message is NOT one render row. In the
             // Anthropic protocol a `tool_result` block lives in the USER
@@ -4414,6 +5718,7 @@ final class EngineConversationSource: ConversationSource {
             model.messages = restored.messages
             model.items = restored.items
             model.messageDetails = restored.details
+            indexProjectedQueuedUserRows(messages, restored: restored)
             model.transcriptUUIDToolIDs = restored.transcriptUUIDToolIDs
             model.restoreTranscriptDisclosures()
             model.backgroundTasks = []
@@ -4424,6 +5729,7 @@ final class EngineConversationSource: ConversationSource {
             model.turnCompletion = nil
             model.statusLine = nil
             model.notice = nil
+            showPersistedTerminalEvidence(sessionID: sessionId)
             // A migration-safe empty resume may have just created its JSONL
             // anchor. Refresh so the full catalog and persisted project index
             // immediately include that preserved UUID.
@@ -4431,6 +5737,8 @@ final class EngineConversationSource: ConversationSource {
             refreshSessionAgentsAfterTransition()
             refreshBackgroundTasks()
             reattachDurableTurnIfNeeded(sessionID: sessionId)
+            probeUnknownSubmissionIfReady()
+            queryQueuedStatuses()
 
         case .sessionEnded:
             model.promptSuggestion = nil
@@ -4582,6 +5890,8 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func beginTurnForTesting(turnId: UInt64 = 1, sessionId: String = "test-session") {
+        releaseRecoveryInterests()
+        retainRecoveryInterest(sessionID: sessionId, turnID: turnId)
         model.activeSessionId = sessionId
         model.streaming = true
         model.turnCompletion = nil
@@ -4593,19 +5903,67 @@ final class EngineConversationSource: ConversationSource {
         currentTurnId = turnId
         executorOwnedTurnID = turnId
         activeTurnEpoch = sessionEpoch
-        nextTurnId = turnId == UInt64.max ? 1 : turnId + 1
+        turnIDExhausted = turnId == UInt64.max
+        if !turnIDExhausted { nextTurnId = turnId + 1 }
     }
 
     func beginDurableTurnForTesting(turnId: UInt64, sessionId: String) {
         durableTurns?.begin(sessionID: sessionId, turnID: turnId)
     }
 
+    func setSideIDForTesting(_ id: String) {
+        precondition(isSideChat)
+        sideID = id
+    }
+
     func recordDurableSequenceForTesting(turnId: UInt64, sequence: UInt64) {
-        durableTurns?.updateSequence(turnID: turnId, sequence: sequence)
+        guard let sessionID = durableTurns?.load()?.sessionID else { return }
+        guard sequence > 0 else { return }
+        for confirmed in 1...sequence {
+            durableTurns?.updateSequence(sessionID: sessionID, turnID: turnId, sequence: confirmed)
+        }
     }
 
     func durableAttachCursorForTesting() -> UInt64? {
         durableTurns?.load()?.lastSequence
+    }
+
+    func pendingSubmissionsForTesting() throws -> [DurableSubmissionRecord] {
+        try durableTurns?.pendingSubmissions() ?? []
+    }
+
+    func failNextSubmissionSyncForTesting() {
+        durableTurns?.failNextSubmissionSyncForTesting()
+    }
+
+    func setFailMainCheckpointSyncForTesting(_ fail: Bool) {
+        durableTurns?.setFailMainCheckpointSyncForTesting(fail)
+    }
+
+    func terminalEvidenceForTesting(sessionID: String) throws -> [TerminalProjectionEvidence] {
+        try durableTurns?.terminalEvidence(sessionID: sessionID) ?? []
+    }
+
+    func failNextTerminalEvidenceSyncForTesting() {
+        durableTurns?.failNextTerminalEvidenceSyncForTesting()
+    }
+
+    func setNextTurnIDForTesting(_ turnID: UInt64) {
+        nextTurnId = turnID
+        turnIDExhausted = false
+    }
+
+    func beginSessionTransitionForTesting() { _ = beginSessionTransition(.resume("test-transition")) }
+    func failSessionTransitionForTesting() { setPendingSessionTransition(nil) }
+
+    func recoveryWatermarkForTesting(sessionID: String, turnID: UInt64) -> (UInt64?, Int)? {
+        guard let entry = Self.recoveryRevisions[recoveryIdentity(sessionID: sessionID, turnID: turnID)] else { return nil }
+        return (entry.revision, entry.owners.values.filter { $0.source != nil }.count)
+    }
+
+    func expireAttachAttemptForTesting() {
+        guard let requestID = attachAttempt?.requestID else { return }
+        failAttachAttempt(requestID: requestID)
     }
 
     func cancelForTesting() {
@@ -4616,6 +5974,26 @@ final class EngineConversationSource: ConversationSource {
 
     func setCommandSubmitterForTesting(_ submitter: ((ClientCommand) async throws -> Void)?) {
         testCommandSubmitter = submitter
+    }
+
+    func checkCommandSubmissionAfterAwaitForTesting() throws {
+        try checkCommandSubmissionAfterAwait()
+    }
+
+    func setWorkspaceOwnerResolverForTesting(_ resolver: (() async throws -> String)?) {
+        testWorkspaceOwnerResolver = resolver
+    }
+
+    private func maySubmitPrompt(owner: String, turnID: UInt64?) -> Bool {
+        guard model.activeSessionId == owner else { return false }
+        if turnID.map({ matchesQueuedTurn(sessionID: owner, turnID: $0) }) == true {
+            return durableTurns?.load() == nil || durableTurns?.load()?.turnID == currentTurnId
+        }
+        return durableTurns == nil || durableTurns?.load().map({ $0.sessionID == owner && $0.turnID == turnID }) == true
+    }
+
+    func maySubmitPromptForTesting(owner: String, turnID: UInt64) -> Bool {
+        maySubmitPrompt(owner: owner, turnID: turnID)
     }
 
     func setBypassPermissionsConfirmerForTesting(
@@ -4636,8 +6014,8 @@ final class EngineConversationSource: ConversationSource {
     /// PR-4 item 1 guard: only append when a turn is actually in flight. After
     /// a cancel/turn-end we drop `streaming`/`streamingIndex`, so a late delta
     /// arriving from the engine must NOT resurrect or corrupt a message.
-    private func appendDelta(_ delta: String) -> UUID? {
-        guard model.streaming else { return nil }
+    private func appendDelta(_ delta: String, allowInactiveRecovery: Bool = false) -> UUID? {
+        guard model.streaming || allowInactiveRecovery else { return nil }
         if let i = streamingIndex,
            model.messages.indices.contains(i),
            activeRunEndsWithBoundary(for: model.messages[i].id) {
@@ -5568,9 +6946,40 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
-    private func fail(_ kind: ConversationError.Kind, _ message: String) {
+    private func fail(_ kind: ConversationError.Kind, _ message: String, provenNotAdmitted: Bool = false) {
         restoreFailedSideSubmission()
-        if let cancellationOperation,
+        if !provenNotAdmitted, let currentTurnId, let durableTurns,
+           (try? durableTurns.pendingSubmissions().contains {
+               $0.sessionID == model.activeSessionId && $0.turnID == currentTurnId
+           }) != false {
+            // A generic error or a live error event is not proof that the
+            // host never admitted this submission. Wait for a terminal state.
+            unresolvedRecoveryTurnID = currentTurnId
+            needsDurableForegroundRecoveryTurnID = currentTurnId
+            model.hasUnresolvedTurnRecovery = true
+            model.hasInactiveDurableRecovery = true
+            model.streaming = false
+            model.slashCommandPending = false
+            model.error = ConversationError(kind: kind, message: message)
+            return
+        }
+        if !provenNotAdmitted, projectingJournalEvent, let pending = pendingTerminalRecovery,
+           pending.sessionID == model.activeSessionId, pending.epoch == sessionEpoch {
+            if replayCursorFailed {
+                _ = saveTerminalEvidence(sessionID: pending.sessionID, turnID: pending.turnID,
+                                         projectionUncertain: true, liveOnlyOutput: false)
+            }
+            unresolvedRecoveryTurnID = pending.turnID
+            needsDurableForegroundRecoveryTurnID = pending.turnID
+            model.hasUnresolvedTurnRecovery = true
+            model.hasInactiveDurableRecovery = true
+            model.error = ConversationError(kind: kind, message: message)
+            model.streaming = false
+            publishActiveTurnCompletion(.failed)
+            clearTurnPointers(keepEpoch: false)
+            return
+        }
+        if !provenNotAdmitted, let cancellationOperation,
            cancellationOperation.turnId == currentTurnId {
             // An engine error racing Cancel is not terminal ownership
             // proof. Keep the durable record and correlator so the caller
@@ -5585,7 +6994,7 @@ final class EngineConversationSource: ConversationSource {
         }
         let settledTurn = currentTurnId != nil
         if let currentTurnId {
-            durableTurns?.clear(turnID: currentTurnId)
+            durableTurns?.clear(turnID: currentTurnId, sessionID: model.activeSessionId)
             if unresolvedRecoveryTurnID == currentTurnId {
                 unresolvedRecoveryTurnID = nil
                 needsDurableForegroundRecoveryTurnID = nil
@@ -5810,8 +7219,21 @@ final class EngineConversationSource: ConversationSource {
               unresolvedRecoveryTurnID == nil,
               pauseAcknowledgements.isEmpty
         else { return }
-        if let record = durableTurns?.load(), record.sessionID != uuid {
-            durableTurns?.clear()
+        if hasUncertainSubmissions() {
+            guard let records = try? durableTurns?.pendingSubmissions(),
+                  records.contains(where: submissionIsUncertain),
+                  records.filter(submissionIsUncertain).allSatisfy({ $0.sessionID == uuid }) else {
+                showSubmissionWarning()
+                return
+            }
+        }
+        if hasAdmittedQueuedSubmissions() {
+            guard let records = try? durableTurns?.pendingSubmissions(),
+                  records.contains(where: { $0.admittedQueued == true }),
+                  records.filter({ $0.admittedQueued == true }).allSatisfy({ $0.sessionID == uuid }) else {
+                showSubmissionWarning()
+                return
+            }
         }
         if uuid == model.activeSessionId,
            pendingSessionTransition == nil,
@@ -5819,6 +7241,11 @@ final class EngineConversationSource: ConversationSource {
             return
         }
         let turnIdToCancel = inFlightTurnForSessionSwitch()
+        if let record = durableTurns?.load(), record.sessionID != uuid,
+           (record.sessionID != model.activeSessionId || record.turnID != turnIdToCancel) {
+            showRecoveryWarning()
+            return
+        }
         model.sessionRestoreRecovery = nil
         model.sessionTransitionFailure = nil
         let transitionOperationID = beginSessionTransition(.resume(uuid))
@@ -5842,13 +7269,127 @@ final class EngineConversationSource: ConversationSource {
         )
     }
 
-    private func reattachDurableTurnIfNeeded(sessionID: String) {
+    private enum AttachBarrierError: LocalizedError {
+        case timedOut
+        var errorDescription: String? {
+            String(localized: "chat_recovery_replay_gap")
+        }
+    }
+
+    private func cancelAttachAttempt() {
+        attachTimeout?.cancel()
+        attachTimeout = nil
+        invalidateWireBatch(for: attachAttempt)
+        let continuation = attachAttempt?.continuation
+        attachAttempt = nil
+        continuation?.resume(throwing: CancellationError())
+    }
+
+    private func invalidateWireBatch(for attempt: AttachAttempt?) {
+        guard let attempt else { return }
+        let key = AttachWireIdentity(sessionID: attempt.sessionID, turnID: attempt.turnID)
+        guard var batch = attachWireBatches[key], batch.requestID == attempt.requestID else { return }
+        batch.acceptsReplay = false
+        attachWireBatches[key] = batch
+    }
+
+    private func failAttachAttempt(requestID: String) {
+        guard attachAttempt?.requestID == requestID else { return }
+        let waiter = attachAttempt?.continuation
+        invalidateWireBatch(for: attachAttempt)
+        attachAttempt = nil
+        attachTimeout?.cancel()
+        attachTimeout = nil
+        waiter?.resume(throwing: AttachBarrierError.timedOut)
+    }
+
+    private func waitForAttachFinished(requestID: String) async throws {
+        try Task.checkCancellation()
+        guard let attempt = attachAttempt, attempt.requestID == requestID else { throw CancellationError() }
+        if attempt.finished { return }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            guard var pending = attachAttempt, pending.requestID == requestID else {
+                continuation.resume(throwing: CancellationError())
+                return
+            }
+            if pending.finished {
+                continuation.resume()
+                return
+            }
+            pending.continuation = continuation
+            attachAttempt = pending
+            attachTimeout = Task { @MainActor [weak self] in
+                do { try await Task.sleep(nanoseconds: 15_000_000_000) }
+                catch { return }
+                self?.failAttachAttempt(requestID: requestID)
+            }
+        }
+        try Task.checkCancellation()
+    }
+
+    private func probeUnknownSubmissionIfReady(retry: Bool = false) {
+        guard recoveryIngressActive, durableRecoveryTask == nil, !model.sessionTransitionPending, !model.isCancelling,
+              !model.activeSessionId.isEmpty, let durableTurns else { return }
+        let entries: [DurableSubmissionRecord]
+        do { entries = try durableTurns.pendingSubmissions() }
+        catch { showSubmissionWarning(); return }
+        guard let candidate = entries.first(where: {
+            $0.sessionID == model.activeSessionId && submissionIsUncertain($0)
+        }) else { return }
+        let identity = SubmissionIdentity(sessionID: candidate.sessionID, turnID: candidate.turnID)
+        let hostTurnID = candidate.turnID
+        guard retry || !attemptedUnknownProbes.contains(identity) else { return }
+        guard currentTurnId == nil || currentTurnId == hostTurnID else { return }
+        if let record = durableTurns.load() {
+            guard record.sessionID == candidate.sessionID, record.turnID == hostTurnID else { return }
+        } else {
+            durableTurns.begin(sessionID: candidate.sessionID, turnID: hostTurnID)
+            guard let record = durableTurns.load(), record.sessionID == candidate.sessionID,
+                  record.turnID == hostTurnID else { showSubmissionWarning(); return }
+        }
+        attemptedUnknownProbes.insert(identity)
+        queuedTurnInterests.removeValue(forKey: candidate.turnID)
+        reattachedTurnIDs.remove(hostTurnID)
+        reattachDurableTurnIfNeeded(sessionID: candidate.sessionID, probeOnly: true)
+    }
+
+    private func reattachDurableTurnIfNeeded(sessionID: String, probeOnly requestedProbe: Bool = false) {
+        if replayCursorFailed {
+            // A live-only event might already be present in the journal.
+            // Reusing this projection for a warm replay can duplicate it.
+            reportRecoveryReplayGap()
+            return
+        }
         guard
             durableRecoveryTask == nil,
             let record = durableTurns?.load(),
             record.sessionID == sessionID,
             reattachedTurnIDs.insert(record.turnID).inserted
         else { return }
+        let entries: [DurableSubmissionRecord]
+        do { entries = try durableTurns?.pendingSubmissions() ?? [] }
+        catch {
+            reattachedTurnIDs.remove(record.turnID)
+            showSubmissionWarning()
+            return
+        }
+        let unknown = entries.first {
+            $0.sessionID == record.sessionID && $0.turnID == record.turnID
+                && submissionIsUncertain($0)
+        }
+        let probeOnly = requestedProbe || unknown != nil
+        if requestedProbe && unknown == nil { reattachedTurnIDs.remove(record.turnID); return }
+        let probeIdentity = SubmissionIdentity(sessionID: record.sessionID, turnID: record.turnID)
+        let pendingIdentity = unknown.map { SubmissionIdentity(sessionID: $0.sessionID, turnID: $0.turnID) } ?? probeIdentity
+        if probeOnly {
+            attemptedUnknownProbes.insert(pendingIdentity)
+            probingUnknownSubmission = probeIdentity
+            latestProbeSnapshot = nil
+        }
+        retainRecoveryInterest(sessionID: record.sessionID, turnID: record.turnID)
+        if recoveryBootstrap?.sessionID != record.sessionID || recoveryBootstrap?.turnID != record.turnID {
+            recoveryBootstrap = RecoveryBootstrap(sessionID: record.sessionID, turnID: record.turnID)
+        }
         currentTurnId = record.turnID
         activeTurnEpoch = sessionEpoch
         unresolvedRecoveryTurnID = record.turnID
@@ -5861,11 +7402,23 @@ final class EngineConversationSource: ConversationSource {
         )
         model.activeTurnToken = token
         model.streaming = false
+        let requestID = UUID().uuidString
+        durableRecoveryAttemptID = requestID
+        attachAttempt = AttachAttempt(requestID: requestID, sessionID: record.sessionID, turnID: record.turnID)
         let recoveryTask = Task { @MainActor [weak self] in
             defer {
-                self?.replayingTurnID = nil
-                self?.durableRecoveryPhase = nil
-                self?.durableRecoveryTask = nil
+                if let self, self.durableRecoveryAttemptID == requestID {
+                    self.cancelAttachAttempt()
+                    self.durableRecoveryAttemptID = nil
+                    self.replayingTurnID = nil
+                    self.durableRecoveryPhase = nil
+                    self.durableRecoveryTask = nil
+                    if probeOnly {
+                        self.probingUnknownSubmission = nil
+                        self.latestProbeSnapshot = nil
+                        Task { @MainActor [weak self] in self?.probeUnknownSubmissionIfReady() }
+                    }
+                }
             }
             guard let self else { return }
             do {
@@ -5873,23 +7426,50 @@ final class EngineConversationSource: ConversationSource {
                 self.durableRecoveryPhase = .attaching(turnID: record.turnID)
                 self.replayProjectionState = nil
                 try await self.submitCommand(.attachTurn(
+                    sessionId: record.sessionID,
                     turnId: record.turnID,
-                    afterSequence: record.lastSequence
+                    afterSequence: record.lastSequence,
+                    requestId: requestID
                 ))
-                // `onEvent` must return before the engine constructor or
-                // command submission can continue, so the callback only
-                // enqueues. Wait until the single listener pump has applied
-                // the recovery snapshot and every retained envelope before
-                // allowing live ResumeTurn events to be projected.
-                await self.listener?.waitUntilIdle()
+                // Completion of submit only guarantees host delivery. The
+                // local FIFO must consume this attempt's Finished marker.
+                try await self.waitForAttachFinished(requestID: requestID)
+                guard self.recoveryIngressActive else { return }
+                if !self.pendingJournalEvents.isEmpty {
+                    self.reportRecoveryReplayGap()
+                }
+                self.cancelAttachAttempt()
+                // A completed delivery boundary does not make a truncated,
+                // invalid, or unprojectable transcript complete. Keep the
+                // durable turn gated until a fresh source can recover it.
+                guard !self.replayCursorFailed else { return }
+                self.replayingTurnID = nil
+                if probeOnly {
+                    guard self.submissionRemainsPending(sessionID: pendingIdentity.sessionID, turnID: pendingIdentity.turnID) else { return }
+                    self.durableRecoveryPhase = nil
+                    if let snapshot = self.latestProbeSnapshot, Self.isTerminalRecoveryState(snapshot.state) {
+                        self.apply(.turnRecoveryState(snapshot: snapshot))
+                    } else {
+                        self.model.hasUnresolvedTurnRecovery = true
+                        self.model.hasInactiveDurableRecovery = true
+                        self.needsDurableForegroundRecoveryTurnID = record.turnID
+                        self.showSubmissionWarning()
+                    }
+                    return
+                }
                 self.durableRecoveryPhase = .resuming(turnID: record.turnID)
-                try await self.submitCommand(.resumeTurn(turnId: record.turnID))
+                try await self.submitCommand(.resumeTurn(sessionId: record.sessionID, turnId: record.turnID))
                 // ResumeTurn emits its own recovery state before any new
                 // live envelopes. Drain that FIFO as well so a foreground
                 // call cannot race the first resumed delta.
                 await self.listener?.waitUntilIdle()
             } catch {
-                self.restoreFailedDurableRecovery(record: record, error: error)
+                if self.recoveryIngressActive, self.durableRecoveryAttemptID == requestID {
+                    if probeOnly && !self.submissionRemainsPending(sessionID: pendingIdentity.sessionID, turnID: pendingIdentity.turnID) {
+                        return
+                    }
+                    self.restoreFailedDurableRecovery(record: record, error: error, probeOnly: probeOnly)
+                }
             }
         }
         durableRecoveryTask = recoveryTask
@@ -5897,7 +7477,8 @@ final class EngineConversationSource: ConversationSource {
 
     private func restoreFailedDurableRecovery(
         record: DurableConversationTurnRecord,
-        error: Error
+        error: Error,
+        probeOnly: Bool = false
     ) {
         durableRecoveryPhase = nil
         reattachedTurnIDs.remove(record.turnID)
@@ -5915,391 +7496,313 @@ final class EngineConversationSource: ConversationSource {
         executorOwnedTurnID = nil
         settleCorrelatedMainRun()
         model.streaming = false
-        model.statusLine = nil
-        model.error = ConversationError(
-            kind: .host,
-            message: String(describing: error)
-        )
-    }
-
-    private func applyRetainedTurnEvent(_ eventJSON: String, turnID: UInt64) {
-        guard
-            currentTurnId == turnID,
-            let data = eventJSON.data(using: .utf8),
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let type = object["type"] as? String
-        else { return }
-        switch type {
-        case "text_delta":
-            if let text = object["text"] as? String {
-                apply(.textDelta(text: text.clientTextDto))
-            }
-        case "tool_use_started":
-            if let id = object["id"] as? String,
-               let tool = object["tool"] as? String,
-               let inputJSON = object["input_json"] as? String,
-               let header = retainedToolHeader(object["header"]) {
-                apply(.toolUseStarted(
-                    id: id,
-                    tool: tool,
-                    inputJson: inputJSON,
-                    header: header
-                ))
-            }
-        case "tool_heartbeat":
-            if let id = object["id"] as? String,
-               let tool = object["tool"] as? String,
-               let elapsed = object["elapsed_ms"] as? NSNumber {
-                apply(.toolHeartbeat(
-                    id: id,
-                    tool: tool,
-                    elapsedMs: elapsed.uint64Value
-                ))
-            }
-        case "tool_use_result":
-            if let id = object["id"] as? String,
-               let tool = object["tool"] as? String,
-               let resultJSON = object["result_json"] as? String,
-               let isError = object["is_error"] as? Bool,
-               let display = retainedToolResultDisplay(object["display"]) {
-                apply(.toolUseResult(
-                    id: id,
-                    tool: tool,
-                    resultJson: resultJSON,
-                    isError: isError,
-                    display: display
-                ))
-            }
-        // The engine journals every forwarded live-turn event verbatim
-        // (`serde_json::to_string(&event)` in `TurnLifecycleListener`), and
-        // `is_live_turn_payload` explicitly includes `SystemNotice` and
-        // `ThinkingDelta`. Dropping them here meant a turn that reasoned or
-        // emitted notices while the app was backgrounded came back with no
-        // reasoning trace and no notices at all, while Android's
-        // `retainedTurnEventToReply` projected both.
-        case "thinking_delta":
-            if let thinking = object["thinking"] as? String {
-                apply(.thinkingDelta(
-                    thinking: thinking,
-                    signature: object["signature"] as? String
-                ))
-            }
-        case "system_notice":
-            if let message = object["message"] as? String {
-                apply(.systemNotice(
-                    message: message.clientTextDto,
-                    isError: object["is_error"] as? Bool ?? false
-                ))
-            }
-        // `turn_started`, `turn_ended` and `error` are deliberately NOT
-        // projected. Unlike Android, whose `ReplyEvent` cases only append to
-        // a transcript, the iOS handlers for these three mutate
-        // durable-recovery OWNERSHIP, and projecting one mid-replay destroys
-        // the checkpoint the replay is reading from:
-        //   - `.turnStarted` sets `executorOwnedTurnID` and
-        //     `model.streaming = true`, which shows Stop for a parked turn.
-        //   - `.turnEnded` calls `durableTurns?.clear(turnID:)` plus
-        //     `clearTurnPointers`.
-        //   - `.error` reaches `fail(...)`, which likewise calls
-        //     `durableTurns?.clear(turnID:)`, drops `hasUnresolvedTurnRecovery`
-        //     and nils `currentTurnId` via `clearTurnPointers(keepEpoch:false)`.
-        // Once the checkpoint is gone, `applyRetainedTurnEvent`'s
-        // `currentTurnId == turnID` guard silently rejects every REMAINING
-        // event in the same replay suffix — strictly worse than the silence
-        // it would replace.
-        //
-        // Do NOT restate the old rationale that the engine "transitions the
-        // checkpoint to a terminal state alongside journalling them", which
-        // would make this rule look redundant. It is false for the case that
-        // matters: `host.rs`'s `TurnOutcomeDto::Cancelled => return None`
-        // (and the `_ => return None` beside it) journal the event with NO
-        // transition at all, so a non-terminal snapshot really can be
-        // followed by these events in the replayed suffix. Surfacing a
-        // replayed failure needs a path that does not clear the checkpoint,
-        // not an entry in this switch.
-        default:
-            break
-        }
-    }
-
-    /// Durable turn rows contain the original serialized `ClientEvent`, not a
-    /// reduced/core event. Rebuild the current required carrier from its JSON
-    /// object so replay has the same presentation data as the live path.
-    private func retainedToolHeader(_ value: Any?) -> ToolHeaderDto? {
-        guard let object = value as? [String: Any],
-              let verbName = object["verb"] as? String,
-              let verb = Self.toolVerbDto(verbName),
-              let label = object["label"] as? String,
-              let title = object["title"] as? String
-        else { return nil }
-
-        let icon: ToolIconDto?
-        if let iconName = object["icon"] as? String {
-            guard let parsed = Self.toolIconDto(iconName) else { return nil }
-            icon = parsed
+        model.statusLine = replayCursorFailed ? String(localized: "chat_recovery_replay_gap") : nil
+        if probeOnly {
+            let notFound: Bool
+            if let clientError = error as? ClientError, case .NotFound = clientError { notFound = true }
+            else { notFound = false }
+            model.error = nil
+            showSubmissionWarning(notFound: notFound)
         } else {
-            icon = nil
+            model.error = ConversationError(kind: .host, message: String(describing: error))
         }
-        let primary: String?
-        if let raw = object["primary"] {
-            guard let parsed = raw as? String else { return nil }
-            primary = parsed
-        } else { primary = nil }
-        let qualifier: String?
-        if let raw = object["qualifier"] {
-            guard let parsed = raw as? String else { return nil }
-            qualifier = parsed
-        } else { qualifier = nil }
-        let count: UInt32?
-        if let raw = object["count"] {
-            guard let parsed = Self.retainedUInt32(raw) else { return nil }
-            count = parsed
-        } else { count = nil }
-        let subLine: ToolSubLineDto?
-        if let raw = object["sub_line"] {
-            guard let line = raw as? [String: Any],
-                  let prefix = line["prefix"] as? String,
-                  let text = line["text"] as? String
-            else { return nil }
-            subLine = ToolSubLineDto(prefix: prefix, text: text)
-        } else { subLine = nil }
-
-        return ToolHeaderDto(
-            verb: verb,
-            icon: icon,
-            label: label,
-            primary: primary,
-            qualifier: qualifier,
-            count: count,
-            subLine: subLine,
-            title: title
-        )
     }
 
-    private func retainedToolResultDisplay(_ value: Any?) -> ToolResultDisplayDto? {
-        guard let object = value as? [String: Any],
-              let rawBodyLines = object["body_lines"],
-              let bodyLines = Self.retainedUInt32(rawBodyLines)
-        else { return nil }
+    private func matchesQueuedTurn(sessionID: String, turnID: UInt64) -> Bool {
+        guard sessionID == model.activeSessionId, let queued = queuedTurnInterests[turnID],
+              queued.epoch == sessionEpoch else { return false }
+        return queued.sessionID.isEmpty || queued.sessionID == sessionID
+    }
 
-        let headline: String?
-        if let raw = object["headline"] {
-            guard let parsed = raw as? String else { return nil }
-            headline = parsed
-        } else { headline = nil }
-        let headlineKind: HeadlineKindDto?
-        if let raw = object["headline_kind"] as? String {
-            guard let parsed = Self.headlineKindDto(raw) else { return nil }
-            headlineKind = parsed
-        } else if object["headline_kind"] == nil {
-            headlineKind = nil
-        } else { return nil }
-        let headlineArgs: [UInt32]
-        if let values = object["headline_args"] as? [Any] {
-            var parsed: [UInt32] = []
-            for value in values {
-                guard let number = Self.retainedUInt32(value) else { return nil }
-                parsed.append(number)
+    private func deferredIdentity(_ event: ClientEvent) -> (String, UInt64)? {
+        switch event {
+        case let .turnRecoveryState(snapshot): return (snapshot.sessionId, snapshot.turnId)
+        case let .turnEventReplay(session, turn, _, _): return (session, turn)
+        case let .turnEventLiveUnretained(session, turn, _): return (session, turn)
+        default: return nil
+        }
+    }
+
+    private func deferQueuedEventIfNeeded(_ event: ClientEvent) -> Bool {
+        guard let (session, turn) = deferredIdentity(event), matchesQueuedTurn(sessionID: session, turnID: turn),
+              currentTurnId != nil || durableTurns?.load() != nil else { return false }
+        if deferredQueuedEvents.count >= 512 {
+            deferredQueuedEvents.append(event)
+            expireDeferredQueuedTurns()
+            return true
+        }
+        deferredQueuedEvents.append(event)
+        if deferredQueuedTimeout == nil {
+            deferredQueuedTimeout = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled else { return }
+                self?.expireDeferredQueuedTurns()
             }
-            headlineArgs = parsed
-        } else if object["headline_args"] == nil {
-            headlineArgs = []
-        } else { return nil }
-        let diff: StructuredDiffDto?
-        if let raw = object["diff"] {
-            guard let parsed = Self.retainedStructuredDiff(raw) else { return nil }
-            diff = parsed
-        } else { diff = nil }
-        let body: String?
-        if let raw = object["body"] {
-            guard let parsed = raw as? String else { return nil }
-            body = parsed
-        } else { body = nil }
-        let bodyTruncated = Self.retainedBool(object["body_truncated"]) ?? false
-        if object["body_truncated"] != nil && Self.retainedBool(object["body_truncated"]) == nil { return nil }
-        let collapsed = Self.retainedBool(object["collapsed"]) ?? false
-        if object["collapsed"] != nil && Self.retainedBool(object["collapsed"]) == nil { return nil }
-
-        return ToolResultDisplayDto(
-            headline: headline,
-            headlineKind: headlineKind,
-            headlineArgs: headlineArgs,
-            diff: diff,
-            body: body,
-            bodyLines: bodyLines,
-            bodyTruncated: bodyTruncated,
-            collapsed: collapsed
-        )
+        }
+        return true
     }
 
-    private static func retainedStructuredDiff(_ value: Any) -> StructuredDiffDto? {
-        guard let object = value as? [String: Any],
-              let rawGutter = object["gutter_width"], let gutter = retainedUInt32(rawGutter),
-              let rawAdditions = object["additions"], let additions = retainedUInt32(rawAdditions),
-              let rawRemovals = object["removals"], let removals = retainedUInt32(rawRemovals),
-              let rawTruncatedRows = object["truncated_rows"], let truncatedRows = retainedUInt32(rawTruncatedRows),
-              let rowValues = object["rows"] as? [Any]
-        else { return nil }
-        let filePath: String?
-        if let raw = object["file_path"] {
-            guard let parsed = raw as? String else { return nil }
-            filePath = parsed
-        } else { filePath = nil }
-        let language: String?
-        if let raw = object["language"] {
-            guard let parsed = raw as? String else { return nil }
-            language = parsed
-        } else { language = nil }
-
-        var rows: [DiffRowDto] = []
-        for value in rowValues {
-            guard let row = value as? [String: Any],
-                  let kindName = row["kind"] as? String,
-                  let kind = Self.diffLineKindDto(kindName),
-                  let rawLineNo = row["line_no"], let lineNo = retainedUInt32(rawLineNo),
-                  let rawHunk = row["hunk"], let hunk = retainedUInt32(rawHunk),
-                  let segmentValues = row["segments"] as? [Any]
-            else { return nil }
-            let wordDiffed: Bool
-            if let raw = row["word_diffed"] {
-                guard let parsed = Self.retainedBool(raw) else { return nil }
-                wordDiffed = parsed
-            } else { wordDiffed = false }
-            var segments: [CodeSegmentDto] = []
-            for value in segmentValues {
-                guard let segment = value as? [String: Any],
-                      let text = segment["text"] as? String,
-                      let className = segment["class"] as? String,
-                      let syntax = Self.syntaxClassDto(className)
-                else { return nil }
-                let rgb: UInt32?
-                if let raw = segment["rgb"] {
-                    guard let parsed = Self.retainedUInt32(raw) else { return nil }
-                    rgb = parsed
-                } else { rgb = nil }
-                let bold = Self.retainedBool(segment["bold"]) ?? false
-                if segment["bold"] != nil && Self.retainedBool(segment["bold"]) == nil { return nil }
-                let italic = Self.retainedBool(segment["italic"]) ?? false
-                if segment["italic"] != nil && Self.retainedBool(segment["italic"]) == nil { return nil }
-                let underline = Self.retainedBool(segment["underline"]) ?? false
-                if segment["underline"] != nil && Self.retainedBool(segment["underline"]) == nil { return nil }
-                let emph = Self.retainedBool(segment["emph"]) ?? false
-                if segment["emph"] != nil && Self.retainedBool(segment["emph"]) == nil { return nil }
-                segments.append(CodeSegmentDto(
-                    text: text, class: syntax, rgb: rgb, bold: bold,
-                    italic: italic, underline: underline, emph: emph
-                ))
+    private func expireDeferredQueuedTurns() {
+        let persisted: [DurableSubmissionRecord]?
+        do { persisted = try durableTurns?.pendingSubmissions() ?? [] }
+        catch { persisted = nil }
+        for event in deferredQueuedEvents {
+            guard let (session, turn) = deferredIdentity(event) else { continue }
+            if persisted == nil || persisted?.contains(where: { $0.sessionID == session && $0.turnID == turn }) == true {
+                incompleteQueuedTurns.insert(turn)
+                do { try durableTurns?.markSubmissionIncomplete(sessionID: session, turnID: turn) }
+                catch { showSubmissionWarning() }
+            } else {
+                queuedTurnInterests.removeValue(forKey: turn)
             }
-            rows.append(DiffRowDto(
-                kind: kind, lineNo: lineNo, hunk: hunk,
-                wordDiffed: wordDiffed, segments: segments
-            ))
         }
-        return StructuredDiffDto(
-            filePath: filePath, language: language, gutterWidth: gutter,
-            additions: additions, removals: removals,
-            truncatedRows: truncatedRows, rows: rows
-        )
+        deferredQueuedEvents.removeAll()
+        deferredQueuedTimeout?.cancel()
+        deferredQueuedTimeout = nil
+        retainOnlyCurrentAndQueuedRecoveryInterests()
+        showRecoveryWarning()
     }
 
-    private static func retainedUInt32(_ value: Any) -> UInt32? {
-        guard let number = value as? NSNumber,
-              CFGetTypeID(number) != CFBooleanGetTypeID(),
-              number.doubleValue.isFinite,
-              number.doubleValue.rounded(.towardZero) == number.doubleValue,
-              number.doubleValue >= 0,
-              number.doubleValue <= Double(UInt32.max)
-        else { return nil }
-        return number.uint32Value
+    private func drainDeferredQueuedEventsIfReady() {
+        guard currentTurnId == nil, durableTurns?.load() == nil, !deferredQueuedEvents.isEmpty else { return }
+        let pending = deferredQueuedEvents
+        deferredQueuedEvents.removeAll()
+        deferredQueuedTimeout?.cancel()
+        deferredQueuedTimeout = nil
+        for event in pending { apply(event) }
     }
 
-    private static func retainedBool(_ value: Any?) -> Bool? {
-        guard let number = value as? NSNumber,
-              CFGetTypeID(number) == CFBooleanGetTypeID()
-        else { return nil }
-        return number.boolValue
+    func expireDeferredQueuedTurnsForTesting() { expireDeferredQueuedTurns() }
+
+    @discardableResult
+    private func adoptQueuedTurn(sessionID: String, turnID: UInt64) -> Bool {
+        guard currentTurnId == nil, matchesQueuedTurn(sessionID: sessionID, turnID: turnID) else { return false }
+        if let record = durableTurns?.load(), record.sessionID != sessionID || record.turnID != turnID {
+            model.error = ConversationError(kind: .host, message: String(localized: "chat_recovery_replay_gap"))
+            return false
+        }
+        queuedTurnInterests.removeValue(forKey: turnID)
+        var projectionIncomplete = incompleteQueuedTurns.remove(turnID) != nil
+        resetProjectedLiveEvents(clearError: true)
+        pendingTerminalRecovery = nil
+        restoredTranscriptIsAuthoritative = false
+        currentTurnId = turnID
+        activeTurnEpoch = sessionEpoch
+        executorOwnedTurnID = turnID
+        model.activeTurnToken = ConversationTurnToken(clientTurnId: turnID, sessionEpoch: sessionEpoch)
+        model.streaming = true
+        model.notice = nil
+        durableTurns?.begin(sessionID: sessionID, turnID: turnID)
+        if let durableTurns {
+            do {
+                let admitted = try durableTurns.pendingSubmissions().contains {
+                    $0.sessionID == sessionID && $0.turnID == turnID && $0.admittedQueued == true
+                }
+                if admitted, !projectionIncomplete, durableTurns.ensureDurable(sessionID: sessionID, turnID: turnID) {
+                    clearSubmissionAfterTerminal(sessionID: sessionID, turnID: turnID)
+                } else if admitted {
+                    try durableTurns.markSubmissionIncomplete(sessionID: sessionID, turnID: turnID)
+                    uncertainSubmissions.insert(SubmissionIdentity(sessionID: sessionID, turnID: turnID))
+                    projectionIncomplete = true
+                }
+            } catch { projectionIncomplete = true; showSubmissionWarning() }
+        }
+        retainRecoveryInterest(sessionID: sessionID, turnID: turnID)
+        retainOnlyCurrentAndQueuedRecoveryInterests()
+        if projectionIncomplete {
+            replayCursorFailed = true
+            showRecoveryWarning()
+        }
+        return true
     }
 
-    private static func toolVerbDto(_ name: String) -> ToolVerbDto? {
-        switch name {
-        case "update": return .update
-        case "create": return .create
-        case "read": return .read
-        case "search": return .search
-        case "shell": return .shell
-        case "output": return .output
-        case "kill": return .kill
-        case "fetch": return .fetch
-        case "task": return .task
-        case "todo": return .todo
-        case "skill": return .skill
-        case "generic": return .generic
-        default: return nil
+    /// Decode the identity and payload together, then project only through the
+    /// source that owns the current session and turn. The host sends no raw
+    /// duplicate for a durable turn event.
+    private func applyJournalEnvelope(_ envelope: ClientEvent) {
+        let sessionID: String
+        let turnID: UInt64
+        switch envelope {
+        case let .turnEventReplay(session, turn, _, _):
+            sessionID = session
+            turnID = turn
+        case let .turnEventLiveUnretained(session, turn, _):
+            sessionID = session
+            turnID = turn
+        default:
+            return
+        }
+        let queuedStart = currentTurnId == nil && matchesQueuedTurn(sessionID: sessionID, turnID: turnID)
+        guard sessionID == model.activeSessionId,
+              (turnID == currentTurnId && activeTurnEpoch == sessionEpoch) || queuedStart,
+              let durableTurns else { return }
+        let identity = JournalIdentity(sessionID: sessionID, turnID: turnID, epoch: sessionEpoch)
+        if journalIdentity != identity {
+            journalIdentity = identity
+            pendingJournalEvents.removeAll()
+        }
+        let delivery: TurnJournalEventDto
+        do {
+            delivery = try decodeTurnEventEnvelope(envelope: envelope)
+        } catch {
+            reportRecoveryReplayGap()
+            return
+        }
+        guard delivery.sessionId == sessionID, delivery.turnId == turnID else { return }
+        if let submission = turnSubmissions[turnID], submission.owner == sessionID {
+            submission.observedServerEvidence = true
+        }
+        if queuedStart {
+            guard case let .turnStarted(reportedTurnID) = delivery.event,
+                  reportedTurnID == nil || reportedTurnID == turnID,
+                  delivery.sequence == nil || delivery.sequence == 1,
+                  adoptQueuedTurn(sessionID: sessionID, turnID: turnID) else { return }
+        }
+        if durableTurns.load() == nil, pendingSlashRaw != nil,
+           case .turnStarted = delivery.event {
+            // Only a slash command promoted to a real turn has a durable
+            // start envelope; ordinary local slash results leave no record.
+            durableTurns.begin(sessionID: sessionID, turnID: turnID)
+        }
+        guard let sequence = delivery.sequence else {
+            // An unconfirmed write might have reached disk. Keep live output,
+            // but do not advance the cursor or warm-attach over this projection.
+            _ = saveTerminalEvidence(sessionID: sessionID, turnID: turnID,
+                                     projectionUncertain: true, liveOnlyOutput: true)
+            if cancellationMatches(sessionID: sessionID, turnID: turnID),
+               let operation = cancellationOperation, operation.terminalState != nil {
+                if case .toolUseResult = delivery.event {
+                    showRecoveryWarning(String(localized: "chat_recovery_projection_uncertain"))
+                }
+            } else {
+                reportRecoveryReplayGap()
+            }
+            _ = applyJournalPayload(delivery.event, identity: identity, retained: false)
+            return
+        }
+        let retained: Bool
+        if case let .attaching(attachingTurn) = durableRecoveryPhase {
+            retained = attachingTurn == turnID && attachAttempt?.started == true && attachAttempt?.finished == false
+        } else { retained = false }
+        if replayCursorFailed {
+            if !retained { _ = applyJournalPayload(delivery.event, identity: identity, retained: false) }
+            return
+        }
+        let projected = durableTurns.projectedSequence(sessionID: sessionID, turnID: turnID)
+        guard sequence > projected else { return }
+        guard pendingJournalEvents[sequence] == nil else { return }
+        if projected == UInt64.max || sequence != projected + 1 {
+            guard pendingJournalEvents.count < 512 else {
+                reportRecoveryReplayGap()
+                return
+            }
+            pendingJournalEvents[sequence] = PendingJournalEvent(event: delivery.event, retained: retained)
+            return
+        }
+        var nextSequence = sequence
+        var next = PendingJournalEvent(event: delivery.event, retained: retained)
+        while true {
+            guard applyJournalPayload(next.event, identity: identity, retained: next.retained) else { return }
+            // A terminal projection may have cleared the durable record and
+            // current pointers. Its matching recovery state remains correlated
+            // via pendingTerminalRecovery; no cursor remains to advance.
+            guard let record = durableTurns.load(), record.sessionID == sessionID, record.turnID == turnID else { return }
+            guard durableTurns.updateSequence(sessionID: sessionID, turnID: turnID, sequence: nextSequence) else {
+                reportRecoveryReplayGap()
+                return
+            }
+            guard nextSequence < UInt64.max,
+                  let buffered = pendingJournalEvents.removeValue(forKey: nextSequence + 1) else { return }
+            nextSequence += 1
+            next = buffered
         }
     }
 
-    private static func toolIconDto(_ name: String) -> ToolIconDto? {
-        switch name {
-        case "read": return .read
-        case "search": return .search
-        case "list": return .list
-        case "edit": return .edit
-        case "terminal": return .terminal
-        case "globe": return .globe
-        case "workflow": return .workflow
-        case "list_checks": return .listChecks
-        case "sparkles": return .sparkles
-        case "plug": return .plug
-        case "output": return .output
-        case "stop": return .stop
-        case "wrench": return .wrench
-        default: return nil
+    private func applyJournalPayload(_ event: ClientEvent, identity: JournalIdentity, retained: Bool) -> Bool {
+        switch event {
+        case .turnStarted, .textDelta, .thinkingDelta, .systemNotice,
+             .toolUseStarted, .toolHeartbeat, .toolUseResult, .usageUpdate,
+             .apiRetry, .costUpdate, .compactionCompleted, .coordinatorStatus,
+             .coordinatorWorker, .messageComplete, .messageIdentity, .messageRetracted,
+             .turnEnded, .error, .askUserQuestion, .askUserQuestionResolved, .planUpdated,
+             .uiLog, .uiToast, .uiStatus, .attachment:
+            break
+        default:
+            // Known wire events that this projection does not consume must not
+            // silently move its recovery cursor.
+            reportRecoveryReplayGap()
+            return false
         }
+        if retained {
+            switch event {
+            case let .turnStarted(reportedTurnID):
+                return reportedTurnID == nil || reportedTurnID == identity.turnID
+            case .turnEnded, .error:
+                // The terminal checkpoint, not a historical event, controls
+                // recovery ownership. A conflicting history is surfaced.
+                reportRecoveryReplayGap()
+                return false
+            default:
+                break
+            }
+            // SessionResumed and the journal do not share a checkpoint
+            // boundary. Appending this suffix could duplicate restored rows.
+            if restoredTranscriptIsAuthoritative {
+                reportRecoveryReplayGap()
+                return false
+            }
+        } else {
+            if case .textDelta = event, !model.streaming, durableRecoveryTask == nil {
+                reportRecoveryReplayGap()
+                return false
+            }
+            switch event {
+            case .turnEnded, .error:
+                pendingTerminalRecovery = identity
+            default:
+                break
+            }
+        }
+        let previous = projectingRetainedTurnEvent
+        let previousJournal = projectingJournalEvent
+        projectingRetainedTurnEvent = retained || (durableRecoveryTask != nil && !model.streaming)
+        projectingJournalEvent = true
+        defer {
+            projectingRetainedTurnEvent = previous
+            projectingJournalEvent = previousJournal
+        }
+        applyOne(event)
+        return !replayCursorFailed
     }
 
-    private static func headlineKindDto(_ name: String) -> HeadlineKindDto? {
-        switch name {
-        case "added": return .added
-        case "removed": return .removed
-        case "added_removed": return .addedRemoved
-        case "lines_read": return .linesRead
-        case "lines_read_partial": return .linesReadPartial
-        case "files_found": return .filesFound
-        case "files_found_truncated": return .filesFoundTruncated
-        case "lines_found": return .linesFound
-        case "matches_found": return .matchesFound
-        case "interrupted": return .interrupted
-        case "no_content": return .noContent
-        case "failed": return .failed
-        case "plain": return .plain
-        default: return nil
-        }
+    private func reportRecoveryReplayGap() {
+        guard durableTurns != nil, currentTurnId != nil, activeTurnEpoch == sessionEpoch else { return }
+        replayCursorFailed = true
+        pendingJournalEvents.removeAll()
+        showRecoveryWarning()
     }
 
-    private static func diffLineKindDto(_ name: String) -> DiffLineKindDto? {
-        switch name {
-        case "add": return .add
-        case "remove": return .remove
-        case "context": return .context
-        default: return nil
-        }
+    private func showRecoveryWarning() {
+        showRecoveryWarning(String(localized: "chat_recovery_replay_gap"))
     }
 
-    private static func syntaxClassDto(_ name: String) -> SyntaxClassDto? {
-        switch name {
-        case "plain": return .plain
-        case "keyword": return .keyword
-        case "type_name": return .typeName
-        case "function": return .function
-        case "string_lit": return .stringLit
-        case "number": return .number
-        case "comment": return .comment
-        case "punctuation": return .punctuation
-        case "operator": return .operator
-        case "variable": return .variable
-        case "constant": return .constant
-        case "attribute": return .attribute
-        default: return nil
+    private func showRecoveryWarning(_ message: String) {
+        guard model.error == nil else {
+            model.statusLine = message
+            return
+        }
+        let error = ConversationError(kind: .host, message: message)
+        replayGapErrorID = error.id
+        model.error = error
+    }
+
+    private func resetProjectedLiveEvents(clearError: Bool = false) {
+        journalIdentity = nil
+        pendingJournalEvents.removeAll()
+        replayCursorFailed = false
+        if clearError {
+            if model.error?.id == replayGapErrorID { model.error = nil }
+            replayGapErrorID = nil
         }
     }
 

@@ -60,7 +60,9 @@ jobs:
             platform: linux
             arch: x64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    # The Windows release Rust build alone took over 50 minutes on the hosted
+    # runner; leave room for native process regressions and package smoke tests.
+    timeout-minutes: ${{ matrix.platform == 'win32' && 120 || 90 }}
     steps:
       - name: Enable Windows long paths and Git symlinks
         if: runner.os == 'Windows'
@@ -176,6 +178,14 @@ jobs:
           cargo test --locked --manifest-path "${runtime_root}/Cargo.toml" -p client
           cargo build --locked --release -p bridge-server --bin bridge-server
 
+      - name: Test the Local Apps service probe
+        working-directory: .
+        run: python scripts/tests/test_probe_local_app_service.py
+
+      - name: Verify the native Local Apps service
+        working-directory: .
+        run: python scripts/ci/probe_local_app_service.py
+
       - name: Test POSIX secure storage
         if: matrix.platform != 'win32'
         working-directory: .
@@ -190,6 +200,37 @@ jobs:
         run: |
           runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
           cargo test --locked --manifest-path "${runtime_root}/Cargo.toml" -p platform-windows --lib
+
+      - name: Test Windows Local App process ownership
+        if: matrix.platform == 'win32'
+        working-directory: .
+        shell: bash
+        run: |
+          cargo test --locked -p bridge-server --bin bridge-server local_app_process::tests -- --test-threads=1
+          cargo test --locked -p bridge-server --test local_app_process_windows
+
+      - name: Test Windows MCP cancellation and transport cleanup
+        if: matrix.platform == 'win32'
+        working-directory: .
+        shell: bash
+        run: |
+          set -o pipefail
+          test_log="$RUNNER_TEMP/windows-mcp-serve-tests.log"
+          cargo test --locked --all-features -p cli --test mcp_serve windows_ -- --test-threads=1 --color never | tee "$test_log"
+          tr -d '\r' < "$test_log" > "$test_log.normalized"
+          for test_name in \
+            windows_duplicate_call_cancellation_reaps_the_started_process_tree \
+            windows_full_stdout_does_not_block_cancellation_or_eof_cleanup \
+            windows_broken_stdout_cancels_open_stdin_and_reaps_the_running_shell; do
+            if ! grep -Fxq "test ${test_name} ... ok" "$test_log.normalized"; then
+              printf 'Required Windows MCP test did not pass: %s\n' "$test_name" >&2
+              exit 1
+            fi
+          done
+          if ! grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$test_log.normalized"; then
+            printf 'Windows MCP test summary did not report a clean run\n' >&2
+            exit 1
+          fi
 
       - name: Test public Windows file handle operations
         if: matrix.platform == 'win32'

@@ -56,6 +56,7 @@ internal fun Set<String>.withTaskStatus(taskId: String, status: TaskStatusDto): 
         TaskStatusDto.COMPLETED,
         TaskStatusDto.FAILED,
         TaskStatusDto.CANCELLED,
+        TaskStatusDto.EXITED_UNKNOWN,
         -> this - taskId
     }
 
@@ -186,4 +187,6 @@ internal fun taskStatusLine(
     } ?: strings.resolve(R.string.chat_task_status_failed, "后台任务 %1\$s 已失败", taskId)
     TaskStatusDto.CANCELLED ->
         strings.resolve(R.string.chat_task_status_cancelled, "后台任务 %1\$s 已取消", taskId)
+    TaskStatusDto.EXITED_UNKNOWN ->
+        strings.resolve(R.string.chat_task_exited_unknown_fmt, "后台任务 %1\$s 已结束，结果未知", taskId)
 }

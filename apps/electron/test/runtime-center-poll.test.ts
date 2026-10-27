@@ -49,6 +49,7 @@ test('hasInFlightTask is true only for pending/running/paused tasks', () => {
   assert.equal(hasInFlightTask([{ status: { type: 'paused' } }]), true);
   assert.equal(hasInFlightTask([{ status: { type: 'completed' } }]), false);
   assert.equal(hasInFlightTask([{ status: { type: 'failed' } }]), false);
+  assert.equal(hasInFlightTask([{ status: { type: 'exited_unknown' } }]), false);
   assert.equal(hasInFlightTask([]), false);
   assert.equal(
     hasInFlightTask([{ status: { type: 'completed' } }, { status: { type: 'running' } }]),

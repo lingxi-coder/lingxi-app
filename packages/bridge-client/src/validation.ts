@@ -87,6 +87,12 @@ function integer(value: unknown, name: string): number {
   return value as number;
 }
 
+function attachRequestId(value: unknown): string {
+  const id = string(value, 'turn attach request id');
+  if (new TextEncoder().encode(id).length > 128) throw new Error('invalid turn attach request id');
+  return id;
+}
+
 function optionalString(value: unknown, name: string): string | undefined {
   return value === undefined ? undefined : string(value, name);
 }
@@ -292,7 +298,7 @@ function taskRow(value: unknown): TaskRowDto {
   string(row['task_type'], 'task type');
   const status = object(row['status'], 'task status');
   exactKeys(status, ['type'], 'task status');
-  if (!['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(String(status['type']))) {
+  if (!['pending', 'running', 'paused', 'completed', 'failed', 'cancelled', 'exited_unknown'].includes(String(status['type']))) {
     throw new Error('invalid task status');
   }
   if (typeof row['description'] !== 'string') throw new Error('invalid task description');
@@ -1170,6 +1176,116 @@ export function validateClientEvent(value: unknown): ClientEvent {
   const input = object(value, 'client event');
   const type = string(input['type'], 'client event type');
   switch (type) {
+    case 'queued_turn_status': {
+      exactKeys(input, ['type', 'request_id', 'session_id', 'turn_id', 'status'], 'queued turn status');
+      attachRequestId(input['request_id']);
+      string(input['session_id'], 'queued turn session id');
+      const turnId = integer(input['turn_id'], 'queued turn id');
+      const status = object(input['status'], 'queued turn status');
+      const kind = string(status['type'], 'queued turn status type');
+      if (kind === 'delivered') {
+        exactKeys(status, ['type', 'batch_owner_turn_id', 'member_turn_ids', 'transcript_uuid'], 'delivered queued turn');
+        const owner = integer(status['batch_owner_turn_id'], 'queued turn batch owner');
+        if (!Array.isArray(status['member_turn_ids']) || status['member_turn_ids'].length === 0) {
+          throw new Error('invalid queued turn members');
+        }
+        const members = status['member_turn_ids'].map((id) => integer(id, 'queued turn member'));
+        if (members[0] !== owner || !members.includes(turnId) || new Set(members).size !== members.length) {
+          throw new Error('invalid queued turn members');
+        }
+        string(status['transcript_uuid'], 'queued turn transcript UUID');
+      } else if (kind === 'terminal') {
+        exactKeys(status, ['type', 'state'], 'terminal queued turn');
+        const state = object(status['state'], 'queued turn terminal state');
+        exactKeys(state, ['type'], 'queued turn terminal state');
+        if (!['completed', 'failed', 'cancelled'].includes(string(state['type'], 'queued turn terminal state'))) {
+          throw new Error('invalid queued turn terminal state');
+        }
+      } else {
+        exactKeys(status, ['type'], 'queued turn status');
+        if (!['pending', 'claimed_uncertain', 'cancelled', 'running'].includes(kind)) {
+          throw new Error('invalid queued turn status type');
+        }
+      }
+      return input as ClientEvent;
+    }
+    case 'turn_attach_started':
+      exactKeys(input, ['type', 'request_id', 'snapshot'], 'turn attach start');
+      attachRequestId(input['request_id']);
+      validateClientEvent({ type: 'turn_recovery_state', snapshot: input['snapshot'] });
+      return input as ClientEvent;
+    case 'turn_attach_finished':
+      exactKeys(input, ['type', 'request_id', 'session_id', 'turn_id'], 'turn attach finish');
+      attachRequestId(input['request_id']);
+      string(input['session_id'], 'turn attach session id');
+      integer(input['turn_id'], 'turn attach turn id');
+      return input as ClientEvent;
+    case 'mod_session_event': {
+      exactKeys(input, ['type', 'session_id', 'mod_turn_id', 'payload'], 'Mod session event');
+      string(input['session_id'], 'Mod session id');
+      if (input['mod_turn_id'] !== null) string(input['mod_turn_id'], 'Mod turn id');
+      const payload = object(input['payload'], 'Mod session payload');
+      const payloadType = string(payload['type'], 'Mod session payload type');
+      switch (payloadType) {
+        case 'notice':
+          exactKeys(payload, ['type', 'message', 'is_error'], 'Mod notice');
+          if (typeof payload['message'] !== 'string') throw new Error('invalid Mod notice message');
+          boolean(payload['is_error'], 'Mod notice error');
+          break;
+        case 'log':
+        case 'notify':
+        case 'toast':
+        case 'status':
+          exactKeys(payload, payloadType === 'toast'
+            ? ['type', 'plugin', 'text', 'timeout_ms']
+            : ['type', 'plugin', 'text'], 'Mod session payload');
+          string(payload['plugin'], 'Mod plugin');
+          if (typeof payload['text'] !== 'string' && !(payloadType === 'status' && payload['text'] === null)) {
+            throw new Error('invalid Mod session text');
+          }
+          if (payloadType === 'toast') integer(payload['timeout_ms'], 'Mod toast timeout');
+          break;
+        default:
+          throw new Error('invalid Mod session payload type');
+      }
+      return input as ClientEvent;
+    }
+    case 'turn_event_replay':
+    case 'turn_event_live_unretained': {
+      const sequenced = type === 'turn_event_replay';
+      exactKeys(input, sequenced
+        ? ['type', 'session_id', 'turn_id', 'sequence', 'event_json']
+        : ['type', 'session_id', 'turn_id', 'event_json'], 'turn event delivery');
+      string(input['session_id'], 'turn event session id');
+      integer(input['turn_id'], 'turn event turn id');
+      string(input['event_json'], 'turn event JSON');
+      if (sequenced && integer(input['sequence'], 'turn event sequence') === 0) {
+        throw new Error('invalid turn event sequence');
+      }
+      return input as ClientEvent;
+    }
+    case 'turn_recovery_state': {
+      exactKeys(input, ['type', 'snapshot'], 'turn recovery event');
+      const snapshot = object(input['snapshot'], 'turn recovery snapshot');
+      exactKeys(snapshot, ['session_id', 'turn_id', 'revision', 'state', 'first_sequence', 'last_sequence', 'safe_to_resume', 'projection_uncertain', 'reason'], 'turn recovery snapshot');
+      string(snapshot['session_id'], 'turn recovery session id');
+      integer(snapshot['turn_id'], 'turn recovery turn id');
+      integer(snapshot['revision'], 'turn recovery revision');
+      integer(snapshot['first_sequence'], 'turn recovery first sequence');
+      integer(snapshot['last_sequence'], 'turn recovery last sequence');
+      boolean(snapshot['safe_to_resume'], 'turn recovery safe to resume');
+      boolean(snapshot['projection_uncertain'], 'turn recovery projection uncertainty');
+      if (snapshot['reason'] !== undefined && typeof snapshot['reason'] !== 'string') {
+        throw new Error('invalid turn recovery reason');
+      }
+      const state = object(snapshot['state'], 'turn recovery state');
+      exactKeys(state, ['type'], 'turn recovery state');
+      const recoveryState = string(state['type'], 'turn recovery state');
+      if (!['running', 'waiting_for_user', 'paused_recoverable', 'completed', 'failed', 'cancelled'].includes(recoveryState)) {
+        throw new Error('invalid turn recovery state');
+      }
+      return input as ClientEvent;
+    }
     case 'workspace_changed': {
       exactKeys(input, ['type', 'state'], 'workspace event');
       const state = object(input['state'], 'workspace state');

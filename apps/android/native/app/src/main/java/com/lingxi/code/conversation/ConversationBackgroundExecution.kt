@@ -24,8 +24,10 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.TaskStatusDto
 import com.lingxi.code.bindings.client.TurnRecoveryStateDto
+import com.lingxi.code.bindings.client.TurnRecoverySnapshotDto
 import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.sessionModeFromWireValue
 import com.lingxi.code.notify.NotificationKind
 import com.lingxi.code.notify.NotificationPolicy
@@ -53,6 +55,12 @@ data class ConversationBackgroundSnapshot(
     /** True only while this source still owns a live engine turn executor. */
     val executorActive: Boolean = false,
 )
+
+internal fun recoveryMatchesBackgroundTurn(
+    recovery: TurnRecoverySnapshotDto,
+    background: ConversationBackgroundSnapshot,
+): Boolean = background.turnId == recovery.turnId.toLong() &&
+    canonicalSessionId(background.sessionId) == canonicalSessionId(recovery.sessionId)
 
 enum class ConversationBackgroundAlert {
     Completed,
@@ -883,7 +891,7 @@ internal object ConversationHeadlessRecovery {
                     )
                     if (event is ClientEvent.TurnRecoveryState && turnId != null) {
                         val recovery = event.snapshot
-                        if (recovery.turnId.toLong() != turnId) return@collect
+                        if (!recoveryMatchesBackgroundTurn(recovery, snapshot)) return@collect
                         owner.turnAttached.complete(Unit)
                         observedRecoverySignal.set(true)
                         val stateIndex = recoveryStateCount.incrementAndGet()
@@ -976,7 +984,7 @@ internal object ConversationHeadlessRecovery {
                             activeTaskIds.remove(taskStatus.first)
                             alerts.notifyPausedRecoverable(current)
                         }
-                        TaskStatusDto.CANCELLED -> activeTaskIds.remove(taskStatus.first)
+                        TaskStatusDto.CANCELLED, TaskStatusDto.EXITED_UNKNOWN -> activeTaskIds.remove(taskStatus.first)
                     }
                     if (activeTaskIds.isEmpty() && (turnId == null || recoveryStateCount.get() > 0L)) {
                         settle(spec.scopeKey, context)

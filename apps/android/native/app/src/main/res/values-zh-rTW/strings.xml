@@ -120,7 +120,7 @@
     <string name="chat_error_connect_failed">無法連線模型服務。請檢查當前網路或 VPN 後重試。</string>
     <string name="chat_error_connect_timeout">連線模型服務逾時。請檢查當前網路或 VPN 後重試。</string>
     <string name="chat_error_discard_background_failed">捨棄背景對話失敗：%1$s</string>
-    <string name="chat_error_discard_unconfirmed">背景對話的捨棄未獲確認，已解除該對話的鎖定。</string>
+    <string name="chat_error_discard_unconfirmed">暫時無法確認背景對話已停止，請重試。</string>
     <string name="chat_error_dns">無法解析模型服務地址。請檢查 VPN、私人 DNS 或當前網路後重試。</string>
     <string name="chat_error_engine_reconnect_failed">引擎重連失敗：%1$s</string>
     <string name="chat_error_engine_submit_failed">引擎錯誤：%1$s</string>
@@ -231,6 +231,7 @@
     <string name="chat_status_cancelled">已取消</string>
     <string name="chat_status_completed">已完成</string>
     <string name="chat_status_failed">失敗</string>
+    <string name="chat_status_exited_unknown">已結束，結果未知</string>
     <string name="chat_status_max_turns">達到上限</string>
     <string name="chat_status_new_project_session">正在新建專案會話…</string>
     <string name="chat_status_new_session">正在新建會話…</string>
@@ -240,6 +241,7 @@
     <string name="chat_status_resuming_project_session">正在恢復專案會話…</string>
     <string name="chat_status_resuming_session">正在恢復會話…</string>
     <string name="chat_status_running">執行中</string>
+    <string name="chat_task_exited_unknown_fmt">背景任務 %1$s 已結束，結果未知</string>
     <string name="chat_status_timed_out">逾時</string>
     <string name="chat_status_unknown">未知</string>
     <string name="chat_stopping">正在停止…</string>
@@ -2488,4 +2490,11 @@
     <string name="remote_file_upload">上傳原始檔案</string>
     <string name="remote_file_uploading">正在上傳至電腦…</string>
     <string name="remote_files">檔案</string>
+    <string name="chat_recovery_replay_gap">對話恢復不完整，請重新開啟對話。</string>
+    <string name="chat_recovery_projection_uncertain">部分執行內容可能未恢復，請檢查後繼續。</string>
+    <string name="chat_recovery_unknown">暫時無法確認操作狀態，請重試。</string>
+    <string name="chat_recovery_not_found">找不到此執行記錄，請檢查對話後繼續。</string>
+    <string name="chat_recovery_reviewed">我已檢查</string>
+    <string name="chat_queued_cancelled">一則排隊輸入已取消，請檢查對話。</string>
+    <string name="chat_recovery_storage_failed">無法儲存對話恢復狀態，請重新啟動應用程式後檢查對話。</string>
 </resources>

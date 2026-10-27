@@ -24,11 +24,12 @@ import XCTest
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: "",
-                appSandboxRoot: NSTemporaryDirectory(),
+                appSandboxRoot: FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true).path,
                 sessionMode: .code,
                 visionDelegationEnabled: true
             )
-            return EngineConversationSource(config: config)
+            return EngineConversationSource(config: config, recoveryStoreRootForTesting: config.appSandboxRoot)
         }
 
         private func request(
@@ -117,10 +118,12 @@ import XCTest
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: 4,
+                revision: 1,
                 state: .waitingForUser,
                 firstSequence: 0,
                 lastSequence: 0,
                 safeToResume: false,
+                projectionUncertain: false,
                 reason: "question"
             )))
 

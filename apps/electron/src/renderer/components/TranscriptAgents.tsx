@@ -31,6 +31,7 @@ function agentStatusText(status: string): string {
     case 'waiting_for_input': return tr('desktop_ui_agent_waiting');
     case 'pending': return tr('chat_plan_state_pending');
     case 'cancelled': return tr('chat_status_cancelled');
+    case 'exited_unknown': return tr('chat_status_exited_unknown');
     case 'killed': return tr('desktop_ui_agent_killed');
     case 'idle': return tr('remote_status_idle');
     default: return shown ? shown[0].toUpperCase() + shown.slice(1).replace(/_/g, ' ') : tr('voice_permission_unknown_label');

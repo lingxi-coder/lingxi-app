@@ -229,4 +229,5 @@ private fun workflowTaskStatusLabel(status: TaskStatusDto): String = when (statu
     TaskStatusDto.COMPLETED -> stringResource(R.string.chat_run_status_completed)
     TaskStatusDto.FAILED -> stringResource(R.string.chat_run_status_failed)
     TaskStatusDto.CANCELLED -> stringResource(R.string.chat_run_status_cancelled)
+    TaskStatusDto.EXITED_UNKNOWN -> stringResource(R.string.chat_status_exited_unknown)
 }

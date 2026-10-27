@@ -255,6 +255,7 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
     send_frame(
         &mut ws,
         &submit(&ClientCommand::SendPrompt {
+            session_id: None,
             text: "hello".into(),
             prompt_mode: None,
             images: Vec::new(),

@@ -498,6 +498,13 @@ export const runtimeCatalog: Record<string, Record<string, string>> = {
     "ja": "%1$d 件失敗",
     "ko": "%1$d개 실패"
   },
+  "desktop_runtime_count_exited_unknown": {
+    "en": "%1$d exited; result unknown",
+    "zh-Hans": "%1$d 项已结束，结果未知",
+    "zh-Hant": "%1$d 項已結束，結果未知",
+    "ja": "%1$d 件終了（結果不明）",
+    "ko": "%1$d개 종료됨(결과 알 수 없음)"
+  },
   "desktop_runtime_count_idle": {
     "en": "%1$d idle",
     "zh-Hans": "%1$d 项空闲",

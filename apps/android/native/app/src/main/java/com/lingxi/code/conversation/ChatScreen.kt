@@ -44,6 +44,7 @@ import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -170,6 +171,8 @@ fun ChatScreen(
     onShare: (String) -> Unit = {},
     onStop: () -> Unit = {},
     onDiscardRecoveredTurn: () -> Unit = {},
+    onRetryDurableRecovery: () -> Unit = {},
+    onAcknowledgeTerminalRecovery: () -> Unit = {},
     onDismissError: () -> Unit = {},
     onDismissCompactRejection: () -> Unit = {},
     /** True to surface the dismissible offline banner above the composer. */
@@ -463,10 +466,34 @@ fun ChatScreen(
                 ModelSetupBanner(onOpenModelSettings = onOpenModelSettings)
             }
             // Match iOS: one runtime footer, with execution details in summary sheets.
-            state.compaction?.let { CompactionProgressRow(it) }
-                ?: state.error?.takeUnless { modelSetupRequired }?.let {
-                    ErrorBanner(error = it, onDismiss = onDismissError)
+            if (state.recoveryStorageFailed) {
+                Text(stringResource(R.string.chat_recovery_storage_failed),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.error)
+            } else {
+                state.compaction?.let { CompactionProgressRow(it) }
+                    ?: state.error?.takeUnless { modelSetupRequired }?.let {
+                        ErrorBanner(error = it, onDismiss = onDismissError)
+                    }
+                val recoveryMessage = when {
+                    state.recoveryRetryAvailable -> R.string.chat_recovery_unknown
+                    state.terminalRecoveryUncertain || state.queuedRecoveryWarning -> R.string.chat_recovery_projection_uncertain
+                    else -> null
                 }
+                recoveryMessage?.let {
+                    Text(stringResource(it), modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp))
+                }
+                if (state.queuedCancellationNotice) {
+                    Text(stringResource(R.string.chat_queued_cancelled),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp))
+                }
+            }
+            if (state.recoveryRetryAvailable) {
+                TextButton(onClick = onRetryDurableRecovery) { Text(stringResource(R.string.common_retry)) }
+            }
+            if (state.terminalRecoveryReviewAvailable) {
+                TextButton(onClick = onAcknowledgeTerminalRecovery) { Text(stringResource(R.string.chat_recovery_reviewed)) }
+            }
             if (audioGuidance != null) {
                 AudioSetupBanner(audioGuidance, onOpenVoiceSettings, onDismissAudioGuidance)
             } else {
@@ -526,11 +553,11 @@ fun ChatScreen(
                 visualizationChip = state.visualizationChip,
                 onRemoveVisualizationChip = onRemoveVisualizationChip,
                 isStreaming = state.isStreaming && sideChatInput(draft) == null,
-                showDiscardRecovery = state.durableRecoveryBlocked,
-                enabled = (sideChatInput(draft) != null || !state.durableRecoveryBlocked) &&
+                showDiscardRecovery = state.durableRecoveryBlocked && !state.recoveryStorageFailed,
+                enabled = !state.recoveryStorageFailed && (sideChatInput(draft) != null || !state.durableRecoveryBlocked) &&
                     (modelSetupRequired || (state.sessionReady && !state.sessionTransitioning)),
                 // Loading preserves the live editor's selection and IME composition.
-                inputEnabled = !state.durableRecoveryBlocked,
+                inputEnabled = !state.durableRecoveryBlocked && !state.recoveryStorageFailed,
                 modelSetupRequired = modelSetupRequired,
                 onOpenModelSettings = onOpenModelSettings,
                 modelProviderStatuses = modelProviderStatuses,

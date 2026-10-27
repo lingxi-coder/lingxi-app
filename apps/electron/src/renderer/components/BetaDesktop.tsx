@@ -4076,7 +4076,7 @@ export function BetaTasks({ bridge, onClose }: { bridge: UseBridge; onClose(): v
                 <span className="background-task-row-heading">
                   <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 99, background: color, flexShrink: 0 }} />
                   <strong style={{ fontSize: 11.5 }}>{task.task_type}</strong>
-                  <span className={running ? 'running-sweep' : undefined} style={{ marginLeft: 'auto', color, fontSize: 10 }}>{tr(({ pending: 'chat_plan_state_pending', running: 'chat_status_running', completed: 'chat_status_completed', failed: 'chat_status_failed', cancelled: 'chat_status_cancelled', killed: 'chat_run_status_cancelled' } as Record<string, string>)[task.status.type] ?? task.status.type)}</span>
+                  <span className={running ? 'running-sweep' : undefined} style={{ marginLeft: 'auto', color, fontSize: 10 }}>{tr(({ pending: 'chat_plan_state_pending', running: 'chat_status_running', completed: 'chat_status_completed', failed: 'chat_status_failed', cancelled: 'chat_status_cancelled', killed: 'chat_run_status_cancelled', exited_unknown: 'chat_status_exited_unknown' } as Record<string, string>)[task.status.type] ?? task.status.type)}</span>
                 </span>
                 <span className={running ? 'background-task-row-description running-sweep' : 'background-task-row-description'}>{task.description}</span>
               </button>

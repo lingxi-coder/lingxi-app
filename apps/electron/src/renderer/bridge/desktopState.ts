@@ -34,6 +34,8 @@ export interface DesktopState {
   readonly permissionMode: PermissionModeId;
   readonly slashCommands: SlashCommandDto[];
   readonly tasks: Readonly<Record<string, TaskRowDto>>;
+  /** Absorbing unknown exits, retained across task-list refreshes. */
+  readonly exitedUnknownTaskIds: ReadonlySet<string>;
   readonly taskOutput: Readonly<Record<string, TaskOutputState>>;
   readonly status: StatusSnapshotDto | null;
   readonly doctor: DoctorReportDto | null;
@@ -71,6 +73,7 @@ export function emptyDesktopState(): DesktopState {
     permissionMode: 'auto',
     slashCommands: [],
     tasks: {},
+    exitedUnknownTaskIds: new Set(),
     taskOutput: {},
     status: null,
     doctor: null,
@@ -164,14 +167,24 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
       };
     case 'compaction_completed':
       return { ...state, lastCompaction: event };
-    case 'task_row':
-      return { ...state, tasks: { ...state.tasks, [event.task.task_id]: event.task } };
+    case 'task_row': {
+      const id = event.task.task_id;
+      const exitedUnknown = event.task.status.type === 'exited_unknown' || state.exitedUnknownTaskIds.has(id);
+      const exitedUnknownTaskIds = exitedUnknown && !state.exitedUnknownTaskIds.has(id)
+        ? new Set([...state.exitedUnknownTaskIds, id]) : state.exitedUnknownTaskIds;
+      const task: TaskRowDto = exitedUnknown ? { ...event.task, status: { type: 'exited_unknown' } } : event.task;
+      return { ...state, exitedUnknownTaskIds, tasks: { ...state.tasks, [id]: task } };
+    }
     case 'task_status_changed': {
       const task = state.tasks[event.task_id];
-      if (!task) return state;
+      const exitedUnknown = event.status.type === 'exited_unknown' || state.exitedUnknownTaskIds.has(event.task_id);
+      const exitedUnknownTaskIds = exitedUnknown && !state.exitedUnknownTaskIds.has(event.task_id)
+        ? new Set([...state.exitedUnknownTaskIds, event.task_id]) : state.exitedUnknownTaskIds;
+      if (!task) return exitedUnknownTaskIds === state.exitedUnknownTaskIds ? state : { ...state, exitedUnknownTaskIds };
       return {
         ...state,
-        tasks: { ...state.tasks, [event.task_id]: { ...task, status: event.status } },
+        exitedUnknownTaskIds,
+        tasks: { ...state.tasks, [event.task_id]: { ...task, status: exitedUnknown ? { type: 'exited_unknown' } : event.status } },
       };
     }
     case 'task_output_chunk':
@@ -226,6 +239,7 @@ export function orderedTasks(state: DesktopState): TaskRowDto[] {
     ['running', 0],
     ['pending', 1],
     ['failed', 2],
+    ['exited_unknown', 3],
     ['completed', 3],
     ['cancelled', 4],
   ]);

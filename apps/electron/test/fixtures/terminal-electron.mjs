@@ -29,7 +29,9 @@ async function main() {
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'A' }); window.webContents.sendInputEvent({ type: 'char', keyCode: 'a' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'A' });
     await wait('window.terminalFixture.state().inputs.length > 0'); result.inputWorks = true;
     await run(`(() => { const textarea = document.querySelector('.xterm-helper-textarea'); textarea.value = ''; textarea.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })); textarea.value = '你好'; textarea.dispatchEvent(new CompositionEvent('compositionupdate', { data: '你好', bubbles: true })); textarea.dispatchEvent(new CompositionEvent('compositionend', { data: '你好', bubbles: true })); })()`);
-    await delay(50);
+    // xterm commits a composition on a later task. Do not send the next key
+    // before those actual UTF-8 characters have reached the terminal bridge.
+    await wait(`window.terminalFixture.state().inputs.map(item => item.data).join('').includes('你好')`);
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'C', modifiers: ['control'] });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'C', modifiers: ['control'] });
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });

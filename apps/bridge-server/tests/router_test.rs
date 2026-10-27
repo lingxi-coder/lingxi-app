@@ -1841,6 +1841,7 @@ async fn slash_command_routes_to_registry() {
     send_command(
         &mut ws,
         &ClientCommand::RunSlashCommand {
+            session_id: None,
             raw: "/clear".into(),
             images: Vec::new(),
             turn_id: Some(7),
@@ -2178,6 +2179,7 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
     send_command(
         &mut ws,
         &ClientCommand::RunSlashCommand {
+            session_id: None,
             raw: "/install".into(),
             images: Vec::new(),
             turn_id: Some(9),
@@ -4485,21 +4487,35 @@ async fn durable_turn_recovery_commands_are_explicitly_rejected_not_silently_dro
     let cases: Vec<(ClientCommand, &str)> = vec![
         (
             ClientCommand::AttachTurn {
+                session_id: "test-session".to_string(),
+                request_id: "test-attach".to_string(),
                 turn_id: 7,
                 after_sequence: Some(3),
             },
             "attach_turn is unavailable on this bridge",
         ),
         (
-            ClientCommand::ResumeTurn { turn_id: 7 },
+            ClientCommand::ResumeTurn {
+                session_id: "test-session".to_string(),
+                turn_id: 7,
+            },
             "resume_turn is unavailable on this bridge",
         ),
         (
             ClientCommand::PauseTurn {
+                session_id: "test-session".to_string(),
                 turn_id: 7,
                 reason: "background_time_expired".to_string(),
             },
             "pause_turn is unavailable on this bridge",
+        ),
+        (
+            ClientCommand::QueryQueuedTurn {
+                session_id: "test-session".to_string(),
+                turn_id: 7,
+                request_id: "test-query".to_string(),
+            },
+            "query_queued_turn is unavailable on this bridge",
         ),
     ];
 
@@ -4537,6 +4553,8 @@ async fn attach_turn_without_a_sequence_is_rejected_the_same_way() {
     router
         .route(
             ClientCommand::AttachTurn {
+                session_id: "test-session".to_string(),
+                request_id: "test-attach".to_string(),
                 turn_id: 1,
                 after_sequence: None,
             },

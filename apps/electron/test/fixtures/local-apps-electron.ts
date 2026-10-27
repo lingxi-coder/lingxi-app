@@ -1,4 +1,4 @@
-import { LocalAppCoreClient } from '../../src/main/local-apps/coreClient';
+import { tracedLocalAppCore } from './local-app-core-diagnostics';
 import { resolveServerBin } from '../../src/main/bridgeDiscovery';
 import { app, BrowserWindow, protocol, dialog, session, type Session } from 'electron';
 import assert from 'node:assert/strict';
@@ -34,7 +34,7 @@ async function main() {
     const canonical = await fs.realpath(source.projectPath);
     return { sourceDirectory: canonical, projectRef: { kind: 'desktopPath' as const, path: canonical }, authoringSessionId: ref.sessionId };
   };
-  const createHost = () => new LocalAppHost({ configHome, core: new LocalAppCoreClient(resolveServerBin(), configHome), preload: join(root, 'localApp.cjs'),
+  const createHost = () => new LocalAppHost({ configHome, core: tracedLocalAppCore(resolveServerBin(), configHome, trace), preload: join(root, 'localApp.cjs'),
     nodeExecutable: process.execPath, mainWindow: () => library, edit: async () => undefined, resolveAuthoringBinding });
   let discovery: { port: number; token: string };
   let url: string;

@@ -174,7 +174,7 @@ Return a keyed answer set for an interactive questionnaire, or cancel the pendin
 
 ## Wire contract and version handshake
 
-The current working-tree constants are BRIDGE_PROTOCOL_VERSION = 0.2.0 and CLIENT_PROTOCOL_VERSION = 29.0.0. Rust is the contract source; the TypeScript DTO file mirrors it. The envelope and DTO contract are checked independently, each requiring the same numeric major version. Malformed or mismatched versions refuse hello and bar later commands; server hello rejection uses wire error code -32600.
+The current working-tree constants are BRIDGE_PROTOCOL_VERSION = 0.2.0 and CLIENT_PROTOCOL_VERSION = 30.0.0. Rust is the contract source; the TypeScript DTO file mirrors it. The envelope and DTO contract are checked independently, each requiring the same numeric major version. Malformed or mismatched versions refuse hello and bar later commands; server hello rejection uses wire error code -32600.
 
 Frame is adjacent-tagged as type/payload; ClientCommand and ClientEvent are internally tagged with snake_case type values. Optional fields may be absent. Tool input_json/result_json payloads remain JSON strings, so clients must parse the contents deliberately and must not change their wire representation to objects. The mcp path/subprotocol names do not make product commands ordinary MCP tools/list or tools/call requests.
 
@@ -203,7 +203,7 @@ Transport framing is separate from the shared ClientCommand / ClientEvent contra
         "supports_tools": true,
         "supports_skills": true,
         "supports_commands": true,
-        "client_protocol_version": "29.0.0"
+        "client_protocol_version": "30.0.0"
       }
     }
   }

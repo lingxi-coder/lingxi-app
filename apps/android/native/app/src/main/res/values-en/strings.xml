@@ -120,7 +120,7 @@
     <string name="chat_error_connect_failed">Couldn\'t connect to the model service. Check your current network or VPN, then try again.</string>
     <string name="chat_error_connect_timeout">Connecting to the model service timed out. Check your current network or VPN, then try again.</string>
     <string name="chat_error_discard_background_failed">Failed to discard the background conversation: %1$s</string>
-    <string name="chat_error_discard_unconfirmed">The discard was never confirmed. The conversation has been unblocked.</string>
+    <string name="chat_error_discard_unconfirmed">Could not confirm that the background conversation stopped. Please retry.</string>
     <string name="chat_error_dns">Couldn\'t resolve the model service address. Check your VPN, private DNS, or current network, then try again.</string>
     <string name="chat_error_engine_reconnect_failed">Engine reconnect failed: %1$s</string>
     <string name="chat_error_engine_submit_failed">Engine error: %1$s</string>
@@ -231,6 +231,7 @@
     <string name="chat_status_cancelled">Cancelled</string>
     <string name="chat_status_completed">Completed</string>
     <string name="chat_status_failed">Failed</string>
+    <string name="chat_status_exited_unknown">Exited; result unknown</string>
     <string name="chat_status_max_turns">Limit Reached</string>
     <string name="chat_status_new_project_session">Starting a new project session…</string>
     <string name="chat_status_new_session">Starting a new session…</string>
@@ -240,6 +241,7 @@
     <string name="chat_status_resuming_project_session">Resuming project session…</string>
     <string name="chat_status_resuming_session">Resuming session…</string>
     <string name="chat_status_running">Running</string>
+    <string name="chat_task_exited_unknown_fmt">Background task %1$s exited; result unknown</string>
     <string name="chat_status_timed_out">Timed Out</string>
     <string name="chat_status_unknown">Unknown</string>
     <string name="chat_stopping">Stopping…</string>
@@ -2488,4 +2490,11 @@
     <string name="remote_file_upload">Upload file</string>
     <string name="remote_file_uploading">Sending to computer…</string>
     <string name="remote_files">Files</string>
+    <string name="chat_recovery_replay_gap">The conversation could not be fully restored. Please reopen it.</string>
+    <string name="chat_recovery_projection_uncertain">Some run content may not have been restored. Please review it before continuing.</string>
+    <string name="chat_recovery_unknown">The status of the operation could not be confirmed. Please retry.</string>
+    <string name="chat_recovery_not_found">The run could not be found. Please review the conversation before continuing.</string>
+    <string name="chat_recovery_reviewed">I have reviewed</string>
+    <string name="chat_queued_cancelled">A queued message was cancelled. Please review the conversation.</string>
+    <string name="chat_recovery_storage_failed">Recovery state could not be saved. Restart the app and review the conversation.</string>
 </resources>

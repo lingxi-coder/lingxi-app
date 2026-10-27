@@ -107,8 +107,9 @@ pub fn rebuild_from_jsonl(messages: &[session::jsonl::JsonlMessage]) -> Vec<Rend
     rebuild_from_jsonl_impl(messages, false)
 }
 
-/// Seed fullscreen selection with the persisted transcript UUID of ordinary
-/// user and assistant text rows. Tool rows use their tool-use ID instead.
+/// Seed rendered rows with their persisted JSONL UUID so they can be located
+/// and removed. Fullscreen selection uses the UUID for ordinary rows and the
+/// tool-use ID for tool calls and results.
 #[must_use]
 pub fn rebuild_from_jsonl_with_request_ids(
     messages: &[session::jsonl::JsonlMessage],
@@ -746,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn jsonl_selection_uses_top_level_uuid_only_for_prose_rows() {
+    fn jsonl_prose_rows_retain_their_persisted_uuids() {
         let user = jsonl("user", &serde_json::json!("hello"));
         let user_uuid = user.uuid.clone();
         let assistant = jsonl("assistant", &serde_json::json!("answer"));
@@ -865,9 +866,8 @@ mod tests {
     #[test]
     fn jsonl_tool_use_then_result_groups_by_id() {
         let id = ToolUseId::new();
-        // The persisted transcript serializes a `ToolUseId` via its derived
-        // `Serialize` (a bare UUID), NOT its `tu:`-prefixed `Display`. Build the
-        // fixture id the same way the engine writes it so the decode round-trips.
+        // Serialize the ID as the engine does so the fixture exercises the
+        // persisted JSONL decode path.
         let id_wire = serde_json::to_value(id.clone()).unwrap();
         let msgs = vec![
             jsonl(
@@ -887,6 +887,7 @@ mod tests {
             ),
         ];
         let identified = rebuild_from_jsonl_with_request_ids(&msgs);
+        assert_eq!(identified.len(), 3);
         assert!(matches!(
             &identified[0],
             RenderedMessage::IdentifiedTranscriptRow { message, request_id }
@@ -895,12 +896,74 @@ mod tests {
         ));
         assert!(matches!(
             &identified[1],
-            RenderedMessage::AssistantToolUse { .. }
+            RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+                if request_id == &msgs[0].uuid
+                    && matches!(message.as_ref(), RenderedMessage::AssistantToolUse { id: gid, tool, .. }
+                        if *gid == id && tool == "Read")
         ));
         assert!(matches!(
             &identified[2],
-            RenderedMessage::UserToolResult { .. }
+            RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+                if request_id == &msgs[1].uuid
+                    && matches!(message.as_ref(), RenderedMessage::UserToolResult { id: gid, tool, result, .. }
+                        if *gid == id && tool == "Read" && result == &serde_json::json!("file body"))
         ));
+
+        // Persisted row UUIDs anchor deep links and tombstones, while selecting
+        // a tool cell must still report the shared tool-use ID.
+        let theme = tui_core::theme::Theme::dark();
+        let mut call_only =
+            crate::transcript::Transcript::from_messages(vec![identified[1].clone()]);
+        let call_start = call_only
+            .message_line_offset(&msgs[0].uuid, 80, &theme, false, None)
+            .expect("tool call UUID is an anchor");
+        assert_eq!(
+            call_only.request_id_for_fullscreen_rows_at(
+                0,
+                0,
+                1,
+                80,
+                &theme,
+                false,
+                None,
+                Some(call_start)
+            ),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            call_only.remove_transcript_rows(std::slice::from_ref(&msgs[0].uuid)),
+            1
+        );
+
+        let mut transcript = crate::transcript::Transcript::from_messages(identified);
+        let result_start = transcript
+            .message_line_offset(&msgs[1].uuid, 80, &theme, false, None)
+            .expect("tool result UUID is an anchor");
+        assert_eq!(
+            transcript.request_id_for_fullscreen_rows_at(
+                0,
+                0,
+                1,
+                80,
+                &theme,
+                false,
+                None,
+                Some(result_start)
+            ),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            transcript.remove_transcript_rows(std::slice::from_ref(&msgs[1].uuid)),
+            1
+        );
+        assert!(transcript
+            .message_line_offset(&msgs[1].uuid, 80, &theme, false, None)
+            .is_none());
+        assert_eq!(
+            transcript.remove_transcript_rows(std::slice::from_ref(&msgs[0].uuid)),
+            2
+        );
+
         let out = rebuild_from_jsonl(&msgs);
         assert_eq!(out.len(), 3);
         assert!(

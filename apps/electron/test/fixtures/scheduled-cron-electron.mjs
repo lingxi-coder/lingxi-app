@@ -84,6 +84,9 @@ async function main() {
     await delay(50);
     const selectedDay = await run(`document.querySelector('dialog[open] button[aria-pressed="true"]').getAttribute('aria-label')`);
     picker.monthRollover = selectedDay.endsWith('-01') && selectedDay.slice(0, 7) !== lastDay.slice(0, 7);
+    // Focus is restored on the next animation frame after the new month is
+    // rendered; that frame can take longer than 50 ms on a hosted runner.
+    await wait(`document.activeElement?.getAttribute("aria-label") === ${JSON.stringify(selectedDay)}`);
     picker.calendarFocus = await run('document.activeElement?.getAttribute("aria-label")') === selectedDay;
     await clickLabel('Previous month');
     picker.previousMonth = await run(`Boolean(document.querySelector('dialog[open] button[aria-label="${lastDay}"]'))`);

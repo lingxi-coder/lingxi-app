@@ -10,6 +10,15 @@ import org.junit.Test
 
 class WorkflowProgressTest {
     @Test
+    fun unknownExitIsTerminalAndDoesNotClaimSuccessOrFailure() {
+        val status = TaskStatusDto.EXITED_UNKNOWN
+        assertTrue(!status.isActivelyExecutingWorkflow())
+        assertTrue(status.isAttentionStatus())
+        assertEquals(emptySet<String>(), setOf("task-1").withTaskStatus("task-1", status))
+        assertEquals("后台任务 task-1 已结束，结果未知", taskStatusLine("task-1", status))
+    }
+
+    @Test
     fun terminalAgentRejectsLateProgress() {
         val started = update(
             sessionId = "session-a",

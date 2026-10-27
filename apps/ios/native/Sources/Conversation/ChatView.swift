@@ -49,6 +49,8 @@ struct ChatView: View {
 
     @State private var latestMessageRequestRevision: UInt64 = 0
     @State private var pendingAgentDetailID: String?
+    @State private var recoveryEvidenceReviewSnapshot: [ConversationRecoveryEvidence] = []
+    @State private var showRecoveryEvidenceConfirmation = false
 
     // Composer draft, HOISTED up to RootView (the iOS analog of Android
     // RootScreen's `draft`) so a hold-to-talk transcription can route its
@@ -898,18 +900,56 @@ struct ChatView: View {
     /// available in a native sheet. Durable completion remains silent.
     @ViewBuilder
     private var runtimeFooter: some View {
-        switch runtimeFooterState {
-        case .hidden:
-            EmptyView()
-        case let .compaction(status):
-            CompactionRuntimeFooter(status: status)
-        case let .error(message):
-            RuntimeErrorBanner(
-                title: runtimeErrorTitle(message),
-                message: message,
-                onDismiss: dismissRuntimeError
-            )
-            .id(message)
+        VStack(spacing: 0) {
+            switch runtimeFooterState {
+            case .hidden:
+                EmptyView()
+            case let .compaction(status):
+                CompactionRuntimeFooter(status: status)
+            case let .error(message):
+                RuntimeErrorBanner(
+                    title: runtimeErrorTitle(message),
+                    message: message,
+                    onDismiss: dismissRuntimeError
+                )
+                .id(message)
+            }
+            if !convo.recoveryEvidenceForReview.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.circle")
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(String(format: String(localized: "chat_recovery_warning_count %@"),
+                                    convo.recoveryEvidenceForReview.count.formatted()))
+                        if convo.recoveryEvidenceForReview.contains(where: { $0.projectionUncertain || $0.liveOnlyOutput }) {
+                            Text("chat_recovery_projection_uncertain")
+                        }
+                        if convo.recoveryEvidenceForReview.contains(where: { $0.queuedCancelled == true }) {
+                            Text("chat_queued_cancelled")
+                        }
+                    }
+                    .font(.callout)
+                    Spacer(minLength: 8)
+                    Button("chat_recovery_review_button") {
+                        recoveryEvidenceReviewSnapshot = convo.recoveryEvidenceForReview
+                        showRecoveryEvidenceConfirmation = true
+                    }
+                    .font(.callout.weight(.semibold))
+                    .accessibilityIdentifier("conversation.recovery.review")
+                }
+                .foregroundStyle(t.text2)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+            }
+        }
+        .alert("chat_recovery_review_title", isPresented: $showRecoveryEvidenceConfirmation) {
+            Button("common_cancel", role: .cancel) { recoveryEvidenceReviewSnapshot = [] }
+            Button("chat_recovery_review_confirm") {
+                source.acknowledgeRecoveryEvidence(recoveryEvidenceReviewSnapshot)
+                recoveryEvidenceReviewSnapshot = []
+            }
+        } message: {
+            Text(String(format: String(localized: "chat_recovery_review_message %@"),
+                        recoveryEvidenceReviewSnapshot.count.formatted()))
         }
     }
 

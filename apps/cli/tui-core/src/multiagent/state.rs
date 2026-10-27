@@ -37,6 +37,8 @@ pub struct TaskRow {
     /// Host-owned terminal failure detail, when one was reported. Values from
     /// the registry are sanitized before they reach the TUI.
     pub error: Option<String>,
+    /// Nonterminal observation failure, sanitized at the presentation boundary.
+    pub observation_error: Option<String>,
 }
 
 /// Maximum number of display characters retained for a task stage/error line.

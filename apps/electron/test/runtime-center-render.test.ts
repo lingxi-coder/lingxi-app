@@ -26,6 +26,7 @@ import type { MessageDto, TaskRowDto } from '@lingxi/bridge-client';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import { TaskDetail } from '../src/renderer/components/RuntimeCenter';
+import { BetaTasks } from '../src/renderer/components/BetaDesktop';
 import type { UseBridge } from '../src/renderer/bridge/bridgeTypes.js';
 
 function render(node: React.ReactElement): string {
@@ -38,6 +39,17 @@ function render(node: React.ReactElement): string {
 // member it touches is behind a defined `task`, which the tests below always
 // supply.
 const EMPTY_BRIDGE = { desktop: { taskOutput: {} } } as unknown as UseBridge;
+
+test('the task sidebar labels an unknown exit and does not offer stop', () => {
+  const desktop = {
+    ...emptyDesktopState(),
+    tasks: { shell: { task_id: 'shell', task_type: 'local_bash', status: { type: 'exited_unknown' }, description: 'Build' } },
+  };
+  const bridge = { desktop, refreshTasks: () => {}, taskOutput: () => {}, stopTask: () => {} } as unknown as UseBridge;
+  const html = render(React.createElement(BetaTasks, { bridge, onClose: () => {} }));
+  assert.match(html, /Exited; result unknown/);
+  assert.doesNotMatch(html, /background-task-stop/);
+});
 
 const FUSION_TASK: TaskRowDto = {
   task_id: 'f00000001',
@@ -358,6 +370,7 @@ test('finished agents and tasks render claude-code labels, and the summary still
     a0000002: { task_id: 'a0000002', task_type: 'local_agent', status: { type: 'completed' }, description: 'Audit mcp parity' },
     b0000003: { task_id: 'b0000003', task_type: 'local_bash', status: { type: 'failed' }, description: 'grep flag' },
     b0000004: { task_id: 'b0000004', task_type: 'local_bash', status: { type: 'cancelled' }, description: 'stopped sweep' },
+    b0000005: { task_id: 'b0000005', task_type: 'local_bash', status: { type: 'exited_unknown' }, description: 'unknown result' },
   } as unknown as Record<string, TaskRowDto>;
   const active = { kind: 'section', id: 'agents' } as const;
   const bridge = {
@@ -371,6 +384,7 @@ test('finished agents and tasks render claude-code labels, and the summary still
   assert.ok(html.includes('done, unread'), `an unsurfaced completion keeps claude-code's ", unread": ${html}`);
   assert.ok(html.includes('>error<'), `a failed background shell reads "error": ${html}`);
   assert.ok(html.includes('>stopped<'), `a cancelled background shell reads "stopped": ${html}`);
+  assert.ok(html.includes('>Exited; result unknown<'), `an unknown exit must keep its distinct outcome: ${html}`);
   assert.ok(!html.includes('>idle<'), `"idle" is the footer group's word, never a row's: ${html}`);
   assert.ok(!html.includes('>completed<'), `the machine status is not what the user reads: ${html}`);
 
@@ -382,6 +396,7 @@ test('finished agents and tasks render claude-code labels, and the summary still
   }));
   assert.ok(overview.includes('Background processes') && overview.includes('done, unread') && overview.includes('stopped'));
   assert.ok(overview.includes('1 done'), `subagent summary counts raw statuses: ${overview}`);
+  assert.ok(overview.includes('Exited; result unknown'), `unknown task exits retain their distinct label: ${overview}`);
 });
 
 test('summary removes Context and Changes and separates side questions from subagents', () => {

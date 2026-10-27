@@ -917,6 +917,61 @@ fn normalize_loopback_host(headers: &[u8], expected_host: Option<SocketAddr>) ->
     normalized
 }
 
+/// The Native capture was recorded on macOS/arm64. Those two SDK headers
+/// describe the executing host, so adapt the expected bytes for this host
+/// while still comparing the header names, order and all other bytes exactly.
+fn native_headers_for_platform(native_headers: &[u8], os: &str, arch: &str) -> Vec<u8> {
+    let os = match os {
+        "macos" => "MacOS".to_owned(),
+        "windows" => "Windows".to_owned(),
+        "linux" => "Linux".to_owned(),
+        "freebsd" => "FreeBSD".to_owned(),
+        "openbsd" => "OpenBSD".to_owned(),
+        "android" => "Android".to_owned(),
+        "ios" => "iOS".to_owned(),
+        other => format!("Other:{other}"),
+    };
+    let arch = match arch {
+        "aarch64" => "arm64".to_owned(),
+        "x86_64" => "x64".to_owned(),
+        "arm" | "x32" => arch.to_owned(),
+        other => format!("other:{other}"),
+    };
+
+    let mut adjusted = native_headers.to_vec();
+    for (captured, expected) in [
+        (
+            "X-Stainless-OS: MacOS\r\n",
+            format!("X-Stainless-OS: {os}\r\n"),
+        ),
+        (
+            "X-Stainless-Arch: arm64\r\n",
+            format!("X-Stainless-Arch: {arch}\r\n"),
+        ),
+    ] {
+        let offset = raw_literal_offset(&adjusted, captured.as_bytes(), "Native platform header");
+        adjusted.splice(offset..offset + captured.len(), expected.bytes());
+    }
+    adjusted
+}
+
+#[test]
+fn native_platform_headers_preserve_all_other_raw_bytes() {
+    let captured = b"First: one\r\nX-Stainless-Arch: arm64\r\nMiddle: two\r\nX-Stainless-OS: MacOS\r\nLast: three\r\n\r\n";
+    assert_eq!(
+        native_headers_for_platform(captured, "macos", "aarch64"),
+        captured
+    );
+    assert_eq!(
+        native_headers_for_platform(captured, "linux", "x86_64"),
+        b"First: one\r\nX-Stainless-Arch: x64\r\nMiddle: two\r\nX-Stainless-OS: Linux\r\nLast: three\r\n\r\n"
+    );
+    assert_eq!(
+        native_headers_for_platform(captured, "windows", "aarch64"),
+        b"First: one\r\nX-Stainless-Arch: arm64\r\nMiddle: two\r\nX-Stainless-OS: Windows\r\nLast: three\r\n\r\n"
+    );
+}
+
 fn count_raw_occurrences(raw: &[u8], needle: &[u8]) -> usize {
     assert!(!needle.is_empty(), "raw byte needle must not be empty");
     raw.windows(needle.len())
@@ -1898,10 +1953,15 @@ fn public_cli_print_text_matches_native_295_raw_http_layout() {
         native_body.len(),
         branding_delta,
     );
+    let adjusted_native_headers = native_headers_for_platform(
+        &native_headers[native_line_end..],
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
     assert_eq!(
         normalize_loopback_host(&adjusted_actual_headers, Some(address)),
-        normalize_loopback_host(&native_headers[native_line_end..], None),
-        "Product raw header order/bytes, allowing only loopback Host and registered Content-Length branding delta"
+        normalize_loopback_host(&adjusted_native_headers, None),
+        "Product raw header order/bytes, allowing only loopback Host, platform, and registered Content-Length branding delta"
     );
     let actual_json = request_body_json(actual_request);
     assert_eq!(

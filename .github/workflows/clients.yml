@@ -52,6 +52,9 @@ jobs:
       - name: Test mobile Linux rootfs tooling
         run: bash scripts/tests/test-rootfs-tooling.sh
 
+      - name: Test Android rootfs CI wiring
+        run: python3 apps/android/native/scripts/test-ci-rootfs-evidence.py
+
   # ---------------------------------------------------------------------------
   # 1. node-clients — shared TS SDK + Electron typecheck (ubuntu).
   #    The Electron app depends on the shared SDK via `file:../../packages/bridge-client`, so the
@@ -165,25 +168,17 @@ jobs:
           bash apps/android/native/scripts/build-mobile-linux-native.sh --variant play
           bash apps/android/native/scripts/build-mobile-linux-native.sh --variant direct
 
-      - name: Stage verified SDK release rootfs assets
+      - name: Fetch verified SDK release rootfs assets
         run: |
           python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
-          sdk_root="$(python3 scripts/lib/mobile_linux_source.py --root)"
-          runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
-          for variant in play direct; do
-            python3 apps/android/native/scripts/stage-mobile-linux-assets.py \
-              --input "$RUNNER_TEMP/sdk-rootfs" \
-              --output "apps/android/native/app/build/generated/mobileLinux/$variant/assets/mobile-linux" \
-              --sdk-root "$sdk_root" --runtime-root "$runtime_root" \
-              --native-root "apps/android/native/app/build/mobileLinuxNative/$variant/native-support"
-          done
 
       # Unit tests + debug APK + androidTest APK. The androidTest APK is what
-      # the emulator job (job 3) installs and runs.
+      # the emulator job (job 3) installs and runs. Gradle stages the fetched
+      # evidence itself, retaining the locked SDK and native artifact checks.
       - name: Gradle — Store/Full tests and APKs
         working-directory: apps/android/native
         run: |
-          ./gradlew \
+          ./gradlew "-PlingxiRootfsEvidenceDir=$RUNNER_TEMP/sdk-rootfs" \
             :app:testPlayDebugUnitTest :app:testDirectDebugUnitTest \
             :app:assemblePlayDebug :app:assembleDirectDebug \
             :app:assemblePlayDebugAndroidTest :app:assembleDirectDebugAndroidTest
@@ -249,15 +244,9 @@ jobs:
       - name: Build Store native runtime from source
         run: bash apps/android/native/scripts/build-mobile-linux-native.sh --variant play
 
-      - name: Stage verified SDK release rootfs assets
+      - name: Fetch verified SDK release rootfs assets
         run: |
           python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
-          python3 apps/android/native/scripts/stage-mobile-linux-assets.py \
-            --input "$RUNNER_TEMP/sdk-rootfs" \
-            --output apps/android/native/app/build/generated/mobileLinux/play/assets/mobile-linux \
-            --sdk-root "$(python3 scripts/lib/mobile_linux_source.py --root)" \
-            --runtime-root "$(python3 scripts/lib/runtime_source.py --root)" \
-            --native-root apps/android/native/app/build/mobileLinuxNative/play/native-support
 
       # api-level 30 (>= minSdk 26), x86_64 + google_apis for KVM-accelerated
       # boot. force-avd-creation + the headless/no-window emulator options are
@@ -272,7 +261,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           working-directory: apps/android/native
-          script: ./gradlew :app:connectedPlayDebugAndroidTest
+          script: ./gradlew "-PlingxiRootfsEvidenceDir=$RUNNER_TEMP/sdk-rootfs" :app:connectedPlayDebugAndroidTest
 
   # ---------------------------------------------------------------------------
   # 4. ios — XCFramework build + Xcode simulator engine round-trip (macOS).
@@ -283,13 +272,23 @@ jobs:
   #    simulators only exist there).
   # ---------------------------------------------------------------------------
   ios:
-    runs-on: macos-latest
+    # The Local App Agent intent uses iOS 27's extended background runtime.
+    runs-on: xcode-27
     needs: mobile-linux-policy
     env:
       LINGXI_MOBILE_LINUX_ENABLED: ${{ vars.LINGXI_MOBILE_LINUX_ENABLED || '0' }}
       LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256: ${{ vars.LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256 || '' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify the iOS SDK
+        run: |
+          xcodebuild -version
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          echo "iOS simulator SDK: $sdk_version"
+          if [[ "${sdk_version%%.*}" -lt 27 ]]; then
+            echo 'The Local App Agent intent requires the iOS 27 SDK or newer.' >&2
+            exit 1
+          fi
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
@@ -333,18 +332,21 @@ jobs:
         working-directory: apps/ios/native
         run: xcodegen generate
 
-      # Pick a concrete, currently-available iPhone simulator by name rather
-      # than hardcoding one Xcode-version-specific device — `simctl list` on the
-      # runner is the source of truth, so this survives runner image bumps.
-      # `jq` is preinstalled on GitHub macOS runners.
+      # Select an available iPhone on the newest installed iOS runtime. Use its
+      # UDID, so the chosen device and runtime cannot be mismatched.
       - name: Resolve a booted-capable simulator
         id: sim
         run: |
-          # First available iPhone simulator name across all runtimes.
-          name="$(xcrun simctl list devices available --json \
-            | jq -r '[.devices[][] | select(.isAvailable and (.name | startswith("iPhone"))) | .name] | first')"
-          echo "Using simulator: ${name}"
-          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          simulator="$(xcrun simctl list devices available --json | jq -er '
+            [.devices | to_entries[]
+             | select(.key | startswith("com.apple.CoreSimulator.SimRuntime.iOS-"))
+             | .key as $runtime | .value[]
+             | select(.isAvailable and (.name | startswith("iPhone")))
+             | {name, udid, version: ($runtime | ltrimstr("com.apple.CoreSimulator.SimRuntime.iOS-") | split("-") | map(tonumber))}]
+            | sort_by(.version) | last | select(.version[0] >= 27) | "\(.udid)\t\(.name)"')"
+          IFS=$'\t' read -r id name <<< "$simulator"
+          echo "Using simulator: ${name} (${id})"
+          echo "id=${id}" >> "$GITHUB_OUTPUT"
 
       # Run EngineRoundtripTests on the simulator under the LingxiCode scheme.
       - name: xcodebuild test (simulator round-trip)
@@ -352,4 +354,4 @@ jobs:
         run: |
           xcodebuild test \
             -scheme LingxiCode \
-            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }},OS=latest"
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}"

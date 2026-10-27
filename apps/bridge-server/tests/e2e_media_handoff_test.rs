@@ -676,6 +676,7 @@ async fn submit_prompt(socket: &mut Socket) {
     send_command(
         socket,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "start a media conversation".into(),
             prompt_mode: None,
             images: Vec::new(),
@@ -884,6 +885,7 @@ async fn conversation_continues_in_the_same_turn_until_realtime_cancel() {
     send_command(
         &mut socket,
         &ClientCommand::Cancel {
+            session_id: None,
             turn_id: Some(TURN_ID),
         },
     )
@@ -985,6 +987,7 @@ async fn cancelling_realtime_continuation_stops_the_in_flight_loop_tick() {
     send_command(
         &mut socket,
         &ClientCommand::Cancel {
+            session_id: None,
             turn_id: Some(TURN_ID),
         },
     )

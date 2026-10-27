@@ -96,7 +96,9 @@ pub(super) async fn read_session_agent_summary(
                 // reached the panel as `idle` here and `completed` from the
                 // live observer.
                 "idle" => "completed".to_string(),
-                "completed" | "failed" | "killed" | "cancelled" | "running" => value.to_string(),
+                "completed" | "failed" | "killed" | "cancelled" | "exited_unknown" | "running" => {
+                    value.to_string()
+                }
                 _ => "unknown".to_string(),
             };
             break;

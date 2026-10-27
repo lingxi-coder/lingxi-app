@@ -98,6 +98,8 @@ test('complete task snapshot validates rows and rejects duplicate or malformed o
     status: { type: 'running' }, description: '' } };
   const events = [...snapshot.events, task];
   assert.deepEqual(validateRuntimeSnapshot({ events }), events);
+  const unknownExit = { ...task, task: { ...task.task, status: { type: 'exited_unknown' } } };
+  assert.deepEqual(validateRuntimeSnapshot({ events: [...snapshot.events, unknownExit] }), [...snapshot.events, unknownExit]);
   for (const bad of [
     [...events, task],
     [...snapshot.events, { ...task, task: { ...task.task, status: { type: 'unknown' } } }],

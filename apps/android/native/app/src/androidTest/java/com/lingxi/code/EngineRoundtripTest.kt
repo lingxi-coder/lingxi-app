@@ -140,6 +140,7 @@ class EngineRoundtripTest {
             // queued; a turn failure streams to the listener, it is NOT thrown.
             engine.submit(
                 ClientCommand.SendPrompt(
+                    sessionId = engine.workspaceState().sessionId,
                     text = ClientTextDto(
                         codeUnits = "Reply with exactly: hello from lingxi".map { it.code.toUShort() },
                     ),

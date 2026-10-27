@@ -102,6 +102,7 @@ async fn queued_path_prompt_keeps_its_ingress_and_optional_attachments() {
         connection.driver = Some(driver.clone());
         connection
             .dispatch(ClientCommand::SendPrompt {
+                session_id: None,
                 text: "seed".into(),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -118,6 +119,7 @@ async fn queued_path_prompt_keeps_its_ingress_and_optional_attachments() {
 
         connection
             .dispatch(ClientCommand::SendPrompt {
+                session_id: None,
                 text: ClientTextDto::from_projection(&text).unwrap(),
                 prompt_mode: None,
                 images: images.clone(),
@@ -127,6 +129,7 @@ async fn queued_path_prompt_keeps_its_ingress_and_optional_attachments() {
             .await;
         connection
             .dispatch(ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: ClientTextDto::from_projection(&text).unwrap(),
                 images: Vec::new(),
                 turn_id: Some(43),

@@ -38,6 +38,7 @@ use tool_api::ask_user_question::AskUserQuestionExchange;
 use tool_workflow::{UltracodeGate, WorkflowSizeGuideline};
 use tui_core::message::CurrentTodo;
 use tui_core::message::RenderedMessage;
+use tui_core::multiagent::background_uncertainty::background_uncertainty_message;
 use tui_core::orchestrator_bridge::{RunningAgentStatus, TurnEvent};
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
@@ -4247,7 +4248,7 @@ impl ChatWidget {
     ///
     /// `false` (nothing to background, or no engine handle) leaves the key
     /// unconsumed.
-    fn background_all_tasks(&self) -> bool {
+    fn background_all_tasks(&mut self) -> bool {
         let Some(registry) = self.task_registry.clone() else {
             return false;
         };
@@ -4257,12 +4258,25 @@ impl ChatWidget {
         else {
             return false;
         };
-        runtime.block_on(async move {
+        let outcome = runtime.block_on(async move {
             if !registry.has_backgroundable_tasks().await {
-                return false;
+                return None;
             }
-            registry.background_all_tasks().await > 0
-        })
+            Some(
+                registry
+                    .background_all_tasks_with_outcome(
+                        lingxi_core::host::task_registry::TaskBackgroundReason::User,
+                    )
+                    .await,
+            )
+        });
+        let Some(outcome) = outcome else {
+            return false;
+        };
+        if let Some(message) = background_uncertainty_message(outcome) {
+            self.show_system_text(&message, true);
+        }
+        outcome.backgrounded != 0 || outcome.unknown != 0 || outcome.capture_unknown
     }
 
     /// A live snapshot of the background-task registry, or the system-line text
@@ -5521,7 +5535,7 @@ impl ChatWidget {
                 matches!(
                     task.status.as_str(),
                     "running" | "pending" | "paused" | "queued"
-                ) || task.is_parked
+                ) || (task.is_parked && task.status != "exited_unknown")
             })
             .map(|task| {
                 task.description
@@ -6103,6 +6117,7 @@ impl ChatWidget {
                     self.compacting_phase = None;
                     return ChatOutcome::Continue;
                 }
+                let mut background_outcome = Default::default();
                 if let Some(token) = self.current_turn.as_ref() {
                     if turn_was_cancelled {
                         return ChatOutcome::Continue;
@@ -6113,13 +6128,16 @@ impl ChatWidget {
                                 .enable_all()
                                 .build()
                             {
-                                runtime.block_on(registry.background_all_tasks_with_reason(
+                                background_outcome = runtime.block_on(registry.background_all_tasks_with_outcome(
                                     lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort,
                                 ));
                             }
                         }
                     }
                     token.cancel();
+                }
+                if let Some(message) = background_uncertainty_message(background_outcome) {
+                    self.show_system_text(&message, true);
                 }
                 // Cancellation is not a terminal boundary. Keep the owner,
                 // active tool, elapsed heartbeat and correlation maps until the
@@ -6945,6 +6963,8 @@ mod tests {
     struct BackgroundStubRegistry {
         backgroundable: bool,
         background_all_calls: std::sync::atomic::AtomicUsize,
+        unknown: usize,
+        capture_unknown: bool,
     }
 
     #[async_trait::async_trait]
@@ -7033,6 +7053,20 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             usize::from(self.backgroundable)
         }
+        async fn background_all_tasks_with_outcome(
+            &self,
+            _reason: lingxi_core::host::task_registry::TaskBackgroundReason,
+        ) -> lingxi_core::host::task_registry::TaskBackgroundBatchOutcome {
+            self.background_all_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            lingxi_core::host::task_registry::TaskBackgroundBatchOutcome {
+                backgrounded: usize::from(
+                    self.backgroundable && self.unknown == 0 && !self.capture_unknown,
+                ),
+                unknown: self.unknown,
+                capture_unknown: self.capture_unknown,
+            }
+        }
     }
 
     #[test]
@@ -7078,6 +7112,8 @@ mod tests {
         let registry = std::sync::Arc::new(BackgroundStubRegistry {
             backgroundable: false,
             background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+            unknown: 0,
+            capture_unknown: false,
         });
         let mut w = widget();
         w.set_task_registry(registry);
@@ -7100,6 +7136,8 @@ mod tests {
         let registry = std::sync::Arc::new(BackgroundStubRegistry {
             backgroundable: true,
             background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+            unknown: 0,
+            capture_unknown: false,
         });
         let mut w = widget();
         w.set_task_registry(registry);
@@ -7124,6 +7162,8 @@ mod tests {
             let registry = std::sync::Arc::new(BackgroundStubRegistry {
                 backgroundable,
                 background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+                unknown: 0,
+                capture_unknown: false,
             });
             let mut w = widget();
             w.set_task_registry(registry.clone());
@@ -7151,6 +7191,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ctrl_b_surfaces_an_unconfirmed_background_transition() {
+        let registry = std::sync::Arc::new(BackgroundStubRegistry {
+            backgroundable: true,
+            background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+            unknown: 1,
+            capture_unknown: false,
+        });
+        let mut w = widget();
+        w.set_task_registry(registry);
+        assert!(
+            w.background_all_tasks(),
+            "the uncertain request was handled"
+        );
+        let notice = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert!(notice.is_error());
+        assert!(notice.body().contains("Could not confirm backgrounding"));
+    }
+
+    #[test]
+    fn ctrl_b_reports_an_uncaptured_task_set_without_inventing_a_count() {
+        let registry = std::sync::Arc::new(BackgroundStubRegistry {
+            backgroundable: true,
+            background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+            unknown: 0,
+            capture_unknown: true,
+        });
+        let mut w = widget();
+        w.set_task_registry(registry);
+        assert!(
+            w.background_all_tasks(),
+            "the uncertain request was handled"
+        );
+        let notice = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert!(notice.is_error());
+        assert!(notice
+            .body()
+            .contains("Could not determine the complete set of tasks"));
+        assert!(!notice.body().contains("task(s)"));
+    }
+
+    #[test]
+    fn interrupt_cancels_and_reports_an_uncaptured_task_set() {
+        let registry = std::sync::Arc::new(BackgroundStubRegistry {
+            backgroundable: true,
+            background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+            unknown: 0,
+            capture_unknown: true,
+        });
+        let mut w = widget();
+        w.set_task_registry(registry.clone());
+        let active = CancellationToken::new();
+        w.apply_turn_event(TurnEvent::TurnStartedWithCancel(active.clone()));
+        assert!(matches!(
+            w.on_pane_outcome(BottomPaneOutcome::Interrupt),
+            ChatOutcome::Continue
+        ));
+        assert!(active.is_cancelled());
+        assert_eq!(
+            registry
+                .background_all_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let notice = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert!(notice.is_error());
+        assert!(notice
+            .body()
+            .contains("Could not determine the complete set of tasks"));
+        assert!(!notice.body().contains("task(s)"));
     }
 
     /// With no engine handle the chord must not be swallowed either.

@@ -2079,16 +2079,15 @@ async fn serve_stdio(
                 });
             }
         }
-    } else if !writer_joined {
-        if tokio::time::timeout(std::time::Duration::from_secs(2), &mut writer_task)
+    } else if !writer_joined
+        && tokio::time::timeout(std::time::Duration::from_secs(2), &mut writer_task)
             .await
             .is_err()
-        {
-            primary = Err(format!(
-                "{}; writer teardown is unverified",
-                primary.unwrap_err()
-            ));
-        }
+    {
+        primary = Err(format!(
+            "{}; writer teardown is unverified",
+            primary.unwrap_err()
+        ));
     }
     // A tail write may have returned a receipt proving it never started after
     // the first sweep. Such a sealed owner can now be safely cancelled.

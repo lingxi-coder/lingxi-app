@@ -642,9 +642,7 @@ mod tests {
                     _ => break false,
                 }
             };
-            if !ready {
-                panic!("shared-pipe child did not become ready");
-            }
+            assert!(ready, "shared-pipe child did not become ready");
             assert!(rustix::fs::fcntl_getfl(&input_reader)?.contains(OFlags::NONBLOCK));
             assert!(rustix::fs::fcntl_getfl(&output_writer)?.contains(OFlags::NONBLOCK));
             input_writer.write_all(b"x")?;
@@ -653,9 +651,7 @@ mod tests {
                 if let Some(status) = child.0.try_wait()? {
                     break status;
                 }
-                if Instant::now() >= deadline {
-                    panic!("shared-pipe child did not exit");
-                }
+                assert!(Instant::now() < deadline, "shared-pipe child did not exit");
                 std::thread::sleep(Duration::from_millis(10));
             };
             assert!(status.success(), "shared-pipe child failed: {status}");
@@ -731,9 +727,7 @@ mod tests {
             if let Some(status) = child.0.try_wait()? {
                 break status;
             }
-            if Instant::now() >= deadline {
-                panic!("setup-panic child did not exit");
-            }
+            assert!(Instant::now() < deadline, "setup-panic child did not exit");
             std::thread::sleep(Duration::from_millis(10));
         };
         assert!(status.success(), "setup-panic child failed: {status}");
@@ -801,9 +795,10 @@ mod tests {
             if let Some(status) = child.0.try_wait()? {
                 break status;
             }
-            if Instant::now() >= deadline {
-                panic!("poisoned-poll child did not exit");
-            }
+            assert!(
+                Instant::now() < deadline,
+                "poisoned-poll child did not exit"
+            );
             std::thread::sleep(Duration::from_millis(10));
         };
         let after = rustix::fs::fcntl_getfl(&output_writer)? & OFlags::NONBLOCK;

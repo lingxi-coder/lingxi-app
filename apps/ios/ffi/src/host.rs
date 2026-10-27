@@ -96,6 +96,13 @@ impl Drop for MediaAudioSessionBindingGuard {
     }
 }
 
+#[cfg(feature = "uniffi")]
+fn retain_media_route_guard(
+    guard: Option<&Arc<MediaAudioSessionBindingGuard>>,
+) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+    guard.map(|guard| guard.clone() as Arc<dyn std::any::Any + Send + Sync>)
+}
+
 /// Exact provider-route slot installed by one engine attachment. Stale
 /// teardown cannot remove a newer route for the same session ID.
 #[cfg(feature = "uniffi")]
@@ -573,7 +580,7 @@ pub fn build_ios_engine_with_config(
         });
         let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge {
             inner: listener,
-            _media_route_guard: route_guard.clone(),
+            _media_route_guard: retain_media_route_guard(route_guard.as_ref()),
         });
         #[cfg(target_os = "ios")]
         let device_control = device_control.map(|inner| Arc::new(IosDeviceControlBridge { inner }));
@@ -772,10 +779,27 @@ pub fn build_ios_engine(
 
 #[cfg(all(test, feature = "uniffi"))]
 mod media_host_policy_tests {
-    use super::with_engine_media_host;
+    use super::{retain_media_route_guard, with_engine_media_host, MediaAudioSessionBindingGuard};
+    use audio_provider::media_cloud::AudioProviderCloudRegistry;
     use harness_runtime::mobile::MobileEngineError;
     use std::cell::Cell;
     use std::sync::Arc;
+
+    #[test]
+    fn listener_guard_retains_the_route_until_listener_release() {
+        assert!(retain_media_route_guard(None).is_none());
+
+        let registry = Arc::new(AudioProviderCloudRegistry::new("wav"));
+        let guard = Arc::new(MediaAudioSessionBindingGuard::new(registry));
+        let weak = Arc::downgrade(&guard);
+        let retained = retain_media_route_guard(Some(&guard)).unwrap();
+        assert!(retained.is::<MediaAudioSessionBindingGuard>());
+
+        drop(guard);
+        assert!(weak.upgrade().is_some());
+        drop(retained);
+        assert!(weak.upgrade().is_none());
+    }
 
     #[test]
     fn app_agent_builds_without_media() {

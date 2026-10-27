@@ -6,8 +6,39 @@ private struct LocalAppAgentNativeStart: Decodable, Sendable {
 }
 
 struct LocalAppAgentNativeEvents: Decodable, Sendable {
+    static let maximumSafeNativeOutputBytes: UInt64 = 9_007_199_254_740_991
     let events: [LocalAppJSON]
     let sequence: UInt64
+    let nativeOutputBytes: UInt64?
+
+    init(events: [LocalAppJSON], sequence: UInt64, nativeOutputBytes: UInt64? = nil) {
+        self.events = events
+        self.sequence = sequence
+        self.nativeOutputBytes = nativeOutputBytes
+    }
+
+    private enum CodingKeys: String, CodingKey { case events, sequence, nativeOutputBytes }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        events = try values.decode([LocalAppJSON].self, forKey: .events)
+        sequence = try values.decode(UInt64.self, forKey: .sequence)
+        let raw: Double?
+        do {
+            raw = try values.decodeIfPresent(Double.self, forKey: .nativeOutputBytes)
+        } catch {
+            throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The native Agent output counter is invalid.")
+        }
+        if let raw {
+            guard raw.isFinite, raw >= 0, raw <= Double(Self.maximumSafeNativeOutputBytes),
+                  raw.rounded(.towardZero) == raw else {
+                throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The native Agent output counter is invalid.")
+            }
+            nativeOutputBytes = UInt64(raw)
+        } else {
+            nativeOutputBytes = nil
+        }
+    }
 }
 
 enum LocalAppAgentHostRequests {
@@ -91,11 +122,13 @@ enum LocalAppAgentRunEvent {
     }
 }
 
-/// Counts only newly observed AG-UI stream output for one native run. The
-/// transport cursor is per event and pages are contiguous; no output is kept.
+/// Counts overlapping AG-UI output and native model-stream observations for
+/// one run without adding them together. No output content is kept.
 struct LocalAppAgentOutputProgress: Sendable {
     private(set) var sequence: UInt64 = 0
-    private(set) var outputBytes: Int64 = 0
+    private(set) var eventOutputBytes: Int64 = 0
+    private(set) var nativeOutputBytes: Int64 = 0
+    var outputBytes: Int64 { max(eventOutputBytes, nativeOutputBytes) }
 
     /// Returns true only when this validated page increases the byte count.
     @discardableResult
@@ -107,13 +140,17 @@ struct LocalAppAgentOutputProgress: Sendable {
         guard batch.sequence >= sequence else {
             throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App event sequence moved backwards.")
         }
-        // A repeated page, including a non-empty replay, must never count twice.
-        guard batch.sequence > sequence else { return false }
-        guard UInt64(batch.events.count) == batch.sequence - sequence else {
+        if let native = batch.nativeOutputBytes,
+           native > LocalAppAgentNativeEvents.maximumSafeNativeOutputBytes {
+            throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The native Agent output counter is invalid.")
+        }
+        let advances = batch.sequence > sequence
+        let count = UInt64(batch.events.count)
+        guard advances ? count == batch.sequence - sequence : count <= batch.sequence else {
             throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App event page does not match its sequence.")
         }
 
-        var nextBytes = outputBytes
+        var nextEventBytes = eventOutputBytes
         var terminalSeen = false
         for event in batch.events {
             guard !terminalSeen, case let .object(fields) = event,
@@ -136,21 +173,92 @@ struct LocalAppAgentOutputProgress: Sendable {
                 guard case .string? = fields[idField], case let .string(delta)? = fields["delta"] else {
                     throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App host returned an invalid AG-UI output event.")
                 }
-                nextBytes = Self.saturatingAdd(nextBytes, delta.utf8.count)
+                if advances { nextEventBytes = Self.saturatingAdd(nextEventBytes, delta.utf8.count) }
             }
             terminalSeen = type == "RUN_FINISHED" || type == "RUN_ERROR"
         }
         // Commit only after the entire page has been validated.
-        let increased = nextBytes > outputBytes
+        let previousBytes = outputBytes
         sequence = batch.sequence
-        outputBytes = nextBytes
-        return increased
+        eventOutputBytes = nextEventBytes
+        if let native = batch.nativeOutputBytes {
+            nativeOutputBytes = max(nativeOutputBytes, Int64(clamping: native))
+        }
+        return outputBytes > previousBytes
     }
 
     static func saturatingAdd(_ current: Int64, _ byteCount: Int) -> Int64 {
         let amount = Int64(clamping: max(0, byteCount))
         let (sum, overflow) = current.addingReportingOverflow(amount)
         return overflow ? Int64.max : sum
+    }
+}
+
+enum LocalAppAgentEventPageError: Error { case deadline }
+
+/// A terminal task may have more than one bounded event page still to replay.
+/// Keep fetching those pages until the terminal event is observed, without
+/// treating a partial page as proof of a missing terminal event.
+@MainActor
+enum LocalAppAgentEventPageReader {
+    // Matches the host's maximum stored AG-UI events per run.
+    private static let maximumEventsPerRun: UInt64 = 10_000
+
+    private static func terminalStorageUnavailable() -> LocalAppServiceFailure {
+        LocalAppServiceFailure("AGENT_TERMINAL_EVENTS_UNAVAILABLE", "The Agent's terminal event storage is unavailable.")
+    }
+
+    static func readAvailable(
+        progress: inout LocalAppAgentOutputProgress,
+        taskIsTerminal: Bool,
+        deadline: Date,
+        runID: String,
+        threadID: String? = nil,
+        fetch: (UInt64) async throws -> LocalAppAgentNativeEvents,
+        onOutput: (Int64) -> Void,
+        now: () -> Date = { Date() }
+    ) async throws -> LocalAppJSON? {
+        // The host commits task state and its terminal event separately. A
+        // read in between returns this one storage code; retry only that case.
+        var retriesRemaining = 2
+        while true {
+            try Task.checkCancellation()
+            guard now() < deadline else { throw LocalAppAgentEventPageError.deadline }
+            let previous = progress.sequence
+            let batch: LocalAppAgentNativeEvents
+            do {
+                batch = try await fetch(previous)
+            } catch {
+                try Task.checkCancellation()
+                guard now() < deadline else { throw LocalAppAgentEventPageError.deadline }
+                guard taskIsTerminal,
+                      let failure = error as? LocalAppServiceFailure,
+                      failure.code == "agent_events_unavailable" else { throw error }
+                guard retriesRemaining > 0,
+                      now().addingTimeInterval(0.15) < deadline else { throw terminalStorageUnavailable() }
+                retriesRemaining -= 1
+                try await Task.sleep(for: .milliseconds(150))
+                continue
+            }
+            try Task.checkCancellation()
+            guard now() < deadline else { throw LocalAppAgentEventPageError.deadline }
+            guard batch.sequence <= maximumEventsPerRun else {
+                throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App event sequence exceeds its storage limit.")
+            }
+            if try progress.consume(batch, runID: runID, threadID: threadID) {
+                onOutput(progress.outputBytes)
+            }
+            try Task.checkCancellation()
+            guard now() < deadline else { throw LocalAppAgentEventPageError.deadline }
+            let events = batch.sequence > previous ? batch.events : []
+            if let terminal = LocalAppAgentRunEvent.terminalEvent(in: events) {
+                return terminal
+            }
+            guard taskIsTerminal else { return nil }
+            guard batch.sequence > previous else {
+                throw LocalAppServiceFailure("AGENT_TERMINAL_EVENT_MISSING", "The Agent task ended without a terminal AG-UI event.")
+            }
+        }
     }
 }
 
@@ -220,6 +328,7 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
         return .result(value: value, dialog: IntentDialog(didSucceed ? "The Local App Agent run finished." : "The Local App Agent run ended without success."))
     }
 
+    @MainActor
     private static func waitForCompletion(
         client: LocalAppServiceClient,
         cancellation: LocalAppAgentIntentCancellation,
@@ -262,24 +371,37 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
             deadline = Date(timeIntervalSince1970: TimeInterval(task.createdAt) / 1_000)
                 .addingTimeInterval(TimeInterval(min(task.limits.timeoutMs, 3_600_000)) / 1_000)
 
-            let batch = try await client.agentHost([
-                "op": .string("eventsNative"),
-                "appId": .string(appID),
-                "revision": .number(Double(revision)),
-                "runId": .string(runID),
-                "afterSequence": .number(Double(outputProgress.sequence))
-            ], as: LocalAppAgentNativeEvents.self)
-            let previousSequence = outputProgress.sequence
-            let outputIncreased = try outputProgress.consume(batch, runID: runID, threadID: threadID)
-            let events = batch.sequence > previousSequence ? batch.events : []
-            if outputIncreased {
-                LocalAppAgentProgressReporting.update(progress, outputBytes: outputProgress.outputBytes)
-                LocalAppAgentBackgroundController.logObservedOutput(
-                    contextKey: contextKey,
-                    outputBytes: outputProgress.outputBytes
+            let terminalEvent: LocalAppJSON?
+            do {
+                terminalEvent = try await LocalAppAgentEventPageReader.readAvailable(
+                    progress: &outputProgress,
+                    taskIsTerminal: task.isTerminal,
+                    deadline: deadline,
+                    runID: runID,
+                    threadID: threadID,
+                    fetch: { sequence in
+                        try await client.agentHost([
+                            "op": .string("eventsNative"),
+                            "appId": .string(appID),
+                            "revision": .number(Double(revision)),
+                            "runId": .string(runID),
+                            "afterSequence": .number(Double(sequence))
+                        ], as: LocalAppAgentNativeEvents.self)
+                    },
+                    onOutput: { bytes in
+                        LocalAppAgentProgressReporting.update(progress, outputBytes: bytes)
+                        LocalAppAgentBackgroundController.logObservedOutput(
+                            contextKey: contextKey,
+                            outputBytes: bytes
+                        )
+                    }
                 )
+            } catch LocalAppAgentEventPageError.deadline {
+                await cancellation.cancel(reason: .intentDeadline)
+                LocalAppAgentProgressReporting.finish(progress, success: false)
+                throw LocalAppServiceFailure("AGENT_TASK_TIMEOUT", "The Local App Agent task exceeded its configured time limit.")
             }
-            if let terminalEvent = LocalAppAgentRunEvent.terminalEvent(in: events),
+            if let terminalEvent,
                let type = LocalAppAgentRunEvent.type(terminalEvent) {
                 if type == "RUN_FINISHED" {
                     guard LocalAppAgentRunEvent.matches(terminalEvent, runID: runID, threadID: threadID) else {
@@ -299,13 +421,6 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
                     LocalAppAgentProgressReporting.finish(progress, success: false)
                     return terminalEvent
                 }
-            }
-            if task.isTerminal {
-                LocalAppAgentProgressReporting.finish(progress, success: false)
-                throw LocalAppServiceFailure(
-                    task.error?.code ?? "AGENT_TERMINAL_EVENT_MISSING",
-                    "The Agent task ended as \(task.state) without a terminal AG-UI event."
-                )
             }
             do { try await Task.sleep(for: .seconds(1)) } catch { throw CancellationError() }
         }

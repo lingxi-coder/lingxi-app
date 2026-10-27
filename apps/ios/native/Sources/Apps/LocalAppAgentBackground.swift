@@ -328,21 +328,26 @@ final class LocalAppAgentBackgroundController {
                     break
                 }
 
-                let batch = try await client.agentHost([
-                    "op": .string("eventsNative"),
-                    "appId": .string(context.wake.appID),
-                    "revision": .number(Double(context.wake.revision)),
-                    "runId": .string(runID),
-                    "afterSequence": .number(Double(outputProgress.sequence))
-                ], as: LocalAppAgentNativeEvents.self)
-                let previousSequence = outputProgress.sequence
-                let outputIncreased = try outputProgress.consume(batch, runID: runID)
-                let events = batch.sequence > previousSequence ? batch.events : []
-                if outputIncreased {
-                    report(agentTask, outputBytes: outputProgress.outputBytes, appName: context.appName, contextKey: contextKey)
-                    Self.logObservedOutput(contextKey: contextKey, outputBytes: outputProgress.outputBytes)
-                }
-                if let terminalEvent = LocalAppAgentRunEvent.terminalEvent(in: events),
+                let terminalEvent = try await LocalAppAgentEventPageReader.readAvailable(
+                    progress: &outputProgress,
+                    taskIsTerminal: agentTask?.isTerminal == true,
+                    deadline: runDeadline ?? receiveDeadline,
+                    runID: runID,
+                    fetch: { sequence in
+                        try await client.agentHost([
+                            "op": .string("eventsNative"),
+                            "appId": .string(context.wake.appID),
+                            "revision": .number(Double(context.wake.revision)),
+                            "runId": .string(runID),
+                            "afterSequence": .number(Double(sequence))
+                        ], as: LocalAppAgentNativeEvents.self)
+                    },
+                    onOutput: { bytes in
+                        self.report(agentTask, outputBytes: bytes, appName: context.appName, contextKey: contextKey)
+                        Self.logObservedOutput(contextKey: contextKey, outputBytes: bytes)
+                    }
+                )
+                if let terminalEvent,
                    let type = LocalAppAgentRunEvent.type(terminalEvent) {
                     if type == "RUN_FINISHED" {
                         guard LocalAppAgentRunEvent.matchesRun(terminalEvent, runID: runID) else {
@@ -377,18 +382,9 @@ final class LocalAppAgentBackgroundController {
                         return
                     }
                 }
-                if let agentTask, agentTask.isTerminal {
-                    await complete(
-                        context.wake,
-                        success: agentTask.state == "succeeded",
-                        deliverResult: LocalAppBrowserResultDeliveryPolicy.shouldDeliver(
-                            taskState: agentTask.state,
-                            terminalEvent: nil
-                        ),
-                        client: client
-                    )
-                    return
-                }
+            } catch LocalAppAgentEventPageError.deadline {
+                await cancel(context.wake, client: client, reason: .monitorDeadline)
+                return
             } catch is CancellationError {
                 return
             } catch let failure as LocalAppServiceFailure where Self.isPermanentMonitorFailure(failure) {
@@ -555,6 +551,8 @@ final class LocalAppAgentBackgroundController {
             "invalid_revision",
             "INVALID_AGENT_TASK",
             "INVALID_AGENT_EVENT",
+            "AGENT_TERMINAL_EVENT_MISSING",
+            "AGENT_TERMINAL_EVENTS_UNAVAILABLE",
         ].contains(failure.code)
     }
 
@@ -605,7 +603,7 @@ enum LocalAppAgentProgressReporting {
         progress.localizedDescription = "Local App Agent"
         let observation: String
         if outputBytes > 0 {
-            observation = "Received \(outputBytes) output bytes; total unknown"
+            observation = "Observed \(outputBytes) stream bytes; total unknown"
         } else if let completedModelTurns, let turnLimit {
             observation = "Completed \(completedModelTurns) model turns; limit \(turnLimit)"
         } else {
@@ -622,8 +620,8 @@ enum LocalAppAgentProgressReporting {
             let completed = max(1, progress.completedUnitCount)
             progress.totalUnitCount = completed
             progress.completedUnitCount = completed
-            if let observation, observation.hasPrefix("Received ") {
-                progress.localizedAdditionalDescription = "Received \(progress.completedUnitCount) output bytes; complete"
+            if let observation, observation.hasPrefix("Observed ") {
+                progress.localizedAdditionalDescription = "Observed \(progress.completedUnitCount) stream bytes; complete"
             } else if let observation, observation.hasPrefix("Completed ") {
                 progress.localizedAdditionalDescription = observation
             } else {
@@ -631,7 +629,7 @@ enum LocalAppAgentProgressReporting {
             }
         } else {
             progress.totalUnitCount = -1
-            if let observation, observation.hasPrefix("Completed ") || observation.hasPrefix("Received ") {
+            if let observation, observation.hasPrefix("Completed ") || observation.hasPrefix("Observed ") {
                 progress.localizedAdditionalDescription = "\(observation); task ended"
             } else {
                 progress.localizedAdditionalDescription = "Task ended"

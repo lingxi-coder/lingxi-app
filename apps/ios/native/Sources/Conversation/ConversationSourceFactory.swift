@@ -32,6 +32,9 @@ enum ConversationSourceFactory {
         var visionDelegationEnabled: Bool = true
         var mobileLinux: TerminalRuntimeConfig? = nil
         var projectMountGrants: [String] = []
+        #if canImport(harness_runtimeFFI)
+        var mediaHostComposition: IOSNativeMediaHostComposition? = nil
+        #endif
     }
 
     static func make(
@@ -59,6 +62,37 @@ enum ConversationSourceFactory {
             projectMountGrants: projectMountGrants))
     }
 
+    #if canImport(harness_runtimeFFI)
+    static func make(
+        projectCwd: String? = nil,
+        additionalWorkspaceDirectories: [String] = [],
+        sessionMode: SessionMode = .code,
+        providerConfigured: Bool = false,
+        providerProfilesJson: String? = nil,
+        providerRoutingJson: String? = nil,
+        defaultModelID: String? = nil,
+        visionDelegationEnabled: Bool = true,
+        mobileLinux: TerminalRuntimeConfig? = nil,
+        projectMountGrants: [String] = [],
+        mediaHostComposition: IOSNativeMediaHostComposition
+    ) -> any ConversationSource {
+        var options = LaunchOptions(
+            projectCwd: projectCwd,
+            additionalWorkspaceDirectories: additionalWorkspaceDirectories,
+            sessionMode: sessionMode,
+            providerConfigured: providerConfigured,
+            providerProfilesJson: providerProfilesJson,
+            providerRoutingJson: providerRoutingJson,
+            defaultModelID: defaultModelID,
+            visionDelegationEnabled: visionDelegationEnabled,
+            mobileLinux: mobileLinux,
+            projectMountGrants: projectMountGrants
+        )
+        options.mediaHostComposition = mediaHostComposition
+        return make(options: options)
+    }
+    #endif
+
     static func make(options: LaunchOptions = .init()) -> any ConversationSource {
         #if DEBUG
             if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" {
@@ -75,7 +109,7 @@ enum ConversationSourceFactory {
                     let source = EngineConversationSource(config: EngineConfig(
                         apiBase: "https://invalid.example", apiKey: "", model: "", appSandboxRoot: root.path,
                         projectCwd: nil, sessionMode: options.sessionMode, visionDelegationEnabled: false,
-                        mobileLinux: runtime))
+                        mobileLinux: runtime), mediaHostComposition: options.mediaHostComposition)
                     source.model.providerConfigured = false
                     return source
                 }
@@ -113,7 +147,7 @@ enum ConversationSourceFactory {
                     mobileLinux: options.mobileLinux,
                     projectMountGrants: options.projectMountGrants)
                 config.additionalWorkspaceDirectories = options.additionalWorkspaceDirectories
-                let source = EngineConversationSource(config: config)
+                let source = EngineConversationSource(config: config, mediaHostComposition: options.mediaHostComposition)
                 source.model.providerConfigured = options.providerConfigured
                 return source
             }

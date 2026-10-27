@@ -449,6 +449,7 @@ async fn run_owned_agent(
         run.inputs,
         run.output,
         run.limits,
+        run.image_input_supported,
         run.cancel,
     );
     tokio::pin!(core);

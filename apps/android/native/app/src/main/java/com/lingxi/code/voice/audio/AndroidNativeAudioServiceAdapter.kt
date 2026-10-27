@@ -10,6 +10,7 @@ import com.lingxi.code.bindings.client.AudioOperationKindDto
 import com.lingxi.code.bindings.client.AudioOperationReadinessDto
 import com.lingxi.code.bindings.client.AudioOperationRequestDto
 import com.lingxi.code.bindings.client.AudioOperationResultDto
+import com.lingxi.code.bindings.client.AudioOperationRoutePolicyDto
 import com.lingxi.code.bindings.client.AudioOwnerDto
 import com.lingxi.code.bindings.client.AudioReadinessStateDto
 import kotlinx.coroutines.CancellationException
@@ -42,6 +43,7 @@ internal class AndroidNativeAudioServiceAdapter(context: Context) : AndroidAudio
                 timeoutBudgetMs = timeoutBudgetMs,
                 maxPayloadBytes = maxPayloadBytes,
                 operation = operation,
+                routePolicy = request.routePolicy.toDeviceAudioRoutePolicy(),
             ),
         ).let { AndroidAudioResultDtoMapper.toDto(it, maxPayloadBytes) }
     }
@@ -110,6 +112,11 @@ internal class AndroidNativeAudioServiceAdapter(context: Context) : AndroidAudio
         is AudioOperationDto.Speak -> DeviceAudioOperation.Speak(text, language, rate, voice)
         is AudioOperationDto.Status -> DeviceAudioOperation.Status(handle)
         AudioOperationDto.EndOwner -> DeviceAudioOperation.EndOwner
+    }
+
+    private fun AudioOperationRoutePolicyDto?.toDeviceAudioRoutePolicy(): DeviceAudioRoutePolicy = when (this) {
+        null -> DeviceAudioRoutePolicy.DEFAULT
+        AudioOperationRoutePolicyDto.HOST_CONFIGURED_LOCAL_ONLY -> DeviceAudioRoutePolicy.HOST_CONFIGURED_LOCAL_ONLY
     }
 
     private fun decodeBoundedAudio(encoded: String): ByteArray? {

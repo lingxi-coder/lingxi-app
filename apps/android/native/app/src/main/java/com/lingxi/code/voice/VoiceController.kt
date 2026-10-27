@@ -26,6 +26,7 @@ import com.lingxi.code.bindings.android.AndroidLaunchModeFfi
 import com.lingxi.code.bindings.android.AndroidPermissionSink
 import com.lingxi.code.bindings.android.AndroidProviderConfigFfi
 import com.lingxi.code.bindings.android.AndroidShellConfigFfi
+import com.lingxi.code.bindings.android.AndroidNativeMediaHost
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.client.PermissionRequest
@@ -37,7 +38,7 @@ import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.toDto
 import com.lingxi.code.voice.audio.AndroidAudioServiceProvider
-import com.lingxi.code.voice.audio.AndroidNativeAudioServiceAdapter
+import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
 import com.lingxi.code.voice.audio.AudioOwnerKey
 import com.lingxi.code.voice.audio.DeviceAudioErrorKind
 import com.lingxi.code.voice.audio.DeviceAudioOperation
@@ -45,7 +46,6 @@ import com.lingxi.code.voice.audio.DeviceAudioResult
 import com.lingxi.code.voice.audio.AudioOperationException
 import com.lingxi.code.voice.audio.AudioDriverException
 import com.lingxi.code.voice.audio.DeviceAudioError
-import com.lingxi.code.vision.AndroidCameraAdapter
 import com.lingxi.code.share.AndroidShareAdapter
 import com.lingxi.code.notify.AndroidNotificationAdapter
 import com.lingxi.code.project.ProjectWorkspace
@@ -205,6 +205,7 @@ fun buildVoiceEngine(
     routingJson: String? = null,
     visionDelegationEnabled: Boolean = true,
     appAgentHost: Boolean = false,
+    mediaHost: AndroidNativeMediaHost? = null,
     projectWorkspace: ProjectWorkspace? = null,
     sessionMode: SessionMode = SessionMode.Code,
     linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
@@ -221,11 +222,9 @@ fun buildVoiceEngine(
     },
 ): MobileEngineHandle? {
     val appContext = context.applicationContext
-    val audio = AndroidNativeAudioServiceAdapter(appContext)
-    // Device-vision: the camera adapter drives the process-global CameraController,
-    // whose ActivityResult launchers are registered by MainActivity. The engine
-    // bridges this onto `traits::CameraControl`, lighting up `tool-camera` on-device.
-    val camera = AndroidCameraAdapter()
+    // The same app-scoped object backs the engine, local Agent hosts, cron and
+    // Remote Control; it also owns the native camera/audio lease callbacks.
+    val appMediaHost = mediaHost ?: AndroidNativeMediaHostProvider.get(appContext)
     // Device-share: the share adapter drives the process-global ShareController,
     // whose Context is attached by MainActivity. The engine bridges this onto
     // `traits::SharingService`, lighting up `tool-share` on-device.
@@ -301,8 +300,7 @@ fun buildVoiceEngine(
                 hostEnvironment = androidHostEnvironment(appContext, launchMode),
             ),
             listener = listener,
-            audio = audio,
-            camera = camera,
+            mediaHost = appMediaHost,
             share = share,
             location = location,
             notifications = notifications,

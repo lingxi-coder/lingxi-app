@@ -50,12 +50,14 @@ pub(crate) use platform_posix::PosixFileSystem as HostFileSystem;
 #[cfg(windows)]
 pub(crate) use platform_windows::WindowsFileSystem as HostFileSystem;
 
-pub mod audio_bridge;
 pub mod app_agent;
+pub mod audio_bridge;
 pub mod audio_provider;
-pub mod local_app_service;
 pub mod boot;
 pub mod browser_native_host;
+pub mod local_app_service;
+pub mod media_bridge;
+pub mod media_service_rpc;
 pub mod realtime_audio;
 pub use configuration_admin::config_admin;
 mod cron_host;

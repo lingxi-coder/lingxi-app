@@ -7,6 +7,7 @@ import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.project.ProjectWorkspace
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.voice.buildVoiceEngine
+import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
 import com.lingxi.code.voice.resolveEngineEnvironmentOverrides
 
 /**
@@ -37,6 +38,7 @@ object HeadlessEngineFactory {
         val appContext = context.applicationContext
         val environment = resolveEngineEnvironmentOverrides(System.getenv())
         val providerLaunch = ProviderSettingsRepository(appContext).engineLaunchConfig()
+        val mediaHost = AndroidNativeMediaHostProvider.get(appContext)
         return buildVoiceEngine(
             context = appContext,
             apiBase = environment.apiBase,
@@ -45,6 +47,7 @@ object HeadlessEngineFactory {
             providerProfilesJson = providerLaunch.providerProfilesJson,
             routingJson = providerLaunch.routingJson,
             visionDelegationEnabled = providerLaunch.visionDelegationEnabled,
+            mediaHost = mediaHost,
             projectWorkspace = run {
                 ProjectWorkspace(
                     projectId = scope.projectId ?: "b51bca68-b85f-4caa-8881-07dd33eba24d",

@@ -4,6 +4,9 @@ import type {
   AudioOperationRequestDto,
   AudioOperationResultDto,
   AudioOwnerDto,
+  MediaDeviceRequestEnvelopeDto,
+  MediaDeviceResponseDto,
+  MediaSessionModeDto,
   ClientEvent,
   ConversationControlsDto,
   PermissionModeId,
@@ -21,11 +24,14 @@ export type { HostPermissionRequest } from '../shared/permission.js';
 export interface DesktopAudioService {
   refreshHostedCapabilities?(): Promise<void>;
   getCapabilities(): AudioCapabilitySnapshotDto;
+  getMediaSessionModes?(): MediaSessionModeDto[];
   initializeCapabilities(): Promise<void>;
   executeAudioRequest(request: AudioOperationRequestDto): Promise<AudioOperationResultDto>;
+  /** Native media lease callback shares the same helper's physical-device coordinator. */
+  executeMediaDevice?(request: MediaDeviceRequestEnvelopeDto): Promise<MediaDeviceResponseDto>;
   cancelAudioRequest(identity: AudioOperationIdDto): Promise<void>;
   endAudioOwner(owner: AudioOwnerDto): Promise<void>;
-  onEvent(callback: (event: { type: string; snapshot?: { capabilities?: AudioCapabilitySnapshotDto } }) => void): () => void;
+  onEvent(callback: (event: { type: string; snapshot?: { capabilities?: AudioCapabilitySnapshotDto; mediaSessionModes?: MediaSessionModeDto[] } }) => void): () => void;
 }
 
 export type ConnectionState =
@@ -108,6 +114,8 @@ export interface BridgeManagerOptions {
   diagnostics?: DiagnosticBuffer;
   /** Main-process device service. Engine audio is dispatched here directly. */
   audioService?: DesktopAudioService;
+  /** Bare persisted AudioConfigurationV4 JSON snapshot for the shared media router. */
+  getMediaAudioConfigurationJson?: () => string;
   /** Internal process-inspection seam used to recover detached Desktop runtimes after a main-process restart. */
   readProcessCommand?: (pid: number) => string | undefined;
   /** Internal process-table seam used to attach sessions still owned by another local Desktop/test host. */

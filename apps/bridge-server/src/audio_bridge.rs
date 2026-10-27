@@ -22,8 +22,7 @@ use client::protocol::events::ClientEvent;
 use lingxi_core::host::audio::{
     AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioInitiator, AudioOperation,
     AudioOperationContext, AudioOperationId, AudioOperationKind, AudioOperationReadiness,
-    AudioOperationSuccess, AudioOwner, AudioReadinessState, AudioRecordingHandle, AudioService,
-    AudioStatus,
+    AudioOperationSuccess, AudioOwner, AudioReadinessState, AudioService, AudioStatus,
 };
 use lingxi_core::host::{SttTranscript, TtsAudio, VoiceRecording};
 use tokio::runtime::Handle;
@@ -170,28 +169,12 @@ pub fn new_audio_bridge(sink: Arc<dyn AudioRequestSink>) -> (Arc<AudioBridge>, A
     )
 }
 
-#[async_trait]
-impl AudioService for AudioBridge {
-    fn capabilities(&self) -> AudioCapabilitySnapshot {
-        self.capabilities
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .snapshot
-            .as_ref()
-            .map(snapshot_from_dto)
-            .unwrap_or(AudioCapabilitySnapshot {
-                service_epoch: 0,
-                support_revision: 0,
-                supported_operations: Vec::new(),
-                readiness: Vec::new(),
-                max_payload_bytes: MAX_AUDIO_PAYLOAD_BYTES as u64,
-            })
-    }
-
-    async fn execute(
+impl AudioBridge {
+    async fn execute_with_route_policy(
         &self,
         context: AudioOperationContext,
         operation: AudioOperation,
+        route_policy: Option<client::protocol::audio::AudioOperationRoutePolicyDto>,
     ) -> Result<AudioOperationSuccess, AudioError> {
         let snapshot = self.capabilities();
         if context.identity.service_epoch != snapshot.service_epoch {
@@ -221,6 +204,7 @@ impl AudioService for AudioBridge {
             owner: owner_to_dto(&context.owner),
             initiator: context.initiator.as_ref().map(initiator_to_dto),
             timeout_budget_ms: context.timeout_budget_ms,
+            route_policy,
             max_payload_bytes: request_payload_limit,
             operation: operation_to_dto(operation),
         };
@@ -296,6 +280,47 @@ impl AudioService for AudioBridge {
             cancel_on_drop.armed = false;
         }
         converted
+    }
+}
+
+#[async_trait]
+impl AudioService for AudioBridge {
+    fn capabilities(&self) -> AudioCapabilitySnapshot {
+        self.capabilities
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot
+            .as_ref()
+            .map(snapshot_from_dto)
+            .unwrap_or(AudioCapabilitySnapshot {
+                service_epoch: 0,
+                support_revision: 0,
+                supported_operations: Vec::new(),
+                readiness: Vec::new(),
+                max_payload_bytes: MAX_AUDIO_PAYLOAD_BYTES as u64,
+            })
+    }
+
+    async fn execute(
+        &self,
+        context: AudioOperationContext,
+        operation: AudioOperation,
+    ) -> Result<AudioOperationSuccess, AudioError> {
+        self.execute_with_route_policy(context, operation, None)
+            .await
+    }
+
+    async fn execute_host_configured_local(
+        &self,
+        context: AudioOperationContext,
+        operation: AudioOperation,
+    ) -> Result<AudioOperationSuccess, AudioError> {
+        self.execute_with_route_policy(
+            context,
+            operation,
+            Some(client::protocol::audio::AudioOperationRoutePolicyDto::HostConfiguredLocalOnly),
+        )
+        .await
     }
 
     async fn cancel(&self, identity: AudioOperationId) -> Result<(), AudioError> {
@@ -502,9 +527,9 @@ fn operation_to_dto(operation: AudioOperation) -> AudioOperationDto {
             sample_rate_hz,
             format,
         },
-        AudioOperation::StopRecording { handle } => {
-            AudioOperationDto::StopRecording { handle: handle.0 }
-        }
+        AudioOperation::StopRecording { handle } => AudioOperationDto::StopRecording {
+            handle: handle.0 .0,
+        },
         AudioOperation::Listen { language } => AudioOperationDto::Listen { language },
         AudioOperation::Synthesize {
             text,
@@ -529,7 +554,7 @@ fn operation_to_dto(operation: AudioOperation) -> AudioOperationDto {
             voice,
         },
         AudioOperation::Status { handle } => AudioOperationDto::Status {
-            handle: handle.map(|handle| handle.0),
+            handle: handle.map(|handle| handle.0 .0),
         },
         AudioOperation::EndOwner => AudioOperationDto::EndOwner,
     }
@@ -627,7 +652,7 @@ fn result_from_dto(
                 ));
             }
             Ok(AudioOperationSuccess::RecordingStarted {
-                handle: AudioRecordingHandle(handle),
+                handle: media_api::RecordingRef::from(media_api::RecordingId(handle)),
             })
         }
         AudioOperationResultDto::Recording {

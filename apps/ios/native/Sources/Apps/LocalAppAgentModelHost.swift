@@ -19,10 +19,10 @@ actor LocalAppAgentModelHost {
     private var building: Building?
     private var configurationDigest: String?
 
-    func ensure() async throws {
+    func ensure(mediaHostComposition: IOSNativeMediaHostComposition) async throws {
         if let pending = building {
             try await complete(pending)
-            return try await ensure()
+            return try await ensure(mediaHostComposition: mediaHostComposition)
         }
         let configuration: IosEngineLaunchConfigFfi = try await MainActor.run {
             let snapshot = ProviderRepository.shared.makeLaunchSnapshot()
@@ -72,7 +72,7 @@ actor LocalAppAgentModelHost {
         // The actor can reenter while the global snapshot is read.
         if let pending = building {
             try await complete(pending)
-            return try await ensure()
+            return try await ensure(mediaHostComposition: mediaHostComposition)
         }
         let identity = [configuration.providerConfig?.providerProfilesJson ?? "", configuration.providerConfig?.routingJson ?? "",
                         configuration.apiBase, configuration.apiKey, configuration.nativeConfigHome,
@@ -82,15 +82,23 @@ actor LocalAppAgentModelHost {
         let digest = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
         if handle != nil && configurationDigest == digest { return }
         let task = Task.detached(priority: .userInitiated) { () throws -> MobileEngineHandle in
-        let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
+            let mediaHost = await MainActor.run { mediaHostComposition.nativeHost }
             return try await withCheckedThrowingContinuation { continuation in
                 let thread = Thread {
                     autoreleasepool {
                         continuation.resume(with: Result {
                             let permissions = AppAgentBootstrapPermissions()
-                            let handle = try buildIosEngineWithConfig(config: configuration, listener: AppAgentBootstrapListener(), audio: audio,
-                                camera: CameraImpl(), share: ShareImpl(), notifications: NotificationImpl(), clipboard: ClipboardImpl(),
-                                permissions: permissions, secureStorage: SecureStorageImpl(), deviceControl: DeviceControlImpl())
+                            let handle = try buildIosEngineWithConfig(
+                                config: configuration,
+                                listener: AppAgentBootstrapListener(),
+                                mediaHost: mediaHost,
+                                share: ShareImpl(),
+                                notifications: NotificationImpl(),
+                                clipboard: ClipboardImpl(),
+                                permissions: permissions,
+                                secureStorage: SecureStorageImpl(),
+                                deviceControl: DeviceControlImpl()
+                            )
                             permissions.attach(handle)
                             return handle
                         })
@@ -105,7 +113,7 @@ actor LocalAppAgentModelHost {
         try await complete(pending)
         // Settings can change while native construction is in flight. Never
         // dispatch against the stale result, even for the first caller.
-        return try await ensure()
+        return try await ensure(mediaHostComposition: mediaHostComposition)
     }
 
     private func complete(_ pending: Building) async throws {

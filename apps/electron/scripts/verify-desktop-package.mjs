@@ -22,6 +22,8 @@ import {
 import { BROKER_RESOURCE_DIRNAME } from './credential-broker.mjs';
 import { verifyProtocolRegistration } from './protocol-registration.mjs';
 import { modBunFilename, verifyModBun } from './mod-bun.mjs';
+import { verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { verifyPortableGStreamerRuntime } from './gstreamer-portable.mjs';
 
 function requirePath(path, label) {
   if (!existsSync(path)) throw new Error(`${label} is missing: ${path}`);
@@ -55,6 +57,10 @@ export function verifyDesktopPackage(root, platform, arch) {
   requirePath(join(resources, 'icon.png'), 'LingXi application icon');
   if (sha256File(join(resources, 'icon.png')) !== sha256File(join(packageRoot, 'assets', 'icons', 'icon.png'))) throw new Error('Packaged brand icon is stale');
   verifyModBun(resources, platform, arch);
+  if (platform === 'darwin') {
+    verifyMacGStreamerRuntime(join(paths.payloadRoot, 'Contents', 'Frameworks'), sidecar);
+  }
+  if (platform !== 'darwin') verifyPortableGStreamerRuntime(resources, platform, arch);
   if (platform !== 'darwin') verifyProtocolRegistration(paths.payloadRoot, platform);
   if (platform === 'darwin') {
     const brokerPaths = [

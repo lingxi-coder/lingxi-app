@@ -8,6 +8,8 @@ import {
   ALLOWED_REFRESH_LISTING_KINDS,
   CLIENT_COMMAND_DISPOSITIONS,
   CLIENT_EVENT_DISPOSITIONS,
+  CLIENT_COMMAND_REMOTE_DISPOSITIONS,
+  CLIENT_EVENT_REMOTE_DISPOSITIONS,
   REFRESH_LISTING_DISPOSITIONS,
 } from '../src/shared/clientCommands';
 
@@ -100,6 +102,18 @@ test('engine audio response and capability commands stay private to main', () =>
   assert.equal(ALLOWED_CLIENT_COMMAND_TYPES.includes('update_audio_capabilities' as never), false);
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.audio_response, 'host_private');
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.update_audio_capabilities, 'host_private');
+});
+
+test('native media control cannot enter the renderer command surface or remote conversation broadcasts', () => {
+  for (const type of ['media_service_request', 'media_connection_response', 'media_device_response', 'media_control_response'] as const) {
+    assert.equal(ALLOWED_CLIENT_COMMAND_TYPES.includes(type as never), false);
+    assert.equal(CLIENT_COMMAND_DISPOSITIONS[type], 'host_private');
+    assert.equal(CLIENT_COMMAND_REMOTE_DISPOSITIONS[type], 'host_only');
+  }
+  for (const type of ['media_service_response', 'media_connection_request', 'media_device_request', 'media_control_request'] as const) {
+    assert.equal(CLIENT_EVENT_DISPOSITIONS[type], 'host_private');
+    assert.equal(CLIENT_EVENT_REMOTE_DISPOSITIONS[type], 'withheld');
+  }
 });
 
 test('side-chat protocol is exposed to the Desktop Side Chat UI', () => {

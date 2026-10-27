@@ -751,6 +751,7 @@ final class IOSAudioServiceTests: XCTestCase {
             owner: .session(sessionId: "session-a"),
             initiator: AudioInitiatorDto(agentId: "agent", toolUseId: "tool", requestId: nil),
             timeoutBudgetMs: nil,
+            routePolicy: nil,
             maxPayloadBytes: maxAudioPayloadBytes(),
             operation: .status(handle: nil)
         )
@@ -767,11 +768,76 @@ final class IOSAudioServiceTests: XCTestCase {
         XCTAssertNil(diagnostics.activeLeasePurpose)
     }
 
+    func testHostConfiguredLocalPolicyRejectsProviderFromCapturedConfiguration() async throws {
+        let suiteName = "IOSAudioServiceTests.route-policy.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AudioConfigurationStore(defaults: defaults)
+        _ = try store.save(
+            AudioConfigurationV4(
+                recognition: AudioRecognitionPreference(source: .automatic),
+                speech: AudioSpeechPreference(source: .provider)
+            ),
+            expectedRevision: store.revision
+        )
+        let service = IOSAudioService(configurationStore: store, serviceEpoch: 78, onInvalidation: { _ in })
+
+        let result = await service.execute(request(
+            identity: identity(generation: 1, epoch: 78),
+            owner: .session(sessionID: "local-only-session"),
+            operation: .synthesize(text: "must not use cloud", language: nil, rate: nil, voice: nil),
+            routePolicy: .hostConfiguredLocalOnly
+        ))
+
+        guard case let .failed(error) = result else {
+            return XCTFail("a provider route must be rejected under the local-only policy")
+        }
+        XCTAssertEqual(error.kind, .invalidRequest)
+        XCTAssertEqual(service.lastOperationDiagnostics?.configurationRevision, store.revision)
+    }
+
+    func testHostConfiguredLocalPolicyRejectsAutomaticProviderVoicePin() async throws {
+        let suiteName = "IOSAudioServiceTests.route-policy-voice.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AudioConfigurationStore(defaults: defaults)
+        _ = try store.save(
+            AudioConfigurationV4(
+                recognition: AudioRecognitionPreference(source: .automatic),
+                speech: AudioSpeechPreference(
+                    source: .automatic,
+                    voice: AudioVoiceSelection(
+                        source: .provider,
+                        id: "provider-voice",
+                        modelId: "voice-model",
+                        profileId: "voice-profile"
+                    )
+                )
+            ),
+            expectedRevision: store.revision
+        )
+        let service = IOSAudioService(configurationStore: store, serviceEpoch: 79, onInvalidation: { _ in })
+
+        let result = await service.execute(request(
+            identity: identity(generation: 1, epoch: 79),
+            owner: .session(sessionID: "local-only-voice-session"),
+            operation: .synthesize(text: "must not use cloud", language: nil, rate: nil, voice: nil),
+            routePolicy: .hostConfiguredLocalOnly
+        ))
+
+        guard case let .failed(error) = result else {
+            return XCTFail("an automatic provider voice pin must be rejected under the local-only policy")
+        }
+        XCTAssertEqual(error.kind, .invalidRequest)
+        XCTAssertEqual(service.lastOperationDiagnostics?.configurationRevision, store.revision)
+    }
+
     private func request(
         identity: IOSAudioOperationIdentity,
         owner: IOSAudioOwner,
         timeoutBudgetMs: UInt64? = nil,
-        operation: IOSAudioOperation
+        operation: IOSAudioOperation,
+        routePolicy: IOSAudioOperationRoutePolicy? = nil
     ) -> IOSAudioOperationRequest {
         IOSAudioOperationRequest(
             identity: identity,
@@ -779,7 +845,8 @@ final class IOSAudioServiceTests: XCTestCase {
             initiator: nil,
             timeoutBudgetMs: timeoutBudgetMs,
             maxPayloadBytes: 16_384,
-            operation: operation
+            operation: operation,
+            routePolicy: routePolicy
         )
     }
 

@@ -1,13 +1,15 @@
 #[cfg(feature = "uniffi")]
 use super::callbacks::{
     IosAudioService, IosCamera, IosClipboard, IosDeviceControl, IosEventListener,
-    IosListenerBridge, IosLocation, IosNotification, IosPermissionSink, IosSecureStorage, IosShare,
+    IosListenerBridge, IosLocation, IosMediaDevicePorts, IosNotification, IosPermissionSink,
+    IosSecureStorage, IosShare,
 };
+#[cfg(feature = "uniffi")]
+use super::callbacks::{IosAudioServiceBridge, IosCameraBridge, IosMediaDevicePortsBridge};
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use super::callbacks::{
-    IosAudioServiceBridge, IosCameraBridge, IosClipboardBridge, IosDeviceControlBridge,
-    IosLocationBridge, IosNotificationBridge, IosPermissionSinkBridge, IosSecureStorageBridge,
-    IosShareBridge,
+    IosClipboardBridge, IosDeviceControlBridge, IosLocationBridge, IosNotificationBridge,
+    IosPermissionSinkBridge, IosSecureStorageBridge, IosShareBridge,
 };
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use super::configuration::{
@@ -36,6 +38,73 @@ use lingxi_core::host::Platform;
 use lingxi_core::host::{AudioService, CameraControl, SharingService};
 use std::sync::Arc;
 
+#[cfg(feature = "uniffi")]
+use audio_provider::{
+    media_cloud::AudioProviderCloudRegistry,
+    media_configuration::audio_routing_settings_from_v4_json_checked, media_host::AppMediaHost,
+    media_native::CallbackMediaDevicePorts, media_store::BoundedMediaResourceStore,
+    AppMediaConversationAttachment, AudioConfigurationSnapshot, AudioProviderHost,
+};
+#[cfg(feature = "uniffi")]
+use media_api::{MediaDevicePorts, MediaResourceStore, MediaSessionMode};
+#[cfg(feature = "uniffi")]
+use std::collections::HashMap;
+#[cfg(feature = "uniffi")]
+use std::sync::Weak;
+
+/// Keeps the latest provider binding alive exactly as long as the engine's
+/// listener bridge. Stale teardown cannot remove a newer registry generation.
+#[cfg(feature = "uniffi")]
+struct MediaAudioSessionBindingGuard {
+    registry: Arc<AudioProviderCloudRegistry>,
+    binding: std::sync::Mutex<Option<MediaAudioSessionBindingFfi>>,
+}
+
+#[cfg(feature = "uniffi")]
+impl MediaAudioSessionBindingGuard {
+    fn new(registry: Arc<AudioProviderCloudRegistry>) -> Self {
+        Self {
+            registry,
+            binding: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn update(&self, binding: MediaAudioSessionBindingFfi) {
+        let mut current = self
+            .binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(previous) = current.replace(binding) {
+            self.registry
+                .unregister_session_if_generation(&previous.session_id, previous.generation);
+        }
+    }
+}
+
+#[cfg(feature = "uniffi")]
+impl Drop for MediaAudioSessionBindingGuard {
+    fn drop(&mut self) {
+        if let Some(binding) = self
+            .binding
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            self.registry
+                .unregister_session_if_generation(&binding.session_id, binding.generation);
+        }
+    }
+}
+
+/// Exact provider-route slot installed by one engine attachment. Stale
+/// teardown cannot remove a newer route for the same session ID.
+#[cfg(feature = "uniffi")]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MediaAudioSessionBindingFfi {
+    pub session_id: String,
+    pub generation: u64,
+}
+
 /// Create a RAM-only side using the same typed callbacks as the main chat.
 #[cfg(feature = "uniffi")]
 #[uniffi::export(async_runtime = "tokio")]
@@ -50,7 +119,10 @@ pub async fn create_ios_side_chat(
         .create_side_chat(
             request_id,
             initial_input,
-            Arc::new(IosListenerBridge { inner: listener }),
+            Arc::new(IosListenerBridge {
+                inner: listener,
+                _media_route_guard: None,
+            }),
             Arc::new(super::callbacks::IosPermissionSinkBridge { inner: permissions }),
         )
         .await
@@ -73,6 +145,228 @@ pub struct PlatformImpls {
     pub app_sandbox_root: String,
     /// Optional mobile-linux runtime configuration.
     pub mobile_linux: Option<IosMobileLinuxConfigFfi>,
+}
+
+/// One explicit app-composed media host shared by native engines and Remote
+/// Control. It owns a single media service, audio route registry, device-port
+/// callback, and owner-scoped resource store for the iOS process.
+#[cfg(feature = "uniffi")]
+#[derive(uniffi::Object)]
+pub struct IosNativeMediaHost {
+    inner: Arc<AppMediaHost>,
+    audio: Arc<dyn AudioService>,
+    camera: Arc<dyn CameraControl>,
+    audio_configuration_json: Arc<std::sync::RwLock<String>>,
+    conversation_attachment: Arc<AppMediaConversationAttachment>,
+    route_guards: std::sync::Mutex<HashMap<usize, Weak<MediaAudioSessionBindingGuard>>>,
+}
+
+#[cfg(feature = "uniffi")]
+#[uniffi::export]
+impl IosNativeMediaHost {
+    /// Construct the app-scoped host from the app's existing audio, camera,
+    /// and shared native media-device callbacks plus current v4 settings.
+    #[uniffi::constructor]
+    pub fn new(
+        audio: Box<dyn IosAudioService>,
+        camera: Box<dyn IosCamera>,
+        media_devices: Box<dyn IosMediaDevicePorts>,
+        media_audio_configuration_json: String,
+    ) -> Result<Arc<Self>, MobileEngineError> {
+        let native_audio: Arc<dyn harness_runtime::mobile::NativeAudioService> =
+            Arc::new(IosAudioServiceBridge { inner: audio });
+        let audio = harness_runtime::mobile::from_native_audio_service(native_audio);
+        let camera: Arc<dyn CameraControl> = Arc::new(IosCameraBridge { inner: camera });
+        let local_modes = media_devices
+            .supported_session_modes()
+            .into_iter()
+            .map(|mode| match mode {
+                client::protocol::media::MediaSessionModeDto::Audio => MediaSessionMode::Audio,
+                client::protocol::media::MediaSessionModeDto::Video => MediaSessionMode::Video,
+                client::protocol::media::MediaSessionModeDto::AudioVideo => {
+                    MediaSessionMode::AudioVideo
+                }
+            })
+            .collect();
+        let callback = Arc::new(IosMediaDevicePortsBridge {
+            inner: media_devices,
+        });
+        let ports: Arc<dyn MediaDevicePorts> = Arc::new(CallbackMediaDevicePorts::new(callback));
+        let settings = audio_routing_settings_from_v4_json_checked(&media_audio_configuration_json)
+            .map_err(|error| {
+                MobileEngineError::Internal(format!(
+                    "iOS media audio settings are invalid: {error}"
+                ))
+            })?;
+        let cloud_audio = Arc::new(AudioProviderCloudRegistry::new("wav"));
+        let capabilities = audio.capabilities();
+        let inner = AppMediaHost::new(
+            Arc::new(BoundedMediaResourceStore::default()),
+            audio.clone(),
+            Some(camera.clone()),
+            ports,
+            local_modes,
+            cloud_audio,
+            Vec::new(),
+            settings,
+            capabilities.service_epoch.max(1),
+            capabilities.max_payload_bytes.max(1),
+        )
+        .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+        let audio_configuration_json =
+            Arc::new(std::sync::RwLock::new(media_audio_configuration_json));
+        let configuration: AudioConfigurationSnapshot = {
+            let settings = audio_configuration_json.clone();
+            Arc::new(move || {
+                Ok(settings
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone())
+            })
+        };
+        let conversation_attachment = AppMediaConversationAttachment::new(
+            inner.cloud_audio_registry(),
+            inner.media_service(),
+            configuration,
+        );
+        Ok(Arc::new(Self {
+            inner,
+            audio,
+            camera,
+            audio_configuration_json,
+            conversation_attachment,
+            route_guards: std::sync::Mutex::new(HashMap::new()),
+        }))
+    }
+
+    /// Replace v4 route settings without replacing the host or any active
+    /// owner-scoped resources.
+    pub fn update_audio_settings(
+        &self,
+        media_audio_configuration_json: String,
+    ) -> Result<(), MobileEngineError> {
+        let mut current_json = self
+            .audio_configuration_json
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        self.inner
+            .update_audio_routing_v4(&media_audio_configuration_json)
+            .map_err(|error| {
+                MobileEngineError::Internal(format!(
+                    "iOS media audio settings are invalid: {error}"
+                ))
+            })?;
+        *current_json = media_audio_configuration_json;
+        Ok(())
+    }
+
+    /// Refresh trusted provider/session bindings after an engine attaches or
+    /// changes session. Provider credentials remain inside the engine/runtime.
+    #[uniffi::method(async_runtime = "tokio")]
+    pub async fn update_audio_session_context(
+        &self,
+        engine: Arc<MobileEngineHandle>,
+    ) -> Result<MediaAudioSessionBindingFfi, MobileEngineError> {
+        let context = engine.current_media_context().await?;
+        let session_id = context.session_id.clone();
+        let (services, credential_ids, _) = engine.audio_provider_services();
+        let provider = Arc::new(AudioProviderHost::from_provider_services(
+            services,
+            credential_ids.clone(),
+        ));
+        for profile_name in credential_ids.keys() {
+            self.inner
+                .cloud_audio_registry()
+                .register_profile(profile_name.clone(), provider.clone())
+                .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+        }
+        let generation = self
+            .inner
+            .cloud_audio_registry()
+            .register_session(
+                context.session_id.clone(),
+                context.profile_id.clone(),
+                context.account_scope.clone(),
+                provider.clone(),
+            )
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+        let binding = MediaAudioSessionBindingFfi {
+            session_id,
+            generation,
+        };
+        let engine_key = Arc::as_ptr(&engine) as usize;
+        let guard = self
+            .route_guards
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&engine_key)
+            .and_then(Weak::upgrade);
+        if let Some(guard) = guard {
+            guard.update(binding.clone());
+        }
+        Ok(binding)
+    }
+
+    /// Remove a session's provider route when the Swift owner releases it.
+    pub fn remove_audio_session_context(&self, session_id: String, generation: u64) {
+        self.inner
+            .cloud_audio_registry()
+            .unregister_session_if_generation(&session_id, generation);
+    }
+}
+
+#[cfg(feature = "uniffi")]
+impl IosNativeMediaHost {
+    fn track_engine_route(
+        &self,
+        engine: &Arc<MobileEngineHandle>,
+        guard: &Arc<MediaAudioSessionBindingGuard>,
+    ) {
+        let mut guards = self
+            .route_guards
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        guards.retain(|_, weak| weak.strong_count() > 0);
+        guards.insert(Arc::as_ptr(engine) as usize, Arc::downgrade(guard));
+    }
+
+    pub(crate) fn audio_service(&self) -> Arc<dyn AudioService> {
+        self.audio.clone()
+    }
+
+    pub(crate) fn camera_control(&self) -> Arc<dyn CameraControl> {
+        self.camera.clone()
+    }
+
+    pub(crate) fn media_service(&self) -> Arc<dyn media_api::MediaService> {
+        self.inner.media_service()
+    }
+
+    pub(crate) fn device_ports(&self) -> Arc<dyn MediaDevicePorts> {
+        self.inner.device_ports()
+    }
+
+    pub(crate) fn resource_store(&self) -> Arc<dyn MediaResourceStore> {
+        self.inner.resource_store()
+    }
+
+    pub(crate) fn cloud_audio_registry(&self) -> Arc<AudioProviderCloudRegistry> {
+        self.inner.cloud_audio_registry()
+    }
+
+    pub(crate) fn media_conversation_attachment(
+        &self,
+    ) -> Arc<dyn harness_runtime::mobile::MediaConversationAttachment> {
+        self.conversation_attachment.clone()
+    }
+
+    pub(crate) async fn attach_incoming_session(
+        &self,
+        context: media_api::MediaOperationContext,
+        session: Box<dyn media_api::MediaSession>,
+    ) -> Result<media_api::MediaSessionRef, media_api::MediaError> {
+        self.inner.attach_incoming_session(context, session).await
+    }
 }
 
 /// Top-level `UniFFI` constructor: build the mobile engine from the Swift-supplied
@@ -179,8 +473,9 @@ pub fn build_mobile_engine(
 /// Foreign-callable constructor for the iOS app (plan M10-P3a).
 ///
 /// Builds a fully-wired [`MobileEngineHandle`] from the Swift-supplied event
-/// listener, app-scoped audio callback, other device callbacks, and runtime
-/// config. The handle owns its tokio runtime and streams every
+/// listener, app-composed media host, other device callbacks, and runtime
+/// config. The same opaque media host can be shared with Remote Control. The
+/// handle owns its tokio runtime and streams every
 /// [`client::protocol::events::ClientEvent`] to `listener.on_event(..)`; the app
 /// drives turns via [`MobileEngineHandle::submit`].
 ///
@@ -239,8 +534,7 @@ pub fn build_ios_cron_store(
 pub fn build_ios_engine_with_config(
     config: IosEngineLaunchConfigFfi,
     listener: Box<dyn IosEventListener>,
-    audio: Box<dyn IosAudioService>,
-    camera: Box<dyn IosCamera>,
+    media_host: Arc<IosNativeMediaHost>,
     share: Box<dyn IosShare>,
     notifications: Box<dyn IosNotification>,
     clipboard: Box<dyn IosClipboard>,
@@ -252,7 +546,13 @@ pub fn build_ios_engine_with_config(
     // conversation host passes one.
     location: Option<Box<dyn IosLocation>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
-    let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge { inner: listener });
+    let route_guard = Arc::new(MediaAudioSessionBindingGuard::new(
+        media_host.inner.cloud_audio_registry(),
+    ));
+    let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge {
+        inner: listener,
+        _media_route_guard: Some(route_guard.clone()),
+    });
     #[cfg(target_os = "ios")]
     let device_control = device_control.map(|inner| Arc::new(IosDeviceControlBridge { inner }));
     #[cfg(not(target_os = "ios"))]
@@ -260,9 +560,8 @@ pub fn build_ios_engine_with_config(
     #[cfg(target_os = "ios")]
     {
         use platform_ios::{IosPlatform, IosPlatformInputs};
-        let native_audio: Arc<dyn harness_runtime::mobile::NativeAudioService> =
-            Arc::new(IosAudioServiceBridge { inner: audio });
-        let audio = harness_runtime::mobile::from_native_audio_service(native_audio);
+        let audio = media_host.audio_service();
+        let camera = media_host.camera_control();
         let device_status = device_control
             .clone()
             .map(|service| service.clone() as Arc<dyn lingxi_core::host::DeviceStatusProvider>);
@@ -278,7 +577,9 @@ pub fn build_ios_engine_with_config(
         let deep_link =
             device_control.map(|service| service as Arc<dyn lingxi_core::host::DeepLinkOpener>);
 
-        let cfg = ios_mobile_config_from_launch_config(&config)?;
+        let mut cfg = ios_mobile_config_from_launch_config(&config)?;
+        cfg.media_service = Some(media_host.media_service());
+        cfg.media_conversation_attachment = Some(media_host.media_conversation_attachment());
         let additional_workspace_mounts = ios_project_mount_grants(&config)?;
         let (workspace_host_path, stable_workspace_id) = match config.mobile_linux.as_ref() {
             Some(linux) => {
@@ -297,7 +598,7 @@ pub fn build_ios_engine_with_config(
         let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
             brand_profile: cfg.brand_runtime_profile.clone(),
             app_sandbox_root: std::path::PathBuf::from(&config.app_sandbox_root),
-            camera: Arc::new(IosCameraBridge { inner: camera }),
+            camera,
             audio,
             share: Arc::new(IosShareBridge { inner: share }),
             notifications: Some(Arc::new(IosNotificationBridge {
@@ -327,15 +628,23 @@ pub fn build_ios_engine_with_config(
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(IosPermissionSinkBridge { inner: permissions });
-        harness_runtime::mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
+        let engine =
+            harness_runtime::mobile::build_mobile_engine(cfg, platform, listener, permission_sink)?;
+        media_host.track_engine_route(&engine, &route_guard);
+        // This UniFFI constructor remains synchronous for its Swift callers.
+        // It runs outside the engine runtime, so use the engine-owned runtime
+        // for the initial trusted provider/session binding.
+        engine
+            .runtime()
+            .block_on(media_host.update_audio_session_context(engine.clone()))?;
+        Ok(engine)
     }
     #[cfg(not(target_os = "ios"))]
     {
         let _ = (
             config,
             listener,
-            audio,
-            camera,
+            media_host,
             share,
             notifications,
             clipboard,
@@ -356,8 +665,7 @@ pub fn build_ios_engine(
     model: String,
     app_sandbox_root: String,
     listener: Box<dyn IosEventListener>,
-    audio: Box<dyn IosAudioService>,
-    camera: Box<dyn IosCamera>,
+    media_host: Arc<IosNativeMediaHost>,
     share: Box<dyn IosShare>,
     notifications: Box<dyn IosNotification>,
     clipboard: Box<dyn IosClipboard>,
@@ -420,8 +728,7 @@ pub fn build_ios_engine(
             host_environment: None,
         },
         listener,
-        audio,
-        camera,
+        media_host,
         share,
         notifications,
         clipboard,

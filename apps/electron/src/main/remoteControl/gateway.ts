@@ -4,14 +4,18 @@
  * gateway's. P3b implements the real one on top of the session runtimes.
  */
 
-import { RemoteRpcError, type DevicePlatform, type FileChannel } from '@lingxi/bridge-client/remote';
+import { RemoteRpcError, type DevicePlatform, type FileChannel, type RemoteMediaCapabilities } from '@lingxi/bridge-client/remote';
 
 /** The approved device on the other end of one connection. */
 export interface RemoteViewer {
   account_uid?: string;
+  /** Self-certifying desktop host id from the authenticated connection. */
+  host_id: string;
   device_id: string;
   device_name: string;
   platform: DevicePlatform;
+  /** Present only when the authenticated viewer declared a concrete handler. */
+  media_capabilities?: RemoteMediaCapabilities;
   conn_id: string;
   push_installation_id?: string;
 }
@@ -21,6 +25,11 @@ export interface RemoteViewerChannel {
   readonly files?: FileChannel;
   /** Queued, then sent under the transport's backpressure; dropped once the connection is closed. */
   notify(method: string, params: unknown): void;
+  /**
+   * Request a bounded control-plane response from this approved viewer. This
+   * exists for media negotiation only; media packets use their own peer.
+   */
+  request(method: 'media.offer' | 'media.control', params: unknown): Promise<unknown>;
 }
 
 export interface RemoteSessionGateway {

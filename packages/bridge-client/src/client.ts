@@ -24,16 +24,29 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 
 import {
   BRIDGE_PROTOCOL_VERSION,
   CLIENT_PROTOCOL_VERSION,
   MAX_BRIDGE_FRAME_BYTES,
+  validateMediaServiceRequest,
   type AudioCapabilitySnapshotDto,
   type BridgeTraceContext,
   type ClientCommand,
   type ClientEvent,
+  type MediaConnectionRequestDto,
+  type MediaControlRequestDto,
+  type MediaContentDto,
+  type MediaDeviceRequestEnvelopeDto,
+  type MediaErrorDto,
+  type MediaOperationDto,
+  type MediaOperationIdDto,
+  type MediaResultDto,
+  type MediaServiceActionDto,
+  type MediaServiceResponseDto,
+  type MediaSessionModeDto,
   type ComputerAccessRequestDto,
   type ComputerAccessResponseDto,
   type Frame,
@@ -78,6 +91,20 @@ const WS_SUBPROTOCOL = 'mcp';
 /** Auth header the endpoint validates against the lockfile `authToken`. */
 const AUTH_HEADER_NAME = 'X-LingXi-Ide-Authorization';
 
+function mediaServiceError(error: MediaErrorDto): Error {
+  const result = new Error(`${error.kind}: ${error.message}`);
+  result.name = `MediaServiceError:${error.kind}`;
+  return result;
+}
+
+function validateMediaSessionModes(modes: MediaSessionModeDto[]): MediaSessionModeDto[] {
+  if (modes.length > 3 || new Set(modes).size !== modes.length
+    || modes.some((mode) => mode !== 'audio' && mode !== 'video' && mode !== 'audio_video')) {
+    throw new Error('invalid native media session mode inventory');
+  }
+  return [...modes];
+}
+
 /** Options for constructing a {@link BridgeClient}. */
 export interface BridgeClientOptions {
   /**
@@ -93,6 +120,8 @@ export interface BridgeClientOptions {
   clientName?: string;
   /** Initial device capabilities; omitted until the device service is known. */
   audioCapabilities?: AudioCapabilitySnapshotDto;
+  /** Exact modes exposed by the native duplex MediaDeviceSession adapter. */
+  mediaSessionModes?: MediaSessionModeDto[];
   /** Handshake timeout in milliseconds (default 10_000). */
   handshakeTimeoutMs?: number;
 }
@@ -102,6 +131,12 @@ export interface BridgeClientEvents {
   event: (event: ClientEvent) => void;
   permission: (request: PermissionRequest) => void;
   computerAccess: (request: ComputerAccessRequestDto) => void;
+  /** Host-private route negotiation event; never part of the general event stream. */
+  mediaConnectionRequest: (request: MediaConnectionRequestDto) => void;
+  /** Host-private native lease callback; never part of the general event stream. */
+  mediaDeviceRequest: (request: MediaDeviceRequestEnvelopeDto) => void;
+  /** Host-private playback barrier; never part of the general event stream. */
+  mediaControlRequest: (request: MediaControlRequestDto) => void;
   close: (code: number, reason: string) => void;
   error: (err: Error) => void;
 }
@@ -110,6 +145,12 @@ interface QueueWaiter {
   owner: symbol;
   resolve: (result: IteratorResult<ClientEvent>) => void;
   reject: (err: Error) => void;
+}
+
+interface PendingMediaServiceRequest {
+  resolve: (response: MediaServiceResponseDto) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
 }
 
 /**
@@ -170,6 +211,9 @@ export class BridgeClient extends EventEmitter {
     { resolve: (result: unknown) => void; reject: (err: Error) => void }
   >();
 
+  /** Correlates private app-scoped MediaService command/response events. */
+  private readonly pendingMediaService = new Map<string, PendingMediaServiceRequest>();
+
   constructor(opts: BridgeClientOptions = {}) {
     super();
     this.opts = opts;
@@ -186,6 +230,90 @@ export class BridgeClient extends EventEmitter {
     listener: BridgeClientEvents[E],
   ): this {
     return super.once(event, listener as (...args: unknown[]) => void);
+  }
+
+  /** Execute one typed operation against the bridge connection's bound session owner. */
+  async executeMedia(
+    operation: MediaOperationDto,
+    limits: { timeout_budget_ms?: number; max_payload_bytes?: number } = {},
+  ): Promise<{ operation_id: MediaOperationIdDto; result: MediaResultDto }> {
+    const action: MediaServiceActionDto = { type: 'execute', operation, ...limits };
+    const budget = limits.timeout_budget_ms ?? (operation.type === 'wait' ? operation.timeout_ms : 30_000);
+    const timeoutMs = Math.min(budget + 5_000, 3_605_000);
+    const response = await this.requestMediaService(action, timeoutMs);
+    const result = response.result;
+    if (result?.type !== 'operation') throw new Error('bridge media service returned the wrong result type');
+    return { operation_id: result.operation_id, result: result.result };
+  }
+
+  /** Read a host-owned media asset after the bound session owner is checked. */
+  async readMedia(mediaRef: string): Promise<MediaContentDto> {
+    const response = await this.requestMediaService({ type: 'read_media', media_ref: mediaRef }, 30_000);
+    const result = response.result;
+    if (result?.type !== 'content') throw new Error('bridge media service returned the wrong result type');
+    return result.content;
+  }
+
+  /** Cancel one owner-checked media operation. */
+  async cancelMedia(operationId: MediaOperationIdDto): Promise<void> {
+    const response = await this.requestMediaService({ type: 'cancel', operation_id: operationId }, 30_000);
+    if (response.result?.type !== 'cancelled') throw new Error('bridge media service did not confirm cancellation');
+  }
+
+  /** Update product-owned audio settings on the authenticated host connection. */
+  async updateMediaAudioSettings(configurationJson: string): Promise<void> {
+    const response = await this.requestMediaService({ type: 'update_audio_settings', configuration_json: configurationJson }, 30_000);
+    if (response.result?.type !== 'settings_updated') throw new Error('bridge media host did not confirm audio settings');
+  }
+
+  /** Register one approved Remote Control route for this authenticated session owner. */
+  async registerMediaConnection(
+    connectionId: string,
+    label: string,
+    supportedModes: readonly MediaSessionModeDto[],
+    sourceKinds: readonly ('microphone' | 'camera' | 'screen')[],
+  ): Promise<void> {
+    const response = await this.requestMediaService({
+      type: 'register_connection',
+      connection_id: connectionId,
+      label,
+      supported_modes: [...supportedModes],
+      source_kinds: [...sourceKinds],
+    }, 30_000);
+    if (response.result?.type !== 'connection_updated') throw new Error('bridge media connector did not confirm route registration');
+  }
+
+  /** Remove one route from this authenticated session owner after revocation or detach. */
+  async unregisterMediaConnection(connectionId: string): Promise<void> {
+    const response = await this.requestMediaService({ type: 'unregister_connection', connection_id: connectionId }, 30_000);
+    if (response.result?.type !== 'connection_updated') throw new Error('bridge media connector did not confirm route removal');
+  }
+
+  private requestMediaService(action: MediaServiceActionDto, timeoutMs: number): Promise<MediaServiceResponseDto> {
+    const request = validateMediaServiceRequest({ request_id: randomUUID(), action });
+    return new Promise<MediaServiceResponseDto>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingMediaService.delete(request.request_id);
+        reject(new Error('bridge media service request timed out'));
+      }, timeoutMs);
+      this.pendingMediaService.set(request.request_id, { resolve, reject, timer });
+      try {
+        this.sendCommand({ type: 'media_service_request', request });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingMediaService.delete(request.request_id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  private acceptMediaServiceResponse(response: MediaServiceResponseDto): void {
+    const pending = this.pendingMediaService.get(response.request_id);
+    if (!pending) return;
+    this.pendingMediaService.delete(response.request_id);
+    clearTimeout(pending.timer);
+    if (response.error) pending.reject(mediaServiceError(response.error));
+    else pending.resolve(response);
   }
 
   override emit<E extends keyof BridgeClientEvents>(
@@ -289,6 +417,9 @@ export class BridgeClient extends EventEmitter {
         supports_commands: true,
         client_protocol_version: CLIENT_PROTOCOL_VERSION,
         ...(this.opts.audioCapabilities === undefined ? {} : { audio: this.opts.audioCapabilities }),
+        ...(this.opts.mediaSessionModes === undefined
+          ? {}
+          : { media_session_modes: validateMediaSessionModes(this.opts.mediaSessionModes) }),
       },
     };
 
@@ -609,6 +740,22 @@ export class BridgeClient extends EventEmitter {
       case 'event':
         try {
           const event = validateClientEvent(frame.payload);
+          if (event.type === 'media_service_response') {
+            this.acceptMediaServiceResponse(event.response);
+            break;
+          }
+          if (event.type === 'media_connection_request') {
+            this.emit('mediaConnectionRequest', event.request);
+            break;
+          }
+          if (event.type === 'media_device_request') {
+            this.emit('mediaDeviceRequest', event.request);
+            break;
+          }
+          if (event.type === 'media_control_request') {
+            this.emit('mediaControlRequest', event.request);
+            break;
+          }
           // Refreshed credentials belong only to the host event handler, never the replay queue.
           if (event.type !== 'openai_oauth_updated') this.pushEvent(event);
           this.emit('event', event);
@@ -646,6 +793,11 @@ export class BridgeClient extends EventEmitter {
   private onClose(code: number, reason: string): void {
     this.emit('close', code, reason);
     this.closeStream();
+    for (const pending of this.pendingMediaService.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('bridge connection closed before media service response'));
+    }
+    this.pendingMediaService.clear();
     for (const pending of this.pendingResponses.values()) {
       pending.reject(new Error(`bridge connection closed (code=${code})`));
     }

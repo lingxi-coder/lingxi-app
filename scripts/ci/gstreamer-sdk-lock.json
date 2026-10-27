@@ -1,0 +1,40 @@
+{
+  "version": "1.28.8",
+  "artifacts": {
+    "android": {
+      "url": "https://gstreamer.freedesktop.org/pkg/android/1.28.8/gstreamer-1.0-android-universal-1.28.8.tar.xz",
+      "filename": "gstreamer-1.0-android-universal-1.28.8.tar.xz",
+      "sha256": "f19c6f971a956675402452fce0fe772d66dbd0d28d70999618355813ea593a99"
+    },
+    "ios": {
+      "url": "https://gstreamer.freedesktop.org/data/pkg/ios/1.28.8/gstreamer-1.28.8-xcframework.tar.xz",
+      "filename": "gstreamer-1.28.8-xcframework.tar.xz",
+      "sha256": "d34ae6bd55b6cb9959734299536003d315deea1ab46f84182113692528d04fb5"
+    },
+    "macos-runtime": {
+      "url": "https://gstreamer.freedesktop.org/data/pkg/osx/1.28.8/gstreamer-1.0-1.28.8-universal.pkg",
+      "filename": "gstreamer-1.0-1.28.8-universal.pkg",
+      "sha256": "d371ab04a7632713626836c2fc234e863cc98484c74c473eba99b0fbd9b3a3fe"
+    },
+    "macos-devel": {
+      "url": "https://gstreamer.freedesktop.org/data/pkg/osx/1.28.8/gstreamer-1.0-devel-1.28.8-universal.pkg",
+      "filename": "gstreamer-1.0-devel-1.28.8-universal.pkg",
+      "sha256": "e6d380bc17be7eccf13e0154567d4718fc9321da822408c7ca0cd808b3d4a3f7"
+    },
+    "windows": {
+      "url": "https://gstreamer.freedesktop.org/pkg/windows/1.28.8/msvc/gstreamer-1.0-msvc-x86_64-1.28.8.exe",
+      "filename": "gstreamer-1.0-msvc-x86_64-1.28.8.exe",
+      "sha256": "e4c41ee6ee9c6c32a45d198463ec08d79bac3bd5fa58adc93d13fe4a08abc9d9"
+    },
+    "linux-source": {
+      "url": "https://gitlab.freedesktop.org/gstreamer/gstreamer/-/archive/1.28.8/gstreamer-1.28.8.tar.gz",
+      "filename": "gstreamer-1.28.8.tar.gz",
+      "sha256": "fd146dc03ea55ccfe78c1a91d35b71f20089209e173163f98237aad9f5ec7540"
+    },
+    "linux-orc": {
+      "url": "https://gstreamer.freedesktop.org/src/orc/orc-0.4.42.tar.xz",
+      "filename": "orc-0.4.42.tar.xz",
+      "sha256": "7ec912ab59af3cc97874c456a56a8ae1eec520c385ec447e8a102b2bd122c90c"
+    }
+  }
+}

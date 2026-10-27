@@ -6,6 +6,16 @@ actor LocalAppServiceClient {
     private struct TargetCompatibility: Decodable, Sendable { let compatible: Bool }
     private var handle: MobileLocalAppServiceHandle?
     private var linuxAttached = false
+    private var mediaHostComposition: IOSNativeMediaHostComposition?
+    private var mediaHostInitializationError: String?
+
+    func configureMediaHost(
+        _ mediaHostComposition: IOSNativeMediaHostComposition?,
+        initializationError: String?
+    ) {
+        self.mediaHostComposition = mediaHostComposition
+        mediaHostInitializationError = initializationError
+    }
 
     func request<T: Decodable & Sendable>(_ fields: [String: LocalAppJSON], as type: T.Type = T.self) async throws -> T {
         if handle == nil {
@@ -49,7 +59,13 @@ actor LocalAppServiceClient {
     // Trusted native UI only; page calls use the authenticated external-browser gateway.
     func agentHost(_ request: String) async throws -> LocalAppJSON {
         if LocalAppAgentHostPolicy.requiresModelHost(request) {
-            try await LocalAppAgentModelHost.shared.ensure()
+            guard let mediaHostComposition else {
+                throw LocalAppServiceFailure(
+                    "MEDIA_HOST_UNAVAILABLE",
+                    mediaHostInitializationError ?? "The app media host is not initialized."
+                )
+            }
+            try await LocalAppAgentModelHost.shared.ensure(mediaHostComposition: mediaHostComposition)
         }
         let _: LocalAppJSON = try await self.request(["op": .string("list")])
         guard let handle else { throw LocalAppServiceFailure("SERVICE_UNAVAILABLE", "Local apps are unavailable.") }
@@ -88,6 +104,8 @@ final class UnifiedLocalApps {
     let devicePermissions = LocalAppDevicePermissions()
     @ObservationIgnored let client: LocalAppServiceClient
     @ObservationIgnored private let agentBackground = LocalAppAgentBackgroundController()
+    @ObservationIgnored private var mediaHostComposition: IOSNativeMediaHostComposition?
+    @ObservationIgnored private var mediaHostInitializationError: String?
     var browserReviewAppID: String?
     private(set) var browserAgentWake: LocalAppAgentWakeRequest?
     func consumeBrowserReview(_ id: String) -> Bool {
@@ -131,11 +149,27 @@ final class UnifiedLocalApps {
     func openExternalBrowser(_ id: String) async throws -> LocalAppLaunch {
         guard let app = record(id) else { throw LocalAppServiceFailure("APP_NOT_FOUND", "The local app was not found.") }
         let release = try await release(id, revision: app.currentRevision)
-        if (release.manifest.capabilities ?? []).contains("agent") { try await LocalAppAgentModelHost.shared.ensure() }
+        if (release.manifest.capabilities ?? []).contains("agent") {
+            guard let mediaHostComposition else {
+                throw LocalAppServiceFailure(
+                    "MEDIA_HOST_UNAVAILABLE",
+                    mediaHostInitializationError ?? "The app media host is not initialized."
+                )
+            }
+            try await LocalAppAgentModelHost.shared.ensure(mediaHostComposition: mediaHostComposition)
+        }
         return try await launch(id)
     }
 
     init(client: LocalAppServiceClient = LocalAppServiceClient()) { self.client = client }
+    func configureMediaHost(
+        _ composition: IOSNativeMediaHostComposition?,
+        initializationError: String?
+    ) async {
+        mediaHostComposition = composition
+        mediaHostInitializationError = initializationError
+        await client.configureMediaHost(composition, initializationError: initializationError)
+    }
     func initialize() async { await refresh(); initialized = true }
     func refresh() async {
         do {

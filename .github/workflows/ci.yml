@@ -16,6 +16,8 @@ jobs:
           python3 scripts/tests/test_mobile_linux_source.py
           python3 scripts/tests/test_fetch_sdk_rootfs.py
           python3 scripts/tests/test_workspace_layout.py
+          python3 scripts/tests/test_gstreamer_sdk.py
+          python3 scripts/tests/test_mobile_gstreamer_cargo.py
       - name: Validate both pinned runtime sources
         run: python3 scripts/checks/check-runtime-dependency.py
       - name: Run every checked-in product gate
@@ -29,23 +31,41 @@ jobs:
         run: python3 scripts/tests/test_gate_triggers.py
 
   unit-tests:
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04's archive provides GStreamer >=1.28 for the Rust v1_28 API.
+    runs-on: ubuntu-26.04
     env:
       RUST_MIN_STACK: "16777216"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install GStreamer development libraries and required plugins
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
       - name: Test all retained product packages
         working-directory: .
         run: cargo test --locked --workspace --all-features --no-fail-fast
 
   lint:
-    runs-on: ubuntu-latest
+    # Match the GStreamer API baseline used by unit-tests and bridge-server.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
+      - name: Install GStreamer development libraries and required plugins
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
       - name: cargo fmt
         working-directory: .
         run: cargo fmt --all -- --check

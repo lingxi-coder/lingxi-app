@@ -21,6 +21,7 @@ import {
   REMOTE_PROTOCOL_MAJOR,
   RemoteProtocolError,
   RemoteRpcError,
+  RPC_DEFAULT_TIMEOUT_MS,
   RpcPeer,
   TunnelLink,
   b64uDecode,
@@ -43,6 +44,9 @@ import {
   type FragmentLink,
   type InitializeResult,
   type OfferRecord,
+  type RemoteMediaCapabilities,
+  type RemoteMediaMode,
+  type RemoteMediaSourceKind,
   type RemoteHostInfo,
   type Rtdb,
   type SigningContext,
@@ -124,6 +128,33 @@ function newerOfferNonce(record: unknown): string | undefined {
 
 interface InitializeRequest {
   pushInstallationId?: string;
+  mediaCapabilities?: RemoteMediaCapabilities;
+}
+
+function parseMediaCapabilities(value: unknown, invalid: (what: string) => RemoteRpcError): RemoteMediaCapabilities | undefined {
+  if (value === undefined) return undefined;
+  if (!isObject(value) || value['version'] !== 1 || !Array.isArray(value['modes']) || !Array.isArray(value['source_kinds'])) {
+    throw invalid('bad app.media_capabilities');
+  }
+  const modes = value['modes'];
+  const sourceKinds = value['source_kinds'];
+  const validModes = modes.every(mode => mode === 'audio' || mode === 'video' || mode === 'audio_video');
+  const validKinds = sourceKinds.every(kind => kind === 'microphone' || kind === 'camera' || kind === 'screen');
+  if (!validModes || !validKinds || modes.length < 1 || modes.length > 3 || sourceKinds.length < 1 || sourceKinds.length > 3
+    || new Set(modes).size !== modes.length || new Set(sourceKinds).size !== sourceKinds.length) {
+    throw invalid('bad app.media_capabilities');
+  }
+  const audioModes = (modes as unknown[]).some(mode => mode === 'audio' || mode === 'audio_video');
+  const videoModes = (modes as unknown[]).some(mode => mode === 'video' || mode === 'audio_video');
+  if (audioModes !== sourceKinds.includes('microphone')
+    || videoModes !== sourceKinds.some(kind => kind === 'camera' || kind === 'screen')) {
+    throw invalid('inconsistent app.media_capabilities');
+  }
+  return {
+    version: 1,
+    modes: modes as RemoteMediaMode[],
+    source_kinds: sourceKinds as RemoteMediaSourceKind[],
+  };
 }
 
 function parseInitialize(params: unknown): InitializeRequest {
@@ -140,7 +171,8 @@ function parseInitialize(params: unknown): InitializeRequest {
   }
   if (!isObject(app) || typeof app['version'] !== 'string' || app['version'].length < 1 || app['version'].length > 64) throw invalid('bad app.version');
   if (typeof app['platform'] !== 'string' || !PLATFORMS.includes(app['platform'])) throw invalid('bad app.platform');
-  const request: InitializeRequest = {};
+  const mediaCapabilities = parseMediaCapabilities(app['media_capabilities'], invalid);
+  const request: InitializeRequest = mediaCapabilities === undefined ? {} : { mediaCapabilities };
   if (push !== undefined) {
     if (typeof push !== 'string' || push.length < 1 || push.length > MAX_PUSH_ID_CHARS || CONTROL.test(push)) throw invalid('bad push_installation_id');
     request.pushInstallationId = push;
@@ -206,6 +238,16 @@ export class HostConnection {
         this.rpc?.notify(method, params).catch((error: unknown) => {
           this.deps.diagnostics('warn', `a notification to a viewer could not be sent (${describeError(error)})`);
         });
+      },
+      request: (method, params) => {
+        if (this.closed || this.disconnecting || !this.approved) {
+          return Promise.reject(new RemoteRpcError('not_approved', 'this device has not been approved'));
+        }
+        const rpc = this.rpc;
+        if (rpc === undefined || rpc.closed) {
+          return Promise.reject(new RemoteRpcError('closed', 'the connection is closed'));
+        }
+        return rpc.request(method, params, { timeoutMs: RPC_DEFAULT_TIMEOUT_MS });
       },
     };
   }
@@ -508,9 +550,11 @@ export class HostConnection {
     this.deps.clock.clearTimeout(this.initializeTimer);
     this.viewer = {
       account_uid: uid,
+      host_id: this.deps.identity.hostId,
       device_id: offer.device.id,
       device_name: offer.device.name,
       platform: offer.device.platform,
+      ...(request.mediaCapabilities === undefined ? {} : { media_capabilities: request.mediaCapabilities }),
       conn_id: this.connId,
       ...(request.pushInstallationId === undefined ? {} : { push_installation_id: request.pushInstallationId }),
     };

@@ -41,6 +41,7 @@ import {
   verifyTeamIdentifier,
 } from './credential-broker.mjs';
 import { verifyModBun } from './mod-bun.mjs';
+import { verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
 
 function requirePath(path, kind = 'path') {
   if (!existsSync(path)) throw new Error(`required ${kind} is missing: ${path}`);
@@ -143,6 +144,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   assertArm64Executable(join(resources, 'bin', 'bridge-server'), 'packaged bridge-server sidecar');
   assertArm64Executable(join(resources, 'bin', 'bun'), 'packaged Mod compiler');
   verifyModBun(resources, 'darwin', 'arm64');
+  verifyMacGStreamerRuntime(join(contents, 'Frameworks'), join(resources, 'bin', 'bridge-server'));
   assertArm64Executable(
     join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE),
     'packaged audio helper app',

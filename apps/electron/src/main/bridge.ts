@@ -24,6 +24,17 @@ import type {
   FusionStrategyRefDto,
   FusionStrategySelectionDto,
   ImageRefDto,
+  MediaConnectionRequestDto,
+  MediaConnectionResponseDto,
+  MediaControlRequestDto,
+  MediaControlResponseDto,
+  MediaDeviceRequestEnvelopeDto,
+  MediaDeviceResponseDto,
+  MediaContentDto,
+  MediaOperationDto,
+  MediaOperationIdDto,
+  MediaResultDto,
+  MediaSessionModeDto,
   PermissionModeId,
   PermissionRequest,
   NativeUiControlResponse,
@@ -45,7 +56,7 @@ import { fusionInvocation, pinFusionStrategy } from '../shared/fusionStrategy.js
 import { REMOTE_STATE_EVENT_TYPES } from '../shared/clientCommands.js';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import {
   discoverExternalReusableBridge,
   discoverReusableBridge,
@@ -104,6 +115,7 @@ import {
 } from './credential-broker.js';
 import { GitActivityTracker } from './git-activity.js';
 import { scheduledRunIdentity } from './scheduled-run-identity.js';
+import { NativeMediaDevices } from './media/nativeMediaDevices.js';
 import {
   DiagnosticBuffer,
   buildBridgeArguments,
@@ -455,6 +467,110 @@ export class SessionRuntime {
   realtimeAudioInput(inputJson: string): void { this.requireClient().sendCommand({ type: 'realtime_audio_input', input_json: inputJson }); }
   stopRealtimeAudio(): void { this.client?.sendCommand({ type: 'stop_realtime_audio' }); }
 
+  updateMediaAudioSettings(configurationJson: string): Promise<void> {
+    return this.requireClient().updateMediaAudioSettings(configurationJson);
+  }
+
+  executeMedia(
+    operation: MediaOperationDto,
+    limits?: { timeout_budget_ms?: number; max_payload_bytes?: number },
+  ): Promise<{ operation_id: MediaOperationIdDto; result: MediaResultDto }> {
+    return this.requireClient().executeMedia(operation, limits);
+  }
+
+  readMedia(mediaRef: string): Promise<MediaContentDto> {
+    return this.requireClient().readMedia(mediaRef);
+  }
+
+  cancelMedia(operationId: MediaOperationIdDto): Promise<void> {
+    return this.requireClient().cancelMedia(operationId);
+  }
+
+  registerMediaConnection(
+    connectionId: string,
+    label: string,
+    supportedModes: readonly MediaSessionModeDto[],
+    sourceKinds: readonly ('microphone' | 'camera' | 'screen')[],
+  ): Promise<void> {
+    return this.requireClient().registerMediaConnection(connectionId, label, supportedModes, sourceKinds);
+  }
+
+  unregisterMediaConnection(connectionId: string): Promise<void> {
+    return this.requireClient().unregisterMediaConnection(connectionId);
+  }
+
+  onMediaConnectionRequest(listener: (request: MediaConnectionRequestDto) => void): () => void {
+    this.mediaConnectionRequestListeners.add(listener);
+    return () => this.mediaConnectionRequestListeners.delete(listener);
+  }
+
+  async respondToMediaConnection(response: MediaConnectionResponseDto): Promise<void> {
+    this.requireClient().sendCommand({ type: 'media_connection_response', response });
+  }
+
+  onMediaControlRequest(listener: (request: MediaControlRequestDto) => void): () => void {
+    this.mediaControlRequestListeners.add(listener);
+    return () => this.mediaControlRequestListeners.delete(listener);
+  }
+
+  async respondToMediaControl(response: MediaControlResponseDto): Promise<void> {
+    this.requireClient().sendCommand({ type: 'media_control_response', response });
+  }
+
+  private updateNativeMediaOwner(sessionId?: string): Promise<void> {
+    const update = this.nativeMediaDeviceUpdate.catch(() => undefined).then(async () => {
+      if (sessionId && this.nativeMediaOwner === sessionId && this.nativeMediaDevices) return;
+      const previous = this.nativeMediaDevices;
+      this.nativeMediaDevices = undefined;
+      this.nativeMediaOwner = undefined;
+      if (previous) {
+        this.retiringNativeMediaDevices.add(previous);
+        try {
+          await previous.dispose();
+          this.retiringNativeMediaDevices.delete(previous);
+        } catch (error) {
+          // Keep the closed wrapper retained until every native lease cleanup
+          // is acknowledged; later cleanup may still resolve a quarantined lease.
+          this.diagnostics.add('warn', 'bridge', `native media owner cleanup is still pending: ${sanitizeDiagnostic(error)}`);
+        }
+      }
+      const service = this.opts.audioService;
+      if (!sessionId || this.disposed || !service?.executeMediaDevice) return;
+      this.nativeMediaDevices = new NativeMediaDevices({
+        audio: { executeMediaDevice: request => service.executeMediaDevice!(request) },
+        owner: { type: 'session', session_id: sessionId },
+      });
+      this.nativeMediaOwner = sessionId;
+    });
+    this.nativeMediaDeviceUpdate = update.catch((error: unknown) => {
+      this.diagnostics.add('warn', 'bridge', `native media owner update failed: ${sanitizeDiagnostic(error)}`);
+    });
+    return update;
+  }
+
+  private async dispatchMediaDeviceRequest(
+    client: BridgeClient,
+    generation: number,
+    request: MediaDeviceRequestEnvelopeDto,
+  ): Promise<void> {
+    const devices = this.nativeMediaDevices;
+    let response: MediaDeviceResponseDto;
+    if (devices) {
+      response = await devices.request(request);
+    } else {
+      response = {
+        request_id: request.request_id,
+        result: { type: 'error', error: { kind: 'unavailable', message: 'The attached session has no native media device host' } },
+      };
+    }
+    if (generation !== this.generation || client !== this.client || this.disposed) return;
+    try {
+      client.sendCommand({ type: 'media_device_response', response });
+    } catch (error) {
+      this.diagnostics.add('warn', 'bridge', `native media response could not be returned: ${sanitizeDiagnostic(error)}`);
+    }
+  }
+
   private cachedAudioSessionContext?: { sessionId: string; profileId: string; accountScope: string };
 
   get audioSessionContext() { return this.cachedAudioSessionContext ? { ...this.cachedAudioSessionContext } : undefined; }
@@ -525,12 +641,19 @@ export class SessionRuntime {
   private readonly diagnostics: DiagnosticBuffer;
   private startPromise: Promise<void> | null = null;
   private lastAudioCapabilities = '';
+  private lastMediaSessionModes = '';
   private readonly unsubscribeAudioService?: () => void;
   private readonly audioRequestsByGeneration = new Map<number, Map<string, AudioOperationRequestDto>>();
   private readonly audioStartsByGeneration = new Map<number, Map<string, AudioOperationRequestDto>>();
   private readonly audioOwnersByGeneration = new Map<number, Map<string, AudioOwnerDto>>();
   private readonly audioCleanupGenerations = new Map<number, Promise<void>>();
   private readonly closedAudioGenerations = new Set<number>();
+  private nativeMediaDevices?: NativeMediaDevices;
+  private nativeMediaOwner?: string;
+  private nativeMediaDeviceUpdate: Promise<void> = Promise.resolve();
+  private readonly retiringNativeMediaDevices = new Set<NativeMediaDevices>();
+  private readonly mediaConnectionRequestListeners = new Set<(request: MediaConnectionRequestDto) => void>();
+  private readonly mediaControlRequestListeners = new Set<(request: MediaControlRequestDto) => void>();
 
   constructor(private readonly opts: BridgeManagerOptions, readonly sessionMode?: RuntimeSessionMode) {
     this.sessionId = opts.sessionId ?? randomUUID();
@@ -540,8 +663,21 @@ export class SessionRuntime {
     this.diagnostics = opts.diagnostics ?? new DiagnosticBuffer();
     if (opts.audioService) {
       this.lastAudioCapabilities = JSON.stringify(opts.audioService.getCapabilities());
+      this.lastMediaSessionModes = JSON.stringify(opts.audioService.getMediaSessionModes?.() ?? []);
       this.unsubscribeAudioService = opts.audioService.onEvent((event) => {
         if (event.type === 'capture_chunk' || event.type === 'input_level') return;
+        const modes = event.snapshot?.mediaSessionModes;
+        if (modes) {
+          const serializedModes = JSON.stringify(modes);
+          if (serializedModes !== this.lastMediaSessionModes) {
+            this.lastMediaSessionModes = serializedModes;
+            try {
+              this.client?.sendCommand({ type: 'update_media_session_modes', modes });
+            } catch (error) {
+              this.diagnostics.add('warn', 'bridge', `failed to update media session modes: ${sanitizeDiagnostic(error)}`);
+            }
+          }
+        }
         const capabilities = event.snapshot?.capabilities;
         if (!capabilities) return;
         const serialized = JSON.stringify(capabilities);
@@ -1549,14 +1685,17 @@ export class SessionRuntime {
     }
     if (generation !== this.generation || this.disposed) throw new Error('bridge connection superseded');
     const initialAudioCapabilities = this.opts.audioService?.getCapabilities();
+    const initialMediaSessionModes = this.opts.audioService?.getMediaSessionModes?.() ?? [];
     const client = new BridgeClient({
       lockfilePath,
       clientName: 'lingxi-electron/0.1.0',
       ...(initialAudioCapabilities ? { audioCapabilities: initialAudioCapabilities } : {}),
+      mediaSessionModes: initialMediaSessionModes,
     });
     this.cachedAudioSessionContext = undefined;
     this.verifiedRealtimeAudio = false;
     this.wireClient(client, generation);
+    await this.updateNativeMediaOwner(this.sessionId);
     const assertCurrentConnection = (): void => {
       if (generation !== this.generation || client !== this.client || this.disposed) {
         this.closeDetachedClient(client);
@@ -1578,6 +1717,13 @@ export class SessionRuntime {
       generation,
       phase: 'websocket_handshake',
     });
+    try {
+      const configuration = this.opts.getMediaAudioConfigurationJson?.();
+      if (configuration !== undefined) await client.updateMediaAudioSettings(configuration);
+    } catch (error) {
+      this.diagnostics.add('warn', 'bridge', `saved media audio settings were not applied: ${sanitizeDiagnostic(error)}`);
+    }
+    assertCurrentConnection();
     client.sendCommand({ type: 'get_audio_session_context' });
     const currentAudioCapabilities = this.opts.audioService?.getCapabilities();
     if (
@@ -1586,6 +1732,14 @@ export class SessionRuntime {
     ) {
       client.sendCommand({ type: 'update_audio_capabilities', capabilities: currentAudioCapabilities });
       this.lastAudioCapabilities = JSON.stringify(currentAudioCapabilities);
+    }
+    const currentMediaSessionModes = this.opts.audioService?.getMediaSessionModes?.();
+    if (
+      currentMediaSessionModes
+      && JSON.stringify(currentMediaSessionModes) !== JSON.stringify(initialMediaSessionModes)
+    ) {
+      client.sendCommand({ type: 'update_media_session_modes', modes: currentMediaSessionModes });
+      this.lastMediaSessionModes = JSON.stringify(currentMediaSessionModes);
     }
     this.lastRuntimeVersions = {
       serverName: hello.server_name,
@@ -1684,6 +1838,42 @@ export class SessionRuntime {
       { ...buildBridgeEnvironment(process.env, launch.apiBaseUrl), ...launch.settingsEnvironment },
       process.env, this.telemetryRevoked ? { ...(launch.telemetry ?? resolveDesktopTelemetry({})), enabled: false } : (launch.telemetry ?? resolveDesktopTelemetry({})),
     );
+    // Remote media ICE policy is a device-level Remote Control setting. Keep
+    // it sourced from Electron's validated process configuration and prevent
+    // project settings from replacing the product-owned resolver input.
+    if (process.env.LINGXI_REMOTE_STUN !== undefined) {
+      environment.LINGXI_REMOTE_STUN = process.env.LINGXI_REMOTE_STUN;
+    } else {
+      delete environment.LINGXI_REMOTE_STUN;
+    }
+    delete environment.LINGXI_GSTREAMER_PLUGIN_DIR;
+    if (this.opts.isPackaged) {
+      const resourcesPath = this.opts.resourcesPath ?? process.resourcesPath;
+      if (process.platform === 'darwin') {
+        environment.LINGXI_GSTREAMER_PLUGIN_DIR = resolve(
+          resourcesPath,
+          '..', 'Frameworks', 'GStreamerPlugins',
+        );
+      } else if (process.platform === 'win32') {
+        const runtimeBin = resolve(resourcesPath, 'gstreamer', 'bin');
+        environment.LINGXI_GSTREAMER_PLUGIN_DIR = resolve(
+          resourcesPath,
+          'gstreamer', 'lib', 'gstreamer-1.0',
+        );
+        environment.PATH = [runtimeBin, ...(environment.PATH ?? '').split(delimiter).filter(Boolean)]
+          .filter((entry, index, entries) => entries.indexOf(entry) === index)
+          .join(delimiter);
+      } else if (process.platform === 'linux') {
+        const runtimeLib = resolve(resourcesPath, 'gstreamer', 'lib');
+        environment.LINGXI_GSTREAMER_PLUGIN_DIR = resolve(
+          runtimeLib,
+          'gstreamer-1.0',
+        );
+        environment.LD_LIBRARY_PATH = [runtimeLib, ...(environment.LD_LIBRARY_PATH ?? '').split(delimiter).filter(Boolean)]
+          .filter((entry, index, entries) => entries.indexOf(entry) === index)
+          .join(delimiter);
+      }
+    }
     // These paths belong to Desktop main, never a workspace or a remembered
     // environment snapshot. Absence must also clear inherited integration flags.
     delete environment.LINGXI_DESKTOP_COMPUTER_POLICY;
@@ -1913,7 +2103,7 @@ export class SessionRuntime {
     if (generation === this.generation && !this.disposed) this.client = client;
     // Restored usage is explicitly marked by the engine and may be separated
     // from SessionResumed by other connection events. Live deltas still need a turn.
-    client.on('event', (event: ClientEvent) => {
+    client.on('event', async (event: ClientEvent) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
       this.telemetry?.onEvent(event);
       if (event.type === 'side_chat_created') { this.pendingSideCreates.delete(event.request_id); this.liveSideChats.add(event.side_id); }
@@ -2117,12 +2307,16 @@ export class SessionRuntime {
           this.fail('engine resumed a different session id');
           return;
         }
+        await this.updateNativeMediaOwner(event.session_id);
         this.sessionHasHistory = true;
         this.sessionIdentityCommitted = true;
         if (this.pendingSessionResume) {
           this.pendingSessionResume.sessionResumed = true;
           this.completePendingSessionResumeIfReady();
         }
+      }
+      if (event.type === 'session_started') {
+        await this.updateNativeMediaOwner(event.session_id);
       }
       if (event.type === 'permission_mode_changed' && event.mode === this.pendingPermissionSwitch?.mode) {
         this.pendingPermissionSwitch.complete();
@@ -2174,6 +2368,7 @@ export class SessionRuntime {
         this.cancellingTurn = false;
         this.clearTurnInteractions(event.type === 'session_ended');
       }
+      if (event.type === 'session_ended') await this.updateNativeMediaOwner();
       if (event.type === 'slash_command_result' && this.pendingModelSwitch?.slash && this.pendingModelSwitch.sent && event.turn_id === this.pendingModelSwitch.turnId) {
         const pending = this.pendingModelSwitch;
         if (event.is_error) pending.fail(new Error('Model switch failed.'));
@@ -2249,6 +2444,23 @@ export class SessionRuntime {
       // background gates after that boundary using the existing permission IPC.
       if (event.type === 'turn_ended') this.replayBackgroundPermissions();
     });
+    client.on('mediaDeviceRequest', (request: MediaDeviceRequestEnvelopeDto) => {
+      void this.dispatchMediaDeviceRequest(client, generation, request);
+    });
+    client.on('mediaConnectionRequest', (request: MediaConnectionRequestDto) => {
+      if (generation !== this.generation || client !== this.client || this.disposed) return;
+      for (const listener of [...this.mediaConnectionRequestListeners]) {
+        try { listener(request); }
+        catch (error) { this.diagnostics.add('warn', 'bridge', `media offer listener failed: ${sanitizeDiagnostic(error)}`); }
+      }
+    });
+    client.on('mediaControlRequest', (request: MediaControlRequestDto) => {
+      if (generation !== this.generation || client !== this.client || this.disposed) return;
+      for (const listener of [...this.mediaControlRequestListeners]) {
+        try { listener(request); }
+        catch (error) { this.diagnostics.add('warn', 'bridge', `media control listener failed: ${sanitizeDiagnostic(error)}`); }
+      }
+    });
     client.on('permission', (request: PermissionRequest) => {
       void this.receivePermissionRequest(client, generation, request).catch((error) => {
         this.diagnostics.add('warn', 'bridge', `permission forwarding failed: ${sanitizeDiagnostic(error)}`);
@@ -2280,12 +2492,14 @@ export class SessionRuntime {
     client.on('close', (code, reason) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
       this.permissionScopeChecks.clear();
+      void this.updateNativeMediaOwner();
       void this.teardownAudioGeneration(generation);
       this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
     });
     client.on('error', (error) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
       this.permissionScopeChecks.clear();
+      void this.updateNativeMediaOwner();
       void this.teardownAudioGeneration(generation);
       this.fail(error);
     });
@@ -3354,6 +3568,15 @@ export class SessionRuntime {
     const stoppingGeneration = this.generation;
     ++this.generation;
     await this.teardownAudioGeneration(stoppingGeneration);
+    await this.updateNativeMediaOwner();
+    for (const retired of [...this.retiringNativeMediaDevices]) {
+      try {
+        await retired.dispose();
+        this.retiringNativeMediaDevices.delete(retired);
+      } catch (error) {
+        this.diagnostics.add('warn', 'bridge', `native media cleanup remains unacknowledged: ${sanitizeDiagnostic(error)}`);
+      }
+    }
     await this.oauthPersistence;
     this.servedCodexToken = undefined;
     this.liveSideChats.clear();

@@ -11,7 +11,9 @@ import type {
   AudioOperationKindDto,
   AudioOperationReadinessDto,
   AudioOperationRequestDto,
+  AudioOperationRoutePolicyDto,
   AudioOwnerDto,
+  MediaSessionModeDto,
   AudioReadinessStateDto,
   ClientEvent,
   ToolHeaderDto,
@@ -52,6 +54,12 @@ import type {
   ServerFallbackTombstoneMessageDto,
   TaskRowDto,
 } from './protocol.js';
+import {
+  validateMediaConnectionRequest,
+  validateMediaControlRequest,
+  validateMediaDeviceRequestEnvelope,
+  validateMediaServiceResponse,
+} from './mediaProtocol.js';
 
 function object(value: unknown, name = 'payload'): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`invalid ${name}`);
@@ -368,7 +376,7 @@ function audioOwner(value: unknown): AudioOwnerDto {
 
 function audioOperationRequest(value: unknown): AudioOperationRequestDto {
   const input = object(value, 'audio operation request');
-  exactKeys(input, ['identity', 'owner', 'initiator', 'timeout_budget_ms', 'max_payload_bytes', 'operation'], 'audio operation request');
+  exactKeys(input, ['identity', 'owner', 'initiator', 'timeout_budget_ms', 'route_policy', 'max_payload_bytes', 'operation'], 'audio operation request');
   let initiator: AudioInitiatorDto | undefined;
   if (input['initiator'] !== undefined) {
     const raw = object(input['initiator'], 'audio initiator');
@@ -381,11 +389,16 @@ function audioOperationRequest(value: unknown): AudioOperationRequestDto {
   }
   const timeoutBudget = input['timeout_budget_ms'] === undefined
     ? undefined : integer(input['timeout_budget_ms'], 'audio timeout budget');
+  const routePolicy = input['route_policy'];
+  if (routePolicy !== undefined && routePolicy !== 'host_configured_local_only') {
+    throw new Error('invalid audio route policy');
+  }
   return {
     identity: audioIdentity(input['identity']),
     owner: audioOwner(input['owner']),
     ...(initiator === undefined ? {} : { initiator }),
     ...(timeoutBudget === undefined ? {} : { timeout_budget_ms: timeoutBudget }),
+    ...(routePolicy === undefined ? {} : { route_policy: routePolicy as AudioOperationRoutePolicyDto }),
     max_payload_bytes: integer(input['max_payload_bytes'], 'audio payload bound'),
     operation: audioOperation(input['operation']),
   };
@@ -473,6 +486,18 @@ function audioCapabilities(value: unknown): AudioCapabilitySnapshotDto {
     readiness,
     max_payload_bytes: integer(input['max_payload_bytes'], 'audio payload bound'),
   };
+}
+
+function mediaSessionModes(value: unknown): MediaSessionModeDto[] {
+  if (!Array.isArray(value) || value.length > 3) throw new Error('invalid media session modes');
+  const modes = value.map((entry): MediaSessionModeDto => {
+    if (entry !== 'audio' && entry !== 'video' && entry !== 'audio_video') {
+      throw new Error('invalid media session mode');
+    }
+    return entry;
+  });
+  if (new Set(modes).size !== modes.length) throw new Error('duplicate media session mode');
+  return modes;
 }
 
 const NATIVE_UI_COMPONENTS = [
@@ -1465,6 +1490,18 @@ export function validateClientEvent(value: unknown): ClientEvent {
     case 'audio_capabilities_changed':
       exactKeys(input, ['type', 'capabilities'], 'client event');
       return { type, capabilities: audioCapabilities(input['capabilities']) };
+    case 'media_connection_request':
+      exactKeys(input, ['type', 'request'], 'media connection event');
+      return { type, request: validateMediaConnectionRequest(input['request']) };
+    case 'media_device_request':
+      exactKeys(input, ['type', 'request'], 'media device event');
+      return { type, request: validateMediaDeviceRequestEnvelope(input['request']) };
+    case 'media_service_response':
+      exactKeys(input, ['type', 'response'], 'media service event');
+      return { type, response: validateMediaServiceResponse(input['response']) };
+    case 'media_control_request':
+      exactKeys(input, ['type', 'request'], 'media control event');
+      return { type, request: validateMediaControlRequest(input['request']) };
     case 'side_chat_created':
       exactKeys(input, ['type', 'request_id', 'side_id'], 'client event');
       return {
@@ -1574,7 +1611,7 @@ export function validateServerHello(value: unknown): ServerHello {
   const capabilities = object(input['capabilities'], 'ServerHello capabilities');
   exactKeys(
     capabilities,
-    ['supports_streaming', 'supports_tools', 'supports_skills', 'supports_commands', 'client_protocol_version', 'audio', 'realtime_audio'],
+    ['supports_streaming', 'supports_tools', 'supports_skills', 'supports_commands', 'client_protocol_version', 'audio', 'media_session_modes', 'realtime_audio'],
     'ServerHello capabilities',
   );
   return {
@@ -1588,6 +1625,9 @@ export function validateServerHello(value: unknown): ServerHello {
       supports_commands: boolean(capabilities['supports_commands'], 'supports_commands'),
       client_protocol_version: string(capabilities['client_protocol_version'], 'client_protocol_version'),
       ...(capabilities['audio'] === undefined ? {} : { audio: audioCapabilities(capabilities['audio']) }),
+      ...(capabilities['media_session_modes'] === undefined
+        ? {}
+        : { media_session_modes: mediaSessionModes(capabilities['media_session_modes']) }),
     },
   };
 }

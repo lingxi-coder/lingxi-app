@@ -1182,6 +1182,57 @@ pub trait AndroidAudioService: Send + Sync {
     ) -> Result<(), AndroidAudioFfiError>;
 }
 
+/// Capabilities returned by the Kotlin-owned media device coordinator.
+///
+/// Keep the callback result in this component so its generated RustBuffer is
+/// owned by the same component as the synchronous callback return slot.
+#[cfg(feature = "uniffi")]
+#[derive(uniffi::Record)]
+pub struct AndroidMediaDeviceCapabilities {
+    /// Exact session modes the platform's shared media-device lease can open.
+    pub session_modes: Vec<client::protocol::media::MediaSessionModeDto>,
+}
+
+/// Component-owned return buffer for the asynchronous media device callback.
+#[cfg(feature = "uniffi")]
+#[derive(uniffi::Record)]
+pub struct AndroidMediaDeviceResponse {
+    /// Correlated result in the transport-independent client contract.
+    pub response: client::protocol::media::MediaDeviceResponseDto,
+}
+
+/// Kotlin-owned callback for the app's single native audio/video coordinator.
+/// This typed callback replaces opening a second capture/render path for RTC.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidMediaDevicePorts: Send + Sync {
+    /// Exact session modes the platform's shared media-device lease can open.
+    fn device_capabilities(&self) -> AndroidMediaDeviceCapabilities;
+
+    /// Execute one owner-bound device lease request and echo its correlation ID.
+    async fn request(
+        &self,
+        request: client::protocol::media::MediaDeviceRequestEnvelopeDto,
+    ) -> AndroidMediaDeviceResponse;
+}
+
+#[cfg(feature = "uniffi")]
+pub(super) struct AndroidMediaDevicePortsBridge {
+    pub(super) inner: Box<dyn AndroidMediaDevicePorts>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl audio_provider::media_native::NativeMediaDeviceCallback for AndroidMediaDevicePortsBridge {
+    async fn request(
+        &self,
+        request: client::protocol::media::MediaDeviceRequestEnvelopeDto,
+    ) -> client::protocol::media::MediaDeviceResponseDto {
+        self.inner.request(request).await.response
+    }
+}
+
 #[cfg(feature = "uniffi")]
 pub(super) struct AndroidAudioServiceBridge {
     pub(super) inner: Box<dyn AndroidAudioService>,
@@ -1222,6 +1273,8 @@ impl harness_runtime::mobile::NativeAudioService for AndroidAudioServiceBridge {
 #[cfg(feature = "uniffi")]
 pub(super) struct AndroidListenerBridge {
     pub(super) inner: Box<dyn AndroidEventListener>,
+    /// Lifetime anchor for the media binding owned by this engine handle.
+    pub(super) _media_binding: Option<std::sync::Arc<super::host::AndroidEngineMediaBinding>>,
 }
 
 #[cfg(feature = "uniffi")]

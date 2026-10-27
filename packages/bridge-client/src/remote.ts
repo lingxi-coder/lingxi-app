@@ -395,6 +395,38 @@ export {
   RpcPeer,
 } from './remote/rpc.js';
 
+export {
+  REMOTE_MEDIA_REFERENCE_MAX_CHARS,
+  REMOTE_MEDIA_SDP_MAX_CHARS,
+  parseRemoteMediaAnswer,
+  parseRemoteMediaBridgeControlRequest,
+  parseRemoteMediaBridgeOfferRequest,
+  parseRemoteMediaControlRequest,
+  parseRemoteMediaControlResult,
+  parseRemoteMediaOffer,
+  parseRemoteMediaPlaybackReceipt,
+  remoteMediaSourceRef,
+  isRemoteMediaSourceForRoute,
+  remoteMediaBridgeControlSuccess,
+  remoteMediaBridgeFailure,
+  remoteMediaBridgeSuccess,
+  type RemoteMediaAnswerResult,
+  type RemoteMediaCapabilities,
+  type RemoteMediaBridgeControlRequest,
+  type RemoteMediaBridgeControlResponse,
+  type RemoteMediaIntent,
+  type RemoteMediaSourceKind,
+  type RemoteMediaBridgeErrorCode,
+  type RemoteMediaBridgeOfferRequest,
+  type RemoteMediaBridgeOfferResponse,
+  type RemoteMediaControlAction,
+  type RemoteMediaControlRequestParams,
+  type RemoteMediaControlResult,
+  type RemoteMediaMode,
+  type RemoteMediaOfferParams,
+  type RemoteMediaPlaybackReceipt,
+} from './remote/media.js';
+
 // ── Message types ────────────────────────────────────────────────────────────
 
 /**

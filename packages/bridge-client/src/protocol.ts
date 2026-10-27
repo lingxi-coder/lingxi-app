@@ -29,6 +29,54 @@
 // Version constants (bridge/src/wire.rs, client-protocol/src/version.rs)
 // ─────────────────────────────────────────────────────────────────────────────
 
+import type {
+  MediaConnectionRequestDto,
+  MediaConnectionResponseDto,
+  MediaControlRequestDto,
+  MediaControlResponseDto,
+  MediaDeviceRequestEnvelopeDto,
+  MediaDeviceResponseDto,
+  MediaServiceRequestDto,
+  MediaServiceResponseDto,
+  MediaSessionModeDto,
+} from './mediaProtocol.js';
+
+export {
+  MAX_MEDIA_AUDIO_SETTINGS_JSON_BYTES,
+  MAX_MEDIA_DEVICE_FRAME_BYTES,
+  MAX_MEDIA_DEVICE_WIRE_BYTES,
+  MAX_REMOTE_MEDIA_SDP_BYTES,
+  validateMediaConnectionRequest,
+  validateMediaConnectionResponse,
+  validateMediaControlRequest,
+  validateMediaControlResponse,
+  validateMediaDeviceResponse,
+  validateMediaServiceRequest,
+} from './mediaProtocol.js';
+
+export type {
+  MediaAssetDto, MediaCapabilitiesDto, MediaCaptureOptionsDto,
+  MediaConnectionRequestDto, MediaConnectionResponseDto, MediaContentDto,
+  MediaControlActionDto, MediaControlRequestDto, MediaControlResponseDto,
+  MediaDeviceAudioControlRequestDto, MediaDeviceAudioWriteRequestDto,
+  MediaDeviceOpenRequestDto, MediaDeviceRequestDto, MediaDeviceRequestEnvelopeDto,
+  MediaDeviceResponseDto, MediaDeviceResultDto, MediaDeviceUpdateRequestDto,
+  MediaDeviceVideoWriteRequestDto, MediaErrorDto, MediaErrorKindDto,
+  MediaEventBatchDto, MediaEventDto, MediaEventKindDto, MediaFrameDto,
+  MediaFramePayloadDto, MediaInitiatorDto, MediaKindDto, MediaMetadataDto,
+  MediaOperationDto, MediaOperationIdDto, MediaOperationKindDto,
+  MediaOperationReadinessDto, MediaOwnerDto, MediaPcmFrameDto,
+  MediaReadinessStateDto, MediaRecordOptionsDto, MediaRenderReceiptDto,
+  MediaResourceRefDto, MediaResourceStateDto, MediaResourceStatusDto,
+  MediaResultDto, MediaServiceActionDto, MediaServiceRequestDto,
+  MediaServiceResponseDto, MediaServiceResultDto, MediaSessionDescriptionDto,
+  MediaSessionDescriptionTypeDto, MediaSessionIntentDto, MediaSessionModeDto,
+  MediaSessionRefDto, MediaSessionRequestDto, MediaSessionStateDto,
+  MediaSessionStatusDto, MediaSessionUpdateDto, MediaSourceDto,
+  MediaSourceKindDto, MediaSourceRefDto, MediaSourceUsageDto,
+  MediaTranscriptionInputDto, MediaVideoFrameDto,
+} from './mediaProtocol.js';
+
 /** Bridge wire-envelope (framing/handshake) version this SDK speaks. */
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
@@ -157,12 +205,16 @@ export interface AudioInitiatorDto {
   request_id?: string;
 }
 
+/** Host-owned local route constraint passed to the native adapter. */
+export type AudioOperationRoutePolicyDto = 'host_configured_local_only';
+
 /** A single immutable audio intent and its host-owned operation context. */
 export interface AudioOperationRequestDto {
   identity: AudioOperationIdDto;
   owner: AudioOwnerDto;
   initiator?: AudioInitiatorDto;
   timeout_budget_ms?: number;
+  route_policy?: AudioOperationRoutePolicyDto;
   max_payload_bytes: number;
   operation: AudioOperationDto;
 }
@@ -742,6 +794,7 @@ export type ClientCommand =
   | { type: 'stop_realtime_audio' }
   | { type: 'get_audio_session_context' }
   | { type: 'update_audio_capabilities'; capabilities: AudioCapabilitySnapshotDto }
+  | { type: 'update_media_session_modes'; modes: MediaSessionModeDto[] }
   // Lightweight in-memory child conversations (client-protocol protocol 25).
   // ClientTextDto remains an ordinary JSON string on the wire; command_json is
   // a JSON-encoded ClientCommand carried as a string, not a nested object.
@@ -749,7 +802,11 @@ export type ClientCommand =
   | { type: 'side_chat_list' }
   | { type: 'side_chat_get'; side_id: string }
   | { type: 'side_chat_end'; side_id: string }
-  | { type: 'side_chat_submit'; side_id: string; request_id: string; command_json: string };
+  | { type: 'side_chat_submit'; side_id: string; request_id: string; command_json: string }
+  | { type: 'media_service_request'; request: MediaServiceRequestDto }
+  | { type: 'media_connection_response'; response: MediaConnectionResponseDto }
+  | { type: 'media_device_response'; response: MediaDeviceResponseDto }
+  | { type: 'media_control_response'; response: MediaControlResponseDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // tool_display.rs — the pre-derived render model for one tool call
@@ -1948,7 +2005,11 @@ export type ClientEvent =
   | { type: 'side_chat_permission'; side_id: string; request: PermissionRequest }
   | { type: 'side_chat_submitted'; side_id: string; request_id: string }
   | { type: 'side_chat_ended'; side_id: string }
-  | { type: 'side_chat_error'; request_id?: string; side_id?: string; message: string };
+  | { type: 'side_chat_error'; request_id?: string; side_id?: string; message: string }
+  | { type: 'media_connection_request'; request: MediaConnectionRequestDto }
+  | { type: 'media_device_request'; request: MediaDeviceRequestEnvelopeDto }
+  | { type: 'media_service_response'; response: MediaServiceResponseDto }
+  | { type: 'media_control_request'; request: MediaControlRequestDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // error.rs
@@ -1976,6 +2037,8 @@ export interface Capabilities {
   client_protocol_version: string;
   /** Device audio is unknown until the client publishes its initial snapshot. */
   audio?: AudioCapabilitySnapshotDto;
+  /** Explicit modes supported by the host's shared MediaDeviceSession adapter. */
+  media_session_modes?: MediaSessionModeDto[];
 }
 
 /** Client → server opening handshake (wire.rs `ClientHello`). */

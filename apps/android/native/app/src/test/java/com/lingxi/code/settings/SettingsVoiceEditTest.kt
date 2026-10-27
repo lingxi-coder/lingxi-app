@@ -26,7 +26,11 @@ class SettingsVoiceEditTest {
         val firstWriteCommitted = CountDownLatch(1)
         val secondWriteCommitted = CountDownLatch(1)
         val storage = BlockingVoiceStorage(firstWriteEntered, allowFirstWrite, firstWriteCommitted, secondWriteCommitted)
-        val store = SettingsStore(voiceRepo = AudioConfigurationRepository(storage))
+        val mediaSettingsUpdates = mutableListOf<AudioConfigurationV4>()
+        val store = SettingsStore(
+            voiceRepo = AudioConfigurationRepository(storage),
+            onVoiceConfigurationSaved = { mediaSettingsUpdates += it },
+        )
         try {
             store.updateVoice { it.copy(language = "en-US") }
             store.updateVoice { it.copy(rate = 1.5) }
@@ -62,6 +66,13 @@ class SettingsVoiceEditTest {
             assertEquals(1.5, store.state.value.voice.rate, 0.0)
             assertEquals(3L, store.state.value.voiceRevision)
             assertTrue(!store.state.value.voiceSaving)
+            assertEquals(
+                listOf(
+                    AudioConfigurationNormalizer.defaults.copy(language = "en-US"),
+                    AudioConfigurationNormalizer.defaults.copy(language = "en-US", rate = 1.5),
+                ),
+                mediaSettingsUpdates,
+            )
         } finally {
             allowFirstWrite.countDown()
             Dispatchers.resetMain()

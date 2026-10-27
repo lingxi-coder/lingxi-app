@@ -96,9 +96,20 @@ log() { printf '\033[1;34m[build-xcframework]\033[0m %s\n' "$*"; }
 # ---------------------------------------------------------------------------
 # 0. Preflight — tools + Rust targets
 # ---------------------------------------------------------------------------
-for tool in cargo rustc xcrun xcodebuild; do
+for tool in cargo rustc python3 xcrun xcodebuild; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "ERROR: required tool not found: ${tool}" >&2; exit 1; }
 done
+
+# Validate and stage the same official GStreamer XCFramework that each Rust
+# staticlib target links against. The app links its single copy separately;
+# libGStreamer is intentionally not bundled into the LingxiCodeFFI archive.
+if [[ "${LINGXI_FFI_BINDINGS_ONLY:-0}" != "1" ]]; then
+  GST_FRAMEWORK_TARGET_ARGS=()
+  for t in "${BUILD_TARGETS[@]}"; do GST_FRAMEWORK_TARGET_ARGS+=(--target "${t}"); done
+  python3 "${REPO_ROOT}/scripts/lib/mobile_gstreamer_cargo.py" stage-ios \
+    --destination "${FRAMEWORKS_DIR}/GStreamer.xcframework" \
+    "${GST_FRAMEWORK_TARGET_ARGS[@]}"
+fi
 
 # The SDK native-support framework contains no Rust core. LingXiCodeFFI below
 # remains the only Rust/UniFFI implementation in the application.
@@ -389,51 +400,65 @@ if [[ ${#FUTURE_PROTOCOL_FILES[@]} -gt 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1d. Force callback-vtable registration in `buildIosEngine`
+# 1d. Force callback-vtable registration before synchronous FFI calls
 # ---------------------------------------------------------------------------
 # UniFFI registers a `callback_interface`'s foreign vtable inside its namespace's
 # `private` lazy `initializationResult`, which is forced ONLY by that namespace's
 # `uniffiEnsureIosFrameworkInitialized()` — called from async FFI calls or the SYNCHRONOUS
-# `makeRustCall`/`rustCallWithError` paths' callers, but NOT by the generated
-# `buildIosEngine` itself (it is a bare `rustCallWithError` that lowers the
-# listener WITHOUT first forcing `ios_framework`'s init). The engine then streams
-# events into the registered `IosEventListener` foreign vtable — but if nothing
-# forced `ios_framework`'s `initializationResult`, that vtable is never set, and
-# the first inbound event panics in Rust with `uniffi_core … "Foreign pointer not
-# set"`. (The pre-P4 EngineModule link smoke only called a C contract-version
-# function, never built a handle, so this latent gap went unobserved.)
+# `makeRustCall`/`rustCallWithError` paths' callers. The generated synchronous
+# engine constructors lower `IosEventListener` without first forcing init, and
+# `IosNativeMediaHost.init` lowers audio, camera, and media-device callbacks the
+# same way. Without this call, the first Rust callback dereferences an unset
+# foreign pointer. (The pre-P4 EngineModule link smoke only called a C
+# contract-version function, never constructed an app media host.)
 #
-# Fix (deterministic, no bindgen/engine-semantics change): make `buildIosEngine`
-# call `ios_framework`'s `uniffiEnsureIosFrameworkInitialized()` as its FIRST statement, so
-# the `uniffiCallbackInitIosEventListener()` inside the lazy init runs before the
-# foreign listener is lowered and handed to the engine. The function/types are
-# unchanged; this only forces the same one-time init UniFFI already runs for
-# async entrypoints. Idempotent: skipped if the call is already present.
-log "Forcing IosEventListener callback-vtable init in engine constructors…"
+# Fix (deterministic, no bindgen/engine-semantics change): force the same
+# one-time namespace initialization before these synchronous constructors lower
+# callback interfaces. Idempotent: skipped if a marker is already present.
+log "Forcing callback-vtable initialization in synchronous UniFFI constructors…"
 IOSF="${GEN_DIR}/LingxiCodeBindings.swift"
 [[ -f "${IOSF}" ]] || { echo "ERROR: ${IOSF} missing after bindgen" >&2; exit 1; }
-for constructor in buildIosEngine buildIosEngineWithConfig; do
-  if ! grep -qF "func ${constructor}(" "${IOSF}"; then
-    echo "ERROR: ${constructor} not found in ${IOSF}; bindgen output shape changed" >&2
+inject_uniffi_init() {
+  local signature="$1"
+  local marker="$2"
+  local label="$3"
+  if ! grep -qF "${signature}" "${IOSF}"; then
+    echo "ERROR: ${label} not found in ${IOSF}; bindgen output shape changed" >&2
     exit 1
   fi
-  marker="M10-P4:${constructor}"
   if ! grep -qF "${marker}" "${IOSF}"; then
     tmp="${IOSF}.initpatch"
-    awk -v signature="public func ${constructor}(" -v marker="${marker}" '
+    awk -v signature="${signature}" -v marker="${marker}" '
       index($0, signature) == 1 {
         print
-        print "    uniffiEnsureIosFrameworkInitialized() // " marker " register IosEventListener vtable before lowering"
+        print "    uniffiEnsureIosFrameworkInitialized() // " marker " register callback vtables before lowering"
         next
       }
       { print }
     ' "${IOSF}" > "${tmp}"
     grep -qF "${marker}" "${tmp}" || {
-      echo "ERROR: failed to inject uniffiEnsureIosFrameworkInitialized() into ${constructor}" >&2
+      echo "ERROR: failed to inject uniffiEnsureIosFrameworkInitialized() into ${label}" >&2
       exit 1
     }
     mv "${tmp}" "${IOSF}"
   fi
+}
+inject_uniffi_init \
+  "public convenience init(audio: IosAudioService, camera: IosCamera, mediaDevices: IosMediaDevicePorts," \
+  "M10-P4:IosNativeMediaHost" \
+  "IosNativeMediaHost.init"
+for constructor in buildIosEngine buildIosEngineWithConfig; do
+  inject_uniffi_init \
+    "public func ${constructor}(" \
+    "M10-P4:${constructor}" \
+    "${constructor}"
+done
+for marker in M10-P4:IosNativeMediaHost M10-P4:buildIosEngine M10-P4:buildIosEngineWithConfig; do
+  count="$(grep -Fc "uniffiEnsureIosFrameworkInitialized() // ${marker} " "${IOSF}")"
+  [[ "${count}" == "1" ]] || {
+    echo "ERROR: expected exactly one UniFFI initialization marker ${marker}; found ${count}" >&2
+    exit 1
+  }
 done
 
 SWIFT_COUNT="$(find "${GEN_DIR}" -maxdepth 1 -type f -name '*.swift' -print | wc -l | tr -d ' ')"
@@ -448,6 +473,12 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Per-arch staticlib builds
 # ---------------------------------------------------------------------------
+run_ios_cargo() {
+  local target="$1"
+  shift
+  python3 "${REPO_ROOT}/scripts/lib/mobile_gstreamer_cargo.py" run ios --target "${target}" -- "$@"
+}
+
 for t in "${BUILD_TARGETS[@]}"; do
   if [[ "${LINGXI_REUSE_RUST_STATICLIBS:-0}" == "1" ]]; then
     # A device archive can be compiled once, then paired with fresh bindings
@@ -472,17 +503,17 @@ for t in "${BUILD_TARGETS[@]}"; do
     # headers to bindgen without changing Rust's target or the resulting slice.
     simulator_bindgen_args="--target=arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator -isysroot ${SIMULATOR_SDK}"
     BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:-} ${simulator_bindgen_args}" \
-      cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi --lib --crate-type staticlib \
+      run_ios_cargo "${t}" cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi --lib --crate-type staticlib \
         --target "${t}" "${PROFILE_ARGS[@]}"
   elif [[ "${t}" == "x86_64-apple-ios" ]]; then
     simulator_bindgen_args="--target=x86_64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator -isysroot ${SIMULATOR_SDK}"
     BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:-} ${simulator_bindgen_args}" \
-      cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi --lib --crate-type staticlib \
+      run_ios_cargo "${t}" cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi --lib --crate-type staticlib \
         --target "${t}" "${PROFILE_ARGS[@]}"
   else
     # Target integration needs only this archive. Host-side UniFFI
     # introspection still builds its archive in step 1.
-    cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi --lib --crate-type staticlib \
+    run_ios_cargo "${t}" cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi --lib --crate-type staticlib \
         --target "${t}" "${PROFILE_ARGS[@]}"
   fi
   arch_lib="${CARGO_TARGET_DIR}/${t}/${PROFILE_DIR}/${STATICLIB}"

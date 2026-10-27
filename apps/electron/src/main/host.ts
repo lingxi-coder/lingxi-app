@@ -744,6 +744,24 @@ export class HostController {
         modelPickerVisibility?: unknown;
         sidebar?: unknown;
       });
+      if ('voice' in patch && result.voice) {
+        const configurationJson = JSON.stringify(result.voice);
+        const updates = this.bridge.runtimeSummaries
+          .filter((summary) => summary.connection.status === 'connected')
+          .map((summary) => this.bridge.get(summary.sessionId)?.updateMediaAudioSettings(configurationJson))
+          .filter((update): update is Promise<void> => update !== undefined);
+        const settled = await Promise.allSettled(updates);
+        let failedUpdates = 0;
+        for (const outcome of settled) {
+          if (outcome.status === 'rejected') {
+            failedUpdates += 1;
+            this.diagnostics.add('warn', 'bridge', `saved media audio settings were not applied to a live session: ${sanitizeDiagnostic(outcome.reason)}`);
+          }
+        }
+        if (failedUpdates > 0) {
+          throw new Error(`Audio settings were saved, but ${failedUpdates} live media session(s) did not apply them. Reconnect those sessions to load the saved configuration.`);
+        }
+      }
       if ('telemetryEnabled' in patch && patch.telemetryEnabled === false) await this.bridge.disableTelemetry();
       if ('notifications' in patch) this.notifier?.setPreferences(result.notifications);
       if (restartsBridge) await this.restartIfConfigured();

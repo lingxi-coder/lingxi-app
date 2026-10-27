@@ -540,6 +540,12 @@ impl cron::scheduler::SessionCronDelivery for MsgQueueWakeupScheduler {
 /// flow through the orchestrator's own output stream, not through this handle.
 pub struct OrchestratorTurnDriver {
     orchestrator: Arc<ConversationOrchestrator>,
+    /// Runtime-owned deferred media continuation coordinator and the same
+    /// facade used by tool dispatch. The bridge's active-turn slot remains
+    /// owned while this driver awaits the handoff.
+    desktop_runtime: Option<Arc<harness_runtime::desktop::DesktopRuntime>>,
+    media_agent_handoffs: Option<Arc<harness_runtime::desktop::DesktopMediaAgentHandoffQueue>>,
+    media_service: Option<Arc<dyn media_api::MediaService>>,
     workspace_session_facts: Option<Arc<crate::workspace_commands::WorkspaceSessionFacts>>,
     /// The connection's event sink, shared with the orchestrator's output stream.
     /// Used solely to emit a terminal [`ClientEvent::Error`] on turn failure;
@@ -585,6 +591,9 @@ impl OrchestratorTurnDriver {
     pub fn new(orchestrator: Arc<ConversationOrchestrator>) -> Self {
         Self {
             orchestrator,
+            desktop_runtime: None,
+            media_agent_handoffs: None,
+            media_service: None,
             workspace_session_facts: None,
             error_sink: None,
             message_output: None,
@@ -614,6 +623,34 @@ impl OrchestratorTurnDriver {
         self
     }
 
+    /// Attach the same desktop runtime whose tool context and output adapter
+    /// share the media handoff queue.
+    #[must_use]
+    pub fn with_desktop_runtime(
+        mut self,
+        runtime: Arc<harness_runtime::desktop::DesktopRuntime>,
+    ) -> Self {
+        self.desktop_runtime = Some(runtime.clone());
+        self.media_agent_handoffs = runtime.media_handoff_queue();
+        self.media_service = runtime.media_service();
+        self
+    }
+
+    /// Inject the exact queue and facade used by Desktop tool dispatch. This
+    /// narrow seam also lets streamed-driver tests exercise continuation and
+    /// terminal delivery without constructing a full product runtime.
+    #[must_use]
+    pub fn with_media_handoff(
+        mut self,
+        queue: Arc<harness_runtime::desktop::DesktopMediaAgentHandoffQueue>,
+        service: Option<Arc<dyn media_api::MediaService>>,
+    ) -> Self {
+        self.desktop_runtime = None;
+        self.media_agent_handoffs = Some(queue);
+        self.media_service = service;
+        self
+    }
+
     /// Construct a driver that surfaces a turn-level failure as a
     /// [`ClientEvent::Error`] on `error_sink`.
     ///
@@ -629,6 +666,9 @@ impl OrchestratorTurnDriver {
     ) -> Self {
         Self {
             orchestrator,
+            desktop_runtime: None,
+            media_agent_handoffs: None,
+            media_service: None,
             workspace_session_facts: None,
             error_sink: Some(error_sink),
             message_output: None,
@@ -711,6 +751,89 @@ impl OrchestratorTurnDriver {
             _ => ClientTextDto::from_utf8(&err.to_string()),
         };
         ClientEvent::Error { kind, message }
+    }
+
+    fn media_handoff_terminal(
+        existing: Option<ClientEvent>,
+        end: orchestrator::RealtimeAgentEnd,
+        cancelled: bool,
+        cost: client::protocol::events::CostDto,
+    ) -> ClientEvent {
+        let (outcome, stop_reason) =
+            if cancelled || end == orchestrator::RealtimeAgentEnd::Cancelled {
+                (TurnOutcomeDto::Cancelled, "cancelled")
+            } else {
+                match end {
+                    orchestrator::RealtimeAgentEnd::Closed => {
+                        (TurnOutcomeDto::EndTurn, "media_realtime_closed")
+                    }
+                    orchestrator::RealtimeAgentEnd::Deadline => {
+                        (TurnOutcomeDto::EndTurn, "media_realtime_deadline")
+                    }
+                    orchestrator::RealtimeAgentEnd::Idle => {
+                        (TurnOutcomeDto::EndTurn, "media_realtime_idle")
+                    }
+                    orchestrator::RealtimeAgentEnd::ToolStopped => {
+                        (TurnOutcomeDto::EndTurn, "media_realtime_tool_stopped")
+                    }
+                    orchestrator::RealtimeAgentEnd::Cancelled => {
+                        unreachable!("handled by the cancellation arm above")
+                    }
+                }
+            };
+        match existing {
+            Some(mut event @ ClientEvent::TurnEnded { .. }) => {
+                if let ClientEvent::TurnEnded {
+                    outcome: existing_outcome,
+                    stop_reason: existing_reason,
+                    cost: existing_cost,
+                } = &mut event
+                {
+                    *existing_outcome = outcome;
+                    *existing_reason = Some(stop_reason.to_owned());
+                    *existing_cost = cost;
+                }
+                event
+            }
+            _ => ClientEvent::TurnEnded {
+                outcome,
+                stop_reason: Some(stop_reason.to_owned()),
+                cost,
+            },
+        }
+    }
+
+    fn media_handoff_failure_terminal(
+        existing: Option<ClientEvent>,
+        cancelled: bool,
+        stop_reason: &str,
+        cost: client::protocol::events::CostDto,
+    ) -> ClientEvent {
+        let (outcome, stop_reason) = if cancelled {
+            (TurnOutcomeDto::Cancelled, "cancelled")
+        } else {
+            (TurnOutcomeDto::EndTurn, stop_reason)
+        };
+        match existing {
+            Some(mut event @ ClientEvent::TurnEnded { .. }) => {
+                if let ClientEvent::TurnEnded {
+                    outcome: existing_outcome,
+                    stop_reason: existing_reason,
+                    cost: existing_cost,
+                } = &mut event
+                {
+                    *existing_outcome = outcome;
+                    *existing_reason = Some(stop_reason.to_owned());
+                    *existing_cost = cost;
+                }
+                event
+            }
+            _ => ClientEvent::TurnEnded {
+                outcome,
+                stop_reason: Some(stop_reason.to_owned()),
+                cost,
+            },
+        }
     }
 
     /// Convert the wire [`ImageRefDto`]s (uniform inline `{media_type, base64}`,
@@ -835,6 +958,42 @@ impl OrchestratorTurnDriver {
                 )
                 .await
         };
+        // A Conversation-intent media session is consumed only after the
+        // ordinary orchestrator call has drained its streamed tool work. The
+        // continuation reuses the current cancellation token and therefore the
+        // same ActiveTurn / permission owner; it never reserves a new turn.
+        let media_handoff = if let Some(runtime) = self.desktop_runtime.as_ref() {
+            runtime
+                .continue_media_agent_handoff(cancel_probe.clone(), result.is_ok())
+                .await
+        } else if let Some(queue) = self.media_agent_handoffs.as_ref() {
+            queue
+                .continue_after_turn(
+                    self.orchestrator.clone(),
+                    self.media_service.clone(),
+                    cancel_probe.clone(),
+                    result.is_ok(),
+                )
+                .await
+        } else {
+            Ok(None)
+        };
+        let deferred_media_terminal = self
+            .media_agent_handoffs
+            .as_ref()
+            .and_then(|queue| queue.take_deferred_terminal());
+        let (media_handoff_end, media_handoff_error) = match media_handoff {
+            Ok(end) => (end, None),
+            Err(error) => (None, Some(error)),
+        };
+        if let (Some(error), Some(sink)) = (&media_handoff_error, &self.error_sink) {
+            if let Some(output) = &self.message_output {
+                output.reset_message_buffer().await;
+            }
+            sink.emit(Self::error_event(error)).await;
+        }
+        // The media continuation is part of this turn, so settle loop state only
+        // after it ends and cancellation or handoff failure is known.
         // USER ABORT (binary `t3t`): the user interrupted this turn, so every
         // pending dynamic-loop wakeup is cancelled, the in-flight tick is
         // dropped, their chain-start records are forgotten and the loop ends
@@ -907,7 +1066,7 @@ impl OrchestratorTurnDriver {
                 },
             );
         }
-        let hard_failure = result.is_err();
+        let hard_failure = result.is_err() || media_handoff_error.is_some();
         if let Some(scheduler) = self.wakeup_scheduler.as_ref() {
             if user_aborted {
                 tool_cron::cancel_dynamic_loop_on_user_abort(scheduler).await;
@@ -928,7 +1087,34 @@ impl OrchestratorTurnDriver {
             // Success / cancellation / max-turns all already produced their
             // terminal events through the orchestrator's output stream
             // (`TurnEnded`, etc.) — nothing more to push here.
-            Ok(_) => {}
+            Ok(_) => {
+                if let Some(end) = media_handoff_end {
+                    let terminal = Self::media_handoff_terminal(
+                        deferred_media_terminal,
+                        end,
+                        cancel_probe.is_cancelled(),
+                        lower_cost_snapshot(&self.orchestrator.snapshot_cost_real().await),
+                    );
+                    if let Some(sink) = &self.error_sink {
+                        sink.emit(terminal).await;
+                    }
+                } else if let Some(terminal) = deferred_media_terminal {
+                    let stop_reason = if media_handoff_error.is_some() {
+                        "media_handoff_error"
+                    } else {
+                        "end_turn"
+                    };
+                    let terminal = Self::media_handoff_failure_terminal(
+                        Some(terminal),
+                        cancel_probe.is_cancelled(),
+                        stop_reason,
+                        lower_cost_snapshot(&self.orchestrator.snapshot_cost_real().await),
+                    );
+                    if let Some(sink) = &self.error_sink {
+                        sink.emit(terminal).await;
+                    }
+                }
+            }
             // A hard failure never reached `emit_end_turn`, so surface it
             // explicitly as a terminal `Error` event (when an error sink is wired)
             // rather than letting the client hang.
@@ -942,17 +1128,13 @@ impl OrchestratorTurnDriver {
                     // cannot safely treat every error as a turn terminal. Make
                     // the hard-turn failure explicit with the same terminal
                     // event shape normal orchestrator completion emits.
-                    let outcome = if cancel_probe.is_cancelled() {
-                        TurnOutcomeDto::Cancelled
-                    } else {
-                        TurnOutcomeDto::EndTurn
-                    };
-                    sink.emit(ClientEvent::TurnEnded {
-                        outcome,
-                        stop_reason: Some("error".to_string()),
-                        cost: lower_cost_snapshot(&self.orchestrator.snapshot_cost_real().await),
-                    })
-                    .await;
+                    let terminal = Self::media_handoff_failure_terminal(
+                        deferred_media_terminal,
+                        cancel_probe.is_cancelled(),
+                        "error",
+                        lower_cost_snapshot(&self.orchestrator.snapshot_cost_real().await),
+                    );
+                    sink.emit(terminal).await;
                 } else {
                     tracing::debug!(error = %err, "bridge-server: turn failed (no error sink)");
                 }
@@ -1066,11 +1248,19 @@ impl TurnDriver for OrchestratorTurnDriver {
         if let Some(queue) = &self.queue {
             queue.register_active_turn(cancel.clone()).await;
         }
+        // A stale interactive handoff queue must not capture this scheduled
+        // turn's terminal. Scheduled requests are denied at tool dispatch and
+        // queue admission, so leave any unrelated pending request untouched.
+        let terminal_deferral_guard = self
+            .media_agent_handoffs
+            .as_ref()
+            .map(|queue| queue.suppress_terminal_deferral_for_scheduled_turn());
         let cancel_probe = cancel.clone();
         let result = self
             .orchestrator
             .run_scheduled_turn(prompt, &model, reasoning, cancel)
             .await;
+        drop(terminal_deferral_guard);
         if let Some(queue) = &self.queue {
             queue.clear_active_turn().await;
         }
@@ -1250,10 +1440,12 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use client::adapter::{AdapterOutputStream, ClientEventSink, MockSink};
+    use client::adapter::{AdapterOutputStream, ClientEventSink, MockSink, TurnTerminalDeferrer};
     use client::protocol::commands::ImageRefDto;
     use client::protocol::events::ClientEvent;
-    use lingxi_core::host::{BudgetError, WorkflowOutputScope, WorkflowOutputScopes};
+    use lingxi_core::host::{
+        BudgetError, OrchestratorHandle, WorkflowOutputScope, WorkflowOutputScopes,
+    };
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_core::types::{ContentBlock, ConversationMessage};
     use orchestrator::conversation::ImageSource;
@@ -1550,6 +1742,165 @@ mod tests {
             OrchestratorTurnDriver::new(orchestrator).with_message_output(message_output),
             sink,
         )
+    }
+
+    struct HandoffTestAttachment;
+
+    #[async_trait::async_trait]
+    impl orchestrator::MediaConversationAttachment for HandoffTestAttachment {
+        async fn open(
+            &self,
+            _request: tool_api::MediaAgentHandoffRequest,
+            _prepared: orchestrator::RealtimeAgentContext,
+            _audio: Arc<dyn media_api::MediaAudioChannel>,
+        ) -> Result<orchestrator::RealtimeAgentSessionIo, String> {
+            Err("scheduled terminal test never opens a handoff".into())
+        }
+    }
+
+    fn queue_stale_interactive_handoff(
+        queue: &harness_runtime::desktop::DesktopMediaAgentHandoffQueue,
+        session_id: lingxi_core::types::SessionId,
+    ) {
+        use tool_api::MediaAgentHandoffHandle as _;
+
+        queue.set_attachment(Some(Arc::new(HandoffTestAttachment)));
+        let session_key = session_id.as_uuid().to_string();
+        let assistant_message_id = lingxi_core::types::MessageId::new();
+        let tool_use_id = lingxi_core::types::ToolUseId::new();
+        let mut invocation = tool_api::test_support::fresh_ctx();
+        invocation.session = Some(Arc::new(tokio::sync::Mutex::new(
+            lingxi_core::SessionState::empty(session_id, "test-model".into()),
+        )));
+        invocation.assistant_message_id = Some(assistant_message_id.clone());
+        invocation.tool_use_id = Some(tool_use_id.clone());
+        invocation.assistant_message = Some(ConversationMessage::Assistant {
+            id: assistant_message_id,
+            content: vec![ContentBlock::ToolUse {
+                id: tool_use_id,
+                name: "media_session_start".into(),
+                input: Utf16JsonProjection::from_serde_value(&serde_json::json!({
+                    "intent":"conversation",
+                    "mode":"audio"
+                }))
+                .expect("handoff fixture input is valid JSON"),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+            per_turn_effort: None,
+            resumable: None,
+        });
+        queue
+            .request(
+                &invocation,
+                &tool_api::MediaAgentCapabilityContext {
+                    session_id: session_key,
+                    model: "test-model".into(),
+                    profile_name: Some("test-profile".into()),
+                    account_scope: Some("profile:test-profile".into()),
+                },
+                tool_api::MediaAgentHandoffRequest {
+                    operation_id: media_api::MediaOperationId::new(1, 1),
+                    session: media_api::MediaSessionRef(media_api::MediaSessionId::from(
+                        "stale-interactive-session",
+                    )),
+                    mode: media_api::MediaSessionMode::Audio,
+                },
+            )
+            .expect("fixture queues one interactive handoff before the scheduled run");
+    }
+
+    #[tokio::test]
+    async fn scheduled_turn_emits_its_terminal_without_consuming_stale_interactive_handoff() {
+        let api = Arc::new(MockApiClient::new(Vec::new()));
+        api.set_model_listings(vec![lingxi_core::host::ModelListing {
+            request_model: "scheduled-model".into(),
+            provider_id: "test-provider".into(),
+            ..Default::default()
+        }]);
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![scripted![
+            message_start("scheduled-message", "scheduled-model"),
+            content_block_start_text(0),
+            text_delta(0, "scheduled complete"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]));
+        let sink = MockSink::arc();
+        let message_output = AdapterOutputStream::new(sink.clone() as Arc<dyn ClientEventSink>);
+        let queue = Arc::new(harness_runtime::desktop::DesktopMediaAgentHandoffQueue::default());
+        queue.set_attachment(Some(Arc::new(HandoffTestAttachment)));
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
+            Arc::new(message_output.clone().with_turn_terminal_deferrer(
+                queue.clone() as Arc<dyn client::adapter::TurnTerminalDeferrer>
+            ));
+        let orchestrator =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                api,
+                streaming,
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output,
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ));
+        queue_stale_interactive_handoff(&queue, orchestrator.current_session_id().await);
+        let driver = OrchestratorTurnDriver::with_error_sink(
+            orchestrator,
+            sink.clone() as Arc<dyn ClientEventSink>,
+        )
+        .with_message_output(message_output)
+        .with_media_handoff(queue.clone(), None);
+
+        let result = driver
+            .run_scheduled_turn(
+                Utf16JsonProjection::from("scheduled prompt"),
+                "test-provider/scheduled-model".into(),
+                client::protocol::controls::ReasoningSelectionDto::Automatic,
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(
+            result.expect("scheduled turn succeeds"),
+            "scheduled complete"
+        );
+
+        let events = sink.events().await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+                .count(),
+            1,
+            "the scheduled turn's terminal must reach the client even with a stale queue entry"
+        );
+        let started = events
+            .iter()
+            .position(|event| matches!(event, ClientEvent::TurnStarted { .. }))
+            .expect("the scheduled turn announces itself");
+        let ended = events
+            .iter()
+            .position(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+            .expect("the scheduled turn emits its terminal");
+        assert!(started < ended, "the terminal follows the turn start");
+        assert!(queue.defer_turn_ended(ClientEvent::TurnEnded {
+            outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
+            stop_reason: Some("probe".into()),
+            cost: client::protocol::events::CostDto {
+                total_usd: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                api_calls: 0,
+                session_duration_secs: 0,
+                formatted: "$0.00".into(),
+            },
+        }));
+        assert!(matches!(
+            queue.take_deferred_terminal(),
+            Some(ClientEvent::TurnEnded { .. })
+        ));
     }
 
     /// A turn the client did not submit must ANNOUNCE itself, and must do so

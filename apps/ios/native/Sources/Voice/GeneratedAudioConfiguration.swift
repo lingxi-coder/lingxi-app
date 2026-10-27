@@ -249,7 +249,6 @@ public enum AudioConfigurationNormalizer {
             voice: voice(speechRaw["voice"]),
             cloud: cloud(speechRaw["cloud"])
         )
-        if speech.source == .automatic { speech.voice = nil }
         return AudioConfigurationV4(
             recognition: recognition,
             speech: speech,

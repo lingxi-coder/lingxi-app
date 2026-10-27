@@ -34,6 +34,9 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi/lingxi-code"
 
 [workspace.dependencies]
+media-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "cdf002334ff8698c9ccb1aa17c10314d340dcbe6" }
+media-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "cdf002334ff8698c9ccb1aa17c10314d340dcbe6" }
+lingxi-webrtc-media = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "cdf002334ff8698c9ccb1aa17c10314d340dcbe6" }
 tool-ui = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "cdf002334ff8698c9ccb1aa17c10314d340dcbe6" }
 lingxi-webrtc-core = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "cdf002334ff8698c9ccb1aa17c10314d340dcbe6" }
 lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "ff71b2ec1139bc67cc8719d78b1735aca967bbe8" }

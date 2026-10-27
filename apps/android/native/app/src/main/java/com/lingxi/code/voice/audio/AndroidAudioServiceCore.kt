@@ -31,7 +31,10 @@ internal data class DeviceAudioRequest(
     val timeoutBudgetMs: Long?,
     val maxPayloadBytes: Long,
     val operation: DeviceAudioOperation,
+    val routePolicy: DeviceAudioRoutePolicy = DeviceAudioRoutePolicy.DEFAULT,
 )
+
+internal enum class DeviceAudioRoutePolicy { DEFAULT, HOST_CONFIGURED_LOCAL_ONLY }
 
 internal sealed interface DeviceAudioOperation {
     data class Capture(val sampleRateHz: Int, val format: String) : DeviceAudioOperation
@@ -115,10 +118,41 @@ internal class AudioOperationException(val kind: DeviceAudioErrorKind, message: 
 internal interface AndroidAudioDeviceDriver {
     suspend fun streamCapture(lease: AudioLease, format: RealtimePcmFormat, onChunk: suspend (ByteArray) -> Unit): Unit =
         throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Streaming PCM capture is unsupported")
+    suspend fun streamCapture(
+        lease: AudioLease,
+        format: RealtimePcmFormat,
+        onChunk: suspend (ByteArray) -> Unit,
+        onReady: () -> Unit,
+    ) {
+        onReady()
+        streamCapture(lease, format, onChunk)
+    }
+    suspend fun streamCaptureTimestamped(
+        lease: AudioLease,
+        format: RealtimePcmFormat,
+        onChunk: suspend (RealtimePcmCaptureFrame) -> Unit,
+        onReady: () -> Unit,
+    ) {
+        // Drivers without native capture timestamps keep working, while the
+        // production AudioRecord driver overrides this with read-time stamps.
+        streamCapture(lease, format, { pcm ->
+            onChunk(RealtimePcmCaptureFrame(pcm, System.currentTimeMillis()))
+        }, onReady)
+    }
     fun pauseStreamCapture(lease: AudioLease, paused: Boolean) = Unit
+    fun setStreamPlaybackGain(lease: AudioLease, gain: Float): Unit =
+        throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Realtime playback gain control is unsupported")
     fun streamingPlaybackPositionMs(lease: AudioLease): Long? = null
     suspend fun streamPlayback(lease: AudioLease, format: RealtimePcmFormat, chunks: kotlinx.coroutines.channels.ReceiveChannel<ByteArray>): Unit =
         throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Streaming PCM playback is unsupported")
+    suspend fun streamPlaybackAcknowledged(
+        lease: AudioLease,
+        format: RealtimePcmFormat,
+        chunks: kotlinx.coroutines.channels.ReceiveChannel<RealtimePcmWrite>,
+        onReady: () -> Unit,
+    ): Unit = throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Acknowledged PCM playback is unsupported")
+    fun interruptStreamPlayback(lease: AudioLease, throughGeneration: Long): RealtimePcmWriteReceipt =
+        throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Realtime playback interruption is unsupported")
     suspend fun captureWav(lease: AudioLease, maxPayloadBytes: Int, untilSilence: Boolean, onReady: () -> Unit): DeviceAudioCapture =
         throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "PCM microphone capture is unsupported")
     fun finishWavCapture(lease: AudioLease) = Unit
@@ -304,6 +338,7 @@ internal class AndroidAudioServiceCore(
     private val operationMutex = Mutex()
     private val serviceOperationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val coordinator = AudioResourceCoordinator(initialEpoch)
+    private val mediaPortGeneration = AtomicLong(0L)
     private val recordings = AudioRecordingRegistry()
     private val operations = ConcurrentHashMap<AudioOperationIdentity, OperationState>()
     private val cancelledOperations = ConcurrentHashMap.newKeySet<AudioOperationIdentity>()
@@ -404,6 +439,121 @@ internal class AndroidAudioServiceCore(
         }
     }
 
+    /** Open the RTC duplex lane using this same app-wide audio lease coordinator. */
+    internal suspend fun openMediaAudioPort(
+        owner: AudioOwnerKey,
+        capture: Boolean,
+        playback: Boolean,
+        sampleRateHz: Int = 24_000,
+    ): AndroidMediaAudioPortSession {
+        if (!capture && !playback) {
+            throw AudioOperationException(DeviceAudioErrorKind.InvalidRequest, "media audio port needs capture or playback")
+        }
+        if (invalidating || owner in endingOwners) {
+            throw AudioOperationException(DeviceAudioErrorKind.Cancelled, "media audio owner is ending")
+        }
+        val format = RealtimePcmFormat(sampleRateHz, 1, "pcm16")
+        format.requireSupported()
+        val leases = ArrayList<AudioLease>(2)
+        try {
+            if (capture) leases += acquireMediaPortLease(owner, AudioResource.Capture)
+            if (playback) leases += acquireMediaPortLease(owner, AudioResource.Playback)
+            val captureLease = leases.firstOrNull { it.resource == AudioResource.Capture }
+            val playbackLease = leases.firstOrNull { it.resource == AudioResource.Playback }
+            val input = kotlinx.coroutines.channels.Channel<RealtimePcmCaptureFrame>(capacity = 8)
+            val output = kotlinx.coroutines.channels.Channel<RealtimePcmWrite>(capacity = 8)
+            val captureReady = CompletableDeferred<Unit>()
+            val playbackReady = CompletableDeferred<Unit>()
+            val captureJob = captureLease?.let { lease ->
+                serviceOperationScope.launch {
+                    try {
+                        driver.streamCaptureTimestamped(lease, format, { frame ->
+                            val sent = input.trySend(frame)
+                            if (sent.isFailure) throw AudioOperationException(DeviceAudioErrorKind.Busy, "media audio input queue is full")
+                        }, { captureReady.complete(Unit) })
+                        input.close()
+                    } catch (error: Throwable) {
+                        input.close(error)
+                        captureReady.completeExceptionally(error)
+                        throw error
+                    }
+                }
+            }
+            val playbackJob = playbackLease?.let { lease ->
+                serviceOperationScope.launch {
+                    try {
+                        driver.streamPlaybackAcknowledged(lease, format, output) { playbackReady.complete(Unit) }
+                    } catch (error: Throwable) {
+                        output.close(error)
+                        while (true) {
+                            val pending = output.tryReceive().getOrNull() ?: break
+                            pending.completion.completeExceptionally(error)
+                        }
+                        playbackReady.completeExceptionally(error)
+                        throw error
+                    }
+                }
+            }
+            val session = AndroidMediaAudioPortSession(
+                core = this,
+                owner = owner,
+                format = format,
+                input = input,
+                output = output,
+                leases = leases.toList(),
+                captureJob = captureJob,
+                playbackJob = playbackJob,
+            )
+            try {
+                if (capture) captureReady.await()
+                if (playback) playbackReady.await()
+            } catch (error: Throwable) {
+                session.stop()
+                throw error
+            }
+            return session
+        } catch (error: Throwable) {
+            for (lease in leases.asReversed()) {
+                runCatching { admission.release(lease) }
+                retireLeaseMetadata(lease)
+            }
+            throw error
+        }
+    }
+
+    private suspend fun acquireMediaPortLease(owner: AudioOwnerKey, resource: AudioResource): AudioLease {
+        val generation = mediaPortGeneration.incrementAndGet()
+        if (generation <= 0L || generation > 9_007_199_254_740_991L) {
+            throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "media audio lease generation is exhausted")
+        }
+        val identity = AudioOperationIdentity(java.util.UUID.randomUUID().toString(), generation, epoch)
+        return when (val decision = admission.acquire(identity, owner, resource, flowDuplex = true)) {
+            is AudioLeaseDecision.Granted -> decision.lease
+            is AudioLeaseDecision.NativeFailure -> throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, decision.message)
+            AudioLeaseDecision.Busy -> throw AudioOperationException(DeviceAudioErrorKind.Busy, "another media audio owner is active")
+            AudioLeaseDecision.StaleEpoch -> throw AudioOperationException(DeviceAudioErrorKind.Cancelled, "media audio service changed before lease admission")
+            is AudioLeaseDecision.PreemptionRequired -> throw AudioOperationException(DeviceAudioErrorKind.Busy, "media audio cannot preempt an active playback owner")
+        }
+    }
+
+    internal suspend fun releaseMediaPortLease(lease: AudioLease) {
+        if (!admission.release(lease) && coordinator.isActive(lease)) {
+            throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "media audio device lease could not be released")
+        }
+        retireLeaseMetadata(lease)
+    }
+
+    internal fun setMediaCaptureEnabled(lease: AudioLease, enabled: Boolean) {
+        driver.pauseStreamCapture(lease, paused = !enabled)
+    }
+
+    internal fun setMediaPlaybackGain(lease: AudioLease, gain: Float) {
+        driver.setStreamPlaybackGain(lease, gain)
+    }
+
+    internal fun interruptMediaPortPlayback(lease: AudioLease, throughGeneration: Long): RealtimePcmWriteReceipt =
+        driver.interruptStreamPlayback(lease, throughGeneration)
+
     suspend fun cancel(identity: AudioOperationIdentity) {
         val operation = operationMutex.withLock {
             rememberCancelled(identity)
@@ -446,12 +596,14 @@ internal class AndroidAudioServiceCore(
                 if (!state.isLive() || request.identity.serviceEpoch != epoch) {
                     throw CancellationException("audio operation is no longer active")
                 }
-                requireMicrophonePermission()
                 val currentSnapshot = runtime.configurationSnapshot()
                 val snapshot = operation.configuration ?: currentSnapshot.configuration
+                requireHostConfiguredLocalOnly(state, snapshot.recognition.source)
+                requireMicrophonePermission()
                 val route = if (snapshot.recognition.source == AudioSource.PROVIDER) {
                     providerRoute(state, snapshot, "recognition")
                 } else runtime.resolveRecognition(snapshot, operation.language)
+                requireHostConfiguredLocalResolution(state, route)
                 state.configurationRevision = operation.configurationRevision ?: currentSnapshot.revision
                 state.requestedSource = route.requested.source.value
                 state.effectiveSource = route.effective?.source?.value
@@ -857,6 +1009,7 @@ internal class AndroidAudioServiceCore(
         val snapshot = runtime.configurationSnapshot()
         state.configurationRevision = snapshot.revision
         val configuration = snapshot.configuration
+        requireHostConfiguredLocalOnly(state, configuration.recognition.source)
         val result = if (configuration.recognition.source == AudioSource.PROVIDER) {
             providerRoute(state, configuration, "recognition")
             checkNotNull(provider).transcribe(state.request, configuration, operation.capture)
@@ -864,6 +1017,7 @@ internal class AndroidAudioServiceCore(
             if (configuration.recognition.source == AudioSource.SYSTEM) throw AudioOperationException(DeviceAudioErrorKind.Unsupported,
                 "Android SpeechRecognizer only accepts live microphone audio. Choose an installed offline model or provider for recorded audio.")
             val route = runtime.resolveRecognition(configuration, operation.language, AudioReadiness.UNAVAILABLE)
+            requireHostConfiguredLocalResolution(state, route)
             requireReadyRoute(route)
             val lease = acquire(state, AudioResource.OfflineRender, modelId = route.effective?.modelId)
             try { runtime.transcribeEncoded(operation.capture, operation.language, configuration) } finally { releaseAfterStop(lease) }
@@ -979,13 +1133,15 @@ internal class AndroidAudioServiceCore(
         state: OperationState,
         operation: DeviceAudioOperation.Listen,
     ): DeviceAudioResult {
-        requireMicrophonePermission()
         val currentSnapshot = runtime.configurationSnapshot()
         val snapshot = operation.configuration ?: currentSnapshot.configuration
+        requireHostConfiguredLocalOnly(state, snapshot.recognition.source)
+        requireMicrophonePermission()
         state.configurationRevision = operation.configurationRevision ?: currentSnapshot.revision
         val resolution = if (snapshot.recognition.source == AudioSource.PROVIDER) {
             providerRoute(state, snapshot, "recognition")
         } else runtime.resolveRecognition(snapshot, operation.language)
+        requireHostConfiguredLocalResolution(state, resolution)
         state.requestedSource = resolution.requested.source.value
         state.effectiveSource = resolution.effective?.source?.value
         state.fallbackReason = resolution.fallbackReason
@@ -1053,10 +1209,12 @@ internal class AndroidAudioServiceCore(
         validateText(operation.text)
         val currentSnapshot = runtime.configurationSnapshot()
         val snapshot = operation.configuration ?: currentSnapshot.configuration
+        requireHostConfiguredLocalOnly(state, snapshot.speech.source, snapshot.speech.voice?.source)
         state.configurationRevision = operation.configurationRevision ?: currentSnapshot.revision
         val resolution = if (snapshot.speech.source == AudioSource.PROVIDER) {
             providerRoute(state, snapshot, "speech")
         } else runtime.resolveSpeech(snapshot, operation.language, operation.voice, operation.rate)
+        requireHostConfiguredLocalResolution(state, resolution)
         state.requestedSource = resolution.requested.source.value
         state.effectiveSource = resolution.effective?.source?.value
         state.fallbackReason = resolution.fallbackReason
@@ -1100,10 +1258,12 @@ internal class AndroidAudioServiceCore(
         validateText(operation.text)
         val currentSnapshot = runtime.configurationSnapshot()
         val snapshot = operation.configuration ?: currentSnapshot.configuration
+        requireHostConfiguredLocalOnly(state, snapshot.speech.source, snapshot.speech.voice?.source)
         state.configurationRevision = operation.configurationRevision ?: currentSnapshot.revision
         val resolution = if (snapshot.speech.source == AudioSource.PROVIDER) {
             providerRoute(state, snapshot, "speech")
         } else runtime.resolveSpeech(snapshot, operation.language, operation.voice, operation.rate)
+        requireHostConfiguredLocalResolution(state, resolution)
         state.requestedSource = resolution.requested.source.value
         state.effectiveSource = resolution.effective?.source?.value
         state.fallbackReason = resolution.fallbackReason
@@ -1590,6 +1750,33 @@ internal class AndroidAudioServiceCore(
 
     private fun requireReadyRoute(route: AudioRouteResolution) {
         if (route.status != AudioRouteStatus.READY) throw routeFailure(route)
+    }
+
+    private fun requireHostConfiguredLocalOnly(
+        state: OperationState,
+        source: AudioSource,
+        voiceSource: AudioSource? = null,
+    ) {
+        if (state.request.routePolicy != DeviceAudioRoutePolicy.HOST_CONFIGURED_LOCAL_ONLY) return
+        if (source == AudioSource.PROVIDER || voiceSource == AudioSource.PROVIDER) {
+            throw AudioOperationException(
+                DeviceAudioErrorKind.InvalidRequest,
+                "The current audio settings select a provider route, but this operation was admitted as host configured local audio.",
+            )
+        }
+    }
+
+    private fun requireHostConfiguredLocalResolution(state: OperationState, route: AudioRouteResolution) {
+        if (state.request.routePolicy != DeviceAudioRoutePolicy.HOST_CONFIGURED_LOCAL_ONLY) return
+        if (route.requested.source == AudioSource.PROVIDER ||
+            route.requested.voice?.source == AudioSource.PROVIDER ||
+            route.effective?.source == AudioSource.PROVIDER
+        ) {
+            throw AudioOperationException(
+                DeviceAudioErrorKind.InvalidRequest,
+                "The current audio settings resolve to a provider route, but this operation was admitted as host configured local audio.",
+            )
+        }
     }
 
     private fun validateCaptureRequest(sampleRateHz: Int, format: String) {

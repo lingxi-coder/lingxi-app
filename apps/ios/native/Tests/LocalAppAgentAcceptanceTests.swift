@@ -1,7 +1,77 @@
 import Foundation
 import Darwin
+import CryptoKit
 import XCTest
 @testable import LingxiCode
+
+private struct LocalAppLoopbackProbeResult {
+    let proxyMode: String
+    let pathCase: String
+    let statusCode: Int?
+    let errorDomain: String?
+    let errorCode: Int?
+    let elapsedMilliseconds: Int
+    let classification: String
+    let taskMetricsIsProxyConnection: String
+    let networkProtocolName: String
+    let responseBytesConsumed: Int
+    let bodyReadLimitReached: Bool
+
+    var jsonObject: [String: Any] {
+        var value: [String: Any] = [
+            "proxyMode": proxyMode,
+            "pathCase": pathCase,
+            "elapsedMilliseconds": elapsedMilliseconds,
+            "classification": classification,
+            "taskMetricsIsProxyConnection": taskMetricsIsProxyConnection,
+            "networkProtocolName": networkProtocolName,
+            "responseBytesConsumed": responseBytesConsumed,
+            "bodyReadLimitReached": bodyReadLimitReached,
+        ]
+        if let statusCode { value["statusCode"] = statusCode } else { value["statusCode"] = NSNull() }
+        if let errorDomain { value["errorDomain"] = errorDomain } else { value["errorDomain"] = NSNull() }
+        if let errorCode { value["errorCode"] = errorCode } else { value["errorCode"] = NSNull() }
+        return value
+    }
+}
+
+/// Refuses redirects outside the exact loopback origin under probe.
+private final class LocalAppLoopbackProbeRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    private let scheme: String
+    private let host: String
+    private let port: Int
+
+    init?(origin: URL) {
+        guard let components = URLComponents(url: origin, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(), scheme == "http",
+              let host = components.host, host == "127.0.0.1",
+              let port = components.port else { return nil }
+        self.scheme = scheme
+        self.host = host
+        self.port = port
+        super.init()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let target = request.url,
+              let components = URLComponents(url: target, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == scheme,
+              components.host == host,
+              components.port == port,
+              components.user == nil,
+              components.password == nil else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
 
 /// External-browser transport acceptance. A new browser request must be held
 /// until the native iOS 26 foreground action has attached its real lease.
@@ -436,6 +506,212 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
         _ = try? ProjectRepository(projectsRoot: URL(fileURLWithPath: MobileUserStorage.directories().projects, isDirectory: true))
             .deleteProject(projectId: app.projectID)
         #endif
+    }
+
+    func testExistingLocalAppLoopbackHTTPPathsUnderCurrentNetwork() async throws {
+        #if targetEnvironment(simulator)
+        throw XCTSkip("This diagnostic requires a physical iPhone foreground loopback service.")
+        #else
+        let appID = "a76ca2d1ab2c545a694b2bf16f8358cea"
+        let expectedRevision: UInt64 = 1
+        let knownPublicAgentRunID = "aa3fb97f-8523-4268-a9be-1d06a9035206"
+        let client = LocalAppServiceClient()
+
+        let record: UnifiedAppRecord = try await client.request([
+            "op": .string("get"), "appId": .string(appID)
+        ])
+        guard record.appId == appID, !record.removed, record.currentRevision == expectedRevision else {
+            throw LocalAppServiceFailure("PROBE_APP_MISMATCH", "The existing HTTP probe app is missing or has a different revision.")
+        }
+        let release: UnifiedAppRelease = try await client.request([
+            "op": .string("getRelease"),
+            "appId": .string(appID),
+            "revision": .number(Double(expectedRevision)),
+        ])
+        guard release.revision == expectedRevision else {
+            throw LocalAppServiceFailure("PROBE_RELEASE_MISMATCH", "The existing HTTP probe release is not the expected revision.")
+        }
+        // This only prepares the existing native Agent host when the known
+        // release declares Agent support; it does not configure or call a model.
+        if (release.manifest.capabilities ?? []).contains("agent") {
+            try await LocalAppAgentModelHost.shared.ensure()
+        }
+        let launch: LocalAppLaunch = try await client.request([
+            "op": .string("start"), "appId": .string(appID)
+        ])
+        let serverRunID = launch.run.runId
+        let validServerRunID = !serverRunID.isEmpty
+            && serverRunID.utf8.count <= 128
+            && serverRunID.utf8.allSatisfy { byte in
+                (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte)
+                    || byte == 45 || byte == 95
+            }
+        guard launch.run.appId == appID,
+              launch.run.revision == expectedRevision,
+              launch.run.phase == "running",
+              validServerRunID,
+              LocalAppExternalBrowserURL.matches(launch.url, origin: launch.origin) else {
+            throw LocalAppServiceFailure("PROBE_LAUNCH_MISMATCH", "The resolved launch did not match the known app revision and a valid loopback server run.")
+        }
+        guard let origin = URL(string: launch.origin),
+              let launchComponents = URLComponents(url: launch.url, resolvingAgainstBaseURL: false),
+              launchComponents.percentEncodedPath.hasPrefix("/__run/\(serverRunID)/") else {
+            throw LocalAppServiceFailure("PROBE_URL_MISMATCH", "The resolved URL did not use the current app run path.")
+        }
+
+        var entryComponents = launchComponents
+        entryComponents.fragment = nil
+        let entryURL = try XCTUnwrap(entryComponents.url)
+        var readyComponents = entryComponents
+        var readyQuery = readyComponents.queryItems ?? []
+        readyQuery.removeAll { $0.name == "__lingxi_ready" }
+        readyQuery.append(URLQueryItem(name: "__lingxi_ready", value: knownPublicAgentRunID))
+        readyComponents.queryItems = readyQuery
+        let readyURL = try XCTUnwrap(readyComponents.url)
+        guard LocalAppExternalBrowserURL.matches(entryURL, origin: launch.origin),
+              LocalAppExternalBrowserURL.matches(readyURL, origin: launch.origin),
+              URLComponents(url: entryURL, resolvingAgainstBaseURL: false)?.percentEncodedPath.hasPrefix("/__run/\(serverRunID)/") == true,
+              URLComponents(url: readyURL, resolvingAgainstBaseURL: false)?.percentEncodedPath.hasPrefix("/__run/\(serverRunID)/") == true,
+              origin.host == "127.0.0.1" else {
+            throw LocalAppServiceFailure("PROBE_ORIGIN_MISMATCH", "The diagnostic URLs did not remain on the app's registered loopback origin.")
+        }
+        let identityHash = SHA256.hash(data: Data("\(appID)|\(expectedRevision)|\(serverRunID)".utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+
+        let cases: [(proxyMode: String, explicitEmptyProxyDictionary: Bool, pathCase: String, url: URL)] = [
+            ("system-default", false, "current-entry", entryURL),
+            ("system-default", false, "ready-query", readyURL),
+            ("explicit-empty-proxy-dictionary", true, "current-entry", entryURL),
+            ("explicit-empty-proxy-dictionary", true, "ready-query", readyURL),
+        ]
+        var results: [LocalAppLoopbackProbeResult] = []
+        for item in cases {
+            results.append(await performLoopbackProbe(
+                url: item.url,
+                origin: origin,
+                proxyMode: item.proxyMode,
+                explicitEmptyProxyDictionary: item.explicitEmptyProxyDictionary,
+                pathCase: item.pathCase
+            ))
+        }
+
+        let receipt: [String: Any] = [
+            "physicalOnly": true,
+            "sourceDevice": "physical-iphone",
+            "targetLoopback": true,
+            "appRevisionRunIdentitySha256": identityHash,
+            "scope": "iPhone foreground native URLSession to 127.0.0.1 only; proxy configuration comparison does not exclude VPN routing",
+            "responseBodyReadLimitBytes": 262_144,
+            "results": results.map(\.jsonObject),
+        ]
+        let receiptData = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+        let attachment = XCTAttachment(data: receiptData, uniformTypeIdentifier: "public.json")
+        attachment.name = "iphone-loopback-http-probe"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        print("IOS_LOOPBACK_HTTP_PROBE \(String(decoding: receiptData, as: UTF8.self))")
+
+        for result in results {
+            XCTAssertEqual(result.statusCode, 200, "HTTP probe did not receive HTTP 200 (\(result.proxyMode)/\(result.pathCase)).")
+        }
+        #endif
+    }
+
+    private func performLoopbackProbe(
+        url: URL,
+        origin: URL,
+        proxyMode: String,
+        explicitEmptyProxyDictionary: Bool,
+        pathCase: String
+    ) async -> LocalAppLoopbackProbeResult {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 25
+        configuration.connectionProxyDictionary = explicitEmptyProxyDictionary ? [:] : nil
+        guard let redirectDelegate = LocalAppLoopbackProbeRedirectDelegate(origin: origin) else {
+            return LocalAppLoopbackProbeResult(
+                proxyMode: proxyMode,
+                pathCase: pathCase,
+                statusCode: nil,
+                errorDomain: nil,
+                errorCode: nil,
+                elapsedMilliseconds: 0,
+                classification: "invalid-loopback-origin",
+                taskMetricsIsProxyConnection: "unknown",
+                networkProtocolName: "unknown",
+                responseBytesConsumed: 0,
+                bodyReadLimitReached: false
+            )
+        }
+        let session = URLSession(configuration: configuration, delegate: redirectDelegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 20
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        var statusCode: Int?
+        var failure: Error?
+        var responseBytesConsumed = 0
+        var bodyReadLimitReached = false
+        do {
+            let (body, response) = try await session.bytes(for: request)
+            statusCode = (response as? HTTPURLResponse)?.statusCode
+            if statusCode != nil {
+                do {
+                    for try await _ in body {
+                        responseBytesConsumed += 1
+                        if responseBytesConsumed >= 262_144 {
+                            bodyReadLimitReached = true
+                            break
+                        }
+                    }
+                } catch {
+                    failure = error
+                }
+            }
+        } catch {
+            failure = error
+        }
+
+        let elapsedMilliseconds = max(0, Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000).rounded()))
+        let nsError = failure.map { $0 as NSError }
+        let errorDomain: String?
+        if let nsError {
+            switch nsError.domain {
+            case NSURLErrorDomain: errorDomain = "NSURLErrorDomain"
+            case "kCFErrorDomainCFNetwork": errorDomain = "CFNetwork"
+            default: errorDomain = "other"
+            }
+        } else {
+            errorDomain = nil
+        }
+        let classification: String
+        if failure != nil {
+            classification = "transport-error"
+        } else if let statusCode, (200...299).contains(statusCode) {
+            classification = "http-success"
+        } else if let statusCode, (300...399).contains(statusCode) {
+            classification = "redirect-response"
+        } else if statusCode != nil {
+            classification = "http-failure"
+        } else {
+            classification = "non-http-response"
+        }
+        return LocalAppLoopbackProbeResult(
+            proxyMode: proxyMode,
+            pathCase: pathCase,
+            statusCode: statusCode,
+            errorDomain: errorDomain,
+            errorCode: nsError?.code,
+            elapsedMilliseconds: elapsedMilliseconds,
+            classification: classification,
+            taskMetricsIsProxyConnection: "unknown",
+            networkProtocolName: "unknown",
+            responseBytesConsumed: responseBytesConsumed,
+            bodyReadLimitReached: bodyReadLimitReached
+        )
     }
 #endif
 

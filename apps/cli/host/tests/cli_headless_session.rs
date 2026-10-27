@@ -176,12 +176,11 @@ mod process_io {
                     if has_clear_output(&self.output) {
                         return;
                     }
-                    if !read_more {
-                        panic!(
-                            "child exited {status} before clear output: {}",
-                            String::from_utf8_lossy(&self.output)
-                        );
-                    }
+                    assert!(
+                        read_more,
+                        "child exited {status} before clear output: {}",
+                        String::from_utf8_lossy(&self.output)
+                    );
                 }
                 assert!(
                     Instant::now() < deadline,

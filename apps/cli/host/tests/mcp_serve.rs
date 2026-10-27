@@ -19,10 +19,10 @@ fn isolated_command(temp: &tempfile::TempDir) -> Command {
     command
 }
 
-fn write_global_config(temp: &tempfile::TempDir, contents: &str) {
+fn write_user_settings(temp: &tempfile::TempDir, contents: &str) {
     let config = temp.path().join("config");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(config.join(".lingxi.json"), contents).unwrap();
+    std::fs::write(config.join("settings.json"), contents).unwrap();
 }
 
 #[test]
@@ -267,7 +267,7 @@ fn serve_rejects_duplicate_tool_id_and_suppresses_cancelled_reply() {
     } else {
         ("Bash", "sleep 10")
     };
-    write_global_config(
+    write_user_settings(
         &temp,
         &serde_json::json!({ "permissions": { "allow": [tool] } }).to_string(),
     );
@@ -394,7 +394,7 @@ fn serve_duplicate_tools_call_id_keeps_original_call_cancellable() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    write_global_config(&temp, r#"{"permissions":{"allow":["Bash","TaskOutput"]}}"#);
+    write_user_settings(&temp, r#"{"permissions":{"allow":["Bash","TaskOutput"]}}"#);
     let config = temp.path().join("config");
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -663,7 +663,8 @@ mod transport_failure_tests {
             let project = home.path().join("project");
             std::fs::create_dir_all(&config).unwrap();
             std::fs::create_dir_all(&project).unwrap();
-            let mut global = json!({"permissions":{"allow":["Bash"]}});
+            let mut global = json!({});
+            let mut settings = json!({"permissions":{"allow":["Bash"]}});
             if gated {
                 let project_key = std::fs::canonicalize(&project)
                     .unwrap()
@@ -691,10 +692,10 @@ mod transport_failure_tests {
                     r#"
 export function register(on) {
   on('tool.describe', { tool: 'Bash' }, async ($, event, next) => {
-    if (await Bun.file(process.env.MCP_TEST_CATALOG_ARMED).exists()) {
-      await Bun.write(process.env.MCP_TEST_CATALOG_ENTERED, 'entered');
-      while (!await Bun.file(process.env.MCP_TEST_CATALOG_RELEASE).exists()) {
-        await new Promise(resolve => setTimeout(resolve, 25));
+    if (await $.fs.exists('catalog-armed')) {
+      await $.fs.write('catalog-entered', 'entered');
+      while (!await $.fs.exists('catalog-release')) {
+        await $.clock.sleep(25);
       }
     }
     return next(event);
@@ -703,11 +704,7 @@ export function register(on) {
 "#,
                 )
                 .unwrap();
-                std::fs::write(
-                    config.join("settings.json"),
-                    r#"{"enabledPlugins":{"catalog-gate@test":true}}"#,
-                )
-                .unwrap();
+                settings["enabledPlugins"] = json!({"catalog-gate@test":true});
                 std::fs::write(
                     config.join("plugins/installed_plugins.json"),
                     serde_json::to_vec(&json!({
@@ -724,6 +721,11 @@ export function register(on) {
                 .unwrap();
             }
             std::fs::write(
+                config.join("settings.json"),
+                serde_json::to_vec(&settings).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
                 config.join(".lingxi.json"),
                 serde_json::to_vec(&global).unwrap(),
             )
@@ -733,9 +735,6 @@ export function register(on) {
                 .current_dir(&project)
                 .env("HOME", home.path())
                 .env("LINGXI_CONFIG_DIR", &config)
-                .env("MCP_TEST_CATALOG_ARMED", project.join("catalog-armed"))
-                .env("MCP_TEST_CATALOG_ENTERED", project.join("catalog-entered"))
-                .env("MCP_TEST_CATALOG_RELEASE", project.join("catalog-release"))
                 .env("ANTHROPIC_API_KEY", "sk-ant-test-mcp-serve")
                 .env("DISABLE_AUTOUPDATER", "1")
                 .args(["mcp", "serve"])
@@ -1236,7 +1235,7 @@ fn windows_duplicate_call_cancellation_reaps_the_started_process_tree() {
     use std::time::{Duration, Instant};
 
     let temp = tempfile::tempdir().unwrap();
-    write_global_config(&temp, r#"{"permissions":{"allow":["PowerShell"]}}"#);
+    write_user_settings(&temp, r#"{"permissions":{"allow":["PowerShell"]}}"#);
     let config = temp.path().join("config");
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -1430,7 +1429,7 @@ fn windows_full_stdout_does_not_block_cancellation_or_eof_cleanup() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    write_global_config(&temp, r#"{"permissions":{"allow":["PowerShell"]}}"#);
+    write_user_settings(&temp, r#"{"permissions":{"allow":["PowerShell"]}}"#);
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let stderr_path = temp.path().join("stderr-full.log");
@@ -1653,7 +1652,7 @@ fn windows_broken_stdout_cancels_open_stdin_and_reaps_the_running_shell() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    write_global_config(&temp, r#"{"permissions":{"allow":["PowerShell"]}}"#);
+    write_user_settings(&temp, r#"{"permissions":{"allow":["PowerShell"]}}"#);
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let stderr_path = temp.path().join("stderr-broken.log");

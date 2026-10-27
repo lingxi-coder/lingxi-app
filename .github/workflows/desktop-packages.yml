@@ -9,6 +9,7 @@ on:
       - 'resources/**'
       - 'tools/**'
       - 'build-support/**'
+      - 'infra/firebase/database.rules.json'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -23,6 +24,7 @@ on:
       - 'resources/**'
       - 'tools/**'
       - 'build-support/**'
+      - 'infra/firebase/database.rules.json'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -241,10 +243,16 @@ jobs:
           cargo test --locked --manifest-path "${sdk_root}/Cargo.toml" -p platform-pty --test windows_file_exports
 
       - name: Build and test shared SDK
+        if: matrix.platform != 'linux'
         working-directory: packages/bridge-client
         run: |
           npm run build
           npm test
+
+      - name: Build shared SDK for Linux emulator tests
+        if: matrix.platform == 'linux'
+        working-directory: packages/bridge-client
+        run: npm run build
 
       - name: Install macOS test search tool
         if: matrix.platform == 'darwin'
@@ -256,7 +264,21 @@ jobs:
 
       - name: Install Linux test search tool and GUI display
         if: matrix.platform == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb ripgrep
+        run: sudo apt-get update && sudo apt-get install -y xvfb ripgrep vim
+
+      - name: Install Java for the Linux RTDB emulator
+        if: matrix.platform == 'linux'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install and check the Linux RTDB test harness
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          python3 -B scripts/tests/test_verify_desktop_test_log.py
+          npm install --prefix "$RUNNER_TEMP/firebase-cli" --no-save --no-audit --no-fund firebase-tools@15.34.0
 
       - name: Typecheck, test, and build Desktop
         shell: bash
@@ -264,11 +286,19 @@ jobs:
         run: |
           npm run typecheck
           if [[ '${{ matrix.platform }}' == 'linux' ]]; then
-            xvfb-run --auto-servernum npm test
+            bash ../../scripts/ci/test_desktop_with_rtdb.sh
           else
             npm test
           fi
           npm run build
+
+      - name: Save Linux Desktop test evidence
+        if: always() && matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-desktop-integration-evidence
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/lingxi-desktop-test-evidence
 
       - name: Package native Desktop target
         shell: bash

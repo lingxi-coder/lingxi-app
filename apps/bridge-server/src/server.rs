@@ -328,7 +328,7 @@ type SharedPermissionGate = Arc<StdMutex<Option<Weak<AdapterPermissionGate>>>>;
 type SharedComputerAccessBroker = Arc<StdMutex<Option<Weak<ComputerAccessBroker>>>>;
 type SharedAskUserQuestionBroker = Arc<StdMutex<Option<Weak<AskUserQuestionBroker>>>>;
 type QueuedPromptPayloads = Arc<Mutex<HashMap<String, QueuedPromptPayload>>>;
-type QuestionRejections = Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>;
+type InteractionRejections = Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>;
 
 /// The SDK queue intentionally stores text only. Inputs carrying attachments
 /// or a client turn identity stay whole until a distinct follow-up turn owns
@@ -357,7 +357,7 @@ struct FrameEventSink {
     active_turn: ActiveTurnControl,
     resume_interactions: ActiveTurnControl,
     ask_user_question_broker: SharedAskUserQuestionBroker,
-    question_rejections: QuestionRejections,
+    question_rejections: InteractionRejections,
 }
 
 /// Event sink for connection-level command output (currently display-only slash
@@ -526,6 +526,7 @@ struct FramePermissionSink {
     active_turn: ActiveTurnControl,
     resume_interactions: ActiveTurnControl,
     gate: SharedPermissionGate,
+    permission_rejections: InteractionRejections,
     handshaken: Arc<AtomicBool>,
 }
 
@@ -550,7 +551,7 @@ impl PermissionRequestSink for FramePermissionSink {
             && !self.active_turn.accepts_permission_owner(owner_id)
             && !self.resume_interactions.accepts_permission_owner(owner_id)
         {
-            self.reject(request_id).await;
+            self.reject(gate, request_id);
             return;
         }
         // Record the tool name for the eventual resolve.
@@ -592,7 +593,7 @@ impl PermissionRequestSink for FramePermissionSink {
         drop(out);
         if !delivered {
             self.tool_names.lock().await.remove(&request_id);
-            self.reject(request_id).await;
+            self.reject(gate, request_id);
         } else {
             lingxi_core::host::live_sessions::set_process_status(
                 "waiting",
@@ -603,17 +604,19 @@ impl PermissionRequestSink for FramePermissionSink {
 }
 
 impl FramePermissionSink {
-    async fn reject(&self, request_id: u64) {
-        let gate = self
-            .gate
+    fn reject(&self, gate: Arc<AdapterPermissionGate>, request_id: u64) {
+        // The gate holds this request's publication lock until emit_request
+        // returns. Resolving inline would wait for that same lock forever.
+        // Own the deferred denial so connection teardown can join it.
+        let mut rejections = self
+            .permission_rejections
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_ref()
-            .and_then(Weak::upgrade);
-        if let Some(gate) = gate {
+            .unwrap_or_else(|poison| poison.into_inner());
+        rejections.retain(|task| !task.is_finished());
+        rejections.push(tokio::spawn(async move {
             gate.resolve(request_id, PermissionResponseDto::Deny, "")
                 .await;
-        }
+        }));
     }
 }
 
@@ -757,7 +760,8 @@ pub struct BridgeConnection {
     permission_gate_ref: SharedPermissionGate,
     computer_access_broker_ref: SharedComputerAccessBroker,
     ask_user_question_broker_ref: SharedAskUserQuestionBroker,
-    question_rejections: QuestionRejections,
+    question_rejections: InteractionRejections,
+    permission_rejections: InteractionRejections,
     driver: Option<Arc<dyn TurnDriver>>,
     /// Client ids explicitly attached through this socket, serialized with
     /// attach/detach and close cleanup. A hello alone never populates this set.
@@ -2735,6 +2739,8 @@ impl Drop for BridgeConnection {
         {
             task.abort();
         }
+        // A permission gate can outlive the connection. Dropping its join
+        // handles detaches pending denials so those checks still fail closed.
         self.active_turn.clear();
         self.resume_interactions.clear();
     }
@@ -2766,6 +2772,7 @@ impl BridgeConnection {
             computer_access_broker_ref: Arc::new(StdMutex::new(None)),
             ask_user_question_broker_ref: Arc::new(StdMutex::new(None)),
             question_rejections: Arc::new(StdMutex::new(Vec::new())),
+            permission_rejections: Arc::new(StdMutex::new(Vec::new())),
             driver: None,
             ui_attached_clients: Arc::new(Mutex::new(HashSet::new())),
             ui_lifecycle_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -3203,6 +3210,7 @@ impl BridgeConnection {
             active_turn: self.active_turn.clone(),
             resume_interactions: self.resume_interactions.clone(),
             gate: self.permission_gate_ref.clone(),
+            permission_rejections: self.permission_rejections.clone(),
             handshaken: self.handshaken.clone(),
         })
     }
@@ -5248,11 +5256,10 @@ impl BridgeConnection {
         }
     }
 
-    async fn join_question_rejections(&self) {
+    async fn join_rejections(rejections: &InteractionRejections) {
         loop {
             let tasks = std::mem::take(
-                &mut *self
-                    .question_rejections
+                &mut *rejections
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner()),
             );
@@ -5356,9 +5363,10 @@ impl BridgeConnection {
             }
         }
 
-        // Publication is now complete and the broker's pending map is empty.
+        // Publication is now complete and the brokers' pending maps are empty.
         // Join every deferred rejection before letting a new socket claim.
-        self.join_question_rejections().await;
+        Self::join_rejections(&self.question_rejections).await;
+        Self::join_rejections(&self.permission_rejections).await;
 
         // Audio requests are drained on DISCONNECT only, never at end-of-turn
         // (they are not in `TurnInteractions`): an audio op is a device
@@ -7932,6 +7940,41 @@ mod tests {
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
         assert_eq!(gate.pending_count().await, 0);
         connection.active_turn.finish(generation);
+    }
+
+    #[tokio::test]
+    async fn permission_without_outbound_is_denied_for_foreground_and_background() {
+        for background_owned in [false, true] {
+            let connection = BridgeConnection::new();
+            let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
+            let connection = connection.bind(gate.clone(), Arc::new(NoTurn));
+            let (generation, _) = connection.active_turn.begin(Some(74));
+            connection.handshaken.store(true, Ordering::SeqCst);
+            let input = Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({ "command": "echo unreachable" }),
+            )
+            .unwrap();
+            let context = permission::gate::PermissionCheckContext {
+                background_owned,
+                ..Default::default()
+            };
+            let decision = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                gate.check_with_context("Bash", &input, &context),
+            )
+            .await
+            .expect("an undelivered request must be denied promptly");
+
+            assert!(matches!(
+                decision,
+                permission::gate::PermissionOutcome::Deny { .. }
+            ));
+            assert_eq!(gate.pending_count().await, 0);
+            assert!(gate.session_allow_rules().lock().await.is_empty());
+            assert!(connection.tool_names.lock().await.is_empty());
+            BridgeConnection::join_rejections(&connection.permission_rejections).await;
+            connection.active_turn.finish(generation);
+        }
     }
 
     #[tokio::test]

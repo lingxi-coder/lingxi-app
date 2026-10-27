@@ -58,7 +58,7 @@ fn cli_reports_unverified_shutdown_for_a_real_blocked_mod_read() {
         r#"
 export function register(on) {
   on('tool.describe', { tool: 'Bash' }, async ($, event, next) => {
-    if (await Bun.file(process.env.MCP_TEST_RUNTIME_ARMED).exists()) {
+    if (await $.fs.exists('runtime-armed')) {
       await $.fs.read('runtime-block.fifo');
     }
     return next(event);
@@ -118,7 +118,6 @@ export function register(on) {
         .current_dir(&project)
         .env("HOME", home.path())
         .env(branding::CONFIG_DIR_ENV, &config)
-        .env("MCP_TEST_RUNTIME_ARMED", project.join("runtime-armed"))
         .env("ANTHROPIC_API_KEY", "sk-ant-test-mcp-serve")
         .env("DISABLE_AUTOUPDATER", "1")
         .args(["mcp", "serve"])

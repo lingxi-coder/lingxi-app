@@ -1011,7 +1011,7 @@ async fn run_protocol_writer(
     mut frames: mpsc::Receiver<ProtocolWrite>,
     events: mpsc::UnboundedSender<ProtocolWriterEvent>,
 ) -> Result<(), String> {
-    let result = async {
+    let result: Result<(), String> = async {
         while let Some(frame) = frames.recv().await {
             let ProtocolWrite::Frame(bytes, kind) = frame else {
                 return Ok(());

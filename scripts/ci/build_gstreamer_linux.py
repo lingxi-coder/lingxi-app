@@ -207,12 +207,21 @@ def _environment(prefix: pathlib.Path, static_plugins: bool = False) -> dict[str
         sdk_pc_dirs.append(str(plugin_pkgconfig_dir))
     pkg_config_path = os.pathsep.join(sdk_pc_dirs)
     pkg_config_libdir = os.pathsep.join((*sdk_pc_dirs, *(path for path in system_pc_dirs if pathlib.Path(path).is_dir())))
-    return {
+    environment = {
         "LINGXI_GSTREAMER_SDK_LINUX_SOURCE": str(prefix),
         "PKG_CONFIG_PATH": pkg_config_path,
         "PKG_CONFIG_LIBDIR": pkg_config_libdir,
         "LD_LIBRARY_PATH": loader_path,
     }
+    if static_plugins:
+        # This SDK also retains shared plugin files for distribution checks.
+        # Static test binaries register those same plugins themselves; letting
+        # GStreamer discover the shared copies registers duplicate GObject types.
+        for suffix in ("", "_1_0"):
+            environment[f"GST_PLUGIN_PATH{suffix}"] = ""
+            environment[f"GST_PLUGIN_SYSTEM_PATH{suffix}"] = ""
+            environment[f"GST_REGISTRY{suffix}"] = str(prefix / "static-plugin-registry.bin")
+    return environment
 
 
 def _build_sdk(root: pathlib.Path, lock: dict, static_plugins: bool = False) -> pathlib.Path:

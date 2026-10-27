@@ -322,6 +322,10 @@ class GStreamerSDKTests(unittest.TestCase):
                 self.assertEqual(sum("--static" in call for call in calls), len(build_gstreamer_linux.PLUGIN_NAMES))
                 environment = build_gstreamer_linux._environment(prefix, True)
                 self.assertIn(str(plugin_pc), environment["PKG_CONFIG_PATH"].split(os.pathsep))
+                for suffix in ("", "_1_0"):
+                    self.assertEqual(environment[f"GST_PLUGIN_PATH{suffix}"], "")
+                    self.assertEqual(environment[f"GST_PLUGIN_SYSTEM_PATH{suffix}"], "")
+                    self.assertEqual(environment[f"GST_REGISTRY{suffix}"], str(prefix / "static-plugin-registry.bin"))
                 self.assertNotIn(str(plugin_pc), build_gstreamer_linux._environment(prefix)["PKG_CONFIG_PATH"].split(os.pathsep))
 
                 with patch.object(build_gstreamer_linux.subprocess, "run", return_value=type("Result", (), {"stdout": "/unrelated", "returncode": 0})()):

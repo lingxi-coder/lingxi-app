@@ -5,9 +5,42 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalAppCoreClient, type LocalAppCoreTransport } from '../src/main/local-apps/coreClient.ts';
 import { CoreLocalAppStore } from '../src/main/local-apps/coreStore.ts';
+import { desktopFixtureTargets } from './fixtures/local-app-desktop-targets.ts';
+import type { DesktopLocalApp } from '../src/shared/localApps.ts';
 
 const id = 'a0123456789abcdef0123456789abcdef';
 const manifest = { schema: 2, name: 'App', entry: { type: 'static', path: 'index.html' }, targets: [{ platform: 'macos', environment: 'web' }], capabilities: [] };
+
+test('Electron fixture declares its host platform and incompatible targets are rejected', async () => {
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  try {
+    for (const [nodePlatform, hostPlatform] of [['darwin', 'macos'], ['win32', 'windows'], ['linux', 'linux']] as const) {
+      Object.defineProperty(process, 'platform', { ...originalPlatform, value: nodePlatform });
+      const targets = desktopFixtureTargets(nodePlatform);
+      assert.deepEqual(targets.native, [{ platform: hostPlatform, environment: 'native' }]);
+      const requests: { platform: string; environment: string }[] = [];
+      let declared: { platform: string; environment: string }[] = targets.native;
+      const transport: LocalAppCoreTransport = { dispose: async () => undefined, request: async <T>(request: Record<string, unknown>) => {
+        assert.equal(request.op, 'checkTarget');
+        const target = request.target as { platform: string; environment: string };
+        requests.push(target);
+        return { compatible: declared.some(entry => entry.platform === target.platform && entry.environment === target.environment) } as T;
+      } };
+      const store = new CoreLocalAppStore('/unused', transport);
+      const row = { id, revision: 1 } as DesktopLocalApp;
+      await store.assertTarget(row);
+      declared = targets.incompatible;
+      await assert.rejects(store.assertTarget(row), /does not support this Desktop runtime/);
+      assert.deepEqual(requests.map(({ platform, environment }) => ({ platform, environment })), [
+        { platform: hostPlatform, environment: 'native' },
+        { platform: hostPlatform, environment: 'native' },
+        { platform: hostPlatform, environment: 'web' },
+      ]);
+    }
+  } finally {
+    Object.defineProperty(process, 'platform', originalPlatform);
+  }
+});
 
 test('Desktop adapter uses canonical digest consent and rejects stale authoring publication', async t => {
   const root = await fs.mkdtemp(join(tmpdir(), 'local-app-core-test-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -86,7 +119,7 @@ test('Agent preferences survive updates but grants remain bound to exact release
   } };
   const store = new CoreLocalAppStore(root, transport);
   const first = await store.get(id);
-  first.agent = { enabled: true, model: {providerId:'configured',modelId:'vision'}, tools:[], background:false,maxTurns:20,timeoutMs:600000 };
+  first.agent = { enabled: true, model: {providerId:'configured',modelId:'vision'}, tools:[], skills:[], background:false,maxTurns:20,timeoutMs:600000 };
   first.grants = ['agent']; await store.save(first);
   latest = 2;
   const second = await store.get(id);

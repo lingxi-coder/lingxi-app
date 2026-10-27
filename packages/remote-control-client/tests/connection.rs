@@ -10,9 +10,8 @@ use remote_control_client::connection::{
 use remote_control_client::device::{MemoryViewerKeys, PinnedHost, TunnelMemory, ViewerKeys};
 use remote_control_client::keys::IdentityKey;
 use remote_control_client::media::{
-    MEDIA_CONTROL_METHOD, RemoteMediaAnswer,
-    RemoteMediaConnection, RemoteMediaControlRequest,
-    RemoteMediaControlResult, RemoteMediaOffer, RemoteMediaOfferHandler,
+    RemoteMediaAnswer, RemoteMediaConnection, RemoteMediaControlRequest, RemoteMediaControlResult,
+    RemoteMediaOffer, RemoteMediaOfferHandler, MEDIA_CONTROL_METHOD,
 };
 use remote_control_client::messages::methods;
 use remote_control_client::rtdb::{MemoryRtdb, Rtdb, RtdbError};
@@ -366,7 +365,10 @@ async fn host_media_offer_is_denied_before_approval_then_bound_and_stopped_with_
         .request(&conn_id, "media.offer", offer.clone())
         .await
         .expect_err("a pending pairing cannot negotiate media");
-    assert_eq!(denied.code, remote_control_client::rpc::RemoteErrorCode::NotApproved);
+    assert_eq!(
+        denied.code,
+        remote_control_client::rpc::RemoteErrorCode::NotApproved
+    );
     assert!(handler.accepted.lock().unwrap().is_empty());
 
     rig.host.approve(&conn_id).await;
@@ -386,14 +388,22 @@ async fn host_media_offer_is_denied_before_approval_then_bound_and_stopped_with_
     assert_eq!(accepted[0].0.connection_id, conn_id);
     drop(accepted);
 
-    let control = rig.host.request(&conn_id, MEDIA_CONTROL_METHOD, json!({
-        "v": 1,
-        "media_session_ref": "media_0123456789abcdef",
-        "generation": 1,
-        "action": "flush_audio",
-        "target_audio_sequence": 1,
-        "target_sample_frames": 960
-    })).await.expect("approved session flush waits for the native receipt");
+    let control = rig
+        .host
+        .request(
+            &conn_id,
+            MEDIA_CONTROL_METHOD,
+            json!({
+                "v": 1,
+                "media_session_ref": "media_0123456789abcdef",
+                "generation": 1,
+                "action": "flush_audio",
+                "target_audio_sequence": 1,
+                "target_sample_frames": 960
+            }),
+        )
+        .await
+        .expect("approved session flush waits for the native receipt");
     assert_eq!(control["played_sample_frames"], 960);
 
     rig.conn.stop();

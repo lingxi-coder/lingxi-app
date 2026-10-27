@@ -4777,8 +4777,12 @@ pub(crate) async fn run_permission_action(
                             let transcript = writer.active_path();
                             if let Some(source) = transcript.parent() {
                                 if let Err(error) = session::jsonl::record_session_alias(
-                                    &paths.lingxi_home, source, std::path::Path::new(&path),
-                                ).await {
+                                    &paths.lingxi_home,
+                                    source,
+                                    std::path::Path::new(&path),
+                                )
+                                .await
+                                {
                                     tracing::warn!(%error, "session alias could not be recorded after /add-dir");
                                 }
                             }

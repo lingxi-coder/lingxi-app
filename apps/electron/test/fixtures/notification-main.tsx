@@ -7,6 +7,9 @@ import { defaultNotificationPreferences } from '../../src/shared/notificationPre
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
+
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en');
 
 function Fixture() {
   const [dark, setDark] = useState(false);

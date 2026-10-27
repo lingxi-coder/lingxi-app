@@ -16,15 +16,15 @@ pub mod device;
 mod direct;
 pub mod encoding;
 pub mod error;
-pub mod framing;
 pub mod files;
-pub mod keys;
-pub mod media;
-#[cfg(feature = "native-media")]
-pub mod native_media;
+pub mod framing;
 #[cfg(feature = "native-media")]
 pub mod host_media;
+pub mod keys;
+pub mod media;
 pub mod messages;
+#[cfg(feature = "native-media")]
+pub mod native_media;
 #[cfg(feature = "webrtc")]
 pub mod native_peer;
 pub mod pairing;

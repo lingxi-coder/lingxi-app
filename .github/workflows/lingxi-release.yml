@@ -11,6 +11,12 @@ on:
     tags: ["v*.*.*"]
   workflow_dispatch:
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+
 concurrency:
   group: lingxi-release
   cancel-in-progress: true
@@ -36,6 +42,14 @@ jobs:
           - { target: x86_64-pc-windows-msvc,     os: windows-latest, cross: false }
           - { target: aarch64-pc-windows-msvc,    os: windows-latest, cross: false }
     steps:
+      - name: Enable Windows long paths and Git symlinks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git config --global core.symlinks true
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/checkout@v4
       - name: Configure macOS code signing
         if: ${{ startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin') }}
@@ -67,6 +81,24 @@ jobs:
           rustup toolchain install 1.94.0 --profile minimal
           rustup default 1.94.0
           rustup target add ${{ matrix.target }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Ensure Windows x64 crypto assembler is available
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+      - name: Verify Windows x64 crypto assembler
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: nasm -v
+      - name: Verify the Windows Askama Git checkout
+        if: runner.os == 'Windows'
+        run: python scripts/checks/audit_askama_upstream.py --checkout-only
       - name: Install cross
         if: ${{ matrix.cross }}
         run: cargo install cross --locked
@@ -156,10 +188,12 @@ jobs:
           if [ -d "target/${{ matrix.target }}/credential-broker" ]; then
             cp -R "target/${{ matrix.target }}/credential-broker" "out/${{ matrix.target }}/credential-broker"
           fi
+          python scripts/ci/release_artifact.py pack \
+            --source "out/${{ matrix.target }}" --archive "out/${{ matrix.target }}.tar"
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.target }}
-          path: out/${{ matrix.target }}/
+          path: out/${{ matrix.target }}.tar
 
   package-and-publish:
     needs: build
@@ -171,6 +205,9 @@ jobs:
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -179,14 +216,16 @@ jobs:
         run: |
           for d in artifacts/bin-*; do
             t="$(basename "$d" | sed 's/^bin-//')"
-            mkdir -p "target/$t"
-            cp -R "$d/." "target/$t/"
+            python scripts/ci/release_artifact.py unpack \
+              --archive "$d/$t.tar" --destination "target/$t"
           done
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: "https://registry.npmjs.org"
       - uses: astral-sh/setup-uv@v5
+      - name: Verify native artifact handoff and installed packages
+        run: python packaging/pypi/tests/test_release_artifact_install.py
       - name: Resolve version
         id: ver
         shell: bash
@@ -220,9 +259,9 @@ jobs:
             ext=""; [[ "$t" == *windows* ]] && ext=".exe"
             rm -rf src/lingxi_cli_bin/bin && mkdir -p src/lingxi_cli_bin/bin
             rm -rf src/lingxi_cli_bin/credential-broker
-            cp "../../target/$t/release/lingxi-cli$ext" "src/lingxi_cli_bin/bin/lingxi$ext"
+            cp -a "../../target/$t/release/lingxi-cli$ext" "src/lingxi_cli_bin/bin/lingxi$ext"
             if [ -d "../../target/$t/credential-broker" ]; then
-              cp -R "../../target/$t/credential-broker" "src/lingxi_cli_bin/credential-broker"
+              cp -a "../../target/$t/credential-broker" "src/lingxi_cli_bin/credential-broker"
             fi
             printf '{"target":"%s"}' "$t" > src/lingxi_cli_bin/lingxi-package.json
             for tag in ${TAGS[$t]}; do

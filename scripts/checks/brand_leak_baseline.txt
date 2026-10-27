@@ -26,7 +26,6 @@ G1	.github/workflows/lingxi-release.yml	\.lingxi
 G1	Cargo.toml	LingXi
 G1	apps/android/native/app/src/androidTest/java/com/lingxi/code/NativeSettingsEngineRoundtripTest.kt	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/android/native/app/src/androidTest/java/com/lingxi/code/cron/CronNativeRoundtripTest.kt	\.lingxi(?![A-Za-z0-9_.\-])
-G1	apps/android/native/app/src/main/java/com/lingxi/code/settings/EngineSettingsPages.kt	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/android/native/app/src/main/java/com/lingxi/code/settings/PermissionModeSettingsRepository.kt	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/android/native/app/src/main/java/com/lingxi/code/settings/ProviderSettingsRepository.kt	LINGXI_
 G1	apps/android/native/app/src/test/java/com/lingxi/code/settings/DesktopSettingsContractTest.kt	\.claude(?![A-Za-z0-9_.\-])
@@ -81,7 +80,6 @@ G1	apps/ios/native/Sources/Conversation/EngineConversationConfiguration.swift	LI
 G1	apps/ios/native/Sources/RuntimeIntegration/LXISHRuntimeBundleManifest.swift	LINGXI_
 G1	apps/ios/native/Sources/RuntimeIntegration/LXISHRuntimeResourceBootstrap.swift	LINGXI_
 G1	apps/ios/native/Sources/Settings/DesktopSettingsRepository.swift	\.lingxi(?![A-Za-z0-9_.\-])
-G1	apps/ios/native/Sources/Settings/MCPConfigurationRepository.swift	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/ios/native/Sources/Theme/Theme.swift	LINGXI_
 G1	apps/ios/native/Tests/LXISHRuntimeBundleManifestTests.swift	LINGXI_
 G1	apps/ios/native/Tests/MCPConfigurationRepositoryTests.swift	\.lingxi(?![A-Za-z0-9_.\-])
@@ -168,7 +166,6 @@ G1	apps/cli/host/tests/mcp_serve.rs	LINGXI
 G1	apps/cli/host/tests/mcp_serve.rs	LingXi
 G1	apps/cli/host/tests/mcp_serve.rs	\.lingxi
 G1	apps/ios/ffi/src/configuration.rs	LINGXI
-G1	apps/ios/ffi/src/configuration.rs	\.lingxi
 G1	apps/ios/ffi/src/host.rs	LINGXI
 G1	apps/ios/ffi/src/lib/tests/tests.rs	LINGXI
 G1	apps/ios/ffi/src/lib/tests/tests.rs	Lingxi
@@ -250,7 +247,6 @@ G3	apps/android/native/app/build.gradle.kts	.lingxi-*
 G3	apps/android/native/app/src/androidTest/java/com/lingxi/code/NativeSettingsEngineRoundtripTest.kt	.lingxi
 G3	apps/android/native/app/src/androidTest/java/com/lingxi/code/cron/CronNativeRoundtripTest.kt	.lingxi
 G3	apps/android/native/app/src/main/java/com/lingxi/code/project/SafProjectSynchronizer.kt	.lingxi
-G3	apps/android/native/app/src/main/java/com/lingxi/code/settings/EngineSettingsPages.kt	.lingxi
 G3	apps/android/native/app/src/main/java/com/lingxi/code/settings/ModelRecentsStore.kt	.lingxi
 G3	apps/android/native/app/src/main/java/com/lingxi/code/settings/PermissionModeSettingsRepository.kt	.lingxi
 G3	apps/android/native/app/src/test/java/com/lingxi/code/settings/DesktopSettingsContractTest.kt	.lingxi
@@ -310,7 +306,6 @@ G3	apps/electron/test/settings-screen-logic.test.ts	.lingxi
 G3	apps/electron/test/settings-screen.test.mjs	.lingxi
 G3	apps/electron/test/validation.test.ts	.lingxi
 G3	apps/ios/native/Sources/Settings/DesktopSettingsRepository.swift	.lingxi
-G3	apps/ios/native/Sources/Settings/MCPConfigurationRepository.swift	.lingxi
 G3	apps/ios/native/Tests/MCPConfigurationRepositoryTests.swift	.lingxi
 G3	apps/ios/native/Tests/NativeSettingsEngineRoundtripTests.swift	.lingxi
 G3	apps/ios/native/project.yml	.lingxi
@@ -355,7 +350,6 @@ G3	apps/cli/host/tests/cli_repl.rs	LINGXI_CONFIG_DIR
 G3	apps/cli/host/tests/cli_resume.rs	LINGXI_CONFIG_DIR
 G3	apps/cli/host/tests/mcp_serve.rs	.lingxi.json
 G3	apps/cli/host/tests/mcp_serve.rs	LINGXI_CONFIG_DIR
-G3	apps/ios/ffi/src/configuration.rs	.lingxi
 G3	apps/ios/ffi/src/lib/tests/tests.rs	.lingxi
 G3	apps/ios/ffi/src/mobile_linux_sdk.rs	.lingxi
 G3	apps/cli/tui-core/src/collapse/group.rs	.lingxi
@@ -376,10 +370,8 @@ G3	scripts/tests/parity_behaviour.py	.lingxi.json
 G3	scripts/tests/parity_behaviour.py	LINGXI.local.md
 G3	scripts/tests/parity_behaviour.py	LINGXI.md
 G3	scripts/tests/teammate_worker_smoke.py	LINGXI_CONFIG_DIR
-G3	apps/android/native/app/src/androidTest/java/com/lingxi/code/apps/ChatAppThemeTest.kt	.lingxi-*
 G3	apps/android/native/app/src/androidTest/java/com/lingxi/code/conversation/VisualizationCardUiTest.kt	.lingxi
 G3	apps/android/native/app/src/androidTest/java/com/lingxi/code/runtime/MobileLinuxProductAcceptanceTest.kt	.lingxi-*
-G3	apps/android/native/app/src/main/java/com/lingxi/code/apps/ChatAppRuntime.kt	.lingxi-*
 G3	apps/android/native/app/src/main/java/com/lingxi/code/plugins/PluginDetails.kt	.lingxi-plugin
 G3	apps/android/native/app/src/test/java/com/lingxi/code/plugins/PluginCatalogTest.kt	.lingxi
 G3	apps/android/native/app/src/test/java/com/lingxi/code/plugins/PluginDetailsTest.kt	.lingxi-plugin

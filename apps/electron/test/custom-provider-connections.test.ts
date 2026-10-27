@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { validateCustomProvider } from '../src/renderer/components/settings/pages/customProviderImport';
+import { DESKTOP_LOCALES, translate } from '../src/renderer/i18n/locale';
+import { withDesktopLocale } from './support/language';
 
 const flat = {
   type: 'openai',
@@ -54,24 +56,32 @@ test('a connection may override the wire protocol, which is the real Zhipu shape
   assert.equal(validateCustomProvider(draft), null);
 });
 
-test('connection ids reject the separators used by qualified model references', () => {
+test('connection ids reject the separators used by qualified model references', () => withDesktopLocale('zh-Hans', () => {
   for (const bad of ['a/b', 'a:b', 'a#b']) {
     const draft = { type: 'openai', baseUrl: 'https://x.example.com', models: [{ id: 'm' }], connections: [{ id: bad }] };
     assert.match(String(validateCustomProvider(draft)), /不能包含/, `id ${bad} must be rejected`);
   }
-});
+}));
 
-test('duplicate connection ids are rejected', () => {
+test('duplicate connection ids are rejected', () => withDesktopLocale('zh-Hans', () => {
   const draft = { type: 'openai', baseUrl: 'https://x.example.com', models: [{ id: 'm' }], connections: [{ id: 'a' }, { id: 'a' }] };
   assert.match(String(validateCustomProvider(draft)), /重复/);
+}));
+
+test('connection validation respects the selected language', () => {
+  const draft = { ...flat, connections: [{ id: 'a' }, { id: 'a' }] };
+  for (const locale of DESKTOP_LOCALES) {
+    const error = withDesktopLocale(locale, () => validateCustomProvider(draft));
+    assert.equal(error, translate('desktop_settings_078850f795', locale, '"a"'), locale);
+  }
 });
 
-test('an empty connections array is rejected rather than silently meaning "none"', () => {
+test('an empty connections array is rejected rather than silently meaning "none"', () => withDesktopLocale('zh-Hans', () => {
   const draft = { ...flat, connections: [] };
   assert.match(String(validateCustomProvider(draft)), /非空数组/);
-});
+}));
 
-test('credentialIds must be distinct non-empty strings, at provider or connection level', () => {
+test('credentialIds must be distinct non-empty strings, at provider or connection level', () => withDesktopLocale('zh-Hans', () => {
   assert.equal(validateCustomProvider({ ...flat, credentialIds: ['a', 'b'] }), null);
   assert.match(String(validateCustomProvider({ ...flat, credentialIds: [] })), /非空数组/);
   assert.match(String(validateCustomProvider({ ...flat, credentialIds: ['a', 'a'] })), /不能重复/);
@@ -79,14 +89,14 @@ test('credentialIds must be distinct non-empty strings, at provider or connectio
 
   const draft = { type: 'openai', baseUrl: 'https://x.example.com/v1', models: [{ id: 'm' }], connections: [{ id: 'cn', credentialIds: ['k1', 'k1'] }] };
   assert.match(String(validateCustomProvider(draft)), /不能重复/);
-});
+}));
 
-test('fallback.on only accepts triggers the engine implements', () => {
+test('fallback.on only accepts triggers the engine implements', () => withDesktopLocale('zh-Hans', () => {
   const base = { type: 'openai', baseUrl: 'https://x.example.com/v1', models: [{ id: 'm' }], connections: [{ id: 'a' }] };
   assert.equal(validateCustomProvider({ ...base, fallback: { on: ['rate_limit', 'auth'] } }), null);
   assert.match(String(validateCustomProvider({ ...base, fallback: { on: ['rate_limits'] } })), /取值无效/);
   assert.match(String(validateCustomProvider({ ...base, fallback: { on: 'rate_limit' } })), /必须是数组/);
-});
+}));
 
 // ── Import must not silently strip what it now supports ───────────────────
 
@@ -133,7 +143,7 @@ test('a bad provider-level credentialIds is caught even when connections are pre
     type: 'openai', models: [{ id: 'm' }], credentialIds: ['a', 'a'],
     connections: [{ id: 'x', baseUrl: 'https://x.test/v1' }],
   };
-  assert.match(String(validateCustomProvider(draft)), /不能重复/);
+  assert.match(String(withDesktopLocale('zh-Hans', () => validateCustomProvider(draft))), /不能重复/);
 });
 
 test('a provider whose every connection carries its own auth needs none at provider level', async () => {
@@ -160,5 +170,5 @@ test('a connection with no auth anywhere is still rejected', async () => {
       { id: 'b', baseUrl: 'https://b.test/v1' },
     ],
   } } });
-  assert.match(String(validateImportEntry(parseProviderImport(json).entries[0])), /API Key/);
+  assert.match(String(withDesktopLocale('zh-Hans', () => validateImportEntry(parseProviderImport(json).entries[0]))), /API Key/);
 });

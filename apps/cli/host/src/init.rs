@@ -399,7 +399,9 @@ pub enum InitError {
 impl From<harness_runtime::desktop::BuildError> for InitError {
     fn from(e: harness_runtime::desktop::BuildError) -> Self {
         match e {
-            harness_runtime::desktop::BuildError::AppInvocation(error) => Self::AppInvocation(error),
+            harness_runtime::desktop::BuildError::AppInvocation(error) => {
+                Self::AppInvocation(error)
+            }
             harness_runtime::desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
             harness_runtime::desktop::BuildError::InvalidAgents(m) => Self::InvalidAgents(m),
             harness_runtime::desktop::BuildError::InvalidToolAliases(m) => {

@@ -1,0 +1,2022 @@
+{
+  "version": 1,
+  "description": "Exact reviewed findings: changed matched lines or counts require re-review; unrelated edits remain visible to all gate rules.",
+  "entries": [
+    {
+      "path": "apps/android/native/app/src/androidTest/java/com/lingxi/code/project/WorkspaceFileDocumentsTest.kt",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 1,
+          "line_sha256": "7d65710fdde4c8a362cc7ef5af0bafe118391ec5c69138e27333b93cee8acf63"
+        }
+      ]
+    },
+    {
+      "path": "apps/android/native/app/src/main/java/com/lingxi/code/project/WorkspaceFileDocuments.kt",
+      "reason": "Workspace file copy and export staging uses an explicit LingXi-owned temporary prefix.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 2,
+          "line_sha256": "b34be799010fb3406cf457a4d9be34865ae51502ac5fdee323421ac549f15c57"
+        }
+      ]
+    },
+    {
+      "path": "apps/android/native/app/src/main/java/com/lingxi/code/project/WorkspaceFiles.kt",
+      "reason": "Workspace file copy and export staging uses an explicit LingXi-owned temporary prefix.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 1,
+          "line_sha256": "d8ab650d386fdb7d34fde5671a0110203dd0155216e4124675852c0e7258a475"
+        }
+      ]
+    },
+    {
+      "path": "apps/android/native/app/src/test/java/com/lingxi/code/apps/UnifiedAppModelsTest.kt",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 1,
+          "line_sha256": "c05f79cdc50bb594dcdfe266dcb132d676ebefefc5901e962bbe7a173c9d7990"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "c05f79cdc50bb594dcdfe266dcb132d676ebefefc5901e962bbe7a173c9d7990"
+        }
+      ]
+    },
+    {
+      "path": "apps/android/native/app/src/test/java/com/lingxi/code/project/ProjectRepositorySessionModeTest.kt",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 4,
+          "line_sha256": "7ca1c6b347133bc43836a59df9b98b433354bd6c208f6aa97db9255cf48f586b"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 4,
+          "line_sha256": "7ca1c6b347133bc43836a59df9b98b433354bd6c208f6aa97db9255cf48f586b"
+        }
+      ]
+    },
+    {
+      "path": "apps/android/native/app/src/test/java/com/lingxi/code/project/WorkspaceFilesTest.kt",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 1,
+          "line_sha256": "d221129e75bbb101de2c825e421526054f9d8efcf510788f8f0fb7cb1f2707fb"
+        }
+      ]
+    },
+    {
+      "path": "apps/android/native/app/src/test/java/com/lingxi/code/settings/PermissionModeSettingsJsonTest.kt",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 4,
+          "line_sha256": "223575d5012f3b2bd3f82dc5230412a309ddde38c7d4439fe4879e15fdb235f9"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 4,
+          "line_sha256": "223575d5012f3b2bd3f82dc5230412a309ddde38c7d4439fe4879e15fdb235f9"
+        }
+      ]
+    },
+    {
+      "path": "apps/bridge-server/src/browser_native_host.rs",
+      "reason": "Browser native host header and Remote Control STUN environment variable are current host protocol/configuration identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "ce5baca6645a35eb8c9bcabfb387a2b2e9f748d6c75d7d3621f4eab8418651e8"
+        }
+      ]
+    },
+    {
+      "path": "apps/bridge-server/src/media_bridge.rs",
+      "reason": "Browser native host header and Remote Control STUN environment variable are current host protocol/configuration identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "41bd97c2b520191b54b9929ce6eaec4a87a4ac18c4c24e79ca204ee34b5ac2ce"
+        }
+      ]
+    },
+    {
+      "path": "apps/cli/host/src/commands/deep_links.rs",
+      "reason": "CLI deep link opens LingXi and reads the established configuration-directory API; tests preserve real input and diagnostics.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 3,
+          "line_sha256": "c4f8bc67fc708869b3d6ded5b083ae71c15a044d6566f9151e867dba629ef3b5"
+        },
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "435d6cf5aaf8e25355ff524119b755264fc9c28913de525b982227c5a0bbeb1e"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 2,
+          "line_sha256": "29de2c6532fba23602409d0800932cfaedcfb78a1b63402b2d9240e1faaf9b42"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 2,
+          "line_sha256": "29de2c6532fba23602409d0800932cfaedcfb78a1b63402b2d9240e1faaf9b42"
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI_CONFIG_DIR",
+          "count": 3,
+          "line_sha256": "c4f8bc67fc708869b3d6ded5b083ae71c15a044d6566f9151e867dba629ef3b5"
+        }
+      ]
+    },
+    {
+      "path": "apps/cli/host/tests/cli_deep_links.rs",
+      "reason": "CLI deep link opens LingXi and reads the established configuration-directory API; tests preserve real input and diagnostics.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 12,
+          "line_sha256": "ec4fe3b05664ec1e7e0db6082d72498a64c2f0f3e3e3c69028996a4e07e75c2b"
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI_CONFIG_DIR",
+          "count": 10,
+          "line_sha256": "fde2cca04a43d2422623657a34315ed82fb71ff0a921e41a2e0d10c834537e44"
+        }
+      ]
+    },
+    {
+      "path": "apps/cli/host/tests/commands_native_cli.rs",
+      "reason": "CLI regression fixture exercises the existing environment key and product prompt, including source capture controls.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "f169e7ca47f5d572b5282badeba8d3ffa8575ff2c1e4690cda2eda68bfc66d8a"
+        }
+      ]
+    },
+    {
+      "path": "apps/cli/host/tests/provider_error_cli.rs",
+      "reason": "CLI regression fixture exercises the existing environment key and product prompt, including source capture controls.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 2,
+          "line_sha256": "4444b3ee5c408f99f9c08b1905a5ce7031ce0c13c9c411e5e634512cdc504e97"
+        },
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "b223e1c2d180e1659caea394bf49549089923b95e1078c85629425ea31937a58"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/native/crashlytics/Sources/LingXiDesktopCrashlytics/Crashlytics.swift",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 1,
+          "line_sha256": "868d84b0f6b7a531aba32922724ee93b6d750820d2f1a8b9ab414920ad1ea64a"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/scripts/computer-use-packaged-acceptance.mjs",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 1,
+          "line_sha256": "936f77b2a892a28292b90cf71c608e417b65022a40ed8df74cb367fc8908be58"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 2,
+          "line_sha256": "29f88f706e0d1ad064f57966aae41da7e4b1d1eff7954c564d12fec3ec73bdec"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 5,
+          "line_sha256": "f57f7bc7a8bc82eabb3789588ca3b9559d09355011b3faba0d127c42f47236ff"
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI_CONFIG_DIR",
+          "count": 2,
+          "line_sha256": "becd2464d074203f07979e8e4dd35f47bc9eee3baa41886a536b066c5a7d19e9"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/scripts/desktop-crashlytics.mjs",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 1,
+          "line_sha256": "f4ea523a4631e4403f283e6aa3b27eb0218aae3436866f12c0301c6cb6fb1391"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/scripts/gstreamer-macos.mjs",
+      "reason": "GStreamer SDK build and packaging controls use the existing LingXi environment and SDK staging names.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 1,
+          "line_sha256": "b3d49f5ca4cf3bab9826a8c4d54c91802511067d844a3f02e21ae2ee3f0fdd6f"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/scripts/gstreamer-portable.mjs",
+      "reason": "GStreamer SDK build and packaging controls use the existing LingXi environment and SDK staging names.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 2,
+          "line_sha256": "d1ac3a5edce9d9c50683df088f2942fbc40ce94b3c71ede15615d6cb91c1dbae"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/scripts/packaged-app-smoke.mjs",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": "LINGXI_CONFIG_DIR",
+          "count": 2,
+          "line_sha256": "94013b82cdfabd729728ec7ae7d339db47596865f7251da80de2c9c3ddab6cfa"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/scripts/protocol-registration.mjs",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 3,
+          "line_sha256": "28eee4b6eb264ac5a514c340eb15745849165b29dda60bb2d449e2d043a90ce2"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/main/host-utils.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": "LINGXI_CONFIG_DIR",
+          "count": 1,
+          "line_sha256": "5861da559ffc2a1d653e078332673892a4b5acc39134ff37784a0d113bebdbf5"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/main/local-apps/agentExecutor.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi.json",
+          "count": 1,
+          "line_sha256": "3ba66e88233531674af0010196002198d8807ec6f0c3425ec1abac342d39d556"
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI_CONFIG_DIR",
+          "count": 1,
+          "line_sha256": "3ba66e88233531674af0010196002198d8807ec6f0c3425ec1abac342d39d556"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/main/local-apps/runtime.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 2,
+          "line_sha256": "415ba3cc849bbf2368b9689ad486a4c62c6a758f2167a7c1e8bc915bf945eae6"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/main/local-apps/store.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 1,
+          "line_sha256": "30d2bc42b7de24804e1a3011b3963e835601262661b448e4ab1a61bfb1633fbf"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/main/remoteControl/config.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 10,
+          "line_sha256": "0c2ebb40828a581988f18e74e2023d369adb125aedc77d40c45d34e8048f6829"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/main/remoteControl/electronBindings.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 1,
+          "line_sha256": "d38392bb0623b418271a2d8a8a6b078c973fb4ee5678243096e55ec503c0925a"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/main/remoteControl/fileStore.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 1,
+          "line_sha256": "67c3a04f97d5fa69b3cfbf6551106224978b71495b219c02c9eaec6522d9bd82"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/main/remoteControl/policy.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 1,
+          "line_sha256": "111bb78ad94de9f29a79cd1300e01d956ee3e004a5fe168b666f1893f50fd3c2"
+        },
+        {
+          "rule": "G3",
+          "needle": "/etc/lingxi",
+          "count": 1,
+          "line_sha256": "375751a82654aeffa94e4026569620d9448c58bfc19863fab902f9a5fd7dc90f"
+        },
+        {
+          "rule": "G3",
+          "needle": "MANAGED_DIR_MACOS",
+          "count": 1,
+          "line_sha256": "ae8ca6e94afca437f620e4b7e1812a656222a4f4a6e4014c984385a129d27e30"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/main/telemetryPolicy.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 2,
+          "line_sha256": "fa00789da6822e8ada362dd74d0c4cb5937a7651cad3bf4474ab61b33c30cccf"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/renderer/bridge/remoteControl.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 2,
+          "line_sha256": "c56efc0a49898daa46928d74e8e9356c7e25ecc4defbd795e35b3300a2609876"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/renderer/components/ComputerApplicationIcon.tsx",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "e625bc5a97a801648bcc73fcde0b9b44f39fdfd5ae81e0fe84952996750ffcc4"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/renderer/components/CreateProjectDialog.tsx",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "bbf6c552045d150e27dac92305b29b462df6d4a57065b3c31bf81425c55f57a2"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/renderer/components/LocalAppAgentSettings.tsx",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 2,
+          "line_sha256": "05435417b66a0a6185e2ad011b9ca8209eca53c676d7199db6914062525def2b"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/renderer/components/LocalAppMarket.tsx",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "3c57673ad70466e94aff9afe2407fec240577811ababdd76b18acdb88b06af63"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/renderer/components/LocalApps.tsx",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 2,
+          "line_sha256": "91bf92eafcd3602f1c12cf0cc945e37e7cf9cb008886e7bb13f6aa6c7626aa23"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/renderer/components/settings/pages/ComputerUse.tsx",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "856224a65bbe333950b8fd8919d44d425712b6aa150a397f237498fa1f2c2561"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/src/renderer/components/settings/pages/useComputerSettings.ts",
+      "reason": "Desktop runtime uses existing LingXi environment, managed policy, app staging or preload API identifiers.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 3,
+          "line_sha256": "1171d56d7d43e802e645a37ce5b02bf65d29cb374f5243f1a38b8bb26f7b90e5"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/crashReporting.test.ts",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": "MANAGED_DIR_MACOS (case)",
+          "count": 1,
+          "line_sha256": "bd42a343c19ae9930685fa0e594517001660a85eeda95f2a9bd10a45a4512695"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/desktop-flow-localization.test.ts",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 1,
+          "line_sha256": "f4256ef515f3914db04cd9a82da4471c189ddac310bac53c0639f52c1c76dd5b"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "f4256ef515f3914db04cd9a82da4471c189ddac310bac53c0639f52c1c76dd5b"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/fixtures/deep-link-preview-main.tsx",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "759c9dc0917eab5300160f2736143da031ace1881b9ec6dbc10da52d564be5b8"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi.json",
+          "count": 1,
+          "line_sha256": "f07990098c70a41d7306ce3f93df4c514e96b0738f1fbdc4281e288a71676ce5"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/fixtures/local-apps-electron.ts",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 1,
+          "line_sha256": "134dd57a2e62017ec4a4c3f76549dba1d8a6e3dd9ade25259b095bdbe218ce72"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "8cfe37ec4687a0fc9b862a71a32a7f660963bbe1a801e066cee2350c7f2463fe"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/fixtures/project-creation-main.tsx",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "8c5fdff6b739528fd6dae53f6b21af793f5d53ba82cbdfe379ccd90a25c9cc38"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/fixtures/remote-rtc-electron.ts",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 2,
+          "line_sha256": "02728ae1bcbd94da1f653e2a10ec75a26b48e2979c4601de0c321d9455077b55"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/fixtures/runtime-lifecycle-main.tsx",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "8c5fdff6b739528fd6dae53f6b21af793f5d53ba82cbdfe379ccd90a25c9cc38"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/fixtures/session-picker-main.tsx",
+      "reason": "Desktop test, packaging or native diagnostic fixture names the existing test environment and preload APIs.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "8c5fdff6b739528fd6dae53f6b21af793f5d53ba82cbdfe379ccd90a25c9cc38"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/host-utils.test.ts",
+      "reason": "Regression uses the current desktop runtime namespace, managed policy or host environment key as test data.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": "LINGXI_CONFIG_DIR",
+          "count": 2,
+          "line_sha256": "5e5a8eec3fb877cd6d027d15ca8bfc189ce7090596e43830043885f13ecb219d"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/local-app-store.test.ts",
+      "reason": "Regression uses the current desktop runtime namespace, managed policy or host environment key as test data.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 4,
+          "line_sha256": "fcb59de02f3021110b0c9ee70b05f5b5710c08e3a90422106bd4cbd91eb925e9"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/local-apps.test.ts",
+      "reason": "Regression uses the current desktop runtime namespace, managed policy or host environment key as test data.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 2,
+          "line_sha256": "f9acb3c7a972f91b21731e59c57052eff9d64804f590529e4db559349c31683e"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/remote-config.test.ts",
+      "reason": "Regression uses the current desktop runtime namespace, managed policy or host environment key as test data.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 1,
+          "line_sha256": "17092a26555c81e9064db0969a88140886571cd812ac1a50d8c5726095214c02"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/remote-files.test.ts",
+      "reason": "Regression uses the current desktop runtime namespace, managed policy or host environment key as test data.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 1,
+          "line_sha256": "66ffeb544cecab1da434af7533b3cc62733aa6812b712d2da3c1ec7d2cf3b7e3"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/remote-policy.test.ts",
+      "reason": "Regression uses the current desktop runtime namespace, managed policy or host environment key as test data.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": "/etc/lingxi",
+          "count": 1,
+          "line_sha256": "6523bef9f571d97ca4e48bb12904a92a56ba74656bff36e6dda6c4afe28b14f7"
+        },
+        {
+          "rule": "G3",
+          "needle": "MANAGED_DIR_MACOS",
+          "count": 1,
+          "line_sha256": "efdb937032c7e66f7c60e1123c9682d49842e986c0748a6c545869a2517b0233"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/session-catalog-workspace.test.ts",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 2,
+          "line_sha256": "376103731c850b1b65e5da0d52db4196f405721630da5391e31c31b08dd00cab"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 2,
+          "line_sha256": "376103731c850b1b65e5da0d52db4196f405721630da5391e31c31b08dd00cab"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi.json",
+          "count": 2,
+          "line_sha256": "376103731c850b1b65e5da0d52db4196f405721630da5391e31c31b08dd00cab"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/session-workspace-runtime.test.ts",
+      "reason": "Regression uses the current desktop runtime namespace, managed policy or host environment key as test data.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": "LINGXI_CONFIG_DIR",
+          "count": 3,
+          "line_sha256": "5bb35193ac3c4ed9e4b2b7637dc0bd85dca9d9181ea4a352b405352eacdc1ca3"
+        }
+      ]
+    },
+    {
+      "path": "apps/electron/test/telemetry.test.ts",
+      "reason": "Regression uses the current desktop runtime namespace, managed policy or host environment key as test data.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 1,
+          "line_sha256": "440ef09fdae93e724ac8f7029774b2e952a0cb9f419ca1741abc7d8c4762e466"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/Sources/Conversation/MockConversationSource.swift",
+      "reason": "iOS UI and diagnostics fixtures use the exact app launch and verification environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 6,
+          "line_sha256": "f7053a52f3a8cce2cfebe041b492f05227347e728ee8749ad0bfbd2e5f27058e"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/Sources/Diagnostics/CrashlyticsDeviceVerification.swift",
+      "reason": "iOS UI and diagnostics fixtures use the exact app launch and verification environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 4,
+          "line_sha256": "1f9921b986c288ec4f62604901c57d412bb5b37fa271d071fb9a86a9adbaf2b1"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/Sources/Projects/WorkspaceDirectoryRepository.swift",
+      "reason": "Workspace file copy and export staging uses an explicit LingXi-owned temporary prefix.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 1,
+          "line_sha256": "31b222e1fd00274e6e5318177e57a06e5bdfc11d4ea817bd378e11a95f2a5537"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/Tests/LocalAppDistributionChannelTests.swift",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 1,
+          "line_sha256": "17bb03162fcc6286d2c1da69c2dd554b7ea54f7e7f8d17a8c9ad78f3ef82e766"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "17bb03162fcc6286d2c1da69c2dd554b7ea54f7e7f8d17a8c9ad78f3ef82e766"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/Tests/LocalAppMarketTests.swift",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 1,
+          "line_sha256": "b8e0d5e8c0d7c3198250810814cc41ce5fe1f6668b24b2ccd715b3e2922e41f4"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 2,
+          "line_sha256": "0850c7dfe1b9b21d4ca3afb3e6acfd6b14257267d87eab50c3b6c88978ce7387"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/Tests/ProjectRepositoryTests.swift",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 1,
+          "line_sha256": "2d5dd2612e80174ea51af84f0c2459fd71f7825fd4d2070b58b09ea6101262b2"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "2d5dd2612e80174ea51af84f0c2459fd71f7825fd4d2070b58b09ea6101262b2"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/Tests/UnifiedLocalAppsAcceptanceTests.swift",
+      "reason": "iOS UI and diagnostics fixtures use the exact app launch and verification environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 3,
+          "line_sha256": "afd3fe8fa49c2fe540312135fb823de2f7ca5808cf9bec9695e63be9c1a5bc0d"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/Tests/WorkspaceDirectoryRepositoryTests.swift",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 1,
+          "line_sha256": "279ab89b6c5ecd4040b35f47a98d2686d6e59065e5a49ee0e1a16d8c2c58af91"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "279ab89b6c5ecd4040b35f47a98d2686d6e59065e5a49ee0e1a16d8c2c58af91"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/Tests/WorkspaceFilesTests.swift",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 1,
+          "line_sha256": "b391c732460db3de52527847c5da7d423640ade2f8d0ef191d105ef00ffe9b65"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/UITests/DeepLinkDeliveryUITests.swift",
+      "reason": "iOS UI and diagnostics fixtures use the exact app launch and verification environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 2,
+          "line_sha256": "bf57addef288ded9c9d4a328e84d0791ade1e23b7fcaffd58951660aec8bce7b"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/UITests/LocalAppBrowserAgentUITests.swift",
+      "reason": "iOS UI and diagnostics fixtures use the exact app launch and verification environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 6,
+          "line_sha256": "9b722f0d9652866d449f96c1427aa1970402ccd74265e448e0f771467a9d70ae"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/UITests/TranscriptInteractionUITests.swift",
+      "reason": "iOS UI and diagnostics fixtures use the exact app launch and verification environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 2,
+          "line_sha256": "72c97be218c2781df72ae15be0fb01f5152e8208608aeb57ba40361d40685b57"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/UITests/WorkspaceDirectoryUITests.swift",
+      "reason": "iOS UI and diagnostics fixtures use the exact app launch and verification environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 2,
+          "line_sha256": "289e317be0be83eb3a7d9a2dcf42af360c1c133b61d4f44d6a4807d191ad162f"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/UITests/WorkspaceFilesUITests.swift",
+      "reason": "iOS UI and diagnostics fixtures use the exact app launch and verification environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 2,
+          "line_sha256": "4bf024dbe705643807c8792621a8c140dcea7fa244ddcf2a659aeea693fb8758"
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/native/scripts/run-deeplink-delivery-ui.py",
+      "reason": "iOS UI and diagnostics fixtures use the exact app launch and verification environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI_",
+          "count": 1,
+          "line_sha256": "02b1c2fdf2b701632a62d2a8d986d48b06781e1d98bf13380249eaf8666753b8"
+        }
+      ]
+    },
+    {
+      "path": "apps/web/src/data/docs/harness.ts",
+      "reason": "Product protocol package and bundled desktop plugin catalog explicitly identify LingXi and its owned metadata directory.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi-plugin",
+          "count": 3,
+          "line_sha256": "de82d463ef30062909a6c30be53447f1941ae035a04e235e34df5b1d757ac6db"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/README.md",
+      "reason": "The identity-v1 design proposal owns the product names, and the listed SVGs and previews are its concrete generated assets; see its README.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "7421513442da68ac5e2dcefa06add393b9737f4156942dcbdbeb4ed739815995"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/brand-data.js",
+      "reason": "The identity-v1 design proposal owns the product names, and the listed SVGs and previews are its concrete generated assets; see its README.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 16,
+          "line_sha256": "245c7b0b301f05a554c453a13c9a4cec347bec2b2dc53e6786f88b37b91e8c0c"
+        },
+        {
+          "rule": "G1",
+          "needle": "灵犀",
+          "count": 17,
+          "line_sha256": "4a7ba2af69f41b1102a0f5c680b4e8ddad35a7992d4004d252739b08df75607e"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/brand.json",
+      "reason": "The identity-v1 design proposal owns the product names, and the listed SVGs and previews are its concrete generated assets; see its README.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 16,
+          "line_sha256": "245c7b0b301f05a554c453a13c9a4cec347bec2b2dc53e6786f88b37b91e8c0c"
+        },
+        {
+          "rule": "G1",
+          "needle": "灵犀",
+          "count": 17,
+          "line_sha256": "4a7ba2af69f41b1102a0f5c680b4e8ddad35a7992d4004d252739b08df75607e"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/build.py",
+      "reason": "The identity-v1 design proposal owns the product names, and the listed SVGs and previews are its concrete generated assets; see its README.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "127a58f24ff45dc2c5abcd8a5a473070dffc912003308dd9ad592a4844449370"
+        },
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 18,
+          "line_sha256": "72b396db02ac5e79cf97098976b465f5cd879f2c1f020b89ab4e22535570e39b"
+        },
+        {
+          "rule": "G1",
+          "needle": "灵犀",
+          "count": 16,
+          "line_sha256": "b699f06b1de9d160e66ed8e32b3119565c1c2d14a6b0f277b94c54742fe983e6"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/index.html",
+      "reason": "The identity-v1 design proposal owns the product names, and the listed SVGs and previews are its concrete generated assets; see its README.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 3,
+          "line_sha256": "19c1b1455da66cf2e0b4eb12d9f75f6012e93de3ff1bcbe3714cbad9c4d3d8ae"
+        },
+        {
+          "rule": "G1",
+          "needle": "灵犀",
+          "count": 5,
+          "line_sha256": "1c2cec5923c37cde715dc77d7a5fef167008853cc87922685a3f0deedbe16961"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/apps/app-master.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "ec9caf19ea489870b15e1162c06b5a6dd3ce78868d30e15dfb0aa57cb77eed99"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/apps/icon.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "b09c139fc18dc6f7c022d46cf1a125519e19083604c0153ab8e7cb2e3b9360b4"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/apps/lockup-dark.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "0796f0222c70c45ebb0f73ef18bce3bdc117fd87af8242ec5206227d2b0d06b2"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/apps/lockup-light.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "0cdebb76e97a4b0934fd9432cf7dc039c64656e98454e259f3aa5903acc91c68"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/apps/small.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "20f3aa41d9575b16f25d8e86f94d0f7278a78215df17c9c019ab7c62e71078b8"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/chat/app-master.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "5ceff3d4b28a4f057d8a55f322954872800c8f558153445c756403347af2989f"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/chat/icon.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "03f099175c3a5e845591c7e6508d480ffdcb702d127b3581cf6d90ad0853848f"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/chat/lockup-dark.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "3c66aaefb7730c2464995dc00b8ba22a167cf41ef4e66e67dc8cbfeb21b14daa"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/chat/lockup-light.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "ce888b67a34711cd238e310c9ddbb2ee117359515f5e2f117531bc6380f57dc6"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/chat/small.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "6ced3241690677ccca353ba91506e9e2a95ab29b44b49b3557d49e34105e42fe"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/code/app-master.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "fa79ce914c5e16feff01ff2413c93da28eb9213c7694e2529bffb4c31789429f"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/code/icon.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "a3da9df92a645a827f67edecbd597c8ca461923d01c5b8a394c6b092b938c2b1"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/code/lockup-dark.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "4bb55c5c688b231982d23fa71c1f03284560a5ac67fdfc3906bc023a278056b3"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/code/lockup-light.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "be418469f216265d94ba9c7ab5a37118a796e45d4cf80ffbddeeaa909f364c35"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/code/small.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "78b6461c73311b250a2201b05c2121d88f87704b1160a1b630722a488b90d61d"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/computer-use/app-master.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "579da750524c1a2525a649d403d66aa5ad8dd322a45d76db18f28c510cbfedb2"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/computer-use/icon.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "26b1d67e0b406fbee0b86636a93e6da76c919ff3c48249bd3f1c7245a413fc79"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/computer-use/lockup-dark.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "5f88d343ea56e96b88908f701202f51c0a2141f5330656aaf716b1968488d578"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/computer-use/lockup-light.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "728240d59190d31d06111b5c6446c8975e4dc709dc58ca9b16c17a7a32c76bb1"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/computer-use/small.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "5ce1e56524772628e4b004d3ac42d8a254857b5515d4c364f1db2c326a3f5657"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/harness/app-master.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "0c5e626ad1de7693acc31edccb787d94db216068fdbeff464d330bad3c63d528"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/harness/icon.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "ea63267fc5fa48562c2e1effe02d620c47152b7ce7ce70186985940b1de04e8d"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/harness/lockup-dark.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "42648c998a9a12bc0f025703ffdec7f935209ed9b90ad902b251f0d194da08be"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/harness/lockup-light.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "40b74dea76d51071b004c91b4d3de290c2a86d8e0292a22e580beff6cb6ebc0d"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/harness/small.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "2e89362e2d08b2fe802e0044f83cfeee84887ef845b0fc7ca19492974d5fcf5f"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/remote/app-master.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "629938a5e4e6d5535fce839f2792c7f24c5d8823e0f7b3c5221c9f4de204d195"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/remote/icon.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "ea27543f4cb4030fcbbe5d9a4c3eeec3fb3a124c3d106f6146e5574bf79a31a8"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/remote/lockup-dark.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "c96950ac87650e36100b35b8aad50eefc14124d15d4b99e120d2cad3c03f03d9"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/remote/lockup-light.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "1a40ad499a68185873ed4aa496a4e8160b3da24f5407d2580edd28050ab52eb3"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/remote/small.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "5b6a8e652ceda7f44c465e4d7e1bc3f5b76ed659abc995bf9ecbf1bed8b552ed"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/sdk/app-master.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "1eb6f2e4af27451f3a2cd527aa90cebe36e66594c3d7f4d76672b07269bcb424"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/sdk/icon.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "01c59420d0e6568504df481bc00f795fc0407cbdfa405fc96004be5127332767"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/sdk/lockup-dark.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "1752d31240e43a14983f5e05400ab678ad5ead2299f199b96c9d4c11540ea617"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/sdk/lockup-light.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "e41dc0da530e1a1a67f0b1d72b9db5f86fa0614488c1306515fff7a0d6c88f3d"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/products/sdk/small.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "a7f5c051955a7ba776b08c3a9049a1cfa06cfdf1ca17504ec1bd686e2446c51d"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/adaptive-foreground.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "8bb6271e7a9958fe1f046ee0624ef71fbbe6dcdf6e7891779d6e078ff84c2561"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/app-master.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "039866c7affce5be6a01b5b80720f79267c3b5712a57270b4d2a9eb2bc8404c3"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/app-preview.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "ec787ec1d03dbb0f9ab8448d7489f173d7436a99036b8b0138bf56fee9510a12"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/favicon.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "ec787ec1d03dbb0f9ab8448d7489f173d7436a99036b8b0138bf56fee9510a12"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/lockup-bilingual-ink.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "79a9c86e217f38e0c700552817858cf235514359a1d33c95d01fbfe93ef422b8"
+        },
+        {
+          "rule": "G1",
+          "needle": "灵犀",
+          "count": 1,
+          "line_sha256": "79a9c86e217f38e0c700552817858cf235514359a1d33c95d01fbfe93ef422b8"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/lockup-bilingual-white.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "7294323585817db0ced2e21bab34032ef3d36b0bd9a88ce6f8c20d65997ef699"
+        },
+        {
+          "rule": "G1",
+          "needle": "灵犀",
+          "count": 1,
+          "line_sha256": "7294323585817db0ced2e21bab34032ef3d36b0bd9a88ce6f8c20d65997ef699"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/lockup-en-ink.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "2004094569ce7e4d9883f21c5bb48736da2b9f026355e4dddeed743af8e1593b"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/lockup-en-white.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "d98f2a52771b063a2c8f5a37347d2b3c5bdcc165d94557c5fadf0051690c4692"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/lockup-zh-ink.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "灵犀",
+          "count": 1,
+          "line_sha256": "f4ee2d96fb4241ab3af72b3c79b6c20ef1ec3bfdd20324259d9faaeb3dfd8697"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/lockup-zh-white.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "灵犀",
+          "count": 1,
+          "line_sha256": "88467f1cc9bdf780206c99bf1f2d4e49f0a065a543691330cbe3931c19da5021"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/mark-blue.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "3a6109f8463f7ee9d6d0b96348542f75afe4848710ae96053b2dc4a0e2adade0"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/mark-ink.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "48ebf3a9701709532cb0ac9d905290b7f1b3f39cd433b487ca92249f8d028056"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/mark-white.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "7073d0268893fa6a2f75aad3a0cc4c79dee1b1376ed03c059b328f08c8795623"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/maskable-icon.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "445c6c12fa0081e1d3d7c5274d017c4622ce7f8d49dbbc461f1e9f5843643336"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/wordmark-en-ink.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "5778aa8e7f7cb8122660857b4091ded5a49674b1bdaeae339279fc9aabda018b"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/svg/wordmark-en-white.svg",
+      "reason": "Generated SVG from the identity-v1 design proposal; the embedded accessible name identifies this product asset.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "7ff45a7105d2e4966e4ad72c5813cae40435fd1b2886c20479d5fce857d57d74"
+        }
+      ]
+    },
+    {
+      "path": "assets/brand/identity-v1/validation.json",
+      "reason": "The identity-v1 design proposal owns the product names, and the listed SVGs and previews are its concrete generated assets; see its README.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "e0f5967c2fd5b8fc0a8e76b29e73fb01a451608228094df333428f315987f91c"
+        }
+      ]
+    },
+    {
+      "path": "deploy/telemetry/compose.yaml",
+      "reason": "Telemetry collector and smoke fixtures use the existing LingXi opt-in and isolated test environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "233d823cb03bf160a13f1623d45559acdc5724326f04ed6e028a3cdeae77f879"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/local-apps/v2/agent/index.html",
+      "reason": "Local Apps example uses the AG-UI com.lingxi.localApp wire key and identifies the LingXi host in user guidance.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "f8880cb0f3e1f3f78909e1e3cf2a7a363b01970b0329954763b716c4c8bad0bc"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/local-apps/v2/calorie-agent/agui-task.mjs",
+      "reason": "Local Apps example uses the AG-UI com.lingxi.localApp wire key and identifies the LingXi host in user guidance.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "b848ac01f7f61368b89e5d3bd270fb217cbd863aea053af44f9d23fe46d5e909"
+        }
+      ]
+    },
+    {
+      "path": "fixtures/local-apps/v2/calorie-agent/app.mjs",
+      "reason": "Local Apps example uses the AG-UI com.lingxi.localApp wire key and identifies the LingXi host in user guidance.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "27223a28bd3b6070614c0fd1411e4078df8383e0ab86c65e0dacaea81303f2e2"
+        },
+        {
+          "rule": "G1",
+          "needle": "灵犀",
+          "count": 1,
+          "line_sha256": "5c9681b80ab45b75f09b65377fbe68d3a3934a4959bb052ff1187dc6fa55809e"
+        }
+      ]
+    },
+    {
+      "path": "packages/bridge-client/test/workspace-session-events.test.ts",
+      "reason": "Native workspace and Local Apps tests use the actual persisted LingXi path and staging identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi(?![A-Za-z0-9_.\\-])",
+          "count": 1,
+          "line_sha256": "cfab1bbcc42ab352aa37dac6e7ec35be404b62ae67df059d984f022e761d926e"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "cfab1bbcc42ab352aa37dac6e7ec35be404b62ae67df059d984f022e761d926e"
+        }
+      ]
+    },
+    {
+      "path": "packages/remote-control-client/Cargo.toml",
+      "reason": "Product protocol package and bundled desktop plugin catalog explicitly identify LingXi and its owned metadata directory.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "d79412e7753449bb1544c4a2443419d625e5b88e863d51d87995298fe1d86eb7"
+        }
+      ]
+    },
+    {
+      "path": "plugins/desktop-mods/.lingxi-plugin/marketplace.json",
+      "reason": "Product protocol package and bundled desktop plugin catalog explicitly identify LingXi and its owned metadata directory.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "34f43d374cd3b0b5ed2c4d26c11cb139566df90089dcff13ec68c2ac449c0f1a"
+        }
+      ]
+    },
+    {
+      "path": "plugins/desktop-mods/replay-theater/.lingxi-plugin/plugin.json",
+      "reason": "Product protocol package and bundled desktop plugin catalog explicitly identify LingXi and its owned metadata directory.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "3b470ddf1b0e5da8d2c034a6e288eb537ac3b91993425121b8a2865d1cdc5a3c"
+        }
+      ]
+    },
+    {
+      "path": "plugins/desktop-mods/test/coexistence.test.mjs",
+      "reason": "Product protocol package and bundled desktop plugin catalog explicitly identify LingXi and its owned metadata directory.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 2,
+          "line_sha256": "262efbe4cd91de1adb7c18c3c3a4430079c3adfb00d3ec2bbc0258ad2d5c4fe3"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi-plugin",
+          "count": 2,
+          "line_sha256": "262efbe4cd91de1adb7c18c3c3a4430079c3adfb00d3ec2bbc0258ad2d5c4fe3"
+        }
+      ]
+    },
+    {
+      "path": "plugins/desktop-mods/token-weather/.lingxi-plugin/plugin.json",
+      "reason": "Product protocol package and bundled desktop plugin catalog explicitly identify LingXi and its owned metadata directory.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "ea3cb852c75e946b39ea72a8672930ef5f7e80a0ae10a70d212a7fd76df61d2b"
+        }
+      ]
+    },
+    {
+      "path": "resources/extensions/README.md",
+      "reason": "Documents actual external Claude plugin input formats and their precedence; it does not claim they are LingXi-owned.",
+      "findings": [
+        {
+          "rule": "G7",
+          "needle": "\\.claude-plugin",
+          "count": 2,
+          "line_sha256": "4c23db266eb072211bcb95a07184deb933f8ec0d096f4423a7a8910202c872c1"
+        }
+      ]
+    },
+    {
+      "path": "scripts/ci/build_gstreamer_linux.py",
+      "reason": "GStreamer SDK build and packaging controls use the existing LingXi environment and SDK staging names.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "1cce10dec6f78cdae11010dad73f8e5d5782a89184ab7fed8a95fffc771f4698"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "a12ee3eeef25ab03e24d9f0a49ada9d7e69acd013b529876ed10a3bd79e07734"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 1,
+          "line_sha256": "a12ee3eeef25ab03e24d9f0a49ada9d7e69acd013b529876ed10a3bd79e07734"
+        }
+      ]
+    },
+    {
+      "path": "scripts/ci/gstreamer_sdk.py",
+      "reason": "GStreamer SDK build and packaging controls use the existing LingXi environment and SDK staging names.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 6,
+          "line_sha256": "a9f946de818c1efdda11c79e8ef36217ce48595ef51922e6a8b4c46e2422b5c6"
+        },
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "a2daec036beadc767b942bdf43809d2ed99296d1930ae9cfed7bf12a5e737f1e"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 4,
+          "line_sha256": "8436e23f647263110a8f88ccedf36d824608ffa69cbdcc9604e2208e29f84494"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 4,
+          "line_sha256": "8436e23f647263110a8f88ccedf36d824608ffa69cbdcc9604e2208e29f84494"
+        }
+      ]
+    },
+    {
+      "path": "scripts/lib/mobile_gstreamer_cargo.py",
+      "reason": "GStreamer SDK build and packaging controls use the existing LingXi environment and SDK staging names.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 6,
+          "line_sha256": "d15c88937d5762b021f8068173ba2f6b2df2274138722fe6fff9e5d19de945f3"
+        }
+      ]
+    },
+    {
+      "path": "scripts/telemetry/run-collector.sh",
+      "reason": "Telemetry collector and smoke fixtures use the existing LingXi opt-in and isolated test environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "c601f4c057e8c8626efab2979bffc307015dc3f3f396bf44a7a0eb166ad0c62f"
+        }
+      ]
+    },
+    {
+      "path": "scripts/telemetry/run_agent_smoke.py",
+      "reason": "Telemetry collector and smoke fixtures use the existing LingXi opt-in and isolated test environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 5,
+          "line_sha256": "ad1d5d46bfd00a059240f581f02f3a3642458d007ce6ae49f02e3f3dce52af1d"
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI_CONFIG_DIR",
+          "count": 1,
+          "line_sha256": "7e4939da16c4a40247113d62544a8d459fbf21e26ca458a32b40ffff34371255"
+        }
+      ]
+    },
+    {
+      "path": "scripts/telemetry/run_desktop_smoke.py",
+      "reason": "Telemetry collector and smoke fixtures use the existing LingXi opt-in and isolated test environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 4,
+          "line_sha256": "f11d88512b0bc584d9a1294c2bb24ac46e3ff3529464a4cd3c61ee004d45586a"
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI_CONFIG_DIR",
+          "count": 1,
+          "line_sha256": "d9534708ba9fdd356a86af39ecb33781950ce8ef05569f02dd4fd6443cfdd70f"
+        }
+      ]
+    },
+    {
+      "path": "scripts/telemetry/test_collector.py",
+      "reason": "Telemetry collector and smoke fixtures use the existing LingXi opt-in and isolated test environment keys.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "2c48a74e5d355bec5893fa1223a3865d0bb5fd62eeba79b78c50152992eab23d"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_gstreamer_sdk.py",
+      "reason": "GStreamer SDK build and packaging controls use the existing LingXi environment and SDK staging names.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 3,
+          "line_sha256": "ea78b17bcdff5ec952fbdca03ed8c4a1ecba111128c58b7b3858c1153387915b"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 2,
+          "line_sha256": "99811496c083e6126aedf6479dab3bebc95a647bed91f4be20e0a502f7457598"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 2,
+          "line_sha256": "99811496c083e6126aedf6479dab3bebc95a647bed91f4be20e0a502f7457598"
+        }
+      ]
+    }
+  ]
+}

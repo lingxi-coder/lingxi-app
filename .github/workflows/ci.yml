@@ -4,12 +4,22 @@ on:
   push:
     branches: [main]
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+
 jobs:
   script-gates:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
+      # Source-policy scripts use tomllib and Python 3.12 f-string syntax.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Test pinned-source rejection cases
         run: |
           python3 scripts/tests/test_runtime_source.py
@@ -18,6 +28,8 @@ jobs:
           python3 scripts/tests/test_workspace_layout.py
           python3 scripts/tests/test_gstreamer_sdk.py
           python3 scripts/tests/test_mobile_gstreamer_cargo.py
+          python3 scripts/tests/test_audit_askama_upstream.py
+          python3 scripts/checks/test_check_i18n_pairing.py
       - name: Validate both pinned runtime sources
         run: python3 scripts/checks/check-runtime-dependency.py
       - name: Run every checked-in product gate
@@ -31,21 +43,29 @@ jobs:
         run: python3 scripts/tests/test_gate_triggers.py
 
   unit-tests:
-    # Ubuntu 26.04's archive provides GStreamer >=1.28 for the Rust v1_28 API.
-    runs-on: ubuntu-26.04
-    env:
-      RUST_MIN_STACK: "16777216"
+    # All features include statically registered GStreamer plugins. The pinned
+    # source SDK supplies their archives and .pc files as well as 1.28 APIs.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
-      - name: Install GStreamer development libraries and required plugins
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore pinned Linux GStreamer static SDK cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gstreamer-sdk/linux-static
+          key: gstreamer-linux-static-jammy-${{ hashFiles('scripts/ci/gstreamer-sdk-lock.json', 'scripts/ci/build_gstreamer_linux.py', 'scripts/ci/gstreamer_sdk.py', 'scripts/ci/gstreamer-linux-meson-requirements.txt') }}
+      - name: Install GStreamer source-build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev
+            build-essential bison flex libglib2.0-dev libopus-dev libvpx-dev ninja-build pkg-config
+      - name: Install pinned Meson
+        run: python3 -m pip install --no-deps --require-hashes -r scripts/ci/gstreamer-linux-meson-requirements.txt
+      - name: Build and validate the pinned GStreamer static SDK
+        run: python3 scripts/ci/build_gstreamer_linux.py --root "$RUNNER_TEMP/gstreamer-sdk/linux-static" --static-plugins
       - name: Test all retained product packages
         working-directory: .
         run: cargo test --locked --workspace --all-features --no-fail-fast
@@ -81,6 +101,9 @@ jobs:
       - uses: actions/checkout@v4
       # Use the workspace toolchain for both builds and dependency metadata.
       - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install cargo-deny
         # >= 0.19 required so the bundled `rustsec` parser understands the
         # CVSS-4.0 advisory entries now present in the live RUSTSEC DB.
@@ -99,6 +122,20 @@ jobs:
       - name: cargo audit
         working-directory: .
         run: cargo audit --deny warnings
+      - name: Audit the original macOS capture dependency
+        working-directory: .
+        run: |
+          runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
+          python3 "$runtime_root/third_party/xcap-macos/audit-upstream.py"
+      - name: Audit the original nix dependency
+        working-directory: .
+        run: |
+          runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
+          python3 "$runtime_root/packages/webrtc/vendor/test-audit-nix-upstream.py"
+          python3 "$runtime_root/packages/webrtc/vendor/audit-nix-upstream.py"
+      - name: Audit the original Askama dependencies
+        working-directory: .
+        run: python3 scripts/checks/audit_askama_upstream.py
       - name: cargo vet
         working-directory: .
         # Source review is a separate hard gate; vulnerability scans do not replace it.

@@ -151,7 +151,7 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
           />
         </div>
         <footer className="computer-access-footer">
-          <span className="computer-access-scope">{tr('desktop_computer_session_scope')}</span>
+          <span className="computer-access-scope">{tr('desktop_computer_session_tier_scope', request.tier === 'read' ? tr('desktop_computer_read_access') : request.tier === 'click' ? tr('desktop_computer_click_access') : tr('desktop_computer_full_access'))}</span>
           <DesktopDialogActions>
             <DesktopDialogButton variant="cancel" onClick={() => onDeny(request.request_id)}>
               {tr('permission_deny')} <kbd aria-hidden="true">Esc</kbd>
@@ -280,7 +280,7 @@ function AppAllowlistPanel({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
         <div style={{ fontSize: 10.5, fontWeight: 600, color: t.text3, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
-          {tr('desktop_computer_app_scope')}
+          {tr('desktop_computer_apps_tier', request.tier === 'read' ? tr('desktop_computer_tier_read') : request.tier === 'click' ? tr('desktop_computer_tier_click') : tr('desktop_computer_tier_full'))}
         </div>
         {request.apps.map((app) => (
           <label key={app.label} style={checkboxRowStyle}>

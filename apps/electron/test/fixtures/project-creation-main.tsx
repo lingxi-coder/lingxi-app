@@ -20,6 +20,7 @@ const fixture = {
   bootstrapErrorOnce: false, rendererErrors: [] as string[],
   defaults: 0, defaultError: '', appsRoot: '/fixture/.current-product/.apps', pickerPurposes: [] as string[], newSessions: [] as string[],
   holdDefaults: false, defaultWaiters: [] as (() => void)[],
+  authoring: [] as Array<{ appId?: string; projectPath: string; sessionId: string }>,
   requestEdit: undefined as ((request: LocalAppEditRequest) => void) | undefined,
 };
 window.addEventListener('error', event => fixture.rendererErrors.push(event.message));
@@ -78,7 +79,21 @@ function snapshot() {
     ref = { projectPath: path, sessionId: `22222222-2222-4333-8444-${String(fixture.newSessions.length).padStart(12, '0')}` };
     return snapshot();
   },
-  localApps: { list: async () => [], onChanged: () => () => {} },
+  localApps: {
+    list: async () => [], legacyEntries: async () => [], onChanged: () => () => {},
+    prepareAuthoring: async (session: { projectPath: string; sessionId: string }) => {
+      if (session.projectPath !== ref.projectPath || session.sessionId !== ref.sessionId) throw new Error('Authoring must use the active Code session');
+      fixture.authoring.push(session);
+      return { workspaceId: `fixture-${session.sessionId}`, sourceDirectory: session.projectPath,
+        projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId };
+    },
+    bindAuthoring: async (appId: string, session: { projectPath: string; sessionId: string }) => {
+      if (session.projectPath !== ref.projectPath || session.sessionId !== ref.sessionId) throw new Error('Authoring must use the active Code session');
+      fixture.authoring.push({ appId, ...session });
+      return { appId, workspaceId: `fixture-${session.sessionId}`, sourceDirectory: session.projectPath,
+        projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId };
+    },
+  },
   command: async () => {},
   listProjectSessions: async (path: string) => ({ projectPath: path, sessions: [] }),
 };

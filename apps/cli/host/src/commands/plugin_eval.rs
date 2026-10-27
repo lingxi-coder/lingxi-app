@@ -16,7 +16,7 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 use serde::ser::SerializeStruct as _;
 use serde::{Deserialize, Serialize};
-use serde_yaml::{Mapping, Value as YamlValue};
+use yaml_serde::{Mapping, Value as YamlValue};
 
 use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 
@@ -3200,7 +3200,7 @@ fn collect_eval_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), Strin
 
 fn parse_case_yaml(path: &Path) -> Result<EvalCase, String> {
     let raw = read_bounded(path, MAX_PROMPT_BYTES)?;
-    let value: YamlValue = serde_yaml::from_str(&raw)
+    let value: YamlValue = yaml_serde::from_str(&raw)
         .map_err(|error| format!("invalid {}: {error}", path.display()))?;
     let map = value
         .as_mapping()
@@ -3586,7 +3586,7 @@ fn parse_markdown_frontmatter(raw: &str, path: &Path) -> Result<(Mapping, String
             path.display()
         ));
     };
-    let frontmatter: YamlValue = serde_yaml::from_str(&rest[..end])
+    let frontmatter: YamlValue = yaml_serde::from_str(&rest[..end])
         .map_err(|error| format!("invalid frontmatter in {}: {error}", path.display()))?;
     let mapping = frontmatter
         .as_mapping()

@@ -6,6 +6,9 @@ import { ContextWindow } from '../../src/renderer/components/ContextWindow';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
+
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en');
 
 type Live = { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number };
 const live: Live = { inputTokens: 79000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };

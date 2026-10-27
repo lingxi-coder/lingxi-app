@@ -100,6 +100,103 @@ class GoogleServicesGeneratedResourceTests(unittest.TestCase):
         )
 
 
+class AndroidDefaultResourceTests(unittest.TestCase):
+    def test_discovers_hand_maintained_defaults_without_trusting_generated_or_other_locales(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            values = repo / check_i18n_pairing.ANDROID_RES_ROOT / "values"
+            values.mkdir(parents=True)
+            (values / "local_apps_v2.xml").write_text(
+                '<resources><!-- <string name="commented">No</string> -->'
+                '<string translatable="false" name="actual">Yes</string></resources>',
+                encoding="utf-8",
+            )
+            (values / "strings.xml").write_text(
+                '<resources><string name="stale_generated">Old</string></resources>',
+                encoding="utf-8",
+            )
+            foreign = values.parent / "values-ja"
+            foreign.mkdir()
+            (foreign / "extra.xml").write_text(
+                '<resources><string name="localized_only">No default</string></resources>',
+                encoding="utf-8",
+            )
+            self.assertEqual(check_i18n_pairing._android_companion_names(repo), {"actual"})
+
+    def test_all_manual_strings_require_nonempty_locales_and_matching_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            res = repo / check_i18n_pairing.ANDROID_RES_ROOT
+            for name in check_i18n_pairing.ANDROID_LOCALE_DIR.values():
+                (res / name).mkdir(parents=True)
+            (res / "values/manual.xml").write_text(
+                '<resources><string name="title">Title</string>'
+                '<string name="args">%1$s: %2$.4f</string>'
+                '<string name="unindexed">%s %d</string>'
+                '<string name="literal" formatted="false">100% complete</string>'
+                '<string name="private" translatable="false">internal</string></resources>',
+                encoding="utf-8",
+            )
+            valid = ('<resources><string name="title">Translated</string>'
+                     '<string name="args">%2$.4f / %1$s</string>'
+                     '<string name="unindexed">%s %d</string>'
+                     '<string name="literal" formatted="false">Complete 100%</string></resources>')
+            for name in ("values-en", "values-ja", "values-ko", "values-zh-rTW"):
+                (res / name / "manual.xml").write_text(valid, encoding="utf-8")
+            self.assertEqual(check_i18n_pairing._android_companion_locale_issues(repo), ({}, {}, {}, {}))
+
+            (res / "values-ko/manual.xml").write_text(
+                '<resources><string name="title"> </string>'
+                '<string name="args">%1$d</string>'
+                '<string name="unindexed">%d %s</string></resources>', encoding="utf-8"
+            )
+            # A stale generated file must not conceal the missing manual value.
+            (res / "values-ko/strings.xml").write_text(
+                '<resources><string name="literal">stale</string></resources>', encoding="utf-8"
+            )
+            (res / "values-ja/extra.xml").write_text(
+                '<resources><string name="orphan">Extra</string></resources>', encoding="utf-8"
+            )
+            gaps, empty, formats, extra = check_i18n_pairing._android_companion_locale_issues(repo)
+            self.assertEqual(gaps, {"ko": ["literal"]})
+            self.assertEqual(empty, {"ko": ["title"]})
+            self.assertEqual(formats, {"ko": ["args", "unindexed"]})
+            self.assertEqual(extra, {"ja": ["orphan"]})
+
+    def test_manual_locale_issues_cannot_be_hidden_by_a_baseline(self):
+        locales = check_i18n_pairing.LOCALES
+        baseline = {
+            "totalKeys": 1,
+            "androidIllegalUnpaired": 0,
+            "iosSourceOrphans": 0,
+            "androidSourceOrphans": 0,
+            "empty": {locale: 0 for locale in locales},
+            "identicalToBase": {locale: 0 for locale in locales},
+            "androidCompanionLocaleGapsTotal": 999,
+        }
+        current = dict(baseline, androidCompanionLocaleGapsTotal=1,
+                       androidCompanionLocaleGaps={"ja": ["missing"]},
+                       androidCompanionEmpty={"ko": ["blank"]},
+                       androidCompanionFormatErrors={"en": ["format"]},
+                       androidCompanionExtra={"zh-Hant": ["extra"]})
+        problems = check_i18n_pairing.compare(baseline, current)
+        self.assertEqual(len(problems), 4)
+        self.assertTrue(any("missing" in problem for problem in problems))
+        self.assertTrue(any("blank" in problem for problem in problems))
+        self.assertTrue(any("format" in problem for problem in problems))
+        self.assertTrue(any("extra" in problem for problem in problems))
+
+    def test_duplicate_manual_strings_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            values = repo / check_i18n_pairing.ANDROID_RES_ROOT / "values"
+            values.mkdir(parents=True)
+            for name in ("first.xml", "second.xml"):
+                (values / name).write_text('<resources><string name="same">value</string></resources>')
+            with self.assertRaises(SystemExit):
+                check_i18n_pairing._android_companion_names(repo)
+
+
 class IntentionalIdenticalTranslationTests(unittest.TestCase):
     def test_exact_reviewed_ui_terms_are_excluded(self):
         for (locale, key), value in check_i18n_pairing.INTENTIONAL_IDENTICAL_TO_BASE.items():

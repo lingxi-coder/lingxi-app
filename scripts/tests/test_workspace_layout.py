@@ -17,8 +17,11 @@ class WorkspaceLayoutTests(unittest.TestCase):
     def test_app_manifests_preserve_local_dependencies_and_sdk_boundaries(self) -> None:
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())
         expected = {
+            "packages/deep-links-rs": "lingxi-deep-links",
             "tools/ios-use": "tool-ios-use",
+            "tools/native-bindgen": "native-bindgen",
             "packages/config-requirements": "config-requirements",
+            "packages/remote-control-client": "remote-control-client",
             "apps/ios/ffi": "ios-framework",
             "apps/android/ffi": "android-aar",
             "apps/bridge-server": "bridge-server",
@@ -35,14 +38,25 @@ class WorkspaceLayoutTests(unittest.TestCase):
         )
         manifests = {(ROOT / path / "Cargo.toml").resolve() for path in expected}
         expected_local_dependencies = {
-            "apps/ios/ffi": {"audio-provider": "../../audio-provider"},
-            "apps/android/ffi": {"audio-provider": "../../audio-provider"},
+            "apps/ios/ffi": {
+                "audio-provider": "../../audio-provider",
+                "remote-control-client": "../../../packages/remote-control-client",
+            },
+            "apps/android/ffi": {
+                "audio-provider": "../../audio-provider",
+                "remote-control-client": "../../../packages/remote-control-client",
+            },
             "apps/bridge-server": {
                 "audio-provider": "../audio-provider",
+                "remote-control-client": "../../packages/remote-control-client",
                 "cli": "../cli/host",
                 "tui-core": "../cli/tui-core",
             },
-            "apps/cli/host": {"tui": "../tui", "tui-core": "../tui-core"},
+            "apps/cli/host": {
+                "lingxi-deep-links": "../../../packages/deep-links-rs",
+                "tui": "../tui",
+                "tui-core": "../tui-core",
+            },
             "apps/cli/tui": {"tui-core": "../tui-core"},
         }
         for relative, name in expected.items():
@@ -81,7 +95,10 @@ class WorkspaceLayoutTests(unittest.TestCase):
             audio_sdk_dependencies,
             {
                 "core",
+                "client",
                 "llm-runtime",
+                "media-api",
+                "media-runtime",
                 "provider-config",
                 "http-client",
                 "orchestrator",
@@ -94,8 +111,15 @@ class WorkspaceLayoutTests(unittest.TestCase):
             audio_provider["dependencies"]["lingxi-llm-client"]["features"],
             "the shared audio provider requires the SDK realtime transport feature",
         )
-        # Folder consolidation must not turn independent SDKs into path/submodule dependencies.
-        self.assertNotIn("patch", workspace)
+        # The WebRTC stack needs the same two git patches as Harness. Reject
+        # unrelated overrides and local patches that could hide source drift.
+        harness = workspace_dependencies["core"]
+        self.assertEqual(workspace.get("patch"), {
+            "crates-io": {
+                name: {"git": harness["git"], "rev": harness["rev"]}
+                for name in ("webrtc", "nix")
+            },
+        })
         sdk_dependencies = [value for value in workspace["workspace"]["dependencies"].values()
                             if isinstance(value, dict) and "git" in value]
         self.assertTrue(sdk_dependencies)

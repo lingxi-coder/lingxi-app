@@ -30,6 +30,12 @@ on:
       - 'packaging/**'
   workflow_dispatch:
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+
 concurrency:
   group: desktop-packages-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -55,16 +61,43 @@ jobs:
             arch: x64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    env:
-      RUST_MIN_STACK: "16777216"
-
     steps:
+      - name: Enable Windows long paths and Git symlinks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git config --global core.symlinks true
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
       - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          # Match rust-toolchain.toml during setup, before native build steps
+          # invoke rustup proxies and try to add components on demand.
+          components: rustfmt, clippy
+
+      - name: Ensure Windows crypto assembler is available
+        if: matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Verify Windows crypto assembler
+        if: matrix.platform == 'win32'
+        run: nasm -v
+
+      - name: Verify the Windows Askama Git checkout
+        if: matrix.platform == 'win32'
+        run: python scripts/checks/audit_askama_upstream.py --checkout-only
 
       - name: Restore the pinned Linux GStreamer runtime SDK cache
         if: matrix.platform == 'linux'

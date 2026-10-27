@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import pathlib
 import plistlib
@@ -69,6 +70,18 @@ class GStreamerSDKTests(unittest.TestCase):
             artifact = {"filename": path.name, "sha256": "0" * 64}
             with self.assertRaisesRegex(gstreamer_sdk.SetupError, "SHA-256 mismatch"):
                 gstreamer_sdk.verify_artifact(path, artifact)
+
+    def test_windows_lock_requires_a_pinned_installer_revision(self) -> None:
+        lock = gstreamer_sdk.load_lock()
+        self.assertEqual(lock["artifacts"]["windows"]["pkg_config_version"], "1.28.8.1")
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = pathlib.Path(directory) / "lock.json"
+            for invalid in (None, "1.28.8", "1.28.9.1", "1.28.8.1.0"):
+                with self.subTest(invalid=invalid):
+                    lock["artifacts"]["windows"]["pkg_config_version"] = invalid
+                    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+                    with self.assertRaisesRegex(gstreamer_sdk.SetupError, "must pin an installer revision"):
+                        gstreamer_sdk.load_lock(lock_path)
 
     def test_archive_extraction_rejects_parent_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -203,6 +216,44 @@ class GStreamerSDKTests(unittest.TestCase):
             with self.assertRaisesRegex(gstreamer_sdk.SetupError, "unmarked or stale"):
                 gstreamer_sdk.install_windows(gstreamer_sdk.load_lock(), root)
 
+    def test_windows_installer_requires_exact_pkg_config_revision_and_plugins(self) -> None:
+        lock = gstreamer_sdk.load_lock()
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            installer = base / "installer.exe"
+            installer.touch()
+            for reported in ("1.28.8.1", "1.28.8", "1.28.8.2", "1.28.9.1", "1.28.8.1.0"):
+                with self.subTest(reported=reported):
+                    root = base / reported
+                    plugin_dir = root / "lib/gstreamer-1.0"
+
+                    def fake_run(command, **kwargs):
+                        if command[0] == str(installer):
+                            (root / "bin").mkdir(parents=True)
+                            (root / "bin/pkg-config.exe").touch()
+                            plugin_dir.mkdir(parents=True)
+                            for name in gstreamer_sdk.PLUGIN_NAMES:
+                                (plugin_dir / f"gst{name}.dll").touch()
+                            stdout = ""
+                        elif "--modversion" in command:
+                            stdout = reported
+                        elif "--variable=pluginsdir" in command:
+                            stdout = str(plugin_dir)
+                        else:
+                            stdout = ""
+                        return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+                    with patch.object(gstreamer_sdk, "download_artifact", return_value=installer), \
+                            patch.object(gstreamer_sdk.subprocess, "run", side_effect=fake_run), \
+                            patch.object(gstreamer_sdk, "export_environment"):
+                        if reported == "1.28.8.1":
+                            gstreamer_sdk.install_windows(lock, root)
+                            self.assertEqual((root / ".lingxi-gstreamer-sdk-version").read_text().strip(), "1.28.8")
+                        else:
+                            with self.assertRaises(gstreamer_sdk.SetupError):
+                                gstreamer_sdk.install_windows(lock, root)
+                            self.assertFalse((root / ".lingxi-gstreamer-sdk-version").exists())
+
     def test_sdk_output_path_must_remain_under_runner_temp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -226,6 +277,56 @@ class GStreamerSDKTests(unittest.TestCase):
         ):
             self.assertIn(option, build_gstreamer_linux.MESON_OPTIONS)
         self.assertIn("--wrap-mode=nodownload", (ROOT / "scripts/ci/build_gstreamer_linux.py").read_text(encoding="utf-8"))
+
+    def test_linux_static_sdk_requires_archives_and_uses_their_own_metadata(self) -> None:
+        lock = gstreamer_sdk.load_lock()
+        self.assertNotEqual(build_gstreamer_linux.build_identity(lock), build_gstreamer_linux.build_identity(lock, True))
+        self.assertNotIn("--default-library=both", build_gstreamer_linux.meson_options(False))
+        self.assertIn("--default-library=both", build_gstreamer_linux.meson_options(True))
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = pathlib.Path(directory)
+            library_dir = prefix / build_gstreamer_linux.LIBDIR
+            plugin_dir = library_dir / "gstreamer-1.0"
+            plugin_pc = plugin_dir / "pkgconfig"
+            plugin_pc.mkdir(parents=True)
+            (library_dir / "pkgconfig").mkdir()
+            (prefix / "share/licenses/GStreamer-1.28.8").mkdir(parents=True)
+            for name in build_gstreamer_linux.RUNTIME_LIBRARIES:
+                (library_dir / name).touch()
+            for name in build_gstreamer_linux.PLUGIN_NAMES:
+                (plugin_dir / f"libgst{name}.so").touch()
+
+            with patch.object(build_gstreamer_linux, "_require_system_tool", return_value="pkg-config"), \
+                    patch.object(build_gstreamer_linux, "_run_pkg_config"):
+                with self.assertRaisesRegex(build_gstreamer_linux.SetupError, "missing static plugins"):
+                    build_gstreamer_linux._validate_prefix(prefix, "1.28.8", True)
+
+                for name in build_gstreamer_linux.PLUGIN_NAMES:
+                    (plugin_dir / f"libgst{name}.a").touch()
+                    (plugin_pc / f"gst{name}.pc").touch()
+                (library_dir / "libgstreamer-1.0.a").touch()
+                with self.assertRaisesRegex(build_gstreamer_linux.SetupError, "static core archives"):
+                    build_gstreamer_linux._validate_prefix(prefix, "1.28.8", True)
+                build_gstreamer_linux._remove_static_core_archives(prefix)
+                self.assertFalse((library_dir / "libgstreamer-1.0.a").exists())
+                self.assertTrue((plugin_dir / "libgstapp.a").exists())
+                calls = []
+
+                def fake_run(command, **kwargs):
+                    calls.append(command)
+                    stdout = str(plugin_pc) if "--variable=pcfiledir" in command else ""
+                    return type("Result", (), {"stdout": stdout, "returncode": 0})()
+
+                with patch.object(build_gstreamer_linux.subprocess, "run", side_effect=fake_run):
+                    build_gstreamer_linux._validate_prefix(prefix, "1.28.8", True)
+                self.assertEqual(sum("--static" in call for call in calls), len(build_gstreamer_linux.PLUGIN_NAMES))
+                environment = build_gstreamer_linux._environment(prefix, True)
+                self.assertIn(str(plugin_pc), environment["PKG_CONFIG_PATH"].split(os.pathsep))
+                self.assertNotIn(str(plugin_pc), build_gstreamer_linux._environment(prefix)["PKG_CONFIG_PATH"].split(os.pathsep))
+
+                with patch.object(build_gstreamer_linux.subprocess, "run", return_value=type("Result", (), {"stdout": "/unrelated", "returncode": 0})()):
+                    with self.assertRaisesRegex(build_gstreamer_linux.SetupError, "outside the pinned SDK"):
+                        build_gstreamer_linux._validate_prefix(prefix, "1.28.8", True)
 
     def test_linux_source_sdk_staging_resolves_system_glib_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -283,13 +384,19 @@ class GStreamerSDKTests(unittest.TestCase):
 
     def test_workflows_provision_sdk_before_native_media_gates(self) -> None:
         ci = ROOT / ".github/workflows/ci.yml"
-        for job_name, gate in (("unit-tests", "cargo test --locked --workspace --all-features"), ("lint", "cargo clippy --locked --workspace")):
-            block = job_block(ci, job_name)
-            self.assertIn("runs-on: ubuntu-26.04", block)
-            self.assertIn("libgstreamer1.0-dev", block)
-            self.assertIn("libgstreamer-plugins-base1.0-dev", block)
-            self.assertIn("gstreamer1.0-plugins-good", block)
-            self.assertLess(block.index("Install GStreamer development libraries"), block.index(gate))
+        unit = job_block(ci, "unit-tests")
+        self.assertIn("runs-on: ubuntu-22.04", unit)
+        self.assertIn("scripts/ci/build_gstreamer_linux.py", unit)
+        self.assertIn("--static-plugins", unit)
+        self.assertLess(unit.index("Install pinned Meson"), unit.index("Build and validate the pinned GStreamer static SDK"))
+        self.assertLess(unit.index("Build and validate the pinned GStreamer static SDK"), unit.index("cargo test --locked --workspace --all-features"))
+
+        lint = job_block(ci, "lint")
+        self.assertIn("runs-on: ubuntu-26.04", lint)
+        self.assertIn("libgstreamer1.0-dev", lint)
+        self.assertIn("libgstreamer-plugins-base1.0-dev", lint)
+        self.assertIn("gstreamer1.0-plugins-good", lint)
+        self.assertLess(lint.index("Install GStreamer development libraries"), lint.index("cargo clippy --locked --workspace"))
 
         clients = ROOT / ".github/workflows/clients.yml"
         for job_name, gate in (("android", "Build Store and Full native runtimes"), ("android-emulator", "Build Store native runtime"), ("ios", "Build XCFramework + Swift bindings")):

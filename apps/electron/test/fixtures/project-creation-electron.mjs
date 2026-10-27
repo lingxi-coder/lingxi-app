@@ -82,8 +82,8 @@ async function main() {
     await run(`document.querySelector('.desktop-rail-settings').click()`);
     await wait(`!!document.querySelector('.settings-screen')`);
     await run(`document.querySelector('[data-nav-page="projects"]').click()`);
-    await wait(`Array.from(document.querySelectorAll('.settings-screen button')).some(b => b.textContent.includes('添加项目'))`);
-    await run(`Array.from(document.querySelectorAll('.settings-screen button')).find(b => b.textContent.includes('添加项目')).focus(); Array.from(document.querySelectorAll('.settings-screen button')).find(b => b.textContent.includes('添加项目')).click()`);
+    await wait(`Array.from(document.querySelectorAll('.settings-screen button')).some(b => b.textContent.includes('Add project'))`);
+    await run(`Array.from(document.querySelectorAll('.settings-screen button')).find(b => b.textContent.includes('Add project')).focus(); Array.from(document.querySelectorAll('.settings-screen button')).find(b => b.textContent.includes('Add project')).click()`);
     await wait(`!!document.querySelector('[aria-label="Create project"]')`);
     await check(`!!document.querySelector('.settings-screen').closest('[inert]')`, 'Settings must remain underneath the create dialog');
     await run(`document.querySelector('[aria-label="Project name"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);
@@ -126,6 +126,7 @@ async function main() {
     await run(`document.querySelector('.create-project-submit').click()`);
     await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 1 && document.querySelector('[contenteditable=true]')?.textContent.includes('创建一个本地应用')`);
     await check(`window.projectCreationFixture.newSessions[0] === '/fixture/.current-product/.apps/Reading garden' && window.projectCreationFixture.projects.length === 2`, 'Confirmed app creation must create exactly one chat in its own project');
+    await check(`window.projectCreationFixture.authoring[0]?.projectPath === '/fixture/.current-product/.apps/Reading garden' && !window.projectCreationFixture.authoring[0]?.appId`, 'The host must prepare the new Code session before exposing its draft');
     await openAppProject();
     await run(`window.projectCreationFixture.nextFolder={id:'explicit-app-folder',path:'/Users/tester/Projects/Explicit app'}; document.querySelector('.create-project-add-folder').click()`);
     await wait(`document.querySelector('[aria-label="Project name"]').value === 'Explicit app'`);
@@ -147,6 +148,7 @@ async function main() {
     await run(`document.querySelector('.create-project-submit').click()`);
     await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 3 && document.querySelector('[contenteditable=true]')?.textContent.includes('修改本地应用「Recovered reader」')`);
     await check(`window.projectCreationFixture.newSessions[2] === '/fixture/.current-product/.apps/Recovered reader' && window.projectCreationFixture.rendererErrors.length === 0`, 'Recovered apps must draft only into the confirmed workspace');
+    await check(`window.projectCreationFixture.authoring.some(item => item.appId === ${JSON.stringify(editRequest.id)} && item.projectPath === '/fixture/.current-product/.apps/Recovered reader')`, 'Recovered apps must bind the replacement Code session before exposing the edit draft');
     const draftBeforeFailure = await run(`document.querySelector('[contenteditable=true]').textContent`);
     await run(`window.projectCreationFixture.newSessionError='Fixture engine startup failed'`);
     await openAppProject();

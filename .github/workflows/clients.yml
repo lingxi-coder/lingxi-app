@@ -16,6 +16,12 @@ on:
   push:
     branches: [main]
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+
 # One in-flight run per ref; a new push to the same PR/branch cancels the old
 # one (matches the cancel-in-progress convention requested for this file).
 concurrency:
@@ -149,7 +155,7 @@ jobs:
           bash apps/android/native/scripts/verify-mobile-linux-pins.sh
           bash scripts/tests/test-rootfs-tooling.sh
           sdk_root="$(python3 scripts/lib/mobile_linux_source.py --root)"
-          rootfs_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["alpine"]["version"])' "$sdk_root/docs/toolchains/runtime-pins.json")"
+          rootfs_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["rootfs_version"])' "$sdk_root/docs/toolchains/runtime-pins.json")"
           evidence="$sdk_root/docs/mobile-linux/releases/$rootfs_version/arm64-v8a"
           bash "$sdk_root/scripts/rootfs/check-rootfs-manifest.sh" "$evidence/rootfs-manifest.json"
           python3 "$sdk_root/scripts/rootfs/verify-evidence.py" --evidence-dir "$evidence"
@@ -306,7 +312,9 @@ jobs:
       - name: Build native support and verified release rootfs
         run: |
           python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
-          bash apps/ios/native/scripts/build-linux-runtime.sh
+          archive_name="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["archive"]["filename"])' "$RUNNER_TEMP/sdk-rootfs/arm64-v8a/rootfs-manifest.json")"
+          bash apps/ios/native/scripts/build-linux-runtime.sh \
+            --rootfs-archive "$RUNNER_TEMP/sdk-rootfs/arm64-v8a/$archive_name"
           bash apps/ios/native/scripts/install-sherpa-runtime.sh
 
       # Build the gitignored Generated/ Swift bindings + the

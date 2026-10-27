@@ -90,6 +90,11 @@ def load_lock(path: pathlib.Path = LOCK_PATH) -> dict:
     expected = {"android", "ios", "macos-runtime", "macos-devel", "windows", "linux-source", "linux-orc"}
     if set(artifacts) != expected:
         raise SetupError(f"GStreamer SDK lock entries differ from the supported targets: {set(artifacts)}")
+    windows_version = artifacts["windows"].get("pkg_config_version", "")
+    if not isinstance(windows_version, str) or not re.fullmatch(
+        re.escape(lock["version"]) + r"\.\d+", windows_version
+    ):
+        raise SetupError("Windows GStreamer pkg-config version must pin an installer revision")
     return lock
 
 
@@ -311,7 +316,7 @@ def _run_pkg_config(
         check=True,
     )
     version = version_result.stdout.strip()
-    parsed = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    parsed = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\.\d+)?", version)
     if not parsed:
         raise SetupError(f"GStreamer SDK reported an invalid version: {version!r}")
     version_tuple = tuple(map(int, parsed.groups()))
@@ -387,7 +392,7 @@ def install_windows(lock: dict, root: pathlib.Path) -> None:
         raise SetupError(f"GStreamer development installer did not provide pkg-config.exe: {pkg_config}")
     plugin_dir = _run_pkg_config(
         str(pkg_config), pkg_config_path, expected_plugins=plugin_files,
-        expected_version=lock["version"],
+        expected_version=lock["artifacts"]["windows"]["pkg_config_version"],
     )
     marker.write_text(lock["version"] + "\n", encoding="ascii")
     export_environment(

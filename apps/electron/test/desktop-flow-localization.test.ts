@@ -8,23 +8,15 @@ import { Plugins } from '../src/renderer/components/settings/pages/Plugins';
 import { permissionModeOptions, PERMISSION_MODE_OPTIONS } from '../src/renderer/model/permissionModes';
 import { chatCatalog } from '../src/renderer/i18n/chatCatalog';
 import { extensionCatalog } from '../src/renderer/i18n/extensionCatalog';
-import { DESKTOP_LOCALES, LANGUAGE_STORAGE_KEY, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
+import { DESKTOP_LOCALES, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
+import { withDesktopLocale } from './support/language';
 
 (globalThis as { React?: typeof React }).React = React;
 
 function renderInLocale(locale: DesktopLocale, element: React.ReactElement): string {
-  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
-  Object.defineProperty(globalThis, 'localStorage', {
-    configurable: true,
-    value: { getItem: (key: string) => key === LANGUAGE_STORAGE_KEY ? locale : null },
-  });
-  try { return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, element)); }
-  finally {
-    if (previous) Object.defineProperty(globalThis, 'localStorage', previous);
-    else Reflect.deleteProperty(globalThis, 'localStorage');
-  }
+  return withDesktopLocale(locale, () => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, element)));
 }
 
 test('extension management screens render the selected language and preserve catalog content', () => {
@@ -32,7 +24,10 @@ test('extension management screens render the selected language and preserve cat
     bridge: {
       bootstrap: { settings: {} },
       skillsEvent: { skills: [{ name: 'User skill name', source_dir: '/tmp/user/.lingxi/skills/my-skill' }] },
-      pluginCatalogEvent: { catalog_json: JSON.stringify({ installed: [{ id: 'user-plugin', name: 'User plugin name' }], revisions: {} }) },
+      pluginCatalogEvent: { catalog_json: JSON.stringify({
+        installed: [{ id: 'user-plugin', name: 'Installed user plugin', description: 'Installed user description' }],
+        available: [{ id: 'available-plugin', name: 'User plugin name', marketplace: 'User marketplace' }], revisions: {},
+      }) },
     },
     snapshot: null, editingLayer: 'user', theme: 'dark', onTheme() {}, onNavigate() {}, onClose() {},
   };
@@ -46,6 +41,10 @@ test('extension management screens render the selected language and preserve cat
     const plugins = renderInLocale(locale, React.createElement(Plugins, props));
     assert.ok(plugins.includes(translate('desktop_extension_plugin_description', locale)), locale);
     assert.ok(plugins.includes('User plugin name'));
+    assert.ok(plugins.includes('User marketplace'));
+    const installed = renderInLocale(locale, React.createElement(Plugins, { ...props, initialPluginId: 'user-plugin' }));
+    assert.ok(installed.includes('Installed user plugin'), locale);
+    assert.ok(installed.includes('Installed user description'), locale);
     for (const html of [mcp, skills, plugins]) assert.doesNotMatch(html, /desktop_extension_|settings_title_plugins/);
   }
 });

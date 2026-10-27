@@ -193,6 +193,8 @@ async function main() {
     await wait(visibleHitTargetExpression('gamma'));
     alpha = await point('alpha');
     const gamma = await point('gamma');
+    const projectSessionOrder = `[...document.querySelectorAll('[data-session-project-path="/fixture"]')].map(button => button.dataset.sessionId)`;
+    assert.deepEqual(await run(projectSessionOrder), ['alpha', 'beta', 'gamma'], 'drag starts in updated order');
     await input('mouseMove', gamma);
     await wait(hitTargetExpression('gamma'));
     await down(gamma);
@@ -210,7 +212,10 @@ async function main() {
     })()`);
     assert.equal(alphaHit.sessionId, 'alpha', `drag pointer did not resolve to alpha: ${JSON.stringify(alphaHit)}`);
     await input('mouseMove', alpha, { button: 'left', modifiers: ['leftButtonDown'] });
-    await wait(`Array.from(document.querySelectorAll('.sidebar-tree-row')).some(row => row.dataset.dragTarget === 'true')`);
+    // The source is already a drop target on activation. Wait for the actual
+    // sortable preview to reach alpha before releasing; otherwise a delayed
+    // mouseMove can arrive together with mouseUp and drop on the source.
+    await wait(`JSON.stringify(${projectSessionOrder}) === JSON.stringify(['gamma', 'alpha', 'beta']) && ${selector('gamma')}.closest('.sidebar-tree-row')?.dataset.dragTarget === 'true'`);
     const dropIndicators = await run(`Array.from(document.querySelectorAll('.sidebar-tree-row[data-drag-target="true"] [data-session-id]')).map(button => button.dataset.sessionId)`);
     assert.deepEqual(dropIndicators, ['gamma'], 'the sortable placeholder marks the dragged item at its preview position');
     await up(alpha);
@@ -220,7 +225,7 @@ async function main() {
     const preferences = await run('window.sessionGesturesFixture.preferences[0]');
     assert.equal(preferences.chatSort, 'manual', 'drag automatically selects manual sorting');
     assert.deepEqual(preferences.manualSessionOrder['/fixture'], ['gamma', 'alpha', 'beta']);
-    assert.deepEqual(await run(`[...document.querySelectorAll('[data-session-project-path="/fixture"]')].map(button => button.dataset.sessionId)`), ['gamma', 'alpha', 'beta'], 'DOM follows saved order');
+    assert.deepEqual(await run(projectSessionOrder), ['gamma', 'alpha', 'beta'], 'DOM follows saved order');
     await wait(`typeof window.sessionGesturesFixture.finishTouch === 'function'`);
     await run(`window.sessionGesturesFixture.finishTouch()`);
     await wait(`window.sessionGesturesFixture.sessions.find(session => session.uuid === 'gamma')?.modified_rfc3339 === '2026-09-23T00:00:00Z'`);
@@ -266,6 +271,12 @@ async function main() {
     await focusForInput('click after cancellation');
     await click('gamma');
     assert.equal((await opened()).length, opensBeforeClick + 1, 'new click works after cancellation');
+    // Optimistic sorting moves the live DOM during dragover. Recreate the
+    // sidebar from the saved preferences with a newer alpha, so neither that
+    // preview nor the updated timestamp order can satisfy this assertion.
+    await run(`window.gestureBeforeRemount = ${selector('gamma')}; window.sessionGesturesFixture.remountWithNewerAlpha()`);
+    await wait(`window.sessionGesturesFixture.sessions.find(session => session.uuid === 'alpha')?.modified_rfc3339 === '2026-09-24T00:00:00Z' && Boolean(${selector('gamma')}) && ${selector('gamma')} !== window.gestureBeforeRemount`);
+    assert.deepEqual(await run(projectSessionOrder), ['gamma', 'alpha', 'beta'], 'manual order survives a sidebar remount when updated order differs');
     process.stdout.write(`${JSON.stringify({ passed: true })}\n`);
   } finally { window.destroy(); app.quit(); }
 }

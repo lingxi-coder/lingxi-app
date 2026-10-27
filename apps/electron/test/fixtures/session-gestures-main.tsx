@@ -7,12 +7,19 @@ import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
 
 const sessions = ['alpha', 'beta', 'gamma'].map((uuid, index) => ({ uuid, title: uuid, modified_rfc3339: `2026-09-${22 - index}T00:00:00Z`, message_count: 1 }));
-const events = { opened: [] as string[], preferences: [] as unknown[], touched: [] as string[], sessions, finishTouch: null as (() => void) | null };
+const events = { opened: [] as string[], preferences: [] as unknown[], touched: [] as string[], sessions, finishTouch: null as (() => void) | null, remountWithNewerAlpha: null as (() => void) | null };
 Object.assign(window, { sessionGesturesFixture: events });
 function Fixture() {
   const [sidebar, setSidebar] = useState({ organization: 'project', chatSort: 'updated', manualSessionOrder: {} });
   const [catalogSessions, setCatalogSessions] = useState(sessions);
+  const [sidebarGeneration, setSidebarGeneration] = useState(0);
   events.sessions = catalogSessions;
+  events.remountWithNewerAlpha = () => {
+    // On remount, updated sorting would place alpha before gamma; only the
+    // saved manual preference can preserve the order produced by the drag.
+    setCatalogSessions(current => current.map(session => session.uuid === 'alpha' ? { ...session, modified_rfc3339: '2026-09-24T00:00:00Z' } : session));
+    setSidebarGeneration(current => current + 1);
+  };
   const bridge = {
     sessionLoading: false,
     bootstrap: {
@@ -32,7 +39,7 @@ function Fixture() {
   } as unknown as UseBridge;
   return <Theme.Provider value={tokens(false)}>
     <div className="desktop-shell" style={{ display: 'flex', height: '100vh' }}>
-      <BetaSidebar bridge={bridge} onOpenSettings={() => {}}>
+      <BetaSidebar key={sidebarGeneration} bridge={bridge} onOpenSettings={() => {}}>
         <main>Isolated session gesture fixture</main>
       </BetaSidebar>
     </div>

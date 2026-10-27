@@ -23,6 +23,31 @@ final class ProjectStoreTests: XCTestCase {
         }
     }
 
+    #if DEBUG
+    func testUITestProjectAndSessionIndexDoesNotModifyUserIndex() async throws {
+        let normal = ProjectStore.forRuntime(managedRoot: managedRoot.path, environment: [:])
+        let userProject = try await normal.createInternal(name: "User project")
+        try await normal.recordStartedSession(projectId: nil, sessionId: "real-session", title: "Real")
+
+        let uiTest = ProjectStore.forRuntime(
+            managedRoot: managedRoot.path, environment: ["LINGXI_UI_TESTING": "1"]
+        )
+        XCTAssertTrue(uiTest.projects.isEmpty)
+        XCTAssertTrue(uiTest.globalSessions.isEmpty)
+        let testProject = try await uiTest.createInternal(name: "UI test project")
+        try await uiTest.recordStartedSession(projectId: nil, sessionId: "ui-files-session", title: "Fixture")
+
+        let reopened = ProjectStore.forRuntime(managedRoot: managedRoot.path, environment: [:])
+        XCTAssertEqual(reopened.projects.map(\.id), [userProject.id])
+        XCTAssertEqual(reopened.globalSessions.map(\.sessionId), ["real-session"])
+        let reopenedUITest = ProjectStore.forRuntime(
+            managedRoot: managedRoot.path, environment: ["LINGXI_UI_TESTING": "1"]
+        )
+        XCTAssertEqual(reopenedUITest.projects.map(\.id), [testProject.id])
+        XCTAssertEqual(reopenedUITest.globalSessions.map(\.sessionId), ["ui-files-session"])
+    }
+    #endif
+
     func testImportUsesInitialScopeAcrossBookmarkAndResolveAndStopsAfterward() async throws {
         try writeExternal("notes.txt", "external")
         let repository = ProjectRepository(projectsRoot: managedRoot)

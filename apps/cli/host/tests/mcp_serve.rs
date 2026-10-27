@@ -63,7 +63,7 @@ fn write_shell_fixture(project: &std::path::Path, name: &str, record_completion:
     let script = format!(
         "sleep 30 & child=$!; trap 'kill \"$child\" 2>/dev/null || true; wait \"$child\" 2>/dev/null || true' EXIT; printf '%s %s %s\\n' \"$1\" \"$$\" \"$child\" > started-{name}.tmp; mv started-{name}.tmp started-{name}; while [ ! -e gate-{name} ]; do sleep 0.05; done{}",
         if record_completion {
-            format!("; printf finished > finished-{name}")
+            format!("; printf 'fixture-{name}-completed\\n'; printf finished > finished-{name}")
         } else {
             String::new()
         }
@@ -695,9 +695,37 @@ fn serve_duplicate_tools_call_id_keeps_original_call_cancellable() {
     );
     std::fs::write(server.project.join("gate-c"), b"release").unwrap();
     let task_output = server.until(|frame| frame["id"] == 12);
-    assert_eq!(
-        task_output["result"]["isError"], false,
+    assert!(
+        task_output.get("error").is_none(),
         "ordinary request should complete after ignored cancellation: {task_output}"
+    );
+    let result = task_output["result"]
+        .as_object()
+        .expect("TaskOutput response must contain a result object");
+    // MCP treats an omitted isError as false; reject null and non-booleans.
+    assert!(
+        matches!(result.get("isError"), None | Some(Value::Bool(false))),
+        "ordinary request should complete after ignored cancellation: {task_output}"
+    );
+    let expected_header = format!(
+        "<retrieval_status>success</retrieval_status>\n\n<task_id>{task_id}</task_id>\n\n<task_type>local_bash</task_type>\n\n<status>completed</status>\n\n<exit_code>0</exit_code>\n\n<output>\n"
+    );
+    assert!(
+        result
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| blocks.iter().any(|block| {
+                block["type"] == "text"
+                    && block["text"].as_str().is_some_and(|text| {
+                        text.strip_prefix(&expected_header)
+                            .and_then(|body| body.split_once("\n</output>"))
+                            .is_some_and(|(output, tail)| {
+                                tail.trim().is_empty()
+                                    && output.lines().any(|line| line == "fixture-c-completed")
+                            })
+                    })
+            })),
+        "TaskOutput must contain the completed task's successful output: {task_output}"
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     while committed_pids.iter().any(|pid| alive(*pid)) {

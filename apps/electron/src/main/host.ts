@@ -14,7 +14,7 @@ import type { HostNotifier } from './notifications.js';
 import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
 import type { RemoteControlUi } from './remoteControl/rendererIpc.js';
-import { CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN, type BotSessionRefUi } from '../shared/bots.js';
+import { CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSION_SHOWN, type BotSessionRefUi } from '../shared/bots.js';
 import type { BotsUi } from './bots/rendererIpc.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
@@ -634,6 +634,12 @@ export class HostController {
     return ref;
   }
 
+  /** Open a Bot's session (a new one without `sessionId`) and make it the one the window shows. */
+  private async openBotSession(botId: string, sessionId?: string): Promise<BotSessionRefUi> {
+    if (!this.botsUi) throw new Error('Bots are unavailable.');
+    return this.showBotSession(await this.botsUi.openSession(botId, sessionId));
+  }
+
   private isBotWorkspace(projectPath: string): boolean {
     return this.botsUi?.botIdFor(projectPath) !== undefined;
   }
@@ -1091,8 +1097,12 @@ export class HostController {
       }
       if (request['action'] === 'open') {
         if (!isSessionId(request['sessionId'])) throw new Error('Invalid scheduled session');
+        const sessionId = request['sessionId'];
         const projectPath = this.scheduled.resolveScope(request['scopeId']);
-        return this.enqueueNavigation(() => this.openSessionAndActivateInternal({ projectPath, sessionId: request['sessionId'] as string }));
+        // A Bot's workspace is no project: its sessions open through the Bot, and are held beside the settings.
+        const botId = this.botsUi?.botIdFor(projectPath);
+        if (botId !== undefined) return this.enqueueNavigation(() => this.openBotSession(botId, sessionId));
+        return this.enqueueNavigation(() => this.openSessionAndActivateInternal({ projectPath, sessionId }));
       }
       throw new Error('Invalid scheduled action');
     });
@@ -1655,13 +1665,15 @@ export class HostController {
   }
 
   private runtimeSummaries(): SessionRuntimeSummary[] {
-    return this.bridge.runtimeSummaries.map((summary) => {
+    return this.bridge.runtimeSummaries.flatMap((summary) => {
       const botId = this.botsUi?.botIdFor(summary.projectPath);
-      return {
+      // The hidden session that watches a Bot's clock is no chat of the Bot's, and must not make the Bot look at work.
+      if (botId !== undefined && this.scheduled?.isControllerSession(summary.projectPath, summary.sessionId)) return [];
+      return [{
         ...summary,
         ...(botId !== undefined ? { botId } : {}),
         connection: { ...summary.connection },
-      };
+      }];
     });
   }
 
@@ -2395,6 +2407,21 @@ export class HostController {
 
   restoreProjectSession(projectPath: string, activeSession?: SessionRef): Promise<SessionRef> {
     return this.enqueueNavigation(() => this.restoreProjectSessionInternal(projectPath, activeSession));
+  }
+
+  /**
+   * The owner clicked a notification: show the session it came from. A Bot's
+   * session is no project's, so it opens through the Bot, and the window is told
+   * which session it now shows, because it shows only what it has been given.
+   */
+  async showNotifiedSession(ref: SessionRef): Promise<void> {
+    const botId = this.botsUi?.botIdFor(ref.projectPath);
+    if (botId === undefined) {
+      await this.restoreProjectSession(ref.projectPath, ref);
+      return;
+    }
+    const shown = await this.enqueueNavigation(() => this.openBotSession(botId, ref.sessionId));
+    this.sendToWindows(CH_BOTS_SESSION_SHOWN, shown);
   }
 
   private async restoreProjectSessionInternal(projectPath: string, activeSession?: SessionRef): Promise<SessionRef> {

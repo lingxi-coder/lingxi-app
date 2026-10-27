@@ -10,6 +10,8 @@ import type { ProjectSessionCatalogRow } from '../src/main/session-catalog.js';
 import { botFixture, SESSION } from './bot-helpers.js';
 
 const OTHER_SESSION = '99999999-2222-4333-8444-555555555555';
+/** The hidden session that watches the clock for a Bot's routines. */
+const CONTROLLER = '33333333-2222-4333-8444-555555555555';
 
 function row(uuid: string, extra: Partial<ProjectSessionCatalogRow> = {}): ProjectSessionCatalogRow {
   return {
@@ -24,6 +26,7 @@ function setup(t: { after(fn: () => void): void }) {
   const warnings: string[] = [];
   let activeWork = false;
   let hold: Promise<void> | undefined;
+  const controllers = new Set<string>();
   const runtimes: BotRuntimes = {
     newSession: async (projectPath, model) => { calls.push(['newSession', projectPath, model]); return { projectPath, sessionId: SESSION }; },
     openSession: async (ref, empty, resumeModel) => { calls.push(['openSession', ref, empty, resumeModel]); return {}; },
@@ -51,10 +54,16 @@ function setup(t: { after(fn: () => void): void }) {
         invalidate: () => { calls.push(['invalidate', configHome]); },
       };
     },
+    routines: {
+      isControllerSession: (workspace, sessionId) => controllers.has(`${workspace}:${sessionId}`),
+      releaseScope: (workspace) => { calls.push(['releaseScope', workspace]); },
+    },
     warn: (message) => warnings.push(message),
   });
   return {
     ...f, service, calls, warnings, catalogs,
+    /** Make a session the controller of a Bot's routines. */
+    controllerOf(workspace: string, sessionId: string) { controllers.add(`${workspace}:${sessionId}`); },
     setActiveWork(value: boolean) { activeWork = value; },
     holdClose(promise: Promise<void>) { hold = promise; },
     settingsOf: (botId: string) => JSON.parse(readFileSync(join(f.store.homeDir(botId), 'settings.json'), 'utf8')),
@@ -222,7 +231,7 @@ test('deleting a Bot stops its sessions, then moves it to the trash, and frees t
   const workspace = s.store.workspaceDir(gone.bot_id);
   assert.ok(s.settingsOf(stays.bot_id).permissions.deny.includes(pathRule('Read', s.store.botDir(gone.bot_id))));
   await s.service.delete(gone.bot_id);
-  assert.deepEqual(s.calls, [['closeProject', workspace]]);
+  assert.deepEqual(s.calls, [['releaseScope', workspace], ['closeProject', workspace]], 'the scheduler lets go before the sessions are stopped');
   assert.ok(!existsSync(s.store.botDir(gone.bot_id)));
   assert.equal(readdirSync(s.store.locations.trashRoot).length, 1);
   assert.deepEqual(s.service.list().map((bot) => bot.bot_id), [stays.bot_id]);
@@ -340,4 +349,107 @@ test('a Bot was last active when its newest transcript last changed', async (t) 
   writeFileSync(join(directory, 'memdir', 'later.md'), 'x');
   utimesSync(join(directory, 'memdir', 'later.md'), 1_800_000_000, 1_800_000_000);
   assert.equal(await s.service.lastActivityAt(bot.bot_id), 1_700_000_500_000, 'only transcripts count, and the newest of them');
+});
+
+// What the routine scheduler asks of the Bots
+
+test('a Bot\'s controller session is not one of its chats, to list, to open or to date its activity by', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Scheduled' });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  s.controllerOf(workspace, CONTROLLER);
+  await s.service.listSessions(bot.bot_id);
+  s.catalogs.get(s.store.homeDir(bot.bot_id))!.sessions.push(row(SESSION), row(CONTROLLER));
+  assert.deepEqual((await s.service.listSessions(bot.bot_id)).map((session) => session.uuid), [SESSION]);
+  s.calls.length = 0;
+  await assert.rejects(s.service.openSession(bot.bot_id, CONTROLLER), /does not belong to this Bot/);
+  await assert.rejects(s.service.openSession(bot.bot_id, CONTROLLER.toUpperCase()), /does not belong to this Bot/);
+  assert.deepEqual(s.calls, [], 'nothing was looked up or started for it');
+  assert.equal((await s.service.openSession(bot.bot_id, SESSION)).sessionId, SESSION);
+
+  const directory = s.store.transcriptsDir(bot.bot_id);
+  mkdirSync(directory, { recursive: true });
+  const touch = (name: string, seconds: number) => { writeFileSync(join(directory, name), '{}\n'); utimesSync(join(directory, name), seconds, seconds); };
+  touch(`${SESSION}.jsonl`, 1_700_000_000);
+  touch(`${CONTROLLER}.jsonl`, 1_700_000_900);
+  assert.equal(await s.service.lastActivityAt(bot.bot_id), 1_700_000_000_000, 'a controller that wrote a transcript after the last chat is not use of the Bot');
+});
+
+test('a Bot that is being deleted is let go of by the scheduler first, and is no routine Bot while it is', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Leaving' });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  assert.deepEqual(s.service.routineBots().map((routine) => routine.botId), [bot.bot_id]);
+  let release!: () => void;
+  s.holdClose(new Promise<void>((resolve) => { release = resolve; }));
+  const deleting = s.service.delete(bot.bot_id);
+  assert.deepEqual(s.calls, [['releaseScope', workspace], ['closeProject', workspace]]);
+  assert.deepEqual(s.service.routineBots(), [], 'not offered while it is being deleted');
+  assert.equal(s.service.routineBotFor(workspace), undefined);
+  assert.equal(s.service.isBotWorkspace(workspace), true, 'though its folder still looks like a Bot\'s');
+  release();
+  await deleting;
+  assert.equal(s.service.routineBotFor(workspace), undefined);
+  assert.equal(s.service.isBotWorkspace(workspace), true, 'and still does after the Bot is gone');
+});
+
+test('a Bot whose deletion fails is a routine Bot again', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Busy' });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  s.setActiveWork(true);
+  await assert.rejects(s.service.delete(bot.bot_id), /cancel active turns/);
+  assert.equal(s.service.routineBotFor(workspace)?.botId, bot.bot_id);
+});
+
+test('the scheduler is told of each Bot by its workspace, name, model and own catalog', async (t) => {
+  const s = setup(t);
+  const modelled = s.service.create({ name: 'Modelled', model: 'a/b' });
+  const plain = s.service.create({ name: 'Plain' });
+  const workspace = s.store.workspaceDir(modelled.bot_id);
+  assert.deepEqual(s.service.routineBots().map(({ catalog: _catalog, ...bot }) => bot), [
+    { botId: modelled.bot_id, name: 'Modelled', workspace, model: 'a/b' },
+    { botId: plain.bot_id, name: 'Plain', workspace: s.store.workspaceDir(plain.bot_id) },
+  ]);
+  const found = s.service.routineBotFor(workspace)!;
+  assert.equal(found.workspace, workspace);
+  assert.equal(s.service.routineBotFor(`${workspace}${'/'}.`)?.workspace, workspace, 'a spelling of the folder is answered with the folder');
+  assert.equal(s.service.routineBotFor(s.folder('project')), undefined);
+  assert.equal(s.service.routineBotFor(s.store.homeDir(modelled.bot_id)), undefined);
+  await found.catalog().find(workspace, SESSION);
+  assert.deepEqual(s.calls.filter((call) => call[0] === 'find'), [['find', s.store.homeDir(modelled.bot_id), workspace, SESSION]], 'its chats are looked up in its home, not the owner\'s');
+});
+
+test('a Bot that cannot be read is left out, and the others are still offered', (t) => {
+  const s = setup(t);
+  const sound = s.service.create({ name: 'Sound' });
+  const damaged = s.service.create({ name: 'Damaged' });
+  writeFileSync(s.store.recordPath(damaged.bot_id), '{ not json');
+  assert.deepEqual(s.service.routineBots().map((routine) => routine.botId), [sound.bot_id]);
+  assert.equal(s.service.routineBotFor(s.store.workspaceDir(damaged.bot_id)), undefined);
+  assert.equal(s.service.isBotWorkspace(s.store.workspaceDir(damaged.bot_id)), true);
+});
+
+test('where Bots cannot run the scheduler is told of none, yet still knows a Bot\'s folder when it sees one', (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Mac Bot' });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  const elsewhere = new BotService({
+    store: s.store, platform: 'linux',
+    runtimes: { newSession: async () => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => undefined },
+    catalogFor: () => { throw new Error('unused'); },
+  });
+  assert.deepEqual(elsewhere.routineBots(), []);
+  assert.equal(elsewhere.routineBotFor(workspace), undefined);
+  assert.equal(elsewhere.isBotWorkspace(workspace), true);
+  assert.equal(elsewhere.nameFor(workspace), undefined);
+});
+
+test('a Bot is named by its folder wherever the app has only the folder', (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Named' });
+  assert.equal(s.service.nameFor(s.store.workspaceDir(bot.bot_id)), 'Named');
+  assert.equal(s.service.nameFor(s.folder('project')), undefined);
+  s.service.update(bot.bot_id, 1, { name: 'Renamed' });
+  assert.equal(s.service.nameFor(s.store.workspaceDir(bot.bot_id)), 'Renamed');
 });

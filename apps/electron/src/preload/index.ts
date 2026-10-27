@@ -22,6 +22,7 @@ import {
   CH_BOTS_PERSONA_GET,
   CH_BOTS_PERSONA_SET,
   CH_BOTS_SESSION_OPEN,
+  CH_BOTS_SESSION_SHOWN,
   CH_BOTS_SESSIONS_LIST,
   CH_BOTS_SKILL_DELETE,
   CH_BOTS_SKILL_IMPORT,
@@ -473,6 +474,7 @@ const api: LingxiApi = {
     openSession: (botId, sessionId) => (sessionId === undefined
       ? ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId)
       : ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId, sessionId)),
+    onSessionShown: callback => subscribe(CH_BOTS_SESSION_SHOWN, callback),
     listSessions: botId => ipcRenderer.invoke(CH_BOTS_SESSIONS_LIST, botId),
     persona: {
       get: botId => ipcRenderer.invoke(CH_BOTS_PERSONA_GET, botId),

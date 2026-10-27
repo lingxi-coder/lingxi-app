@@ -8,13 +8,17 @@ import { BotsUi } from '../src/main/bots/rendererIpc.js';
 import { BotService } from '../src/main/bots/service.js';
 import { HostController, type WorkspaceDialogs } from '../src/main/host.js';
 import { DiagnosticBuffer } from '../src/main/host-utils.js';
+import { ScheduledTaskService } from '../src/main/scheduled.js';
 import { SettingsStore } from '../src/main/settings.js';
-import { CH_BOTS_CREATE, CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN } from '../src/shared/bots.js';
+import { CH_BOTS_CREATE, CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSION_SHOWN } from '../src/shared/bots.js';
+import { CH_SCHEDULED } from '../src/shared/scheduled.js';
 import { CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK } from '../src/shared/projectCreation.js';
 import { botFixture, SESSION } from './bot-helpers.js';
 
 const OWNER_SESSION = 'aaaaaaaa-2222-4333-8444-555555555555';
 const REPLACEMENT = 'bbbbbbbb-2222-4333-8444-555555555555';
+/** A chat a routine started in a Bot's workspace. */
+const RUN_SESSION = 'cccccccc-2222-4333-8444-555555555555';
 
 function hostFixture(t: TestContext) {
   const f = botFixture(t);
@@ -31,6 +35,9 @@ function hostFixture(t: TestContext) {
   const closed: string[] = [];
   const created: string[] = [];
   let summaries: any[] = [];
+  const sent: Array<[string, unknown]> = [];
+  /** The sessions the Bots' own catalog has, by id. */
+  const botSessions = new Map<string, { uuid: string; empty_session: boolean; resume_model?: string }>();
   const bridge = {
     registerIpc() {}, registerWindow() {},
     get runtimeSummaries() { return summaries; },
@@ -41,6 +48,8 @@ function hostFixture(t: TestContext) {
     newSession: async (projectPath: string) => { created.push(projectPath); return { projectPath, sessionId: REPLACEMENT }; },
   };
   const botWorkspaces = new Map<string, string>();
+  // As the app wires them: the scheduler is made first and learns of the Bots afterwards.
+  let scheduled: ScheduledTaskService | undefined;
   const service = new BotService({
     store: f.store, platform: 'darwin',
     runtimes: {
@@ -49,9 +58,13 @@ function hostFixture(t: TestContext) {
       closeProject: async (projectPath) => { closed.push(projectPath); },
     },
     catalogFor: () => ({
-      list: async () => ({ sessions: [] }), find: async () => undefined, invalidate: () => undefined,
+      list: async () => ({ sessions: [] }), find: async (_path, sessionId) => botSessions.get(sessionId.toLowerCase()) as any, invalidate: () => undefined,
       workspaceSettings: async () => ({ environment: {}, configHome: '/unused' }),
     }),
+    routines: {
+      isControllerSession: (workspace, sessionId) => scheduled?.isControllerSession(workspace, sessionId) === true,
+      releaseScope: (workspace) => scheduled?.releaseScope(workspace),
+    },
   });
   const registered = new Map<string, (...args: any[]) => any>();
   const ipc = { handle: (name: string, handler: (...args: any[]) => any) => registered.set(name, handler), removeHandler: (name: string) => registered.delete(name) };
@@ -61,15 +74,18 @@ function hostFixture(t: TestContext) {
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any, undefined, undefined, undefined, undefined, dialogs);
   host.attachBots(new BotsUi({ service, content: new BotContent(f.store) }));
+  scheduled = new ScheduledTaskService(settings, bridge as any, {} as any, () => false, () => undefined);
+  scheduled.attachBots(service);
+  host.attachScheduled(scheduled);
   const frame = { url: 'http://127.0.0.1:4242' };
-  const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, removeListener() {}, send() {} };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, removeListener() {}, send(channel: string, payload: unknown) { sent.push([channel, payload]); } };
   host.registerWindow(sender as any, frame.url);
   host.registerIpc();
   t.after(() => host.dispose());
   const event = { sender, senderFrame: frame };
   const call = async (channel: string, ...args: unknown[]): Promise<any> => registered.get(channel)!(event, ...args);
   return {
-    ...f, settings, project, ownerRef, host, service, registered, call, closed, created, picks,
+    ...f, settings, project, ownerRef, host, service, scheduled, registered, call, closed, created, picks, sent, botSessions,
     pickReturns(path: string | undefined) { pickResult = path; },
     setSummaries(value: any[]) { summaries = value; },
     freshSettings: () => new SettingsStore(f.userData),
@@ -233,4 +249,115 @@ test('the app data is recognised when it is reached through a link', (t) => {
   const settings = new SettingsStore(link);
   assert.equal(settings.isAppDataFolder(realpathSync(join(link, 'bots'))), true);
   assert.equal(settings.isAppDataFolder(realpathSync(f.folder('repo'))), false);
+});
+
+// The routines of a Bot
+
+function runSession(f: ReturnType<typeof hostFixture>) {
+  f.botSessions.set(RUN_SESSION, { uuid: RUN_SESSION, empty_session: false });
+}
+
+test('the chat of a routine\'s run opens as a chat of the Bot, not of a project', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  runSession(f);
+  assert.deepEqual(f.scheduled.scopes().filter((scope) => scope.botId === bot.botId).map((scope) => scope.id), [workspace], 'the Bot\'s workspace is a scope');
+  const opened = await f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: RUN_SESSION });
+  assert.deepEqual(opened, { botId: bot.botId, projectPath: workspace, sessionId: RUN_SESSION });
+  assert.deepEqual(f.settings.getPublic().activeSession, { projectPath: workspace, sessionId: RUN_SESSION }, 'the window is shown the run\'s chat');
+  assert.deepEqual(f.settings.getPublic().projects, [f.project], 'and no project was added');
+  assert.deepEqual(f.freshSettings().getPublic().activeSession, f.ownerRef, 'the session the app restores is still the owner\'s');
+});
+
+test('a routine\'s chat is not opened through a Bot that does not have it, or that is gone', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  await assert.rejects(f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: RUN_SESSION }), /does not belong to this Bot/);
+  await assert.rejects(f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: 'not-a-session' }), /Invalid scheduled session/);
+  assert.deepEqual(f.settings.getPublic().activeSession, f.ownerRef, 'the window keeps what it showed');
+  runSession(f);
+  await f.call(CH_BOTS_DELETE, bot.botId);
+  await assert.rejects(f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: RUN_SESSION }), /This Bot is unavailable/);
+});
+
+test('a routine of a project still opens its chat the way a project\'s chat opens', async (t) => {
+  const f = hostFixture(t);
+  await newBot(f);
+  const opened: unknown[] = [];
+  (f.host as any).openSessionAndActivateInternal = async (ref: unknown) => { opened.push(ref); return {}; };
+  await f.call(CH_SCHEDULED, { action: 'open', scopeId: f.project, sessionId: RUN_SESSION });
+  assert.deepEqual(opened, [{ projectPath: f.project, sessionId: RUN_SESSION }]);
+});
+
+test('clicking the notification of a Bot\'s routine shows its chat and tells the window', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  runSession(f);
+  await f.host.showNotifiedSession({ projectPath: workspace, sessionId: RUN_SESSION });
+  assert.deepEqual(f.settings.getPublic().activeSession, { projectPath: workspace, sessionId: RUN_SESSION });
+  assert.deepEqual(f.sent.filter(([channel]) => channel === CH_BOTS_SESSION_SHOWN), [[CH_BOTS_SESSION_SHOWN, { botId: bot.botId, projectPath: workspace, sessionId: RUN_SESSION }]]);
+  assert.deepEqual(f.settings.getPublic().projects, [f.project]);
+  assert.deepEqual(f.freshSettings().getPublic().activeSession, f.ownerRef);
+});
+
+test('a notification that names a chat the Bot no longer has shows nothing and tells the window nothing', async (t) => {
+  const f = hostFixture(t);
+  const { workspace } = await newBot(f);
+  await assert.rejects(f.host.showNotifiedSession({ projectPath: workspace, sessionId: RUN_SESSION }), /does not belong to this Bot/);
+  assert.deepEqual(f.sent.filter(([channel]) => channel === CH_BOTS_SESSION_SHOWN), []);
+  assert.deepEqual(f.settings.getPublic().activeSession, f.ownerRef);
+});
+
+test('a notification of a project restores the project\'s session as it did, and the window is not told of a Bot', async (t) => {
+  const f = hostFixture(t);
+  await newBot(f);
+  const restored: unknown[][] = [];
+  (f.host as any).restoreProjectSession = async (...args: unknown[]) => { restored.push(args); return f.ownerRef; };
+  await f.host.showNotifiedSession(f.ownerRef);
+  assert.deepEqual(restored, [[f.project, f.ownerRef]]);
+  assert.deepEqual(f.sent, []);
+});
+
+test('a notification of a Bot is taken in turn with the other navigation', async (t) => {
+  const f = hostFixture(t);
+  const { workspace } = await newBot(f);
+  runSession(f);
+  const order: string[] = [];
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  (f.host as any).navigationQueue = (f.host as any).navigationQueue.then(async () => { order.push('earlier navigation'); await blocked; });
+  const notified = f.host.showNotifiedSession({ projectPath: workspace, sessionId: RUN_SESSION }).then(() => order.push('notification'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(f.settings.getPublic().activeSession, f.ownerRef, 'it waits for the navigation already under way');
+  release();
+  await notified;
+  assert.deepEqual(order, ['earlier navigation', 'notification']);
+  assert.equal(f.settings.getPublic().activeSession?.sessionId, RUN_SESSION);
+});
+
+test('the hidden session that watches a Bot\'s clock does not count among the Bot\'s running chats', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  const controllerOf = (path: string): string => (f.scheduled as any).controllerRef(path).sessionId;
+  const summary = (projectPath: string, sessionId: string) => ({ projectPath, sessionId, connection: { status: 'connected' }, turnActive: true, pendingInteractions: 0, pendingAskUserQuestions: 0 });
+  f.setSummaries([summary(workspace, controllerOf(workspace)), summary(workspace, SESSION), summary(f.project, controllerOf(f.project))]);
+  const summaries = (f.host as any).runtimeSummaries();
+  assert.deepEqual(summaries.map((item: any) => [item.projectPath, item.sessionId, item.botId]), [
+    [workspace, SESSION, bot.botId],
+    [f.project, controllerOf(f.project), undefined],
+  ], 'the Bot\'s chat stays, the Bot\'s controller goes, and a project is left as it was');
+});
+
+test('deleting a Bot lets the scheduler go of it before its sessions are stopped', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  const order: string[] = [];
+  const release = f.scheduled.releaseScope.bind(f.scheduled);
+  f.scheduled.releaseScope = (path: string) => { order.push(`release ${path}`); release(path); };
+  const close = f.closed.push.bind(f.closed);
+  f.closed.push = (...paths: string[]) => { order.push(`close ${paths.join()}`); return close(...paths); };
+  await f.call(CH_BOTS_DELETE, bot.botId);
+  assert.deepEqual(order, [`release ${workspace}`, `close ${workspace}`]);
+  assert.equal(f.scheduled.scopes().some((scope) => scope.botId === bot.botId), false);
+  assert.deepEqual(f.settings.getPublic().activeSession, f.ownerRef);
 });

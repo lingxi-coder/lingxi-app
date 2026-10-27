@@ -94,6 +94,16 @@ test('a session is opened by Bot id, optionally with a session id, and listed', 
   await assert.rejects(s.call(CH_BOTS_SESSION_OPEN, bot.botId, SESSION), /does not belong to this Bot/);
 });
 
+test('the host opens a Bot\'s session by the same checks the window\'s request goes through', async (t) => {
+  const s = setup(t);
+  const bot = await s.call(CH_BOTS_CREATE, { name: 'Hosted' });
+  const ui = new BotsUi({ service: s.service, content: new BotContent(s.store) });
+  assert.deepEqual(await ui.openSession(bot.botId), { botId: bot.botId, projectPath: s.store.workspaceDir(bot.botId), sessionId: SESSION });
+  await assert.rejects(ui.openSession('bad'), /invalid Bot id/);
+  for (const bad of [5, null, {}, 'not-a-session', [SESSION]]) await assert.rejects(ui.openSession(bot.botId, bad), /invalid session id/);
+  await assert.rejects(ui.openSession(bot.botId, SESSION), /does not belong to this Bot/);
+});
+
 test('persona, memory and skills go through to the Bot\'s files', async (t) => {
   const s = setup(t);
   const bot = await s.call(CH_BOTS_CREATE, { name: 'Files', persona: 'First.' });

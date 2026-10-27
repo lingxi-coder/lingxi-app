@@ -272,14 +272,23 @@ export class BotStore {
     return join(this.transcriptsDir(botId), 'memdir');
   }
 
-  /** The Bot a working directory belongs to, if it is the workspace of an existing Bot. */
-  botIdForWorkspace(path: string): string | undefined {
+  /**
+   * The Bot a working directory would belong to if that Bot exists: the path
+   * alone decides, so a Bot that was deleted still has its workspace named.
+   */
+  workspaceBotId(path: string): string | undefined {
     if (typeof path !== 'string' || !isAbsolute(path)) return undefined;
     const normalized = resolve(path);
     const botDir = dirname(normalized);
     if (basename(normalized) !== 'workspace' || dirname(botDir) !== this.root) return undefined;
     const botId = basename(botDir);
-    return isBotId(botId) && existsSync(join(botDir, 'bot.json')) ? botId : undefined;
+    return isBotId(botId) ? botId : undefined;
+  }
+
+  /** The Bot a working directory belongs to, if it is the workspace of an existing Bot. */
+  botIdForWorkspace(path: string): string | undefined {
+    const botId = this.workspaceBotId(path);
+    return botId !== undefined && existsSync(join(this.botDir(botId), 'bot.json')) ? botId : undefined;
   }
 
   /** Every other entry of the Bots folder, whatever it is: they are all out of bounds for a Bot. */

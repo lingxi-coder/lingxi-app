@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 import type { BotsAvailability } from '../../shared/bots.js';
 import type { SessionRef, WorkspaceLaunchSettings } from '../bridgeTypes.js';
+import type { RoutineBot } from '../scheduled.js';
 import type { ProjectSessionCatalogRow } from '../session-catalog.js';
 import { isSessionId } from '../sessionIdentity.js';
 import { writeAllBotSettings, writeBotSettings } from './botSettings.js';
@@ -42,10 +43,23 @@ export interface BotCatalog {
   invalidate(): void;
 }
 
+/**
+ * What of the routine scheduler the Bots use. A Bot's routines run in a hidden
+ * controller session of its workspace, which is no chat of the Bot's.
+ */
+export interface BotRoutines {
+  /** Whether a session of a working directory is the hidden one that watches the clock. */
+  isControllerSession(workspace: string, sessionId: string): boolean;
+  /** Let go of what the scheduler holds for a working directory, before its sessions are stopped. */
+  releaseScope(workspace: string): void;
+}
+
 export interface BotServiceOptions {
   store: BotStore;
   runtimes: BotRuntimes;
   catalogFor(configHome: string): BotCatalog;
+  /** The routine scheduler; absent where nothing is scheduled. */
+  routines?: BotRoutines;
   /** The platform the app runs on; this process's by default. */
   platform?: NodeJS.Platform;
   /** Something went wrong that does not stop the operation. */
@@ -132,6 +146,9 @@ export class BotService {
     this.assertNotDeleting(botId);
     this.deleting.add(botId);
     try {
+      // The scheduler no longer lists the Bot, and lets go of its controller so
+      // that the controller does not hold an engine on the folder that moves.
+      this.options.routines?.releaseScope(workspace);
       await this.options.runtimes.closeProject(workspace);
       this.store.trash(botId);
       this.catalogs.delete(botId);
@@ -153,6 +170,7 @@ export class BotService {
       return { botId, projectPath: ref.projectPath, sessionId: ref.sessionId };
     }
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
+    if (this.options.routines?.isControllerSession(projectPath, sessionId.toLowerCase())) throw new Error('session does not belong to this Bot');
     const row = await this.catalog(botId).find(projectPath, sessionId);
     if (!row) throw new Error('session does not belong to this Bot');
     await this.options.runtimes.openSession({ projectPath, sessionId: row.uuid }, row.empty_session, row.resume_model ?? record.model);
@@ -165,20 +183,28 @@ export class BotService {
     this.store.get(botId);
     // The owner asked to see them: show what is there now, not what was there a few seconds ago.
     this.catalog(botId).invalidate();
-    const { sessions } = await this.catalog(botId).list(this.store.workspaceDir(botId));
-    return sessions.map(({ empty_session: _empty, resume_model: _model, workspace_path: _workspace, ...row }) => row);
+    const workspace = this.store.workspaceDir(botId);
+    const { sessions } = await this.catalog(botId).list(workspace);
+    return sessions
+      .filter((row) => !this.options.routines?.isControllerSession(workspace, row.uuid))
+      .map(({ empty_session: _empty, resume_model: _model, workspace_path: _workspace, ...row }) => row);
   }
 
   /**
    * When the Bot was last used: the newest modification time among its
-   * transcripts, read from the files rather than from a running engine.
+   * transcripts, read from the files rather than from a running engine. The
+   * scheduler's hidden controller session is not use of the Bot.
    */
   async lastActivityAt(botId: string): Promise<number | undefined> {
     this.assertAvailable();
     const directory = this.store.transcriptsDir(botId);
+    const workspace = this.store.workspaceDir(botId);
     let names: string[];
-    try { names = (await readdir(directory)).filter((name) => name.endsWith('.jsonl')).slice(0, MAX_ACTIVITY_FILES); }
-    catch { return undefined; }
+    try {
+      names = (await readdir(directory))
+        .filter((name) => name.endsWith('.jsonl') && !this.options.routines?.isControllerSession(workspace, name.slice(0, -'.jsonl'.length)))
+        .slice(0, MAX_ACTIVITY_FILES);
+    } catch { return undefined; }
     let newest: number | undefined;
     for (const name of names) {
       try {
@@ -211,6 +237,46 @@ export class BotService {
     const botId = this.botIdFor(projectPath);
     if (botId === undefined) return undefined;
     try { return this.store.get(botId).model; } catch { return undefined; }
+  }
+
+  /** The name of the Bot a working directory belongs to, if it has one. */
+  nameFor(projectPath: string): string | undefined {
+    const botId = this.botIdFor(projectPath);
+    if (botId === undefined) return undefined;
+    try { return this.store.get(botId).name; } catch { return undefined; }
+  }
+
+  // What the routine scheduler asks
+
+  /** The Bots whose routines run now: none where Bots cannot run, and not one that is being deleted or cannot be read. */
+  routineBots(): RoutineBot[] {
+    if (!this.availability().available) return [];
+    let entries: ReturnType<BotStore['entries']>;
+    try { entries = this.store.entries(); } catch { return []; }
+    return entries.flatMap(({ botId, record }) => record !== undefined && !this.deleting.has(botId) ? [this.routineBot(record)] : []);
+  }
+
+  /** The Bot whose workspace a working directory is, while its routines can run. */
+  routineBotFor(workspace: string): RoutineBot | undefined {
+    const botId = this.botIdFor(workspace);
+    if (botId === undefined || this.deleting.has(botId)) return undefined;
+    try { return this.routineBot(this.store.get(botId)); } catch { return undefined; }
+  }
+
+  /** Whether a working directory is shaped like a Bot's workspace, whether or not the Bot still exists. */
+  isBotWorkspace(path: string): boolean {
+    return this.store.workspaceBotId(path) !== undefined;
+  }
+
+  private routineBot(record: BotRecord): RoutineBot {
+    const botId = record.bot_id;
+    return {
+      botId,
+      name: record.name,
+      workspace: this.store.workspaceDir(botId),
+      ...(record.model !== undefined ? { model: record.model } : {}),
+      catalog: () => this.catalog(botId),
+    };
   }
 
   /**

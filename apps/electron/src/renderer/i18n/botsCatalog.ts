@@ -747,5 +747,68 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "en": "The change could not be made: %1$s",
     "ja": "変更を行えませんでした：%1$s",
     "ko": "변경할 수 없습니다: %1$s"
+  },
+  "bots_tab_routines": {
+    "zh-Hans": "例行任务",
+    "zh-Hant": "例行任務",
+    "en": "Routines",
+    "ja": "ルーティン",
+    "ko": "루틴"
+  },
+  "bots_routines_hint": {
+    "zh-Hans": "例行任务是这个 Bot 按计划自行执行的任务，使用它自己的人设、记忆和技能。也可以在“定时任务”页面查看。",
+    "zh-Hant": "例行任務是這個 Bot 依排程自行執行的任務，使用它自己的人設、記憶與技能。也可以在「定時任務」頁面查看。",
+    "en": "A routine is a task this Bot runs on a schedule, with its own persona, memory and skills. Routines also show on the Scheduled Tasks page.",
+    "ja": "ルーティンは、この Bot が固有のペルソナ・記憶・スキルを使ってスケジュールどおりに実行するタスクです。「定時タスク」ページにも表示されます。",
+    "ko": "루틴은 이 Bot이 자신의 페르소나, 기억, 스킬로 일정에 따라 실행하는 작업입니다. '예약 작업' 페이지에도 표시됩니다."
+  },
+  "bots_routines_new": {
+    "zh-Hans": "新建例行任务",
+    "zh-Hant": "新增例行任務",
+    "en": "New routine",
+    "ja": "新しいルーティン",
+    "ko": "새 루틴"
+  },
+  "bots_routines_loading": {
+    "zh-Hans": "正在加载例行任务…",
+    "zh-Hant": "正在載入例行任務…",
+    "en": "Loading routines…",
+    "ja": "ルーティンを読み込み中…",
+    "ko": "루틴 불러오는 중…"
+  },
+  "bots_routines_failed": {
+    "zh-Hans": "无法加载例行任务：%1$s",
+    "zh-Hant": "無法載入例行任務：%1$s",
+    "en": "Routines could not be loaded: %1$s",
+    "ja": "ルーティンを読み込めませんでした：%1$s",
+    "ko": "루틴을 불러올 수 없습니다: %1$s"
+  },
+  "bots_routines_empty": {
+    "zh-Hans": "还没有例行任务。创建一个，让这个 Bot 按计划工作。",
+    "zh-Hant": "還沒有例行任務。建立一個，讓這個 Bot 依排程工作。",
+    "en": "No routines yet. Create one to have this Bot work on a schedule.",
+    "ja": "ルーティンはまだありません。作成すると、この Bot がスケジュールどおりに作業します。",
+    "ko": "아직 루틴이 없습니다. 하나 만들면 이 Bot이 일정에 따라 작업합니다."
+  },
+  "bots_routines_unavailable": {
+    "zh-Hans": "这个 Bot 的例行任务暂时无法使用。",
+    "zh-Hant": "這個 Bot 的例行任務暫時無法使用。",
+    "en": "Routines are not available for this Bot right now.",
+    "ja": "この Bot のルーティンは現在利用できません。",
+    "ko": "지금은 이 Bot의 루틴을 사용할 수 없습니다."
+  },
+  "bots_routine_scope": {
+    "zh-Hans": "Bot · %1$s",
+    "zh-Hant": "Bot · %1$s",
+    "en": "Bot · %1$s",
+    "ja": "Bot · %1$s",
+    "ko": "Bot · %1$s"
+  },
+  "bots_routine_scope_note": {
+    "zh-Hans": "任务将以这个 Bot 的身份运行：在它自己的工作区中，使用它的人设、记忆和技能。",
+    "zh-Hant": "任務將以這個 Bot 的身分執行：在它自己的工作區中，使用它的人設、記憶與技能。",
+    "en": "This task runs as the Bot, in its own workspace, with its persona, memory and skills.",
+    "ja": "このタスクは Bot として、Bot 専用のワークスペースで、そのペルソナ・記憶・スキルを使って実行されます。",
+    "ko": "이 작업은 Bot으로서 Bot 전용 작업 공간에서 해당 Bot의 페르소나, 기억, 스킬로 실행됩니다."
   }
 };

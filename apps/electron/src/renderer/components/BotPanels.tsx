@@ -1,6 +1,7 @@
 import type { SessionRowDto } from '@lingxi/bridge-client';
 import { tr } from '../i18n/locale';
 import { botMemoryProblem, type BotMemoryController } from '../bridge/botMemory';
+import { routineRow, type BotRoutinesController } from '../bridge/botRoutines';
 import type { BotSkillsController } from '../bridge/botSkills';
 import { relativeActivity } from '../bridge/botSession';
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
@@ -34,6 +35,34 @@ export function BotChatsPanel({ chats, opening, disabled, onOpen, onRetry }: {
       </button>
     </li>)}
   </ul>;
+}
+
+/** The tasks that run as the Bot. Making and changing one is done on the Scheduled page, which this sends the owner to. */
+export function BotRoutinesPanel({ controller, scopeId, onNew, onOpen }: {
+  controller: BotRoutinesController;
+  /** The scope the scheduler lists for this Bot; absent while it does not list one. */
+  scopeId: string | undefined;
+  onNew(scopeId: string): void;
+  onOpen(scopeId: string, jobId: string): void;
+}) {
+  const state = useObservable(controller);
+  return <div className="bots-panel">
+    <p className="bots-hint">{tr('bots_routines_hint')}</p>
+    <div><button type="button" disabled={scopeId === undefined} onClick={() => { if (scopeId !== undefined) onNew(scopeId); }}>{tr('bots_routines_new')}</button></div>
+    {scopeId === undefined ? <p role="status" className="bots-muted">{tr('bots_routines_unavailable')}</p> : null}
+    {scopeId !== undefined && state.error !== undefined ? <p role="alert" className="bots-problem">{tr('bots_routines_failed', state.error)} <button type="button" onClick={() => void controller.load(scopeId)}>{tr('common_retry')}</button></p> : null}
+    {scopeId !== undefined && state.jobs === undefined && state.error === undefined ? <p role="status" className="bots-muted">{tr('bots_routines_loading')}</p> : null}
+    {scopeId !== undefined && state.jobs?.length === 0 ? <p className="bots-empty-line">{tr('bots_routines_empty')}</p> : null}
+    {scopeId !== undefined && state.jobs && state.jobs.length > 0 ? <ul className="bots-rows" aria-label={tr('bots_tab_routines')}>
+      {state.jobs.map(routineRow).map((row) => <li key={row.id}>
+        <button type="button" className="bots-chat-row" disabled={!row.openable} onClick={() => onOpen(scopeId, row.id)}>
+          <span className="bots-row-title">{row.title}<span className="bots-tag" data-status={row.status}>{row.statusLabel}</span></span>
+          <span className="bots-muted">{row.schedule}</span>
+          <span className="bots-muted">{row.next}</span>
+        </button>
+      </li>)}
+    </ul> : null}
+  </div>;
 }
 
 export function BotMemoryPanel({ controller }: { controller: BotMemoryController }) {

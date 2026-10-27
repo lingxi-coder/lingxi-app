@@ -29,6 +29,11 @@ export const CH_BOTS_UPDATE = 'lingxi:bots:update';
 export const CH_BOTS_DELETE = 'lingxi:bots:delete';
 /** Invoke(`botId: string, sessionId?: string`) → `BotSessionRefUi`. Without `sessionId` a new session starts. */
 export const CH_BOTS_SESSION_OPEN = 'lingxi:bots:sessions:open';
+/**
+ * Event(`BotSessionRefUi`). The host opened a session of a Bot on its own (the owner clicked
+ * a notification) and made it the one the window shows; the window follows.
+ */
+export const CH_BOTS_SESSION_SHOWN = 'lingxi:bots:sessions:shown';
 /** Invoke(`botId: string`) → `BotSessionsUi`. */
 export const CH_BOTS_SESSIONS_LIST = 'lingxi:bots:sessions:list';
 /** Invoke(`botId: string`) → `string`. */
@@ -142,6 +147,8 @@ export interface BotsApi {
   update(botId: string, expectedRevision: number, patch: BotUpdateRequest): Promise<BotUi>;
   delete(botId: string): Promise<void>;
   openSession(botId: string, sessionId?: string): Promise<BotSessionRefUi>;
+  /** Called when the host made a session of a Bot the displayed one without being asked by the window. */
+  onSessionShown(callback: (session: BotSessionRefUi) => void): () => void;
   listSessions(botId: string): Promise<BotSessionsUi>;
   persona: {
     get(botId: string): Promise<string>;

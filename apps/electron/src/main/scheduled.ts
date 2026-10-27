@@ -9,10 +9,38 @@ import type { SessionRuntime } from './bridge.js';
 import { isSessionId } from './sessionIdentity.js';
 import { scheduledRunIdentity } from './scheduled-run-identity.js';
 import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
-import type { ProjectSessionCatalog } from './session-catalog.js';
+import type { ProjectSessionCatalogRow } from './session-catalog.js';
 import type { SessionRef } from '../shared/settings.js';
 
 type ScheduledRunResult = { sessionId: string; summary: string };
+
+/** What of a session catalog the scheduler reads: the owner's, or the one a Bot keeps in its own home. */
+export interface RoutineCatalog {
+  list(projectPath: string): Promise<{ sessions: ProjectSessionCatalogRow[] }>;
+  find(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogRow | undefined>;
+}
+
+/** What the scheduler needs of one Bot to run its routines. */
+export interface RoutineBot {
+  botId: string;
+  name: string;
+  /** The Bot's working directory: the scope its routines live in. */
+  workspace: string;
+  /** The Bot's own model, if it has one. */
+  model?: string;
+  /** The catalog of the Bot's home, where its chats are; they are not in the owner's. */
+  catalog(): RoutineCatalog;
+}
+
+/** What the scheduler asks of the Bots. */
+export interface RoutineBots {
+  /** The Bots whose routines run now: none where Bots cannot run, and not one that is being deleted. */
+  routineBots(): RoutineBot[];
+  /** The Bot whose workspace a working directory is, while its routines can run. */
+  routineBotFor(workspace: string): RoutineBot | undefined;
+  /** Whether a working directory is shaped like a Bot's workspace, even if the Bot is gone or being deleted. */
+  isBotWorkspace(workspace: string): boolean;
+}
 
 const MAX_RECENT_SCHEDULED_RUNS = 500;
 
@@ -33,11 +61,12 @@ export class ScheduledTaskService {
   private retention?: Promise<void>;
   private readonly scopeCache = new Map<string, { label: string; jobs: CronJobDto[] }>();
   private cacheWrites: Promise<void> = Promise.resolve();
+  private bots?: RoutineBots;
 
   constructor(
     private readonly settings: SettingsStore,
     private readonly bridge: SessionRuntimeManager,
-    private readonly catalog: ProjectSessionCatalog,
+    private readonly catalog: RoutineCatalog,
     /** Returns whether the notification was actually delivered — a refusal
      * releases the durable dedupe key so the run can be announced later. */
     private readonly notify: (title: string, body: string, ref?: SessionRef) => boolean,
@@ -53,14 +82,23 @@ export class ScheduledTaskService {
     }
   }
 
+  /** Bots are known once the app has made them; until then only the owner's projects have routines. */
+  attachBots(bots: RoutineBots): void {
+    this.bots = bots;
+  }
+
   scopes(): ScheduledScope[] {
-    return [{ id: 'global', label: 'No project' }, ...this.settings.getPublic().projects.map((path) => ({ id: path, projectPath: path, label: basename(path) })), ...[...this.scopeCache].filter(([path, value]) => path !== this.settings.scheduledWorkspace && !this.settings.hasProject(path) && value.jobs.length > 0).map(([path, value]) => ({ id: path, projectPath: path, label: `${value.label} (unavailable)`, unavailable: true }))];
+    // A Bot's workspace is a scope of its own, named for the Bot. It is not a project, so it has no `projectPath`.
+    const bots = (this.bots?.routineBots() ?? []).map((bot): ScheduledScope => ({ id: bot.workspace, label: bot.name, botId: bot.botId }));
+    return [{ id: 'global', label: 'No project' }, ...this.settings.getPublic().projects.map((path) => ({ id: path, projectPath: path, label: basename(path) })), ...bots, ...[...this.scopeCache].filter(([path, value]) => path !== this.settings.scheduledWorkspace && !this.settings.hasProject(path) && !this.bots?.isBotWorkspace(path) && value.jobs.length > 0).map(([path, value]) => ({ id: path, projectPath: path, label: `${value.label} (unavailable)`, unavailable: true }))];
   }
 
   resolveScope(id: string): string {
     if (id === 'global') return this.settings.scheduledWorkspace;
-    if (!this.settings.hasProject(id)) throw new Error('Project is unavailable. Select an existing project.');
-    return id;
+    if (this.settings.hasProject(id)) return id;
+    const bot = this.bots?.routineBotFor(id);
+    if (bot) return bot.workspace;
+    throw new Error(this.bots?.isBotWorkspace(id) ? 'This Bot is unavailable.' : 'Project is unavailable. Select an existing project.');
   }
 
   start(): void {
@@ -80,6 +118,9 @@ export class ScheduledTaskService {
 
   private async controller(path: string): Promise<SessionRuntime> {
     if (this.disposed) throw new Error('Scheduled task service is closed');
+    const bot = this.bots?.routineBotFor(path);
+    // No lease for a Bot that is going away: it would outlive the Bot's folder.
+    if (!bot && this.bots?.isBotWorkspace(path)) throw new Error('This Bot is unavailable.');
     if (path === this.settings.scheduledWorkspace) {
       await mkdir(path, { recursive: true, mode: 0o700 });
       if ((await lstat(path)).isSymbolicLink()) throw new Error('Managed scheduled workspace must not be a symlink.');
@@ -87,7 +128,8 @@ export class ScheduledTaskService {
     const ref = this.controllers.get(path)?.ref ?? this.controllerRef(path);
     let entry = this.controllers.get(path);
     if (!entry) { entry = { ref, release: this.bridge.retainBackgroundSession(ref) }; this.controllers.set(path, entry); }
-    try { return await this.bridge.ensure(ref, true, this.settings.getPublic().model); }
+    // A Bot's controller starts on the Bot's model; the owner's would win over it.
+    try { return await this.bridge.ensure(ref, true, bot ? bot.model : this.settings.getPublic().model); }
     catch (error) {
       // Release the lease THIS call created, and only while it is still the
       // registered one. Two `controller()` calls can be in flight (the 30s
@@ -124,15 +166,22 @@ export class ScheduledTaskService {
     return this.syncing;
   }
 
+  /** The chats of a scope are in the Bot's home for a Bot's workspace, and in the owner's otherwise. */
+  private catalogFor(path: string): RoutineCatalog {
+    return this.bots?.routineBotFor(path)?.catalog() ?? this.catalog;
+  }
+
   async context(scopeId: string) {
     const path = this.resolveScope(scopeId);
     const runtime = await this.controller(path);
-    const [models, catalog] = await Promise.all([runtime.scheduledModelCatalog(), this.catalog.list(path)]);
+    const [models, catalog] = await Promise.all([runtime.scheduledModelCatalog(), this.catalogFor(path).list(path)]);
     return { models: models.details ?? [], currentModel: models.current, sessions: catalog.sessions.filter((session) => !this.isControllerSession(path, session.uuid) && !this.settings.isSessionArchived({ projectPath: path, sessionId: session.uuid })).map((session) => ({ uuid: session.uuid, title: session.title })) };
   }
 
   async manage(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]> {
-    if (scopeId !== 'global' && !this.settings.hasProject(scopeId)) {
+    if (scopeId !== 'global' && !this.settings.hasProject(scopeId) && !this.bots?.routineBotFor(scopeId)) {
+      // A Bot that is gone took its routines with it; nothing is kept to show.
+      if (this.bots?.isBotWorkspace(scopeId)) throw new Error('This Bot is unavailable.');
       const cached = this.scopeCache.get(scopeId);
       if (cached && (request.action === 'list' || request.action === 'history')) return cached.jobs.map((job) => ({ ...job, ...(job.automation && job.automation.status !== 'completed' ? { automation: { ...job.automation, status: 'paused' as const, statusReason: 'Project is unavailable. Add it again to manage this task.' } } : {}) }));
       throw new Error('Project is unavailable. Add it again to manage this task.');
@@ -176,7 +225,26 @@ export class ScheduledTaskService {
   }
 
   private cacheJobs(path: string, jobs: CronJobDto[]): Promise<void> {
+    // The cache keeps the tasks of projects that were removed. A Bot's tasks
+    // are not kept: they go with the Bot, and a run still finishing after the
+    // Bot was deleted must not bring them back as an unavailable project.
+    if (this.bots?.isBotWorkspace(path)) return Promise.resolve();
     this.scopeCache.set(path, { label: basename(path), jobs });
+    return this.persistCache();
+  }
+
+  /**
+   * Stop looking after a scope: let go of its controller and forget the tasks
+   * cached for it. A Bot's scope goes this way before the Bot is deleted, so
+   * that no lease keeps an engine on the folder that is about to move.
+   */
+  releaseScope(path: string): void {
+    const controller = this.controllers.get(path);
+    if (controller) { controller.release(); this.controllers.delete(path); }
+    if (this.scopeCache.delete(path)) void this.persistCache();
+  }
+
+  private persistCache(): Promise<void> {
     if (typeof this.settings.settingsPath !== 'string') return Promise.resolve();
     const operation = this.cacheWrites.then(async () => {
       const file = join(dirname(this.settings.settingsPath), 'scheduled-scopes.json');
@@ -218,7 +286,7 @@ export class ScheduledTaskService {
   private async validateTarget(path: string, sessionId?: string): Promise<void> {
     if (!isSessionId(sessionId)) throw new Error('paused: Select a valid target chat.');
     if (this.settings.isSessionArchived({ projectPath: path, sessionId })) throw new Error('paused: The target chat was archived. Select another chat.');
-    if (!(await this.catalog.find(path, sessionId))) throw new Error('paused: The target chat is unavailable. Select another chat.');
+    if (!(await this.catalogFor(path).find(path, sessionId))) throw new Error('paused: The target chat is unavailable. Select another chat.');
   }
 
   private async notifyOnce(key: string, title: string, body: string, ref?: SessionRef): Promise<void> {
@@ -274,6 +342,12 @@ export class ScheduledTaskService {
     if (this.disposed) throw new Error('cancelled: Scheduled task service is closed.');
   }
 
+  /** A task runs in one of the owner's projects, in the scheduled workspace, or in the workspace of a Bot that is not being deleted. */
+  private assertTrusted(path: string): void {
+    if (this.settings.isTrustedWorkspace(path) || this.bots?.routineBotFor(path)) return;
+    throw new Error(this.bots?.isBotWorkspace(path) ? 'paused: The Bot is unavailable.' : 'paused: The project is unavailable.');
+  }
+
   private async runOnce(source: SessionRuntime, runId: string, task: CronJobDto, occurrenceId: string, hostAdmitted: boolean): Promise<ScheduledRunResult> {
     try {
       this.assertRunAllowed();
@@ -292,7 +366,7 @@ export class ScheduledTaskService {
     const config = task.automation;
     if (!config) throw new Error('paused: Scheduled task configuration is missing.');
     const path = source.projectPath;
-    if (!this.settings.isTrustedWorkspace(path)) throw new Error('paused: The project is unavailable.');
+    this.assertTrusted(path);
     const existing = config.runMode === 'selected_session' ? config.targetSessionId : config.runMode === 'task_session' ? config.ownedSessionId : undefined;
     if (existing) await this.validateTarget(path, existing);
     else if (config.runMode === 'selected_session') throw new Error('paused: Select a target chat.');
@@ -301,7 +375,7 @@ export class ScheduledTaskService {
     const operation = previous.catch(() => undefined).then(async () => {
       // Revalidate after waiting: the service, projects and targets may disappear while queued.
       this.assertRunAllowed();
-      if (!this.settings.isTrustedWorkspace(path)) throw new Error('paused: The project is unavailable.');
+      this.assertTrusted(path);
       if (existing) await this.validateTarget(path, existing);
       this.assertRunAllowed();
       return this.bridge.withBackgroundSession(ref, !existing, config.model, async (runtime) => {

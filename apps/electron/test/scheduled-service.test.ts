@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import type { CronAutomationDto, CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
-import { ScheduledTaskService } from '../src/main/scheduled';
+import { ScheduledTaskService, type RoutineBot, type RoutineBots, type RoutineCatalog } from '../src/main/scheduled';
 import type { SessionRuntime } from '../src/main/bridge.js';
 import type { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 import type { SettingsStore } from '../src/main/settings';
@@ -59,9 +59,10 @@ async function harness(t: TestContext) {
   const errors: unknown[] = [];
   let execute = async (_runId: string, _task: CronJobDto) => 'A completed summary';
   let ensureFailure: Error | undefined;
+  let managed: CronJobDto[] = [];
   const runtime = (ref: SessionRef) => ({ projectPath: ref.projectPath,
     markCronRunStarted: async (runId: string, sessionId: string) => { bindings.push({ runId, sessionId }); },
-    manageCron: async (request: CronRequestDto) => { requests.push(request); return []; },
+    manageCron: async (request: CronRequestDto) => { requests.push(request); return managed; },
     scheduledModelCatalog: async () => ({ details: [], current: 'openai/project-model' }),
     runScheduledTurn: async (runId: string, saved: CronJobDto, beforeStart?: () => Promise<void>) => { await beforeStart?.(); turns.push({ runId, task: saved, ref }); return execute(runId, saved); },
   }) as unknown as SessionRuntime;
@@ -91,6 +92,8 @@ async function harness(t: TestContext) {
   t.after(async () => { service.dispose(); await rm(directory, { recursive: true, force: true }); });
   return { directory, project, global, projects, archived, catalogRows, ensured, background, turns, requests, leases, notifications, errors, bindings, service, createService,
     source: runtime({ projectPath: project, sessionId: targetId }),
+    runtime,
+    setManaged: (jobs: CronJobDto[]) => { managed = jobs; },
     setExecute: (callback: typeof execute) => { execute = callback; },
     failEnsure: (error: Error) => { ensureFailure = error; },
   };
@@ -307,4 +310,243 @@ test('selected and task-owned targets beyond the sidebar limit remain valid auth
   assert.equal(owned.sessionId, targetId);
   assert.equal(h.turns.length, 2);
   assert.deepEqual(h.background.map(({ empty }) => empty), [false, false]);
+});
+
+// ---- The workspaces of Bots ----
+
+const botTarget = '66666666-7777-4888-8999-000000000000';
+
+/** The Bots the scheduler is told of: one that exists, as `BotService` answers for its folder. */
+function botsOf(h: Awaited<ReturnType<typeof harness>>, options: { model?: string } = {}) {
+  const root = join(h.directory, 'bots');
+  const workspace = join(root, 'Bot0000000000000000001', 'workspace');
+  const rows: { uuid: string; title: string }[] = [{ uuid: botTarget, title: 'Bot chat' }];
+  const catalogCalls: string[] = [];
+  const catalog: RoutineCatalog = {
+    list: async (path) => { catalogCalls.push(`list ${path}`); return { sessions: rows } as never; },
+    find: async (path, sessionId) => { catalogCalls.push(`find ${path} ${sessionId}`); return rows.find((row) => row.uuid === sessionId) as never; },
+  };
+  const bot: RoutineBot = { botId: 'Bot0000000000000000001', name: 'Research', workspace, ...(options.model ? { model: options.model } : {}), catalog: () => catalog };
+  const present = new Set([workspace]);
+  const deleting = new Set<string>();
+  const api: RoutineBots = {
+    routineBots: () => present.has(workspace) && !deleting.has(workspace) ? [bot] : [],
+    routineBotFor: (path) => path === workspace && present.has(workspace) && !deleting.has(workspace) ? bot : undefined,
+    isBotWorkspace: (path) => basename(path) === 'workspace' && dirname(dirname(path)) === root,
+  };
+  h.service.attachBots(api);
+  return { bot, workspace, rows, catalogCalls, deleting, remove: () => { present.delete(workspace); }, api };
+}
+
+async function until(condition: () => Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail('the condition did not come true');
+}
+
+test('the workspace of a Bot is a scope named for the Bot, and is not a project', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  assert.deepEqual(h.service.scopes(), [
+    { id: 'global', label: 'No project' },
+    { id: h.project, projectPath: h.project, label: 'project' },
+    { id: b.workspace, label: 'Research', botId: b.bot.botId },
+  ]);
+  assert.ok(!('projectPath' in h.service.scopes()[2]!), 'the Bot\'s folder is not offered as a project');
+  assert.equal(h.service.resolveScope(b.workspace), b.workspace);
+  assert.equal(h.projects.has(b.workspace), false);
+  await assert.rejects(async () => h.service.resolveScope(join(dirname(b.workspace), 'home')), /Project is unavailable/);
+  await assert.rejects(async () => h.service.resolveScope(join(h.directory, 'bots', 'Bot0000000000000000002', 'workspace')), /This Bot is unavailable/, 'the folder of a Bot that is not there');
+});
+
+test('a Bot that is being deleted, or is gone, is not a scope and starts no controller', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  await writeCatalog(b.workspace, [task()]);
+  b.deleting.add(b.workspace);
+  assert.deepEqual(h.service.scopes().map((scope) => scope.id), ['global', h.project]);
+  assert.throws(() => h.service.resolveScope(b.workspace), /This Bot is unavailable/);
+  await assert.rejects(h.service.manage(b.workspace, { action: 'list' }), /This Bot is unavailable/);
+  await assert.rejects(h.service.manage(b.workspace, { action: 'create', automation: task().automation }), /This Bot is unavailable/);
+  await assert.rejects(h.service.context(b.workspace), /This Bot is unavailable/);
+  assert.equal(h.ensured.length, 0, 'no engine was started for it');
+  assert.equal(h.leases.length, 0, 'and no lease taken');
+  b.deleting.delete(b.workspace);
+  b.remove();
+  assert.deepEqual(h.service.scopes().map((scope) => scope.id), ['global', h.project]);
+  await assert.rejects(h.service.manage(b.workspace, { action: 'list' }), /This Bot is unavailable/);
+});
+
+test('a Bot that begins to be deleted while the scheduler is reading its catalog gets no controller and no lease', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  // The scope was listed and its catalog read; only then did the deletion start. The scheduler gets to the controller last.
+  b.deleting.add(b.workspace);
+  await assert.rejects((h.service as any).controller(b.workspace), /This Bot is unavailable/);
+  assert.equal(h.leases.length, 0);
+  assert.equal(h.ensured.length, 0);
+});
+
+test('a Bot\'s routines are managed in its workspace, by a controller that starts on the Bot\'s model and not the owner\'s', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h, { model: 'bot/model' });
+  await writeCatalog(b.workspace, [task()]);
+  await writeCatalog(h.project, [task()]);
+  await h.service.manage(b.workspace, { action: 'list' });
+  await h.service.manage(h.project, { action: 'list' });
+  assert.equal(h.ensured[0]!.ref.projectPath, b.workspace);
+  assert.equal(h.ensured[0]!.empty, true);
+  assert.equal(h.ensured[0]!.model, 'bot/model');
+  assert.equal(h.ensured[1]!.ref.projectPath, h.project);
+  assert.equal(h.ensured[1]!.model, 'openai/default', 'a project still starts on the owner\'s model');
+  assert.ok(h.service.isControllerSession(b.workspace, h.ensured[0]!.ref.sessionId));
+  assert.deepEqual(h.errors, []);
+});
+
+test('reading the routines of a Bot that has none starts no engine, so opening a Bot\'s page costs nothing', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  assert.deepEqual(await h.service.manage(b.workspace, { action: 'list' }), []);
+  assert.deepEqual(await h.service.manage(b.workspace, { action: 'history', id: 'task-1' }), []);
+  assert.equal(h.ensured.length, 0);
+  assert.equal(h.leases.length, 0);
+  assert.deepEqual(h.errors, []);
+});
+
+test('a Bot without a model of its own starts its controller on no model, which the Bot\'s launch then settles', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  await writeCatalog(b.workspace, [task()]);
+  await h.service.manage(b.workspace, { action: 'list' });
+  assert.equal(h.ensured[0]!.model, undefined, 'the owner\'s model must not be passed on: it would win over what the Bot is set to');
+});
+
+test('discovery finds the routines a chat of the Bot scheduled, and lets go of the Bot\'s controller when the Bot goes', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  await writeCatalog(b.workspace, [{ automation: { status: 'active' } }]);
+  await h.service.sync();
+  assert.equal(h.leases.length, 1);
+  assert.equal(h.leases[0]!.ref.projectPath, b.workspace);
+  assert.equal(h.leases[0]!.released, false);
+  b.deleting.add(b.workspace);
+  await h.service.sync();
+  assert.equal(h.leases[0]!.released, true);
+  assert.deepEqual(h.errors, []);
+});
+
+test('a routine of a Bot runs in the Bot\'s workspace although it is not a project', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  const source = h.runtime({ projectPath: b.workspace, sessionId: targetId });
+  const result = await runClaim(h.service, source, 'bot-run', task({ model: 'bot/model' }));
+  assert.deepEqual(h.background.map((item) => [item.ref.projectPath, item.empty, item.model]), [[b.workspace, true, 'bot/model']]);
+  assert.deepEqual(h.notifications.map((item) => item.ref), [{ projectPath: b.workspace, sessionId: result.sessionId }], 'the notification names the Bot\'s workspace, which the host opens as the Bot\'s chat');
+  assert.deepEqual(h.bindings.map((binding) => binding.sessionId), [result.sessionId]);
+});
+
+test('a routine of a Bot that is being deleted, or is gone, does not run', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  const source = h.runtime({ projectPath: b.workspace, sessionId: targetId });
+  b.deleting.add(b.workspace);
+  await assert.rejects(runClaim(h.service, source, 'deleting', task()), /paused: The Bot is unavailable\./);
+  b.deleting.delete(b.workspace);
+  b.remove();
+  await assert.rejects(runClaim(h.service, source, 'gone', task()), /paused: The Bot is unavailable\./);
+  assert.equal(h.background.length, 0);
+  assert.equal(h.notifications.at(-1)?.body, 'The Bot is unavailable.');
+  // Another folder that is neither a project nor a Bot's is still the project that is unavailable.
+  await assert.rejects(runClaim(h.service, h.runtime({ projectPath: join(h.directory, 'elsewhere'), sessionId: targetId }), 'stranger', task()), /paused: The project is unavailable\./);
+});
+
+test('a routine queued behind another one is checked again once it is its turn, and the Bot may be gone by then', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  const source = h.runtime({ projectPath: b.workspace, sessionId: targetId });
+  const entered = deferred(); const finish = deferred<string>();
+  h.setExecute(async () => { entered.resolve(); return finish.promise; });
+  const saved = task({ runMode: 'selected_session', targetSessionId: botTarget });
+  const first = runClaim(h.service, source, 'first', saved);
+  await entered.promise;
+  const second = runClaim(h.service, source, 'second', saved);
+  const rejected = assert.rejects(second, /The Bot is unavailable/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  b.deleting.add(b.workspace);
+  finish.resolve('Finished first run');
+  await first; await rejected;
+  assert.equal(h.turns.length, 1, 'the second run never started');
+});
+
+test('the chats a routine can target are the Bot\'s own, not the owner\'s', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  const context = await h.service.context(b.workspace);
+  assert.deepEqual(context.sessions, [{ uuid: botTarget, title: 'Bot chat' }]);
+  assert.deepEqual(b.catalogCalls, [`list ${b.workspace}`]);
+  assert.equal(h.ensured[0]!.ref.projectPath, b.workspace);
+  await h.service.manage(b.workspace, { action: 'create', automation: task({ runMode: 'selected_session', targetSessionId: botTarget }).automation });
+  assert.ok(b.catalogCalls.includes(`find ${b.workspace} ${botTarget}`), 'a target is looked up in the Bot\'s catalog');
+  await assert.rejects(h.service.manage(b.workspace, { action: 'create', automation: task({ runMode: 'selected_session', targetSessionId: targetId }).automation }), /target chat is unavailable/, 'a chat of the owner\'s is not the Bot\'s');
+  // And a project\'s routine still looks in the owner\'s catalog.
+  await h.service.manage(h.project, { action: 'create', automation: task({ runMode: 'selected_session', targetSessionId: targetId }).automation });
+  assert.ok(!b.catalogCalls.some((call) => call.includes(h.project)));
+});
+
+test('the tasks of a Bot are never kept for an unavailable project, whether the Bot is there or not', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  h.setManaged([task()]);
+  await h.service.manage(b.workspace, { action: 'create', automation: task().automation });
+  await h.service.manage(h.project, { action: 'create', automation: task().automation });
+  const cacheFile = join(h.directory, 'scheduled-scopes.json');
+  const cached = JSON.parse(await readFile(cacheFile, 'utf8')) as { path: string }[];
+  assert.deepEqual(cached.map((row) => row.path), [h.project], 'only the project is remembered');
+  h.projects.delete(h.project);
+  b.deleting.add(b.workspace);
+  assert.deepEqual(h.service.scopes().filter((scope) => scope.unavailable).map((scope) => scope.id), [h.project], 'the Bot is not listed as an unavailable project');
+  b.remove();
+  assert.deepEqual(h.service.scopes().filter((scope) => scope.unavailable).map((scope) => scope.id), [h.project]);
+});
+
+test('an entry kept for the folder of a Bot is never offered as an unavailable project, and is dropped when the Bot is released', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  const cacheFile = join(h.directory, 'scheduled-scopes.json');
+  await writeFile(cacheFile, JSON.stringify([{ path: b.workspace, label: 'workspace', jobs: [task()] }, { path: h.project, label: 'project', jobs: [task()] }]));
+  const service = h.createService();
+  t.after(() => service.dispose());
+  service.attachBots(b.api);
+  h.projects.delete(h.project);
+  b.remove();
+  assert.deepEqual(service.scopes().filter((scope) => scope.unavailable).map((scope) => scope.id), [h.project]);
+  service.releaseScope(b.workspace);
+  await until(async () => !(await readFile(cacheFile, 'utf8')).includes(b.workspace));
+  assert.deepEqual((JSON.parse(await readFile(cacheFile, 'utf8')) as { path: string }[]).map((row) => row.path), [h.project], 'what was kept for the project is kept');
+});
+
+test('releasing a scope lets go of its controller at once, and the scheduler may start another when the scope is listed again', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  h.setManaged([task()]);
+  await writeCatalog(b.workspace, [task()]);
+  await h.service.manage(b.workspace, { action: 'list' });
+  assert.equal(h.leases.length, 1);
+  assert.equal(h.leases[0]!.released, false, 'an active routine keeps the controller');
+  h.service.releaseScope(b.workspace);
+  assert.equal(h.leases[0]!.released, true);
+  h.service.releaseScope(b.workspace);
+  h.service.releaseScope(join(h.directory, 'never-seen'));
+  assert.equal(h.leases.length, 1, 'releasing what is not held is harmless');
+  await h.service.manage(b.workspace, { action: 'list' });
+  assert.equal(h.leases.length, 2);
+  assert.equal(h.leases[1]!.released, false);
+});
+
+test('without Bots attached the scheduler is what it was: projects only, and a Bot\'s folder is just an unknown path', async (t) => {
+  const h = await harness(t);
+  assert.deepEqual(h.service.scopes().map((scope) => scope.id), ['global', h.project]);
+  assert.throws(() => h.service.resolveScope(join(h.directory, 'bots', 'Bot0000000000000000001', 'workspace')), /Project is unavailable/);
 });

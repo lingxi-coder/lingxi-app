@@ -1851,14 +1851,13 @@ export function useBridge(): UseBridge {
   }, [applyBootstrap, beginNavigationOperation, capture, host, isCurrentNavigationOperation]);
 
   /**
-   * Show a chat of a Bot in the chat view: a new one, or the one named. The host
-   * starts it and makes it the displayed session; this follows with a snapshot.
-   * A failure is thrown to the caller, who tells the owner where they are, and
-   * is not put in the window's error banner.
+   * Show a chat of a Bot in the chat view once `open` has had the host start it
+   * and make it the displayed session; this follows with a snapshot. A failure
+   * is thrown to the caller, who tells the owner where they are, and is not put
+   * in the window's error banner.
    */
-  const openBotSession = useCallback(async (botId: string, sessionId?: string): Promise<BotSessionRefUi> => {
-    const bots = host?.bots;
-    if (!host || !bots) throw new Error('Desktop host unavailable.');
+  const followBotSession = useCallback(async <T,>(botId: string, sessionId: string | undefined, open: () => Promise<T>): Promise<T> => {
+    if (!host) throw new Error('Desktop host unavailable.');
     const operationId = beginNavigationOperation();
     const target = { projectPath: pendingBotPath(botId), sessionId: sessionId ?? `pending-new:${operationId}` } satisfies SessionRef;
     pendingSessionRef.current = target;
@@ -1868,7 +1867,7 @@ export function useBridge(): UseBridge {
     removedRuntimeIds.current.delete(target.sessionId);
     setError(null);
     try {
-      const opened = await bots.openSession(botId, sessionId);
+      const opened = await open();
       const snapshot = await host.bootstrap();
       if (isCurrentNavigationOperation(operationId)) {
         pendingSessionRef.current = null;
@@ -1893,6 +1892,19 @@ export function useBridge(): UseBridge {
       throw cause;
     }
   }, [applyBootstrap, beginNavigationOperation, host, isCurrentNavigationOperation]);
+
+  /** Show a chat of a Bot in the chat view: a new one, or the one named. */
+  const openBotSession = useCallback(async (botId: string, sessionId?: string): Promise<BotSessionRefUi> => {
+    const bots = host?.bots;
+    if (!bots) throw new Error('Desktop host unavailable.');
+    return followBotSession(botId, sessionId, () => bots.openSession(botId, sessionId));
+  }, [followBotSession, host]);
+
+  /** The host opened a chat of a Bot on its own: show it, and say so in the error banner if the window cannot. */
+  const showBotSession = useCallback(async (session: BotSessionRefUi): Promise<void> => {
+    try { await followBotSession(session.botId, session.sessionId, async () => session); }
+    catch (cause) { capture(cause); }
+  }, [capture, followBotSession]);
 
   /** Choose a folder with the system dialog, for a Bot to be given. It is not added to the projects. */
   const pickBotFolder = useCallback(async () => {
@@ -2451,11 +2463,14 @@ export function useBridge(): UseBridge {
     [command, refreshMcpServers],
   );
   const [remoteScheduledScopes, setRemoteScheduledScopes] = useState<ScheduledScope[] | null>(null);
+  // The scopes also include the Bots, which the window learns of by other means than the settings.
+  const [scheduledScopesRevision, setScheduledScopesRevision] = useState(0);
+  const refreshScheduledScopes = useCallback(() => setScheduledScopesRevision((revision) => revision + 1), []);
   useEffect(() => {
     let cancelled = false;
     void host?.scheduled?.scopes().then((scopes) => { if (!cancelled) setRemoteScheduledScopes(scopes); }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [host, bootstrap?.settings.projects]);
+  }, [host, bootstrap?.settings.projects, scheduledScopesRevision]);
   const scheduledScopes = useMemo<ScheduledScope[]>(() => remoteScheduledScopes ?? [
     { id: 'global', label: 'No project' },
     ...(bootstrap?.settings.projects ?? []).map((path) => ({ id: path, projectPath: path, label: path.split('/').filter(Boolean).pop() ?? path })),
@@ -2473,10 +2488,17 @@ export function useBridge(): UseBridge {
     return jobs.find((job) => job.id === jobId)?.automation?.runs ?? [];
   }, [manageScheduled]);
   const openScheduledSession = useCallback(async (scopeId: string, sessionId: string) => {
-    if (!host?.scheduled) throw new Error('Scheduled task service unavailable.');
-    await host.scheduled.openSession(scopeId, sessionId);
+    const scheduled = host?.scheduled;
+    if (!host || !scheduled) throw new Error('Scheduled task service unavailable.');
+    // A Bot's workspace is no project: the chat of a run opens as a Bot's chat does.
+    const botId = scheduledScopes.find((scope) => scope.id === scopeId)?.botId;
+    if (botId !== undefined) {
+      await followBotSession(botId, sessionId, () => scheduled.openSession(scopeId, sessionId));
+      return;
+    }
+    await scheduled.openSession(scopeId, sessionId);
     applyBootstrap(await host.bootstrap());
-  }, [host, applyBootstrap]);
+  }, [host, applyBootstrap, followBotSession, scheduledScopes]);
   const manageCron = useCallback((request: CronRequestDto): Promise<CronJobDto[]> => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) {
@@ -2546,7 +2568,7 @@ export function useBridge(): UseBridge {
 
   return {
     linkDraft, offerLinkDraft: setLinkDraft, clearLinkDraft: () => setLinkDraft(null),
-    scheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
+    scheduledScopes, refreshScheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
     manageCron,
     uiSurfaceClientId: stableUiSurfaceClientId,
     updatePromptSuggestionContext, promptSuggestionFeedback,
@@ -2629,6 +2651,7 @@ export function useBridge(): UseBridge {
     renameSession,
     openSession,
     openBotSession,
+    showBotSession,
     deleteBot,
     pickBotFolder,
     listProjectSessions,

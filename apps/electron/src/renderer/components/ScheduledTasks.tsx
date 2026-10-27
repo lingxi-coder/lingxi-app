@@ -6,6 +6,7 @@ import {
   type ScheduledCronJob,
   type ScheduledTaskDraft,
 } from '../bridge/scheduledTaskDraft';
+import { jobStatus, nextRunLabel, scheduleLabel, scopeName, taskStatusLabel } from '../bridge/scheduledPresentation';
 import { currentLocale, tr } from '../i18n/locale';
 import { useT } from '../theme/ThemeContext';
 import type { ScheduledLinkRequest } from '../deepLinkRoutes';
@@ -21,7 +22,7 @@ const SUGGESTIONS = [
 
 
 type ScopedJob = { job: ScheduledCronJob; scopeId: string };
-type Initial = { title: string; schedule: string; description: string; draft?: ScheduledTaskDraft; preset?: Pick<ScheduledTaskDraft, 'frequency' | 'day' | 'time'> };
+type Initial = { title: string; schedule: string; description: string; draft?: ScheduledTaskDraft; preset?: Pick<ScheduledTaskDraft, 'frequency' | 'day' | 'time'>; scopeId?: string };
 const taskKey = (item: ScopedJob) => `${item.scopeId}:${item.job.id}`;
 export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: { bridge: UseBridge; visible: boolean; onOpenChat?(): void; initialTarget?: ScheduledLinkRequest }) {
   const [jobs, setJobs] = useState<ScopedJob[]>([]);
@@ -47,6 +48,7 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: {
   const version = useRef(0);
   const scopes = bridge.scheduledScopes;
   const scopesKey = scopes.map((scope) => scope.id).join('\n');
+  const scopeLabel = (scopeId: string): string | undefined => { const scope = scopes.find((item) => item.id === scopeId); return scope && scopeName(scope); };
   const refresh = useCallback(async (quiet = false) => {
     if (mutation.current || (quiet && dirtyRef.current)) return;
     // `setError('')` is gated with the spinner: a quiet poll is not a user
@@ -94,6 +96,14 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: {
     let cancelled = false;
     const target = initialTarget;
     void (async () => {
+      if (target.kind === 'new') {
+        // A new task in a scope that is no longer listed is not one to start.
+        if (!scopes.some(scope => scope.id === target.scope)) throw new Error('desktop_scheduled_scope_unavailable');
+        consumedTarget.current = target.requestId;
+        const navigate = () => open(null, { title: '', schedule: '', description: '', scopeId: target.scope });
+        if (dirtyRef.current) setPending(() => navigate); else navigate();
+        return;
+      }
       const owners = target.scope ? scopes.filter(scope => scope.id === target.scope) : scopes;
       if (!owners.length) throw new Error('desktop_scheduled_scope_unavailable');
       const lists = await Promise.all(owners.map(async scope => (await bridge.manageScheduled(scope.id, { action: 'list' })).map(job => ({ job, scopeId: scope.id }))));
@@ -157,7 +167,7 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: {
     '--scheduled-muted': t.text3, '--scheduled-border': t.border, '--scheduled-hover': t.surfaceHover, '--scheduled-accent': t.accent } as CSSProperties;
   const query = search.trim().toLocaleLowerCase();
   const filtered = jobs.filter(({ job, scopeId }) => (filter === 'all' || (job.automation?.status ?? 'active') === filter)
-    && `${job.prompt} ${job.cron} ${scopes.find((scope) => scope.id === scopeId)?.label}`.toLocaleLowerCase().includes(query));
+    && `${job.prompt} ${job.cron} ${scopeLabel(scopeId)}`.toLocaleLowerCase().includes(query));
   const sessions = Object.entries(bridge.bootstrap?.projectCatalogs ?? {}).flatMap(([scopeId, catalog]) => catalog.sessions.map((session) => ({ id: session.uuid, title: session.title || `${tr('drawer_tab_chat')} ${session.uuid.slice(0, 8)}`, scopeId })));
   const suggestions = SUGGESTIONS.map((item) => ({ ...item, title: tr(item.titleKey), schedule: tr(item.scheduleKey), description: tr(item.descriptionKey) }));
   const editing = Boolean(selected || initial);
@@ -172,10 +182,10 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: {
         <div className="scheduled-list-heading"><span>{tr('cron_task_count_header_fmt', filtered.length)}</span><button type="button" disabled={loading || busy} onClick={() => void refresh()}>{tr('settings_linux_refresh_button')}</button></div>
         {loading && <p role="status" className="scheduled-empty">{tr('desktop_scheduled_loading')}</p>}
         <div className="scheduled-suggestions">{filtered.map((item) => {
-          const { job } = item; const draft = scheduledTaskFromJob(job); const status = job.automation?.status ?? 'active'; const latest = job.automation?.runs?.at(-1);
+          const { job } = item; const draft = scheduledTaskFromJob(job); const status = jobStatus(job); const latest = job.automation?.runs?.at(-1);
           return <button type="button" key={taskKey(item)} className={`scheduled-suggestion scheduled-job${selected && taskKey(selected) === taskKey(item) ? ' selected' : ''}`} disabled={busy || job.permanent || job.durable === false} onClick={() => choose(() => open(item))}>
             <span className={`scheduled-dot scheduled-dot-${status}`} aria-label={taskStatusLabel(status)} />
-            <span className="scheduled-suggestion-copy"><span>{draft.title}</span><span className="scheduled-suggestion-description">{scheduleLabel(draft)} · {scopes.find((scope) => scope.id === item.scopeId)?.label ?? tr('common_none')}</span><span className="scheduled-suggestion-description">{job.automation?.statusReason ?? (job.next_run_at ? tr('desktop_scheduled_next_run', new Date(job.next_run_at).toLocaleString(currentLocale())) : status === 'active' ? tr('desktop_scheduled_local') : taskStatusLabel(status))}</span>{latest && <span className="scheduled-suggestion-description">{tr('desktop_scheduled_latest', runStatusLabel(latest.status))}{latest.error ? ` · ${latest.error}` : ''}</span>}</span>
+            <span className="scheduled-suggestion-copy"><span>{draft.title}</span><span className="scheduled-suggestion-description">{scheduleLabel(draft)} · {scopeLabel(item.scopeId) ?? tr('common_none')}</span><span className="scheduled-suggestion-description">{nextRunLabel(job)}</span>{latest && <span className="scheduled-suggestion-description">{tr('desktop_scheduled_latest', runStatusLabel(latest.status))}{latest.error ? ` · ${latest.error}` : ''}</span>}</span>
           </button>;
         })}</div>
         {!loading && filtered.length === 0 && <p className="scheduled-empty">{query || filter !== 'all' ? tr('desktop_scheduled_no_matches') : `${tr('cron_no_tasks_yet')} ${tr('cron_empty_help')}`}</p>}
@@ -183,7 +193,7 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: {
       </div>
     </div>
     {editing && <aside className="scheduled-detail">
-      <ScheduledTaskSetup key={editorVersion} initial={initial ?? undefined} editingJob={selected?.job} scopeId={selected?.scopeId ?? 'global'} scopes={scopes} sessions={sessions} models={bridge.desktop.modelDetails} defaultModel={bridge.desktop.currentModel} defaultReasoning={bridge.desktop.conversationControls?.reasoning.requested} onBack={() => choose(close)} onSave={save} onDirtyChange={setDirty} loadContext={bridge.scheduledContext} />
+      <ScheduledTaskSetup key={editorVersion} initial={initial ?? undefined} editingJob={selected?.job} scopeId={selected?.scopeId ?? initial?.scopeId ?? 'global'} scopes={scopes} sessions={sessions} models={bridge.desktop.modelDetails} defaultModel={bridge.desktop.currentModel} defaultReasoning={bridge.desktop.conversationControls?.reasoning.requested} onBack={() => choose(close)} onSave={save} onDirtyChange={setDirty} loadContext={bridge.scheduledContext} />
       {selected && <div className="scheduled-detail-actions"><button type="button" disabled={busy} onClick={() => void loadHistory()}>{tr('cron_run_history_section')}</button><button type="button" disabled={busy} onClick={() => choose(() => open(null, { title: '', schedule: '', description: '', draft: { ...scheduledTaskFromJob(selected.job), automation: selected.job.automation ? { version: 2, model: selected.job.automation.model, reasoning: selected.job.automation.reasoning, notificationPolicy: selected.job.automation.notificationPolicy, status: 'active', statusReason: undefined, runMode: 'new_session', targetSessionId: undefined, ownedSessionId: undefined } : undefined } }))}>{tr('cron_copy_project')}</button>{deleting ? <><button type="button" disabled={busy} onClick={() => void remove()}>{tr('desktop_scheduled_confirm_delete')}</button><button type="button" onClick={() => setDeleting(false)}>{tr('common_cancel')}</button></> : <button type="button" disabled={busy} onClick={() => setDeleting(true)}>{tr('common_delete')}</button>}</div>}
       {showHistory && <section className="scheduled-history" aria-label={tr('cron_run_history_section')}><h3>{tr('cron_run_history_section')}</h3>{history.length === 0 && <p>{tr('desktop_scheduled_no_runs')}</p>}{history.map((run) => <article key={run.id} id={`scheduled-run-${run.id}`} aria-current={run.id === targetRunId ? 'true' : undefined} style={run.id === targetRunId ? { outline: '2px solid var(--scheduled-accent)', outlineOffset: 4 } : undefined}><strong>{runStatusLabel(run.status)}</strong><time>{new Date(run.scheduledAt).toLocaleString(currentLocale())}</time><p>{run.model}</p>{run.startedAt && <p>{tr('cron_started_at_label')}: {new Date(run.startedAt).toLocaleString(currentLocale())}{run.finishedAt ? ` · ${tr('cron_finished_at_label')}: ${new Date(run.finishedAt).toLocaleString(currentLocale())}` : ''}</p>}<p>{run.error ?? run.summary}</p>{run.sessionId && selected && <button type="button" onClick={() => void bridge.openScheduledSession(selected.scopeId, run.sessionId!).then(() => onOpenChat?.()).catch((cause) => setError(String(cause)))}>{tr('cron_open_chat')}</button>}</article>)}</section>}
     </aside>}
@@ -198,24 +208,10 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: {
   </section>;
 }
 
-function taskStatusLabel(status: string): string {
-  const keys: Record<string, string> = { all: 'drawer_filter_all', active: 'cron_task_status_active', paused: 'chat_status_paused', completed: 'chat_status_completed' };
-  return keys[status] ? tr(keys[status]!) : status;
-}
 function runStatusLabel(status: string): string {
   const keys: Record<string, string> = { succeeded: 'cron_status_succeeded', completed: 'chat_status_completed', failed: 'chat_status_failed', cancelled: 'chat_status_cancelled', started: 'chat_status_running', running: 'chat_status_running', queued: 'cron_status_queued', interrupted: 'chat_result_interrupted' };
   return keys[status] ? tr(keys[status]!) : status;
 }
-function scheduleLabel(draft: ScheduledTaskDraft): string {
-  if (draft.frequency === 'Custom') return `${draft.cron} (${draft.timezone})`;
-  if (draft.frequency === 'Weekly') {
-    const index = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].indexOf(draft.day);
-    const day = index < 0 ? draft.day : new Intl.DateTimeFormat(currentLocale(), { weekday: 'long' }).format(new Date(2024, 0, index + 1));
-    return tr('desktop_scheduled_weekly_schedule', day, draft.time, draft.timezone);
-  }
-  return tr('desktop_scheduled_schedule', tr(draft.frequency === 'Daily' ? 'desktop_scheduled_daily' : 'desktop_scheduled_weekdays'), draft.time, draft.timezone);
-}
-
 function scheduledErrorLabel(error: string): string {
   return ['desktop_scheduled_scope_unavailable', 'desktop_scheduled_scope_ambiguous', 'cron_link_missing'].includes(error) ? tr(error) : error;
 }

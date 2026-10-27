@@ -338,8 +338,10 @@ function bridgeStub(runtimes: unknown[] = [], extra: Record<string, unknown> = {
     openBotSession: async () => ({ botId: 'a', projectPath: '/data/bots/a/workspace', sessionId: 's1' }),
     deleteBot: async () => undefined,
     pickBotFolder: async () => null,
+    scheduledScopes: [{ id: '/data/bots/a/workspace', label: 'Alpha', botId: 'a' }],
+    manageScheduled: async () => [],
     ...extra,
-  } as unknown as Pick<UseBridge, 'bootstrap' | 'desktop' | 'sessionLoading' | 'sessionRuntimeStatus' | 'openBotSession' | 'deleteBot' | 'pickBotFolder'>;
+  } as unknown as Pick<UseBridge, 'bootstrap' | 'desktop' | 'sessionLoading' | 'sessionRuntimeStatus' | 'openBotSession' | 'deleteBot' | 'pickBotFolder' | 'scheduledScopes' | 'manageScheduled'>;
 }
 
 async function pageBots(view: UseBots['view'], bots: BotUi[]): Promise<UseBots> {
@@ -358,7 +360,7 @@ test('the page shows which Bots are working from the chats the host is running',
   ];
   // The window has since heard that Beta is waiting for an answer: that is fresher than the summary.
   const live = (sessionId: string) => sessionId === 's-b' ? { turnActive: true, pendingInteractions: 1 } : undefined;
-  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(runtimes, { sessionRuntimeStatus: live }), onOpenChat: noop }));
+  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(runtimes, { sessionRuntimeStatus: live }), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
   assert.match(html, /aria-label="Bots"/);
   assert.match(html, /Alpha[\s\S]*?data-state="working">Working</);
   assert.match(html, /Beta[\s\S]*?data-state="waiting">Needs you</);
@@ -367,10 +369,11 @@ test('the page shows which Bots are working from the chats the host is running',
 
 test('a Bot opens to its chats first, with the sections of its settings, and a chat can be started or the Bot deleted', async () => {
   const bots = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha', description: 'First helper' })]);
-  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop }));
+  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
   assert.match(html, /<h1>Alpha<\/h1>/);
   assert.match(html, /First helper/);
-  for (const tab of ['Chats', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
+  for (const tab of ['Chats', 'Routines', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
+  assert.ok(html.indexOf('>Chats</button>') < html.indexOf('>Routines</button>') && html.indexOf('>Routines</button>') < html.indexOf('>General</button>'), 'the routines come after the chats');
   assert.match(html, /aria-current="page">Chats</);
   assert.match(html, />New chat</);
   assert.match(html, />Delete Bot</);
@@ -380,13 +383,13 @@ test('a Bot opens to its chats first, with the sections of its settings, and a c
 
 test('while another chat is opening the Bot\'s chats cannot be started', async () => {
   const bots = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha' })]);
-  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub([], { sessionLoading: true }), onOpenChat: noop }));
+  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub([], { sessionLoading: true }), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
   assert.match(html, /<button type="button" data-variant="primary" disabled="">New chat<\/button>/);
 });
 
 test('the page shows the form that makes a Bot when asked to', async () => {
   const bots = await pageBots({ kind: 'create' }, []);
-  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop }));
+  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
   assert.match(html, /<h1>New Bot<\/h1>/);
   assert.match(html, />Create Bot</);
 });

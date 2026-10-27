@@ -219,6 +219,8 @@ export interface UseBridge {
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionRef | false>;
   /** Show a chat of a Bot in the chat view; a new one when `sessionId` is absent. Rejects with the reason it could not start. */
   openBotSession(botId: string, sessionId?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
+  /** Follow the host, which made a chat of a Bot the displayed one on its own (the owner clicked a notification). */
+  showBotSession(session: import('../../shared/bots').BotSessionRefUi): Promise<void>;
   deleteBot(botId: string): Promise<void>;
   pickBotFolder(): Promise<import('../../shared/projectCreation').ProjectFolderSelection | null>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<(ProjectSessionCatalogState & { projectPath: string }) | undefined>;
@@ -308,6 +310,8 @@ export interface UseBridge {
   removeMcpServer(scope: WritableScopeDto, name: string): Promise<void>;
   /** Native Desktop skill administration. Write commands resolve only after the correlated terminal operation event. */
   scheduledScopes: ScheduledScope[];
+  /** Ask the host for the scopes again, as when a Bot was made, renamed or deleted. */
+  refreshScheduledScopes(): void;
   scheduledContext(scopeId: string): Promise<ScheduledContext>;
   manageScheduled(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]>;
   readScheduledHistory(scopeId: string, jobId: string): Promise<CronRunDto[]>;

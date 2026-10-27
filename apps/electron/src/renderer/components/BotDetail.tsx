@@ -4,10 +4,12 @@ import { tr } from '../i18n/locale';
 import { botDraftProblems, hasBotDraftProblems, ipcErrorMessage } from '../bridge/botForm';
 import { BotEditorController, botEditorDirty, type BotEditorState } from '../bridge/botEditor';
 import { BotMemoryController } from '../bridge/botMemory';
+import { BotRoutinesController, routineScopeOf } from '../bridge/botRoutines';
 import { BotSkillsController } from '../bridge/botSkills';
 import { relativeActivity, removeBot, startBotChat, type BotActivity } from '../bridge/botSession';
 import type { BotsController } from '../bridge/botsStore';
-import { BotChatsPanel, BotMemoryPanel, BotSkillsPanel, type BotChats } from './BotPanels';
+import type { UseBridge } from '../bridge/bridgeTypes';
+import { BotChatsPanel, BotMemoryPanel, BotRoutinesPanel, BotSkillsPanel, type BotChats } from './BotPanels';
 import {
   BotConfirm,
   BotFoldersField,
@@ -18,15 +20,16 @@ import {
   type ModelChoices,
 } from './BotFields';
 
-export type BotTab = 'chats' | 'general' | 'persona' | 'memory' | 'skills' | 'folders' | 'permissions';
+export type BotTab = 'chats' | 'routines' | 'general' | 'persona' | 'memory' | 'skills' | 'folders' | 'permissions';
 
-const TABS: readonly BotTab[] = ['chats', 'general', 'persona', 'memory', 'skills', 'folders', 'permissions'];
+const TABS: readonly BotTab[] = ['chats', 'routines', 'general', 'persona', 'memory', 'skills', 'folders', 'permissions'];
 /** The tabs whose fields are one draft, saved together. */
 const DRAFT_TABS: ReadonlySet<BotTab> = new Set<BotTab>(['general', 'persona', 'folders', 'permissions']);
 
 function tabLabel(tab: BotTab): string {
   switch (tab) {
     case 'chats': return tr('bots_tab_chats');
+    case 'routines': return tr('bots_tab_routines');
     case 'general': return tr('bots_tab_general');
     case 'persona': return tr('bots_tab_persona');
     case 'memory': return tr('bots_tab_memory');
@@ -67,7 +70,10 @@ export function BotSaveBar({ state, dirty, problems, onSave, onReload }: {
   </footer>;
 }
 
-export function BotDetail({ botId, listed, api, bots, activity, models, pickFolder, visible, sessionLoading, onBack, onOpenChat, onDelete }: {
+/** What of the Scheduled page's data a Bot's routines panel reads. */
+export type BotRoutinesBridge = Pick<UseBridge, 'scheduledScopes' | 'manageScheduled'>;
+
+export function BotDetail({ botId, listed, api, bots, activity, models, pickFolder, visible, sessionLoading, routines: routinesBridge, onBack, onOpenChat, onNewRoutine, onOpenRoutine, onDelete }: {
   botId: string;
   /** The Bot as the list has it: its name is there to show before the Bot itself has been read. */
   listed: BotUi | undefined;
@@ -79,14 +85,21 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   /** The page is the one on screen. Coming back to it reads the chats again. */
   visible: boolean;
   sessionLoading: boolean;
+  routines: BotRoutinesBridge;
   onBack(): void;
   /** Show a chat of this Bot (a new one without an id) in the chat view. Rejects with the reason it could not start. */
   onOpenChat(sessionId?: string): Promise<void>;
+  /** Go to the Scheduled page to make a task that runs as this Bot, in the scope the scheduler lists for it. */
+  onNewRoutine(scopeId: string): void;
+  /** Go to the Scheduled page to see one of this Bot's tasks. */
+  onOpenRoutine(scopeId: string, jobId: string): void;
   onDelete(): Promise<void>;
 }) {
   const [editor] = useState(() => new BotEditorController(api, botId, (bot) => bots.put(bot)));
   const [memory] = useState(() => new BotMemoryController(api.memory, botId));
   const [skills] = useState(() => new BotSkillsController(api.skills, botId));
+  const [routines] = useState(() => new BotRoutinesController(routinesBridge.manageScheduled));
+  const routineScope = routineScopeOf(routinesBridge.scheduledScopes, botId);
   const state = useObservable(editor);
   const [tab, setTab] = useState<BotTab>('chats');
   const [chats, setChats] = useState<BotChats>({ status: 'loading' });
@@ -106,6 +119,10 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   }, [visible, tab, loadChats]);
   useEffect(() => { if (tab === 'memory') void memory.load(); }, [tab, memory]);
   useEffect(() => { if (tab === 'skills') void skills.load(); }, [tab, skills]);
+  // The routines are read again whenever the page comes back, as the chats are: they run and finish while it is away.
+  useEffect(() => {
+    if (visible && tab === 'routines' && routineScope !== undefined) void routines.load(routineScope);
+  }, [visible, tab, routines, routineScope]);
 
   const name = state.bot?.name ?? listed?.name ?? '';
   const description = state.bot?.description ?? listed?.description ?? '';
@@ -153,6 +170,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
       {TABS.map((id) => <button key={id} type="button" aria-current={tab === id ? 'page' : undefined} onClick={() => setTab(id)}>{tabLabel(id)}</button>)}
     </nav>
     {tab === 'chats' ? <BotChatsPanel chats={chats} opening={opening} disabled={sessionLoading} onOpen={(sessionId) => void open(sessionId)} onRetry={() => { setChats({ status: 'loading' }); void loadChats(); }} /> : null}
+    {tab === 'routines' ? <BotRoutinesPanel controller={routines} scopeId={routineScope} onNew={onNewRoutine} onOpen={onOpenRoutine} /> : null}
     {tab === 'memory' ? <BotMemoryPanel controller={memory} /> : null}
     {tab === 'skills' ? <BotSkillsPanel controller={skills} /> : null}
     {DRAFT_TABS.has(tab) && state.phase === 'ready' ? <>

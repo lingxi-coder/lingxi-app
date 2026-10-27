@@ -13,13 +13,17 @@ import { BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField,
 import { Icon } from './Icon';
 
 /** The Bots page: the list, the form that makes a Bot, and one Bot with its settings. */
-export function Bots({ visible, bots, api, bridge, onOpenChat }: {
+export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onOpenRoutine }: {
   visible: boolean;
   bots: UseBots;
   api: BotsApi;
-  bridge: Pick<UseBridge, 'bootstrap' | 'desktop' | 'sessionLoading' | 'sessionRuntimeStatus' | 'openBotSession' | 'deleteBot' | 'pickBotFolder'>;
+  bridge: Pick<UseBridge, 'bootstrap' | 'desktop' | 'sessionLoading' | 'sessionRuntimeStatus' | 'openBotSession' | 'deleteBot' | 'pickBotFolder' | 'scheduledScopes' | 'manageScheduled'>;
   /** Called once a chat of a Bot is on screen, to show the chat view. */
   onOpenChat(): void;
+  /** Show the Scheduled page's editor for a new task in a Bot's scope. */
+  onNewRoutine(scopeId: string): void;
+  /** Show a task of a Bot's scope on the Scheduled page. */
+  onOpenRoutine(scopeId: string, jobId: string): void;
 }) {
   const t = useT();
   useI18n();
@@ -42,6 +46,7 @@ export function Bots({ visible, bots, api, bridge, onOpenChat }: {
       : view.kind === 'detail'
         ? <BotDetail key={view.botId} botId={view.botId} listed={state.bots.find((bot) => bot.botId === view.botId)} api={api} bots={controller}
           activity={activityOf(view.botId)} models={models} pickFolder={bridge.pickBotFolder} visible={visible} sessionLoading={bridge.sessionLoading}
+          routines={bridge} onNewRoutine={onNewRoutine} onOpenRoutine={onOpenRoutine}
           onBack={() => setView({ kind: 'list' })}
           onOpenChat={async (sessionId) => { await bridge.openBotSession(view.botId, sessionId); onOpenChat(); }}
           onDelete={async () => { await bridge.deleteBot(view.botId); controller.remove(view.botId); setView({ kind: 'list' }); }} />

@@ -5,6 +5,7 @@ import './components/LocalApps.css';
 import { Bots } from './components/Bots';
 import './components/Bots.css';
 import { useBots } from './bridge/useBots';
+import { botScopesKey } from './bridge/botRoutines';
 import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
 import type { LocalAppEditRequest } from '../shared/localApps';
 import type { TerminalScope } from '../shared/terminal';
@@ -88,6 +89,15 @@ export function App() {
   const bots = useBots(botsApi);
   const localAppBridge = useRef(bridge);
   localAppBridge.current = bridge;
+  // The Scheduled page lists the workspace of every Bot as a scope; ask for the scopes again when Bots are made, renamed or deleted.
+  const botScopes = botScopesKey(bots.state.bots);
+  const seenBotScopes = useRef<string>();
+  const { refreshScheduledScopes } = bridge;
+  useEffect(() => {
+    const before = seenBotScopes.current;
+    seenBotScopes.current = botScopes;
+    if (before !== undefined && before !== botScopes) refreshScheduledScopes();
+  }, [botScopes, refreshScheduledScopes]);
   const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading || localAppBridge.current.projectCreationOpen, []);
   const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
     if (sessionNavigationBlocked()) return;
@@ -166,6 +176,22 @@ export function App() {
     return () => window.removeEventListener('keydown', toggle);
   }, [settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked]);
   useEffect(() => window.lingxi?.onLocalAppEdit?.(openLocalAppChat), [openLocalAppChat]);
+  // The host made a chat of a Bot the displayed one on its own (a notification was clicked): bring the window to it.
+  useEffect(() => botsApi?.onSessionShown?.((session) => {
+    cancelLocalAppNavigation();
+    setSettingsRoute(null);
+    setPage('chat');
+    setActivityView(false);
+    void localAppBridge.current.showBotSession(session);
+  }), [botsApi, cancelLocalAppNavigation]);
+  const botRoutineRequests = useRef(0);
+  /** Send the owner to the Scheduled page, to what a Bot's routines panel pointed at. */
+  const openRoutine = useCallback((target: { kind: 'new'; scope: string } | { kind: 'job'; id: string; scope: string }) => {
+    if (sessionNavigationBlocked()) return;
+    cancelLocalAppNavigation();
+    setScheduledTarget({ requestId: `bot-routine:${++botRoutineRequests.current}`, ...target });
+    setPage('scheduled');
+  }, [cancelLocalAppNavigation, sessionNavigationBlocked]);
   const workspace = bridge.bootstrap?.workspace;
   // A Bot's folder is not a project: with a Bot's chat on screen, project-bound parts of the window follow the selected project instead.
   const activeBotId = bridge.activeBotId;
@@ -429,10 +455,13 @@ export function App() {
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}
-              onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }} />
+              onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }}
+              onNewRoutine={(scope) => openRoutine({ kind: 'new', scope })}
+              onOpenRoutine={(scope, id) => openRoutine({ kind: 'job', id, scope })} />
           </div>}
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
-          <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => openPage('chat')} />
+          {/* The run's chat is already open when this is called, as a Bot's chat is while it still reads as loading; the window must not wait for that to show it. */}
+          <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }} />
           </div>
           {page === 'changes' && <GitChangesPage />}
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>

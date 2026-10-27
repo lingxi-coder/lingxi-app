@@ -440,14 +440,15 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   });
   /**
    * The one place an OS notification is raised. Shared by the scheduled-task
-   * service and `HostNotifier` so both get the same click behaviour: restore
+   * service and `HostNotifier` so both get the same click behaviour: show
    * the session the notification came from, then raise the window.
    */
   const showNotification = (title: string, body: string, ref?: SessionRef): void => {
     if (!Notification.isSupported()) return;
-    const notification = new Notification(notificationPresentation(title, body, ref));
+    // A Bot's workspace is a folder nobody named; the notification names the Bot.
+    const notification = new Notification(notificationPresentation(title, body, ref, process.platform, ref ? bots?.nameFor(ref.projectPath) : undefined));
     notification.on('click', () => {
-      if (ref) void host?.restoreProjectSession(ref.projectPath, ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error)));
+      if (ref) void host?.showNotifiedSession(ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error)));
       const window = getMainWindow();
       window?.show(); window?.focus();
     });
@@ -754,8 +755,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         store: botStore,
         runtimes: bridge,
         catalogFor: (configHome) => new ProjectSessionCatalog({ ...catalogOptions, configHome }),
+        // The scheduler was made first; it learns of the Bots below, and is asked for these only when used.
+        routines: {
+          isControllerSession: (workspace, sessionId) => scheduled?.isControllerSession(workspace, sessionId) === true,
+          releaseScope: (workspace) => scheduled?.releaseScope(workspace),
+        },
         warn: (message) => diagnostics.add('warn', 'host', `bots: ${message}`),
       });
+      scheduled?.attachBots(bots);
       host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore) }));
     } catch (error) {
       diagnostics.add('warn', 'host', `bots unavailable: ${sanitizeDiagnostic(error)}`);

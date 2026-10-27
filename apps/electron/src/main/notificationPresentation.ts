@@ -7,8 +7,9 @@ function notificationLine(value: string, limit: number): string {
   return characters.length > limit ? `${characters.slice(0, limit - 1).join('')}…` : characters.join('');
 }
 
-export function notificationPresentation(title: string, body: string, ref?: SessionRef, platform = process.platform) {
-  const project = ref ? notificationLine(basename(ref.projectPath), 60) : '';
+/** `label` names where the session lives when the folder's name would not say it, as for a Bot. */
+export function notificationPresentation(title: string, body: string, ref?: SessionRef, platform = process.platform, label?: string) {
+  const project = ref ? notificationLine(label ?? basename(ref.projectPath), 60) : '';
   return {
     title: notificationLine(title, 80) || 'LingXi Code',
     body: notificationLine(body, 240),

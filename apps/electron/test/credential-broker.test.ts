@@ -7,6 +7,7 @@ import { buildBridgeArguments, buildCredentialEnvelope } from '../src/main/host-
 
 import {
   createMacCredentialBrokerClient,
+  deletePluginSecretsForPlugin,
   resolveProviderCredential,
   resolveProviderIdForModel,
   resolveModelCredentialProviderIds,
@@ -74,6 +75,46 @@ test('plugin secrets use an independent broker service and launch envelope map',
   assert.equal(requests[1]?.['service'], 'com.lingxi.plugin-secrets.v1');
   assert.equal(requests[2]?.['service'], 'com.lingxi.plugin-secrets.v1');
   assert.equal(requests[2]?.['account'], 'weather%40official/API_KEY');
+});
+
+test('plugin secret cleanup deletes orphan keys for one plugin and leaves other plugins untouched', async () => {
+  const refs = [
+    { pluginId: 'weather@official', key: 'API_KEY' },
+    { pluginId: 'weather@official', key: 'RENAMED_SCHEMA_KEY' },
+    { pluginId: 'other@official', key: 'API_KEY' },
+  ];
+  const deleted: string[] = [];
+  const broker = {
+    listPluginSecrets: async () => refs.slice(),
+    deletePluginSecret: async (pluginId: string, key: string) => {
+      deleted.push(`${pluginId}/${key}`);
+      const index = refs.findIndex(ref => ref.pluginId === pluginId && ref.key === key);
+      if (index >= 0) refs.splice(index, 1);
+    },
+  };
+
+  const result = await deletePluginSecretsForPlugin('weather@official', broker);
+
+  assert.deepEqual(result, { deletedCount: 2, failedCount: 0, aborted: false });
+  assert.deepEqual(deleted.sort(), ['weather@official/API_KEY', 'weather@official/RENAMED_SCHEMA_KEY']);
+  assert.deepEqual(refs, [{ pluginId: 'other@official', key: 'API_KEY' }]);
+});
+
+test('plugin secret cleanup aborts if the registry guard changes before deleting', async () => {
+  const deleted: string[] = [];
+  let guardCalls = 0;
+  const broker = {
+    listPluginSecrets: async () => [
+      { pluginId: 'weather@official', key: 'API_KEY' },
+    ],
+    deletePluginSecret: async (pluginId: string, key: string) => { deleted.push(`${pluginId}/${key}`); },
+  };
+
+  const result = await deletePluginSecretsForPlugin('weather@official', broker, async () => ++guardCalls === 1);
+
+  assert.deepEqual(result, { deletedCount: 0, failedCount: 0, aborted: true });
+  assert.deepEqual(deleted, []);
+  assert.equal(guardCalls, 2, 'the post-list and per-key guards prevent broker deletes');
 });
 
 test('OpenRouter nested model references resolve to the OpenRouter credential', async () => {

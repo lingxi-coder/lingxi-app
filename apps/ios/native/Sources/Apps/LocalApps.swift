@@ -128,7 +128,7 @@ final class UnifiedLocalApps {
         guard browserAgentWake == wake else { return }
         browserAgentWake = nil
     }
-    func prepareBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest, returnURL: URL, origin: String) async throws -> URL {
+    func prepareBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest) async throws -> (launch: LocalAppLaunch, readyURL: URL) {
         guard browserAgentWake == wake, let app = record(wake.appID), app.currentRevision == wake.revision else {
             await agentBackground.cancel(wake, client: client)
             clearBrowserAgentWake(wake)
@@ -140,7 +140,36 @@ final class UnifiedLocalApps {
             clearBrowserAgentWake(wake)
             throw LocalAppServiceFailure("AGENT_NOT_DECLARED", "This app version does not declare Agent support.")
         }
-        return try await agentBackground.acquireAndReserve(wake, appName: app.name, returnURL: returnURL, origin: origin, client: client)
+        // A retained SwiftUI view can outlive the gateway run that supplied
+        // its original launch URL. Resolve the serving URL again before
+        // reserving background time; `start` returns the current run when
+        // the same app revision is already running.
+        let launch: LocalAppLaunch
+        do {
+            launch = try await LocalAppAgentHandoffLaunchResolver.resolve(wake) {
+                try await self.openExternalBrowser(wake.appID)
+            }
+        } catch {
+            await agentBackground.cancel(wake, client: client)
+            clearBrowserAgentWake(wake)
+            throw error
+        }
+        guard browserAgentWake == wake else {
+            await agentBackground.cancel(wake, client: client)
+            throw LocalAppServiceFailure("STALE_AGENT_WAKE", "This browser Agent request was replaced before it could start.")
+        }
+        let readyURL = try await agentBackground.acquireAndReserve(
+            wake,
+            appName: app.name,
+            launch: launch,
+            client: client
+        )
+        guard browserAgentWake == wake,
+              record(wake.appID)?.currentRevision == wake.revision else {
+            await agentBackground.cancel(wake, client: client)
+            throw LocalAppServiceFailure("STALE_AGENT_WAKE", "The app version or browser request changed before the handoff completed.")
+        }
+        return (launch, readyURL)
     }
     func cancelBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest) async {
         await agentBackground.cancel(wake, client: client)

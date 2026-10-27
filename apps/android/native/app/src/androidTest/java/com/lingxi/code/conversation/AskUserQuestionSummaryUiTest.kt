@@ -22,14 +22,18 @@ import org.junit.runner.RunWith
 class AskUserQuestionSummaryUiTest {
     @get:Rule val rule = createComposeRule()
 
-    @Test fun selectionSubmitsOriginalQuestionKey() {
+    @Test fun singleQuestionStaysExpandedForRevisionAndSubmitsOriginalQuestionKey() {
         val question = "同时纳入原生实时对话？"
         val answer = "同时纳入"
+        val revisedAnswer = "后续纳入"
         var submitted: AskUserQuestionAnswersDto? = null
         val request = com.lingxi.code.bindings.client.AskUserQuestionRequestDto(
             requestId = 42uL,
             questions = listOf(com.lingxi.code.bindings.client.AskQuestionDto(
-                question.toClientTextDto(), "范围".toClientTextDto(), listOf(com.lingxi.code.bindings.client.AskOptionDto(answer.toClientTextDto(), "双向音频与打断".toClientTextDto(), null)), false)),
+                question.toClientTextDto(), "范围".toClientTextDto(), listOf(
+                    com.lingxi.code.bindings.client.AskOptionDto(answer.toClientTextDto(), "双向音频与打断".toClientTextDto(), null),
+                    com.lingxi.code.bindings.client.AskOptionDto(revisedAnswer.toClientTextDto(), "先完成基础能力".toClientTextDto(), null),
+                ), false)),
             timeoutSecs = null)
         rule.setContent {
             LingXiTheme(darkTheme = false) {
@@ -37,10 +41,12 @@ class AskUserQuestionSummaryUiTest {
             }
         }
         rule.onNodeWithText(answer).performClick()
+        rule.onNodeWithText(revisedAnswer).assertIsDisplayed().performClick()
+        rule.onNodeWithText(answer).assertIsDisplayed()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         rule.onNodeWithText(context.getString(com.lingxi.code.R.string.chat_question_submit)).performClick()
         rule.runOnIdle {
-            org.junit.Assert.assertEquals(listOf(question to answer), submitted?.pairs?.map { it.question.displayText() to it.answer.displayText() })
+            org.junit.Assert.assertEquals(listOf(question to revisedAnswer), submitted?.pairs?.map { it.question.displayText() to it.answer.displayText() })
         }
     }
 

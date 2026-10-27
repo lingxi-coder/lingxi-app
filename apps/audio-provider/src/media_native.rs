@@ -12,13 +12,103 @@ use media_api::{
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex as StdMutex, OnceLock,
 };
+use std::time::Duration;
+use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
+
+// Keep an opening callback alive after its caller is cancelled. Native callback
+// implementations cannot all recover a lease that has been opened but whose
+// response was dropped at the FFI/Bridge boundary. This executor is process
+// scoped so dropping an individual host runtime cannot cancel that recovery.
+// A permit remains held by each open or live lease, bounding stuck callbacks.
+const MAX_NATIVE_MEDIA_LEASES: usize = 256;
+const NATIVE_MEDIA_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+const NATIVE_MEDIA_STOP_ATTEMPTS: usize = 3;
+
+struct NativeMediaExecutor {
+    runtime: tokio::runtime::Runtime,
+    leases: Arc<Semaphore>,
+}
+
+fn native_media_executor() -> Option<&'static NativeMediaExecutor> {
+    static EXECUTOR: OnceLock<Option<NativeMediaExecutor>> = OnceLock::new();
+    EXECUTOR
+        .get_or_init(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("native-media-cleanup")
+                .enable_all()
+                .build()
+                .ok()?;
+            Some(NativeMediaExecutor {
+                runtime,
+                leases: Arc::new(Semaphore::new(MAX_NATIVE_MEDIA_LEASES)),
+            })
+        })
+        .as_ref()
+}
+
+/// Schedule a bounded stop for an opened native lease whose response was
+/// abandoned. The permit stays reserved until native cleanup is acknowledged;
+/// an unrecoverable failure quarantines it for the lifetime of its semaphore.
+pub fn schedule_native_media_stop(
+    callback: Arc<dyn NativeMediaDeviceCallback>,
+    lease_id: String,
+    permit: OwnedSemaphorePermit,
+) {
+    let Some(executor) = native_media_executor() else {
+        permit.forget();
+        tracing::error!("native media cleanup executor is unavailable");
+        return;
+    };
+    executor.runtime.spawn(async move {
+        for attempt in 0..NATIVE_MEDIA_STOP_ATTEMPTS {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let request = dto::MediaDeviceRequestEnvelopeDto {
+                request_id: request_id.clone(),
+                request: dto::MediaDeviceRequestDto::Stop {
+                    lease_id: lease_id.clone(),
+                },
+            };
+            let result =
+                tokio::time::timeout(NATIVE_MEDIA_STOP_TIMEOUT, callback.request(request)).await;
+            if matches!(
+                result,
+                Ok(dto::MediaDeviceResponseDto {
+                    request_id: ref response_id,
+                    result: dto::MediaDeviceResultDto::Stopped
+                        | dto::MediaDeviceResultDto::Error {
+                            error: dto::MediaErrorDto {
+                                kind: dto::MediaErrorKindDto::NotFound,
+                                ..
+                            }
+                        },
+                }) if response_id == &request_id
+            ) {
+                return;
+            }
+            if attempt + 1 < NATIVE_MEDIA_STOP_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        // Do not admit another lease into a slot whose native cleanup has not
+        // been acknowledged. The process-scoped permit stays quarantined.
+        permit.forget();
+        tracing::error!("abandoned native media lease cleanup was not acknowledged");
+    });
+}
 
 /// Native product callback that owns the platform's shared mic, camera, and
 /// renderer coordinator. One request always receives one correlated response.
 #[async_trait]
 pub trait NativeMediaDeviceCallback: Send + Sync {
+    /// Freeze any connection-scoped routing for an open and its resulting
+    /// lease. Platforms with an app-scoped callback may use the default.
+    fn bind_for_open(&self) -> Option<Arc<dyn NativeMediaDeviceCallback>> {
+        None
+    }
+
     /// Execute one validated callback request against the app's current device
     /// coordinator. The callback must never create a parallel audio route.
     async fn request(
@@ -72,14 +162,12 @@ impl CallbackMediaDevicePorts {
             result => Ok(result),
         }
     }
-}
 
-#[async_trait]
-impl MediaDevicePorts for CallbackMediaDevicePorts {
-    async fn open(
+    async fn open_owned(
         &self,
         context: MediaOperationContext,
         request: MediaSessionRequest,
+        permit: OwnedSemaphorePermit,
     ) -> Result<Arc<dyn MediaDeviceSession>, MediaError> {
         let result = self
             .call(
@@ -99,13 +187,8 @@ impl MediaDevicePorts for CallbackMediaDevicePorts {
         let dto::MediaDeviceResultDto::Opened { lease } = result else {
             return Err(unexpected_result("open", &result));
         };
-        if lease.lease_id.is_empty() || lease.lease_id.len() > 128 {
-            return Err(MediaError::new(
-                MediaErrorKind::NativeFailure,
-                "native media callback returned an invalid lease identity",
-            ));
-        }
-        Ok(Arc::new(CallbackMediaDeviceSession {
+        let valid_lease_id = !lease.lease_id.is_empty() && lease.lease_id.len() <= 128;
+        let session = Arc::new(CallbackMediaDeviceSession {
             callback: self.callback.clone(),
             lease_id: lease.lease_id,
             context,
@@ -113,7 +196,52 @@ impl MediaDevicePorts for CallbackMediaDevicePorts {
             video_source: request.video_source,
             stopped: AtomicBool::new(false),
             stop_gate: tokio::sync::Mutex::new(()),
-        }))
+            permit: StdMutex::new(Some(permit)),
+        });
+        if !valid_lease_id {
+            return Err(MediaError::new(
+                MediaErrorKind::NativeFailure,
+                "native media callback returned an invalid lease identity",
+            ));
+        }
+        Ok(session)
+    }
+}
+
+#[async_trait]
+impl MediaDevicePorts for CallbackMediaDevicePorts {
+    async fn open(
+        &self,
+        context: MediaOperationContext,
+        request: MediaSessionRequest,
+    ) -> Result<Arc<dyn MediaDeviceSession>, MediaError> {
+        let executor = native_media_executor().ok_or_else(|| {
+            MediaError::new(
+                MediaErrorKind::Unavailable,
+                "native media cleanup executor is unavailable",
+            )
+        })?;
+        let permit = executor.leases.clone().try_acquire_owned().map_err(|_| {
+            MediaError::new(MediaErrorKind::Busy, "native media lease capacity is full")
+        })?;
+        let callback = self
+            .callback
+            .bind_for_open()
+            .unwrap_or_else(|| self.callback.clone());
+        let ports = Self::new(callback);
+        let (sender, receiver) = oneshot::channel();
+        executor.runtime.spawn(async move {
+            let result = ports.open_owned(context, request, permit).await;
+            // If the receiver was dropped either before or after send, the
+            // returned session's Drop still releases the unclaimed lease.
+            let _ = sender.send(result);
+        });
+        receiver.await.map_err(|_| {
+            MediaError::new(
+                MediaErrorKind::Unavailable,
+                "native media open task ended without a response",
+            )
+        })?
     }
 }
 
@@ -125,6 +253,19 @@ struct CallbackMediaDeviceSession {
     video_source: Option<MediaSourceRef>,
     stopped: AtomicBool,
     stop_gate: tokio::sync::Mutex<()>,
+    permit: StdMutex<Option<OwnedSemaphorePermit>>,
+}
+
+impl Drop for CallbackMediaDeviceSession {
+    fn drop(&mut self) {
+        if !self.stopped.load(Ordering::Acquire) {
+            if let Some(permit) = self.permit.get_mut().unwrap().take() {
+                schedule_native_media_stop(self.callback.clone(), self.lease_id.clone(), permit);
+            } else {
+                tracing::error!("native media lease lost its cleanup reservation");
+            }
+        }
+    }
 }
 
 impl CallbackMediaDeviceSession {
@@ -331,13 +472,19 @@ impl MediaDeviceSession for CallbackMediaDeviceSession {
             .call(dto::MediaDeviceRequestDto::Stop {
                 lease_id: self.lease_id.clone(),
             })
-            .await?
+            .await
         {
-            dto::MediaDeviceResultDto::Stopped => {
+            Ok(dto::MediaDeviceResultDto::Stopped)
+            | Err(MediaError {
+                kind: MediaErrorKind::NotFound,
+                ..
+            }) => {
                 self.stopped.store(true, Ordering::Release);
+                drop(self.permit.lock().unwrap().take());
                 Ok(())
             }
-            result => Err(unexpected_result("stop", &result)),
+            Ok(result) => Err(unexpected_result("stop", &result)),
+            Err(error) => Err(error),
         }
     }
 }
@@ -574,4 +721,381 @@ fn unexpected_result(operation: &str, result: &dto::MediaDeviceResultDto) -> Med
         MediaErrorKind::NativeFailure,
         format!("native media callback returned an invalid {operation} result: {result:?}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    use tokio::sync::Notify;
+
+    struct OpeningCallback {
+        opened: Notify,
+        release: Semaphore,
+        stopped: mpsc::Sender<String>,
+        fail_open: AtomicBool,
+        fail_stops: AtomicUsize,
+        stop_not_found: AtomicBool,
+        hold_failed_stop: AtomicBool,
+        release_failed_stop: Semaphore,
+    }
+
+    impl OpeningCallback {
+        fn new() -> (Arc<Self>, mpsc::Receiver<String>) {
+            let (stopped, receiver) = mpsc::channel();
+            (
+                Arc::new(Self {
+                    opened: Notify::new(),
+                    release: Semaphore::new(0),
+                    stopped,
+                    fail_open: AtomicBool::new(false),
+                    fail_stops: AtomicUsize::new(0),
+                    stop_not_found: AtomicBool::new(false),
+                    hold_failed_stop: AtomicBool::new(false),
+                    release_failed_stop: Semaphore::new(0),
+                }),
+                receiver,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl NativeMediaDeviceCallback for OpeningCallback {
+        async fn request(
+            &self,
+            envelope: dto::MediaDeviceRequestEnvelopeDto,
+        ) -> dto::MediaDeviceResponseDto {
+            let result = match envelope.request {
+                dto::MediaDeviceRequestDto::Open { .. } => {
+                    if self.fail_open.load(Ordering::Acquire) {
+                        return dto::MediaDeviceResponseDto {
+                            request_id: envelope.request_id,
+                            result: dto::MediaDeviceResultDto::Error {
+                                error: dto::MediaErrorDto {
+                                    kind: dto::MediaErrorKindDto::NativeFailure,
+                                    message: "open failed".into(),
+                                },
+                            },
+                        };
+                    }
+                    // The native lease exists before the response is released.
+                    self.opened.notify_one();
+                    self.release.acquire().await.unwrap().forget();
+                    dto::MediaDeviceResultDto::Opened {
+                        lease: dto::MediaDeviceLeaseDto {
+                            lease_id: "test-native-lease".into(),
+                        },
+                    }
+                }
+                dto::MediaDeviceRequestDto::Stop { lease_id } => {
+                    self.stopped.send(lease_id).unwrap();
+                    if self
+                        .fail_stops
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                            remaining.checked_sub(1)
+                        })
+                        .is_ok()
+                    {
+                        if self.hold_failed_stop.load(Ordering::Acquire) {
+                            self.release_failed_stop.acquire().await.unwrap().forget();
+                        }
+                        dto::MediaDeviceResultDto::Error {
+                            error: dto::MediaErrorDto {
+                                kind: dto::MediaErrorKindDto::NativeFailure,
+                                message: "stop failed".into(),
+                            },
+                        }
+                    } else if self.stop_not_found.load(Ordering::Acquire) {
+                        dto::MediaDeviceResultDto::Error {
+                            error: dto::MediaErrorDto {
+                                kind: dto::MediaErrorKindDto::NotFound,
+                                message: "lease is already absent".into(),
+                            },
+                        }
+                    } else {
+                        dto::MediaDeviceResultDto::Stopped
+                    }
+                }
+                other => panic!("unexpected callback: {other:?}"),
+            };
+            dto::MediaDeviceResponseDto {
+                request_id: envelope.request_id,
+                result,
+            }
+        }
+    }
+
+    struct MismatchedStopCallback {
+        inner: Arc<OpeningCallback>,
+        mismatches: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl NativeMediaDeviceCallback for MismatchedStopCallback {
+        async fn request(
+            &self,
+            envelope: dto::MediaDeviceRequestEnvelopeDto,
+        ) -> dto::MediaDeviceResponseDto {
+            let is_stop = matches!(&envelope.request, dto::MediaDeviceRequestDto::Stop { .. });
+            let mut response = self.inner.request(envelope).await;
+            if is_stop
+                && self
+                    .mismatches
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+            {
+                response.request_id = "wrong-request".into();
+            }
+            response
+        }
+    }
+
+    fn open_args() -> (MediaOperationContext, MediaSessionRequest) {
+        (
+            MediaOperationContext::new(
+                MediaOperationId::new(1, 1),
+                MediaOwner::Session {
+                    session_id: "session".into(),
+                },
+            ),
+            MediaSessionRequest {
+                intent: MediaSessionIntent::Observation,
+                mode: MediaSessionMode::Audio,
+                audio_source: Some(MediaSourceRef(MediaSourceId::from(
+                    "media-runtime:microphone",
+                ))),
+                video_source: None,
+            },
+        )
+    }
+
+    fn assert_stopped_once(stopped: &mpsc::Receiver<String>) {
+        assert_eq!(
+            stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "test-native-lease"
+        );
+        assert!(stopped.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_open_stops_the_late_native_lease() {
+        let (callback, stopped) = OpeningCallback::new();
+        let ports = Arc::new(CallbackMediaDevicePorts::new(callback.clone()));
+        let (context, request) = open_args();
+        let open = tokio::spawn(async move { ports.open(context, request).await });
+        callback.opened.notified().await;
+        open.abort();
+        assert!(matches!(open.await, Err(error) if error.is_cancelled()));
+        callback.release.add_permits(1);
+        assert_stopped_once(&stopped);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_delivered_but_unpolled_lease_stops_it() {
+        let (callback, stopped) = OpeningCallback::new();
+        callback.release.add_permits(1);
+        let ports = CallbackMediaDevicePorts::new(callback);
+        let (context, request) = open_args();
+        let session = ports.open(context, request).await.unwrap();
+        let (sender, receiver) = oneshot::channel();
+        assert!(sender.send(session).is_ok());
+        drop(receiver);
+        assert_stopped_once(&stopped);
+    }
+
+    #[tokio::test]
+    async fn successful_open_remains_live_until_explicit_stop() {
+        let (callback, stopped) = OpeningCallback::new();
+        callback.release.add_permits(1);
+        let ports = CallbackMediaDevicePorts::new(callback);
+        let (context, request) = open_args();
+        let session = ports.open(context, request).await.unwrap();
+        assert!(stopped.try_recv().is_err());
+        session.stop().await.unwrap();
+        drop(session);
+        assert_stopped_once(&stopped);
+    }
+
+    #[tokio::test]
+    async fn failed_open_releases_its_capacity() {
+        let (callback, _) = OpeningCallback::new();
+        callback.fail_open.store(true, Ordering::Release);
+        let ports = CallbackMediaDevicePorts::new(callback);
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let (context, request) = open_args();
+        assert!(ports.open_owned(context, request, permit).await.is_err());
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_explicit_stop_retains_capacity_until_a_successful_retry() {
+        let (callback, stopped) = OpeningCallback::new();
+        callback.release.add_permits(1);
+        callback.fail_stops.store(1, Ordering::Release);
+        let ports = CallbackMediaDevicePorts::new(callback);
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let (context, request) = open_args();
+        let session = ports.open_owned(context, request, permit).await.unwrap();
+        assert!(session.stop().await.is_err());
+        assert_eq!(capacity.available_permits(), 0);
+        session.stop().await.unwrap();
+        assert_eq!(capacity.available_permits(), 1);
+        drop(session);
+        assert_eq!(
+            stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "test-native-lease"
+        );
+        assert_stopped_once(&stopped);
+    }
+
+    #[tokio::test]
+    async fn explicit_stop_accepts_an_already_absent_lease() {
+        let (callback, stopped) = OpeningCallback::new();
+        callback.release.add_permits(1);
+        callback.stop_not_found.store(true, Ordering::Release);
+        let ports = CallbackMediaDevicePorts::new(callback);
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let (context, request) = open_args();
+        let session = ports.open_owned(context, request, permit).await.unwrap();
+        session.stop().await.unwrap();
+        assert_eq!(capacity.available_permits(), 1);
+        drop(session);
+        assert_stopped_once(&stopped);
+    }
+
+    #[tokio::test]
+    async fn abandoned_lease_retries_stop_before_releasing_capacity() {
+        let (callback, stopped) = OpeningCallback::new();
+        callback.release.add_permits(1);
+        callback.fail_stops.store(1, Ordering::Release);
+        callback.hold_failed_stop.store(true, Ordering::Release);
+        let ports = CallbackMediaDevicePorts::new(callback.clone());
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let (context, request) = open_args();
+        let session = ports.open_owned(context, request, permit).await.unwrap();
+        drop(session);
+        assert_eq!(
+            stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "test-native-lease"
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        callback.release_failed_stop.add_permits(1);
+        assert_eq!(
+            stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "test-native-lease"
+        );
+        let permit = tokio::time::timeout(Duration::from_secs(2), capacity.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        assert!(stopped.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[tokio::test]
+    async fn abandoned_lease_requires_a_correlated_stop_acknowledgement() {
+        let (inner, stopped) = OpeningCallback::new();
+        inner.release.add_permits(1);
+        let callback = Arc::new(MismatchedStopCallback {
+            inner,
+            mismatches: AtomicUsize::new(1),
+        });
+        let ports = CallbackMediaDevicePorts::new(callback);
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let (context, request) = open_args();
+        let session = ports.open_owned(context, request, permit).await.unwrap();
+        drop(session);
+        assert_eq!(
+            stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "test-native-lease"
+        );
+        assert_eq!(
+            stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "test-native-lease"
+        );
+        let permit = tokio::time::timeout(Duration::from_secs(2), capacity.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        assert!(stopped.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[tokio::test]
+    async fn abandoned_lease_accepts_a_correlated_already_absent_response() {
+        let (callback, stopped) = OpeningCallback::new();
+        callback.release.add_permits(1);
+        callback.stop_not_found.store(true, Ordering::Release);
+        let ports = CallbackMediaDevicePorts::new(callback);
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let (context, request) = open_args();
+        let session = ports.open_owned(context, request, permit).await.unwrap();
+        drop(session);
+        assert_eq!(
+            stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "test-native-lease"
+        );
+        let permit = tokio::time::timeout(Duration::from_secs(2), capacity.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        assert!(stopped.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[tokio::test]
+    async fn repeatedly_failed_cleanup_quarantines_capacity() {
+        let (callback, stopped) = OpeningCallback::new();
+        callback.release.add_permits(1);
+        callback
+            .fail_stops
+            .store(NATIVE_MEDIA_STOP_ATTEMPTS, Ordering::Release);
+        let ports = CallbackMediaDevicePorts::new(callback);
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let (context, request) = open_args();
+        let session = ports.open_owned(context, request, permit).await.unwrap();
+        drop(session);
+        for _ in 0..NATIVE_MEDIA_STOP_ATTEMPTS {
+            assert_eq!(
+                stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
+                "test-native-lease"
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), capacity.acquire())
+                .await
+                .is_err()
+        );
+        assert!(stopped.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[test]
+    fn abandoned_open_cleanup_survives_its_host_runtime() {
+        let (callback, stopped) = OpeningCallback::new();
+        let ports = Arc::new(CallbackMediaDevicePorts::new(callback.clone()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (context, request) = open_args();
+            let open = tokio::spawn(async move { ports.open(context, request).await });
+            callback.opened.notified().await;
+            open.abort();
+            assert!(matches!(open.await, Err(error) if error.is_cancelled()));
+        });
+        drop(runtime);
+        callback.release.add_permits(1);
+        assert_stopped_once(&stopped);
+    }
 }

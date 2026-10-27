@@ -67,6 +67,8 @@ targets:
         buildPhase: resources
       - path: ../../../docs/mobile-linux/mobile-linux-native-pins.json
         buildPhase: resources
+      - path: ../../../resources/extensions/public-directory.json
+        buildPhase: resources
     dependencies:
       - package: ZIPFoundation
       - package: Firebase

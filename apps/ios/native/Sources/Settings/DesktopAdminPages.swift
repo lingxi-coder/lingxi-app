@@ -136,8 +136,19 @@ struct DesktopPluginsPage: View {
 }
 
 /// MCP's three storage scopes are independent of settings file layers.
+private enum MCPAdminDirectoryTab: String, Hashable {
+    case publicDirectory
+    case personal
+}
+
+private enum PendingPublicMCPAction {
+    case useTemplate(PublicExtensionItem)
+    case openExisting(name: String)
+}
+
 struct DesktopMCPAdminPage: View {
     let host: SettingsHost
+    @Environment(\.openURL) private var openURL
     var initialName: String? = nil
     var initialScope: String? = nil
     @State private var initialSelectionError: String?
@@ -147,7 +158,14 @@ struct DesktopMCPAdminPage: View {
     @State private var selectedName: String?
     @State private var name = ""
     @State private var draft = "{}"
+    @State private var baselineName = ""
+    @State private var baselineDraft = "{}"
     @State private var draftRevision: String?
+    @State private var directoryTab = MCPAdminDirectoryTab.personal
+    @State private var pendingPublicMCPAction: PendingPublicMCPAction?
+    @State private var confirmsTemplateReplacement = false
+    @State private var directoryConfirmationTitle = ""
+    @State private var directoryConfirmationMessage = ""
     private var snapshot: [String: Any] { DesktopSettingsRepository.object(repository.catalogs["mcp"] ?? "{}") ?? [:] }
     private var scopeRow: [String: Any] {
         (snapshot["scopes"] as? [[String: Any]] ?? []).first { $0["scope"] as? String == scope } ?? [:]
@@ -165,47 +183,99 @@ struct DesktopMCPAdminPage: View {
         default: String(localized: "mcp_scope_user_desc")
         }
     }
+    private var mcpScopeLabel: String {
+        switch scope {
+        case "project": String(localized: "mcp_scope_project_title")
+        case "local": String(localized: "mcp_scope_local_title")
+        default: String(localized: "settings_parity_user_layer")
+        }
+    }
+    private func templateMatch(_ item: PublicExtensionItem) -> PublicMCPTemplateMatch? {
+        guard let config = item.mcpConfig else { return nil }
+        return publicMCPTemplateMatch(name: item.mcpName ?? item.name, template: config, configuredServers: servers)
+    }
     private var writable: Bool { repository.connected && !repository.saving && draftRevision != nil && initialSelectionError == nil }
+    private var hasUnsavedDraft: Bool { name != baselineName || draft != baselineDraft }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            SettingsConnectionStatus()
-            if let initialSelectionError {
-                ContentUnavailableView(String(localized: "mcp_server_unavailable"), systemImage: "link", description: Text(initialSelectionError))
-            }
-            Picker(String(localized: "mcp_storage_scope"), selection: $scope) {
-                Text(String(localized: "settings_parity_user_layer")).tag("user"); Text(String(localized: "mcp_scope_local_title")).tag("local"); Text(String(localized: "mcp_scope_project_title")).tag("project")
+            Picker(String(localized: "public_extensions_source"), selection: $directoryTab) {
+                Text("public_extensions_public_tab").tag(MCPAdminDirectoryTab.publicDirectory)
+                Text("public_extensions_personal_tab").tag(MCPAdminDirectoryTab.personal)
             }.pickerStyle(.segmented)
-            // MCP 的三个作用域和设置页的层用了同样的词，却是两套独立存储 —— 而且
-            // 「本地」的含义正好相反：设置层的 local 在项目内，MCP 的 local 在主目录。
-            // 刚在设置页学会一个意思的人，到这一页会把同一个词读成同一个意思。
-            Text(mcpScopeDescription).font(.caption).foregroundStyle(.secondary)
-            Text("mcp_scope_vs_layers_note").font(.caption2).foregroundStyle(.secondary)
-            Text(scopeRow["path"] as? String ?? String(localized: "mcp_scope_load_hint"))
-                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            DisclosureGroup(String(localized: "mcp_runtime_servers")) {
-                ForEach(host.convo.mcpServers) { server in
-                    HStack {
-                        Text(server.name)
-                        Spacer()
-                        Text(String(describing: server.status)).foregroundStyle(.secondary)
-                    }.padding(.vertical, 4)
+
+            if directoryTab == .publicDirectory {
+                Text("public_extensions_mcp_note")
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(String(format: String(localized: "public_extensions_mcp_scope_format"), mcpScopeLabel))
+                    .font(.caption).foregroundStyle(.secondary)
+                PublicExtensionDirectoryList(
+                    kind: .mcp,
+                    actionTitle: { item in
+                        switch templateMatch(item) {
+                        case .some(.sameConfiguration):
+                            return String(localized: "public_extensions_mcp_open_existing")
+                        case .some(.nameConflict):
+                            return String(localized: "public_extensions_mcp_name_conflict_action")
+                        case .some(.notConfigured):
+                            return String(localized: "public_extensions_use_template")
+                        case .none:
+                            return String(localized: "public_extensions_open_documentation")
+                        }
+                    },
+                    action: { item in
+                        switch templateMatch(item) {
+                        case .some(.sameConfiguration):
+                            requestOpenExisting(item)
+                        case .some(.nameConflict):
+                            requestTemplate(item, hasNameConflict: true)
+                        case .some(.notConfigured):
+                            requestTemplate(item)
+                        case .none:
+                            openOfficialDocumentation(for: item)
+                        }
+                    }
+                )
+            } else {
+                SettingsConnectionStatus()
+                if let initialSelectionError {
+                    ContentUnavailableView(String(localized: "mcp_server_unavailable"), systemImage: "link", description: Text(initialSelectionError))
                 }
-            }
-            ForEach(servers.keys.sorted(), id: \.self) { serverName in
-                Button(serverName) { select(serverName) }
-            }
-            HStack {
-                Button("settings_linux_refresh_button") { Task { await load() } }.disabled(!repository.connected)
-                Button("settings_parity_new_server") { select(nil) }.disabled(scopeRow.isEmpty)
-            }
-            TextField("settings_parity_server_name", text: $name).textFieldStyle(.roundedBorder)
-                .disabled(selectedName != nil || !writable).autocorrectionDisabled().textInputAutocapitalization(.never)
-            TextEditor(text: $draft).font(.system(.body, design: .monospaced)).frame(minHeight: 180)
-                .disabled(!writable).autocorrectionDisabled().textInputAutocapitalization(.never)
-            HStack {
-                Button("settings_parity_save_server") { Task { await save(remove: false) } }.disabled(!writable || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                if selectedName != nil {
-                    Button("settings_parity_remove_server", role: .destructive) { Task { await save(remove: true) } }.disabled(!writable)
+                Picker(String(localized: "mcp_storage_scope"), selection: $scope) {
+                    Text(String(localized: "settings_parity_user_layer")).tag("user"); Text(String(localized: "mcp_scope_local_title")).tag("local"); Text(String(localized: "mcp_scope_project_title")).tag("project")
+                }.pickerStyle(.segmented)
+                // MCP 的三个作用域和设置页的层用了同样的词，却是两套独立存储 —— 而且
+                // 「本地」的含义正好相反：设置层的 local 在项目内，MCP 的 local 在主目录。
+                // 刚在设置页学会一个意思的人，到这一页会把同一个词读成同一个意思。
+                Text(mcpScopeDescription).font(.caption).foregroundStyle(.secondary)
+                Text("mcp_scope_vs_layers_note").font(.caption2).foregroundStyle(.secondary)
+                Text(scopeRow["path"] as? String ?? String(localized: "mcp_scope_load_hint"))
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                DisclosureGroup(String(localized: "mcp_runtime_servers")) {
+                    ForEach(host.convo.mcpServers) { server in
+                        HStack {
+                            Text(server.name)
+                            Spacer()
+                            Text(String(describing: server.status)).foregroundStyle(.secondary)
+                        }.padding(.vertical, 4)
+                    }
+                }
+                ForEach(servers.keys.sorted(), id: \.self) { serverName in
+                    Button(serverName) { select(serverName) }
+                }
+                HStack {
+                    Button("settings_linux_refresh_button") { Task { await load() } }.disabled(!repository.connected)
+                    Button("settings_parity_new_server") { select(nil) }.disabled(scopeRow.isEmpty)
+                }
+                TextField("settings_parity_server_name", text: $name).textFieldStyle(.roundedBorder)
+                    .disabled(selectedName != nil || !writable).autocorrectionDisabled().textInputAutocapitalization(.never)
+                TextEditor(text: $draft).font(.system(.body, design: .monospaced)).frame(minHeight: 180)
+                    .disabled(!writable).autocorrectionDisabled().textInputAutocapitalization(.never)
+                HStack {
+                    Button("settings_parity_save_server") { Task { await save(remove: false) } }.disabled(!writable || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if selectedName != nil {
+                        Button("settings_parity_remove_server", role: .destructive) { Task { await save(remove: true) } }.disabled(!writable)
+                    }
                 }
             }
         }.task(id: repository.sourceGeneration) { await load() }
@@ -219,7 +289,34 @@ struct DesktopMCPAdminPage: View {
         }
         .onChange(of: repository.catalogs["mcp"]) { _, _ in
             resolveInitialSelection()
-            select(selectedName.flatMap { servers[$0] == nil ? nil : $0 })
+            if let selectedName, servers[selectedName] != nil {
+                if hasUnsavedDraft {
+                    draftRevision = scopeRow["revision_sha256"] as? String
+                } else {
+                    select(selectedName)
+                }
+            } else if selectedName == nil {
+                // A public template is an unsaved draft. Catalog refreshes must
+                // update its revision without replacing its raw JSON contents.
+                draftRevision = scopeRow["revision_sha256"] as? String
+            } else if !hasUnsavedDraft {
+                select(nil)
+            }
+        }
+        .alert(directoryConfirmationTitle, isPresented: $confirmsTemplateReplacement) {
+            Button(String(localized: "public_extensions_continue"), role: .destructive) {
+                switch pendingPublicMCPAction {
+                case .some(.useTemplate(let item)): applyTemplate(item)
+                case .some(.openExisting(let name)):
+                    select(name)
+                    directoryTab = .personal
+                case .none: break
+                }
+                pendingPublicMCPAction = nil
+            }
+            Button(String(localized: "common_cancel"), role: .cancel) { pendingPublicMCPAction = nil }
+        } message: {
+            Text(directoryConfirmationMessage)
         }
     }
     private func load() async {
@@ -240,8 +337,55 @@ struct DesktopMCPAdminPage: View {
         selectedName = selected
         name = selected ?? ""
         draft = DesktopSettingsRepository.json(selected.flatMap { servers[$0] } ?? [:])
+        baselineName = name
+        baselineDraft = draft
         draftRevision = scopeRow["revision_sha256"] as? String
     }
+
+    private func requestTemplate(_ item: PublicExtensionItem, hasNameConflict: Bool = false) {
+        guard case .some = item.mcpConfig else { return }
+        guard hasNameConflict || hasUnsavedDraft else {
+            applyTemplate(item)
+            return
+        }
+        pendingPublicMCPAction = .useTemplate(item)
+        if hasNameConflict {
+            directoryConfirmationTitle = String(localized: "public_extensions_mcp_name_conflict_title")
+            directoryConfirmationMessage = String(localized: "public_extensions_mcp_name_conflict_message")
+        } else {
+            directoryConfirmationTitle = String(localized: "public_extensions_replace_title")
+            directoryConfirmationMessage = String(localized: "public_extensions_replace_message")
+        }
+        confirmsTemplateReplacement = true
+    }
+
+    private func requestOpenExisting(_ item: PublicExtensionItem) {
+        let name = item.mcpName ?? item.name
+        guard hasUnsavedDraft else {
+            select(name)
+            directoryTab = .personal
+            return
+        }
+        pendingPublicMCPAction = .openExisting(name: name)
+        directoryConfirmationTitle = String(localized: "public_extensions_open_existing_title")
+        directoryConfirmationMessage = String(localized: "public_extensions_open_existing_message")
+        confirmsTemplateReplacement = true
+    }
+
+    private func applyTemplate(_ item: PublicExtensionItem) {
+        guard let config = item.mcpConfig else { return }
+        selectedName = nil
+        name = item.mcpName ?? item.name
+        draft = DesktopSettingsRepository.json(config)
+        draftRevision = scopeRow["revision_sha256"] as? String
+        directoryTab = .personal
+    }
+
+    private func openOfficialDocumentation(for item: PublicExtensionItem) {
+        guard let url = URL(string: item.documentationURL), url.scheme?.lowercased() == "https" else { return }
+        openURL(url)
+    }
+
     private func save(remove: Bool) async {
         guard writable, let config = DesktopSettingsRepository.object(draft) else { repository.errorMessage = String(localized: "mcp_json_object_required"); return }
         let payload: [String: Any] = ["scope": scope, "name": name, "config": config]

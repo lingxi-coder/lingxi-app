@@ -2000,7 +2000,7 @@ fun RootScreen(
                     "开发目录已变化，没有插入草稿。"
                 }
                 if (appId == null) {
-                    val prompt = "请在这个源码项目中创建应用：$name。使用 LocalApp schema 2，完成后发布到本机应用库。"
+                    val prompt = "请在这个源码项目中创建应用：$name。使用 local-app skill 和 LocalApp schema 2，完成后发布到本机应用库。"
                     val key = ConversationScope.Project(project.record.id).sessionStateKey(mode)
                     scopeStore.persistDraft(key, prompt)
                     draft = prompt; draftScopeKey = key; chatViewModel.onDraftChanged(prompt)

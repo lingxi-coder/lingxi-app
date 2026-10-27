@@ -553,6 +553,15 @@ export class SessionRuntime {
     generation: number,
     request: MediaDeviceRequestEnvelopeDto,
   ): Promise<void> {
+    // Lifecycle events must remain ordered even if an old native lease is
+    // still closing. Wait for the latest owner update here instead, and do not
+    // dispatch against a superseded connection or owner transition.
+    while (generation === this.generation && client === this.client && !this.disposed) {
+      const update = this.nativeMediaDeviceUpdate;
+      await update;
+      if (update === this.nativeMediaDeviceUpdate) break;
+    }
+    if (generation !== this.generation || client !== this.client || this.disposed) return;
     const devices = this.nativeMediaDevices;
     let response: MediaDeviceResponseDto;
     if (devices) {
@@ -2307,7 +2316,7 @@ export class SessionRuntime {
           this.fail('engine resumed a different session id');
           return;
         }
-        await this.updateNativeMediaOwner(event.session_id);
+        void this.updateNativeMediaOwner(event.session_id);
         this.sessionHasHistory = true;
         this.sessionIdentityCommitted = true;
         if (this.pendingSessionResume) {
@@ -2316,7 +2325,7 @@ export class SessionRuntime {
         }
       }
       if (event.type === 'session_started') {
-        await this.updateNativeMediaOwner(event.session_id);
+        void this.updateNativeMediaOwner(event.session_id);
       }
       if (event.type === 'permission_mode_changed' && event.mode === this.pendingPermissionSwitch?.mode) {
         this.pendingPermissionSwitch.complete();
@@ -2368,7 +2377,7 @@ export class SessionRuntime {
         this.cancellingTurn = false;
         this.clearTurnInteractions(event.type === 'session_ended');
       }
-      if (event.type === 'session_ended') await this.updateNativeMediaOwner();
+      if (event.type === 'session_ended') void this.updateNativeMediaOwner();
       if (event.type === 'slash_command_result' && this.pendingModelSwitch?.slash && this.pendingModelSwitch.sent && event.turn_id === this.pendingModelSwitch.turnId) {
         const pending = this.pendingModelSwitch;
         if (event.is_error) pending.fail(new Error('Model switch failed.'));
@@ -2738,14 +2747,6 @@ export class SessionRuntime {
       this.activeTurnGeneration = this.generation;
       this.activeTurnId = turnId;
       this.cancellingTurn = false;
-      // The bridge announces engine-initiated turns, but an ordinary submitted
-      // prompt relies on its submitting client to open the turn. Passive remote
-      // viewers need that boundary too, before any deltas can be rendered. Keep
-      // it in the replay stream without replaying a second start to the sender.
-      this.noteRemoteEvent(this.eventEnvelope({
-        type: 'turn_started',
-        ...(turnId !== undefined ? { turn_id: turnId } : {}),
-      }, true));
       this.notifyActivityChanged();
     }
   }

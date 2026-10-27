@@ -26,7 +26,9 @@ struct AudioConfigurationV4 {
 #[serde(rename_all = "camelCase")]
 struct RecognitionV4 {
     source: String,
-    offline_model_id: Option<String>,
+    // Parsed for schema validation; the native audio service owns model selection.
+    #[serde(rename = "offlineModelId")]
+    _offline_model_id: Option<String>,
     cloud: CloudV4,
 }
 
@@ -187,9 +189,10 @@ fn validate_voice_scope(
         (AudioRouteMode::HostConfigured, "system" | "offline") => {
             let source_matches = saved_source == "automatic" || saved_source == voice.source;
             let offline_model_matches = voice.source != "offline"
-                || voice.model_id.as_deref().is_some_and(|model| {
-                    offline_model_id.map_or(true, |selected| selected == model)
-                });
+                || voice
+                    .model_id
+                    .as_deref()
+                    .is_some_and(|model| offline_model_id.is_none_or(|selected| selected == model));
             if source_matches && offline_model_matches {
                 (route, None)
             } else {
@@ -337,6 +340,18 @@ mod tests {
                 .and_then(|defaults| defaults.voice.as_deref()),
             Some("system-voice")
         );
+    }
+
+    #[test]
+    fn recognition_offline_model_is_validated_but_selected_by_the_native_host() {
+        let saved = r#"{"schemaVersion":4,"recognition":{"source":"offline","offlineModelId":"model-a","cloud":{"binding":"follow_session"}},"speech":{"source":"automatic","cloud":{"binding":"follow_session"}},"language":"auto","rate":1.0}"#;
+        let settings = audio_routing_settings_from_v4_json_checked(saved).unwrap();
+        assert!(matches!(
+            settings.operations.get(&AudioOperationKind::Transcribe),
+            Some(AudioRouteMode::HostConfigured)
+        ));
+        let invalid = saved.replace("\"offlineModelId\":\"model-a\"", "\"offlineModelId\":42");
+        assert!(audio_routing_settings_from_v4_json_checked(&invalid).is_err());
     }
 
     #[test]

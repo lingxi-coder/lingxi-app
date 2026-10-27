@@ -23,7 +23,7 @@ import {
   type TerminalScope,
 } from '../shared/terminal.js';
 import { createRequire } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import {
   closeSync,
@@ -56,9 +56,11 @@ import { CH_SESSION_WORKSPACE, sessionCatalogScope, type SessionCatalogRow, type
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
 import {
+  deletePluginSecretsForPlugin,
   readProviderEnvironmentCredential,
   resolveCodexOAuthSession,
   resolveProviderTestCredential,
+  validatePluginSecretPluginId,
   type CredentialBrokerStatus,
   type ProviderCredentialBroker,
 } from './credential-broker.js';
@@ -117,6 +119,14 @@ export interface PluginSecretMetadata {
   restartRequired?: boolean;
 }
 
+export interface PluginSecretCleanupResult {
+  pluginId: string;
+  status: 'cleared' | 'retained' | 'deferred' | 'partial';
+  deletedCount: number;
+  failedCount: number;
+  restartRequired?: boolean;
+}
+
 export const CH_BOOTSTRAP = 'lingxi:bootstrap';
 export const CH_SETTINGS_GET = 'lingxi:settings:get';
 export const CH_SETTINGS_FILE_OPEN = 'lingxi:settings:file:open';
@@ -135,6 +145,7 @@ export const CH_CODEX_CANCEL = 'lingxi:codex:cancel';
 export const CH_PLUGIN_SECRET_GET = 'lingxi:plugin-secret:get';
 export const CH_PLUGIN_SECRET_SET = 'lingxi:plugin-secret:set';
 export const CH_PLUGIN_SECRET_CLEAR = 'lingxi:plugin-secret:clear';
+export const CH_PLUGIN_SECRET_CLEANUP = 'lingxi:plugin-secret:cleanup-after-uninstall';
 export const CH_BRIDGE_RESTART = 'lingxi:bridge:restart';
 export const CH_DIAGNOSTICS_GET = 'lingxi:diagnostics:get';
 export const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
@@ -176,6 +187,94 @@ function credentialBrokerDisplayError(diagnostic: string): string {
 function pathEscapes(root: string, candidate: string): boolean {
   const value = relative(root, candidate);
   return value === '..' || value.startsWith(`..${sep}`) || isAbsolute(value);
+}
+
+const MAX_PLUGIN_REGISTRY_BYTES = 8 * 1024 * 1024;
+
+interface InstalledPluginRegistrySnapshot {
+  revision: string;
+  installed: boolean;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Read the canonical V2 registry without traversing symlinked plugin paths. */
+function readInstalledPluginRegistrySnapshot(configHome: string, pluginId: string): InstalledPluginRegistrySnapshot {
+  validatePluginSecretPluginId(pluginId);
+  if (!isAbsolute(configHome) || configHome.includes('\0')) throw new Error('plugin registry root is unavailable');
+
+  const root = realpathSync.native(resolve(configHome));
+  if (!lstatSync(root).isDirectory()) throw new Error('plugin registry root is unavailable');
+  const pluginsDir = join(root, 'plugins');
+  const pluginsMetadata = lstatSync(pluginsDir);
+  if (!pluginsMetadata.isDirectory() || pluginsMetadata.isSymbolicLink()) {
+    throw new Error('plugin registry directory is unsafe');
+  }
+  const canonicalPluginsDir = realpathSync.native(pluginsDir);
+  if (canonicalPluginsDir !== pluginsDir || pathEscapes(root, canonicalPluginsDir)) {
+    throw new Error('plugin registry directory is unsafe');
+  }
+
+  const registryPath = join(pluginsDir, 'installed_plugins.json');
+  const before = lstatSync(registryPath);
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error('plugin registry file is unsafe');
+  if (before.size > MAX_PLUGIN_REGISTRY_BYTES) throw new Error('plugin registry file is too large');
+  const canonicalRegistryPath = realpathSync.native(registryPath);
+  if (canonicalRegistryPath !== registryPath || pathEscapes(pluginsDir, canonicalRegistryPath)) {
+    throw new Error('plugin registry file is unsafe');
+  }
+
+  const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+  const fd = openSync(registryPath, constants.O_RDONLY | noFollow);
+  let bytes: Buffer;
+  try {
+    const metadata = fstatSync(fd);
+    if (!metadata.isFile() || metadata.size > MAX_PLUGIN_REGISTRY_BYTES
+      || metadata.dev !== before.dev || metadata.ino !== before.ino) {
+      throw new Error('plugin registry file changed while opening');
+    }
+    bytes = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (read === 0) throw new Error('plugin registry file changed while reading');
+      offset += read;
+    }
+    const after = lstatSync(registryPath);
+    if (after.isSymbolicLink() || !after.isFile() || after.dev !== metadata.dev || after.ino !== metadata.ino
+      || realpathSync.native(registryPath) !== canonicalRegistryPath) {
+      throw new Error('plugin registry file changed while reading');
+    }
+  } finally {
+    closeSync(fd);
+  }
+
+  let document: unknown;
+  try {
+    document = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw new Error('plugin registry file is invalid');
+  }
+  if (!isPlainRecord(document) || document['version'] !== 2 || !isPlainRecord(document['plugins'])) {
+    throw new Error('plugin registry format is unsupported');
+  }
+  const plugins = document['plugins'];
+  let installed = false;
+  for (const [id, records] of Object.entries(plugins)) {
+    if (!id || !Array.isArray(records) || records.length === 0) {
+      throw new Error('plugin registry records are invalid');
+    }
+    for (const record of records) {
+      if (!isPlainRecord(record) || typeof record['scope'] !== 'string' || !record['scope']
+        || typeof record['installPath'] !== 'string' || !record['installPath']) {
+        throw new Error('plugin registry records are invalid');
+      }
+    }
+    if (id === pluginId) installed = true;
+  }
+  return { revision: createHash('sha256').update(bytes).digest('hex'), installed };
 }
 
 function decodedTextLooksBinary(value: string): boolean {
@@ -1199,24 +1298,27 @@ export class HostController {
         throw new Error('invalid plugin secret');
       }
       if (!this.credentialBroker) throw new Error('secure plugin credential broker is unavailable');
-      const preview = await this.credentialBroker.setPluginSecret(pluginId, key, secret);
-      this.bridge.invalidateLaunchConfigCache();
-      let restartRequired = this.hasActiveWork();
-      if (!restartRequired) {
-        try {
-          await this.restartIfConfigured();
-        } catch (error) {
-          restartRequired = true;
-          this.diagnostics.add('warn', 'host', error);
+      validatePluginSecretPluginId(pluginId);
+      return this.enqueuePluginSecretMutation(pluginId, async () => {
+        const preview = await this.credentialBroker!.setPluginSecret(pluginId, key, secret);
+        this.bridge.invalidateLaunchConfigCache();
+        let restartRequired = this.hasActiveWork();
+        if (!restartRequired) {
+          try {
+            await this.restartIfConfigured();
+          } catch (error) {
+            restartRequired = true;
+            this.diagnostics.add('warn', 'host', error);
+          }
         }
-      }
-      return {
-        pluginId: preview.pluginId,
-        key: preview.key,
-        configured: preview.configured,
-        ...(preview.maskedValue ? { maskedValue: preview.maskedValue } : {}),
-        ...(restartRequired ? { restartRequired: true } : {}),
-      } satisfies PluginSecretMetadata;
+        return {
+          pluginId: preview.pluginId,
+          key: preview.key,
+          configured: preview.configured,
+          ...(preview.maskedValue ? { maskedValue: preview.maskedValue } : {}),
+          ...(restartRequired ? { restartRequired: true } : {}),
+        } satisfies PluginSecretMetadata;
+      });
     });
     this.ipc.handle(CH_PLUGIN_SECRET_CLEAR, async (
       event: IpcMainInvokeEvent,
@@ -1226,18 +1328,33 @@ export class HostController {
       this.assertSender(event);
       if (typeof pluginId !== 'string' || typeof key !== 'string') throw new Error('invalid plugin secret reference');
       if (!this.credentialBroker) throw new Error('secure plugin credential broker is unavailable');
-      await this.credentialBroker.deletePluginSecret(pluginId, key);
-      this.bridge.invalidateLaunchConfigCache();
-      let restartRequired = this.hasActiveWork();
-      if (!restartRequired) {
-        try {
-          await this.restartIfConfigured();
-        } catch (error) {
-          restartRequired = true;
-          this.diagnostics.add('warn', 'host', error);
+      validatePluginSecretPluginId(pluginId);
+      return this.enqueuePluginSecretMutation(pluginId, async () => {
+        await this.credentialBroker!.deletePluginSecret(pluginId, key);
+        this.bridge.invalidateLaunchConfigCache();
+        let restartRequired = this.hasActiveWork();
+        if (!restartRequired) {
+          try {
+            await this.restartIfConfigured();
+          } catch (error) {
+            restartRequired = true;
+            this.diagnostics.add('warn', 'host', error);
+          }
         }
+        return { pluginId, key, configured: false, ...(restartRequired ? { restartRequired: true } : {}) } satisfies PluginSecretMetadata;
+      });
+    });
+    this.ipc.handle(CH_PLUGIN_SECRET_CLEANUP, async (
+      event: IpcMainInvokeEvent,
+      pluginId: unknown,
+      lastScopeRemoved: unknown,
+    ): Promise<PluginSecretCleanupResult> => {
+      this.assertSender(event);
+      if (typeof pluginId !== 'string' || lastScopeRemoved !== true) {
+        throw new Error('plugin credential cleanup requires a confirmed last-scope uninstall');
       }
-      return { pluginId, key, configured: false, ...(restartRequired ? { restartRequired: true } : {}) } satisfies PluginSecretMetadata;
+      validatePluginSecretPluginId(pluginId);
+      return this.enqueuePluginSecretMutation(pluginId, () => this.deletePluginSecretsAfterUninstall(pluginId));
     });
     this.ipc.handle(CH_BRIDGE_RESTART, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
       this.assertSender(event);
@@ -1681,6 +1798,80 @@ export class HostController {
     });
     this.credentialMutations.set(providerId, completion);
     return completion;
+  }
+
+  private enqueuePluginSecretMutation<T>(pluginId: string, operation: () => Promise<T>): Promise<T> {
+    return this.enqueueCredentialMutation(`plugin-secret:${pluginId}`, operation);
+  }
+
+  private async deletePluginSecretsAfterUninstall(pluginId: string): Promise<PluginSecretCleanupResult> {
+    if (!this.credentialBroker) throw new Error('secure plugin credential broker is unavailable');
+    const { configHome } = await this.sessionCatalog.productPaths();
+    const initial = readInstalledPluginRegistrySnapshot(configHome, pluginId);
+    if (initial.installed) {
+      return { pluginId, status: 'retained', deletedCount: 0, failedCount: 0 };
+    }
+
+    type RegistryGuardStatus = 'stable' | 'retained' | 'changed' | 'unavailable';
+    let guardStatus: RegistryGuardStatus = 'stable';
+    const canDelete = async (): Promise<boolean> => {
+      let current: InstalledPluginRegistrySnapshot;
+      try {
+        current = readInstalledPluginRegistrySnapshot(configHome, pluginId);
+      } catch (error) {
+        guardStatus = 'unavailable';
+        this.diagnostics.add('warn', 'host', `plugin credential cleanup registry check failed: ${sanitizeDiagnostic(error)}`);
+        return false;
+      }
+      if (current.installed) {
+        guardStatus = 'retained';
+        return false;
+      }
+      if (current.revision !== initial.revision) {
+        guardStatus = 'changed';
+        return false;
+      }
+      guardStatus = 'stable';
+      return true;
+    };
+
+    const summary = await deletePluginSecretsForPlugin(pluginId, this.credentialBroker, canDelete);
+    if (summary.failedCount > 0) {
+      this.diagnostics.add('warn', 'host', `plugin credential cleanup left ${summary.failedCount} broker key(s)`);
+    }
+    const guardStatusAtCleanupEnd = guardStatus as RegistryGuardStatus;
+    await canDelete();
+    const checkedGuardStatus = guardStatus as RegistryGuardStatus;
+    const effectiveGuardStatus = checkedGuardStatus === 'stable' && guardStatusAtCleanupEnd !== 'stable'
+      ? guardStatusAtCleanupEnd
+      : checkedGuardStatus;
+
+    let restartRequired = false;
+    if (summary.deletedCount > 0) {
+      this.bridge.invalidateLaunchConfigCache();
+      restartRequired = this.hasActiveWork();
+      if (!restartRequired) {
+        try {
+          await this.restartIfConfigured();
+        } catch (error) {
+          restartRequired = true;
+          this.diagnostics.add('warn', 'host', error);
+        }
+      }
+    }
+
+    let status: PluginSecretCleanupResult['status'];
+    if (effectiveGuardStatus === 'retained' && summary.deletedCount === 0) status = 'retained';
+    else if (effectiveGuardStatus !== 'stable') status = summary.deletedCount > 0 || summary.failedCount > 0 ? 'partial' : 'deferred';
+    else if (summary.aborted || summary.failedCount > 0) status = 'partial';
+    else status = 'cleared';
+    return {
+      pluginId,
+      status,
+      deletedCount: summary.deletedCount,
+      failedCount: summary.failedCount,
+      ...(restartRequired ? { restartRequired: true } : {}),
+    };
   }
 
   private credentialProviderIds(): string[] {
@@ -2279,7 +2470,7 @@ export class HostController {
       CH_WORKSPACE_FILES_SEARCH, CH_COMPUTER_SETTINGS,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_PROVIDER_CONNECTION_TEST, CH_CODEX_LOGIN, CH_CODEX_CANCEL,
-      CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,
+      CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR, CH_PLUGIN_SECRET_CLEANUP,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_INTERFACE_LOCALE, CH_OPEN_SYSTEM_SETTINGS,
       CH_REALTIME_AUDIO_COMMAND, CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_OPERATION, CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_FINISH_LISTEN,

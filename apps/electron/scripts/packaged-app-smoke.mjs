@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
@@ -435,6 +435,11 @@ function collectLeakMatches(text, patterns) {
   return patterns.filter((pattern) => pattern.test(text));
 }
 
+function processIdFromCommand(line) {
+  const match = line.match(/^\s*(\d+)\s+/);
+  return match ? Number.parseInt(match[1], 10) : undefined;
+}
+
 function trackedCommands(tempRoot) {
   try {
     return execFileSync('/bin/ps', ['-ax', '-o', 'pid=,command='], { encoding: 'utf8' })
@@ -447,16 +452,18 @@ function trackedCommands(tempRoot) {
   }
 }
 
-async function reapTrackedCommands(tempRoot) {
-  const evidence = trackedCommands(tempRoot);
+async function reapTrackedCommands(tempRoot, protectedProcessIds = new Set()) {
+  const evidence = trackedCommands(tempRoot)
+    .filter((line) => !protectedProcessIds.has(processIdFromCommand(line)));
   for (const line of evidence) {
-    const pid = Number.parseInt(line, 10);
+    const pid = processIdFromCommand(line);
     if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) continue;
     try { process.kill(pid, 'SIGTERM'); } catch {}
   }
   if (evidence.length > 0) await delay(500);
-  for (const line of trackedCommands(tempRoot)) {
-    const pid = Number.parseInt(line, 10);
+  for (const line of trackedCommands(tempRoot)
+    .filter((entry) => !protectedProcessIds.has(processIdFromCommand(entry)))) {
+    const pid = processIdFromCommand(line);
     if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) continue;
     try { process.kill(pid, 'SIGKILL'); } catch {}
   }
@@ -752,6 +759,140 @@ async function assertRuntimeCleanup(tempRoot, bridgeRuntimeDir) {
     { timeoutMs: 10_000, intervalMs: 100, label: 'bridge runtime cleanup' },
   );
   assert.deepEqual(leftoverBridgeEntries, [], 'bridge runtime launch artifacts must be cleaned up');
+}
+
+function canonicalPathInside(root, candidate, label) {
+  const canonicalRoot = realpathSync.native(root);
+  const canonicalCandidate = realpathSync.native(candidate);
+  const relativePath = relative(canonicalRoot, canonicalCandidate);
+  assert.ok(
+    relativePath !== '' && relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath),
+    `${label} must resolve below the isolated smoke home`,
+  );
+  return canonicalCandidate;
+}
+
+function temporaryCredentialBrokerPaths(tempHome, channel) {
+  assert.ok(['development', 'production'].includes(channel));
+  const label = `com.lingxi.code.credential-broker${channel === 'development' ? '.development' : ''}`;
+  const canonicalHome = realpathSync.native(tempHome);
+  return {
+    homePath: canonicalHome,
+    label,
+    target: `gui/${process.getuid()}/${label}`,
+    plistPath: join(canonicalHome, 'Library', 'LaunchAgents', `${label}.plist`),
+    programPath: join(canonicalHome, 'Library', 'Application Support', 'LingXi', 'CredentialBroker',
+      channel, 'LingXiCredentialBroker.app', 'Contents', 'MacOS', 'LingXiCredentialBroker'),
+  };
+}
+
+function assertCredentialBrokerChannelUnregistered(channel) {
+  assert.ok(['development', 'production'].includes(channel));
+  const label = `com.lingxi.code.credential-broker${channel === 'development' ? '.development' : ''}`;
+  const target = `gui/${process.getuid()}/${label}`;
+  const state = spawnSync('/bin/launchctl', ['print', target], { encoding: 'utf8', timeout: 10_000 });
+  if (state.status === 113) return;
+  if (state.status !== 0) {
+    throw new Error(`cannot verify that the ${channel} credential Broker service is unregistered: ${state.stderr ?? state.error?.message ?? state.status}`);
+  }
+  throw new Error(`refusing packaged smoke because credential Broker service ${target} is already registered`);
+}
+
+function launchctlAssignment(output, name) {
+  return output.match(new RegExp(`^\\s*${name}\\s*=\\s*(.+?)\\s*$`, 'm'))?.[1];
+}
+
+export function assertTemporaryBrokerLaunchdIdentity(output, paths) {
+  const serviceTarget = output.match(/^\s*(\S+)\s*=\s*\{$/m)?.[1];
+  assert.equal(serviceTarget, paths.target, 'launchd service label must match the isolated Broker target');
+  const launchdPath = launchctlAssignment(output, 'path');
+  const launchdProgram = launchctlAssignment(output, 'program');
+  assert.ok(launchdPath, 'launchd must report the registered Broker plist path');
+  assert.ok(launchdProgram, 'launchd must report the registered Broker program path');
+  const plistPath = realpathSync.native(launchdPath);
+  const programPath = realpathSync.native(launchdProgram);
+  assert.equal(plistPath, paths.plistPath, 'refusing to operate on a Broker registered outside this isolated smoke home');
+  assert.equal(programPath, paths.programPath, 'refusing to operate on a Broker program that does not match this isolated smoke home');
+  const pidValue = launchctlAssignment(output, 'pid');
+  const pid = pidValue === undefined ? undefined : Number.parseInt(pidValue, 10);
+  assert.ok(pid === undefined || (Number.isSafeInteger(pid) && pid > 1), 'launchd Broker PID must be valid');
+  return { plistPath, programPath, pid };
+}
+
+function temporaryBrokerLaunchdState(paths) {
+  const result = spawnSync('/bin/launchctl', ['print', paths.target], {
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+  if (result.status === 113) return null;
+  assert.equal(result.status, 0, `cannot inspect isolated credential broker (${result.stderr ?? result.error?.message ?? result.status})`);
+
+  assert.equal(existsSync(paths.plistPath), true, 'isolated credential Broker LaunchAgent plist must exist');
+  const plistPath = canonicalPathInside(paths.homePath, paths.plistPath, 'credential Broker LaunchAgent plist');
+  const programPath = canonicalPathInside(paths.homePath, paths.programPath, 'credential Broker executable');
+  const identity = assertTemporaryBrokerLaunchdIdentity(result.stdout, { ...paths, plistPath, programPath });
+
+  const plist = JSON.parse(execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', plistPath], { encoding: 'utf8' }));
+  assert.equal(plist.Label, paths.label, 'isolated Broker plist label must match the expected channel');
+  assert.ok(Array.isArray(plist.ProgramArguments) && plist.ProgramArguments.length === 1,
+    'isolated Broker plist must launch only its expected executable');
+  assert.equal(realpathSync.native(plist.ProgramArguments[0]), programPath,
+    'isolated Broker plist must launch only its expected executable');
+  assert.equal(plist.MachServices?.[paths.label], true, 'isolated Broker plist must own its expected Mach service');
+
+  const { pid } = identity;
+  if (pid !== undefined) {
+    const images = execFileSync('/usr/sbin/lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], { encoding: 'utf8' })
+      .split('\n')
+      .filter((line) => line.startsWith('n'))
+      .map((line) => line.slice(1))
+      .filter((path) => path.startsWith('/'));
+    assert.ok(images.some((image) => {
+      try { return realpathSync.native(image) === programPath; } catch { return false; }
+    }), 'launchd Broker PID executable must match the isolated Broker program');
+  }
+  return { ...paths, plistPath, programPath, pid };
+}
+
+async function waitForTemporaryCredentialBroker(tempHome, channel, protectedProcessIds = new Set()) {
+  const paths = temporaryCredentialBrokerPaths(tempHome, channel);
+  return await waitFor(() => {
+    const state = temporaryBrokerLaunchdState(paths);
+    if (!state?.pid) return undefined;
+    protectedProcessIds.add(state.pid);
+    return state;
+  }, { timeoutMs: 10_000, intervalMs: 100, label: 'isolated credential Broker launch' });
+}
+
+async function bootoutTemporaryCredentialBroker(tempHome, channel, protectedProcessIds = new Set()) {
+  const paths = temporaryCredentialBrokerPaths(tempHome, channel);
+  let owned = temporaryBrokerLaunchdState(paths);
+  if (!owned) return false;
+  if (owned.pid !== undefined) protectedProcessIds.add(owned.pid);
+
+  // Re-read the service immediately before bootout. The label alone is never
+  // sufficient ownership evidence because a real user Broker may share it.
+  const actionTimeState = temporaryBrokerLaunchdState(paths);
+  assert.ok(actionTimeState, 'isolated Broker disappeared before guarded bootout');
+  assert.equal(actionTimeState.target, owned.target);
+  assert.equal(actionTimeState.plistPath, owned.plistPath);
+  assert.equal(actionTimeState.programPath, owned.programPath);
+  if (owned.pid !== undefined) assert.equal(actionTimeState.pid, owned.pid, 'isolated Broker PID changed before guarded bootout');
+  owned = actionTimeState;
+
+  const stopped = spawnSync('/bin/launchctl', ['bootout', owned.target], { encoding: 'utf8', timeout: 10_000 });
+  assert.ok([0, 3].includes(stopped.status), `isolated Broker bootout failed (${stopped.stderr ?? stopped.error?.message ?? stopped.status})`);
+  await waitFor(() => {
+    const result = spawnSync('/bin/launchctl', ['print', owned.target], { encoding: 'utf8', timeout: 10_000 });
+    if (result.status === 113) return true;
+    assert.equal(result.status, 0, `launchctl failed while waiting for isolated Broker removal (${result.stderr ?? result.error?.message ?? result.status})`);
+    const current = temporaryBrokerLaunchdState(paths);
+    assert.ok(current, 'isolated Broker disappeared during launchd verification');
+    assert.equal(current.plistPath, owned.plistPath, 'Broker service was replaced by a different LaunchAgent');
+    assert.equal(current.programPath, owned.programPath, 'Broker service was replaced by a different executable');
+    return undefined;
+  }, { timeoutMs: 10_000, intervalMs: 100, label: 'isolated credential Broker bootout' });
+  return true;
 }
 
 // A unique, disposable profile exercises the signed Broker rather than mocking
@@ -1345,6 +1486,10 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   if (!existsSync(appPath)) {
     throw new Error(`packaged app is missing: ${appPath}`);
   }
+  const brokerManifest = JSON.parse(readFileSync(join(appPath, 'Contents', 'Resources',
+    'credential-broker', 'broker-manifest.json'), 'utf8'));
+  assert.ok(['development', 'production'].includes(brokerManifest.channel), 'packaged Broker channel is invalid');
+  assertCredentialBrokerChannelUnregistered(brokerManifest.channel);
   const preexistingAppCommands = runningAppCommands();
   if (preexistingAppCommands.length > 0) {
     throw new Error(`refusing packaged smoke launch while another ${APP_NAME} instance is running: ${preexistingAppCommands.join(' | ')}`);
@@ -1381,6 +1526,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   const cdpPort = await reserveLoopbackPort();
   const env = sanitizePackagedAppEnvironment(process.env, {
     HOME: tempHome,
+    CFFIXED_USER_HOME: tempHome,
     TMPDIR: tempTmp,
     LINGXI_CONFIG_DIR: join(tempHome, ".lingxi"),
   });
@@ -1398,6 +1544,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   let customProbe;
   let coldSession;
   let scheduledRecords;
+  const protectedBrokerProcessIds = new Set();
   const consoleErrors = [];
   const runtimeExceptions = [];
   const logErrors = [];
@@ -1449,6 +1596,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     scheduledRecords = await assertScheduledPersistenceBeforeRestart(page, `${customProbe.providerId}/smoke-model`);
 
     assertNoRendererErrors();
+    await waitForTemporaryCredentialBroker(tempHome, brokerManifest.channel, protectedBrokerProcessIds);
 
     await closePackagedApp(browser, child, copiedAppBundleId);
     child = null;
@@ -1457,6 +1605,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     browser = null;
     page = null;
 
+    await bootoutTemporaryCredentialBroker(tempHome, brokerManifest.channel, protectedBrokerProcessIds);
     await assertRuntimeCleanup(tempRoot, runtimePaths.bridgeRuntimeDir);
 
     // Relaunch the same signed app and isolated settings home, then prove both
@@ -1476,12 +1625,14 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     const cleared = await evaluate(page, `window.lingxi.providerCredentials(${JSON.stringify(customProbe.providerId)})`);
     assert.equal(cleared.find((entry) => entry.providerId === customProbe.providerId)?.configured, false);
     assertNoRendererErrors();
+    await waitForTemporaryCredentialBroker(tempHome, brokerManifest.channel, protectedBrokerProcessIds);
     await closePackagedApp(browser, child, copiedAppBundleId);
     child = null;
     await browser.close();
     await page.close();
     browser = null;
     page = null;
+    await bootoutTemporaryCredentialBroker(tempHome, brokerManifest.channel, protectedBrokerProcessIds);
     await assertRuntimeCleanup(tempRoot, runtimePaths.bridgeRuntimeDir);
 
     return {
@@ -1516,10 +1667,26 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
         await new Promise((resolvePromise) => child.once('exit', resolvePromise));
       }
     }
-    const survivors = await reapTrackedCommands(tempRoot);
-    rmSync(tempRoot, { recursive: true, force: true });
+    let survivors = [];
+    let profileCleanupFailed = false;
+    try {
+      await bootoutTemporaryCredentialBroker(tempHome, brokerManifest.channel, protectedBrokerProcessIds);
+    } catch (error) {
+      profileCleanupFailed = true;
+      log(`refusing to remove isolated smoke home after Broker ownership/bootout verification failed: ${formatError(error)}`);
+    }
+    if (!profileCleanupFailed) {
+      survivors = await reapTrackedCommands(tempRoot, protectedBrokerProcessIds);
+      if (survivors.length === 0) rmSync(tempRoot, { recursive: true, force: true });
+      else log(`retaining isolated smoke home because processes survived normal cleanup: ${survivors.join(' | ')}`);
+    } else {
+      survivors = trackedCommands(tempRoot);
+    }
     if (output.stdout.trim()) log(`app stdout: ${output.stdout.trim()}`);
     if (output.stderr.trim()) log(`app stderr: ${output.stderr.trim()}`);
+    if (profileCleanupFailed) {
+      throw new Error(`isolated smoke home retained at ${tempRoot} because Broker cleanup could not be verified`);
+    }
     if (survivors.length > 0) {
       throw new Error(`tracked packaged processes survived cleanup: ${survivors.join(' | ')}`);
     }

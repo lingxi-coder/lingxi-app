@@ -36,7 +36,7 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         textValues(app).joined(separator: "\n")
     }
 
-    private func textValues(_ app: XCUIApplication) -> [String] {
+    private func textValues(_ app: XCUIApplication, deduplicating: Bool = true) -> [String] {
         let leaves = app.otherElements.allElementsBoundByIndex.filter {
             $0.children(matching: .any).count == 0
         }
@@ -48,12 +48,126 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         var seen = Set<String>()
         var values: [String] = []
         for element in elements {
+            var elementValues = Set<String>()
             let candidates = [element.label, element.value as? String ?? ""]
-            for candidate in candidates where !candidate.isEmpty && seen.insert(candidate).inserted {
+            for candidate in candidates where !candidate.isEmpty && elementValues.insert(candidate).inserted {
+                if deduplicating && !seen.insert(candidate).inserted { continue }
                 values.append(candidate)
             }
         }
         return values
+    }
+
+    private func protocolPayload(
+        in app: XCUIApplication,
+        accepting predicate: ([String: Any]) -> Bool
+    ) -> [String: Any]? {
+        func decode(_ text: String) -> [String: Any]? {
+            guard let data = text.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data),
+                  let payload = json as? [String: Any],
+                  predicate(payload) else {
+                return nil
+            }
+            return payload
+        }
+
+        let values = textValues(app, deduplicating: false)
+        for value in values {
+            if let payload = decode(value) { return payload }
+        }
+
+        // WebKit can expose a <pre> as ordered leaf text nodes. Stitch only
+        // candidate fragments from those nodes, and accept them only if the
+        // caller's protocol-shape predicate matches the decoded JSON object.
+        let starts = values.indices.filter { index in
+            let value = values[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.hasPrefix("{") || value.contains("\"RunAgentInput\"")
+        }
+        for start in starts {
+            var fragments: [String] = []
+            let endLimit = min(values.count, start + 160)
+            for end in start..<endLimit {
+                fragments.append(values[end])
+                guard fragments.count > 1 else { continue }
+                for separator in ["", "\n"] {
+                    if let payload = decode(fragments.joined(separator: separator)) {
+                        return payload
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private func runResultPayload(in app: XCUIApplication) -> [String: Any]? {
+        protocolPayload(in: app) { payload in
+            guard let input = payload["RunAgentInput"] as? [String: Any],
+                  input["messages"] as? [[String: Any]] != nil,
+                  let runAgentResult = payload["RunAgentResult"] as? [String: Any],
+                  let result = runAgentResult["result"] as? [String: Any] else {
+                return false
+            }
+            return result["answer"] as? String != nil
+        }
+    }
+
+    private func runInputPayload(in app: XCUIApplication) -> [String: Any]? {
+        protocolPayload(in: app) { payload in
+            guard let input = payload["RunAgentInput"] as? [String: Any] else { return false }
+            return input["messages"] as? [[String: Any]] != nil
+        }
+    }
+
+    private func inputMessages(in payload: [String: Any]) -> [[String: Any]]? {
+        (payload["RunAgentInput"] as? [String: Any])?["messages"] as? [[String: Any]]
+    }
+
+    private func textContent(in message: [String: Any]) -> String? {
+        if let content = message["content"] as? String { return content }
+        guard let parts = message["content"] as? [[String: Any]] else { return nil }
+        let textParts = parts.compactMap { part -> String? in
+            guard part["type"] as? String == "text" else { return nil }
+            return part["text"] as? String
+        }
+        return textParts.isEmpty ? nil : textParts.joined()
+    }
+
+    private func answer(in payload: [String: Any]) -> String? {
+        (((payload["RunAgentResult"] as? [String: Any])?["result"] as? [String: Any])?["answer"] as? String)
+    }
+
+    private func publicImageRunIDs(in payload: [String: Any]) -> (runID: String, threadID: String)? {
+        guard let input = payload["RunAgentInput"] as? [String: Any],
+              let runID = input["runId"] as? String,
+              UUID(uuidString: runID) != nil,
+              let threadID = input["threadId"] as? String,
+              UUID(uuidString: threadID) != nil,
+              let messages = input["messages"] as? [[String: Any]],
+              messages.count == 1,
+              let message = messages.first,
+              message["role"] as? String == "user",
+              let parts = message["content"] as? [[String: Any]],
+              parts.count == 2 else {
+            return nil
+        }
+
+        let expectedPrompt = "Describe the main food visible in this public image and estimate how many pieces are visible."
+        guard let textPart = parts.first,
+              textPart["type"] as? String == "text",
+              textPart["text"] as? String == expectedPrompt,
+              let imagePart = parts.last,
+              imagePart["type"] as? String == "image",
+              let source = imagePart["source"] as? [String: Any],
+              source["type"] as? String == "data",
+              source["mimeType"] as? String == "image/jpeg",
+              source["value"] as? String == "[base64 omitted; 576216 bytes]",
+              let metadata = imagePart["metadata"] as? [String: Any],
+              let localAppMetadata = metadata["com.lingxi.localApp"] as? [String: Any],
+              localAppMetadata["filename"] as? String == "public-apple.jpg" else {
+            return nil
+        }
+        return (runID, threadID)
     }
 
     private func attachScreen(_ name: String) {
@@ -171,14 +285,21 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         return startedID
     }
 
-    private func startBrowserRun(_ browser: XCUIApplication, host: XCUIApplication) -> String? {
+    private func startBrowserRun(
+        _ browser: XCUIApplication,
+        host: XCUIApplication,
+        expectedRunID: String? = nil
+    ) -> String? {
+        guard waitForNativeStartButton(browser: browser, host: host) else { return nil }
         let start = host.buttons["开始 Agent 并返回应用"]
-        XCTAssertTrue(start.waitForExistence(timeout: 45), "The browser run should reach the trusted native handoff. Host UI: \(host.debugDescription)")
         let waitingCopy = "浏览器 Agent 请求等待后台任务许可。运行："
         let waitingLabel = host.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", waitingCopy)).firstMatch
         let nativeText = waitingLabel.exists ? waitingLabel.label : pageText(host)
         let nativeRunPrefix = regexMatches(#"运行：([0-9a-fA-F]{8})"#, in: nativeText).first
         XCTAssertNotNil(nativeRunPrefix, "The trusted Apps page must identify the pending public run. Host UI: \(host.debugDescription)")
+        if let expectedRunID, let nativeRunPrefix {
+            XCTAssertTrue(expectedRunID.lowercased().hasPrefix(nativeRunPrefix.lowercased()), "The native handoff prefix must match the existing pending public run ID.")
+        }
         attachScreen("native-agent-handoff-\(nativeRunPrefix ?? "run")")
         print("IOS_AGUI_NATIVE_HANDOFF_READY runPrefix=\(nativeRunPrefix ?? "unreadable") source=system-browser-deep-link")
         XCTAssertTrue(start.isHittable, "The explicit native Start Agent action must be available to the user.")
@@ -187,16 +308,150 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         return nativeRunPrefix
     }
 
+    private func matchesLingxiPageOpenPrompt(_ text: String) -> Bool {
+        let normalized = text.lowercased()
+        let namesLingxi = normalized.contains("lingxi") || normalized.contains("灵犀")
+        let englishPrompt = normalized.contains("open this page") && namesLingxi
+        let chinesePrompt = normalized.contains("打开")
+            && (normalized.contains("页面") || normalized.contains("网页") || normalized.contains("此页"))
+            && namesLingxi
+        return englishPrompt || chinesePrompt
+    }
+
+    private func promptText(in container: XCUIElement) -> String {
+        ([container.label]
+            + container.staticTexts.allElementsBoundByIndex.map(\.label)
+            + container.textViews.allElementsBoundByIndex.map(\.label))
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func exactWakePromptButton(in container: XCUIElement, opening: Bool) -> XCUIElement? {
+        let expected = opening ? ["open", "打开"] : ["cancel", "取消"]
+        return container.buttons.allElementsBoundByIndex.first { expected.contains($0.label.lowercased()) }
+    }
+
+    private func tapLingxiPageOpenPrompt(
+        in container: XCUIElement,
+        prompt: String,
+        source: String,
+        promptSeen: inout Bool
+    ) -> Bool {
+        guard matchesLingxiPageOpenPrompt(prompt) else { return false }
+        promptSeen = true
+        guard container.exists,
+              let open = exactWakePromptButton(in: container, opening: true),
+              let cancel = exactWakePromptButton(in: container, opening: false),
+              open.exists,
+              open.isEnabled,
+              open.isHittable,
+              cancel.exists,
+              cancel.isHittable else {
+            return false
+        }
+        attachScreen("browser-lingxi-open-prompt-\(source)")
+        print("IOS_AGUI_LINGXI_OPEN_PROMPT_MATCHED source=\(source) buttons=exact-open-cancel")
+        open.tap()
+        print("IOS_AGUI_LINGXI_WAKE_OPEN_CONFIRMED source=\(source)")
+        return true
+    }
+
+    private func acceptLingxiPageOpenPromptIfPresent(
+        browser: XCUIApplication,
+        springBoard: XCUIApplication,
+        promptSeen: inout Bool
+    ) -> Bool {
+        let containers: [(XCUIElement, String)] =
+            browser.alerts.allElementsBoundByIndex.map { ($0, "browser-alert") }
+            + browser.sheets.allElementsBoundByIndex.map { ($0, "browser-sheet") }
+            + springBoard.alerts.allElementsBoundByIndex.map { ($0, "springboard-alert") }
+        for (container, source) in containers {
+            if tapLingxiPageOpenPrompt(
+                in: container,
+                prompt: promptText(in: container),
+                source: source,
+                promptSeen: &promptSeen
+            ) {
+                return true
+            }
+        }
+
+        // Some iOS/browser combinations expose this system confirmation as a
+        // generic browser web UI instead of an alert or sheet. Require the
+        // explicit LingXi page-open text and exact scoped action buttons.
+        guard let promptElement = browser.staticTexts.allElementsBoundByIndex.first(where: {
+            $0.isHittable && matchesLingxiPageOpenPrompt($0.label)
+        }) else {
+            return false
+        }
+        return tapLingxiPageOpenPrompt(
+            in: browser,
+            prompt: promptElement.label,
+            source: "browser-static-text",
+            promptSeen: &promptSeen
+        )
+    }
+
+    private func waitForNativeStartButton(
+        browser: XCUIApplication,
+        host: XCUIApplication,
+        timeout: TimeInterval = 45
+    ) -> Bool {
+        let start = host.buttons["开始 Agent 并返回应用"]
+        let springBoard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let deadline = Date().addingTimeInterval(timeout)
+        var matchingPromptSeen = false
+        var openPromptTapped = false
+        while Date() < deadline {
+            if start.exists {
+                print("IOS_AGUI_NATIVE_START_BUTTON_VISIBLE promptSeen=\(matchingPromptSeen) openPromptTapped=\(openPromptTapped)")
+                return true
+            }
+            if !openPromptTapped {
+                openPromptTapped = acceptLingxiPageOpenPromptIfPresent(
+                    browser: browser,
+                    springBoard: springBoard,
+                    promptSeen: &matchingPromptSeen
+                )
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        attachScreen("native-handoff-timeout")
+        print("IOS_AGUI_NATIVE_HANDOFF_TIMEOUT promptSeen=\(matchingPromptSeen) openPromptTapped=\(openPromptTapped) hostStartVisible=false")
+        print("IOS_AGUI_CURRENT_BROWSER_DEBUG_BEGIN\n\(browser.debugDescription)\nIOS_AGUI_CURRENT_BROWSER_DEBUG_END")
+        XCTFail("Timed out waiting for the trusted native Start Agent button after resolving only the matching LingXi browser prompt.")
+        return false
+    }
+
     private func runPageButton(
         _ title: String,
         expectedSuccess: String,
         expectedAttachment: String,
         expectedPartType: String,
         browser: XCUIApplication,
-        host: XCUIApplication
+        host: XCUIApplication,
+        expectedRunID: String? = nil
     ) -> String {
         tapPageButton(title, in: browser)
-        let runIDBeforeHandoff = startBrowserRun(browser, host: host)
+        return finishPageRun(
+            expectedSuccess: expectedSuccess,
+            expectedAttachment: expectedAttachment,
+            expectedPartType: expectedPartType,
+            expectedRunID: expectedRunID,
+            browser: browser,
+            host: host
+        )
+    }
+
+    private func finishPageRun(
+        expectedSuccess: String,
+        expectedAttachment: String,
+        expectedPartType: String,
+        expectedRunID: String? = nil,
+        browser: XCUIApplication,
+        host: XCUIApplication
+    ) -> String {
+        let runIDBeforeHandoff = startBrowserRun(browser, host: host, expectedRunID: expectedRunID)
         var text = waitForPageText(expectedSuccess, in: browser, timeout: 240, scroll: true)
         if !text.contains("RUN_FINISHED") {
             text = waitForPageText("RUN_FINISHED", in: browser, timeout: 20, scroll: true)
@@ -205,6 +460,9 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         XCTAssertTrue(text.localizedCaseInsensitiveContains(expectedPartType), "Expected the official ContentPart type in RunAgentInput. Snapshot: \(text.prefix(3000))")
         XCTAssertTrue(text.contains("[base64 omitted"), "The browser evidence should show redacted inline bytes, not raw file data.")
         let runID = assertLifecycle(browser, outcome: "success", nativeRunPrefix: runIDBeforeHandoff)
+        if let expectedRunID {
+            XCTAssertEqual(runID, expectedRunID, "The terminal events must belong to the exact existing pending public run ID.")
+        }
         XCTAssertTrue(text.contains("RunAgentResult"), "Successful AG-UI run did not expose the official RunAgentResult.")
         attachScreen("browser-\(expectedPartType)-run-finished-\(runID.prefix(8))")
         print("IOS_AGUI_BROWSER_RUN_PASS kind=\(expectedPartType) runId=\(runID) terminal=RUN_FINISHED outcome=success")
@@ -227,13 +485,60 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         attachScreen("system-selected-browser-agent-page")
         print("IOS_AGUI_BROWSER_PAGE_READY appId=\(appID) browserBundleId=\(browserID) resolver=system-openURL")
 
-        _ = runPageButton("Run public image", expectedSuccess: "image run succeeded", expectedAttachment: "public-apple.jpg", expectedPartType: "image", browser: browser, host: host)
+        let retryPending = browser.buttons["Retry the same pending request"]
+        let isSubmittingImage = pageText(browser).contains("Submitting standard AG-UI input for image")
+        if isSubmittingImage {
+            guard let payload = runInputPayload(in: browser),
+                  let pendingImage = publicImageRunIDs(in: payload) else {
+                attachScreen("invalid-active-pending-image-input")
+                XCTFail("The browser is already submitting an image, but its RunAgentInput is not the exact public-apple.jpg fixture; refusing to start a replacement run.")
+                return
+            }
+            print("IOS_AGUI_PENDING_IMAGE_CONTINUE_READY runId=\(pendingImage.runID) threadId=\(pendingImage.threadID) file=public-apple.jpg")
+            _ = finishPageRun(
+                expectedSuccess: "image run succeeded",
+                expectedAttachment: "public-apple.jpg",
+                expectedPartType: "image",
+                expectedRunID: pendingImage.runID,
+                browser: browser,
+                host: host
+            )
+        } else if retryPending.exists && retryPending.isEnabled {
+            guard let payload = runInputPayload(in: browser),
+                  let pendingImage = publicImageRunIDs(in: payload) else {
+                attachScreen("invalid-pending-image-retry-input")
+                XCTFail("The visible pending retry was not the exact public-apple.jpg image input with valid public run/thread IDs; refusing to submit or retry another request.")
+                return
+            }
+            attachScreen("browser-pending-public-image-retry-\(pendingImage.runID.prefix(8))")
+            print("IOS_AGUI_PENDING_IMAGE_RETRY_READY runId=\(pendingImage.runID) threadId=\(pendingImage.threadID) file=public-apple.jpg")
+            tapPageButton("Retry the same pending request", in: browser)
+            _ = finishPageRun(
+                expectedSuccess: "image run succeeded",
+                expectedAttachment: "public-apple.jpg",
+                expectedPartType: "image",
+                expectedRunID: pendingImage.runID,
+                browser: browser,
+                host: host
+            )
+        } else {
+            let runImage = browser.buttons["Run public image"]
+            guard runImage.exists && runImage.isEnabled else {
+                attachScreen("pending-image-retry-and-new-run-unavailable")
+                XCTFail("Neither a validated pending retry nor the enabled new-image action is available; preserving the existing input.")
+                return
+            }
+            _ = runPageButton("Run public image", expectedSuccess: "image run succeeded", expectedAttachment: "public-apple.jpg", expectedPartType: "image", browser: browser, host: host)
+        }
         _ = runPageButton("Run text file", expectedSuccess: "document run succeeded", expectedAttachment: "acceptance-stationery.txt", expectedPartType: "document", browser: browser, host: host)
 
         tapPageButton("Create Chat", in: browser)
         let createdChat = waitForPageText("Created host-owned persistent Chat", in: browser, timeout: 30, scroll: true)
         XCTAssertTrue(createdChat.contains("threadId"), "Chat creation must expose its host-owned threadId.")
-        enterChatText("Answer with the exact phrase context-seed.", in: browser)
+        let markerSuffix = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12))
+        let contextMarker = "IOS_CHAT_CONTEXT_\(markerSuffix)"
+        let firstChatPrompt = "Remember this marker for my next message: \(contextMarker). For this turn, reply with exactly context-seed."
+        enterChatText(firstChatPrompt, in: browser)
         tapPageButton("Send Chat turn", in: browser)
         let firstChatRun = startBrowserRun(browser, host: host)
         var firstChatEvidence = waitForPageText("chat run succeeded", in: browser, timeout: 240, scroll: true)
@@ -241,7 +546,17 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             firstChatEvidence = waitForPageText("RUN_FINISHED", in: browser, timeout: 20, scroll: true)
         }
         let firstChatRunID = assertLifecycle(browser, outcome: "success", nativeRunPrefix: firstChatRun)
-        XCTAssertTrue(firstChatEvidence.contains("context-seed"), "The first Chat input and result should remain visible as canonical evidence.")
+        let firstPayload = try XCTUnwrap(runResultPayload(in: browser), "Could not decode the official RunAgentResult JSON from the page result element. Snapshot: \(pageText(browser).prefix(3000))")
+        let firstInput = try XCTUnwrap(firstPayload["RunAgentInput"] as? [String: Any], "The first RunAgentInput was missing.")
+        XCTAssertEqual(firstInput["runId"] as? String, firstChatRunID, "The first RunAgentInput must match the public run reported by lifecycle events.")
+        let firstMessages = try XCTUnwrap(inputMessages(in: firstPayload), "The first RunAgentInput must expose messages.")
+        XCTAssertEqual(firstMessages.count, 1, "The first Chat RunAgentInput must contain exactly its new user turn.")
+        let firstMessage = try XCTUnwrap(firstMessages.first, "The first RunAgentInput has no user message.")
+        XCTAssertEqual(firstMessage["role"] as? String, "user")
+        let firstInputText = try XCTUnwrap(textContent(in: firstMessage), "The first user message must include text content.")
+        XCTAssertTrue(firstInputText.contains(contextMarker), "The first user prompt must contain the unique synthetic context marker.")
+        let firstAnswer = try XCTUnwrap(answer(in: firstPayload), "RunAgentResult.result.answer was missing from the first Chat turn.")
+        XCTAssertEqual(firstAnswer, "context-seed", "The first Chat turn should answer exactly context-seed.")
         attachScreen("browser-chat-first-run-\(firstChatRunID.prefix(8))")
 
         tapPageButton("Read-only reconnect to last run", in: browser)
@@ -249,10 +564,13 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         XCTAssertTrue(reconnect.contains("no new run started"), "connectAgent must replay the existing run without submitting another run.")
         XCTAssertTrue(reconnect.contains(firstChatRunID), "Read-only replay must refer to the same public runId.")
         tapPageButton("Refresh Chat history", in: browser)
-        let history = waitForPageText("context-seed", in: browser, timeout: 30, scroll: true)
+        let history = waitForPageText(contextMarker, in: browser, timeout: 30, scroll: true)
+        XCTAssertTrue(history.contains("context-seed"), "Canonical Chat history should preserve the first assistant turn separately from the next RunAgentInput.")
         XCTAssertTrue(history.contains("assistant"), "Canonical Chat history should include the assistant reply.")
 
-        enterChatText("Using the previous message as context, answer with the exact phrase context-seed.", in: browser)
+        let followupPrompt = "What exact marker did I ask you to remember in the previous message? Reply with only the marker."
+        XCTAssertFalse(followupPrompt.contains(contextMarker), "The second user prompt must not reveal the marker.")
+        enterChatText(followupPrompt, in: browser)
         tapPageButton("Send Chat turn", in: browser)
         let followupRun = startBrowserRun(browser, host: host)
         var followup = waitForPageText("chat run succeeded", in: browser, timeout: 240, scroll: true)
@@ -260,8 +578,18 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             followup = waitForPageText("RUN_FINISHED", in: browser, timeout: 20, scroll: true)
         }
         let followupRunID = assertLifecycle(browser, outcome: "success", nativeRunPrefix: followupRun)
-        XCTAssertTrue(followup.contains("Answer with the exact phrase context-seed."), "The second Chat RunAgentInput must preserve the canonical first turn.")
-        XCTAssertTrue(followup.contains("Using the previous message as context"), "The second Chat RunAgentInput must append the new user turn.")
+        let followupPayload = try XCTUnwrap(runResultPayload(in: browser), "Could not decode the official RunAgentResult JSON from the follow-up page result element. Snapshot: \(pageText(browser).prefix(3000))")
+        let followupInput = try XCTUnwrap(followupPayload["RunAgentInput"] as? [String: Any], "The follow-up RunAgentInput was missing.")
+        XCTAssertEqual(followupInput["runId"] as? String, followupRunID, "The follow-up RunAgentInput must match the public run reported by lifecycle events.")
+        let followupMessages = try XCTUnwrap(inputMessages(in: followupPayload), "The second RunAgentInput must expose messages.")
+        XCTAssertEqual(followupMessages.count, 1, "The second RunAgentInput must send only the new user turn, not replay prior Chat history.")
+        let followupMessage = try XCTUnwrap(followupMessages.first, "The second RunAgentInput has no user message.")
+        XCTAssertEqual(followupMessage["role"] as? String, "user")
+        let followupInputText = try XCTUnwrap(textContent(in: followupMessage), "The second user message must include text content.")
+        XCTAssertEqual(followupInputText, followupPrompt, "The second RunAgentInput should contain only the new prompt.")
+        XCTAssertFalse(followupInputText.contains(contextMarker), "The second RunAgentInput must not include the marker as prompt text or replayed history.")
+        let followupAnswer = try XCTUnwrap(answer(in: followupPayload), "RunAgentResult.result.answer was missing from the follow-up Chat turn.")
+        XCTAssertEqual(followupAnswer, contextMarker, "The second Chat turn must recall the marker from the host-persisted prior turn.")
         attachScreen("browser-chat-followup-\(followupRunID.prefix(8))")
 
         enterChatText("Write a detailed 1500 word explanation of how a paper notebook is made. Continue until complete.", in: browser)

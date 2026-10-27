@@ -1939,6 +1939,11 @@ export function useBridge(): UseBridge {
     catch (cause) { return capture(cause); }
   }, [capture, host]);
 
+  const cleanupPluginSecretsAfterUninstall = useCallback(async (pluginId: string, lastScopeRemoved: true) => {
+    if (!host?.cleanupPluginSecretsAfterUninstall) throw new Error('Plugin credential cleanup is unavailable.');
+    return host.cleanupPluginSecretsAfterUninstall(pluginId, lastScopeRemoved);
+  }, [host]);
+
   const setThemePreference = useCallback(async (theme: 'dark' | 'light' | 'system') => {
     if (!host) return;
     try { patchBootstrap({ settings: await host.updateSettings({ theme }) }); } catch (cause) { capture(cause); }
@@ -2566,6 +2571,7 @@ export function useBridge(): UseBridge {
     pluginSecret,
     setPluginSecret,
     clearPluginSecret,
+    cleanupPluginSecretsAfterUninstall,
     setThemePreference,
     setCollapseThoughtsByDefault,
     setApiBaseUrl,

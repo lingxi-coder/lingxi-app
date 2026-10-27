@@ -139,23 +139,45 @@ private struct PluginNoteRow: View {
 /// added marketplaces offer, and the marketplaces themselves. Every change is an
 /// operation of the plugin system in the user layer; the raw per-layer
 /// configuration stays one tap away under Advanced.
+private enum PluginDirectoryTab: String, Hashable {
+    case publicDirectory
+    case personal
+}
+
 struct PluginsPage: View {
     let host: SettingsHost
     @Environment(\.theme) private var t
+    @Environment(\.openURL) private var openURL
     @State private var repository = DesktopSettingsRepository.shared
+    @State private var directoryTab = PluginDirectoryTab.personal
     @State private var vendors: [String: String] = [:]
     @State private var busy: String?
     @State private var error: String?
     @State private var confirmation: PluginConfirmation?
     @State private var addingMarketplace = false
     @State private var marketplaceSource = ""
+    @State private var pendingPublicMarketplace: PublicExtensionMarketplace?
 
     private var catalog: PluginCatalog { repository.pluginCatalog }
+
+    private func marketplaceRegistration(for item: PublicExtensionItem) -> PublicMarketplaceRegistration? {
+        guard let marketplace = item.marketplace else { return nil }
+        return publicMarketplaceRegistration(marketplace, registered: catalog.marketplaces)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             blurb(String(localized: "plugins_blurb"))
-            if !repository.connected {
+            Picker(String(localized: "public_extensions_source"), selection: $directoryTab) {
+                Text("public_extensions_public_tab").tag(PluginDirectoryTab.publicDirectory)
+                Text("public_extensions_personal_tab").tag(PluginDirectoryTab.personal)
+            }
+            .pickerStyle(.segmented)
+            .padding(.bottom, 14)
+
+            if directoryTab == .publicDirectory {
+                publicDirectoryContent
+            } else if !repository.connected {
                 Label("settings_parity_disconnected", systemImage: "network.slash").font(.footnote).foregroundColor(t.text3)
             } else if repository.catalogs["plugin"] == nil {
                 ProgressView().frame(maxWidth: .infinity).padding(24)
@@ -184,13 +206,146 @@ struct PluginsPage: View {
                 .autocorrectionDisabled().textInputAutocapitalization(.never)
             Button(String(localized: "plugins_marketplace_add")) {
                 let source = marketplaceSource.trimmingCharacters(in: .whitespacesAndNewlines)
+                let candidate = pendingPublicMarketplace
                 marketplaceSource = ""
+                pendingPublicMarketplace = nil
                 guard !source.isEmpty else { return }
-                run("marketplace:add", ["action": "marketplace_add", "source": source])
+                if let candidate {
+                    confirmPublicMarketplace(candidate, enteredSource: source)
+                } else {
+                    run("marketplace:add", ["action": "marketplace_add", "source": source])
+                }
             }
-            Button(String(localized: "common_cancel"), role: .cancel) { marketplaceSource = "" }
+            Button(String(localized: "common_cancel"), role: .cancel) {
+                marketplaceSource = ""
+                pendingPublicMarketplace = nil
+            }
         } message: {
             Text("plugins_marketplace_add_body")
+        }
+    }
+
+    private var publicDirectoryContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let error {
+                Text(String(localized: "plugins_operation_failed \(error)"))
+                    .font(.footnote).foregroundColor(t.danger)
+            }
+            Text("public_extensions_plugin_note")
+                .font(.footnote).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !repository.connected {
+                Label("settings_parity_disconnected", systemImage: "network.slash")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else if repository.catalogs["plugin"] == nil {
+                ProgressView().frame(maxWidth: .infinity).padding(12)
+            }
+            PublicExtensionDirectoryList(
+                kind: .plugin,
+                actionTitle: { item in
+                    if case nil = item.marketplace {
+                        return String(localized: "public_extensions_open_documentation")
+                    }
+                    switch marketplaceRegistration(for: item) {
+                    case .some(.notRegistered):
+                        return String(localized: "public_extensions_review_marketplace_source")
+                    case .some(.registered(let name)):
+                        return String(localized: "public_extensions_marketplace_open_existing \(name)")
+                    case .some(.nameConflict(_)):
+                        return String(localized: "public_extensions_marketplace_name_conflict_action")
+                    case .none:
+                        return String(localized: "public_extensions_open_documentation")
+                    }
+                },
+                action: { item in
+                    if let marketplace = item.marketplace {
+                        switch marketplaceRegistration(for: item) {
+                        case .some(.notRegistered):
+                            marketplaceSource = marketplace.source
+                            pendingPublicMarketplace = marketplace
+                            addingMarketplace = true
+                        case .some(.registered(_)), .some(.nameConflict(_)):
+                            directoryTab = .personal
+                        case .none:
+                            openOfficialDocumentation(for: item)
+                        }
+                    } else {
+                        openOfficialDocumentation(for: item)
+                    }
+                },
+                canAct: { item in
+                    if let marketplace = item.marketplace {
+                        return repository.connected
+                            && repository.catalogs["plugin"] != nil
+                            && busy == nil
+                            && !marketplace.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    }
+                    return URL(string: item.documentationURL)?.scheme?.lowercased() == "https"
+                }
+            )
+        }
+    }
+
+    private func openOfficialDocumentation(for item: PublicExtensionItem) {
+        guard let url = URL(string: item.documentationURL), url.scheme?.lowercased() == "https" else { return }
+        openURL(url)
+    }
+
+    private func confirmPublicMarketplace(_ candidate: PublicExtensionMarketplace, enteredSource: String) {
+        let sourceGeneration = repository.sourceGeneration
+        let previousArrival = repository.catalogArrivals["plugin", default: 0]
+        busy = "marketplace:add"
+        error = nil
+        Task {
+            defer { if busy == "marketplace:add" { busy = nil } }
+            await repository.admin(domain: "plugin", action: "get_catalog")
+            for _ in 0 ..< 50 where publicMarketplaceConfirmationIsCurrent(
+                capturedGeneration: sourceGeneration,
+                currentGeneration: repository.sourceGeneration,
+                connected: repository.connected
+            )
+                && repository.catalogArrivals["plugin", default: 0] <= previousArrival {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard publicMarketplaceConfirmationIsCurrent(
+                    capturedGeneration: sourceGeneration,
+                    currentGeneration: repository.sourceGeneration,
+                    connected: repository.connected
+                  ),
+                  repository.catalogArrivals["plugin", default: 0] > previousArrival else {
+                error = String(localized: "plugins_catalog_refresh_first")
+                return
+            }
+
+            switch publicMarketplaceConfirmationRegistration(
+                candidateName: candidate.name,
+                enteredSource: enteredSource,
+                registered: repository.pluginCatalog.marketplaces
+            ) {
+            case .registered, .nameConflict:
+                // A catalog update may have happened while the confirmation was
+                // open. Let the user inspect/manage that current catalog; do not
+                // submit an add that the engine could silently treat as a no-op.
+                directoryTab = .personal
+            case .notRegistered:
+                guard publicMarketplaceConfirmationIsCurrent(
+                    capturedGeneration: sourceGeneration,
+                    currentGeneration: repository.sourceGeneration,
+                    connected: repository.connected
+                ) else {
+                    error = String(localized: "plugins_catalog_refresh_first")
+                    return
+                }
+                do {
+                    try await repository.applyPluginOperation([
+                        "action": "marketplace_add",
+                        "source": enteredSource,
+                    ])
+                } catch is CancellationError {
+                } catch {
+                    self.error = error.localizedDescription
+                }
+            }
         }
     }
 
@@ -290,7 +445,7 @@ struct PluginsPage: View {
                 icon: .plus,
                 label: String(localized: "plugins_marketplace_add"),
                 isLast: true,
-                onTap: busy == nil ? { addingMarketplace = true } : nil
+                onTap: busy == nil ? { pendingPublicMarketplace = nil; addingMarketplace = true } : nil
             ) {
                 if busy == "marketplace:add" { ProgressView().controlSize(.small) }
             }

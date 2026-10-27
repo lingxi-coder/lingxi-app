@@ -56,10 +56,72 @@ fn settings_reload_error_details(diagnostic: &Utf16JsonProjection) -> String {
     .expect("reload error details preserve valid source JSON")
 }
 
+fn plugin_operation_details(
+    reload_error: Option<&Utf16JsonProjection>,
+    cleanup: Option<&plugin_admin::PluginCredentialCleanup>,
+) -> Option<String> {
+    let mut fields = Vec::new();
+    if let Some(diagnostic) = reload_error {
+        fields.push((
+            "reloadError".to_owned(),
+            diagnostic
+                .subprojection("/message")
+                .unwrap_or_else(|_| diagnostic.clone()),
+        ));
+        fields.push(("reloadErrorDiagnostic".to_owned(), diagnostic.clone()));
+    }
+    if let Some(cleanup) = cleanup {
+        let serialized = serde_json::to_string(cleanup)
+            .expect("plugin credential cleanup contains serializable metadata only");
+        fields.push((
+            "credentialCleanup".to_owned(),
+            Utf16JsonProjection::parse(&serialized)
+                .expect("serialized cleanup metadata is valid source JSON"),
+        ));
+    }
+    if fields.is_empty() {
+        return None;
+    }
+    Some(
+        Utf16JsonProjection::object(fields)
+            .expect("plugin operation details are an object")
+            .to_json_string()
+            .expect("plugin operation details preserve source JSON"),
+    )
+}
+
 #[cfg(test)]
 mod settings_reload_error_source_tests {
     use super::*;
     use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn plugin_cleanup_metadata_preserves_reload_diagnostics_without_secret_values() {
+        let cleanup = plugin_admin::PluginCredentialCleanup {
+            plugin_id: "example@catalog".to_owned(),
+            last_scope_removed: true,
+        };
+        let diagnostic = Utf16JsonProjection::parse(r#""refresh \ud800 failed""#).unwrap();
+        let serialized = plugin_operation_details(Some(&diagnostic), Some(&cleanup)).unwrap();
+        let details = Utf16JsonProjection::parse(&serialized).unwrap();
+        assert_eq!(
+            details.string_units("/reloadError"),
+            diagnostic.string_units("")
+        );
+        assert_eq!(
+            details.string_units("/reloadErrorDiagnostic"),
+            diagnostic.string_units("")
+        );
+        assert_eq!(
+            details.string_at("/credentialCleanup/pluginId"),
+            Some("example@catalog")
+        );
+        assert!(serialized.contains("\"lastScopeRemoved\":true"));
+        assert_eq!(plugin_operation_details(None, None), None);
+        let cleanup_only = plugin_operation_details(None, Some(&cleanup)).unwrap();
+        assert!(!cleanup_only.contains("reloadError"));
+        assert!(!cleanup_only.contains("secret"));
+    }
 
     #[test]
     fn plain_refresh_error_retains_its_source_string_in_operation_details() {
@@ -1557,12 +1619,18 @@ impl EngineCommandRouter {
                 .await;
                 let result = match self.settings.as_ref() {
                     Some(context) => {
-                        plugin_admin::apply_operation(context, revision_sha256, payload_json).await
+                        plugin_admin::apply_operation(
+                            context,
+                            revision_sha256,
+                            payload_json,
+                            self.credentials.clone(),
+                        )
+                        .await
                     }
                     None => Err("plugin apply unavailable: missing settings context".to_string()),
                 };
                 match result {
-                    Ok(operation_message) => {
+                    Ok(operation_result) => {
                         let (effect, reload_error) = if self.is_turn_active() {
                             (ConfigurationEffectDto::RestartRequired, None)
                         } else {
@@ -1594,8 +1662,11 @@ impl EngineCommandRouter {
                             operation_id,
                             ConfigurationOperationStatusDto::Succeeded,
                             effect,
-                            Some(operation_message),
-                            reload_error.map(|error| settings_reload_error_details(&error)),
+                            Some(operation_result.message),
+                            plugin_operation_details(
+                                reload_error.as_ref(),
+                                operation_result.credential_cleanup.as_ref(),
+                            ),
                         )
                         .await;
                         self.emit_settings_snapshot(sink).await;

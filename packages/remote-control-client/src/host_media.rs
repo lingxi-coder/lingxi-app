@@ -1309,16 +1309,6 @@ impl RemoteHostMediaSession {
         );
     }
 
-    fn push_error(&self, kind: MediaErrorKind, message: &str) {
-        self.push_event(
-            MediaEventKind::Error {
-                kind,
-                message: message.chars().take(1024).collect(),
-            },
-            unix_now_ms(),
-        );
-    }
-
     fn push_event(&self, kind: MediaEventKind, occurred_at_unix_ms: u64) {
         let sequence = self
             .event_sequence

@@ -39,6 +39,7 @@
       <button id="retry-pending" type="button" data-testid="retry-pending" hidden>Retry the same pending request</button>
       <button id="cancel-run" type="button" data-testid="cancel-run" disabled>Cancel active run</button>
     </div>
+    <output id="image-status" class="muted" aria-live="polite">Loading the public image fixture…</output>
   </section>
 
   <section aria-labelledby="chat-title">
@@ -95,6 +96,7 @@
 
     let agent;
     let chat;
+    let publicImageFile = null;
     let busy = false;
     let activeRunId = null;
     let activeTask = false;
@@ -183,7 +185,7 @@
     function updateControls() {
       const usable = Boolean(agent && storageReady && !busy);
       const canStart = usable && !state.pending;
-      $('run-image').disabled = !canStart;
+      $('run-image').disabled = !canStart || !publicImageFile;
       $('run-text-file').disabled = !canStart;
       $('create-chat').disabled = !canStart;
       $('open-chat').disabled = !usable || !state.chatId;
@@ -223,23 +225,38 @@
       return makeInput(threadId, [{id: newId(), role: 'user', content}], outputSchema);
     }
 
+    function validateStructuredOutput(kind, value) {
+      const schema = {image: imageSchema, document: documentSchema, chat: chatSchema}[kind];
+      const fail = () => { throw new Error(`${kind} result did not match its declared outputSchema.`); };
+      if (!schema || schema.type !== 'object' || !isRecord(value)) fail();
+
+      const properties = schema.properties ?? {};
+      const allowed = new Set(Object.keys(properties));
+      if (schema.additionalProperties === false
+          && Object.keys(value).some(key => !allowed.has(key))) fail();
+      if ((schema.required ?? []).some(key => !Object.prototype.hasOwnProperty.call(value, key))) fail();
+
+      for (const [key, property] of Object.entries(properties)) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        const actual = value[key];
+        if (property.type === 'string') {
+          if (typeof actual !== 'string' || Array.from(actual).length < (property.minLength ?? 0)) fail();
+        } else if (property.type === 'integer') {
+          if (!Number.isInteger(actual) || actual < (property.minimum ?? Number.NEGATIVE_INFINITY)) fail();
+        } else {
+          fail();
+        }
+      }
+    }
+
     function validateResult(kind, runResult) {
       if (!isRecord(runResult) || !Array.isArray(runResult.newMessages) || !isRecord(runResult.result)) {
         throw new Error('The official RunAgentResult did not contain the expected structured object and messages.');
       }
-      if (!runResult.newMessages.some(message => message?.role === 'assistant')) {
-        throw new Error('The RunAgentResult did not contain an assistant Message.');
-      }
-      const value = runResult.result;
       if (typeof window.LingxiLocalAppAGUI?.validateMessage === 'function') {
         runResult.newMessages.forEach(message => window.LingxiLocalAppAGUI.validateMessage(message));
       }
-      if (kind === 'image' && (typeof value.food !== 'string' || typeof value.description !== 'string'
-          || !Number.isInteger(value.visibleCount))) throw new Error('Image result did not match its declared outputSchema.');
-      if (kind === 'document' && (typeof value.item !== 'string' || !Number.isInteger(value.count))) {
-        throw new Error('Document result did not match its declared outputSchema.');
-      }
-      if (kind === 'chat' && typeof value.answer !== 'string') throw new Error('Chat result did not match its declared outputSchema.');
+      validateStructuredOutput(kind, runResult.result);
     }
 
     async function readTask(runId, threadId) {
@@ -323,6 +340,26 @@
       const messages = await allChatMessages(chat);
       $('chat-history').textContent = JSON.stringify(redactProtocol(messages), null, 2);
       $('chat-handle').textContent = `Open host Chat · threadId ${chat.id} · ${messages.length} canonical Messages`;
+    }
+
+    async function preloadPublicImage() {
+      publicImageFile = null;
+      $('image-status').textContent = 'Loading the public image fixture…';
+      updateControls();
+      try {
+        const response = await fetch(new URL('./public-apple.jpg', location.href), {cache: 'no-store'});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const blob = await response.blob();
+        if (blob.size === 0) throw new Error('the image file was empty');
+        publicImageFile = new File([blob], 'public-apple.jpg', {type: blob.type || 'image/jpeg'});
+        $('image-status').textContent = `Public image fixture ready · ${publicImageFile.type} · ${publicImageFile.size} bytes.`;
+      } catch (failure) {
+        publicImageFile = null;
+        const reason = failure?.message || String(failure);
+        $('image-status').textContent = `Public image fixture unavailable (${reason}); only the image run is disabled.`;
+      } finally {
+        updateControls();
+      }
     }
 
     async function latestFromHost(listPage) {
@@ -461,7 +498,9 @@
       let monitor = true;
       const monitorPromise = monitorActiveTask(input, () => monitor);
       setError('');
-      setStatus(`Submitting standard AG-UI input for ${kind}; no provider details are exposed to the page.`);
+      setStatus(kind === 'chat'
+        ? 'Submitting the new Chat message to the host-owned persistent Chat; prior turns remain in the Harness session.'
+        : `Submitting standard AG-UI input for ${kind}; no provider details are exposed to the page.`);
       updateControls();
       try {
         const runResult = kind === 'chat'
@@ -524,10 +563,9 @@
     async function runImage() {
       setError('');
       try {
-        const response = await fetch(new URL('./public-apple.jpg', location.href), {cache: 'no-store'});
-        if (!response.ok) throw new Error(`Public image fetch failed with HTTP ${response.status}.`);
-        const blob = await response.blob();
-        const file = new File([blob], 'public-apple.jpg', {type: blob.type || 'image/jpeg'});
+        if (!publicImageFile) throw new Error('Public image fixture is unavailable. Reload the page to retry its read-only preload.');
+        setStatus('Preparing the image request from the preloaded public fixture…');
+        const file = publicImageFile;
         const part = await agent.file(file);
         const input = createSingleInput(newId(), [
           {type: 'text', text: 'Describe the main food visible in this public image and estimate how many pieces are visible.'},
@@ -583,8 +621,8 @@
         if (!chat) throw new Error('Create or open a persistent Chat first.');
         const text = $('chat-prompt').value.trim();
         if (!text) throw new Error('Enter a Chat message first.');
-        const history = await allChatMessages(chat);
-        const input = makeInput(chat.id, [...history, {id: newId(), role: 'user', content: [{type: 'text', text}]}], chatSchema);
+        const input = makeInput(chat.id,
+          [{id: newId(), role: 'user', content: [{type: 'text', text}]}], chatSchema);
         await submitInput(input, 'chat', chat.id);
         $('chat-prompt').value = '';
       } catch (failure) { setError(failure?.message || String(failure)); }
@@ -660,9 +698,13 @@
         agent = window.localApp.agent;
         if (typeof window.localApp.host?.open === 'function') $('host-open').hidden = false;
         setStatus('Host Agent ready. Model selection and approvals remain in trusted native settings.');
+        void preloadPublicImage();
         if (!storageReady) setError(`Saved acceptance state was not changed: ${storageFailure}`);
         await restoreReadOnly();
       } catch (failure) {
+        if (!agent) {
+          $('image-status').textContent = 'Public image fixture unavailable because the host Agent did not become ready; only the image run is disabled.';
+        }
         setStatus('Host Agent unavailable. Reopen this page from the native Apps library.');
         setError(failure?.message || String(failure));
       } finally { updateControls(); }

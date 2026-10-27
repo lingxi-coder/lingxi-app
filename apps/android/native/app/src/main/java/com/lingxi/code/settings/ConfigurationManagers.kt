@@ -15,12 +15,18 @@ import org.json.JSONObject
 internal fun JSONArray.records(): List<JSONObject> = (0 until length()).mapNotNull { optJSONObject(it) }
 
 @Composable
-internal fun McpConfigurationPage(bridge: SettingsEngineBridge, initialName: String? = null, initialScope: String? = null) {
+internal fun McpConfigurationPage(
+    bridge: SettingsEngineBridge,
+    initialName: String? = null,
+    initialScope: String? = null,
+    initialConfigJson: String? = null,
+    directoryConfigJson: String? = null,
+) {
     val state by bridge.state.collectAsState()
     val coroutine = rememberCoroutineScope()
     var scope by remember(state.generation, initialScope) { mutableStateOf(initialScope ?: "user") }
-    var name by remember(state.generation, scope, initialName) { mutableStateOf(initialName.orEmpty()) }
-    var config by remember(state.generation, scope) { mutableStateOf("{}") }
+    var name by remember(state.generation, initialName, initialScope, directoryConfigJson) { mutableStateOf(initialName.orEmpty()) }
+    var config by remember(state.generation, initialName, initialScope, initialConfigJson, directoryConfigJson) { mutableStateOf(initialConfigJson ?: "{}") }
     var error by remember { mutableStateOf<String?>(null) }
     var deleteRequested by remember { mutableStateOf(false) }
     val snapshot = runCatching { JSONObject(state.catalogs["mcp"] ?: "{}") }.getOrDefault(JSONObject())
@@ -28,10 +34,21 @@ internal fun McpConfigurationPage(bridge: SettingsEngineBridge, initialName: Str
     val current = scopes.firstOrNull { it.optString("scope") == scope }
     val raw = runCatching { JSONObject(current?.optString("raw_json") ?: "{}") }.getOrDefault(JSONObject())
     val servers = raw.optJSONObject("mcpServers") ?: JSONObject()
-    var initialServerLoaded by remember(state.generation, initialName, initialScope) { mutableStateOf(false) }
-    var deepLinkMissing by remember(state.generation, initialName, initialScope) { mutableStateOf(false) }
-    LaunchedEffect(state.catalogs["mcp"], initialName, initialScope, scope) {
-        if (!initialServerLoaded && initialName != null && state.catalogs["mcp"] != null) {
+    val publicNameCollision = publicMcpNameConflicts(
+        name = name,
+        scope = scope,
+        initialName = initialName,
+        initialScope = initialScope,
+        initialConfigJson = initialConfigJson,
+        directoryConfigJson = directoryConfigJson,
+        existingConfigJson = servers.optJSONObject(name)?.toString(),
+    )
+    var initialServerLoaded by remember(state.generation, initialName, initialScope, initialConfigJson, directoryConfigJson) {
+        mutableStateOf(initialName == null || initialConfigJson != null)
+    }
+    var deepLinkMissing by remember(state.generation, initialName, initialScope, directoryConfigJson) { mutableStateOf(false) }
+    LaunchedEffect(state.catalogs["mcp"], initialName, initialScope, directoryConfigJson, scope) {
+        if (!initialServerLoaded && initialConfigJson == null && initialName != null && state.catalogs["mcp"] != null) {
             val destination = runCatching { resolveMcpDeepLinkScope(scopes, initialName, initialScope) }.getOrElse {
                 error = it.message; deepLinkMissing = true; initialServerLoaded = true; return@LaunchedEffect
             }
@@ -75,8 +92,9 @@ internal fun McpConfigurationPage(bridge: SettingsEngineBridge, initialName: Str
         if (revisionAtEdit != null && currentRevision != revisionAtEdit) Text(settingsLabel("This layer changed while you were editing. Review your draft before saving."))
         OutlinedTextField(name, { name = it }, label = { Text(settingsLabel("Server name")) }, singleLine = true, modifier = Modifier.fillMaxWidth())
         McpServerFields(config, { config = it }, current == null)
+        if (publicNameCollision) Text(stringResource(R.string.extension_directory_mcp_name_conflict), color = MaterialTheme.colorScheme.error)
         Text(settingsLabel("Use command/args for stdio or url for a remote server. Runtime support and approval are checked by the engine."))
-        Button(enabled = revisionAtEdit != null && name.isNotBlank() && state.pending == null, onClick = {
+        Button(enabled = revisionAtEdit != null && name.isNotBlank() && !publicNameCollision && state.pending == null, onClick = {
             coroutine.launch {
                 runCatching {
                     val parsed = JSONObject(config)

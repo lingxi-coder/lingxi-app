@@ -14,6 +14,7 @@ import type { HostNotifier } from './notifications.js';
 import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
 import type { RemoteControlUi } from './remoteControl/rendererIpc.js';
+import type { BotsUi } from './bots/rendererIpc.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
 import {
@@ -501,6 +502,8 @@ export class HostController {
   private offGit?: () => void;
   private remoteControlUi?: RemoteControlUi;
   private remoteControlChannels: string[] = [];
+  private botsUi?: BotsUi;
+  private botsChannels: string[] = [];
   private readonly gitWatches = new Map<WebContents, Map<string, Promise<() => void>>>();
   private terminals?: TerminalManager;
   private offTerminals?: () => void;
@@ -574,6 +577,12 @@ export class HostController {
     if (this.registered) this.registerRemoteControlIpc();
   }
 
+  /** The Bots page's handlers; registered with the rest by `registerIpc`. */
+  attachBots(ui: BotsUi): void {
+    this.botsUi = ui;
+    if (this.registered) this.registerBotsIpc();
+  }
+
   /** Send to every window of the app that is still alive. */
   sendToWindows(channel: string, payload: unknown): void {
     for (const target of this.targets.keys()) if (!target.isDestroyed()) target.send(channel, payload);
@@ -588,6 +597,18 @@ export class HostController {
         return handler(...args);
       });
       this.remoteControlChannels.push(channel);
+    }
+  }
+
+  private registerBotsIpc(): void {
+    const ui = this.botsUi;
+    if (!ui || this.botsChannels.length > 0) return;
+    for (const [channel, handler] of Object.entries(ui.handlers())) {
+      this.ipc.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+        this.assertSender(event);
+        return handler(...args);
+      });
+      this.botsChannels.push(channel);
     }
   }
 
@@ -708,6 +729,7 @@ export class HostController {
       return icon;
     });
     this.registerRemoteControlIpc();
+    this.registerBotsIpc();
     this.ipc.handle(CH_ACCOUNT, (event: IpcMainInvokeEvent, command: unknown) => {
       this.assertSender(event);
       if (!this.account) throw new Error('Account service is unavailable');
@@ -2453,6 +2475,9 @@ export class HostController {
     this.remoteControlChannels = [];
     this.remoteControlUi?.dispose();
     this.remoteControlUi = undefined;
+    for (const channel of this.botsChannels) this.ipc.removeHandler(channel);
+    this.botsChannels = [];
+    this.botsUi = undefined;
     this.codexLoginAbort?.abort();
     this.offTerminals?.();
     this.offGit?.();

@@ -281,4 +281,6 @@ export interface WorkspaceLaunchSettings {
   environment: Record<string, string>;
   configHome: string;
   globalConfigPath?: string;
+  /** Directories granted to every session of this workspace unless the session carries grants of its own. */
+  additionalDirectories?: readonly string[];
 }

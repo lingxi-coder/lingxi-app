@@ -804,7 +804,7 @@ export class SessionRuntimeManager {
         if (owner) this.sessionConfigOwners.set(ref.sessionId, owner);
         if (environment) this.sessionSettingsEnvironment.set(ref.sessionId, { ...environment });
         return { ...config, ...owner, settingsEnvironment: environment, initialProjectRoot,
-          additionalDirectories: this.sessionDirectoryGrants.get(ref.sessionId),
+          additionalDirectories: this.sessionDirectoryGrants.get(ref.sessionId) ?? settings?.additionalDirectories,
           promptDirectories: this.sessionPromptDirectories.get(ref.sessionId) };
       },
       ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),

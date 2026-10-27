@@ -4,6 +4,7 @@ import type { AccountApi } from '../../shared/account.js';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type { ScheduledApi } from '../../shared/scheduled';
 import type { RemoteControlApi } from '../../shared/remoteControl';
+import type { BotsApi } from '../../shared/bots';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../../shared/visualization';
 import type { GitApi } from '../../shared/git.js';
 import type { TerminalApi } from '../../shared/terminal.js';
@@ -160,6 +161,7 @@ export interface LingxiApi {
   onLocalAppEdit?(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled?: ScheduledApi;
   remoteControl?: RemoteControlApi;
+  bots?: BotsApi;
   git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;

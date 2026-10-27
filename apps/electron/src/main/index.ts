@@ -42,6 +42,10 @@ import { RemoteCommands } from './remoteControl/remoteCommands.js';
 import { nativeImageCodec } from './remoteControl/nativeImageCodec.js';
 import { PushRequester, RemotePush } from './remoteControl/pushRequests.js';
 import { RemoteControlUi } from './remoteControl/rendererIpc.js';
+import { BotContent } from './bots/content.js';
+import { BotsUi } from './bots/rendererIpc.js';
+import { BotService } from './bots/service.js';
+import { BotStore } from './bots/store.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
 import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
@@ -114,6 +118,8 @@ let remotePolicy: RemotePolicy | null = null;
 let remoteGateway: SessionGateway | null = null;
 let remotePush: RemotePush | null = null;
 let remoteUi: RemoteControlUi | null = null;
+/** Desktop Bots; absent until the product paths are known. */
+let bots: BotService | null = null;
 let remotePolicyTimer: NodeJS.Timeout | undefined;
 /** How often the administrator's `managed-settings.json` is read again. */
 const REMOTE_POLICY_RECHECK_MS = 30_000;
@@ -412,11 +418,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         isForeground: () => windowFocused,
       })
     : null;
-  const sessionCatalog = new ProjectSessionCatalog({
+  const catalogOptions = {
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
-  });
+  };
+  const sessionCatalog = new ProjectSessionCatalog(catalogOptions);
   const launchCache = new SessionLaunchCache();
   // The one refresher of the Codex session. Engines get only access tokens.
   // The wall clock is checked every minute and on wake: a timer alone would
@@ -455,7 +462,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
     getTelemetryConfig: () => settings.getTelemetryConfig(),
-    workspaceSettings: (projectPath) => sessionCatalog.workspaceSettings(projectPath),
+    // A Bot's working directory is not a project: it has its own configuration home and grants.
+    workspaceSettings: (projectPath) => bots?.ownsWorkspace(projectPath)
+      ? bots.launchSettings(projectPath) : sessionCatalog.workspaceSettings(projectPath),
     appVersion: app.getVersion(),
     getSavedPermissionMode: () => settings.getLastPermissionMode(),
     onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
@@ -482,17 +491,20 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         // Adding a Project is the Desktop trust decision. Repository edits must
         // not silently revoke a live session or reintroduce the removed setup
         // prompt; removal from the Project list revokes access instead.
-        return { workspace: ref.projectPath, trusted: settings.isTrustedWorkspace(ref.projectPath) };
+        return { workspace: ref.projectPath, trusted: settings.isTrustedWorkspace(ref.projectPath) || bots?.ownsWorkspace(ref.projectPath) === true };
       } catch {
         return { workspace: ref.projectPath, trusted: false };
       }
     },
-    onModelSelected: (ref, model) => settings.setSessionModel(ref, model),
-    getSavedModel: (ref) => settings.getSessionModel(ref),
+    // A Bot's model is its own; choosing one in a Bot's session must not become the default of the owner's sessions.
+    onModelSelected: (ref, model) => { if (!bots?.ownsWorkspace(ref.projectPath)) settings.setSessionModel(ref, model); },
+    getSavedModel: (ref) => bots?.ownsWorkspace(ref.projectPath) ? undefined : settings.getSessionModel(ref),
     resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
     codexTokens,
     invalidateLaunchConfigCache: () => launchCache.invalidate(),
     onFirstPromptSent: (ref) => {
+      // A Bot's session is not one of the owner's: it is neither the one to restore at startup nor one to share.
+      if (bots?.ownsWorkspace(ref.projectPath)) return;
       settings.setActiveSession(ref);
       // `remoteControlAtStartup`: a new chat starts shared with the user's other devices.
       try { remotePolicy?.sessionCreated(ref); } catch (error) { diagnostics.add('warn', 'host', `remote control: ${sanitizeDiagnostic(error)}`); }
@@ -523,7 +535,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     launchConfig: async (ref: SessionRef, resumeModel?: string) => {
       const workspace = ref.projectPath;
       const configured = settings.getPublic();
-      const model = settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
+      const botWorkspace = bots?.ownsWorkspace(workspace) === true;
+      const model = botWorkspace
+        ? resumeModel ?? bots?.modelFor(workspace) ?? configured.model
+        : settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
       const startedAt = Date.now();
       // A chat opens even when its credentials cannot be read. The engine
       // starts without them, and the first prompt that needs one loads it
@@ -574,11 +589,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           LINGXI_DESKTOP_BROWSER_DESCRIPTOR: browserDescriptor,
         },
         sessionId: ref.sessionId,
-        trusted: settings.isTrustedWorkspace(workspace),
+        // Making a Bot is the owner's decision to trust its folders; they are not in the project list.
+        trusted: settings.isTrustedWorkspace(workspace) || botWorkspace,
         telemetry: settings.getTelemetryConfig(),
         allowInsights: settings.getInsightsAllowed(),
         allowTeamOnboarding: settings.getTeamOnboardingAllowed(),
-        remoteControlEnabled: (settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1'))
+        remoteControlEnabled: !botWorkspace && (settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1'))
           && (remotePolicy?.allows() ?? true),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
@@ -732,6 +748,19 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     return undefined;
   });
   if (productPaths) {
+    // The Bots live beside the app's other data and keep clear of the default configuration home.
+    try {
+      const botStore = new BotStore({ userData, home: app.getPath('home'), defaultConfigHome: productPaths.configHome });
+      bots = new BotService({
+        store: botStore,
+        runtimes: bridge,
+        catalogFor: (configHome) => new ProjectSessionCatalog({ ...catalogOptions, configHome }),
+        warn: (message) => diagnostics.add('warn', 'host', `bots: ${message}`),
+      });
+      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore) }));
+    } catch (error) {
+      diagnostics.add('warn', 'host', `bots unavailable: ${sanitizeDiagnostic(error)}`);
+    }
     const agentRoot = join(productPaths.configHome, 'local-apps', 'v2');
     const agentExecutor = new LocalAppAgentExecutor({
       configHome: productPaths.configHome,
@@ -906,6 +935,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   remotePush = null;
   remoteUi = null;
   remotePolicy = null;
+  bots = null;
   const shutdownPhases: Array<[string, () => Promise<void>]> = [
     ['browser', () => currentBrowser?.close() ?? Promise.resolve()],
     ['local_apps', () => currentLocalApps?.dispose() ?? Promise.resolve()],

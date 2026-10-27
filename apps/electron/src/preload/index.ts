@@ -10,6 +10,25 @@ import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, typ
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
 import {
+  CH_BOTS_CREATE,
+  CH_BOTS_DELETE,
+  CH_BOTS_GET,
+  CH_BOTS_LIST,
+  CH_BOTS_MEMORY_DELETE,
+  CH_BOTS_MEMORY_LIST,
+  CH_BOTS_MEMORY_READ,
+  CH_BOTS_MEMORY_WRITE,
+  CH_BOTS_PERSONA_GET,
+  CH_BOTS_PERSONA_SET,
+  CH_BOTS_SESSION_OPEN,
+  CH_BOTS_SESSIONS_LIST,
+  CH_BOTS_SKILL_DELETE,
+  CH_BOTS_SKILL_IMPORT,
+  CH_BOTS_SKILLS_LIST,
+  CH_BOTS_UPDATE,
+  type BotsApi,
+} from '../shared/bots.js';
+import {
   CH_REMOTE_AT_STARTUP_GET,
   CH_REMOTE_AT_STARTUP_SET,
   CH_REMOTE_DEVICE_REVOKE,
@@ -234,6 +253,7 @@ export interface LingxiApi {
   onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled: ScheduledApi;
   remoteControl: RemoteControlApi;
+  bots: BotsApi;
   git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;
@@ -439,6 +459,32 @@ const api: LingxiApi = {
     onSessions: callback => subscribe(CH_REMOTE_SESSIONS_EVENT, callback),
     onPromptEcho: callback => subscribe(CH_REMOTE_PROMPT_ECHO, callback),
   } satisfies RemoteControlApi,
+  bots: {
+    list: () => ipcRenderer.invoke(CH_BOTS_LIST),
+    get: botId => ipcRenderer.invoke(CH_BOTS_GET, botId),
+    create: request => ipcRenderer.invoke(CH_BOTS_CREATE, request),
+    update: (botId, expectedRevision, patch) => ipcRenderer.invoke(CH_BOTS_UPDATE, botId, expectedRevision, patch),
+    delete: botId => ipcRenderer.invoke(CH_BOTS_DELETE, botId),
+    openSession: (botId, sessionId) => (sessionId === undefined
+      ? ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId)
+      : ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId, sessionId)),
+    listSessions: botId => ipcRenderer.invoke(CH_BOTS_SESSIONS_LIST, botId),
+    persona: {
+      get: botId => ipcRenderer.invoke(CH_BOTS_PERSONA_GET, botId),
+      set: (botId, text) => ipcRenderer.invoke(CH_BOTS_PERSONA_SET, botId, text),
+    },
+    memory: {
+      list: botId => ipcRenderer.invoke(CH_BOTS_MEMORY_LIST, botId),
+      read: (botId, name) => ipcRenderer.invoke(CH_BOTS_MEMORY_READ, botId, name),
+      write: (botId, name, content) => ipcRenderer.invoke(CH_BOTS_MEMORY_WRITE, botId, name, content),
+      delete: (botId, name) => ipcRenderer.invoke(CH_BOTS_MEMORY_DELETE, botId, name),
+    },
+    skills: {
+      list: botId => ipcRenderer.invoke(CH_BOTS_SKILLS_LIST, botId),
+      delete: (botId, name) => ipcRenderer.invoke(CH_BOTS_SKILL_DELETE, botId, name),
+      importFromUser: (botId, name) => ipcRenderer.invoke(CH_BOTS_SKILL_IMPORT, botId, name),
+    },
+  } satisfies BotsApi,
   bootstrap: () => ipcRenderer.invoke(CH_BOOTSTRAP) as Promise<BootstrapState>,
   settings: () => ipcRenderer.invoke(CH_SETTINGS_GET) as Promise<PublicSettings>,
   openSettingsFile: (path) => ipcRenderer.invoke(CH_SETTINGS_FILE_OPEN, path) as Promise<void>,

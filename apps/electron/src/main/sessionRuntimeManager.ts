@@ -797,7 +797,7 @@ export class SessionRuntimeManager {
         const config = await launchConfig(ref, this.sessionModelHints.get(ref.sessionId));
         const initialProjectRoot = this.sessionProjectRoots.get(ref.sessionId) ?? config.initialProjectRoot ?? ref.projectPath;
         this.sessionProjectRoots.set(ref.sessionId, initialProjectRoot);
-        const settings = await workspaceSettings?.(ref.projectPath);
+        const settings = await workspaceSettings?.(ref.projectPath, ref);
         const environment = settings ? {
           ...this.sessionSettingsEnvironment.get(ref.sessionId),
           ...settings.environment,

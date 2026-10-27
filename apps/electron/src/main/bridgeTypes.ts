@@ -188,7 +188,8 @@ export interface SessionRuntimeSummary {
 }
 
 export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
-  workspaceSettings?: (projectPath: string) => Promise<WorkspaceLaunchSettings>;
+  /** What a session of a working directory is launched with; it is told which session, for settings that belong to the one. */
+  workspaceSettings?: (projectPath: string, ref: SessionRef) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
@@ -215,6 +216,28 @@ export interface PromptSource {
   origin: RemotePromptOrigin;
   /** The sending device when `origin` is `device`. */
   deviceName?: string;
+}
+
+/** How {@link SessionRuntime.runHostTurn} is asked to run a turn. */
+export interface HostTurnOptions {
+  /** Who the prompt shows as coming from; the host's own by default. */
+  source?: PromptSource;
+  /** Aborting it cancels the turn, which then ends as `cancelled`. */
+  signal?: AbortSignal;
+  /** How long a cancelled turn is given to end before it is let go as `cancelled` all the same; ten seconds by default. */
+  cancelGraceMs?: number;
+}
+
+/** How a turn that {@link SessionRuntime.runHostTurn} ran ended. */
+export interface HostTurnResult {
+  /** `failed`: the engine reported an error, or the reply was cut short. */
+  status: 'completed' | 'failed' | 'cancelled';
+  /** The last thing the assistant said in the turn. */
+  text: string;
+  /** What went wrong, when `status` is `failed`. */
+  error?: string;
+  /** What the turn cost, in US dollars, when the engine said. */
+  costUsd?: number;
 }
 
 /**

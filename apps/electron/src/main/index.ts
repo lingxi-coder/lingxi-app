@@ -45,8 +45,10 @@ import { RemoteControlUi } from './remoteControl/rendererIpc.js';
 import { BotContent } from './bots/content.js';
 import { ownerPreferenceHooks } from './bots/ownerPreferences.js';
 import { BotsUi } from './bots/rendererIpc.js';
+import { BotRouter } from './bots/router.js';
 import { BotService } from './bots/service.js';
 import { BotStore } from './bots/store.js';
+import { BotTasks } from './bots/taskService.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
 import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
@@ -121,6 +123,8 @@ let remotePush: RemotePush | null = null;
 let remoteUi: RemoteControlUi | null = null;
 /** Desktop Bots; absent until the product paths are known. */
 let bots: BotService | null = null;
+/** The endpoint through which Bots hand tasks to each other; made with the Bots. */
+let botRouter: BotRouter | null = null;
 let remotePolicyTimer: NodeJS.Timeout | undefined;
 /** How often the administrator's `managed-settings.json` is read again. */
 const REMOTE_POLICY_RECHECK_MS = 30_000;
@@ -465,8 +469,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   bridge = new SessionRuntimeManager({
     getTelemetryConfig: () => settings.getTelemetryConfig(),
     // A Bot's working directory is not a project: it has its own configuration home and grants.
-    workspaceSettings: (projectPath) => bots?.ownsWorkspace(projectPath)
-      ? bots.launchSettings(projectPath) : sessionCatalog.workspaceSettings(projectPath),
+    workspaceSettings: (projectPath, ref) => bots?.ownsWorkspace(projectPath)
+      ? bots.launchSettings(projectPath, ref.sessionId) : sessionCatalog.workspaceSettings(projectPath),
     appVersion: app.getVersion(),
     ...ownerPreferenceHooks(settings, (ref) => bots?.ownsWorkspace(ref.projectPath) === true),
     notifier,
@@ -751,16 +755,34 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // The Bots live beside the app's other data and keep clear of the default configuration home.
     try {
       const botStore = new BotStore({ userData, home: app.getPath('home'), defaultConfigHome: productPaths.configHome });
+      const manager = bridge;
+      const botWarn = (message: string): void => { diagnostics.add('warn', 'host', `bots: ${message}`); };
+      // Tasks between Bots, and the endpoint they are handed through. The router listens
+      // before any session of a Bot is launched, which asks it for an address and a token.
+      const botTasks = new BotTasks({
+        store: botStore,
+        runtimes: { withSession: (ref, empty, model, operation) => manager.withBackgroundSession(ref, empty, model, operation) },
+        available: () => bots?.availability().available === true,
+        isDeleting: (botId) => bots?.isDeleting(botId) === true,
+        warn: botWarn,
+      });
+      botTasks.load();
+      const router = new BotRouter({ backend: botTasks, warn: botWarn });
+      botRouter = router;
+      router.start().catch((error: unknown) => botWarn(`the router cannot listen: ${sanitizeDiagnostic(error)}`));
+      router.watchRuntimes(manager);
       bots = new BotService({
         store: botStore,
         runtimes: bridge,
+        router,
+        delegation: botTasks,
         catalogFor: (configHome) => new ProjectSessionCatalog({ ...catalogOptions, configHome }),
         // The scheduler was made first; it learns of the Bots below, and is asked for these only when used.
         routines: {
           isControllerSession: (workspace, sessionId) => scheduled?.isControllerSession(workspace, sessionId) === true,
           releaseScope: (workspace) => scheduled?.releaseScope(workspace),
         },
-        warn: (message) => diagnostics.add('warn', 'host', `bots: ${message}`),
+        warn: botWarn,
       });
       scheduled?.attachBots(bots);
       host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore) }));
@@ -942,7 +964,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   remoteUi = null;
   remotePolicy = null;
   bots = null;
+  const currentBotRouter = botRouter;
+  botRouter = null;
   const shutdownPhases: Array<[string, () => Promise<void>]> = [
+    ['bot_router', () => currentBotRouter?.dispose() ?? Promise.resolve()],
     ['browser', () => currentBrowser?.close() ?? Promise.resolve()],
     ['local_apps', () => currentLocalApps?.dispose() ?? Promise.resolve()],
     ['git', () => currentGit?.dispose() ?? Promise.resolve()],

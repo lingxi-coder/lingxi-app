@@ -11,9 +11,12 @@
  *    Glob) and no `Edit` (Edit, Write, NotebookEdit) in the other Bots, the other
  *    private data of the app, or the configuration home of normal sessions; no
  *    `Edit` in a folder bound read-only; no `Edit` in the files that decide what
- *    the Bot may do (`bot.json`, its settings and persona, `.mcp.json`).
+ *    the Bot may do (`bot.json`, its settings and persona, `.mcp.json`) or in the
+ *    tasks other Bots handed it.
  *  - `permissions.allow`: reading and writing the Bot's own memory, which the
- *    engine does not exempt from the working-directory rule.
+ *    engine does not exempt from the working-directory rule, and the tools of the
+ *    Bot router, which hand work to other Bots (what that work may do is decided
+ *    by the permissions of the Bot that gets it, not by this).
  *  - `sandbox`: on, refusing to start without it, and the same private places
  *    unreadable to the commands of the Bash tool, which no permission rule
  *    reaches. The sandbox is off in the engine unless the settings turn it on.
@@ -34,6 +37,7 @@ import type { PermissionModeId } from '@lingxi/bridge-client';
 
 import { isPermissionModeId } from '../host-utils.js';
 import { writeFileAtomic } from './files.js';
+import { routerToolRules } from './routerTools.js';
 import { stillBound, type BotRecord, type BotStore, type BotWorkspace } from './store.js';
 
 /** Beside `settings.json`: the entries LingXi generated into it. */
@@ -94,12 +98,13 @@ export function buildManagedSettings(store: BotStore, record: BotRecord, workspa
       join(home, 'LINGXI.md'), join(home, 'settings.json'), join(home, 'settings.local.json'), join(home, '.lingxi.json'), join(home, MANAGED_FILE),
       join(workspace, '.lingxi', 'settings.json'), join(workspace, '.lingxi', 'settings.local.json'), join(workspace, '.mcp.json'),
     ].map((path) => pathRule('Edit', path, false)),
+    pathRule('Edit', store.tasksDir(botId)),
   ];
   return {
     ...(record.model !== undefined ? { model: record.model } : {}),
     ...(record.permission_mode !== undefined ? { defaultMode: record.permission_mode } : {}),
     additionalDirectories: workspaces.map((bound) => bound.path),
-    allow: [pathRule('Read', memory), pathRule('Edit', memory)],
+    allow: [pathRule('Read', memory), pathRule('Edit', memory), ...routerToolRules()],
     deny,
     denyRead: isolated,
   };

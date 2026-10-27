@@ -84,6 +84,8 @@ export interface BotUi {
   model?: string;
   /** What a session of the Bot starts in. Absent: the engine's own default, which asks before it acts. */
   permissionMode?: PermissionModeId;
+  /** The ids of the Bots that may delegate tasks to this one. Absent: none may. */
+  acceptFrom?: string[];
   workspaces: BotWorkspaceUi[];
   /** Epoch milliseconds; absent while the Bot has had no session. */
   lastActivityAt?: number;
@@ -96,6 +98,7 @@ export interface BotCreateRequest {
   persona?: string;
   model?: string;
   permissionMode?: PermissionModeId;
+  acceptFrom?: string[];
   workspaces?: BotWorkspaceUi[];
 }
 
@@ -106,6 +109,8 @@ export interface BotUpdateRequest {
   model?: string | null;
   /** `null` goes back to the engine's default. */
   permissionMode?: PermissionModeId | null;
+  /** Replaces the whole list; an empty list lets no Bot delegate to this one. */
+  acceptFrom?: string[];
   /** Replaces the whole list. */
   workspaces?: BotWorkspaceUi[];
 }

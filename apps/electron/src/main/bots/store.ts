@@ -4,6 +4,7 @@
  *     <userData>/bots/<botId>/bot.json     the record (the last file written when a Bot is made)
  *                            home/         the Bot's configuration home: LINGXI.md, settings.json, skills/, its sessions and memory
  *                            workspace/    the folder the Bot's sessions run in
+ *                            tasks/        the tasks other Bots handed this one, a file each
  *     <userData>/bots-trash/<botId>-<ms>/  a deleted Bot, kept until its owner removes it
  *
  * The root is deliberately outside the default configuration home (`~/.lingxi`):
@@ -23,6 +24,7 @@ import { projectDirName } from './projectDirName.js';
 
 export const BOT_RECORD_VERSION = 1;
 export const MAX_BOT_WORKSPACES = 16;
+export const MAX_ACCEPT_FROM = 64;
 export const MAX_PERSONA_BYTES = 64 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_NAME_CHARS = 80;
@@ -54,6 +56,8 @@ export interface BotRecord {
   model?: string;
   /** What a session starts in; one of the modes the Desktop offers. Absent: the engine's default. */
   permission_mode?: PermissionModeId;
+  /** The Bots that may delegate tasks to this one, by id. Absent: none may. */
+  accept_from?: string[];
   workspaces: BotWorkspace[];
   /** Only the owner exists in this version. */
   audiences: Array<{ id: 'owner'; kind: 'owner' }>;
@@ -65,6 +69,7 @@ export interface BotCreateInput {
   persona?: string;
   model?: string;
   permissionMode?: PermissionModeId;
+  acceptFrom?: ReadonlyArray<string>;
   workspaces?: ReadonlyArray<{ path: string; mode: BotWorkspaceMode }>;
 }
 
@@ -75,6 +80,8 @@ export interface BotPatch {
   model?: string | null;
   /** `null` removes the Bot's own permission mode. */
   permissionMode?: PermissionModeId | null;
+  /** The Bots that may delegate tasks to this one; an empty list removes them all. */
+  acceptFrom?: ReadonlyArray<string>;
   workspaces?: ReadonlyArray<{ path: string; mode: BotWorkspaceMode }>;
 }
 
@@ -167,6 +174,17 @@ export function isBotId(value: unknown): value is string {
   return typeof value === 'string' && BOT_ID.test(value);
 }
 
+/** The Bots allowed to delegate to a Bot: valid ids, each once, not the Bot itself. */
+function acceptFromList(value: unknown, selfId?: string): string[] {
+  if (!Array.isArray(value) || value.length > MAX_ACCEPT_FROM || !value.every(isBotId) || new Set(value).size !== value.length
+    || (selfId !== undefined && value.includes(selfId))) throw new Error('invalid accept_from');
+  return [...value];
+}
+
+function sameBotIds(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  return JSON.stringify([...(left ?? [])].sort()) === JSON.stringify([...(right ?? [])].sort());
+}
+
 function parseWorkspaceEntry(value: unknown): { path: string; mode: BotWorkspaceMode } {
   const entry = plainObject(value, 'workspace');
   exactKeys(entry, ['path', 'mode'], [], 'workspace');
@@ -182,7 +200,7 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
   try { parsed = JSON.parse(text); } catch { throw new Error('bot.json is not valid JSON'); }
   const input = plainObject(parsed, 'bot.json');
   if (input['v'] !== BOT_RECORD_VERSION) throw new Error('bot.json has an unsupported version');
-  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model', 'permission_mode'], 'bot.json');
+  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model', 'permission_mode', 'accept_from'], 'bot.json');
   if (input['bot_id'] !== expectedId || !isBotId(input['bot_id'])) throw new Error('bot.json belongs to a different Bot');
   const name = botName(input['name']);
   if (name !== input['name']) throw new Error('invalid name');
@@ -198,6 +216,7 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
   if (owner['id'] !== 'owner' || owner['kind'] !== 'owner') throw new Error('invalid audiences');
   const description = botDescription(input['description']);
   if (description !== input['description']) throw new Error('invalid description');
+  const acceptFrom = input['accept_from'] === undefined ? [] : acceptFromList(input['accept_from'], expectedId);
   return {
     v: BOT_RECORD_VERSION,
     bot_id: expectedId,
@@ -208,6 +227,7 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
     revision: revision as number,
     ...(input['model'] !== undefined ? { model: botModel(input['model']) } : {}),
     ...(input['permission_mode'] !== undefined ? { permission_mode: botPermissionMode(input['permission_mode']) } : {}),
+    ...(acceptFrom.length > 0 ? { accept_from: acceptFrom } : {}),
     workspaces,
     audiences: [{ id: 'owner', kind: 'owner' }],
   };
@@ -261,6 +281,8 @@ export class BotStore {
   recordPath(botId: string): string { return join(this.botDir(botId), 'bot.json'); }
   homeDir(botId: string): string { return join(this.botDir(botId), 'home'); }
   workspaceDir(botId: string): string { return join(this.botDir(botId), 'workspace'); }
+  /** `<bot>/tasks`: the tasks other Bots handed this one, a file each. They go to the trash with the Bot. */
+  tasksDir(botId: string): string { return join(this.botDir(botId), 'tasks'); }
 
   /** `<home>/projects/<project dir>`: where the engine keeps this Bot's transcripts, and its memory. */
   transcriptsDir(botId: string): string {
@@ -343,6 +365,7 @@ export class BotStore {
     const description = input.description === undefined ? '' : botDescription(input.description);
     const model = input.model === undefined ? undefined : botModel(input.model);
     const permissionMode = input.permissionMode === undefined ? undefined : botPermissionMode(input.permissionMode);
+    const acceptFrom = this.acceptFrom(input.acceptFrom ?? [], undefined, []);
     const workspaces = this.workspaces(input.workspaces ?? []);
     const persona = input.persona === undefined ? defaultPersona(name, description) : personaText(input.persona);
     let botId = '';
@@ -372,6 +395,7 @@ export class BotStore {
         revision: 1,
         ...(model !== undefined ? { model } : {}),
         ...(permissionMode !== undefined ? { permission_mode: permissionMode } : {}),
+        ...(acceptFrom.length > 0 ? { accept_from: acceptFrom } : {}),
         workspaces,
         audiences: [{ id: 'owner', kind: 'owner' }],
       };
@@ -399,7 +423,13 @@ export class BotStore {
     else if (patch.model !== undefined) next.model = botModel(patch.model);
     if (patch.permissionMode === null) delete next.permission_mode;
     else if (patch.permissionMode !== undefined) next.permission_mode = botPermissionMode(patch.permissionMode);
+    if (patch.acceptFrom !== undefined) {
+      const acceptFrom = this.acceptFrom(patch.acceptFrom, botId, current.accept_from ?? []);
+      if (acceptFrom.length > 0) next.accept_from = acceptFrom;
+      else delete next.accept_from;
+    }
     const unchanged = (['name', 'description', 'model', 'permission_mode'] as const).every((key) => next[key] === current[key])
+      && sameBotIds(next.accept_from, current.accept_from)
       && JSON.stringify(next.workspaces) === JSON.stringify(current.workspaces);
     if (unchanged) return current;
     next.revision = current.revision + 1;
@@ -438,6 +468,13 @@ export class BotStore {
       throw new Error('A Bot cannot work in the LingXi configuration folder.');
     }
     return { path: real, mode: entry.mode };
+  }
+
+  /** The list of Bots that may delegate here, sorted: valid, once each, existing (or listed already), and not the Bot itself. */
+  private acceptFrom(ids: ReadonlyArray<string>, selfId: string | undefined, listed: readonly string[]): string[] {
+    const list = acceptFromList(ids, selfId);
+    if (list.some((id) => !listed.includes(id) && !existsSync(this.recordPath(id)))) throw new Error('accept_from names a Bot that does not exist');
+    return list.sort();
   }
 
   private workspaces(entries: ReadonlyArray<{ path: string; mode: BotWorkspaceMode }>): BotWorkspace[] {

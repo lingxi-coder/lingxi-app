@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 import { MANAGED_FILE, applyManagedSettings, pathRule, writeAllBotSettings, writeBotSettings } from '../src/main/bots/botSettings.js';
 import { projectDirName } from '../src/main/bots/projectDirName.js';
+import { routerToolRules } from '../src/main/bots/routerTools.js';
 import type { BotCreateInput, BotRecord } from '../src/main/bots/store.js';
 import { botFixture } from './bot-helpers.js';
 
@@ -61,7 +62,10 @@ test('a Bot may use its bound folders and its own memory, and is walled off from
   const memory = join(f.store.homeDir(bot.bot_id), 'projects', projectDirName(f.store.workspaceDir(bot.bot_id)), 'memdir');
   assert.equal(settings.model, 'anthropic/claude-test');
   assert.deepEqual(settings.permissions.additionalDirectories, [writable, readonly]);
-  assert.deepEqual(settings.permissions.allow, [read(memory), edit(memory)]);
+  assert.deepEqual(settings.permissions.allow, [read(memory), edit(memory), ...routerToolRules()]);
+  assert.deepEqual(routerToolRules(), [
+    'mcp__bots__list_bots', 'mcp__bots__delegate_task', 'mcp__bots__get_task', 'mcp__bots__message_bot', 'mcp__bots__cancel_task', 'mcp__bots__attach_artifact',
+  ], 'the engine names a tool of an MCP server mcp__<server>__<tool>, and each rule names exactly one');
 
   const isolated = [
     f.store.botDir(sibling.bot_id),
@@ -89,6 +93,7 @@ test('a Bot may use its bound folders and its own memory, and is walled off from
     join(f.store.workspaceDir(bot.bot_id), '.lingxi', 'settings.json'), join(f.store.workspaceDir(bot.bot_id), '.lingxi', 'settings.local.json'),
     join(f.store.workspaceDir(bot.bot_id), '.mcp.json'),
   ]) assert.ok(settings.permissions.deny.includes(edit(file, false)), `no changing ${file}`);
+  assert.ok(settings.permissions.deny.includes(edit(f.store.tasksDir(bot.bot_id))), 'no changing the tasks other Bots handed it');
 
   assert.equal(settings.sandbox.enabled, true);
   assert.equal(settings.sandbox.failIfUnavailable, true);

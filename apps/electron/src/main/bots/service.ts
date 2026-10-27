@@ -24,6 +24,8 @@ import type { RoutineBot } from '../scheduled.js';
 import type { ProjectSessionCatalogRow } from '../session-catalog.js';
 import { isSessionId } from '../sessionIdentity.js';
 import { writeAllBotSettings, writeBotSettings } from './botSettings.js';
+import { ensureRouterEntry } from './mcpConfig.js';
+import { ROUTER_TOKEN_ENV, ROUTER_URL_ENV } from './routerTools.js';
 import { BotNotFoundError, type BotCreateInput, type BotPatch, type BotRecord, type BotStore, type BotWorkspace } from './store.js';
 
 /** What of the runtime manager the Bots use. */
@@ -54,12 +56,32 @@ export interface BotRoutines {
   releaseScope(workspace: string): void;
 }
 
+/** What of the Bot router the service uses: the address it listens at, and a token for each session that may call it. */
+export interface BotRouterAccess {
+  /** The router's address once it listens; rejects if it cannot. */
+  ready(): Promise<string>;
+  /** The token that speaks for a session; a session has one at a time. */
+  issue(botId: string, sessionId: string): string;
+  /** None of the Bot's sessions may call the router any more. */
+  revokeBot(botId: string): void;
+}
+
+/** What of the tasks between Bots the service uses. */
+export interface BotDelegation {
+  /** The Bot is about to go: its tasks end, and the work on them stops. */
+  botDeleting(botId: string): Promise<void>;
+}
+
 export interface BotServiceOptions {
   store: BotStore;
   runtimes: BotRuntimes;
   catalogFor(configHome: string): BotCatalog;
   /** The routine scheduler; absent where nothing is scheduled. */
   routines?: BotRoutines;
+  /** The Bot router; without it a Bot's sessions cannot reach the other Bots. */
+  router?: BotRouterAccess;
+  /** Tasks between Bots; absent where there are none. */
+  delegation?: BotDelegation;
   /** The platform the app runs on; this process's by default. */
   platform?: NodeJS.Platform;
   /** Something went wrong that does not stop the operation. */
@@ -146,12 +168,16 @@ export class BotService {
     this.assertNotDeleting(botId);
     this.deleting.add(botId);
     try {
+      // No new task goes to the Bot or comes from it now; those under way end
+      // before anything of the Bot is stopped.
+      if (this.options.delegation !== undefined) await this.options.delegation.botDeleting(botId);
       // The scheduler no longer lists the Bot, and lets go of its controller so
       // that the controller does not hold an engine on the folder that moves.
       this.options.routines?.releaseScope(workspace);
       await this.options.runtimes.closeProject(workspace);
       this.store.trash(botId);
       this.catalogs.delete(botId);
+      this.options.router?.revokeBot(botId);
     } finally {
       this.deleting.delete(botId);
     }
@@ -263,6 +289,11 @@ export class BotService {
     try { return this.routineBot(this.store.get(botId)); } catch { return undefined; }
   }
 
+  /** Whether the Bot is being deleted right now. */
+  isDeleting(botId: string): boolean {
+    return this.deleting.has(botId);
+  }
+
   /** Whether a working directory is shaped like a Bot's workspace, whether or not the Bot still exists. */
   isBotWorkspace(path: string): boolean {
     return this.store.workspaceBotId(path) !== undefined;
@@ -284,7 +315,7 @@ export class BotService {
    * owner's projects. The settings are made current first, so that the engine
    * reads the isolation as it is now.
    */
-  async launchSettings(projectPath: string): Promise<WorkspaceLaunchSettings> {
+  async launchSettings(projectPath: string, sessionId?: string): Promise<WorkspaceLaunchSettings> {
     this.assertAvailable();
     const botId = this.store.botIdForWorkspace(projectPath);
     if (botId === undefined) throw new Error('not the workspace of a Bot');
@@ -292,14 +323,34 @@ export class BotService {
     const bound = this.writeSettings(this.store.get(botId));
     const home = this.store.homeDir(botId);
     const base = await this.catalog(botId).workspaceSettings(this.store.workspaceDir(botId));
+    const globalConfigPath = join(home, '.lingxi.json');
     return {
       // The engine reads some of its configuration from the environment only,
       // and what the Bot's own settings say must not move the home elsewhere.
-      environment: { ...base.environment, LINGXI_CONFIG_DIR: home },
+      environment: { ...base.environment, LINGXI_CONFIG_DIR: home, ...await this.routerEnvironment(botId, sessionId, globalConfigPath) },
       configHome: home,
-      globalConfigPath: join(home, '.lingxi.json'),
+      globalConfigPath,
       additionalDirectories: bound.map((workspace) => workspace.path),
     };
+  }
+
+  /**
+   * What lets a session's engine reach the Bot router: the router's entry among
+   * the MCP servers of the Bot's configuration, and in the session's environment
+   * the router's address and the token that speaks for this session. A session
+   * that cannot be given them still runs, without the other Bots.
+   */
+  private async routerEnvironment(botId: string, sessionId: string | undefined, globalConfigPath: string): Promise<Record<string, string>> {
+    const { router } = this.options;
+    if (router === undefined || sessionId === undefined) return {};
+    try {
+      const url = await router.ready();
+      ensureRouterEntry(globalConfigPath);
+      return { [ROUTER_URL_ENV]: url, [ROUTER_TOKEN_ENV]: router.issue(botId, sessionId) };
+    } catch (error) {
+      this.warn(`Bot ${botId}: the session cannot reach the other Bots: ${error instanceof Error ? error.message : String(error)}`);
+      return {};
+    }
   }
 
   private catalog(botId: string): BotCatalog {

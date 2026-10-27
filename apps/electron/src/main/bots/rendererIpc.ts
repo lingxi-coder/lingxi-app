@@ -71,6 +71,12 @@ function permissionMode(value: unknown): PermissionModeId | undefined {
   return value;
 }
 
+function acceptFrom(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((id) => !isBotId(id))) throw new Error('invalid accept list');
+  return [...value];
+}
+
 function workspaces(value: unknown): BotWorkspaceUi[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) throw new Error('invalid workspaces');
@@ -82,11 +88,12 @@ function workspaces(value: unknown): BotWorkspaceUi[] | undefined {
 }
 
 function createRequest(value: unknown): BotCreateRequest {
-  const request = plainObject(value, ['name', 'description', 'persona', 'model', 'permissionMode', 'workspaces']);
+  const request = plainObject(value, ['name', 'description', 'persona', 'model', 'permissionMode', 'acceptFrom', 'workspaces']);
   const description = optionalText(request['description'], 'description');
   const persona = optionalText(request['persona'], 'persona');
   const model = optionalText(request['model'], 'model');
   const mode = permissionMode(request['permissionMode']);
+  const accepted = acceptFrom(request['acceptFrom']);
   const bound = workspaces(request['workspaces']);
   return {
     name: text(request['name'], 'name'),
@@ -94,22 +101,25 @@ function createRequest(value: unknown): BotCreateRequest {
     ...(persona !== undefined ? { persona } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(mode !== undefined ? { permissionMode: mode } : {}),
+    ...(accepted !== undefined ? { acceptFrom: accepted } : {}),
     ...(bound !== undefined ? { workspaces: bound } : {}),
   };
 }
 
 function updateRequest(value: unknown): BotUpdateRequest {
-  const request = plainObject(value, ['name', 'description', 'model', 'permissionMode', 'workspaces']);
+  const request = plainObject(value, ['name', 'description', 'model', 'permissionMode', 'acceptFrom', 'workspaces']);
   const name = optionalText(request['name'], 'name');
   const description = optionalText(request['description'], 'description');
   const model = request['model'] === null ? null : optionalText(request['model'], 'model');
   const mode = request['permissionMode'] === null ? null : permissionMode(request['permissionMode']);
+  const accepted = acceptFrom(request['acceptFrom']);
   const bound = workspaces(request['workspaces']);
   return {
     ...(name !== undefined ? { name } : {}),
     ...(description !== undefined ? { description } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(mode !== undefined ? { permissionMode: mode } : {}),
+    ...(accepted !== undefined ? { acceptFrom: accepted } : {}),
     ...(bound !== undefined ? { workspaces: bound } : {}),
   };
 }
@@ -129,6 +139,7 @@ export function botUi(record: BotRecord, lastActivityAt?: number): BotUi {
     revision: record.revision,
     ...(record.model !== undefined ? { model: record.model } : {}),
     ...(record.permission_mode !== undefined ? { permissionMode: record.permission_mode } : {}),
+    ...(record.accept_from !== undefined ? { acceptFrom: [...record.accept_from] } : {}),
     workspaces: record.workspaces.map((workspace) => ({ path: workspace.path, mode: workspace.mode })),
     ...(lastActivityAt !== undefined ? { lastActivityAt } : {}),
   };

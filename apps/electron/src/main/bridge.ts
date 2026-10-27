@@ -94,6 +94,8 @@ import type {
   BridgeRuntimeVersions,
   ConnectionState,
   HostPermissionRequest,
+  HostTurnOptions,
+  HostTurnResult,
   InteractionRecord,
   PromptJournalEntry,
   PromptSource,
@@ -207,6 +209,18 @@ const MAX_JOURNAL_ENTRIES_WITH_IMAGES = 20;
 const MAX_INTERACTION_RECORDS = 200;
 
 const REMOTE_STATE_EVENTS: ReadonlySet<string> = new Set(REMOTE_STATE_EVENT_TYPES);
+
+/** How long a host turn waits for the engine to end a cancelled turn before it is let go. */
+const HOST_TURN_CANCEL_GRACE_MS = 10_000;
+
+/** A random 53-bit turn id, never 0, so that the host's turn is told apart from the ones the window and devices number. */
+function randomHostTurnId(): number {
+  for (;;) {
+    const bytes = randomBytes(8);
+    const id = (bytes.readUInt32BE(0) & 0x1fffff) * 2 ** 32 + bytes.readUInt32BE(4);
+    if (id > 0) return id;
+  }
+}
 
 // Mod UI requests share the runtime's ordinary command lane, and a transcript
 // mounts a render site per tool row, so opening a long chat asks for well over
@@ -855,6 +869,89 @@ export class SessionRuntime {
       this.pendingPromptHydrations.delete(token);
       this.notifyActivityChanged();
     }
+  }
+
+  /**
+   * Send a prompt as the host and wait for its turn to end: what the assistant
+   * ended with, what the turn cost, how it ended. The prompt goes the ordinary
+   * way, which queues behind a turn that is running, so a session that is not
+   * idle is refused rather than joined. A turn that stops for a permission or a
+   * question carries on once someone answers it in the chat; this just waits.
+   * Rejects when the connection is lost or the session is closed first.
+   */
+  async runHostTurn(prompt: string, options: HostTurnOptions = {}): Promise<HostTurnResult> {
+    if (this.disposed) throw new Error('The session was closed.');
+    if (this.turnActive || this.pendingInteractions > 0) throw new Error('busy: The session is working on something else.');
+    const { signal } = options;
+    if (signal?.aborted) return { status: 'cancelled', text: '' };
+    const turnId = randomHostTurnId();
+    const costBefore = this.lastKnownCost?.total_usd ?? 0;
+    return new Promise<HostTurnResult>((resolve, reject) => {
+      let started = false;
+      let done = false;
+      // The text of the message being written, and of the last one that was finished.
+      let streaming = '';
+      let finished = '';
+      let failure: string | undefined;
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      const said = (): string => (streaming.trim() !== '' ? streaming : finished);
+      const settle = (outcome: HostTurnResult | Error): void => {
+        if (done) return;
+        done = true;
+        stopObserving();
+        if (graceTimer !== undefined) clearTimeout(graceTimer);
+        signal?.removeEventListener('abort', cancel);
+        if (outcome instanceof Error) reject(outcome);
+        else resolve(outcome);
+      };
+      const cancel = (): void => {
+        if (done || graceTimer !== undefined) return;
+        try { this.cancelTurn(turnId); } catch { settle({ status: 'cancelled', text: said() }); return; }
+        graceTimer = setTimeout(() => settle({ status: 'cancelled', text: said() }), options.cancelGraceMs ?? HOST_TURN_CANCEL_GRACE_MS);
+        graceTimer.unref?.();
+      };
+      const stopObserving = this.observeRemote((observation) => {
+        if (observation.type === 'disposed') { settle(new Error('The session was closed.')); return; }
+        if (observation.type === 'state') {
+          // Closing a session says it is disconnected first, so what it was told is read off the flag.
+          if (observation.state.status !== 'connected') settle(new Error(this.disposed ? 'The session was closed.' : 'interrupted: The connection to the session was lost.'));
+          return;
+        }
+        if (observation.type !== 'event') return;
+        const event = observation.envelope.event;
+        if (event.type === 'turn_started') {
+          if (event.turn_id === turnId) started = true;
+          return;
+        }
+        if (!started) return;
+        if (event.type === 'text_delta') streaming += event.text;
+        else if (event.type === 'message_complete') {
+          const complete = event.message === undefined
+            ? streaming
+            : event.message.blocks.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n');
+          if (complete.trim() !== '') finished = complete;
+          streaming = '';
+        } else if (event.type === 'error') failure ??= event.message;
+        else if (event.type === 'turn_ended') {
+          const total = event.cost?.total_usd;
+          const costUsd = typeof total === 'number' && Number.isFinite(total) ? Math.max(0, total - costBefore) : undefined;
+          const result = { text: said(), ...(costUsd !== undefined ? { costUsd } : {}) };
+          if (event.outcome.type === 'cancelled') settle({ status: 'cancelled', ...result });
+          else if (failure !== undefined) settle({ status: 'failed', error: failure, ...result });
+          else if (event.stop_reason === 'error') settle({ status: 'failed', error: 'The turn ended with an error.', ...result });
+          else if (event.outcome.type === 'max_turns') settle({ status: 'failed', error: 'The reply reached its length limit and was cut short.', ...result });
+          else settle({ status: 'completed', ...result });
+        }
+      });
+      signal?.addEventListener('abort', cancel, { once: true });
+      const failed = (error: unknown): void => {
+        settle(signal?.aborted ? { status: 'cancelled', text: '' } : error instanceof Error ? error : new Error(String(error)));
+      };
+      try {
+        const sent = this.sendPrompt(prompt, [], turnId, undefined, options.source ?? { origin: 'scheduled' });
+        if (sent) sent.catch(failed);
+      } catch (error) { failed(error); }
+    });
   }
 
   private sendCronCommand(command: Extract<ClientCommand, { type: 'cron_manage' }>): Promise<CronJobDto[]> {

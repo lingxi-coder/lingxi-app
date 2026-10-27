@@ -41,7 +41,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import type { MessageDto } from '@lingxi/bridge-client';
 import {
-  ManualClock,
   MemoryRtdb,
   RemoteRpcError,
   RtdbClient,
@@ -70,7 +69,7 @@ import { RemoteCommands, type RemotePromptEcho } from '../src/main/remoteControl
 import { SessionGateway } from '../src/main/remoteControl/sessionGateway.js';
 import { LIVE_BATCH_MS } from '../src/main/remoteControl/sessionAttachment.js';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
-import { FakeAccount, FakePeers, FakeSettings as FakeServiceSettings, MemoryFiles, START, diagnosticsLog, drive, elapse, testHostIdentity } from './remote-helpers.js';
+import { FakeAccount, FakePeers, FakeSettings as FakeServiceSettings, MemoryFiles, PendingAsyncWork, START, SteppedManualClock, diagnosticsLog, driveWhileIdle, elapseWhileIdle, settle, testHostIdentity, trackWebCrypto } from './remote-helpers.js';
 import { FakeSettings as FakePolicySettings, SESSION_A, permissionRequest } from './remote-session-helpers.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,6 +119,8 @@ const PROJECT = '/workspace';
 const engine = { clients: new Map<string, FakeClient>(), history: new Map<string, MessageDto[]>() };
 const originalStart = SessionRuntime.prototype.start;
 const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+const cryptoWork = new PendingAsyncWork();
+const restoreCrypto = trackWebCrypto(cryptoWork);
 
 before(() => {
   // Starting a runtime would spawn the engine; here it connects a FakeClient the way `bridge.test.ts` does by hand.
@@ -145,6 +146,7 @@ before(() => {
 after(() => {
   SessionRuntime.prototype.start = originalStart;
   SessionRuntime.prototype.resumeOwnedSession = originalResume;
+  restoreCrypto();
 });
 
 const HISTORY: MessageDto[] = [
@@ -241,7 +243,7 @@ interface Backend {
 }
 
 function memoryBackend(): Backend {
-  const clock = new ManualClock(START);
+  const clock = new SteppedManualClock(START);
   const memory = new MemoryRtdb({ clock });
   const written: Written[] = [];
   const network = new Network();
@@ -254,22 +256,15 @@ function memoryBackend(): Backend {
     hostDb: new TapRtdb(memory, 'host', new Network(), written),
     viewerDb: new TapRtdb(memory, 'viewer', network, written),
     probe: memory,
-    until: async (condition, label) => {
-      for (let turn = 0; turn < 40_000; turn++) {
-        if (await condition()) return;
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        clock.advance(25);
-      }
-      throw new Error(`timed out waiting for ${label}`);
-    },
+    until: (condition, label) => driveWhileIdle(clock, condition, cryptoWork, label),
     run: async (promise) => {
       let outcome: { ok: true; value: any } | { ok: false; error: unknown } | undefined;
       promise.then((value) => { outcome = { ok: true, value }; }, (error: unknown) => { outcome = { ok: false, error }; });
-      await drive(clock, () => outcome !== undefined, 'a promise to settle', 40_000);
+      await driveWhileIdle(clock, () => outcome !== undefined, cryptoWork, 'a promise to settle');
       if (!outcome!.ok) throw outcome!.error;
       return outcome!.value;
     },
-    pass: (ms) => elapse(clock, ms, 250),
+    pass: (ms) => elapseWhileIdle(clock, ms, cryptoWork),
     close: async () => undefined,
   };
 }
@@ -671,6 +666,324 @@ async function sessionFlow(backend: Backend): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. First pairing over the tunnel
 // ─────────────────────────────────────────────────────────────────────────────
+
+test('the memory clock waits for controlled asynchronous work before advancing timers', async () => {
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  let release!: () => void;
+  const pending = work.track(new Promise<void>((resolve) => { release = resolve; }));
+  let fired = false;
+  clock.setTimeout(() => { fired = true; }, 25);
+  const driving = driveWhileIdle(clock, () => fired, work, 'the timer');
+  try {
+    await settle(50);
+    assert.equal(work.pending, 1);
+    assert.equal(clock.now(), START, 'pending real work must not consume a protocol deadline');
+    assert.equal(fired, false);
+  } finally {
+    release();
+  }
+  await pending;
+  await driving;
+  assert.equal(clock.now(), START + 25, 'fake timers still advance after the work completes');
+});
+
+test('the memory clock reports blocked asynchronous work instead of waiting forever', async () => {
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  let release!: () => void;
+  const pending = work.track(new Promise<void>((resolve) => { release = resolve; }));
+  try {
+    await assert.rejects(driveWhileIdle(clock, () => false, work, 'blocked work', 40_000, 25, 30), /timed out waiting for blocked work/);
+    assert.equal(clock.now(), START);
+  } finally {
+    release();
+    await pending;
+  }
+  await assert.rejects(work.track(Promise.reject(new Error('controlled failure'))), /controlled failure/);
+  assert.equal(work.pending, 0, 'rejected work must release its tracking slot');
+});
+
+test('the memory backend tracks real WebCrypto promises and releases failed operations', async () => {
+  assert.equal(cryptoWork.pending, 0);
+  const digest = globalThis.crypto.subtle.digest('SHA-256', new Uint8Array([1, 2, 3]));
+  assert.equal(cryptoWork.pending, 1);
+  assert.equal((await digest).byteLength, 32);
+  assert.equal(cryptoWork.pending, 0);
+
+  const invalid = globalThis.crypto.subtle.digest('not-an-algorithm', new Uint8Array());
+  assert.equal(cryptoWork.pending, 1);
+  await assert.rejects(invalid);
+  assert.equal(cryptoWork.pending, 0);
+});
+
+test('the memory clock bounds synchronous and asynchronous conditions by real time', async () => {
+  for (const asynchronous of [false, true]) {
+    const clock = new SteppedManualClock(START);
+    const work = new PendingAsyncWork();
+    let fired = false;
+    clock.setTimeout(() => { fired = true; }, 25);
+    await driveWhileIdle(clock, () => asynchronous ? Promise.resolve(fired) : fired, work, 'condition');
+    assert.equal(clock.now(), START + 25);
+    assert.equal(fired, true);
+  }
+
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  await assert.rejects(driveWhileIdle(clock, () => new Promise<boolean>(() => {}), work, 'hanging condition', 40_000, 25, 30), /timed out waiting for hanging condition/);
+  assert.equal(clock.now(), START);
+
+  let release!: (value: boolean) => void;
+  const late = new Promise<boolean>((resolve) => { release = resolve; });
+  await assert.rejects(driveWhileIdle(clock, () => late, work, 'late condition', 40_000, 25, 30), /timed out waiting for late condition/);
+  release(true);
+  await late;
+  assert.equal(clock.now(), START);
+
+  await assert.rejects(driveWhileIdle(clock, () => new Promise<boolean>((resolve) => {
+    queueMicrotask(() => {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+      resolve(true);
+    });
+  }), work, 'late microtask condition', 40_000, 25, 10), /timed out waiting for late microtask condition/);
+  assert.equal(clock.now(), START);
+
+  await assert.rejects(driveWhileIdle(clock, () => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+    return true;
+  }, work, 'late synchronous condition', 40_000, 25, 10), /timed out waiting for late synchronous condition/);
+  assert.equal(clock.now(), START);
+  await assert.rejects(driveWhileIdle(clock, () => { throw new Error('condition failed'); }, work), /condition failed/);
+  await assert.rejects(driveWhileIdle(clock, () => Promise.reject(new Error('async condition failed')), work), /async condition failed/);
+});
+
+test('timers due together wait for real WebCrypto and can be cancelled before the next callback', async () => {
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  const subtle = globalThis.crypto.subtle;
+  const descriptor = Object.getOwnPropertyDescriptor(subtle, 'digest')!;
+  const digest = subtle.digest.bind(subtle);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  Object.defineProperty(subtle, 'digest', {
+    configurable: true, writable: true,
+    value: (...args: Parameters<SubtleCrypto['digest']>) => Promise.all([digest(...args), gate]).then(([value]) => value),
+  });
+  const restore = trackWebCrypto(work);
+  let started!: () => void;
+  const began = new Promise<void>((resolve) => { started = resolve; });
+  let completed: Promise<void> | undefined;
+  let expired = false;
+  let deadlineTimer: unknown;
+  clock.setTimeout(() => {
+    completed = subtle.digest('SHA-256', new Uint8Array([1])).then(() => { clock.clearTimeout(deadlineTimer); });
+    started();
+  }, 25);
+  deadlineTimer = clock.setTimeout(() => { expired = true; }, 25);
+  const advancing = elapseWhileIdle(clock, 25, work, 25);
+  try {
+    await Promise.race([began, advancing.then(() => { throw new Error('timer did not start WebCrypto'); })]);
+    await settle(50);
+    assert.equal(work.pending, 1);
+    assert.equal(clock.now(), START + 25);
+    assert.equal(expired, false, 'a later timer at the same instant must not overtake the crypto operation');
+  } finally {
+    release();
+    try { await completed; await advancing; }
+    finally { restore(); Object.defineProperty(subtle, 'digest', descriptor); }
+  }
+  assert.equal(expired, false, 'the completed operation cancelled its deadline');
+  assert.equal(clock.now(), START + 25);
+});
+
+test('an uncancelled timer due with pending work fires once that work settles', async () => {
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  let release!: () => void; let started!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const began = new Promise<void>((resolve) => { started = resolve; });
+  let pending: Promise<void> | undefined;
+  let expired = false;
+  clock.setTimeout(() => { pending = work.track(gate); started(); }, 25);
+  clock.setTimeout(() => { expired = true; }, 25);
+  const advancing = elapseWhileIdle(clock, 25, work, 25);
+  try {
+    await Promise.race([began, advancing.then(() => { throw new Error('timer did not start its work'); })]);
+    await settle(50);
+    assert.equal(expired, false);
+  } finally { release(); await pending; await advancing; }
+  assert.equal(expired, true);
+  assert.equal(clock.now(), START + 25);
+});
+
+test('memory backend pass waits for pending work and still fires actual timeouts', async () => {
+  const backend = memoryBackend();
+  const clock = backend.clock;
+  let release!: () => void;
+  const pending = cryptoWork.track(new Promise<void>((resolve) => { release = resolve; }));
+  let expired = false;
+  clock.setTimeout(() => { expired = true; }, 125);
+  const passing = backend.pass(200);
+  try {
+    await settle(50);
+    assert.equal(clock.now(), START);
+    assert.equal(expired, false);
+  } finally {
+    release();
+    await pending;
+    await passing;
+  }
+  assert.equal(clock.now(), START + 200);
+  assert.equal(expired, true, 'an uncancelled protocol timeout must still fire');
+});
+
+test('a test can explicitly trigger a deadline while real work is stalled', async () => {
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  let release!: () => void;
+  const pending = work.track(new Promise<void>((resolve) => { release = resolve; }));
+  let expired = false;
+  clock.setTimeout(() => { expired = true; }, 25);
+  try {
+    clock.advanceExplicitly(25);
+    assert.equal(work.pending, 1);
+    assert.equal(expired, true);
+    assert.equal(clock.now(), START + 25);
+  } finally { release(); await pending; }
+});
+
+test('nested explicit advances preserve the furthest time reached', () => {
+  const clock = new SteppedManualClock(START);
+  const events: string[] = [];
+  clock.setTimeout(() => { events.push('outer'); clock.advanceExplicitly(50); }, 10);
+  clock.setTimeout(() => { events.push('inner'); }, 30);
+  clock.advanceExplicitly(25);
+  assert.deepEqual(events, ['outer', 'inner']);
+  assert.equal(clock.now(), START + 60);
+});
+
+test('backend run reports an explicitly triggered timeout while crypto remains pending', async () => {
+  const backend = memoryBackend();
+  const clock = backend.clock as SteppedManualClock;
+  let release!: () => void;
+  const pending = cryptoWork.track(new Promise<void>((resolve) => { release = resolve; }));
+  const request = new Promise<void>((_, reject) => {
+    clock.setTimeout(() => reject(new Error('protocol deadline reached')), 50);
+  });
+  const expected = assert.rejects(backend.run(request), /protocol deadline reached/);
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await settle(50);
+    assert.equal(clock.now(), START);
+    clock.advanceExplicitly(50);
+    await Promise.race([expected, new Promise<never>((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error('backend did not report its protocol deadline')), 1_000);
+    })]);
+    assert.equal(cryptoWork.pending, 1, 'the protocol timeout must not require stalled work to finish');
+    assert.equal(clock.now(), START + 50);
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    release(); await pending; await expected.catch(() => undefined);
+  }
+});
+
+test('an explicit advance past an active step resumes the driver at the new time', async () => {
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  let release!: () => void;
+  const pending = work.track(new Promise<void>((resolve) => { release = resolve; }));
+  let fired = false;
+  clock.setTimeout(() => { fired = true; }, 75);
+  const driving = driveWhileIdle(clock, () => fired, work, 'later timer');
+  try {
+    await settle(50);
+    assert.equal(clock.now(), START);
+    clock.advanceExplicitly(50);
+    assert.equal(clock.now(), START + 50);
+    assert.equal(fired, false);
+  } finally { release(); await pending; }
+  await driving;
+  assert.equal(clock.now(), START + 75);
+  assert.equal(fired, true);
+});
+
+test('a driven condition can complete while unrelated real work remains pending', async () => {
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  let release!: () => void;
+  const pending = work.track(new Promise<void>((resolve) => { release = resolve; }));
+  let done = false;
+  const driving = driveWhileIdle(clock, () => done, work, 'independent completion');
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await settle(10);
+    done = true;
+    await Promise.race([driving, new Promise<never>((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error('independent completion was not observed')), 1_000);
+    })]);
+    assert.equal(work.pending, 1);
+    assert.equal(clock.now(), START);
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    release(); await pending; await driving.catch(() => undefined);
+  }
+});
+
+test('pass resumes after an explicit advance and reaches its original target', async () => {
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  let release!: () => void;
+  const pending = work.track(new Promise<void>((resolve) => { release = resolve; }));
+  let expired = false;
+  clock.setTimeout(() => { release(); }, 50);
+  clock.setTimeout(() => { expired = true; }, 175);
+  const passing = elapseWhileIdle(clock, 200, work, 25);
+  try {
+    await settle(10);
+    clock.advanceExplicitly(50);
+    await passing;
+    assert.equal(clock.now(), START + 200);
+    assert.equal(expired, true);
+  } finally { release(); await pending; await passing.catch(() => undefined); }
+});
+
+test('explicit advances do not reset the real deadline for blocked work', async () => {
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  let release!: () => void;
+  const pending = work.track(new Promise<void>((resolve) => { release = resolve; }));
+  const driving = driveWhileIdle(clock, () => false, work, 'still blocked', 40_000, 25, 80);
+  const advancing = setInterval(() => clock.advanceExplicitly(1), 5);
+  try {
+    await assert.rejects(driving, /timed out waiting for still blocked/);
+    assert.equal(work.pending, 1);
+  } finally { clearInterval(advancing); release(); await pending; }
+});
+
+test('pass stays bounded if an explicit advance passes its target while work is stalled', async () => {
+  const clock = new SteppedManualClock(START);
+  const work = new PendingAsyncWork();
+  let release!: () => void;
+  const pending = work.track(new Promise<void>((resolve) => { release = resolve; }));
+  let expired = false;
+  clock.setTimeout(() => { expired = true; }, 25);
+  const passing = elapseWhileIdle(clock, 25, work, 25, 80);
+  const expected = assert.rejects(passing, /timed out waiting for fake time to pass/);
+  try {
+    await settle(10);
+    clock.advanceExplicitly(50);
+    await expected;
+    assert.equal(expired, true);
+    assert.equal(clock.now(), START + 50);
+    assert.equal(work.pending, 1);
+  } finally { release(); await pending; await expected.catch(() => undefined); }
+});
+
+test('memory clock propagates timer callback failures', async () => {
+  const clock = new SteppedManualClock(START);
+  clock.setTimeout(() => { throw new Error('timer failed'); }, 25);
+  await assert.rejects(elapseWhileIdle(clock, 25, new PendingAsyncWork()), /timer failed/);
+});
 
 test('1. first pairing over the tunnel: same code on both sides, approval, pin, and a second connection without a dialog', async () => {
   await firstPairing(memoryBackend());

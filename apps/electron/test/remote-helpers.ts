@@ -43,6 +43,7 @@ import {
   type RemoteErrorCode,
   type Rtdb,
 } from '@lingxi/bridge-client/remote';
+import { performance } from 'node:perf_hooks';
 
 import type { ApprovalOutcome, ApprovalRequest } from '../src/main/remoteControl/approvalDialog.js';
 import { DeviceRegistry, type RegistryFiles } from '../src/main/remoteControl/deviceRegistry.js';
@@ -65,6 +66,180 @@ export const UID = 'uid-1';
 /** Give promise continuations and WebCrypto jobs a few event-loop turns. */
 export async function settle(turns = 5): Promise<void> {
   for (let i = 0; i < turns; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+/** Track real asynchronous work that must finish before fake time advances. */
+export class PendingAsyncWork {
+  private active = 0;
+  private readonly waiters = new Set<() => void>();
+
+  get pending(): number { return this.active; }
+
+  track<T>(promise: Promise<T>): Promise<T> {
+    this.active++;
+    const finish = () => {
+      this.active--;
+      if (this.active === 0) for (const waiter of this.waiters) waiter();
+    };
+    return promise.then((value) => { finish(); return value; }, (error: unknown) => { finish(); throw error; });
+  }
+
+  async waitUntilIdle(timeoutMs: number, onWake: (wake: () => void) => () => void): Promise<'idle' | 'wake' | 'timeout'> {
+    if (this.active === 0) return 'idle';
+    return new Promise((resolve) => {
+      let unsubscribe = () => {};
+      const finish = (result: 'idle' | 'wake' | 'timeout') => {
+        clearTimeout(timer); this.waiters.delete(done); unsubscribe(); resolve(result);
+      };
+      const done = () => finish('idle');
+      const timer = setTimeout(() => finish('timeout'), timeoutMs);
+      this.waiters.add(done);
+      unsubscribe = onWake(() => finish('wake'));
+    });
+  }
+}
+
+/** Observe WebCrypto promises without changing their results or error behavior. */
+export function trackWebCrypto(work: PendingAsyncWork): () => void {
+  const subtle = globalThis.crypto.subtle;
+  const names = ['encrypt', 'decrypt', 'sign', 'verify', 'digest', 'generateKey', 'deriveKey', 'deriveBits', 'importKey', 'exportKey', 'wrapKey', 'unwrapKey'] as const;
+  const originals = new Map<string, PropertyDescriptor | undefined>();
+  for (const name of names) {
+    originals.set(name, Object.getOwnPropertyDescriptor(subtle, name));
+    const method = subtle[name];
+    Object.defineProperty(subtle, name, { configurable: true, writable: true, value: (...args: unknown[]) => work.track(Reflect.apply(method, subtle, args) as Promise<unknown>) });
+  }
+  return () => {
+    for (const [name, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(subtle, name, descriptor);
+      else Reflect.deleteProperty(subtle, name);
+    }
+  };
+}
+
+/** Use ManualClock's ordering and cancellation, but return after each timer. */
+export class SteppedManualClock extends ManualClock {
+  private readonly timerFired = Symbol('timer fired');
+  private readonly advanceWaiters = new Set<() => void>();
+  private revision = 0;
+
+  get explicitRevision(): number { return this.revision; }
+
+  onExplicitAdvance(wake: () => void): () => void {
+    this.advanceWaiters.add(wake);
+    return () => { this.advanceWaiters.delete(wake); };
+  }
+
+  override setTimeout(fn: () => void, ms: number): unknown {
+    return super.setTimeout(() => { fn(); throw this.timerFired; }, ms);
+  }
+
+  override advance(_ms: number): void {
+    throw new Error('use the asynchronous clock driver');
+  }
+
+  /** Run at most one due callback; return false once time reaches target. */
+  advanceOne(target: number): boolean {
+    if (!Number.isFinite(target) || target < this.now()) throw new Error('invalid fake time target');
+    try { super.advance(target - this.now()); return false; }
+    catch (error) { if (error === this.timerFired) return true; throw error; }
+  }
+
+  /** Intentionally trigger deadlines even if real work is stalled. */
+  advanceExplicitly(ms: number): void {
+    if (!Number.isFinite(ms) || ms < 0) throw new Error('invalid fake time interval');
+    const target = this.now() + ms;
+    try {
+      for (let timer = 0; timer < 40_000; timer++) {
+        // A timer may explicitly advance the same clock past this target.
+        if (this.now() > target) return;
+        if (!this.advanceOne(target)) return;
+      }
+      throw new Error('too many timers while advancing fake time');
+    } finally {
+      this.revision++;
+      for (const wake of this.advanceWaiters) wake();
+    }
+  }
+}
+
+function remainingTime(deadline: number, label: string): number {
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) throw new Error(`timed out waiting for ${label}`);
+  return remaining;
+}
+
+/** A predicate must not outlive the same deadline as the timer driver. */
+async function evaluateBeforeDeadline(done: () => boolean | Promise<boolean>, deadline: number, label: string): Promise<boolean> {
+  remainingTime(deadline, label);
+  const result = done();
+  if (typeof result === 'boolean') { remainingTime(deadline, label); return result; }
+  const promise = Promise.resolve(result);
+  let remaining: number;
+  try { remaining = remainingTime(deadline, label); }
+  catch (error) { void promise.catch(() => undefined); throw error; }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const value = await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), remaining); }),
+    ]);
+    remainingTime(deadline, label);
+    return value;
+  } finally { if (timer) clearTimeout(timer); }
+}
+
+/** Yield between real operations, including those started by timer callbacks. */
+async function idleTurn(clock: SteppedManualClock, work: PendingAsyncWork, deadline: number, label: string, recheck: boolean): Promise<'idle' | 'wake'> {
+  for (;;) {
+    const revision = clock.explicitRevision;
+    const remaining = remainingTime(deadline, label);
+    // A driven condition may become true independently of the blocked work.
+    // Poll it without moving fake time; explicit advances wake it immediately.
+    const result = await work.waitUntilIdle(recheck ? Math.min(remaining, 10) : remaining, (wake) => clock.onExplicitAdvance(wake));
+    remainingTime(deadline, label);
+    if (result !== 'idle') return 'wake';
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    remainingTime(deadline, label);
+    if (clock.explicitRevision !== revision) return 'wake';
+    if (work.pending === 0) return 'idle';
+  }
+}
+
+async function advanceWhileIdle(clock: SteppedManualClock, target: number, work: PendingAsyncWork, deadline: number, label: string, done?: () => Promise<boolean>): Promise<boolean> {
+  for (;;) {
+    const state = await idleTurn(clock, work, deadline, label, done !== undefined);
+    if (state === 'wake' && done && await done()) return true;
+    // Another caller may deliberately advance this same clock while we await.
+    if (clock.now() > target) return false;
+    if (state === 'wake') continue;
+    if (!clock.advanceOne(target)) return false;
+  }
+}
+
+/** Drive timers only between real operations; bound both real and fake waits. */
+export async function driveWhileIdle(clock: SteppedManualClock, done: () => boolean | Promise<boolean>, work: PendingAsyncWork, label = 'condition', limit = 40_000, stepMs = 25, timeoutMs = 5_000): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  const check = () => evaluateBeforeDeadline(done, deadline, label);
+  for (let turn = 0; turn < limit; turn++) {
+    if (await check()) return;
+    if (await advanceWhileIdle(clock, clock.now() + stepMs, work, deadline, label, check)) return;
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+/** Explicitly pass fake time without running another timer over pending work. */
+export async function elapseWhileIdle(clock: SteppedManualClock, ms: number, work: PendingAsyncWork, stepMs = 250, timeoutMs = 5_000): Promise<void> {
+  if (!Number.isFinite(ms) || !Number.isFinite(stepMs) || ms < 0 || stepMs <= 0) throw new Error('invalid fake time interval');
+  const deadline = performance.now() + timeoutMs;
+  const target = clock.now() + ms;
+  while (clock.now() < target) {
+    await advanceWhileIdle(clock, Math.min(target, clock.now() + stepMs), work, deadline, 'fake time to pass');
+  }
+  // Match elapse's final event-loop turns, while waiting for any work they start.
+  for (let turn = 0; turn < 10; turn++) {
+    while (await idleTurn(clock, work, deadline, 'fake time to pass', false) !== 'idle') { /* recheck after explicit advancement */ }
+  }
 }
 
 /** Wait, in real time, until `condition()` holds. */

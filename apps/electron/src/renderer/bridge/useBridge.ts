@@ -158,6 +158,8 @@ import {
   isSideQuestionCommand,
 } from './sideQuestion.js';
 import { firstSubmittedSession, submittedSessionCatalogs } from './submittedSessionCatalog.js';
+import { botIdOfSession, isBotSession, pendingBotPath } from './botSession.js';
+import type { BotSessionRefUi } from '../../shared/bots.js';
 import type { SubmittedSession } from './submittedSessionCatalog.js';
 import {
   MAX_TRACKED_SPEECH_SUBSCRIBERS,
@@ -313,6 +315,8 @@ export function useBridge(): UseBridge {
   const activeSession = displayedSession(persistedActiveSession, pendingSession);
   const sessionLoading = pendingSession !== null && !sessionReady;
   const activeSessionId = activeSession?.sessionId ?? null;
+  // A Bot's chat is shown in the chat view but is not a project's: the project-only parts of the window leave it alone.
+  const activeBotId = useMemo(() => botIdOfSession(bootstrap?.runtimes ?? [], activeSession), [bootstrap?.runtimes, activeSession]);
   const providerSettingsSaves = useRef(new Set<AbortController>());
   useEffect(() => () => {
     for (const controller of providerSettingsSaves.current) controller.abort();
@@ -695,6 +699,8 @@ export function useBridge(): UseBridge {
 
   const scheduleProjectCatalogRefresh = useCallback((sessionId: string): void => {
     const summary = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId);
+    // A Bot lists its own chats; its folder is not a project and has no catalog to refresh.
+    if (isBotSession(bootstrapRef.current?.runtimes ?? [], sessionId)) return;
     const projectPath = summary?.projectPath
       ?? (bootstrapRef.current?.activeSession?.sessionId === sessionId ? bootstrapRef.current.activeSession.projectPath : undefined);
     if (!projectPath || !host) return;
@@ -1230,6 +1236,8 @@ export function useBridge(): UseBridge {
   }, [activeSessionId, bootstrap?.workspace.trusted, connection.status, host, requestTaskList, sessionLoading]);
 
   const submittedSessionFor = useCallback((sessionId: string, text: string): SubmittedSession | undefined => {
+    // A Bot's chats never get a row in a project's catalog.
+    if (isBotSession(bootstrapRef.current?.runtimes ?? [], sessionId)) return undefined;
     const ref = bootstrapRef.current?.runtimes.find((entry) => entry.sessionId === sessionId)
       ?? (activeSessionIdRef.current === sessionId
         ? pendingSessionRef.current ?? bootstrapRef.current?.activeSession ?? bootstrapRef.current?.settings.activeSession : undefined);
@@ -1842,6 +1850,65 @@ export function useBridge(): UseBridge {
     }
   }, [applyBootstrap, beginNavigationOperation, capture, host, isCurrentNavigationOperation]);
 
+  /**
+   * Show a chat of a Bot in the chat view: a new one, or the one named. The host
+   * starts it and makes it the displayed session; this follows with a snapshot.
+   * A failure is thrown to the caller, who tells the owner where they are, and
+   * is not put in the window's error banner.
+   */
+  const openBotSession = useCallback(async (botId: string, sessionId?: string): Promise<BotSessionRefUi> => {
+    const bots = host?.bots;
+    if (!host || !bots) throw new Error('Desktop host unavailable.');
+    const operationId = beginNavigationOperation();
+    const target = { projectPath: pendingBotPath(botId), sessionId: sessionId ?? `pending-new:${operationId}` } satisfies SessionRef;
+    pendingSessionRef.current = target;
+    setSessionReady(false);
+    sessionLoadingRef.current = true;
+    setPendingSession(target);
+    removedRuntimeIds.current.delete(target.sessionId);
+    setError(null);
+    try {
+      const opened = await bots.openSession(botId, sessionId);
+      const snapshot = await host.bootstrap();
+      if (isCurrentNavigationOperation(operationId)) {
+        pendingSessionRef.current = null;
+        setSessionReady(false);
+        sessionLoadingRef.current = false;
+        setPendingSession(null);
+        applyBootstrap(snapshot);
+      }
+      return opened;
+    } catch (cause) {
+      if (isCurrentNavigationOperation(operationId)) {
+        pendingSessionRef.current = null;
+        setSessionReady(false);
+        sessionLoadingRef.current = false;
+        setPendingSession(null);
+        try {
+          await recoverLatestNavigationFailure(operationId, isCurrentNavigationOperation, () => host.bootstrap(), applyBootstrap);
+        } catch {
+          // The failure to start the chat is what the owner needs to read; a failed refresh cannot make the stale selection authoritative.
+        }
+      }
+      throw cause;
+    }
+  }, [applyBootstrap, beginNavigationOperation, host, isCurrentNavigationOperation]);
+
+  /** Choose a folder with the system dialog, for a Bot to be given. It is not added to the projects. */
+  const pickBotFolder = useCallback(async () => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    return host.pickProjectFolder('project');
+  }, [host]);
+
+  /** Delete a Bot, then take the host's view of the sessions, since the Bot's chats were stopped with it. */
+  const deleteBot = useCallback(async (botId: string): Promise<void> => {
+    const bots = host?.bots;
+    if (!host || !bots) throw new Error('Desktop host unavailable.');
+    await bots.delete(botId);
+    try { applyBootstrap(await host.bootstrap()); }
+    catch { /* The disposed chats already left the window's view; the next snapshot completes it. */ }
+  }, [applyBootstrap, host]);
+
   const sessionRuntimeStatus = useCallback((sessionId: string): SessionRuntimeStatus | undefined => {
     const summary: SessionRuntimeSummary | undefined = bootstrap?.runtimes.find((runtime) => runtime.sessionId === sessionId);
     const state = runtimeStates.get(sessionId);
@@ -1866,9 +1933,10 @@ export function useBridge(): UseBridge {
   }, [bootstrap, runtimeStates]);
 
   const searchWorkspaceFiles = useCallback(async (query: string) => {
-    if (!host) return { files: [], truncated: false };
+    // A Bot's folder is not a project, so the project file search would refuse it.
+    if (!host || activeBotId) return { files: [], truncated: false };
     try { return await host.searchWorkspaceFiles(query); } catch (cause) { return capture(cause); }
-  }, [capture, host]);
+  }, [activeBotId, capture, host]);
 
   const setProviderCredential = useCallback(async (providerId: string, credential: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
@@ -2498,6 +2566,7 @@ export function useBridge(): UseBridge {
     pluginCatalogEvent,
     configurationOperations,
     activeSession,
+    activeBotId,
     sessionLoading,
     connection,
     connected: !sessionLoading && connection.status === 'connected',
@@ -2559,6 +2628,9 @@ export function useBridge(): UseBridge {
     touchSession,
     renameSession,
     openSession,
+    openBotSession,
+    deleteBot,
+    pickBotFolder,
     listProjectSessions,
     sessionRuntimeStatus,
     searchWorkspaceFiles,

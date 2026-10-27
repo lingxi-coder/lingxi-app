@@ -2,6 +2,9 @@ import { tr } from './i18n/locale';
 import { useI18n } from './i18n/useI18n';
 import { LocalApps } from './components/LocalApps';
 import './components/LocalApps.css';
+import { Bots } from './components/Bots';
+import './components/Bots.css';
+import { useBots } from './bridge/useBots';
 import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
 import type { LocalAppEditRequest } from '../shared/localApps';
 import type { TerminalScope } from '../shared/terminal';
@@ -73,7 +76,7 @@ export function App() {
   const [localAppNavigationError, setLocalAppNavigationError] = useState('');
   const localAppNavigation = useRef(0);
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
-  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps' | 'changes'>('chat');
+  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps' | 'changes' | 'bots'>('chat');
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const [sessionPicker, setSessionPicker] = useState<SessionPickerRequest | null>(null);
@@ -81,6 +84,8 @@ export function App() {
   const sessionPickerSequence = useRef(0);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme, locale]);
   const bridge = useBridge();
+  const botsApi = window.lingxi?.bots;
+  const bots = useBots(botsApi);
   const localAppBridge = useRef(bridge);
   localAppBridge.current = bridge;
   const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading || localAppBridge.current.projectCreationOpen, []);
@@ -125,7 +130,7 @@ export function App() {
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
   }, []);
-  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps' | 'changes') => {
+  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots') => {
     if (sessionNavigationBlocked()) return;
     cancelLocalAppNavigation();
     setPage(next);
@@ -162,7 +167,11 @@ export function App() {
   }, [settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked]);
   useEffect(() => window.lingxi?.onLocalAppEdit?.(openLocalAppChat), [openLocalAppChat]);
   const workspace = bridge.bootstrap?.workspace;
-  const sessionPickerProject = bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path ?? bridge.bootstrap?.settings.projects[0];
+  // A Bot's folder is not a project: with a Bot's chat on screen, project-bound parts of the window follow the selected project instead.
+  const activeBotId = bridge.activeBotId;
+  const botChat = activeBotId !== undefined;
+  const activeBot = botChat ? bots.state.bots.find((bot) => bot.botId === activeBotId) : undefined;
+  const sessionPickerProject = (botChat ? undefined : bridge.activeSession?.projectPath) ?? bridge.bootstrap?.settings.activeProject ?? (botChat ? undefined : workspace?.path) ?? bridge.bootstrap?.settings.projects[0];
   const closeSessionPicker = useCallback(() => {
     const request = sessionPickerRequest.current;
     sessionPickerRequest.current = null;
@@ -211,8 +220,8 @@ export function App() {
   // terminal opened in that window fail validation.
   const settledSession = bridge.activeSession?.sessionId?.startsWith('pending-new:') ? undefined : bridge.activeSession;
   const sideChats = useSideChats(settledSession?.sessionId);
-  const gitScope = selectedGitScope(bridge.bootstrap?.settings.activeProject, settledSession, workspace?.path);
-  const terminalProject = terminalLinkScope?.projectPath ?? bridge.activeSession?.projectPath ?? workspace?.path;
+  const gitScope = botChat ? null : selectedGitScope(bridge.bootstrap?.settings.activeProject, settledSession, workspace?.path);
+  const terminalProject = terminalLinkScope?.projectPath ?? (botChat ? undefined : bridge.activeSession?.projectPath ?? workspace?.path);
   const terminal = useTerminalPanel(terminalLinkScope ?? (terminalProject ? { projectPath: terminalProject, sessionId: settledSession?.sessionId ?? '__draft__' } : null), page === 'chat' && settingsRoute === null);
   useEffect(() => { if (!terminal.hasCommandReview) setTerminalLinkScope(null); }, [settledSession?.sessionId, terminal.hasCommandReview]);
   const providerConfigured = Boolean(bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured));
@@ -388,6 +397,9 @@ export function App() {
             apps={page === 'apps'}
             changes={page === 'changes'}
             onOpenApps={() => openPage('apps')}
+            bots={page === 'bots'}
+            botsAvailable={bots.available}
+            onOpenBots={() => openPage('bots')}
             scheduled={page === 'scheduled'}
             onOpenScheduled={() => openPage('scheduled')}
             onOpenChat={() => openPage('chat')}
@@ -396,6 +408,7 @@ export function App() {
               <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
+                  bot={activeBotId !== undefined ? { name: activeBot?.name ?? '', onOpen: () => { bots.setView({ kind: 'detail', botId: activeBotId }); openPage('bots'); } } : undefined}
                   sideChatOpen={sideChats.open && Boolean(sideChats.selected)}
                   sideChatAvailable={sideChats.sides.length > 0}
                   onToggleSideChat={() => sideChats.setOpen(!sideChats.open)}
@@ -414,6 +427,10 @@ export function App() {
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
+          {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
+            <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}
+              onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }} />
+          </div>}
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
           <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => openPage('chat')} />
           </div>
@@ -439,7 +456,7 @@ export function App() {
                   onOpenAgent={(agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
                   collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
                   emptyMessage={emptyMessage}
-                  welcomeProject={(bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
+                  welcomeProject={botChat ? activeBot?.name ?? '' : (bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
                   // Item ids restart at `i1` in every session; the Stage's
                   // collapse map is scoped by this and dropped when it changes.
                   sessionKey={bridge.conversation.sessionKey}

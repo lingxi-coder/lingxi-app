@@ -135,6 +135,8 @@ export interface UseBridge {
   readonly pluginCatalogEvent: PluginCatalogEvent | null;
   readonly configurationOperations: Readonly<Partial<Record<ConfigurationDomainDto, ConfigurationOperationEvent>>>;
   readonly activeSession: SessionRef | undefined;
+  /** The Bot whose chat is displayed. A Bot's folder is not a project, so project-only parts of the window leave such a chat alone. */
+  readonly activeBotId: string | undefined;
   readonly sessionLoading: boolean;
   readonly connection: ConnectionState;
   readonly connected: boolean;
@@ -215,6 +217,10 @@ export interface UseBridge {
   renameSession(projectPath: string, sessionId: string, title: string): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionRef | false>;
+  /** Show a chat of a Bot in the chat view; a new one when `sessionId` is absent. Rejects with the reason it could not start. */
+  openBotSession(botId: string, sessionId?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
+  deleteBot(botId: string): Promise<void>;
+  pickBotFolder(): Promise<import('../../shared/projectCreation').ProjectFolderSelection | null>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<(ProjectSessionCatalogState & { projectPath: string }) | undefined>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
   sessionRuntimeStatus(sessionId: string): SessionRuntimeStatus | undefined;

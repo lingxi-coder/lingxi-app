@@ -1,14 +1,38 @@
 import XCTest
 
+private struct BrowserRunInputEvidence {
+    let input: [String: Any]
+    let runID: String
+    let threadID: String
+}
+
+private struct BrowserRunResultEvidence {
+    let runAgentResult: [String: Any]
+    let reconnect: [String: Any]?
+}
+
 /// Verifies the app-scoped foreground handoff UI without assuming which
 /// external browser the person selected in iOS Settings.
 final class LocalAppBrowserAgentUITests: XCTestCase {
+    private let publicImagePrompt = "Describe the main food visible in this public image and estimate how many pieces are visible."
+    private let documentPrompt = "Read the attached text file and return its item and count."
+    private var targetFixtureAppID: String?
+    private var targetFixtureRevision: Int?
+    private var targetFixtureIdentityVerified = false
+
     private func stagedAppID() throws -> String {
         let id = ProcessInfo.processInfo.environment["LINGXI_AGENT_BROWSER_APP_ID"] ?? ""
         try XCTSkipUnless(id.range(of: #"^a[0-9a-f]{32}$"#, options: .regularExpression) != nil,
                           "Stage an isolated Local App and pass LINGXI_AGENT_BROWSER_APP_ID")
         try XCTSkipUnless(ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] == nil,
                           "Requires an iOS 26 physical device")
+        let revisionText = ProcessInfo.processInfo.environment["LINGXI_AGENT_BROWSER_REVISION"] ?? "1"
+        guard let revision = Int(revisionText), revision > 0 else {
+            throw XCTSkip("LINGXI_AGENT_BROWSER_REVISION must be a positive integer")
+        }
+        targetFixtureAppID = id
+        targetFixtureRevision = revision
+        targetFixtureIdentityVerified = false
         return id
     }
 
@@ -20,7 +44,7 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         parts.queryItems = [
             URLQueryItem(name: "review", value: "agent"),
             URLQueryItem(name: "runId", value: runID),
-            URLQueryItem(name: "revision", value: ProcessInfo.processInfo.environment["LINGXI_AGENT_BROWSER_REVISION"] ?? "1")
+            URLQueryItem(name: "revision", value: String(targetFixtureRevision ?? 1))
         ]
         return try XCTUnwrap(parts.url)
     }
@@ -34,6 +58,163 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
 
     private func pageText(_ app: XCUIApplication) -> String {
         textValues(app).joined(separator: "\n")
+    }
+
+    private func accessibleLabels(_ app: XCUIApplication) -> [String] {
+        let leaves = app.otherElements.allElementsBoundByIndex.filter {
+            $0.children(matching: .any).count == 0
+        }
+        let elements = app.staticTexts.allElementsBoundByIndex
+            + app.textViews.allElementsBoundByIndex
+            + app.textFields.allElementsBoundByIndex
+            + app.buttons.allElementsBoundByIndex
+            + leaves
+        return elements.flatMap { [$0.label, $0.value as? String ?? ""] }.filter { !$0.isEmpty }
+    }
+
+    private func hasTargetFixtureTitle(_ app: XCUIApplication) -> Bool {
+        accessibleLabels(app).contains("Agent device acceptance")
+    }
+
+    private func localAppInfo(in app: XCUIApplication) -> (id: String, revision: Int)? {
+        guard hasTargetFixtureTitle(app),
+              let payload = protocolPayload(in: app, accepting: { payload in
+                  payload["localAppInfo"] as? [String: Any] != nil
+                      && payload["sdkPendingDatabase"] != nil
+                      && payload["fixtureStorageBytes"] != nil
+              }),
+              let info = payload["localAppInfo"] as? [String: Any],
+              let id = info["id"] as? String,
+              id.range(of: #"^[A-Za-z0-9._-]{1,128}$"#, options: .regularExpression) != nil,
+              let revision = info["revision"] as? Int else {
+            return nil
+        }
+        return (id, revision)
+    }
+
+    private func isTargetFixture(_ app: XCUIApplication) -> Bool {
+        guard hasTargetFixtureTitle(app),
+              let expectedAppID = targetFixtureAppID,
+              let expectedRevision = targetFixtureRevision,
+              let info = localAppInfo(in: app) else {
+            return false
+        }
+        return info.id == expectedAppID && info.revision == expectedRevision
+    }
+
+    private func waitForTargetFixtureIdentity(
+        _ app: XCUIApplication,
+        timeout: TimeInterval = 30
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var nextSwipe = Date().addingTimeInterval(1)
+        var diagnosticsOpened = false
+        let disclosure = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "Safe diagnostics")
+        ).firstMatch
+
+        while Date() < deadline {
+            if isTargetFixture(app) {
+                targetFixtureIdentityVerified = true
+                return true
+            }
+            if hasTargetFixtureTitle(app), !diagnosticsOpened {
+                if disclosure.exists && disclosure.isHittable {
+                    disclosure.tap()
+                    diagnosticsOpened = true
+                } else if Date() >= nextSwipe {
+                    app.swipeUp()
+                    nextSwipe = Date().addingTimeInterval(1)
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        XCTFail("The browser page did not report the staged Local App id and revision. \(safePageSummary(app))")
+        return false
+    }
+
+    private func safeStatusBucket(_ app: XCUIApplication) -> String {
+        let labels = accessibleLabels(app)
+        let known: [(String, String)] = [
+            ("Host Agent ready", "host-ready"),
+            ("Read-only reconnect succeeded", "read-only-reconnect-succeeded"),
+            ("Read-only reconnect to saved run", "read-only-reconnect-pending"),
+            ("Read-only recovery for accepted run", "read-only-recovery-pending"),
+            ("image run succeeded", "image-run-succeeded"),
+            ("document run succeeded", "document-run-succeeded"),
+            ("chat run succeeded", "chat-run-succeeded"),
+            ("Run failed or was interrupted", "run-failed-or-interrupted"),
+            ("Submitting standard AG-UI input", "submitting-single-run"),
+            ("Submitting the new Chat message", "submitting-chat-run"),
+            ("SDK handoff failed", "sdk-handoff-failed"),
+            ("The SDK accepted saved run", "sdk-handoff-accepted"),
+            ("Cancellation requested for public run", "cancel-requested"),
+            ("Host Agent unavailable", "host-unavailable"),
+        ]
+        for label in labels {
+            if let match = known.first(where: { label.hasPrefix($0.0) }) { return match.1 }
+        }
+        return "unavailable"
+    }
+
+    private func safeHandoffErrorCode(_ app: XCUIApplication) -> String {
+        guard let diagnostics = protocolPayload(in: app, accepting: { payload in
+            payload["sdkHandoffErrorCode"] != nil
+                && payload["sdkPendingDatabase"] != nil
+                && payload["fixtureStorageBytes"] != nil
+        }) else { return "unavailable" }
+        let handoff = diagnostics["sdkHandoff"] as? [String: Any]
+        let code = diagnostics["sdkHandoffErrorCode"] as? String ?? handoff?["code"] as? String
+        guard let code,
+              code.range(of: #"^[A-Za-z0-9._-]{1,80}$"#, options: .regularExpression) != nil else {
+            return "none"
+        }
+        return code
+    }
+
+    private func safeTerminal(_ app: XCUIApplication, runID: String?) -> String {
+        guard let runID, let events = eventRecords(app, runID: runID) else { return "unavailable" }
+        let runEvents = events.filter { $0["runId"] as? String == runID }
+        if runEvents.contains(where: { $0["type"] as? String == "RUN_ERROR" }) { return "RUN_ERROR" }
+        if let finish = runEvents.first(where: { $0["type"] as? String == "RUN_FINISHED" }) {
+            let outcome = (finish["outcome"] as? [String: Any])?["type"] as? String
+            if let outcome, ["success", "cancelled"].contains(outcome) {
+                return "RUN_FINISHED/\(outcome)"
+            }
+            return "RUN_FINISHED/other"
+        }
+        return runEvents.contains(where: { $0["type"] as? String == "RUN_STARTED" }) ? "RUN_STARTED" : "none"
+    }
+
+    private func safePublicID(_ value: String?) -> String {
+        guard let value,
+              value.range(of: #"^[A-Za-z0-9_-]{1,128}$"#, options: .regularExpression) != nil else {
+            return "unavailable"
+        }
+        return value
+    }
+
+    private func safePageSummary(
+        _ app: XCUIApplication,
+        input suppliedInput: BrowserRunInputEvidence? = nil
+    ) -> String {
+        guard isTargetFixture(app),
+              let fixtureAppID = targetFixtureAppID,
+              let fixtureRevision = targetFixtureRevision,
+              let info = localAppInfo(in: app) else {
+            return "fixtureIdentity=unverified/wrong-app"
+        }
+        let input = suppliedInput ?? runInputEvidence(in: app)
+        let messages = input.flatMap { $0.input["messages"] as? [[String: Any]] } ?? []
+        let allowedTypes = Set(["text", "image", "document", "file"])
+        let partTypes = Set(messages.flatMap { message -> [String] in
+            guard let parts = message["content"] as? [[String: Any]] else {
+                return (message["content"] as? String).map { _ in ["text"] } ?? []
+            }
+            return parts.compactMap { $0["type"] as? String }.filter { allowedTypes.contains($0) }
+        }).sorted().joined(separator: ",")
+        let messageCount = input == nil ? "unavailable" : String(messages.count)
+        return "fixtureIdentity=verified title=Agent-device-acceptance appId=\(safePublicID(fixtureAppID)) revision=\(fixtureRevision) sdkId=\(safePublicID(info.id)) sdkRevision=\(info.revision) runId=\(safePublicID(input?.runID)) threadId=\(safePublicID(input?.threadID)) messageCount=\(messageCount) partTypes=[\(partTypes)] status=\(safeStatusBucket(app)) terminal=\(safeTerminal(app, runID: input?.runID)) handoffErrorCode=\(safeHandoffErrorCode(app))"
     }
 
     private func textValues(_ app: XCUIApplication, deduplicating: Bool = true) -> [String] {
@@ -100,27 +281,130 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         return nil
     }
 
-    private func runResultPayload(in app: XCUIApplication) -> [String: Any]? {
-        protocolPayload(in: app) { payload in
-            guard let input = payload["RunAgentInput"] as? [String: Any],
-                  input["messages"] as? [[String: Any]] != nil,
-                  let runAgentResult = payload["RunAgentResult"] as? [String: Any],
-                  let result = runAgentResult["result"] as? [String: Any] else {
-                return false
-            }
-            return result["answer"] as? String != nil
+    private func runResultValue(_ value: Any?) -> [String: Any]? {
+        guard let runAgentResult = value as? [String: Any],
+              runAgentResult["result"] as? [String: Any] != nil,
+              runAgentResult["newMessages"] as? [[String: Any]] != nil else {
+            return nil
         }
+        return runAgentResult
+    }
+
+    private func runInputEvidence(from payload: [String: Any]) -> BrowserRunInputEvidence? {
+        guard let input = payload["RunAgentInput"] as? [String: Any],
+              let runID = input["runId"] as? String, !runID.isEmpty,
+              let threadID = input["threadId"] as? String, !threadID.isEmpty,
+              input["messages"] as? [[String: Any]] != nil else {
+            return nil
+        }
+        return BrowserRunInputEvidence(input: input, runID: runID, threadID: threadID)
     }
 
     private func runInputPayload(in app: XCUIApplication) -> [String: Any]? {
-        protocolPayload(in: app) { payload in
-            guard let input = payload["RunAgentInput"] as? [String: Any] else { return false }
-            return input["messages"] as? [[String: Any]] != nil
+        guard isTargetFixture(app) else { return nil }
+        return protocolPayload(in: app) { payload in
+            self.runInputEvidence(from: payload) != nil
         }
     }
 
-    private func inputMessages(in payload: [String: Any]) -> [[String: Any]]? {
-        (payload["RunAgentInput"] as? [String: Any])?["messages"] as? [[String: Any]]
+    private func runInputEvidence(in app: XCUIApplication) -> BrowserRunInputEvidence? {
+        guard let payload = runInputPayload(in: app) else { return nil }
+        return runInputEvidence(from: payload)
+    }
+
+    private func sameRunInput(_ lhs: BrowserRunInputEvidence, _ rhs: BrowserRunInputEvidence) -> Bool {
+        guard lhs.runID == rhs.runID, lhs.threadID == rhs.threadID,
+              let left = try? JSONSerialization.data(withJSONObject: lhs.input, options: [.sortedKeys]),
+              let right = try? JSONSerialization.data(withJSONObject: rhs.input, options: [.sortedKeys]) else {
+            return false
+        }
+        return left == right
+    }
+
+    private func waitForRunInput(
+        in app: XCUIApplication,
+        excludingRunID: String? = nil,
+        expectedUserText: String? = nil,
+        timeout: TimeInterval = 30
+    ) -> BrowserRunInputEvidence? {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastText = ""
+        var nextSwipe = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            lastText = pageText(app)
+            if let evidence = runInputEvidence(in: app) {
+                let excluded = excludingRunID.map { evidence.runID == $0 } ?? false
+                let expectedTextMatches = expectedUserText.map {
+                    hasUserMessage(evidence.input, exactText: $0)
+                } ?? true
+                if !excluded && expectedTextMatches {
+                    return evidence
+                }
+            }
+            if Date() >= nextSwipe {
+                app.swipeUp()
+                nextSwipe = Date().addingTimeInterval(1.5)
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        }
+        XCTFail("Could not observe the expected current RunAgentInput. \(safePageSummary(app))")
+        return nil
+    }
+
+    private func hasUserMessage(_ input: [String: Any], exactText: String) -> Bool {
+        guard let messages = input["messages"] as? [[String: Any]] else { return false }
+        return messages.contains {
+            $0["role"] as? String == "user" && textContent(in: $0) == exactText
+        }
+    }
+
+    private func runResultEvidence(
+        in app: XCUIApplication,
+        input: BrowserRunInputEvidence,
+        requireReconnect: Bool = false
+    ) -> BrowserRunResultEvidence? {
+        guard isTargetFixture(app) else { return nil }
+        if !requireReconnect,
+           let direct = protocolPayload(in: app, accepting: { payload in
+               guard let shownInput = self.runInputEvidence(from: payload),
+                     self.sameRunInput(shownInput, input),
+                     self.runResultValue(payload["RunAgentResult"]) != nil else {
+                   return false
+               }
+               return true
+           }),
+           let result = runResultValue(direct["RunAgentResult"]) {
+            return BrowserRunResultEvidence(runAgentResult: result, reconnect: nil)
+        }
+
+        guard let recovered = protocolPayload(in: app, accepting: { payload in
+            guard let reconnect = payload["reconnect"] as? [String: Any],
+                  reconnect["mode"] as? String == "read-only",
+                  reconnect["runId"] as? String == input.runID,
+                  reconnect["threadId"] as? String == input.threadID,
+                  self.runResultValue(payload["RunAgentResult"]) != nil,
+                  let callbackTypes = payload["callbackEventTypes"] as? [String],
+                  callbackTypes.contains("RUN_FINISHED"),
+                  !callbackTypes.contains("RUN_ERROR") else {
+                return false
+            }
+            return true
+        }),
+              let reconnect = recovered["reconnect"] as? [String: Any],
+              let result = runResultValue(recovered["RunAgentResult"]) else {
+            return nil
+        }
+
+        if let visibleInput = runInputEvidence(in: app), !sameRunInput(visibleInput, input) {
+            return nil
+        }
+        // The read-only result view omits input; use only the input captured
+        // before handoff and only after reconnect metadata matches it exactly.
+        return BrowserRunResultEvidence(runAgentResult: result, reconnect: reconnect)
+    }
+
+    private func inputMessages(in input: [String: Any]) -> [[String: Any]]? {
+        input["messages"] as? [[String: Any]]
     }
 
     private func textContent(in message: [String: Any]) -> String? {
@@ -133,41 +417,60 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         return textParts.isEmpty ? nil : textParts.joined()
     }
 
-    private func answer(in payload: [String: Any]) -> String? {
-        (((payload["RunAgentResult"] as? [String: Any])?["result"] as? [String: Any])?["answer"] as? String)
+    private func answer(in runAgentResult: [String: Any]) -> String? {
+        ((runAgentResult["result"] as? [String: Any])?["answer"] as? String)
     }
 
     private func publicImageRunIDs(in payload: [String: Any]) -> (runID: String, threadID: String)? {
-        guard let input = payload["RunAgentInput"] as? [String: Any],
-              let runID = input["runId"] as? String,
-              UUID(uuidString: runID) != nil,
-              let threadID = input["threadId"] as? String,
-              UUID(uuidString: threadID) != nil,
-              let messages = input["messages"] as? [[String: Any]],
+        guard let evidence = runInputEvidence(from: payload),
+              UUID(uuidString: evidence.runID) != nil,
+              UUID(uuidString: evidence.threadID) != nil,
+              hasExactFileInput(
+                  evidence,
+                  prompt: publicImagePrompt,
+                  partType: "image",
+                  filename: "public-apple.jpg",
+                  mimeType: "image/jpeg",
+                  byteCount: 576216
+              ) else {
+            return nil
+        }
+        return (evidence.runID, evidence.threadID)
+    }
+
+    private func hasExactFileInput(
+        _ evidence: BrowserRunInputEvidence,
+        prompt: String,
+        partType expectedPartType: String,
+        filename: String,
+        mimeType: String,
+        byteCount: Int
+    ) -> Bool {
+        guard let messages = evidence.input["messages"] as? [[String: Any]],
               messages.count == 1,
               let message = messages.first,
               message["role"] as? String == "user",
               let parts = message["content"] as? [[String: Any]],
               parts.count == 2 else {
-            return nil
+            return false
         }
 
-        let expectedPrompt = "Describe the main food visible in this public image and estimate how many pieces are visible."
         guard let textPart = parts.first,
               textPart["type"] as? String == "text",
-              textPart["text"] as? String == expectedPrompt,
-              let imagePart = parts.last,
-              imagePart["type"] as? String == "image",
-              let source = imagePart["source"] as? [String: Any],
+              textPart["text"] as? String == prompt,
+              let filePart = parts.last,
+              filePart["type"] as? String == expectedPartType,
+              let source = filePart["source"] as? [String: Any],
               source["type"] as? String == "data",
-              source["mimeType"] as? String == "image/jpeg",
-              source["value"] as? String == "[base64 omitted; 576216 bytes]",
-              let metadata = imagePart["metadata"] as? [String: Any],
+              source["mimeType"] as? String == mimeType,
+              source["value"] as? String == "[base64 omitted; \(byteCount) bytes]",
+              let metadata = filePart["metadata"] as? [String: Any],
               let localAppMetadata = metadata["com.lingxi.localApp"] as? [String: Any],
-              localAppMetadata["filename"] as? String == "public-apple.jpg" else {
-            return nil
+              localAppMetadata["version"] as? Int == 1,
+              localAppMetadata["filename"] as? String == filename else {
+            return false
         }
-        return (runID, threadID)
+        return true
     }
 
     private func attachScreen(_ name: String) {
@@ -195,17 +498,27 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         }
-        XCTFail("Timed out waiting for browser text \(marker.debugDescription). Snapshot: \(lastText.prefix(3000))")
+        XCTFail("Timed out waiting for the expected browser state. \(safePageSummary(app))")
         return lastText
     }
 
-    private func tapPageButton(_ title: String, in app: XCUIApplication, timeout: TimeInterval = 20) {
+    private func requireTargetFixtureIdentity(_ app: XCUIApplication) -> Bool {
+        guard isTargetFixture(app) else {
+            XCTFail("The browser page identity no longer matches the staged Local App id and revision; refusing the action. \(safePageSummary(app))")
+            return false
+        }
+        return true
+    }
+
+    private func tapPageButton(_ title: String, in app: XCUIApplication, timeout: TimeInterval = 20) -> Bool {
+        guard requireTargetFixtureIdentity(app) else { return false }
         let button = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", title)).firstMatch
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if button.exists && button.isHittable && button.isEnabled {
+                guard requireTargetFixtureIdentity(app) else { return false }
                 button.tap()
-                return
+                return true
             }
             if button.exists, button.frame.maxY < app.frame.minY + 100 {
                 app.swipeDown()
@@ -214,15 +527,22 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         }
-        XCTFail("Browser button \(title.debugDescription) was not enabled and hittable. Snapshot: \(pageText(app).prefix(3000))")
+        XCTFail("The expected fixture control was not enabled and hittable. \(safePageSummary(app))")
+        return false
     }
 
-    private func enterChatText(_ text: String, in app: XCUIApplication) {
+    private func enterChatText(_ text: String, in app: XCUIApplication) -> Bool {
+        guard requireTargetFixtureIdentity(app) else { return false }
         _ = waitForPageText("Message to send in this Chat", in: app, timeout: 20, scroll: true)
         let field = app.textViews.matching(NSPredicate(format: "label CONTAINS %@", "Message to send in this Chat")).firstMatch
-        XCTAssertTrue(field.waitForExistence(timeout: 10), "Chat message field did not appear. Snapshot: \(pageText(app).prefix(2000))")
+        guard field.waitForExistence(timeout: 10) else {
+            XCTFail("Chat message field did not appear. \(safePageSummary(app))")
+            return false
+        }
+        guard requireTargetFixtureIdentity(app) else { return false }
         field.tap()
         field.typeText(text)
+        return true
     }
 
     private func regexMatches(_ pattern: String, in text: String) -> [String] {
@@ -234,7 +554,8 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         }
     }
 
-    private func eventRecords(_ app: XCUIApplication) -> [[String: Any]]? {
+    private func eventRecords(_ app: XCUIApplication, runID: String? = nil) -> [[String: Any]]? {
+        guard isTargetFixture(app) else { return nil }
         let candidates = textValues(app) + [pageText(app)]
         for candidate in candidates {
             let eventText: String
@@ -248,63 +569,163 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             let jsonText = String(eventText[start...end])
             guard let data = jsonText.data(using: .utf8),
                   let records = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-                  records.contains(where: { $0["type"] as? String == "RUN_STARTED" }) else { continue }
+                  records.contains(where: {
+                      $0["type"] as? String == "RUN_STARTED"
+                          && (runID == nil || $0["runId"] as? String == runID)
+                  }) else { continue }
             return records
         }
         return nil
     }
 
+    private func hasLifecycleOutcome(
+        _ app: XCUIApplication,
+        runID: String,
+        threadID: String,
+        outcome expectedOutcome: String
+    ) -> Bool {
+        guard let events = eventRecords(app, runID: runID) else { return false }
+        let runEvents = events.filter { $0["runId"] as? String == runID }
+        let starts = runEvents.filter { $0["type"] as? String == "RUN_STARTED" }
+        let finishes = runEvents.filter { $0["type"] as? String == "RUN_FINISHED" }
+        let errors = events.filter { $0["type"] as? String == "RUN_ERROR" }
+        guard starts.count == 1, finishes.count == 1, errors.isEmpty,
+              starts.first?["threadId"] as? String == threadID,
+              finishes.first?["threadId"] as? String == threadID else {
+            return false
+        }
+        return (finishes.first?["outcome"] as? [String: Any])?["type"] as? String == expectedOutcome
+    }
+
+    private func waitForSuccessfulRunResult(
+        in app: XCUIApplication,
+        input: BrowserRunInputEvidence,
+        kind: String,
+        timeout: TimeInterval = 240,
+        requireReconnect: Bool = false
+    ) -> BrowserRunResultEvidence? {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastText = ""
+        var nextSwipe = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            lastText = pageText(app)
+            if let evidence = runResultEvidence(in: app, input: input, requireReconnect: requireReconnect),
+               hasLifecycleOutcome(app, runID: input.runID, threadID: input.threadID, outcome: "success") {
+                let directStatus = lastText.contains(
+                    "\(kind) run succeeded · thread \(input.threadID) · run \(input.runID)"
+                )
+                let reconnectStatus = evidence.reconnect != nil
+                    && lastText.contains("Read-only reconnect succeeded")
+                    && lastText.contains("no new run started")
+                if requireReconnect ? reconnectStatus : (directStatus || reconnectStatus) {
+                    return evidence
+                }
+            }
+            if Date() >= nextSwipe {
+                app.swipeUp()
+                nextSwipe = Date().addingTimeInterval(1.5)
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        }
+        XCTFail("The current run did not expose its typed result, exact IDs, successful terminal lifecycle, and success status. \(safePageSummary(app, input: input))")
+        return nil
+    }
+
+    private func waitForCancelledRun(
+        in app: XCUIApplication,
+        input: BrowserRunInputEvidence,
+        timeout: TimeInterval = 120
+    ) -> String {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastText = ""
+        var nextSwipe = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            lastText = pageText(app)
+            if hasLifecycleOutcome(app, runID: input.runID, threadID: input.threadID, outcome: "cancelled") {
+                return lastText
+            }
+            if Date() >= nextSwipe {
+                app.swipeUp()
+                nextSwipe = Date().addingTimeInterval(1.5)
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        }
+        XCTFail("The current run did not finish with a standard cancelled outcome. \(safePageSummary(app, input: input))")
+        return lastText
+    }
+
     private func assertLifecycle(
         _ app: XCUIApplication,
         outcome expectedOutcome: String,
+        expectedRunID: String,
         nativeRunPrefix: String? = nil
     ) -> String {
-        guard let events = eventRecords(app) else {
-            XCTFail("Could not decode the accessible standard BaseEvent JSON. Snapshot: \(pageText(app).prefix(5000))")
+        guard let events = eventRecords(app, runID: expectedRunID) else {
+            XCTFail("Could not decode the accessible standard BaseEvent JSON. \(safePageSummary(app))")
             return ""
         }
-        let starts = events.filter { $0["type"] as? String == "RUN_STARTED" }
-        let finishes = events.filter { $0["type"] as? String == "RUN_FINISHED" }
+        let runEvents = events.filter { $0["runId"] as? String == expectedRunID }
+        let starts = runEvents.filter { $0["type"] as? String == "RUN_STARTED" }
+        let finishes = runEvents.filter { $0["type"] as? String == "RUN_FINISHED" }
+        let errors = events.filter { $0["type"] as? String == "RUN_ERROR" }
         XCTAssertEqual(starts.count, 1, "Expected one standard RUN_STARTED event.")
         XCTAssertEqual(finishes.count, 1, "Expected one standard RUN_FINISHED event.")
+        XCTAssertTrue(errors.isEmpty, "A successful or cancelled run must not also report RUN_ERROR.")
         guard let startedID = starts.first?["runId"] as? String,
               let finishedID = finishes.first?["runId"] as? String else {
             XCTFail("RUN_STARTED and RUN_FINISHED must each echo the public runId.")
             return ""
         }
+        XCTAssertEqual(startedID, expectedRunID, "The lifecycle must belong to the exact captured public runId.")
         XCTAssertEqual(startedID, finishedID, "RUN_STARTED and RUN_FINISHED must echo the same public runId.")
         if let nativeRunPrefix {
             XCTAssertTrue(startedID.hasPrefix(nativeRunPrefix), "The public event runId must match the native handoff prefix.")
         }
         let actualOutcome = (finishes.first?["outcome"] as? [String: Any])?["type"] as? String
-        if let actualOutcome {
-            XCTAssertEqual(actualOutcome, expectedOutcome, "Unexpected RUN_FINISHED outcome.")
-        } else if expectedOutcome == "cancelled" {
-            XCTFail("Cancellation must be reported as RUN_FINISHED outcome=cancelled.")
-        }
+        XCTAssertEqual(actualOutcome, expectedOutcome, "Unexpected RUN_FINISHED outcome.")
         return startedID
     }
 
     private func startBrowserRun(
         _ browser: XCUIApplication,
         host: XCUIApplication,
-        expectedRunID: String? = nil
+        expectedRunID: String
     ) -> String? {
+        // The page was verified before the browser action. Once the wake
+        // opens LingXi, Safari's background accessibility tree may disappear.
+        guard targetFixtureIdentityVerified else {
+            XCTFail("The staged browser identity was not verified before handoff.")
+            return nil
+        }
+        if browser.state == .runningForeground {
+            guard requireTargetFixtureIdentity(browser) else { return nil }
+        }
         guard waitForNativeStartButton(browser: browser, host: host) else { return nil }
         let start = host.buttons["开始 Agent 并返回应用"]
         let waitingCopy = "浏览器 Agent 请求等待后台任务许可。运行："
         let waitingLabel = host.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", waitingCopy)).firstMatch
-        let nativeText = waitingLabel.exists ? waitingLabel.label : pageText(host)
+        let nativeText = waitingLabel.exists ? waitingLabel.label : ""
+        guard nativeText.contains(expectedRunID) else {
+            XCTFail("The trusted native handoff must identify the full captured public run ID.")
+            return nil
+        }
         let nativeRunPrefix = regexMatches(#"运行：([0-9a-fA-F]{8})"#, in: nativeText).first
-        XCTAssertNotNil(nativeRunPrefix, "The trusted Apps page must identify the pending public run. Host UI: \(host.debugDescription)")
-        if let expectedRunID, let nativeRunPrefix {
+        XCTAssertNotNil(nativeRunPrefix, "The trusted Apps page must identify the pending public run. \(safePageSummary(browser))")
+        if let nativeRunPrefix {
             XCTAssertTrue(expectedRunID.lowercased().hasPrefix(nativeRunPrefix.lowercased()), "The native handoff prefix must match the existing pending public run ID.")
+        }
+        guard start.exists && start.isHittable else {
+            XCTFail("The explicit native Start Agent action must be available. \(safePageSummary(browser))")
+            return nil
         }
         attachScreen("native-agent-handoff-\(nativeRunPrefix ?? "run")")
         print("IOS_AGUI_NATIVE_HANDOFF_READY runPrefix=\(nativeRunPrefix ?? "unreadable") source=system-browser-deep-link")
-        XCTAssertTrue(start.isHittable, "The explicit native Start Agent action must be available to the user.")
         start.tap()
-        XCTAssertTrue(browser.wait(for: .runningForeground, timeout: 60), "iOS did not return to the observed system-selected browser after the native lease action.")
+        guard browser.wait(for: .runningForeground, timeout: 60) else {
+            XCTFail("iOS did not return to the observed system-selected browser after the native lease action.")
+            return nil
+        }
+        guard waitForTargetFixtureIdentity(browser) else { return nil }
         return nativeRunPrefix
     }
 
@@ -408,6 +829,9 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
                 return true
             }
             if !openPromptTapped {
+                if browser.state == .runningForeground {
+                    guard requireTargetFixtureIdentity(browser) else { return false }
+                }
                 openPromptTapped = acceptLingxiPageOpenPromptIfPresent(
                     browser: browser,
                     springBoard: springBoard,
@@ -416,54 +840,75 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
-        attachScreen("native-handoff-timeout")
         print("IOS_AGUI_NATIVE_HANDOFF_TIMEOUT promptSeen=\(matchingPromptSeen) openPromptTapped=\(openPromptTapped) hostStartVisible=false")
-        print("IOS_AGUI_CURRENT_BROWSER_DEBUG_BEGIN\n\(browser.debugDescription)\nIOS_AGUI_CURRENT_BROWSER_DEBUG_END")
-        XCTFail("Timed out waiting for the trusted native Start Agent button after resolving only the matching LingXi browser prompt.")
+        print("IOS_AGUI_BROWSER_SAFE_SUMMARY \(safePageSummary(browser))")
+        XCTFail("Timed out waiting for the trusted native Start Agent action. \(safePageSummary(browser))")
         return false
     }
 
     private func runPageButton(
         _ title: String,
-        expectedSuccess: String,
-        expectedAttachment: String,
+        kind: String,
+        expectedPrompt: String,
         expectedPartType: String,
+        expectedFilename: String,
+        expectedMimeType: String,
+        expectedByteCount: Int,
         browser: XCUIApplication,
-        host: XCUIApplication,
-        expectedRunID: String? = nil
+        host: XCUIApplication
     ) -> String {
-        tapPageButton(title, in: browser)
+        let previousRunID = runInputEvidence(in: browser)?.runID
+        guard tapPageButton(title, in: browser) else { return "" }
+        guard let input = waitForRunInput(in: browser, excludingRunID: previousRunID) else { return "" }
         return finishPageRun(
-            expectedSuccess: expectedSuccess,
-            expectedAttachment: expectedAttachment,
+            kind: kind,
+            expectedPrompt: expectedPrompt,
             expectedPartType: expectedPartType,
-            expectedRunID: expectedRunID,
+            expectedFilename: expectedFilename,
+            expectedMimeType: expectedMimeType,
+            expectedByteCount: expectedByteCount,
+            input: input,
             browser: browser,
             host: host
         )
     }
 
     private func finishPageRun(
-        expectedSuccess: String,
-        expectedAttachment: String,
+        kind: String,
+        expectedPrompt: String,
         expectedPartType: String,
-        expectedRunID: String? = nil,
+        expectedFilename: String,
+        expectedMimeType: String,
+        expectedByteCount: Int,
+        input: BrowserRunInputEvidence,
         browser: XCUIApplication,
         host: XCUIApplication
     ) -> String {
-        let runIDBeforeHandoff = startBrowserRun(browser, host: host, expectedRunID: expectedRunID)
-        var text = waitForPageText(expectedSuccess, in: browser, timeout: 240, scroll: true)
-        if !text.contains("RUN_FINISHED") {
-            text = waitForPageText("RUN_FINISHED", in: browser, timeout: 20, scroll: true)
+        guard let runIDBeforeHandoff = startBrowserRun(browser, host: host, expectedRunID: input.runID) else {
+            return ""
         }
-        XCTAssertTrue(text.localizedCaseInsensitiveContains(expectedAttachment), "Expected the file to appear in redacted RunAgentInput. Snapshot: \(text.prefix(3000))")
-        XCTAssertTrue(text.localizedCaseInsensitiveContains(expectedPartType), "Expected the official ContentPart type in RunAgentInput. Snapshot: \(text.prefix(3000))")
-        XCTAssertTrue(text.contains("[base64 omitted"), "The browser evidence should show redacted inline bytes, not raw file data.")
-        let runID = assertLifecycle(browser, outcome: "success", nativeRunPrefix: runIDBeforeHandoff)
-        if let expectedRunID {
-            XCTAssertEqual(runID, expectedRunID, "The terminal events must belong to the exact existing pending public run ID.")
+        guard let evidence = waitForSuccessfulRunResult(in: browser, input: input, kind: kind) else { return "" }
+        XCTAssertTrue(
+            hasExactFileInput(
+                input,
+                prompt: expectedPrompt,
+                partType: expectedPartType,
+                filename: expectedFilename,
+                mimeType: expectedMimeType,
+                byteCount: expectedByteCount
+            ),
+            "RunAgentInput did not match the exact text, file type, filename, MIME type, and redacted byte metadata. \(safePageSummary(browser, input: input))"
+        )
+        let runID = assertLifecycle(
+            browser,
+            outcome: "success",
+            expectedRunID: input.runID,
+            nativeRunPrefix: runIDBeforeHandoff
+        )
+        if let reconnect = evidence.reconnect {
+            XCTAssertEqual(reconnect["runId"] as? String, input.runID)
+            XCTAssertEqual(reconnect["threadId"] as? String, input.threadID)
         }
-        XCTAssertTrue(text.contains("RunAgentResult"), "Successful AG-UI run did not expose the official RunAgentResult.")
         attachScreen("browser-\(expectedPartType)-run-finished-\(runID.prefix(8))")
         print("IOS_AGUI_BROWSER_RUN_PASS kind=\(expectedPartType) runId=\(runID) terminal=RUN_FINISHED outcome=success")
         return runID
@@ -482,6 +927,7 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         host.open(try XCTUnwrap(URL(string: "lingxi://apps/\(appID)")))
         XCTAssertTrue(browser.wait(for: .runningForeground, timeout: 60), "The normal Local App launch must open iOS's system-selected browser.")
         _ = waitForPageText("Host Agent ready", in: browser, timeout: 60)
+        guard waitForTargetFixtureIdentity(browser) else { return }
         attachScreen("system-selected-browser-agent-page")
         print("IOS_AGUI_BROWSER_PAGE_READY appId=\(appID) browserBundleId=\(browserID) resolver=system-openURL")
 
@@ -489,112 +935,176 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         let isSubmittingImage = pageText(browser).contains("Submitting standard AG-UI input for image")
         if isSubmittingImage {
             guard let payload = runInputPayload(in: browser),
-                  let pendingImage = publicImageRunIDs(in: payload) else {
-                attachScreen("invalid-active-pending-image-input")
-                XCTFail("The browser is already submitting an image, but its RunAgentInput is not the exact public-apple.jpg fixture; refusing to start a replacement run.")
+                  let pendingImage = publicImageRunIDs(in: payload),
+                  let pendingInput = runInputEvidence(from: payload) else {
+                XCTFail("The active image submission did not match the exact public fixture; no replacement was started. \(safePageSummary(browser))")
                 return
             }
+            XCTAssertEqual(pendingInput.runID, pendingImage.runID)
+            XCTAssertEqual(pendingInput.threadID, pendingImage.threadID)
             print("IOS_AGUI_PENDING_IMAGE_CONTINUE_READY runId=\(pendingImage.runID) threadId=\(pendingImage.threadID) file=public-apple.jpg")
             _ = finishPageRun(
-                expectedSuccess: "image run succeeded",
-                expectedAttachment: "public-apple.jpg",
+                kind: "image",
+                expectedPrompt: publicImagePrompt,
                 expectedPartType: "image",
-                expectedRunID: pendingImage.runID,
+                expectedFilename: "public-apple.jpg",
+                expectedMimeType: "image/jpeg",
+                expectedByteCount: 576216,
+                input: pendingInput,
                 browser: browser,
                 host: host
             )
         } else if retryPending.exists && retryPending.isEnabled {
             guard let payload = runInputPayload(in: browser),
-                  let pendingImage = publicImageRunIDs(in: payload) else {
-                attachScreen("invalid-pending-image-retry-input")
-                XCTFail("The visible pending retry was not the exact public-apple.jpg image input with valid public run/thread IDs; refusing to submit or retry another request.")
+                  let pendingImage = publicImageRunIDs(in: payload),
+                  let pendingInput = runInputEvidence(from: payload) else {
+                XCTFail("The visible retry was not the exact public fixture input; no replacement was submitted. \(safePageSummary(browser))")
                 return
             }
+            XCTAssertEqual(pendingInput.runID, pendingImage.runID)
+            XCTAssertEqual(pendingInput.threadID, pendingImage.threadID)
             attachScreen("browser-pending-public-image-retry-\(pendingImage.runID.prefix(8))")
             print("IOS_AGUI_PENDING_IMAGE_RETRY_READY runId=\(pendingImage.runID) threadId=\(pendingImage.threadID) file=public-apple.jpg")
-            tapPageButton("Retry the same pending request", in: browser)
+            guard tapPageButton("Retry the same pending request", in: browser) else { return }
             _ = finishPageRun(
-                expectedSuccess: "image run succeeded",
-                expectedAttachment: "public-apple.jpg",
+                kind: "image",
+                expectedPrompt: publicImagePrompt,
                 expectedPartType: "image",
-                expectedRunID: pendingImage.runID,
+                expectedFilename: "public-apple.jpg",
+                expectedMimeType: "image/jpeg",
+                expectedByteCount: 576216,
+                input: pendingInput,
                 browser: browser,
                 host: host
             )
         } else {
             let runImage = browser.buttons["Run public image"]
             guard runImage.exists && runImage.isEnabled else {
-                attachScreen("pending-image-retry-and-new-run-unavailable")
-                XCTFail("Neither a validated pending retry nor the enabled new-image action is available; preserving the existing input.")
+                XCTFail("No validated pending retry or enabled new-image action is available; preserving existing input. \(safePageSummary(browser))")
                 return
             }
-            _ = runPageButton("Run public image", expectedSuccess: "image run succeeded", expectedAttachment: "public-apple.jpg", expectedPartType: "image", browser: browser, host: host)
+            _ = runPageButton(
+                "Run public image",
+                kind: "image",
+                expectedPrompt: publicImagePrompt,
+                expectedPartType: "image",
+                expectedFilename: "public-apple.jpg",
+                expectedMimeType: "image/jpeg",
+                expectedByteCount: 576216,
+                browser: browser,
+                host: host
+            )
         }
-        _ = runPageButton("Run text file", expectedSuccess: "document run succeeded", expectedAttachment: "acceptance-stationery.txt", expectedPartType: "document", browser: browser, host: host)
+        _ = runPageButton(
+            "Run text file",
+            kind: "document",
+            expectedPrompt: documentPrompt,
+            expectedPartType: "document",
+            expectedFilename: "acceptance-stationery.txt",
+            expectedMimeType: "text/plain;charset=utf-8",
+            expectedByteCount: 26,
+            browser: browser,
+            host: host
+        )
 
-        tapPageButton("Create Chat", in: browser)
+        guard tapPageButton("Create Chat", in: browser) else { return }
         let createdChat = waitForPageText("Created host-owned persistent Chat", in: browser, timeout: 30, scroll: true)
         XCTAssertTrue(createdChat.contains("threadId"), "Chat creation must expose its host-owned threadId.")
         let markerSuffix = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12))
         let contextMarker = "IOS_CHAT_CONTEXT_\(markerSuffix)"
         let firstChatPrompt = "Remember this marker for my next message: \(contextMarker). For this turn, reply with exactly context-seed."
-        enterChatText(firstChatPrompt, in: browser)
-        tapPageButton("Send Chat turn", in: browser)
-        let firstChatRun = startBrowserRun(browser, host: host)
-        var firstChatEvidence = waitForPageText("chat run succeeded", in: browser, timeout: 240, scroll: true)
-        if !firstChatEvidence.contains("RUN_FINISHED") {
-            firstChatEvidence = waitForPageText("RUN_FINISHED", in: browser, timeout: 20, scroll: true)
-        }
-        let firstChatRunID = assertLifecycle(browser, outcome: "success", nativeRunPrefix: firstChatRun)
-        let firstPayload = try XCTUnwrap(runResultPayload(in: browser), "Could not decode the official RunAgentResult JSON from the page result element. Snapshot: \(pageText(browser).prefix(3000))")
-        let firstInput = try XCTUnwrap(firstPayload["RunAgentInput"] as? [String: Any], "The first RunAgentInput was missing.")
-        XCTAssertEqual(firstInput["runId"] as? String, firstChatRunID, "The first RunAgentInput must match the public run reported by lifecycle events.")
-        let firstMessages = try XCTUnwrap(inputMessages(in: firstPayload), "The first RunAgentInput must expose messages.")
+        let previousChatRunID = runInputEvidence(in: browser)?.runID
+        guard enterChatText(firstChatPrompt, in: browser),
+              tapPageButton("Send Chat turn", in: browser) else { return }
+        let firstInput = try XCTUnwrap(
+            waitForRunInput(in: browser, excludingRunID: previousChatRunID, expectedUserText: firstChatPrompt),
+            "The first Chat turn did not expose its new RunAgentInput before native handoff."
+        )
+        guard let firstChatRun = startBrowserRun(browser, host: host, expectedRunID: firstInput.runID) else { return }
+        let firstEvidence = try XCTUnwrap(
+            waitForSuccessfulRunResult(in: browser, input: firstInput, kind: "chat"),
+            "The first Chat run did not complete with its own typed result and terminal lifecycle."
+        )
+        let firstChatRunID = assertLifecycle(
+            browser,
+            outcome: "success",
+            expectedRunID: firstInput.runID,
+            nativeRunPrefix: firstChatRun
+        )
+        XCTAssertEqual(firstInput.runID, firstChatRunID, "The first RunAgentInput must match the public run reported by lifecycle events.")
+        let firstMessages = try XCTUnwrap(inputMessages(in: firstInput.input), "The first RunAgentInput must expose messages.")
         XCTAssertEqual(firstMessages.count, 1, "The first Chat RunAgentInput must contain exactly its new user turn.")
         let firstMessage = try XCTUnwrap(firstMessages.first, "The first RunAgentInput has no user message.")
         XCTAssertEqual(firstMessage["role"] as? String, "user")
         let firstInputText = try XCTUnwrap(textContent(in: firstMessage), "The first user message must include text content.")
         XCTAssertTrue(firstInputText.contains(contextMarker), "The first user prompt must contain the unique synthetic context marker.")
-        let firstAnswer = try XCTUnwrap(answer(in: firstPayload), "RunAgentResult.result.answer was missing from the first Chat turn.")
-        XCTAssertEqual(firstAnswer, "context-seed", "The first Chat turn should answer exactly context-seed.")
+        let firstAnswer = try XCTUnwrap(answer(in: firstEvidence.runAgentResult), "RunAgentResult.result.answer was missing from the first Chat turn.")
+        XCTAssertTrue(firstAnswer == "context-seed", "The first Chat turn should answer exactly context-seed. \(safePageSummary(browser, input: firstInput))")
         attachScreen("browser-chat-first-run-\(firstChatRunID.prefix(8))")
 
-        tapPageButton("Read-only reconnect to last run", in: browser)
-        let reconnect = waitForPageText("Read-only reconnect succeeded", in: browser, timeout: 60, scroll: true)
+        guard tapPageButton("Read-only reconnect to last run", in: browser) else { return }
+        _ = waitForPageText(
+            "Read-only reconnect to saved run \(firstInput.runID)",
+            in: browser,
+            timeout: 20,
+            scroll: true
+        )
+        let reconnectEvidence = try XCTUnwrap(
+            waitForSuccessfulRunResult(in: browser, input: firstInput, kind: "chat", timeout: 60, requireReconnect: true),
+            "Read-only reconnect did not return the current run's typed result and exact saved IDs."
+        )
+        let reconnect = pageText(browser)
         XCTAssertTrue(reconnect.contains("no new run started"), "connectAgent must replay the existing run without submitting another run.")
         XCTAssertTrue(reconnect.contains(firstChatRunID), "Read-only replay must refer to the same public runId.")
-        tapPageButton("Refresh Chat history", in: browser)
+        XCTAssertEqual(reconnectEvidence.reconnect?["runId"] as? String, firstInput.runID)
+        XCTAssertEqual(reconnectEvidence.reconnect?["threadId"] as? String, firstInput.threadID)
+        XCTAssertTrue(answer(in: reconnectEvidence.runAgentResult) == "context-seed", "Read-only reconnect must restore the same typed result. \(safePageSummary(browser, input: firstInput))")
+        guard tapPageButton("Refresh Chat history", in: browser) else { return }
         let history = waitForPageText(contextMarker, in: browser, timeout: 30, scroll: true)
         XCTAssertTrue(history.contains("context-seed"), "Canonical Chat history should preserve the first assistant turn separately from the next RunAgentInput.")
         XCTAssertTrue(history.contains("assistant"), "Canonical Chat history should include the assistant reply.")
 
         let followupPrompt = "What exact marker did I ask you to remember in the previous message? Reply with only the marker."
         XCTAssertFalse(followupPrompt.contains(contextMarker), "The second user prompt must not reveal the marker.")
-        enterChatText(followupPrompt, in: browser)
-        tapPageButton("Send Chat turn", in: browser)
-        let followupRun = startBrowserRun(browser, host: host)
-        var followup = waitForPageText("chat run succeeded", in: browser, timeout: 240, scroll: true)
-        if !followup.contains("RUN_FINISHED") {
-            followup = waitForPageText("RUN_FINISHED", in: browser, timeout: 20, scroll: true)
-        }
-        let followupRunID = assertLifecycle(browser, outcome: "success", nativeRunPrefix: followupRun)
-        let followupPayload = try XCTUnwrap(runResultPayload(in: browser), "Could not decode the official RunAgentResult JSON from the follow-up page result element. Snapshot: \(pageText(browser).prefix(3000))")
-        let followupInput = try XCTUnwrap(followupPayload["RunAgentInput"] as? [String: Any], "The follow-up RunAgentInput was missing.")
-        XCTAssertEqual(followupInput["runId"] as? String, followupRunID, "The follow-up RunAgentInput must match the public run reported by lifecycle events.")
-        let followupMessages = try XCTUnwrap(inputMessages(in: followupPayload), "The second RunAgentInput must expose messages.")
+        let previousFollowupRunID = runInputEvidence(in: browser)?.runID
+        guard enterChatText(followupPrompt, in: browser),
+              tapPageButton("Send Chat turn", in: browser) else { return }
+        let followupInput = try XCTUnwrap(
+            waitForRunInput(in: browser, excludingRunID: previousFollowupRunID, expectedUserText: followupPrompt),
+            "The follow-up Chat turn did not expose its new RunAgentInput before native handoff."
+        )
+        guard let followupRun = startBrowserRun(browser, host: host, expectedRunID: followupInput.runID) else { return }
+        let followupEvidence = try XCTUnwrap(
+            waitForSuccessfulRunResult(in: browser, input: followupInput, kind: "chat"),
+            "The follow-up Chat run did not complete with its own typed result and terminal lifecycle."
+        )
+        let followupRunID = assertLifecycle(
+            browser,
+            outcome: "success",
+            expectedRunID: followupInput.runID,
+            nativeRunPrefix: followupRun
+        )
+        XCTAssertEqual(followupInput.runID, followupRunID, "The follow-up RunAgentInput must match the public run reported by lifecycle events.")
+        let followupMessages = try XCTUnwrap(inputMessages(in: followupInput.input), "The second RunAgentInput must expose messages.")
         XCTAssertEqual(followupMessages.count, 1, "The second RunAgentInput must send only the new user turn, not replay prior Chat history.")
         let followupMessage = try XCTUnwrap(followupMessages.first, "The second RunAgentInput has no user message.")
         XCTAssertEqual(followupMessage["role"] as? String, "user")
         let followupInputText = try XCTUnwrap(textContent(in: followupMessage), "The second user message must include text content.")
-        XCTAssertEqual(followupInputText, followupPrompt, "The second RunAgentInput should contain only the new prompt.")
+        XCTAssertTrue(followupInputText == followupPrompt, "The second RunAgentInput should contain only the new prompt. \(safePageSummary(browser, input: followupInput))")
         XCTAssertFalse(followupInputText.contains(contextMarker), "The second RunAgentInput must not include the marker as prompt text or replayed history.")
-        let followupAnswer = try XCTUnwrap(answer(in: followupPayload), "RunAgentResult.result.answer was missing from the follow-up Chat turn.")
-        XCTAssertEqual(followupAnswer, contextMarker, "The second Chat turn must recall the marker from the host-persisted prior turn.")
+        let followupAnswer = try XCTUnwrap(answer(in: followupEvidence.runAgentResult), "RunAgentResult.result.answer was missing from the follow-up Chat turn.")
+        XCTAssertTrue(followupAnswer == contextMarker, "The second Chat turn must recall the marker from the host-persisted prior turn. \(safePageSummary(browser, input: followupInput))")
         attachScreen("browser-chat-followup-\(followupRunID.prefix(8))")
 
-        enterChatText("Write a detailed 1500 word explanation of how a paper notebook is made. Continue until complete.", in: browser)
-        tapPageButton("Send Chat turn", in: browser)
-        let cancelledRunPrefix = startBrowserRun(browser, host: host)
+        let cancellationPrompt = "Write a detailed 1500 word explanation of how a paper notebook is made. Continue until complete."
+        let previousCancellationRunID = runInputEvidence(in: browser)?.runID
+        guard enterChatText(cancellationPrompt, in: browser),
+              tapPageButton("Send Chat turn", in: browser) else { return }
+        let cancelledInput = try XCTUnwrap(
+            waitForRunInput(in: browser, excludingRunID: previousCancellationRunID, expectedUserText: cancellationPrompt),
+            "The cancellation run did not expose its new RunAgentInput before native handoff."
+        )
+        guard let cancelledRunPrefix = startBrowserRun(browser, host: host, expectedRunID: cancelledInput.runID) else { return }
         let cancel = browser.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Cancel active run")).firstMatch
         let cancelDeadline = Date().addingTimeInterval(45)
         while Date() < cancelDeadline && (!cancel.exists || !cancel.isEnabled || !cancel.isHittable) {
@@ -603,14 +1113,17 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.25))
         }
-        XCTAssertTrue(cancel.exists && cancel.isEnabled, "The running task must expose its cancel action before completion. Snapshot: \(pageText(browser).prefix(3000))")
+        XCTAssertTrue(cancel.exists && cancel.isEnabled, "The running task must expose its cancel action before completion. \(safePageSummary(browser, input: cancelledInput))")
+        guard requireTargetFixtureIdentity(browser) else { return }
         cancel.tap()
         attachScreen("browser-chat-cancel-requested")
-        var cancelled = waitForPageText("RUN_FINISHED", in: browser, timeout: 120, scroll: true)
-        if !cancelled.localizedCaseInsensitiveContains("cancelled") {
-            cancelled = waitForPageText("cancelled", in: browser, timeout: 30, scroll: true)
-        }
-        let cancelledRunID = assertLifecycle(browser, outcome: "cancelled", nativeRunPrefix: cancelledRunPrefix)
+        let cancelled = waitForCancelledRun(in: browser, input: cancelledInput)
+        let cancelledRunID = assertLifecycle(
+            browser,
+            outcome: "cancelled",
+            expectedRunID: cancelledInput.runID,
+            nativeRunPrefix: cancelledRunPrefix
+        )
         XCTAssertFalse(cancelled.contains("RUN_ERROR"), "Cancellation should be a RUN_FINISHED cancelled outcome, not a success or error masquerading as completion.")
         attachScreen("browser-chat-cancelled-\(cancelledRunID.prefix(8))")
         print("IOS_AGUI_BROWSER_CANCEL_PASS runId=\(cancelledRunID) terminal=RUN_FINISHED outcome=cancelled")

@@ -1,3 +1,4 @@
+//! Real local transport and media-provider loopback integration tests.
 #![cfg(feature = "native-media")]
 
 use async_trait::async_trait;

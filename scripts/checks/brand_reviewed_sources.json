@@ -1803,6 +1803,24 @@
       ]
     },
     {
+      "path": "packaging/pypi/tests/test_release_artifact_install.py",
+      "reason": "Release install fixture executes the exact native credential-broker app path and tests the documented LINGXI_CLI_BIN_PLATFORM_TAG environment key; these identities must match the shipped npm and wheel layouts.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "4af03d61c09195545e739e5f6ff6e5b6109866525910a16433d200c73be5a848"
+        },
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 6,
+          "line_sha256": "7a76f23c6990c1f7e6bc999fd4081db8ed2dfc101c51cc8c55fb35029aa3e947"
+        }
+      ]
+    },
+    {
       "path": "plugins/desktop-mods/.lingxi-plugin/marketplace.json",
       "reason": "Product protocol package and bundled desktop plugin catalog explicitly identify LingXi and its owned metadata directory.",
       "findings": [

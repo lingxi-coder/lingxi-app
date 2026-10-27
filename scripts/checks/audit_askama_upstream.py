@@ -95,7 +95,7 @@ def verify_archive(name, archive):
 def verify_checkout(workspace):
     metadata = subprocess.run(
         ["cargo", "metadata", "--locked", "--all-features", "--format-version=1"],
-        cwd=workspace, check=True, text=True, capture_output=True,
+        cwd=workspace, check=True, encoding="utf-8", capture_output=True,
     )
     verify_git_packages(json.loads(metadata.stdout))
 

@@ -7195,7 +7195,7 @@ mod tests {
         let ChatOutcome::Submit(prompt, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("explicit Enter must submit the restored draft");
         };
-        assert_eq!(prompt.string_at("").as_deref(), Some(draft));
+        assert_eq!(prompt.string_at(""), Some(draft));
     }
 
     #[test]

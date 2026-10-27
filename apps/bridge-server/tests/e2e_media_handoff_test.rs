@@ -573,22 +573,20 @@ fn build_orchestrator(
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![
         first, second, third,
     ]));
-    let orchestrator =
-        ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig {
-                interactive_permissions: true,
-                ..OrchestratorConfig::default()
-            },
-            Arc::new(MockApiClient::new(Vec::new())),
-            streaming,
-            tools,
-            orchestrator::test_support::noop_hook_executor(),
-            gate as Arc<dyn permission::gate::PermissionGate>,
-            output,
-            Arc::new(StaticMemoryProvider::empty()),
-            std::env::temp_dir(),
-        ));
-    orchestrator
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig {
+            interactive_permissions: true,
+            ..OrchestratorConfig::default()
+        },
+        Arc::new(MockApiClient::new(Vec::new())),
+        streaming,
+        tools,
+        orchestrator::test_support::noop_hook_executor(),
+        gate as Arc<dyn permission::gate::PermissionGate>,
+        output,
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ))
 }
 
 async fn build_rig(

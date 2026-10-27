@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Execute the real JNI build script with a tiny Cargo/NDK failure boundary."""
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,12 +12,18 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "apps/android/native/scripts/build-jni.sh"
+GSTREAMER_HELPER = ROOT / "scripts/lib/mobile_gstreamer_cargo.py"
+SPEC = importlib.util.spec_from_file_location("mobile_gstreamer_cargo", GSTREAMER_HELPER)
+assert SPEC and SPEC.loader
+GSTREAMER = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(GSTREAMER)
 ABIS = ("arm64-v8a", "x86_64")
 PACKAGE = Path("com/lingxi/code/bindings")
 LIBRARY = "libandroid_aar.so"
 
 MOCK_TOOL = r'''#!/usr/bin/env python3
 import os
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -30,16 +37,39 @@ if tool == "rustup":
         print("aarch64-linux-android\nx86_64-linux-android")
 elif tool == "cargo":
     if args[0] == "ndk":
+        abi = args[args.index("-t") + 1]
+        triple, slice_name = {"arm64-v8a": ("aarch64-linux-android", "arm64"),
+                              "x86_64": ("x86_64-linux-android", "x86_64")}[abi]
+        pkg_dirs = os.environ["PKG_CONFIG_LIBDIR"].split(os.pathsep)
+        expected_pc = Path(os.environ["LINGXI_GSTREAMER_SDK_ANDROID"]) / slice_name / "lib/pkgconfig"
+        identity_root = (Path(os.environ["CARGO_TARGET_DIR"]).resolve()
+                         / ".mobile-gstreamer-pc/android" / triple)
+        if (Path(pkg_dirs[0]) != expected_pc.resolve()
+                or len(pkg_dirs) != 2
+                or Path(pkg_dirs[1]).parent != identity_root
+                or not Path(pkg_dirs[1]).is_dir()
+                or os.environ.get("PKG_CONFIG_ALLOW_CROSS") != "1"
+                or os.environ.get("PKG_CONFIG_ALL_STATIC") != "1"
+                or os.environ.get("PKG_CONFIG_PATH") != ""):
+            print(f"unexpected GStreamer environment for {abi}: {pkg_dirs}", file=sys.stderr)
+            sys.exit(20)
+        compiler = Path(os.environ[f"CC_{triple}"])
+        linker = os.environ[f"CARGO_TARGET_{triple.upper().replace('-', '_')}_LINKER"]
+        if (compiler.name != f"{triple}24-clang" or str(compiler) != linker
+                or not compiler.is_relative_to(Path(os.environ["ANDROID_NDK_HOME"]).resolve())):
+            print(f"unexpected NDK compiler for {abi}: {compiler}", file=sys.stderr)
+            sys.exit(20)
+        with Path(os.environ["JNI_FIXTURE_CARGO_LOG"]).open("a") as log:
+            log.write(json.dumps({"abi": abi, "pkgconfig": pkg_dirs[0], "compiler": str(compiler)}) + "\n")
         if os.environ.get("JNI_FIXTURE_LOCKFILE_DRIFT") == "1":
             if "--locked" in args:
                 print("fixture lock file needs updating but --locked was passed", file=sys.stderr)
                 sys.exit(101)
             Path("Cargo.lock").write_text("unexpected dependency resolution")
         output = Path(args[args.index("-o") + 1])
-        for abi in ("arm64-v8a", "x86_64"):
-            target = output / abi / "libandroid_aar.so"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(f"new-library-{abi}".encode())
+        target = output / abi / "libandroid_aar.so"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(f"new-library-{abi}".encode())
         target = Path(os.environ["CARGO_TARGET_DIR"]) / "aarch64-linux-android/release/libandroid_aar.so"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"unstripped metadata fixture")
@@ -102,6 +132,9 @@ class AndroidJniPromotionTests(unittest.TestCase):
         script.parent.mkdir(parents=True)
         shutil.copy2(SCRIPT, script)
         self.script = script
+        helper = self.repo / "scripts/lib/mobile_gstreamer_cargo.py"
+        helper.parent.mkdir(parents=True)
+        shutil.copy2(GSTREAMER_HELPER, helper)
         ffi = self.repo / "apps/android/ffi/uniffi.toml"
         ffi.parent.mkdir(parents=True)
         ffi.write_text("# unused mock bindgen config\n")
@@ -125,6 +158,15 @@ class AndroidJniPromotionTests(unittest.TestCase):
                              "if os.environ.get('JNI_FIXTURE_MARK_STRIPPED') == '1':\n"
                              "    Path(sys.argv[1]).write_bytes(b'stripped runtime')\n")
             strip.chmod(0o755)
+            for triple in ("aarch64-linux-android", "x86_64-linux-android"):
+                (strip.parent / f"{triple}24-clang").write_text("fixture compiler, never executed\n")
+            (strip.parent / "llvm-ar").write_text("fixture archiver, never executed\n")
+        self.sdk = self.root / "mock GStreamer SDK"
+        for slice_name in ("arm64", "x86_64"):
+            pkgconfig = self.sdk / slice_name / "lib/pkgconfig"
+            pkgconfig.mkdir(parents=True)
+            for module in GSTREAMER.MODULES:
+                (pkgconfig / f"{module}.pc").write_text("Name: JNI fixture\n")
         self.bin = self.root / "mock tools"
         self.bin.mkdir()
         for tool in ("cargo", "cargo-ndk", "rustc", "rustup", "curl", "cp", "mv"):
@@ -137,8 +179,12 @@ class AndroidJniPromotionTests(unittest.TestCase):
         self.failure_marker = self.root / "promotion-failed"
         self.aar = archive
         self.download_count = self.root / "download-count"
+        self.cargo_log = self.root / "cargo-ndk.log"
         self.env = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
                     "ANDROID_NDK_HOME": str(self.ndk), "CARGO_TARGET_DIR": str(self.repo / "target"),
+                    "LINGXI_GSTREAMER_SDK_ANDROID": str(self.sdk),
+                    "LINGXI_ANDROID_ABI": "all", "LINGXI_FFI_PROFILE": "release",
+                    "JNI_FIXTURE_CARGO_LOG": str(self.cargo_log),
                     "JNI_FIXTURE_FINAL_JNI": str(self.jni),
                     "JNI_FIXTURE_FAILURE_MARKER": str(self.failure_marker),
                     "JNI_FIXTURE_DOWNLOAD_COUNT": str(self.download_count),
@@ -147,6 +193,9 @@ class AndroidJniPromotionTests(unittest.TestCase):
         self.env.pop("LINGXI_ANDROID_JNILIBS_DIR", None)
         self.env.pop("LINGXI_ANDROID_NATIVE_SYMBOLS_DIR", None)
         self.env.pop("LINGXI_KOTLIN_OUT", None)
+        self.env.pop("LINGXI_GSTREAMER_SDK_ANDROID_ARM64", None)
+        self.env.pop("LINGXI_GSTREAMER_SDK_ANDROID_X86_64", None)
+        self.env.pop("PKG_CONFIG_SYSROOT_DIR", None)
         self.handwritten = self.kotlin / "com/lingxi/code/Handwritten.kt"
         self.handwritten.parent.mkdir(parents=True)
         self.handwritten.write_text("handwritten app source")
@@ -187,6 +236,16 @@ class AndroidJniPromotionTests(unittest.TestCase):
         self.assertIn("bindgen failed", result.stderr)
         self.assert_preserved(before)
 
+    def test_missing_sdk_metadata_fails_before_cargo_and_preserves_artifacts(self):
+        self.seed_previous_pair()
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
+        (self.sdk / "arm64/lib/pkgconfig/gstrtp.pc").unlink()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("missing required pkg-config metadata gstrtp.pc", result.stderr)
+        self.assertFalse(self.cargo_log.exists())
+        self.assert_preserved(before)
+
     def test_second_abi_promotion_failure_rolls_back_previous_pair(self):
         self.seed_previous_pair()
         before = (files(self.jni), files(self.kotlin), files(self.symbols))
@@ -208,6 +267,8 @@ class AndroidJniPromotionTests(unittest.TestCase):
         support = {abi: (self.jni / abi / "libnative-support.so").read_bytes() for abi in ABIS}
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in self.cargo_log.read_text().splitlines()]
+        self.assertEqual([call["abi"] for call in calls], list(ABIS))
         for abi in ABIS:
             self.assertEqual((self.jni / abi / LIBRARY).read_bytes(), f"new-library-{abi}".encode())
             self.assertEqual((self.jni / abi / "libnative-support.so").read_bytes(), support[abi])

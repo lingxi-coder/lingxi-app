@@ -680,20 +680,11 @@ fn rtp_sample_frames_to_source_frames(
     .min(accepted_source_sample_frames)
 }
 
+#[derive(Default)]
 struct AudioEncoderState {
     processor: Option<(u32, AudioProcessor)>,
     pending_sample_frames: u64,
     sequence: u64,
-}
-
-impl Default for AudioEncoderState {
-    fn default() -> Self {
-        Self {
-            processor: None,
-            pending_sample_frames: 0,
-            sequence: 0,
-        }
-    }
 }
 
 #[async_trait]

@@ -146,6 +146,7 @@ zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 platform-windows = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
+lingxi-async-owned-fd = { path = "../../../packages/async-owned-fd" }
 # Real `BypassEnv::effective_uid` returns the REAL uid (parity with TS
 # `process.getuid()`). `nix::unistd::getuid()` is a SAFE wrapper around
 # `getuid(2)`, so `apps/cli` keeps its crate-level `#![forbid(unsafe_code)]`

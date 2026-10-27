@@ -1166,7 +1166,7 @@ async function runLocalizationScenario(window, webContents) {
 
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true } });
+  const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
     const { webContents } = window;
@@ -1199,8 +1199,10 @@ async function main() {
     await new Promise(resolve => process.stdout.write(`${JSON.stringify(result)}\n`, resolve));
   } finally {
     if (!window.isDestroyed()) window.destroy();
-    if (app.isReady()) await app.quit();
   }
 }
 
-main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`); app.exit(1); });
+// This fixture checks settings interactions. Once its flushed result and window
+// teardown complete, exit deterministically rather than waiting for Chromium's
+// asynchronous app.quit shutdown (which can retain the process under load).
+main().then(() => app.exit(0)).catch((error) => { process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`); app.exit(1); });

@@ -18,6 +18,7 @@ class WorkspaceLayoutTests(unittest.TestCase):
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())
         expected = {
             "packages/deep-links-rs": "lingxi-deep-links",
+            "packages/async-owned-fd": "lingxi-async-owned-fd",
             "tools/ios-use": "tool-ios-use",
             "tools/native-bindgen": "native-bindgen",
             "packages/config-requirements": "config-requirements",
@@ -54,6 +55,7 @@ class WorkspaceLayoutTests(unittest.TestCase):
             },
             "apps/cli/host": {
                 "lingxi-deep-links": "../../../packages/deep-links-rs",
+                "lingxi-async-owned-fd": "../../../packages/async-owned-fd",
                 "tui": "../tui",
                 "tui-core": "../tui-core",
             },
@@ -111,13 +113,16 @@ class WorkspaceLayoutTests(unittest.TestCase):
             audio_provider["dependencies"]["lingxi-llm-client"]["features"],
             "the shared audio provider requires the SDK realtime transport feature",
         )
-        # The WebRTC stack needs the same two git patches as Harness. Reject
-        # unrelated overrides and local patches that could hide source drift.
+        # Preserve the iOS nix fix and the maintained upstream Askama parser.
+        # WebRTC itself uses the unpatched, maintained registry release.
         harness = workspace_dependencies["core"]
         self.assertEqual(workspace.get("patch"), {
             "crates-io": {
-                name: {"git": harness["git"], "rev": harness["rev"]}
-                for name in ("webrtc", "nix")
+                "nix": {"git": harness["git"], "rev": harness["rev"]},
+                "askama_derive": {
+                    "git": "https://github.com/askama-rs/askama.git",
+                    "rev": "3863808cf594054f7644979ed92caaafc878f378",
+                },
             },
         })
         sdk_dependencies = [value for value in workspace["workspace"]["dependencies"].values()

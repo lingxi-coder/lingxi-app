@@ -1,13 +1,13 @@
 //! Unix process IO without Tokio's uncancellable blocking stdio workers.
 
 use harness_runtime::headless::io::{HeadlessIo, Output};
+use lingxi_async_owned_fd::OwnedAsyncFd;
 use rustix::fs::{FileType, OFlags};
 use std::io::{self, IsTerminal};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
-use tokio::io::unix::AsyncFd;
+use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf};
 
 /// Capture every original flag before modifying any descriptor. stdout and
@@ -17,6 +17,28 @@ struct ProcessFds {
     fds: [OwnedFd; 3],
     flags: [OFlags; 3],
     changed: [bool; 3],
+}
+
+impl ProcessFds {
+    fn new(fds: [OwnedFd; 3], types: [FileType; 3]) -> io::Result<Arc<Self>> {
+        let flags = [
+            rustix::fs::fcntl_getfl(&fds[0])?,
+            rustix::fs::fcntl_getfl(&fds[1])?,
+            rustix::fs::fcntl_getfl(&fds[2])?,
+        ];
+        let mut group = Self {
+            fds,
+            flags,
+            changed: [false; 3],
+        };
+        for index in 0..3 {
+            if types[index] != FileType::RegularFile && !flags[index].contains(OFlags::NONBLOCK) {
+                rustix::fs::fcntl_setfl(&group.fds[index], flags[index] | OFlags::NONBLOCK)?;
+                group.changed[index] = true;
+            }
+        }
+        Ok(Arc::new(group))
+    }
 }
 
 impl Drop for ProcessFds {
@@ -39,20 +61,29 @@ struct ProcessFd {
     index: usize,
 }
 
-impl AsRawFd for ProcessFd {
-    fn as_raw_fd(&self) -> RawFd {
-        self.group.fds[self.index].as_raw_fd()
-    }
-}
-
 impl AsFd for ProcessFd {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.group.fds[self.index].as_fd()
     }
 }
 
+struct RegisteredProcessFd {
+    // Fields are dropped in declaration order: deregister this owned duplicate
+    // before the final group owner can restore the shared O_NONBLOCK flags.
+    registered: OwnedAsyncFd,
+    _owner: ProcessFd,
+}
+
+fn register(fd: ProcessFd, interest: Interest) -> io::Result<RegisteredProcessFd> {
+    let owned = rustix::io::fcntl_dupfd_cloexec(&fd, 3)?;
+    Ok(RegisteredProcessFd {
+        registered: OwnedAsyncFd::new(owned, interest)?,
+        _owner: fd,
+    })
+}
+
 enum ProcessIo {
-    Ready(AsyncFd<ProcessFd>),
+    Ready(RegisteredProcessFd),
     /// Regular files have no readiness registration on epoll. Perform their
     /// ordinary file syscalls directly; no detached blocking task retains them.
     File(ProcessFd),
@@ -91,17 +122,7 @@ impl AsyncRead for ProcessIo {
                 buf.advance(count);
                 Poll::Ready(Ok(()))
             }
-            Self::Ready(fd) => loop {
-                let mut guard = ready!(fd.poll_read_ready(cx))?;
-                match guard.try_io(|fd| read(fd.get_ref(), buf.initialize_unfilled())) {
-                    Ok(Ok(count)) => {
-                        buf.advance(count);
-                        return Poll::Ready(Ok(()));
-                    }
-                    Ok(Err(error)) => return Poll::Ready(Err(error)),
-                    Err(_would_block) => continue,
-                }
-            },
+            Self::Ready(fd) => Pin::new(&mut fd.registered).poll_read(cx, buf),
         }
     }
 }
@@ -114,13 +135,7 @@ impl AsyncWrite for ProcessIo {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::File(fd) => Poll::Ready(write(fd, bytes)),
-            Self::Ready(fd) => loop {
-                let mut guard = ready!(fd.poll_write_ready(cx))?;
-                match guard.try_io(|fd| write(fd.get_ref(), bytes)) {
-                    Ok(result) => return Poll::Ready(result),
-                    Err(_would_block) => continue,
-                }
-            },
+            Self::Ready(fd) => Pin::new(&mut fd.registered).poll_write(cx, bytes),
         }
     }
 
@@ -140,11 +155,6 @@ pub(crate) fn open() -> io::Result<HeadlessIo> {
         rustix::io::fcntl_dupfd_cloexec(std::io::stdout(), 3)?,
         rustix::io::fcntl_dupfd_cloexec(std::io::stderr(), 3)?,
     ];
-    let flags = [
-        rustix::fs::fcntl_getfl(&fds[0])?,
-        rustix::fs::fcntl_getfl(&fds[1])?,
-        rustix::fs::fcntl_getfl(&fds[2])?,
-    ];
     let types = [
         FileType::from_raw_mode(rustix::fs::fstat(&fds[0])?.st_mode),
         FileType::from_raw_mode(rustix::fs::fstat(&fds[1])?.st_mode),
@@ -155,18 +165,7 @@ pub(crate) fn open() -> io::Result<HeadlessIo> {
         std::io::stdout().is_terminal(),
         std::io::stderr().is_terminal(),
     ];
-    let mut group = ProcessFds {
-        fds,
-        flags,
-        changed: [false; 3],
-    };
-    for index in 0..3 {
-        if types[index] != FileType::RegularFile && !flags[index].contains(OFlags::NONBLOCK) {
-            rustix::fs::fcntl_setfl(&group.fds[index], flags[index] | OFlags::NONBLOCK)?;
-            group.changed[index] = true;
-        }
-    }
-    let group = Arc::new(group);
+    let group = ProcessFds::new(fds, types)?;
     let stream = |index, interest| -> io::Result<ProcessIo> {
         let fd = ProcessFd {
             group: group.clone(),
@@ -179,7 +178,7 @@ pub(crate) fn open() -> io::Result<HeadlessIo> {
             // nonblocking syscall completes immediately.
             Ok(ProcessIo::File(fd))
         } else {
-            AsyncFd::with_interest(fd, interest).map(ProcessIo::Ready)
+            register(fd, interest).map(ProcessIo::Ready)
         }
     };
     Ok(HeadlessIo {
@@ -188,4 +187,69 @@ pub(crate) fn open() -> io::Result<HeadlessIo> {
         stdout: Output::with_terminal(stream(1, Interest::WRITABLE)?, terminals[1]),
         stderr: Output::with_terminal(stream(2, Interest::WRITABLE)?, terminals[2]),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn shared_pipe_flags_restore_after_the_last_registered_stream_drops() -> io::Result<()> {
+        let (reader, writer) = std::io::pipe()?;
+        let original_reader_flags = rustix::fs::fcntl_getfl(&reader)?;
+        let original_writer_flags = rustix::fs::fcntl_getfl(&writer)?;
+        let group = ProcessFds::new(
+            [
+                reader.as_fd().try_clone_to_owned()?,
+                writer.as_fd().try_clone_to_owned()?,
+                writer.as_fd().try_clone_to_owned()?,
+            ],
+            [FileType::Fifo; 3],
+        )?;
+        let mut input = ProcessIo::Ready(register(
+            ProcessFd {
+                group: group.clone(),
+                index: 0,
+            },
+            Interest::READABLE,
+        )?);
+        let stdout = ProcessIo::Ready(register(
+            ProcessFd {
+                group: group.clone(),
+                index: 1,
+            },
+            Interest::WRITABLE,
+        )?);
+        let mut stderr = ProcessIo::Ready(register(
+            ProcessFd {
+                group: group.clone(),
+                index: 2,
+            },
+            Interest::WRITABLE,
+        )?);
+        drop(group);
+        drop(stdout);
+        assert!(rustix::fs::fcntl_getfl(&writer)?.contains(OFlags::NONBLOCK));
+        stderr.write_all(b"ok").await?;
+        let mut bytes = [0; 2];
+        timeout(Duration::from_secs(2), input.read_exact(&mut bytes)).await??;
+        assert_eq!(&bytes, b"ok");
+        drop(stderr);
+        assert!(rustix::fs::fcntl_getfl(&writer)?.contains(OFlags::NONBLOCK));
+        drop(input);
+        // Restore only the flag owned by ProcessFds. Other flags can change
+        // independently (File::write enables no-SIGPIPE on macOS).
+        assert_eq!(
+            rustix::fs::fcntl_getfl(&reader)? & OFlags::NONBLOCK,
+            original_reader_flags & OFlags::NONBLOCK
+        );
+        assert_eq!(
+            rustix::fs::fcntl_getfl(&writer)? & OFlags::NONBLOCK,
+            original_writer_flags & OFlags::NONBLOCK
+        );
+        Ok(())
+    }
 }

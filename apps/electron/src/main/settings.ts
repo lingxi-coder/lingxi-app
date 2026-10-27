@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
+import { isInside } from './bots/files.js';
 import { isSessionId } from './sessionIdentity.js';
 
 import {
@@ -42,16 +43,21 @@ export class SettingsStore {
   // test root — would otherwise never match and the app's own scheduled
   // workspace would be rejected as "not in the project list".
   private readonly managedWorkspace: string;
+  // The app's own data folder, as a real path when it can be resolved.
+  private readonly userDataFolder: string;
 
   constructor(userData: string) {
     this.settingsPath = join(userData, 'settings.v1.json');
     const managed = join(userData, 'scheduled-workspace');
     let canonical = managed;
+    let folder = userData;
     try {
       mkdirSync(managed, { recursive: true, mode: 0o700 });
       canonical = realpathSync.native(managed);
+      folder = realpathSync.native(userData);
     } catch { /* Fall back to the literal path; requireProject still mkdirs. */ }
     this.managedWorkspace = canonical;
+    this.userDataFolder = folder;
     this.settings = this.readSettings();
   }
 
@@ -181,6 +187,23 @@ export class SettingsStore {
     return this.getPublic();
   }
 
+  /**
+   * Show a session of a Bot in the window. The Bot's folder is not a project, so
+   * the reference is not checked against the project list; the caller has
+   * established that it is a Bot's. It lives in memory only, like an unsent
+   * draft: the session the app reopens at startup is the owner's own.
+   */
+  setActiveBotSession(ref: SessionRef): PublicSettings {
+    this.volatileActiveSession = { ...ref };
+    return this.getPublic();
+  }
+
+  /** Stop showing the in-memory session if it is one of this folder's (a Bot that is gone); the saved one shows again. */
+  dropVolatileSessionIn(folder: string): PublicSettings {
+    if (this.volatileActiveSession && this.volatileActiveSession.projectPath === folder) this.volatileActiveSession = undefined;
+    return this.getPublic();
+  }
+
   /** Move host metadata with the transcript's stable UUID in one settings write. */
   relocateSession(ref: SessionRef, projectPath: string, selection?: Omit<SessionTranscriptSelection, keyof SessionRef> | null): void {
     if (selection && (!isAbsolute(selection.catalogProjectPath) || selection.catalogProjectPath.length > 32_768
@@ -249,6 +272,15 @@ export class SettingsStore {
 
   isTrustedWorkspace(path: string): boolean {
     return path === this.scheduledWorkspace || this.hasProject(path);
+  }
+
+  /**
+   * Whether a folder belongs to the app's own data (its settings, logs and
+   * credentials, and the Bots), which is no place for a project of the owner's.
+   * The scheduled workspace is in there, and is one the app manages itself.
+   */
+  isAppDataFolder(canonical: string): boolean {
+    return isInside(canonical, this.userDataFolder) && !isInside(canonical, this.managedWorkspace);
   }
 
   hasProject(canonical: string): boolean {

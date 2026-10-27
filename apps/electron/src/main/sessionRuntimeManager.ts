@@ -1,5 +1,5 @@
 import { assertSessionRef, isSessionId } from './sessionIdentity.js';
-import type { ClientEvent } from '@lingxi/bridge-client';
+import type { ClientEvent, PermissionModeId } from '@lingxi/bridge-client';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -772,6 +772,10 @@ export class SessionRuntimeManager {
       onModelChanged,
       onModelSelected,
       getSavedModel,
+      getSavedPermissionMode,
+      onPermissionModeSelected,
+      getSavedFastMode,
+      onFastModeSelected,
       onFirstPromptSent,
       maxCachedRuntimes: _maxCachedRuntimes,
       workspaceSettings,
@@ -809,6 +813,10 @@ export class SessionRuntimeManager {
       },
       ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),
       ...(getSavedModel ? { getSavedModel: () => getSavedModel(ref) } : {}),
+      ...(getSavedPermissionMode ? { getSavedPermissionMode: () => getSavedPermissionMode(ref) } : {}),
+      ...(onPermissionModeSelected ? { onPermissionModeSelected: (mode: PermissionModeId) => onPermissionModeSelected(ref, mode) } : {}),
+      ...(getSavedFastMode ? { getSavedFastMode: () => getSavedFastMode(ref) } : {}),
+      ...(onFastModeSelected ? { onFastModeSelected: (enabled: boolean) => onFastModeSelected(ref, enabled) } : {}),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),
       onModelChanged: (model: string) => {
         this.sessionModelHints.set(ref.sessionId, model);

@@ -214,6 +214,35 @@ export class BotContent {
   }
 
   /**
+   * The skills of the owner's own configuration (`<default configuration
+   * home>/skills`) that `importUserSkill` can copy: folders, or links to
+   * folders, with a `SKILL.md` of their own. Nothing of them is shared with a
+   * Bot until one is imported.
+   */
+  async listImportableSkills(): Promise<BotSkillUi[]> {
+    const directory = join(this.store.locations.defaultConfigHomes[0]!, 'skills');
+    let dirents;
+    try { dirents = await readdir(directory, { withFileTypes: true }); }
+    catch (error) {
+      if (missing(error) || (error as NodeJS.ErrnoException).code === 'ENOTDIR') return [];
+      throw error;
+    }
+    const skills: BotSkillUi[] = [];
+    for (const dirent of dirents) {
+      if (!SKILL_NAME.test(dirent.name) || dirent.name.includes('..')) continue;
+      if (skills.length >= MAX_SKILLS) break;
+      const skillFile = join(directory, dirent.name, 'SKILL.md');
+      try {
+        // A link to a folder counts, as it does when the skill is imported.
+        if (!(await stat(join(directory, dirent.name))).isDirectory() || !(await lstat(skillFile)).isFile()) continue;
+      } catch { continue; }
+      const fields = frontMatter(await readHead(skillFile));
+      skills.push({ name: dirent.name, ...(fields['description'] ? { description: fields['description'] } : {}) });
+    }
+    return skills.sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  /**
    * Copy `<default configuration home>/skills/<name>` into the Bot, once. The
    * copy does not follow the original afterwards. A link inside the skill, a
    * file that is not a regular file, or a skill that is too large is refused:

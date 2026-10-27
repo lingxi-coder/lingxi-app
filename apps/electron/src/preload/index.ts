@@ -10,6 +10,7 @@ import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, typ
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
 import {
+  CH_BOTS_AVAILABILITY,
   CH_BOTS_CREATE,
   CH_BOTS_DELETE,
   CH_BOTS_GET,
@@ -24,6 +25,7 @@ import {
   CH_BOTS_SESSIONS_LIST,
   CH_BOTS_SKILL_DELETE,
   CH_BOTS_SKILL_IMPORT,
+  CH_BOTS_SKILLS_IMPORTABLE,
   CH_BOTS_SKILLS_LIST,
   CH_BOTS_UPDATE,
   type BotsApi,
@@ -167,6 +169,8 @@ export interface RuntimeEventEnvelope<T = unknown> {
 export interface SessionRuntimeSummary {
   projectPath: string;
   sessionId: string;
+  /** Set when the session is a Bot's. It is not a project's session and is listed with its Bot, not with the projects. */
+  botId?: string;
   connection: ConnectionState;
   turnActive: boolean;
   pendingInteractions: number;
@@ -460,6 +464,7 @@ const api: LingxiApi = {
     onPromptEcho: callback => subscribe(CH_REMOTE_PROMPT_ECHO, callback),
   } satisfies RemoteControlApi,
   bots: {
+    availability: () => ipcRenderer.invoke(CH_BOTS_AVAILABILITY),
     list: () => ipcRenderer.invoke(CH_BOTS_LIST),
     get: botId => ipcRenderer.invoke(CH_BOTS_GET, botId),
     create: request => ipcRenderer.invoke(CH_BOTS_CREATE, request),
@@ -483,6 +488,7 @@ const api: LingxiApi = {
       list: botId => ipcRenderer.invoke(CH_BOTS_SKILLS_LIST, botId),
       delete: (botId, name) => ipcRenderer.invoke(CH_BOTS_SKILL_DELETE, botId, name),
       importFromUser: (botId, name) => ipcRenderer.invoke(CH_BOTS_SKILL_IMPORT, botId, name),
+      listImportable: () => ipcRenderer.invoke(CH_BOTS_SKILLS_IMPORTABLE),
     },
   } satisfies BotsApi,
   bootstrap: () => ipcRenderer.invoke(CH_BOOTSTRAP) as Promise<BootstrapState>,

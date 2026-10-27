@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { pathRule } from '../src/main/bots/botSettings.js';
-import { BotService, type BotCatalog, type BotRuntimes } from '../src/main/bots/service.js';
+import { BotService, botsAvailability, type BotCatalog, type BotRuntimes } from '../src/main/bots/service.js';
 import { BotConflictError, BotNotFoundError } from '../src/main/bots/store.js';
 import type { ProjectSessionCatalogRow } from '../src/main/session-catalog.js';
 import { botFixture, SESSION } from './bot-helpers.js';
@@ -36,6 +36,7 @@ function setup(t: { after(fn: () => void): void }) {
   const catalogs = new Map<string, { configHome: string; sessions: ProjectSessionCatalogRow[]; environment: Record<string, string> }>();
   const service = new BotService({
     store: f.store,
+    platform: 'darwin',
     runtimes,
     catalogFor: (configHome): BotCatalog => {
       const state = { configHome, sessions: [] as ProjectSessionCatalogRow[], environment: { FROM_SETTINGS: 'yes' } as Record<string, string> };
@@ -47,6 +48,7 @@ function setup(t: { after(fn: () => void): void }) {
           calls.push(['workspaceSettings', configHome, projectPath]);
           return { environment: state.environment, configHome, globalConfigPath: join(configHome, '.lingxi.json') };
         },
+        invalidate: () => { calls.push(['invalidate', configHome]); },
       };
     },
     warn: (message) => warnings.push(message),
@@ -257,4 +259,85 @@ test('nothing starts, changes or launches in a Bot while it is being deleted', a
   release();
   await deleting;
   assert.ok(!existsSync(s.store.botDir(bot.bot_id)));
+});
+
+// Where Bots can run
+
+const REFUSAL = /Bots are available on macOS only\./;
+
+test('Bots are available on macOS and nowhere else', () => {
+  assert.deepEqual(botsAvailability('darwin'), { available: true });
+  for (const platform of ['linux', 'win32', 'freebsd', 'android'] as const) {
+    assert.deepEqual(botsAvailability(platform), { available: false, reason: 'Bots are available on macOS only.' }, platform);
+  }
+  assert.deepEqual(botsAvailability(), botsAvailability(process.platform), 'this computer by default');
+});
+
+test('where Bots cannot run every operation is refused in words the owner can read', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Mac Bot' });
+  for (const platform of ['linux', 'win32'] as const) {
+    const elsewhere = new BotService({
+      store: s.store, platform,
+      runtimes: { newSession: async () => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => { throw new Error('unused'); } },
+      catalogFor: () => ({ list: async () => ({ sessions: [] }), find: async () => undefined, workspaceSettings: async () => ({ environment: {}, configHome: '/x' }), invalidate: () => undefined }),
+    });
+    assert.deepEqual(elsewhere.availability(), { available: false, reason: 'Bots are available on macOS only.' });
+    assert.throws(() => elsewhere.assertAvailable(), REFUSAL);
+    assert.throws(() => elsewhere.list(), REFUSAL);
+    assert.throws(() => elsewhere.get(bot.bot_id), REFUSAL);
+    assert.throws(() => elsewhere.create({ name: 'Nowhere' }), REFUSAL);
+    assert.throws(() => elsewhere.update(bot.bot_id, 1, { name: 'Renamed' }), REFUSAL);
+    await assert.rejects(elsewhere.delete(bot.bot_id), REFUSAL);
+    await assert.rejects(elsewhere.openSession(bot.bot_id), REFUSAL);
+    await assert.rejects(elsewhere.listSessions(bot.bot_id), REFUSAL);
+    await assert.rejects(elsewhere.launchSettings(s.store.workspaceDir(bot.bot_id)), REFUSAL);
+    await assert.rejects(elsewhere.lastActivityAt(bot.bot_id), REFUSAL);
+    // And the app does not treat the folder of a Bot as one.
+    assert.equal(elsewhere.ownsWorkspace(s.store.workspaceDir(bot.bot_id)), false);
+    assert.equal(elsewhere.botIdFor(s.store.workspaceDir(bot.bot_id)), undefined);
+    assert.equal(elsewhere.modelFor(s.store.workspaceDir(bot.bot_id)), undefined);
+  }
+  assert.deepEqual(s.service.list().map((record) => record.bot_id), [bot.bot_id], 'nothing above touched the Bot');
+  assert.equal(s.store.get(bot.bot_id).revision, 1);
+  assert.deepEqual(s.calls, []);
+});
+
+test('the Bot whose folder a working directory is can be told from the directory', (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Found' });
+  assert.equal(s.service.botIdFor(s.store.workspaceDir(bot.bot_id)), bot.bot_id);
+  assert.equal(s.service.workspaceOf(bot.bot_id), s.store.workspaceDir(bot.bot_id));
+  assert.equal(s.service.botIdFor(s.folder('repo')), undefined);
+  assert.equal(s.service.botIdFor(s.store.homeDir(bot.bot_id)), undefined);
+});
+
+// What the Bots page shows
+
+test('listing the sessions reads the home again instead of what was listed a few seconds ago', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Fresh' });
+  await s.service.listSessions(bot.bot_id);
+  const home = s.store.homeDir(bot.bot_id);
+  assert.deepEqual(s.calls.map((call) => call[0]), ['invalidate', 'list']);
+  assert.deepEqual(s.calls[0], ['invalidate', home]);
+});
+
+test('a Bot was last active when its newest transcript last changed', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Active' });
+  assert.equal(await s.service.lastActivityAt(bot.bot_id), undefined, 'a Bot that has had no session has no time');
+  const directory = s.store.transcriptsDir(bot.bot_id);
+  mkdirSync(join(directory, 'memdir'), { recursive: true });
+  const touch = (name: string, seconds: number) => {
+    const path = join(directory, name);
+    writeFileSync(path, '{}\n');
+    utimesSync(path, seconds, seconds);
+  };
+  touch('11111111-2222-4333-8444-555555555555.jsonl', 1_700_000_000);
+  touch('99999999-2222-4333-8444-555555555555.jsonl', 1_700_000_500);
+  touch('notes.txt', 1_800_000_000);
+  writeFileSync(join(directory, 'memdir', 'later.md'), 'x');
+  utimesSync(join(directory, 'memdir', 'later.md'), 1_800_000_000, 1_800_000_000);
+  assert.equal(await s.service.lastActivityAt(bot.bot_id), 1_700_000_500_000, 'only transcripts count, and the newest of them');
 });

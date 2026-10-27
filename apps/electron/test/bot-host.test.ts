@@ -1,0 +1,236 @@
+import { test, type TestContext } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { BotContent } from '../src/main/bots/content.js';
+import { BotsUi } from '../src/main/bots/rendererIpc.js';
+import { BotService } from '../src/main/bots/service.js';
+import { HostController, type WorkspaceDialogs } from '../src/main/host.js';
+import { DiagnosticBuffer } from '../src/main/host-utils.js';
+import { SettingsStore } from '../src/main/settings.js';
+import { CH_BOTS_CREATE, CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN } from '../src/shared/bots.js';
+import { CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK } from '../src/shared/projectCreation.js';
+import { botFixture, SESSION } from './bot-helpers.js';
+
+const OWNER_SESSION = 'aaaaaaaa-2222-4333-8444-555555555555';
+const REPLACEMENT = 'bbbbbbbb-2222-4333-8444-555555555555';
+
+function hostFixture(t: TestContext) {
+  const f = botFixture(t);
+  // The fixture's stand-in for the app's settings is not a settings file the store can read.
+  rmSync(join(f.userData, 'settings.v1.json'));
+  const settings = new SettingsStore(f.userData);
+  const project = f.folder('project');
+  const ownerRef = { projectPath: project, sessionId: OWNER_SESSION };
+  settings.addProject(project);
+  settings.activateProject(project);
+  settings.setActiveSession(ownerRef);
+  const picks: string[] = [];
+  let pickResult: string | undefined;
+  const closed: string[] = [];
+  const created: string[] = [];
+  let summaries: any[] = [];
+  const bridge = {
+    registerIpc() {}, registerWindow() {},
+    get runtimeSummaries() { return summaries; },
+    get: () => undefined,
+    isProjectClosing: () => false,
+    hasActiveWork: () => false,
+    closeSession: async (ref: { sessionId: string }) => { closed.push(ref.sessionId); },
+    newSession: async (projectPath: string) => { created.push(projectPath); return { projectPath, sessionId: REPLACEMENT }; },
+  };
+  const botWorkspaces = new Map<string, string>();
+  const service = new BotService({
+    store: f.store, platform: 'darwin',
+    runtimes: {
+      newSession: async (projectPath) => ({ projectPath, sessionId: SESSION }),
+      openSession: async (ref) => ({ ...ref }),
+      closeProject: async (projectPath) => { closed.push(projectPath); },
+    },
+    catalogFor: () => ({
+      list: async () => ({ sessions: [] }), find: async () => undefined, invalidate: () => undefined,
+      workspaceSettings: async () => ({ environment: {}, configHome: '/unused' }),
+    }),
+  });
+  const registered = new Map<string, (...args: any[]) => any>();
+  const ipc = { handle: (name: string, handler: (...args: any[]) => any) => registered.set(name, handler), removeHandler: (name: string) => registered.delete(name) };
+  const dialogs: WorkspaceDialogs = {
+    pickDirectory: async (path) => { picks.push(path); return pickResult; },
+    trustDirectory: async () => true,
+  };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any, undefined, undefined, undefined, undefined, dialogs);
+  host.attachBots(new BotsUi({ service, content: new BotContent(f.store) }));
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, removeListener() {}, send() {} };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+  t.after(() => host.dispose());
+  const event = { sender, senderFrame: frame };
+  const call = async (channel: string, ...args: unknown[]): Promise<any> => registered.get(channel)!(event, ...args);
+  return {
+    ...f, settings, project, ownerRef, host, service, registered, call, closed, created, picks,
+    pickReturns(path: string | undefined) { pickResult = path; },
+    setSummaries(value: any[]) { summaries = value; },
+    freshSettings: () => new SettingsStore(f.userData),
+  };
+}
+
+async function newBot(f: ReturnType<typeof hostFixture>) {
+  const bot = await f.call(CH_BOTS_CREATE, { name: 'Helper' });
+  return { bot, workspace: f.store.workspaceDir(bot.botId) };
+}
+
+test('opening a Bot\'s session shows it in the window without making it a project or the session to restore', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  const opened = await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
+  assert.deepEqual(opened, { botId: bot.botId, projectPath: workspace, sessionId: SESSION });
+  assert.deepEqual(f.settings.getPublic().activeSession, { projectPath: workspace, sessionId: SESSION }, 'the window is shown the Bot\'s session');
+  assert.deepEqual(f.settings.getPublic().projects, [f.project], 'and no project was added');
+  assert.deepEqual(f.freshSettings().getPublic().activeSession, f.ownerRef, 'but the session the app restores is still the owner\'s');
+  assert.ok(!readFileSync(f.settings.settingsPath, 'utf8').includes(workspace), 'nothing of the Bot is in the saved settings');
+  assert.deepEqual((f.host as any).workspace(), { path: workspace, fingerprint: (f.host as any).workspace().fingerprint, trusted: true }, 'its folder is trusted without being a project');
+});
+
+test('the owner\'s own session shows again when the owner opens it', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
+  assert.equal(f.settings.getPublic().activeSession?.projectPath, workspace);
+  f.settings.setActiveSession(f.ownerRef);
+  assert.deepEqual(f.settings.getPublic().activeSession, f.ownerRef);
+  assert.equal((f.host as any).workspace().path, f.project);
+  assert.equal((f.host as any).workspace().trusted, true);
+});
+
+test('a folder that is not a project and not a Bot\'s stays untrusted', (t) => {
+  const f = hostFixture(t);
+  f.settings.setActiveBotSession({ projectPath: f.folder('stranger'), sessionId: SESSION });
+  assert.equal((f.host as any).workspace().trusted, false);
+});
+
+test('the sessions of the runtime manager say which of them are a Bot\'s', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  const summary = (projectPath: string, sessionId: string) => ({ projectPath, sessionId, connection: { status: 'connected' }, turnActive: false, pendingInteractions: 0, pendingAskUserQuestions: 0 });
+  f.setSummaries([summary(workspace, SESSION), summary(f.project, OWNER_SESSION)]);
+  const [botSession, ownerSession] = (f.host as any).runtimeSummaries();
+  assert.equal(botSession.botId, bot.botId);
+  assert.ok(!('botId' in ownerSession));
+  assert.deepEqual(botSession.connection, { status: 'connected' });
+});
+
+test('everything a project can do stays closed to the folder of a Bot', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
+  const channels = [...f.registered.keys()];
+  const projectChannels = channels.filter((name) => /project:sessions:list|session:new|session:open|session:archive|session:rename/.test(name));
+  assert.ok(projectChannels.length >= 3, `found the project channels: ${projectChannels.join(', ')}`);
+  for (const channel of projectChannels) {
+    await assert.rejects(f.call(channel, workspace, SESSION), /project is not in the project list/, channel);
+  }
+  assert.deepEqual(f.settings.getPublic().projects, [f.project]);
+});
+
+test('deleting the Bot whose session is shown brings back the session the window had', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
+  assert.equal(f.settings.getPublic().activeSession?.projectPath, workspace);
+  await f.call(CH_BOTS_DELETE, bot.botId);
+  assert.deepEqual(f.closed, [workspace]);
+  assert.deepEqual(f.settings.getPublic().activeSession, f.ownerRef);
+});
+
+test('deleting a Bot leaves the session the window shows alone when it is not the Bot\'s', async (t) => {
+  const f = hostFixture(t);
+  const { bot } = await newBot(f);
+  const other = await f.call(CH_BOTS_CREATE, { name: 'Other' });
+  await f.call(CH_BOTS_SESSION_OPEN, other.botId);
+  const shown = f.settings.getPublic().activeSession;
+  await f.call(CH_BOTS_DELETE, bot.botId);
+  assert.deepEqual(f.settings.getPublic().activeSession, shown);
+});
+
+test('clearing a Bot\'s chat starts a new chat of the same Bot without touching the projects', async (t) => {
+  const f = hostFixture(t);
+  const { bot, workspace } = await newBot(f);
+  await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
+  await f.call('lingxi:session:clear', SESSION);
+  assert.deepEqual(f.created, [workspace]);
+  assert.deepEqual(f.settings.getPublic().activeSession, { projectPath: workspace, sessionId: REPLACEMENT });
+  assert.deepEqual(f.settings.getPublic().projects, [f.project]);
+  assert.equal(f.settings.getPublic().activeProject, f.project, 'the owner\'s active project is not the Bot\'s folder');
+  assert.deepEqual(f.freshSettings().getPublic().activeSession, f.ownerRef);
+});
+
+test('a Bot\'s chat cannot move to another folder or take one on', async (t) => {
+  const f = hostFixture(t);
+  const { bot } = await newBot(f);
+  await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
+  for (const action of ['cd', 'add-dir'] as const) {
+    await assert.rejects(f.host.updateSessionWorkspace(SESSION, { action, path: f.folder('elsewhere') }), /A Bot works in its own folder/);
+  }
+  assert.deepEqual(f.picks, [], 'the owner is not even asked to pick a folder');
+  assert.deepEqual(f.settings.getPublic().projects, [f.project]);
+});
+
+// The app's own data is no place for a project
+
+test('the app\'s own data folder, and the Bots in it, cannot be added as a project', async (t) => {
+  const f = hostFixture(t);
+  const { workspace } = await newBot(f);
+  mkdirSync(join(f.userData, 'bots-trash'), { recursive: true });
+  const places = [
+    f.userData, f.store.root, f.store.botDir(f.service.list()[0]!.bot_id), workspace,
+    join(f.userData, 'logs'), join(f.userData, 'bridge-runtime'), join(f.userData, 'bots-trash'),
+  ];
+  for (const place of places) {
+    f.pickReturns(place);
+    const selection = await f.call(CH_PROJECT_FOLDER_PICK);
+    assert.equal(selection.path, realpathSync(place));
+    await assert.rejects(f.call(CH_PROJECT_CREATE, selection.id), /belongs to the app's own data/, place);
+  }
+  assert.deepEqual(f.settings.getPublic().projects, [f.project]);
+  assert.deepEqual(f.freshSettings().getPublic().projects, [f.project]);
+});
+
+test('an ordinary folder can still be added as a project', async (t) => {
+  const f = hostFixture(t);
+  const repo = f.folder('repo');
+  f.pickReturns(repo);
+  const selection = await f.call(CH_PROJECT_FOLDER_PICK);
+  const workspace = await f.call(CH_PROJECT_CREATE, selection.id);
+  assert.equal(workspace.path, repo);
+  assert.ok(f.settings.getPublic().projects.includes(repo));
+});
+
+test('which folders are the app\'s own data: all of userData but the folder the app manages for scheduled tasks', (t) => {
+  const f = botFixture(t);
+  rmSync(join(f.userData, 'settings.v1.json'));
+  const settings = new SettingsStore(f.userData);
+  const real = realpathSync(f.userData);
+  assert.equal(settings.isAppDataFolder(real), true);
+  assert.equal(settings.isAppDataFolder(join(real, 'logs')), true);
+  assert.equal(settings.isAppDataFolder(join(real, 'bots')), true);
+  assert.equal(settings.isAppDataFolder(join(real, 'bots', 'x', 'workspace')), true);
+  assert.equal(settings.isAppDataFolder(join(real, 'bots-trash')), true);
+  assert.equal(settings.isAppDataFolder(join(real, 'scheduled-workspace-two')), true, 'a folder that merely starts with the same letters');
+  assert.equal(settings.isAppDataFolder(settings.scheduledWorkspace), false, 'the one the app manages itself');
+  assert.equal(settings.isAppDataFolder(join(settings.scheduledWorkspace, 'sub')), false);
+  assert.equal(settings.isAppDataFolder(join(real, '..')), false, 'a folder that holds the app data is not part of it');
+  assert.equal(settings.isAppDataFolder(f.folder('repo')), false);
+  assert.equal(settings.isAppDataFolder(`${real}-sibling`), false);
+});
+
+test('the app data is recognised when it is reached through a link', (t) => {
+  const f = botFixture(t);
+  const link = join(f.root, 'link');
+  symlinkSync(f.userData, link);
+  rmSync(join(f.userData, 'settings.v1.json'));
+  const settings = new SettingsStore(link);
+  assert.equal(settings.isAppDataFolder(realpathSync(join(link, 'bots'))), true);
+  assert.equal(settings.isAppDataFolder(realpathSync(f.folder('repo'))), false);
+});

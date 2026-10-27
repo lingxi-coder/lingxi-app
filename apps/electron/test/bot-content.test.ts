@@ -278,6 +278,42 @@ test('a skill that the owner keeps behind a link of their own can be imported', 
   assert.ok(existsSync(join(f.skills, 'shared', 'SKILL.md')));
 });
 
+test('the skills the owner has can be listed for importing: folders with a SKILL.md, links to folders included', async (t) => {
+  const f = fixture(t);
+  assert.deepEqual(await f.content.listImportableSkills(), []);
+  const owners = join(f.defaultConfigHome, 'skills');
+  writeSkill(owners, 'deploy');
+  writeSkill(owners, 'alpha');
+  const real = writeSkill(join(f.root, 'dotfiles', 'skills'), 'shared');
+  symlinkSync(real, join(owners, 'shared'));
+  mkdirSync(join(owners, 'empty'));
+  writeFileSync(join(owners, 'empty', 'readme.md'), 'not a skill');
+  writeFileSync(join(owners, 'afile'), 'x');
+  mkdirSync(join(owners, '.hidden'));
+  writeFileSync(join(owners, '.hidden', 'SKILL.md'), '---\ndescription: hidden\n---\n');
+  mkdirSync(join(owners, 'bad name'));
+  writeFileSync(join(owners, 'bad name', 'SKILL.md'), 'x');
+  writeSkill(owners, 'plain', { 'SKILL.md': 'no front matter' });
+  assert.deepEqual(await f.content.listImportableSkills(), [
+    { name: 'alpha', description: 'Does alpha' },
+    { name: 'deploy', description: 'Does deploy' },
+    { name: 'plain' },
+    { name: 'shared', description: 'Does shared' },
+  ]);
+  // Listing shares nothing: the Bot has none of them until one is imported.
+  assert.deepEqual(await f.content.listSkills(f.id), []);
+  assert.deepEqual((await f.content.importUserSkill(f.id, 'alpha')).name, 'alpha');
+  assert.deepEqual((await f.content.listImportableSkills()).map((skill) => skill.name), ['alpha', 'deploy', 'plain', 'shared'], 'what the Bot has is still the owner\'s to offer');
+});
+
+test('there is nothing to import where the owner has no skills folder, or a file in its place', async (t) => {
+  const f = fixture(t);
+  rmSync(join(f.defaultConfigHome, 'skills'), { recursive: true });
+  assert.deepEqual(await f.content.listImportableSkills(), []);
+  writeFileSync(join(f.defaultConfigHome, 'skills'), 'a file');
+  assert.deepEqual(await f.content.listImportableSkills(), []);
+});
+
 test('a skill that is too large, too many files or too deep is refused', async (t) => {
   const f = fixture(t);
   const many = writeSkill(join(f.defaultConfigHome, 'skills'), 'many');

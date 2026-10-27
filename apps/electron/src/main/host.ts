@@ -14,6 +14,7 @@ import type { HostNotifier } from './notifications.js';
 import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
 import type { RemoteControlUi } from './remoteControl/rendererIpc.js';
+import { CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN, type BotSessionRefUi } from '../shared/bots.js';
 import type { BotsUi } from './bots/rendererIpc.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
@@ -606,10 +607,35 @@ export class HostController {
     for (const [channel, handler] of Object.entries(ui.handlers())) {
       this.ipc.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
         this.assertSender(event);
+        // Opening a Bot's session and deleting a Bot change which session the window shows, so they take their turn with the other navigation.
+        if (channel === CH_BOTS_SESSION_OPEN) {
+          return this.enqueueNavigation(async () => this.showBotSession(await handler(...args) as BotSessionRefUi));
+        }
+        if (channel === CH_BOTS_DELETE) {
+          return this.enqueueNavigation(async () => {
+            const workspace = typeof args[0] === 'string' ? this.botsUi?.workspaceOf(args[0]) : undefined;
+            await handler(...args);
+            if (workspace !== undefined) this.settings.dropVolatileSessionIn(workspace);
+          });
+        }
         return handler(...args);
       });
       this.botsChannels.push(channel);
     }
+  }
+
+  /**
+   * The window now shows a session of a Bot. A Bot's folder is not a project,
+   * so the session is held in memory beside the settings, never in them.
+   */
+  private showBotSession(ref: BotSessionRefUi): BotSessionRefUi {
+    this.settings.setActiveBotSession({ projectPath: ref.projectPath, sessionId: ref.sessionId });
+    this.workspaceFiles.invalidate();
+    return ref;
+  }
+
+  private isBotWorkspace(projectPath: string): boolean {
+    return this.botsUi?.botIdFor(projectPath) !== undefined;
   }
 
   /**
@@ -1508,7 +1534,8 @@ export class HostController {
     if (!workspace) return { trusted: false };
     try {
       const trust = this.settings.getTrust(workspace);
-      return { path: workspace, fingerprint: trust.fingerprint, trusted: this.settings.isTrustedWorkspace(workspace) };
+      // A Bot's folder is trusted without being a project.
+      return { path: workspace, fingerprint: trust.fingerprint, trusted: this.settings.isTrustedWorkspace(workspace) || this.isBotWorkspace(workspace) };
     } catch (error) {
       this.diagnostics.add('warn', 'host', error);
       return { path: workspace, trusted: false, recovery: workspaceRecovery(workspace, error) };
@@ -1628,10 +1655,14 @@ export class HostController {
   }
 
   private runtimeSummaries(): SessionRuntimeSummary[] {
-    return this.bridge.runtimeSummaries.map((summary) => ({
-      ...summary,
-      connection: { ...summary.connection },
-    }));
+    return this.bridge.runtimeSummaries.map((summary) => {
+      const botId = this.botsUi?.botIdFor(summary.projectPath);
+      return {
+        ...summary,
+        ...(botId !== undefined ? { botId } : {}),
+        connection: { ...summary.connection },
+      };
+    });
   }
 
   private hasActiveWork(projectPath?: string): boolean {
@@ -1939,6 +1970,7 @@ export class HostController {
     if (this.closingProjects.has(workspace)) throw new Error('project is closing');
     this.workspaceFiles.invalidate();
     if (addProject) {
+      this.assertNotAppData(workspace);
       const wasEmpty = this.settings.getPublic().projects.length === 0;
       this.settings.addProject(workspace);
       // General project creation supplies the first draft. App creation only
@@ -1955,6 +1987,11 @@ export class HostController {
     try { fingerprint = this.settings.getTrust(workspace).fingerprint; }
     catch (error) { this.diagnostics.add('warn', 'host', error); }
     return { path: workspace, trusted: this.settings.isTrustedWorkspace(workspace), ...(fingerprint ? { fingerprint } : {}) };
+  }
+
+  /** The app's own data, the Bots among it, is not a place for a project. */
+  private assertNotAppData(canonical: string): void {
+    if (this.settings.isAppDataFolder(canonical)) throw new Error("This folder belongs to the app's own data and cannot be used as a project.");
   }
 
   private requireCodexTokens(): CodexTokenManager {
@@ -2105,6 +2142,7 @@ export class HostController {
   private async trustSessionSource(ref: SessionRef): Promise<void> {
     if (this.isProjectClosing(ref.projectPath)) throw new Error('project is closing');
     if (this.settings.isTrustedWorkspace(ref.projectPath)) return;
+    this.assertNotAppData(ref.projectPath);
     if (!await this.directoryDialogs.trustDirectory(ref.projectPath)) throw new Error('Opening this directory was cancelled.');
     if (this.isProjectClosing(ref.projectPath)) throw new Error('project is closing');
     if (canonicalWorkspace(ref.projectPath) !== ref.projectPath) throw new Error('The session directory changed. Refresh the session list and try again.');
@@ -2119,6 +2157,8 @@ export class HostController {
     return this.enqueueNavigation(async () => {
       const ref = this.settings.getPublic().activeSession;
       if (!ref || ref.sessionId !== sessionId) throw new Error('This chat is no longer active.');
+      // The folders a Bot may use are the ones in its settings, not whatever a chat asks for.
+      if (this.isBotWorkspace(ref.projectPath)) throw new Error("A Bot works in its own folder. Change the folders it may use in the Bot's settings.");
       const runtime = this.bridge.require(ref);
       const release = runtime.beginWorkspaceChange();
       let originalCwd: string | undefined;
@@ -2148,6 +2188,7 @@ export class HostController {
         // Every affirmative answer is pinned to the canonical path shown by
         // the engine. A symlink change must ask again for the new directory.
         while (result.status === 'needs_trust') {
+          this.assertNotAppData(result.directory);
           this.settings.assertSessionRelocationAllowed(result.directory);
           if (!await this.directoryDialogs.trustDirectory(result.directory)) return null;
           result = await runtime.setWorkingDirectory({ path, trust_accepted: true, trusted_directory: result.directory });
@@ -2157,6 +2198,7 @@ export class HostController {
         const after = await runtime.getWorkspaceState();
         const target = canonicalWorkspace(result.cwd);
         if (this.isProjectClosing(target)) throw new Error('project is closing');
+        this.assertNotAppData(target);
         this.settings.relocateSession(ref, target, after.has_conversation === false || !after.transcript_path ? null : {
           catalogProjectPath: target, scope: 'current', transcriptPath: after.transcript_path,
         });
@@ -2459,8 +2501,11 @@ export class HostController {
     await this.terminals?.closeScope(active);
     await this.bridge.closeSession(active);
     const replacement = await this.bridge.newSession(active.projectPath);
-    this.settings.activateProject(active.projectPath);
-    this.settings.setActiveSessionDraft(replacement);
+    if (this.isBotWorkspace(active.projectPath)) this.settings.setActiveBotSession(replacement);
+    else {
+      this.settings.activateProject(active.projectPath);
+      this.settings.setActiveSessionDraft(replacement);
+    }
     this.workspaceFiles.invalidate();
   }
 

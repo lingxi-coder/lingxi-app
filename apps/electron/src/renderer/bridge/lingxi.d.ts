@@ -71,6 +71,8 @@ export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEvent
 export interface SessionRuntimeSummary {
   projectPath: string;
   sessionId: string;
+  /** Set when the session is a Bot's. It is not a project's session and is listed with its Bot, not with the projects. */
+  botId?: string;
   connection: ConnectionState;
   turnActive: boolean;
   pendingInteractions: number;

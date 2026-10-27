@@ -35,9 +35,10 @@ test('the engine of a Bot is started in the Bot workspace with the Bot home, its
   const docs = f.folder('docs');
   const service = new BotService({
     store: f.store,
+    platform: 'darwin',
     runtimes: { newSession: async () => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => undefined },
     catalogFor: () => ({
-      list: async () => ({ sessions: [] }), find: async () => undefined,
+      list: async () => ({ sessions: [] }), find: async () => undefined, invalidate: () => undefined,
       workspaceSettings: async () => ({ environment: { FROM_SETTINGS: 'x' }, configHome: '/ignored' }),
     }),
   });
@@ -72,9 +73,10 @@ test('the process that is started reads the Bot home, whatever the owner\'s envi
   const f = botFixture(t);
   const service = new BotService({
     store: f.store,
+    platform: 'darwin',
     runtimes: { newSession: async () => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => undefined },
     catalogFor: () => ({
-      list: async () => ({ sessions: [] }), find: async () => undefined,
+      list: async () => ({ sessions: [] }), find: async () => undefined, invalidate: () => undefined,
       // The Bot's own settings try to point the engine back at the owner's home.
       workspaceSettings: async () => ({ environment: { LINGXI_CONFIG_DIR: f.defaultConfigHome, KEPT: 'yes' }, configHome: f.defaultConfigHome }),
     }),

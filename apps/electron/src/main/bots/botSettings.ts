@@ -17,7 +17,9 @@
  *  - `sandbox`: on, refusing to start without it, and the same private places
  *    unreadable to the commands of the Bash tool, which no permission rule
  *    reaches. The sandbox is off in the engine unless the settings turn it on.
- *  - `model`, when the Bot has one.
+ *  - `model` and `permissions.defaultMode`, when the Bot has them. The Bot's
+ *    mode is the one its sessions start in; the owner's own last choice never
+ *    reaches a Bot.
  *
  * Everything else in the file stays as it is. The entries LingXi wrote last
  * time are remembered in a file beside `settings.json`, so that regenerating
@@ -28,6 +30,9 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+import type { PermissionModeId } from '@lingxi/bridge-client';
+
+import { isPermissionModeId } from '../host-utils.js';
 import { writeFileAtomic } from './files.js';
 import { stillBound, type BotRecord, type BotStore, type BotWorkspace } from './store.js';
 
@@ -36,6 +41,7 @@ export const MANAGED_FILE = '.lingxi-bot-managed.json';
 
 export interface ManagedSettings {
   model?: string;
+  defaultMode?: PermissionModeId;
   additionalDirectories: string[];
   allow: string[];
   deny: string[];
@@ -91,6 +97,7 @@ export function buildManagedSettings(store: BotStore, record: BotRecord, workspa
   ];
   return {
     ...(record.model !== undefined ? { model: record.model } : {}),
+    ...(record.permission_mode !== undefined ? { defaultMode: record.permission_mode } : {}),
     additionalDirectories: workspaces.map((bound) => bound.path),
     allow: [pathRule('Read', memory), pathRule('Edit', memory)],
     deny,
@@ -124,13 +131,15 @@ function writeIfChanged(path: string, text: string): void {
 function parseManaged(text: string, path: string): ManagedSettings {
   try {
     const input = plainObject(JSON.parse(text), 'managed settings');
-    if (input['v'] !== 1 || Object.keys(input).some((key) => !['v', 'model', 'additionalDirectories', 'allow', 'deny', 'denyRead'].includes(key))) {
+    if (input['v'] !== 1 || Object.keys(input).some((key) => !['v', 'model', 'defaultMode', 'additionalDirectories', 'allow', 'deny', 'denyRead'].includes(key))) {
       throw new Error('unsupported');
     }
     const lists = (['additionalDirectories', 'allow', 'deny', 'denyRead'] as const).map((key) => stringList(input[key], key));
-    if (lists.some((list) => list === undefined) || (input['model'] !== undefined && typeof input['model'] !== 'string')) throw new Error('invalid');
+    if (lists.some((list) => list === undefined) || (input['model'] !== undefined && typeof input['model'] !== 'string')
+      || (input['defaultMode'] !== undefined && !isPermissionModeId(input['defaultMode']))) throw new Error('invalid');
     return {
       ...(typeof input['model'] === 'string' ? { model: input['model'] } : {}),
+      ...(isPermissionModeId(input['defaultMode']) ? { defaultMode: input['defaultMode'] } : {}),
       additionalDirectories: lists[0]!, allow: lists[1]!, deny: lists[2]!, denyRead: lists[3]!,
     };
   } catch {
@@ -146,8 +155,10 @@ function serializeManaged(managed: ManagedSettings): string {
 function union(left: ManagedSettings, right: ManagedSettings): ManagedSettings {
   const merge = (a: string[], b: string[]): string[] => [...new Set([...a, ...b])];
   const model = right.model ?? left.model;
+  const defaultMode = right.defaultMode ?? left.defaultMode;
   return {
     ...(model !== undefined ? { model } : {}),
+    ...(defaultMode !== undefined ? { defaultMode } : {}),
     additionalDirectories: merge(left.additionalDirectories, right.additionalDirectories),
     allow: merge(left.allow, right.allow),
     deny: merge(left.deny, right.deny),
@@ -182,6 +193,8 @@ export function applyManagedSettings(
   if (next.model !== undefined) settings['model'] = next.model;
   else if (previous?.model !== undefined && settings['model'] === previous.model) delete settings['model'];
   const permissions = objectField(settings, 'permissions', 'permissions');
+  if (next.defaultMode !== undefined) permissions['defaultMode'] = next.defaultMode;
+  else if (previous?.defaultMode !== undefined && permissions['defaultMode'] === previous.defaultMode) delete permissions['defaultMode'];
   mergeList(permissions, 'additionalDirectories', 'permissions.additionalDirectories', previous?.additionalDirectories, next.additionalDirectories);
   mergeList(permissions, 'allow', 'permissions.allow', previous?.allow, next.allow);
   mergeList(permissions, 'deny', 'permissions.deny', previous?.deny, next.deny);

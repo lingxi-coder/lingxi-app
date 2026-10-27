@@ -178,6 +178,8 @@ export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEvent
 export interface SessionRuntimeSummary {
   projectPath: string;
   sessionId: string;
+  /** Set when the session is a Bot's. It is not a project's session and is listed with its Bot, not with the projects. */
+  botId?: string;
   connection: ConnectionState;
   turnActive: boolean;
   pendingInteractions: number;
@@ -185,13 +187,18 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
   workspaceSettings?: (projectPath: string) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
   onModelSelected?: (ref: SessionRef, model: string) => void;
   getSavedModel?: (ref: SessionRef) => string | undefined;
+  // The owner's last permission mode and Fast mode are preferences of the owner's sessions; asking per session lets a Bot's sessions keep clear of them.
+  getSavedPermissionMode?: (ref: SessionRef) => PermissionModeId | undefined;
+  onPermissionModeSelected?: (ref: SessionRef, mode: PermissionModeId) => void;
+  getSavedFastMode?: (ref: SessionRef) => boolean | undefined;
+  onFastModeSelected?: (ref: SessionRef, enabled: boolean) => void;
   onFirstPromptSent?: (ref: SessionRef) => boolean | void;
   /** Maximum retained runtimes when enough idle sessions are evictable. */
   maxCachedRuntimes?: number;

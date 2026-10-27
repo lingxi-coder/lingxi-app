@@ -8,12 +8,17 @@
  * owner's), and the folders bound to it are granted to the engine. The app
  * asks this service whether a working directory is a Bot's, and for these
  * launch settings, wherever it would ask the project list.
+ *
+ * Bots are macOS-only in this version: their isolation relies on the engine's
+ * sandbox and on POSIX path rules. Anywhere else every operation is refused.
  */
 
 import { existsSync } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { SessionRowDto } from '@lingxi/bridge-client';
+import type { BotsAvailability } from '../../shared/bots.js';
 import type { SessionRef, WorkspaceLaunchSettings } from '../bridgeTypes.js';
 import type { ProjectSessionCatalogRow } from '../session-catalog.js';
 import { isSessionId } from '../sessionIdentity.js';
@@ -33,14 +38,25 @@ export interface BotCatalog {
   list(projectPath: string): Promise<{ sessions: ProjectSessionCatalogRow[] }>;
   find(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogRow | undefined>;
   workspaceSettings(projectPath: string): Promise<WorkspaceLaunchSettings>;
+  /** Forget what was listed, so that the next listing reads the home again. */
+  invalidate(): void;
 }
 
 export interface BotServiceOptions {
   store: BotStore;
   runtimes: BotRuntimes;
   catalogFor(configHome: string): BotCatalog;
+  /** The platform the app runs on; this process's by default. */
+  platform?: NodeJS.Platform;
   /** Something went wrong that does not stop the operation. */
   warn?: (message: string) => void;
+}
+
+const MAX_ACTIVITY_FILES = 500;
+
+/** Whether Bots can run on a platform. They need the engine's sandbox, which Desktop uses on macOS only. */
+export function botsAvailability(platform: NodeJS.Platform = process.platform): BotsAvailability {
+  return platform === 'darwin' ? { available: true } : { available: false, reason: 'Bots are available on macOS only.' };
 }
 
 export interface BotSessionRef {
@@ -56,6 +72,16 @@ export class BotService {
 
   constructor(private readonly options: BotServiceOptions) {
     this.store = options.store;
+  }
+
+  availability(): BotsAvailability {
+    return botsAvailability(this.options.platform);
+  }
+
+  /** Refuse, in words the owner can read, wherever Bots cannot run. */
+  assertAvailable(): void {
+    const { available, reason } = this.availability();
+    if (!available) throw new Error(reason ?? 'Bots are not available on this computer.');
   }
 
   private warn(message: string): void {
@@ -75,14 +101,17 @@ export class BotService {
   }
 
   list(): BotRecord[] {
+    this.assertAvailable();
     return this.store.list();
   }
 
   get(botId: string): BotRecord {
+    this.assertAvailable();
     return this.store.get(botId);
   }
 
   create(input: BotCreateInput): BotRecord {
+    this.assertAvailable();
     const record = this.store.create(input, (draft) => { this.writeSettings(draft); });
     // Every other Bot must now keep out of this one.
     writeAllBotSettings(this.store, (message) => this.warn(message), record.bot_id);
@@ -90,12 +119,14 @@ export class BotService {
   }
 
   update(botId: string, expectedRevision: number, patch: BotPatch): BotRecord {
+    this.assertAvailable();
     this.assertNotDeleting(botId);
     return this.store.update(botId, expectedRevision, patch, (draft) => { this.writeSettings(draft); });
   }
 
   /** Stop the Bot's sessions, then move its folder to the trash folder. Rejects while a session is working. */
   async delete(botId: string): Promise<void> {
+    this.assertAvailable();
     const workspace = this.store.workspaceDir(botId);
     if (!existsSync(this.store.botDir(botId))) throw new BotNotFoundError();
     this.assertNotDeleting(botId);
@@ -113,6 +144,7 @@ export class BotService {
 
   /** A new session of the Bot, or an existing one of its own. */
   async openSession(botId: string, sessionId?: string): Promise<BotSessionRef> {
+    this.assertAvailable();
     this.assertNotDeleting(botId);
     const record = this.store.get(botId);
     const projectPath = this.store.workspaceDir(botId);
@@ -129,21 +161,54 @@ export class BotService {
 
   /** The Bot's own sessions, read from its home. */
   async listSessions(botId: string): Promise<SessionRowDto[]> {
+    this.assertAvailable();
     this.store.get(botId);
+    // The owner asked to see them: show what is there now, not what was there a few seconds ago.
+    this.catalog(botId).invalidate();
     const { sessions } = await this.catalog(botId).list(this.store.workspaceDir(botId));
     return sessions.map(({ empty_session: _empty, resume_model: _model, workspace_path: _workspace, ...row }) => row);
   }
 
+  /**
+   * When the Bot was last used: the newest modification time among its
+   * transcripts, read from the files rather than from a running engine.
+   */
+  async lastActivityAt(botId: string): Promise<number | undefined> {
+    this.assertAvailable();
+    const directory = this.store.transcriptsDir(botId);
+    let names: string[];
+    try { names = (await readdir(directory)).filter((name) => name.endsWith('.jsonl')).slice(0, MAX_ACTIVITY_FILES); }
+    catch { return undefined; }
+    let newest: number | undefined;
+    for (const name of names) {
+      try {
+        const { mtimeMs } = await stat(join(directory, name));
+        if (newest === undefined || mtimeMs > newest) newest = mtimeMs;
+      } catch { /* A transcript that went away has no time to give. */ }
+    }
+    return newest === undefined ? undefined : Math.floor(newest);
+  }
+
   // What the app asks when it launches or looks after a session
+
+  /** The working directory of the Bot's sessions. */
+  workspaceOf(botId: string): string {
+    return this.store.workspaceDir(botId);
+  }
+
+  /** The Bot whose workspace a working directory is, if it is one and Bots can run here. */
+  botIdFor(projectPath: string): string | undefined {
+    return this.availability().available ? this.store.botIdForWorkspace(projectPath) : undefined;
+  }
 
   /** Whether a working directory is the workspace of an existing Bot, which is then trusted without being a project. */
   ownsWorkspace(projectPath: string): boolean {
-    return this.store.botIdForWorkspace(projectPath) !== undefined;
+    return this.botIdFor(projectPath) !== undefined;
   }
 
   /** The model of the Bot a working directory belongs to, if it has one. */
   modelFor(projectPath: string): string | undefined {
-    const botId = this.store.botIdForWorkspace(projectPath);
+    const botId = this.botIdFor(projectPath);
     if (botId === undefined) return undefined;
     try { return this.store.get(botId).model; } catch { return undefined; }
   }
@@ -154,6 +219,7 @@ export class BotService {
    * reads the isolation as it is now.
    */
   async launchSettings(projectPath: string): Promise<WorkspaceLaunchSettings> {
+    this.assertAvailable();
     const botId = this.store.botIdForWorkspace(projectPath);
     if (botId === undefined) throw new Error('not the workspace of a Bot');
     this.assertNotDeleting(botId);

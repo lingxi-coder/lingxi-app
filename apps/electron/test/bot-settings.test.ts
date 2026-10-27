@@ -302,3 +302,82 @@ test('merging only ever touches the copy it was given', () => {
   assert.deepEqual((merged['permissions'] as any).deny, ['x', 'y']);
   assert.deepEqual((existing['permissions'] as any).deny, ['x']);
 });
+
+// The permission mode a Bot's sessions start in
+
+test('the mode of a Bot is written where the engine reads the starting mode of the user settings', (t) => {
+  const f = botFixture(t);
+  const bot = makeBot(f, { name: 'Careful', permissionMode: 'plan' });
+  assert.equal(settingsOf(f, bot).permissions.defaultMode, 'plan');
+  assert.equal(JSON.parse(readFileSync(join(f.store.homeDir(bot.bot_id), MANAGED_FILE), 'utf8')).defaultMode, 'plan');
+  for (const mode of ['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions'] as const) {
+    const other = makeBot(f, { name: `Mode ${mode}`, permissionMode: mode });
+    assert.equal(settingsOf(f, other).permissions.defaultMode, mode);
+  }
+});
+
+test('without a mode of its own a Bot starts in the engine default, not in the mode the owner last chose', (t) => {
+  const f = botFixture(t);
+  const bare = makeBot(f, { name: 'No mode' });
+  assert.ok(!('defaultMode' in settingsOf(f, bare).permissions));
+  assert.ok(!('defaultMode' in JSON.parse(readFileSync(join(f.store.homeDir(bare.bot_id), MANAGED_FILE), 'utf8'))));
+  // The owner's own settings are never read into a Bot.
+  writeFileSync(join(f.defaultConfigHome, 'settings.json'), JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }));
+  writeBotSettings(f.store, bare);
+  assert.ok(!('defaultMode' in settingsOf(f, bare).permissions));
+});
+
+test('changing or clearing the mode removes what the Bot put in, and a mode someone else set stays', (t) => {
+  const f = botFixture(t);
+  const bot = makeBot(f, { name: 'Changing mode', permissionMode: 'acceptEdits' });
+  const changed = f.store.update(bot.bot_id, 1, { permissionMode: 'dontAsk' });
+  writeBotSettings(f.store, changed);
+  assert.equal(settingsOf(f, bot).permissions.defaultMode, 'dontAsk');
+  const cleared = f.store.update(bot.bot_id, 2, { permissionMode: null });
+  writeBotSettings(f.store, cleared);
+  assert.ok(!('defaultMode' in settingsOf(f, bot).permissions), 'the mode it set is removed');
+
+  const foreign = makeBot(f, { name: 'Foreign mode' });
+  const settings = settingsOf(f, foreign);
+  settings.permissions.defaultMode = 'plan';
+  writeFileSync(settingsPath(f, foreign), JSON.stringify(settings));
+  writeBotSettings(f.store, foreign);
+  assert.equal(settingsOf(f, foreign).permissions.defaultMode, 'plan', 'a mode the Bot never had is not the Bot\'s to remove');
+
+  const owned = makeBot(f, { name: 'Owned mode', permissionMode: 'auto' });
+  const edited = settingsOf(f, owned);
+  edited.permissions.defaultMode = 'default';
+  writeFileSync(settingsPath(f, owned), JSON.stringify(edited));
+  writeBotSettings(f.store, owned);
+  assert.equal(settingsOf(f, owned).permissions.defaultMode, 'auto', 'while the Bot has a mode it is the Bot\'s');
+  const again = settingsOf(f, owned);
+  again.permissions.defaultMode = 'plan';
+  writeFileSync(settingsPath(f, owned), JSON.stringify(again));
+  writeBotSettings(f.store, f.store.update(owned.bot_id, 1, { permissionMode: null }));
+  assert.equal(settingsOf(f, owned).permissions.defaultMode, 'plan', 'and a mode changed by someone else after the Bot wrote its own stays when the Bot lets go');
+});
+
+test('regenerating with a mode twice changes nothing, and the list of what was written rejects a mode that is not one', (t) => {
+  const f = botFixture(t);
+  const bot = makeBot(f, { name: 'Idempotent mode', permissionMode: 'acceptEdits' });
+  const before = readFileSync(settingsPath(f, bot), 'utf8');
+  const managedPath = join(f.store.homeDir(bot.bot_id), MANAGED_FILE);
+  const managedBefore = readFileSync(managedPath, 'utf8');
+  writeBotSettings(f.store, bot);
+  assert.equal(readFileSync(settingsPath(f, bot), 'utf8'), before);
+  assert.equal(readFileSync(managedPath, 'utf8'), managedBefore);
+  const managed = JSON.parse(managedBefore);
+  for (const bad of ['yolo', 5, null]) {
+    writeFileSync(managedPath, JSON.stringify({ ...managed, defaultMode: bad }));
+    assert.throws(() => writeBotSettings(f.store, bot), /is unreadable/);
+    assert.equal(readFileSync(settingsPath(f, bot), 'utf8'), before);
+  }
+});
+
+test('a mode that is merged is only ever put into the copy it was given', () => {
+  const existing = { permissions: { defaultMode: 'default', allow: [] } };
+  const managed = { defaultMode: 'plan' as const, additionalDirectories: [], allow: [], deny: [], denyRead: [] };
+  const merged = applyManagedSettings(existing, undefined, managed) as any;
+  assert.equal(merged.permissions.defaultMode, 'plan');
+  assert.equal(existing.permissions.defaultMode, 'default');
+});

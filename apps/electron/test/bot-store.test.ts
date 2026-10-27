@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 import { BotConflictError, BotNotFoundError, BotStore, parseRecord } from '../src/main/bots/store.js';
 import { projectDirName } from '../src/main/bots/projectDirName.js';
+import { BOT_CONFLICT_MESSAGE } from '../src/shared/bots.js';
 import { botFixture } from './bot-helpers.js';
 
 const ID = 'Bot0000000000000000001';
@@ -318,4 +319,65 @@ test('the same folder cannot be bound twice, not even through a link, and the li
   const many = Array.from({ length: 17 }, (_, index) => ({ path: f.folder(`many-${index}`), mode: 'read' as const }));
   assert.throws(() => f.store.create({ name: 'Many', workspaces: many }), /invalid workspaces/);
   assert.equal(f.store.create({ name: 'Sixteen', workspaces: many.slice(0, 16) }).workspaces.length, 16);
+});
+
+// The permission mode a Bot's sessions start in
+
+const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'] as const;
+
+test('a Bot can start in any of the permission modes the Desktop offers, and in no other', (t) => {
+  const f = botFixture(t);
+  for (const mode of MODES) {
+    const bot = f.store.create({ name: `In ${mode}`, permissionMode: mode });
+    assert.equal(bot.permission_mode, mode);
+    assert.equal(JSON.parse(recordText(f.store, bot.bot_id)).permission_mode, mode);
+    assert.equal(f.store.get(bot.bot_id).permission_mode, mode);
+  }
+  for (const bad of ['', 'Default', 'yolo', 'bypass', 5, null, {}, ['plan']]) {
+    assert.throws(() => f.store.create({ name: 'Bad', permissionMode: bad as any }), /invalid permission mode/, JSON.stringify(bad));
+  }
+  assert.equal(f.store.list().length, MODES.length, 'a refused creation leaves no Bot behind');
+  const plain = f.store.create({ name: 'Plain' });
+  assert.ok(!('permission_mode' in plain) && !('permission_mode' in JSON.parse(recordText(f.store, plain.bot_id))), 'no mode means the key is absent');
+});
+
+test('the mode is changed and removed by an update, which is checked first', (t) => {
+  const f = botFixture(t);
+  const bot = f.store.create({ name: 'Moody' });
+  const planned = f.store.update(bot.bot_id, 1, { permissionMode: 'plan' });
+  assert.equal(planned.permission_mode, 'plan');
+  assert.equal(planned.revision, 2);
+  assert.equal(f.store.update(bot.bot_id, 2, { permissionMode: 'plan' }).revision, 2, 'the same mode again changes nothing');
+  assert.equal(f.store.update(bot.bot_id, 2, { name: 'Moody too' }).permission_mode, 'plan', 'what the patch does not mention stays');
+  const before = recordText(f.store, bot.bot_id);
+  for (const bad of ['', 'yolo', 5, {}]) assert.throws(() => f.store.update(bot.bot_id, 3, { permissionMode: bad as any }), /invalid permission mode/);
+  assert.equal(recordText(f.store, bot.bot_id), before, 'a refused mode changes nothing');
+  const cleared = f.store.update(bot.bot_id, 3, { permissionMode: null });
+  assert.equal(cleared.permission_mode, undefined);
+  assert.ok(!('permission_mode' in JSON.parse(recordText(f.store, bot.bot_id))));
+  assert.equal(f.store.update(bot.bot_id, 4, { permissionMode: null }).revision, 4, 'clearing a mode that is not set changes nothing');
+});
+
+test('the record is read strictly where the mode is concerned', (t) => {
+  const f = botFixture(t);
+  const bot = f.store.create({ name: 'Strict mode', permissionMode: 'acceptEdits' });
+  const good = JSON.parse(recordText(f.store, bot.bot_id));
+  assert.deepEqual(parseRecord(JSON.stringify(good), bot.bot_id), bot);
+  for (const bad of ['', 'yolo', 5, null]) {
+    assert.throws(() => parseRecord(JSON.stringify({ ...good, permission_mode: bad }), bot.bot_id), /invalid permission mode/, JSON.stringify(bad));
+  }
+});
+
+test('a conflict says what the window knows it by', (t) => {
+  const f = botFixture(t);
+  const bot = f.store.create({ name: 'Raced' });
+  f.store.update(bot.bot_id, 1, { name: 'Won' });
+  assert.throws(() => f.store.update(bot.bot_id, 1, { name: 'Lost' }), (error: Error) => error instanceof BotConflictError && error.message === BOT_CONFLICT_MESSAGE);
+});
+
+test('the transcripts of a Bot are in the project folder of its workspace, and its memory is inside it', (t) => {
+  const f = botFixture(t);
+  const bot = f.store.create({ name: 'Transcribed' });
+  assert.equal(f.store.transcriptsDir(bot.bot_id), join(f.store.homeDir(bot.bot_id), 'projects', projectDirName(f.store.workspaceDir(bot.bot_id))));
+  assert.equal(f.store.memoryDir(bot.bot_id), join(f.store.transcriptsDir(bot.bot_id), 'memdir'));
 });

@@ -6,8 +6,17 @@
  * bound to it.
  */
 
-import type { SessionRowDto } from '@lingxi/bridge-client';
+import type { PermissionModeId, SessionRowDto } from '@lingxi/bridge-client';
 
+/**
+ * What a rejected update says when the Bot changed since the window read it. The
+ * window tells this apart from other failures by the text: an error that crosses
+ * the IPC boundary keeps its message and loses its class.
+ */
+export const BOT_CONFLICT_MESSAGE = 'This Bot changed. Reload and try again.';
+
+/** Invoke → `BotsAvailability`. The only channel that answers when Bots cannot be used here. */
+export const CH_BOTS_AVAILABILITY = 'lingxi:bots:availability';
 /** Invoke → `BotUi[]`. */
 export const CH_BOTS_LIST = 'lingxi:bots:list';
 /** Invoke(`botId: string`) → `BotUi`. */
@@ -40,6 +49,14 @@ export const CH_BOTS_SKILLS_LIST = 'lingxi:bots:skills:list';
 export const CH_BOTS_SKILL_DELETE = 'lingxi:bots:skills:delete';
 /** Invoke(`botId: string, name: string`) → `BotSkillUi`. Copies `~/.lingxi/skills/<name>` into the Bot once; the copy is not kept in step. */
 export const CH_BOTS_SKILL_IMPORT = 'lingxi:bots:skills:import';
+/** Invoke → `BotSkillUi[]`. The skills of the owner's own configuration that can be copied into a Bot. */
+export const CH_BOTS_SKILLS_IMPORTABLE = 'lingxi:bots:skills:importable';
+
+/** Whether Bots can be used on this computer, and if not, why (in words fit for the owner). */
+export interface BotsAvailability {
+  available: boolean;
+  reason?: string;
+}
 
 export type BotWorkspaceMode = 'read' | 'write';
 
@@ -60,7 +77,11 @@ export interface BotUi {
   revision: number;
   /** Absent: the Bot uses the model new sessions use. */
   model?: string;
+  /** What a session of the Bot starts in. Absent: the engine's own default, which asks before it acts. */
+  permissionMode?: PermissionModeId;
   workspaces: BotWorkspaceUi[];
+  /** Epoch milliseconds; absent while the Bot has had no session. */
+  lastActivityAt?: number;
 }
 
 export interface BotCreateRequest {
@@ -69,6 +90,7 @@ export interface BotCreateRequest {
   /** The first text of the Bot's `LINGXI.md`. */
   persona?: string;
   model?: string;
+  permissionMode?: PermissionModeId;
   workspaces?: BotWorkspaceUi[];
 }
 
@@ -77,6 +99,8 @@ export interface BotUpdateRequest {
   description?: string;
   /** `null` goes back to the default model. */
   model?: string | null;
+  /** `null` goes back to the engine's default. */
+  permissionMode?: PermissionModeId | null;
   /** Replaces the whole list. */
   workspaces?: BotWorkspaceUi[];
 }
@@ -110,6 +134,8 @@ export interface BotSkillUi {
 }
 
 export interface BotsApi {
+  /** Never rejects for a computer that cannot run Bots: that is the answer. */
+  availability(): Promise<BotsAvailability>;
   list(): Promise<BotUi[]>;
   get(botId: string): Promise<BotUi>;
   create(request: BotCreateRequest): Promise<BotUi>;
@@ -131,5 +157,7 @@ export interface BotsApi {
     list(botId: string): Promise<BotSkillUi[]>;
     delete(botId: string, name: string): Promise<void>;
     importFromUser(botId: string, name: string): Promise<BotSkillUi>;
+    /** What `importFromUser` can copy: the skills of the owner's configuration, whatever the Bot has. */
+    listImportable(): Promise<BotSkillUi[]>;
   };
 }

@@ -14,7 +14,10 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path';
+import type { PermissionModeId } from '@lingxi/bridge-client';
 
+import { BOT_CONFLICT_MESSAGE } from '../../shared/bots.js';
+import { isPermissionModeId } from '../host-utils.js';
 import { isInside, writeFileAtomic } from './files.js';
 import { projectDirName } from './projectDirName.js';
 
@@ -49,6 +52,8 @@ export interface BotRecord {
   updated_at: number;
   revision: number;
   model?: string;
+  /** What a session starts in; one of the modes the Desktop offers. Absent: the engine's default. */
+  permission_mode?: PermissionModeId;
   workspaces: BotWorkspace[];
   /** Only the owner exists in this version. */
   audiences: Array<{ id: 'owner'; kind: 'owner' }>;
@@ -59,6 +64,7 @@ export interface BotCreateInput {
   description?: string;
   persona?: string;
   model?: string;
+  permissionMode?: PermissionModeId;
   workspaces?: ReadonlyArray<{ path: string; mode: BotWorkspaceMode }>;
 }
 
@@ -67,6 +73,8 @@ export interface BotPatch {
   description?: string;
   /** `null` removes the Bot's own model. */
   model?: string | null;
+  /** `null` removes the Bot's own permission mode. */
+  permissionMode?: PermissionModeId | null;
   workspaces?: ReadonlyArray<{ path: string; mode: BotWorkspaceMode }>;
 }
 
@@ -103,7 +111,7 @@ export class BotNotFoundError extends Error {
 
 export class BotConflictError extends Error {
   constructor() {
-    super('This Bot changed. Reload and try again.');
+    super(BOT_CONFLICT_MESSAGE);
     this.name = 'BotConflictError';
   }
 }
@@ -139,6 +147,11 @@ function botModel(value: unknown): string {
   return singleLine(value, 'model', MAX_MODEL_CHARS);
 }
 
+function botPermissionMode(value: unknown): PermissionModeId {
+  if (!isPermissionModeId(value)) throw new Error('invalid permission mode');
+  return value;
+}
+
 /** The text of a Bot's `LINGXI.md`. */
 export function personaText(value: unknown): string {
   if (typeof value !== 'string' || value.includes('\0') || Buffer.byteLength(value, 'utf8') > MAX_PERSONA_BYTES) throw new Error('invalid persona');
@@ -169,7 +182,7 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
   try { parsed = JSON.parse(text); } catch { throw new Error('bot.json is not valid JSON'); }
   const input = plainObject(parsed, 'bot.json');
   if (input['v'] !== BOT_RECORD_VERSION) throw new Error('bot.json has an unsupported version');
-  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model'], 'bot.json');
+  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model', 'permission_mode'], 'bot.json');
   if (input['bot_id'] !== expectedId || !isBotId(input['bot_id'])) throw new Error('bot.json belongs to a different Bot');
   const name = botName(input['name']);
   if (name !== input['name']) throw new Error('invalid name');
@@ -194,6 +207,7 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
     updated_at: timestamp(input['updated_at'], 'updated_at'),
     revision: revision as number,
     ...(input['model'] !== undefined ? { model: botModel(input['model']) } : {}),
+    ...(input['permission_mode'] !== undefined ? { permission_mode: botPermissionMode(input['permission_mode']) } : {}),
     workspaces,
     audiences: [{ id: 'owner', kind: 'owner' }],
   };
@@ -248,9 +262,14 @@ export class BotStore {
   homeDir(botId: string): string { return join(this.botDir(botId), 'home'); }
   workspaceDir(botId: string): string { return join(this.botDir(botId), 'workspace'); }
 
-  /** `<home>/projects/<project dir>/memdir`: where the engine keeps what this Bot remembers. */
+  /** `<home>/projects/<project dir>`: where the engine keeps this Bot's transcripts, and its memory. */
+  transcriptsDir(botId: string): string {
+    return join(this.homeDir(botId), 'projects', projectDirName(this.workspaceDir(botId)));
+  }
+
+  /** `<transcripts>/memdir`: where the engine keeps what this Bot remembers. */
   memoryDir(botId: string): string {
-    return join(this.homeDir(botId), 'projects', projectDirName(this.workspaceDir(botId)), 'memdir');
+    return join(this.transcriptsDir(botId), 'memdir');
   }
 
   /** The Bot a working directory belongs to, if it is the workspace of an existing Bot. */
@@ -314,6 +333,7 @@ export class BotStore {
     const name = botName(input.name);
     const description = input.description === undefined ? '' : botDescription(input.description);
     const model = input.model === undefined ? undefined : botModel(input.model);
+    const permissionMode = input.permissionMode === undefined ? undefined : botPermissionMode(input.permissionMode);
     const workspaces = this.workspaces(input.workspaces ?? []);
     const persona = input.persona === undefined ? defaultPersona(name, description) : personaText(input.persona);
     let botId = '';
@@ -342,6 +362,7 @@ export class BotStore {
         updated_at: now,
         revision: 1,
         ...(model !== undefined ? { model } : {}),
+        ...(permissionMode !== undefined ? { permission_mode: permissionMode } : {}),
         workspaces,
         audiences: [{ id: 'owner', kind: 'owner' }],
       };
@@ -367,7 +388,9 @@ export class BotStore {
     };
     if (patch.model === null) delete next.model;
     else if (patch.model !== undefined) next.model = botModel(patch.model);
-    const unchanged = (['name', 'description', 'model'] as const).every((key) => next[key] === current[key])
+    if (patch.permissionMode === null) delete next.permission_mode;
+    else if (patch.permissionMode !== undefined) next.permission_mode = botPermissionMode(patch.permissionMode);
+    const unchanged = (['name', 'description', 'model', 'permission_mode'] as const).every((key) => next[key] === current[key])
       && JSON.stringify(next.workspaces) === JSON.stringify(current.workspaces);
     if (unchanged) return current;
     next.revision = current.revision + 1;

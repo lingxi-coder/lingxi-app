@@ -43,6 +43,7 @@ import { nativeImageCodec } from './remoteControl/nativeImageCodec.js';
 import { PushRequester, RemotePush } from './remoteControl/pushRequests.js';
 import { RemoteControlUi } from './remoteControl/rendererIpc.js';
 import { BotContent } from './bots/content.js';
+import { ownerPreferenceHooks } from './bots/ownerPreferences.js';
 import { BotsUi } from './bots/rendererIpc.js';
 import { BotService } from './bots/service.js';
 import { BotStore } from './bots/store.js';
@@ -466,10 +467,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     workspaceSettings: (projectPath) => bots?.ownsWorkspace(projectPath)
       ? bots.launchSettings(projectPath) : sessionCatalog.workspaceSettings(projectPath),
     appVersion: app.getVersion(),
-    getSavedPermissionMode: () => settings.getLastPermissionMode(),
-    onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
-    getSavedFastMode: () => settings.getLastFastMode(),
-    onFastModeSelected: (enabled) => settings.setLastFastMode(enabled),
+    ...ownerPreferenceHooks(settings, (ref) => bots?.ownsWorkspace(ref.projectPath) === true),
     notifier,
     onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
     isPackaged: app.isPackaged,
@@ -706,7 +704,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     gateway,
     runtimeRef: (sessionId) => {
       const runtime = bridge?.get(sessionId);
-      return runtime ? { projectPath: runtime.projectPath, sessionId } : undefined;
+      // A Bot's chats stay on this computer: `/remote-control` in one finds no session to share.
+      return runtime && !bots?.ownsWorkspace(runtime.projectPath) ? { projectPath: runtime.projectPath, sessionId } : undefined;
     },
     signedIn: () => account.snapshot().user !== null,
     onAccountChanged: (callback) => account.onChanged(() => callback()),

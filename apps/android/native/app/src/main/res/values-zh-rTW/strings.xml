@@ -2036,6 +2036,8 @@
     <string name="remote_fail_unsupported">這支手機不支援遠端控制所需的加密功能。</string>
     <string name="remote_fail_unknown_host">找不到這台電腦的資訊。請確認桌面版已開啟遠端控制。</string>
     <string name="remote_fail_network">無法連線到雲端服務，請檢查網路。</string>
+    <string name="remote_file_timeout">檔案傳輸逾時，請檢查連線後重試。</string>
+    <string name="remote_file_save_incomplete">儲存未完成。所選檔案可能是空的或不完整，請重新下載並選擇新檔案。</string>
     <string name="remote_fail_network_denied">帳號沒有權限存取遠端控制資料。請重新登入。</string>
     <string name="remote_fail_no_answer">電腦沒有回應。請確認它在線上且靈犀桌面版正在執行。</string>
     <string name="remote_fail_closed">連線已關閉。</string>

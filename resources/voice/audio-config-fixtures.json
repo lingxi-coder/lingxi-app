@@ -535,6 +535,63 @@
       }
     },
     {
+      "name": "unconfigured speech prefers system without a provider profile",
+      "input": {
+        "kind": "speech",
+        "preference": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": []
+      },
+      "expected": {
+        "requested": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "effective": {
+          "source": "system",
+          "modelId": null,
+          "voiceId": null
+        },
+        "status": "ready",
+        "reason": "ready",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "unconfigured recognition requests system permission without a provider profile",
+      "input": {
+        "kind": "recognition",
+        "preference": {
+          "source": "automatic",
+          "offlineModelId": null
+        },
+        "language": "en-US",
+        "systemStatus": "permissionRequired",
+        "offlineModels": []
+      },
+      "expected": {
+        "requested": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "effective": {
+          "source": "system",
+          "modelId": null,
+          "voiceId": null
+        },
+        "status": "permissionRequired",
+        "reason": "systemPermissionRequired",
+        "fallbackReason": null
+      }
+    },
+    {
       "name": "automatic falls back in catalog order when system is unavailable",
       "input": {
         "kind": "recognition",

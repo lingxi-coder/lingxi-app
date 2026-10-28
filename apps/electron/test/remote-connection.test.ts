@@ -571,6 +571,46 @@ test('a viewer\'s closing is passed to the gateway only if it had been approved'
 
 // ── WebRTC ───────────────────────────────────────────────────────────────────
 
+for (const approved of [true, false]) {
+  test(`initialize before the WebRTC connected notification preserves ${approved ? 'approved' : 'pending'} viewers`, async () => {
+    await withHarness(async (h) => {
+      const viewer = await h.viewer();
+      if (approved) h.approveDevice(viewer);
+      const connId = randomId();
+      await viewer.connect({ transport: 'webrtc', connId, get link() { return h.peers.pairs.get(connId)!.viewer; } });
+      const host = h.peers.pairs.get(connId)!.host;
+
+      // Control messages can arrive while the renderer is still awaiting getStats.
+      assert.equal((await viewer.initialize<InitializeResult>()).status, approved ? 'approved' : 'pending_approval');
+      await elapse(h.clock, 21_000);
+      assert.equal(host.closeReason, undefined, 'valid initialize also satisfies the transport-open deadline');
+      host.open('host');
+      await elapse(h.clock, 16_000);
+      assert.equal(host.closeReason, undefined);
+      assert.deepEqual(await viewer.call('ping'), {});
+      if (!approved) {
+        assert.equal(await viewer.callError('sessions.list', {}), 'not_approved');
+        h.approval.answer({ allowed: true });
+        await viewer.notification('auth.approved');
+      }
+      assert.deepEqual(await viewer.call('sessions.list', {}), { ok: true });
+    });
+  });
+}
+
+test('a WebRTC viewer with invalid initialize still times out after connected', async () => {
+  await withHarness(async (h) => {
+    const viewer = await h.viewer();
+    const connId = randomId();
+    await viewer.connect({ transport: 'webrtc', connId, get link() { return h.peers.pairs.get(connId)!.viewer; } });
+    const host = h.peers.pairs.get(connId)!.host;
+    assert.equal(await viewer.callError('initialize', 'invalid'), 'invalid_params');
+    host.open('host');
+    await elapse(h.clock, 16_000);
+    assert.equal(host.closeReason, 'initialize_timeout');
+  });
+});
+
 test('WebRTC end to end over an in-memory DataChannel', async () => {
   await withHarness(async (h) => {
     const viewer = await h.viewer();

@@ -141,10 +141,12 @@ async function main(): Promise<void> {
   assert.equal(receipt.sha256, file.sha256);
   const reverse = await run<FileOffer>(`window.viewer.prepareFile(${SIZE}, '${'34'.repeat(16)}')`);
   await run(`window.viewer.receiveFile('one', ${JSON.stringify(reverse)})`);
-  const source = (await store.source('fixture', file.session_id, file.transfer_id)).source;
-  await bulk.send(reverse, source, {
-    offer: async () => ({ offset: 0 }), commit: async () => ({ ...reverse, ref: reverse.transfer_id }), cancel: async () => undefined,
-  });
+  const source = await store.source('fixture', file.session_id, file.transfer_id);
+  try {
+    await bulk.send(reverse, source.source, {
+      offer: async () => ({ offset: 0 }), commit: async () => ({ ...reverse, ref: reverse.transfer_id }), cancel: async () => undefined,
+    });
+  } finally { await source.close(); }
   await run(`window.viewer.finishFile('one', '${'34'.repeat(16)}')`);
   await until(async () => (await status('one')).received.length === 2, 'control messages during file transfer');
   // A DataChannel.send exception must close only the failed file lane.

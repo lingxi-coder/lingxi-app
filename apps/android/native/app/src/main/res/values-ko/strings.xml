@@ -2036,6 +2036,8 @@
     <string name="remote_fail_unsupported">이 휴대폰은 원격 제어에 필요한 암호화 기능을 지원하지 않습니다.</string>
     <string name="remote_fail_unknown_host">이 컴퓨터의 정보를 찾을 수 없습니다. 데스크톱 앱에서 원격 제어가 켜져 있는지 확인하세요.</string>
     <string name="remote_fail_network">클라우드 서비스에 연결할 수 없습니다. 네트워크를 확인하세요.</string>
+    <string name="remote_file_timeout">파일 전송 시간이 초과되었습니다. 연결을 확인한 후 다시 시도하세요.</string>
+    <string name="remote_file_save_incomplete">저장이 완료되지 않았습니다. 선택한 파일이 비어 있거나 불완전할 수 있습니다. 다시 다운로드하고 새 파일을 선택하세요.</string>
     <string name="remote_fail_network_denied">이 계정은 원격 제어 데이터에 접근할 수 없습니다. 다시 로그인하세요.</string>
     <string name="remote_fail_no_answer">컴퓨터가 응답하지 않습니다. 온라인이고 LingXi가 실행 중인지 확인하세요.</string>
     <string name="remote_fail_closed">연결이 닫혔습니다.</string>

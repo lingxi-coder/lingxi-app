@@ -3369,6 +3369,15 @@ test('Side Chat envelopes bypass parent turn state and retain independent identi
   assert.equal(runtime.hasActiveWork, false);
 });
 
+test('effort selections reach the engine during an active turn without cancelling it', async () => {
+  const { manager, commands } = trustedManager();
+  (manager as any).activeTurn = true;
+  const command = { type: 'set_reasoning_selection', selection: { type: 'level', id: 'high' } };
+  await manager.dispatchCommand(command);
+  assert.deepEqual(commands, [command]);
+  assert.equal((manager as any).turnActive, true);
+});
+
 test('computer policy failure revokes immediately and stops despite active Side Chats', async () => {
   const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
   const calls: string[] = [];

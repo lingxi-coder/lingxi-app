@@ -12,7 +12,6 @@ import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 
 (globalThis as { React?: typeof React }).React = React;
-const escaped = (text: string) => renderToStaticMarkup(React.createElement(React.Fragment, null, text));
 
 function renderInLocale(locale: DesktopLocale, element: React.ReactElement): string {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
@@ -33,21 +32,16 @@ const request: ComputerAccessRequestDto = {
   tier: 'read', clipboard_read: true, clipboard_write: true, system_key_combos: true,
 };
 
-test('read-only computer settings render localized copy and preserve unavailable integration controls', () => {
+test('computer and browser settings render localized copy and preserve app/user content in every supported language', () => {
+  const controller = { state: null, pending: false, error: null, refresh: async () => {}, execute: async () => false };
   for (const locale of DESKTOP_LOCALES) {
     const settings = renderInLocale(locale, React.createElement(ComputerUse));
     assert.ok(settings.includes(`<h1>${translate('desktop_computer_title', locale)}</h1>`), locale);
-    assert.ok(settings.includes(escaped(translate('desktop_computer_readonly_any_app_description', locale))), locale);
-    assert.ok(settings.includes(escaped(translate('desktop_computer_readonly_permanent_access', locale))), locale);
-    const anyAppLabel = translate('desktop_computer_readonly_any_app_label', locale);
-    const anyAppToggle = (settings.match(/<button\b[^>]*>/g) ?? []).find(tag => tag.includes(`aria-label="${anyAppLabel}"`));
-    assert.ok(anyAppToggle, locale);
-    assert.match(anyAppToggle, /disabled/, locale);
-    const browser = renderInLocale(locale, React.createElement(GoogleChromeSettings, { onBack: () => {} }));
+    assert.ok(settings.includes(translate('desktop_computer_add_installed_app', locale)), locale);
+    const browser = renderInLocale(locale, React.createElement(GoogleChromeSettings, { settings: controller, onBack: () => {} }));
     assert.ok(browser.includes(translate('desktop_computer_website_permissions', locale)), locale);
-    assert.ok(browser.includes(escaped(translate('desktop_computer_readonly_full_cdp_description', locale))), locale);
-    assert.ok(browser.includes(escaped(translate('desktop_computer_readonly_browser_settings', locale))), locale);
-    assert.match(browser, /<select[^>]*disabled/);
+    assert.ok(browser.includes(translate('desktop_computer_full_cdp_description', locale)), locale);
+    assert.ok(browser.includes(translate('desktop_computer_downloads_scope', locale)), locale);
     const prompt = renderInLocale(locale, React.createElement(ComputerAccessPrompt, {
       request, onSubmit: () => {}, onDeny: () => {}, onOpenSystemSettings: () => {},
     }));
@@ -59,21 +53,6 @@ test('read-only computer settings render localized copy and preserve unavailable
       assert.doesNotMatch(settings, /Manage how LingXi uses other applications/);
       assert.doesNotMatch(browser, /Choose default permissions and add exceptions/);
       assert.doesNotMatch(prompt, /Allowing LingXi to use apps/);
-    }
-  }
-});
-
-test('computer approval preserves the HEAD session tier and Apps tier heading', () => {
-  for (const locale of DESKTOP_LOCALES) {
-    for (const tier of ['read', 'click', 'full'] as const) {
-      const prompt = renderInLocale(locale, React.createElement(ComputerAccessPrompt, {
-        request: { ...request, tier }, onSubmit: () => {}, onDeny: () => {}, onOpenSystemSettings: () => {},
-      }));
-      const access = translate(`desktop_computer_${tier}_access`, locale);
-      assert.ok(prompt.includes(escaped(translate('desktop_computer_session_tier_scope', locale, access))), `${locale}: ${tier}`);
-      const tierLabel = translate(`desktop_computer_tier_${tier}`, locale);
-      assert.ok(prompt.includes(escaped(translate('desktop_computer_apps_tier', locale, tierLabel))), `${locale}: ${tier}`);
-      assert.doesNotMatch(prompt, /desktop_computer_|%\d+\$[sd]/);
     }
   }
 });

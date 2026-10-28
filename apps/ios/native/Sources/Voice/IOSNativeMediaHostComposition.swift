@@ -58,7 +58,7 @@ final class IOSNativeMediaHostComposition {
         }
     }
 
-    func updateAudioSessionContext(for engine: MobileEngineHandle) async throws -> MediaAudioSessionBindingFfi {
+    func updateAudioSessionContext(for engine: MobileEngineHandle) async throws -> MediaAudioSessionBindingFfi? {
         try await nativeHost.updateAudioSessionContext(engine: engine)
     }
 

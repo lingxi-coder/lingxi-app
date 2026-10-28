@@ -103,6 +103,8 @@ export function toolIconName(verb: string, tool?: string, icon?: ToolIconDto): s
   const identity = (verb.toLowerCase() === 'generic' ? tool?.split('__').at(-1) ?? verb : verb).toLowerCase();
   if (/(?:^|_)(?:send_message|send_input|message|chat)(?:_|$)/.test(identity)) return 'chat';
   if (/(?:^|_)(?:view_image|image|images|screenshot)(?:_|$)/.test(identity)) return 'image';
+  const isMcp = /^(?:mcp__|mcp[.:/])/i.test(tool ?? verb);
+  if (isMcp && (!icon || icon === 'wrench') && verb.toLowerCase() === 'generic') return 'mcp-fallback';
   if (icon) return SEMANTIC_TOOL_ICONS[icon] ?? 'box';
   const value = verb.toLowerCase();
   if (value === 'fetch') return 'globe';
@@ -116,7 +118,7 @@ export function toolIconName(verb: string, tool?: string, icon?: ToolIconDto): s
   if (['edit', 'write', 'update', 'create', 'patch'].some((part) => value.includes(part))) return 'compose';
   if (['git', 'commit', 'branch'].some((part) => value.includes(part))) return 'git';
   if (['read', 'file', 'glob', 'directory', 'list'].some((part) => value.includes(part))) return 'file';
-  return 'box';
+  return isMcp ? 'mcp-fallback' : 'box';
 }
 
 function ToolGlyph({ item, permissionRequest }: { item: ToolRunItem; permissionRequest: boolean }) {

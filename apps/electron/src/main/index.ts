@@ -99,6 +99,7 @@ let terminals: TerminalManager | null = null;
 let nativeAudio: NativeAudioManager | null = null;
 let notifier: HostNotifier | null = null;
 let quitting = false;
+let shutdownDiagnostics: DiagnosticBuffer | undefined;
 let localApps: LocalAppHost | null = null;
 let remoteControl: RemoteControlService | null = null;
 let remotePolicy: RemotePolicy | null = null;
@@ -315,6 +316,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   refreshApplicationMenu();
   const userData = app.getPath('userData');
   const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
+  shutdownDiagnostics = diagnostics;
   onNativeLocaleChange(() => {
     try { persistInterfaceLocale(interfaceLocalePath); }
     catch (error) { diagnostics.add('warn', 'host', `interface language persistence failed: ${sanitizeDiagnostic(error)}`); }
@@ -837,13 +839,22 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   remotePush = null;
   remoteUi = null;
   remotePolicy = null;
-  void Promise.all([
-    currentBrowser?.close() ?? Promise.resolve(),
-    currentLocalApps?.dispose() ?? Promise.resolve(),
-    currentGit?.dispose() ?? Promise.resolve(),
-    currentTerminals?.dispose() ?? Promise.resolve(),
-    currentAudio?.dispose() ?? Promise.resolve(),
-    currentBridge?.dispose() ?? Promise.resolve(),
-    currentRemote?.dispose() ?? Promise.resolve(),
-  ]).finally(() => app.quit());
+  const shutdownPhases: Array<[string, () => Promise<void>]> = [
+    ['browser', () => currentBrowser?.close() ?? Promise.resolve()],
+    ['local_apps', () => currentLocalApps?.dispose() ?? Promise.resolve()],
+    ['git', () => currentGit?.dispose() ?? Promise.resolve()],
+    ['terminals', () => currentTerminals?.dispose() ?? Promise.resolve()],
+    ['audio', () => currentAudio?.dispose() ?? Promise.resolve()],
+    ['bridge', () => currentBridge?.dispose() ?? Promise.resolve()],
+    ['remote', () => currentRemote?.dispose() ?? Promise.resolve()],
+  ];
+  void Promise.all(shutdownPhases.map(async ([phase, dispose]) => {
+    const started = Date.now();
+    const record = (status: string): void => shutdownDiagnostics?.add('info', 'host', JSON.stringify({
+      event: 'shutdown_phase', phase, status, durationMs: Date.now() - started,
+    }));
+    record('started');
+    try { await dispose(); record('completed'); }
+    catch (error) { record('failed'); throw error; }
+  })).finally(() => app.quit());
   });

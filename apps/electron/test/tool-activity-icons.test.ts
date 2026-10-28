@@ -23,6 +23,7 @@ const examples = [
   ['TaskOutput', 'output', 'output'],
   ['TaskStop', 'kill', 'stop'],
   ['Unknown', 'generic', 'box'],
+  ['mcp__unknown__call', 'generic', 'mcp-fallback'],
   ['mcp__tools__send_message', 'generic', 'chat'],
   ['mcp__tools__view_image', 'generic', 'image'],
 ] as const;
@@ -43,15 +44,15 @@ test('single and collapsed tool rows share semantic artwork in both themes', () 
 });
 
 test('generic tool recognition preserves unknown fallback and explicit verbs', () => {
-  assert.equal(toolIconName('generic', 'mcp__unknown__call'), 'box');
-  assert.equal(toolIconName('generic', 'mcp__image_server__unrelated'), 'box');
+  assert.equal(toolIconName('generic', 'mcp__unknown__call'), 'mcp-fallback');
+  assert.equal(toolIconName('generic', 'mcp__image_server__unrelated'), 'mcp-fallback');
   assert.equal(toolIconName('update', 'image'), 'compose');
   assert.equal(toolIconName('TodoWrite'), 'tasks');
 });
 
 
 test('engine semantic icons select Codex artwork including generic MCP tools', () => {
-  const icons = { read: 'file', search: 'search', list: 'list', edit: 'compose', terminal: 'terminal', globe: 'globe', workflow: 'workflow', list_checks: 'tasks', sparkles: 'spark', plug: 'plug', output: 'output', stop: 'stop', wrench: 'box' } as const;
+  const icons = { read: 'file', search: 'search', list: 'list', edit: 'compose', terminal: 'terminal', globe: 'globe', workflow: 'workflow', list_checks: 'tasks', sparkles: 'spark', plug: 'plug', output: 'output', stop: 'stop', wrench: 'mcp-fallback' } as const;
   for (const [semantic, expected] of Object.entries(icons)) {
     const item: ToolRunItem = { type: 'tool', id: semantic, tool: 'mcp__tools__custom', status: 'done', view: { verb: 'generic', icon: semantic as keyof typeof icons, label: semantic, title: semantic } };
     const render = (node: React.ReactElement) => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, node));

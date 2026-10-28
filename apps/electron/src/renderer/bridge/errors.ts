@@ -14,6 +14,10 @@ export function classifyDesktopError(raw: string): ActionableError {
       detail: tr('desktop_misc_disk_error_hint'),
     };
   }
+  // Session-control rejection text mentions authentication, but does not report a credential failure.
+  if (/^cancel the active turn before /i.test(message)) {
+    return { title: tr('desktop_misc_turn_in_progress'), detail: message };
+  }
   if (/Data Protection Keychain.*unavailable|keychain access group|app signature/i.test(message)) {
     return { title: tr('desktop_misc_secure_unavailable'), detail: tr('desktop_misc_keychain_reconnect') };
   }

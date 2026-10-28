@@ -134,7 +134,7 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
           <p className="computer-access-risk-label"><Icon name="shieldAlert" size={19} stroke={1.7} />{tr('desktop_computer_risk')}</p>
           <h2 id="lingxi-computer-access-title">{tr('desktop_computer_allow_prompt', appName)}</h2>
           <p id="lingxi-computer-access-risk" className="computer-access-copy">
-            {tr(request.apps.length === 1 ? 'desktop_computer_prompt_risk_one' : 'desktop_computer_prompt_risk_many')}
+            {tr('desktop_computer_prompt_risk')}
           </p>
           <p id="lingxi-computer-access-detail" className="computer-access-reason">{request.reason}</p>
           <AppAllowlistPanel
@@ -280,8 +280,7 @@ function AppAllowlistPanel({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
         <div style={{ fontSize: 10.5, fontWeight: 600, color: t.text3, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
-          {tr('desktop_computer_app_scope')}
-        </div>
+          {tr('desktop_computer_app_scope')}</div>
         {request.apps.map((app) => (
           <label key={app.label} style={checkboxRowStyle}>
             <input

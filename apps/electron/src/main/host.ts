@@ -1,9 +1,9 @@
 import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
 import { CH_APPLICATION_ICON } from '../shared/applicationIcon.js';
-import { CH_COMPUTER_SETTINGS } from '../shared/computerSettings.js';
-import type { ComputerSettingsStore } from './computerSettings.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
 import { nativeTr, setNativeLocale } from '../shared/nativeLocale.js';
+import { CH_COMPUTER_SETTINGS } from '../shared/computerSettings.js';
+import type { ComputerSettingsStore } from './computerSettings.js';
 import { applicationIcon } from './applicationIcon.js';
 import type { AccountService } from './account.js';
 import { RealtimeAudioController } from './audio/realtimeAudioController.js';

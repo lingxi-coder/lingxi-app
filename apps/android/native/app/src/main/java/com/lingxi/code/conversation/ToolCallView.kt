@@ -125,7 +125,7 @@ internal fun ToolCallView(
                     modifier = Modifier.size(18.dp), color = t.text3, strokeWidth = 1.5.dp,
                 )
             } else {
-                com.lingxi.code.components.LXIcon(toolIconName(call.header?.verb),
+                com.lingxi.code.components.LXIcon(toolIconName(call.header?.verb, call.tool),
                     size = 18.dp, color = if (call.status == AgentToolStatus.Failed) t.danger else t.text3)
             }
             Spacer(Modifier.width(9.dp))

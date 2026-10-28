@@ -171,7 +171,7 @@ import XCTest
     final class EngineRoundtripTests: XCTestCase {
 
         @MainActor
-        func testOfficialDeepSeekSnapshotBuildsEngineWithoutDuplicateProfile() throws {
+        func testOfficialDeepSeekSnapshotBuildsEngineWithoutDuplicateProfile() async throws {
             let sandbox = FileManager.default.temporaryDirectory
                 .appendingPathComponent("LingxiCodeDeepSeekTest-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
@@ -212,21 +212,22 @@ import XCTest
                 hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
             )
 
-            XCTAssertNoThrow(
-                try buildIosEngineWithConfig(
-                    config: config,
-                    listener: NoopEventListener(),
-                    mediaHost: try IOSNativeMediaHostComposition(
-                        audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
-                    ).nativeHost,
-                    share: ShareImpl(),
-                    notifications: NotificationImpl(),
-                    clipboard: ClipboardImpl(),
-                    permissions: NoopPermissionSink(),
-                    secureStorage: nil,
-                    deviceControl: nil
-                )
+            let mediaHost = try IOSNativeMediaHostComposition(
+                audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
+            ).nativeHost
+            let handle = try buildIosEngineWithConfig(
+                config: config,
+                listener: NoopEventListener(),
+                mediaHost: mediaHost,
+                share: ShareImpl(),
+                notifications: NotificationImpl(),
+                clipboard: ClipboardImpl(),
+                permissions: NoopPermissionSink(),
+                secureStorage: nil,
+                deviceControl: nil
             )
+            let binding = try await mediaHost.updateAudioSessionContext(engine: handle)
+            XCTAssertNotNil(binding, "A configured provider must retain its audio route")
         }
 
         func testModelDisplayGroupsOnlyInputByProviderAndPreservesReferences() {

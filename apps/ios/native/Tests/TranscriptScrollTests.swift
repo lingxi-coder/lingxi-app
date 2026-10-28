@@ -18,6 +18,21 @@ import XCTest
 /// contract — comparing `contentSize` directly against `visibleMaxY` — so a
 /// future edit can't silently reintroduce a reconstructed maximum.
 final class TranscriptScrollTests: XCTestCase {
+    func testPassiveDeltasDoNotReissueTheNativeBottomEdge() {
+        XCTAssertFalse(TranscriptTailScrollRequest.shouldSchedule(explicit: false, isAtBottomEdge: true, hasPendingRequest: false))
+        XCTAssertFalse(TranscriptTailScrollRequest.shouldSchedule(explicit: false, isAtBottomEdge: true, hasPendingRequest: true))
+    }
+
+    func testPassiveLayoutAndTextUpdatesShareOnePendingTailRequest() {
+        XCTAssertTrue(TranscriptTailScrollRequest.shouldSchedule(explicit: false, isAtBottomEdge: false, hasPendingRequest: false))
+        XCTAssertFalse(TranscriptTailScrollRequest.shouldSchedule(explicit: false, isAtBottomEdge: false, hasPendingRequest: true))
+    }
+
+    func testExplicitSendOrJumpCanReplaceAnExistingTailRequest() {
+        XCTAssertTrue(TranscriptTailScrollRequest.shouldSchedule(explicit: true, isAtBottomEdge: true, hasPendingRequest: true))
+        XCTAssertTrue(TranscriptTailScrollRequest.shouldSchedule(explicit: true, isAtBottomEdge: false, hasPendingRequest: true))
+    }
+
     private let slack = TranscriptScrollFollowState.bottomSlack
 
     private func atBottom(contentSize: CGFloat, visibleMaxY: CGFloat) -> Bool {

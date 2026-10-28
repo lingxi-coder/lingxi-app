@@ -2451,6 +2451,8 @@
     <string name="extension_directory_kind_plugin">插件</string>
     <string name="remote_files">文件</string>
     <string name="remote_file_upload">上传原文件</string>
+    <string name="remote_file_timeout">文件传输超时，请检查连接后重试。</string>
+    <string name="remote_file_save_incomplete">保存未完成。选择的目标文件可能为空或不完整，请重新下载并选择新文件。</string>
     <string name="remote_file_cancel">取消传输</string>
     <string name="remote_file_attach">发送到会话</string>
     <string name="remote_file_download">下载</string>

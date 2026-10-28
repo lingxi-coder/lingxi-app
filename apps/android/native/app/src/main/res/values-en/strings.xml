@@ -2451,6 +2451,8 @@
     <string name="extension_directory_kind_plugin">Plugin</string>
     <string name="remote_files">Files</string>
     <string name="remote_file_upload">Upload file</string>
+    <string name="remote_file_timeout">File transfer timed out. Check your connection and try again.</string>
+    <string name="remote_file_save_incomplete">The save did not finish. The selected file may be empty or incomplete; download again and choose a new file.</string>
     <string name="remote_file_cancel">Cancel transfer</string>
     <string name="remote_file_attach">Send to session</string>
     <string name="remote_file_download">Download</string>

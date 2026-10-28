@@ -22,6 +22,10 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     @State private var scrollTask: Task<Void, Never>?
     @State private var pendingRowID: String?
     @State private var pendingLatestAnimation: Bool?
+    #if DEBUG
+    @State private var diagnosticMetrics = ""
+    private let showsScrollDiagnostics = ProcessInfo.processInfo.environment["LINGXI_TRANSCRIPT_DIAGNOSTICS"] == "1"
+    #endif
     @State private var lastRowRequest: TranscriptScrollRowRequest?
 
     var body: some View {
@@ -45,6 +49,11 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
         .onScrollGeometryChange(for: TranscriptScrollMetrics.self) { geometry in
             TranscriptScrollMetrics(geometry)
         } action: { previous, current in
+            #if DEBUG
+            if showsScrollDiagnostics {
+                diagnosticMetrics = "h=\(Int(current.contentHeight)) y=\(Int(current.visibleMinY))..\(Int(current.visibleMaxY)) v=\(Int(current.viewportSize.height)) f=\(followState.followsLatest) p=\(followState.phase)"
+            }
+            #endif
             if followState.geometryChanged(from: previous, to: current) {
                 scrollToLatest(animated: false)
             }
@@ -100,6 +109,14 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             // handles focus changes where the keyboard is already presented.
             scrollToLatest(animated: false)
         }
+        .overlay(alignment: .topLeading) {
+            #if DEBUG
+            if showsScrollDiagnostics {
+                Text(diagnosticMetrics).font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.red).background(.yellow).allowsHitTesting(false)
+            }
+            #endif
+        }
         .overlay(alignment: .bottomTrailing) {
             if !followState.followsLatest {
                 Button {
@@ -135,6 +152,13 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     private func scrollToLatest(animated: Bool, explicit: Bool = false) {
         guard followState.followsLatest,
               explicit ? followState.canApplyExplicitRequest : followState.canFollow else { return }
+        // ScrollPosition keeps an edge anchored through content/viewport changes.
+        // Reissuing that same edge on every delta/measure creates a feedback loop
+        // with lazy layout, repeatedly interrupting native position correction.
+        guard TranscriptTailScrollRequest.shouldSchedule(
+            explicit: explicit, isAtBottomEdge: scrollPosition.edge == .bottom,
+            hasPendingRequest: scrollTask != nil
+        ) else { return }
         cancelPendingScroll()
         let scope = scrollScope
         scrollTask = Task { @MainActor in
@@ -142,6 +166,7 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             await Task.yield()
             guard !Task.isCancelled, scope == scrollScope, followState.followsLatest,
                   explicit ? followState.canApplyExplicitRequest : followState.canFollow else { return }
+            scrollTask = nil
             pendingLatestAnimation = nil
             if animated && !reduceMotion {
                 withAnimation(.easeOut(duration: 0.2)) {
@@ -176,6 +201,7 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
         scrollTask = Task { @MainActor in
             await Task.yield()
             guard !Task.isCancelled, scope == scrollScope, followState.canApplyExplicitRequest else { return }
+            scrollTask = nil
             scrollPosition.scrollTo(id: rowID, anchor: .center)
             pendingRowID = nil
         }
@@ -309,5 +335,13 @@ private struct OptionalAccessibilityIdentifier: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+/// Native edge anchoring owns passive streaming/layout updates. Only explicit
+/// user actions replace it; passive callers share one pending request.
+enum TranscriptTailScrollRequest {
+    static func shouldSchedule(explicit: Bool, isAtBottomEdge: Bool, hasPendingRequest: Bool) -> Bool {
+        explicit || (!isAtBottomEdge && !hasPendingRequest)
     }
 }

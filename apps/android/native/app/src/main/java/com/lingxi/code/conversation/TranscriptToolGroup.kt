@@ -58,7 +58,9 @@ internal fun transcriptBlocks(blocks: List<MessageContent>): List<TranscriptBloc
     flush()
 }
 
-internal fun toolIconName(verb: ToolVerbUi?) = when (verb) {
+internal fun toolIconName(verb: ToolVerbUi?, tool: String = "") = when {
+    tool.startsWith("mcp__", ignoreCase = true) && (verb == null || verb == ToolVerbUi.Generic) -> LXIconName.McpFallback
+    else -> when (verb) {
     ToolVerbUi.Read -> LXIconName.Book
     ToolVerbUi.Search -> LXIconName.Search
     ToolVerbUi.Update, ToolVerbUi.Create -> LXIconName.Edit
@@ -68,6 +70,7 @@ internal fun toolIconName(verb: ToolVerbUi?) = when (verb) {
     ToolVerbUi.Todo -> LXIconName.Check
     ToolVerbUi.Skill -> LXIconName.Skill
     else -> LXIconName.Plug
+    }
 }
 
 @Composable
@@ -94,7 +97,7 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                LXIcon(toolIconName(last.header?.verb), size = 18.dp, color = t.text3)
+                LXIcon(toolIconName(last.header?.verb, last.tool), size = 18.dp, color = t.text3)
                 Text(title + detail, modifier = Modifier.weight(1f), color = t.text3, fontSize = 13.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (failed > 0) Text("! $failed", color = t.danger, fontSize = 12.sp)

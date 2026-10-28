@@ -1,6 +1,9 @@
 package com.lingxi.code.components
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.Forum
@@ -51,11 +54,12 @@ enum class LXIconName {
     Menu, SideChat, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, AudioWave, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
     ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share,
-    ArrowRight, Terminal, Lightbulb, Apps, AppBuilder,
+    ArrowRight, Terminal, Lightbulb, Apps, AppBuilder, McpFallback,
 }
 
 /** Shared semantic names resolve to Android's Material icon family. */
 val LXIconName.materialIcon: ImageVector get() = when (this) {
+    LXIconName.McpFallback -> Icons.Outlined.Power
     LXIconName.Menu -> Icons.Outlined.Menu
     LXIconName.SideChat -> Icons.Outlined.Forum
     LXIconName.Edit -> Icons.Outlined.Edit
@@ -105,5 +109,15 @@ fun LXIcon(
     stroke: Float = 1.7f,
     contentDescription: String? = null,
 ) {
-    Icon(name.materialIcon, contentDescription, modifier.size(size), tint = color)
+    if (name == LXIconName.McpFallback) {
+        Canvas(modifier.size(size)) {
+            val scale = this.size.width / 16f
+            for (x in listOf(4.5f, 11.5f)) for (y in listOf(4.5f, 11.5f)) {
+                drawCircle(color, radius = 2.25f * scale, center = Offset(x * scale, y * scale), style = Stroke(1.05f * scale))
+            }
+            drawLine(color, Offset(6.1f * scale, 9.9f * scale), Offset(9.9f * scale, 6.1f * scale), strokeWidth = 1.05f * scale)
+        }
+    } else {
+        Icon(name.materialIcon, contentDescription, modifier.size(size), tint = color)
+    }
 }

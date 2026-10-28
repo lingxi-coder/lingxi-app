@@ -370,7 +370,7 @@ test('named service cookies use service paths and HEAD preserves representation 
   } finally {await gateway.dispose();}
 });
 
-test('disconnect during request authorization does not consume request slots or dispatch', async () => {
+test('pending request authorization reserves capacity and disconnect releases it', async () => {
   const {port,gateway,adapter}=await setup();
   let release!:()=>void;
   try {
@@ -381,14 +381,38 @@ test('disconnect during request authorization does not consume request slots or 
     adapter.resource=async()=>{dispatches++;return new Response('alive');};
     let closed=0, allClosed!:()=>void;
     const serverClosed=new Promise<void>(resolve=>{allClosed=resolve;});
-    (gateway as any).server.on('request', (_req: unknown,res: import('node:http').ServerResponse)=>res.once('close',()=>{if (++closed===32) allClosed();}));
+    (gateway as any).server.on('request', (_req: unknown,res: import('node:http').ServerResponse)=>res.once('close',()=>{if (res.statusCode!==429 && ++closed===32) allClosed();}));
     const requests=Array.from({length:32},()=>{const req=httpRequest({hostname:'127.0.0.1',port,path:'/',headers:{host:s.host,cookie:s.cookie}});req.on('error',()=>{});req.end();return req;});
-    await ready; requests.forEach(req=>req.destroy()); await serverClosed; release();
+    await ready;
+    const rejected=await Promise.all(Array.from({length:32},()=>request(port,s.host,'/',{cookie:s.cookie})));
+    assert.ok(rejected.every(result=>result.status===429)); assert.equal(entered,32);
+    requests.forEach(req=>req.destroy()); await serverClosed;
+    const serverSession=[...(gateway as any).sessions.values()][0] as {active:number};
+    assert.equal(serverSession.active,0); release();
     await new Promise<void>(resolve=>setImmediate(resolve));
     assert.equal(dispatches,0);
     adapter.current=async()=>true;
     assert.equal((await request(port,s.host,'/',{cookie:s.cookie})).body,'alive');
   } finally {release?.();await gateway.dispose();}
+});
+
+test('authorization failure, exception, and revocation release reserved request capacity', async () => {
+  for (const outcome of ['denied','error','revoked'] as const) {
+    const {port,gateway,adapter}=await setup(); let release!:()=>void;
+    try {
+      const s=await session(gateway,port);
+      const serverSession=[...(gateway as any).sessions.values()][0] as {active:number};
+      let entered!:()=>void; const ready=new Promise<void>(resolve=>{entered=resolve;});
+      const gate=new Promise<void>(resolve=>{release=resolve;});
+      adapter.current=async()=>{entered();await gate;if(outcome==='error') throw new Error('authorization failed');return outcome!=='denied';};
+      const result=request(port,s.host,'/',{cookie:s.cookie});
+      await ready; assert.equal(serverSession.active,1);
+      if(outcome==='revoked') { gateway.revokeOwner(owner); assert.equal(serverSession.active,0); }
+      release(); assert.equal((await result).status,outcome==='error'?400:401);
+      await new Promise<void>(resolve=>setImmediate(resolve));
+      assert.equal(serverSession.active,0);
+    } finally { release?.(); await gateway.dispose(); }
+  }
 });
 
 test('pending WebSocket upgrades reserve slots and release them on disconnect and revoke', async () => {

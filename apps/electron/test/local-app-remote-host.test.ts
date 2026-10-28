@@ -129,6 +129,21 @@ test('remote Agent mutations receive the browser session cancellation signal', a
   assert.deepEqual(seen,['cancel','createChat','archiveChat','deleteChat','sendChat','cancelChat']);
 });
 
+test('remote Agent request cannot reuse authorization across app withdrawal and regrant', async t => {
+  const f=await fixture(t);await f.host.request({action:'remote-access',id,enabled:true});await f.host.remoteOpen(id,owner);
+  let release!:()=>void, entered!:()=>void, calls=0;
+  const gate=new Promise<void>(resolve=>{release=resolve;}), waiting=new Promise<void>(resolve=>{entered=resolve;});
+  const authorize=f.host.authorizeAgent.bind(f.host);
+  f.host.authorizeAgent=async (...args:any[])=>{const result=await authorize(...args);entered();await gate;return result;};
+  f.host.setAgentBroker({cancelApp:async()=>{},archiveChat:async()=>{calls++;}});
+  const run={appId:id,revision:1,runId:'run-one'}, session=new AbortController();
+  const pending=assert.rejects(f.host.remoteInvoke(run,'agent.chats.archive',{chatId:'chat'},session.signal,'s'.repeat(43)));
+  await waiting;await f.host.cancelAgentApp(id,'changed');f.host.blockedAgentApps.delete(id);release();await pending;
+  assert.equal(calls,0);
+  await f.host.remoteInvoke(run,'agent.chats.archive',{chatId:'chat'},session.signal,'s'.repeat(43));
+  assert.equal(calls,1);
+});
+
 test('remote browser access keeps the host alive and its unused headless run stops', async t => {
   const f=await fixture(t);await f.host.request({action:'remote-access',id,enabled:true});await f.host.remoteOpen(id,owner);
   assert.equal(await f.host.hasBackgroundApps(),true);
@@ -285,6 +300,23 @@ test('remote HTML leaves HEAD and no-body response statuses empty', async t => {
   }
   let cancelled=false;f.host.services.fetch=async()=>new Response(new ReadableStream({cancel(){cancelled=true;}}),{headers:{'content-type':'text/html'}});
   const response=await f.host.remoteResource(run,new Request(url,{method:'HEAD'}));assert.equal(response.body,null);assert.equal(cancelled,true);
+});
+
+test('remote HTML rejects unsupported encodings before injecting into encoded bytes', async t => {
+  const f=await fixture(t);await f.host.setRemoteAccess(id,true);await f.host.remoteOpen(id,owner);
+  f.row.manifest.entry={type:'server',process:'api'};f.runtime.workspace=()=>'/unused';f.runtime.service=()=>({port:12345});
+  const run={appId:id,revision:1,runId:'run-one'},url=`https://${id}-${'1'.repeat(20)}.apps.example.com/`;
+  for(const coding of ['custom','gzip, custom']){
+    let cancelled=false;f.host.services.fetch=async()=>{
+      const response=new Response(new Uint8Array([0xff,0,0x80]),{headers:{'content-type':'text/html','content-encoding':coding}});
+      const cancel=response.body!.cancel.bind(response.body);response.body!.cancel=(reason?:unknown)=>{cancelled=true;return cancel(reason);};return response;
+    };
+    const response=await f.host.remoteResource(run,new Request(url));assert.equal(response.status,502);assert.equal(cancelled,true);assert.doesNotMatch(await response.text(),/__lingxi_local_app_sdk/);
+  }
+  f.host.services.fetch=async()=>new Response('<html>identity</html>',{headers:{'content-type':'text/html','content-encoding':'identity'}});
+  assert.match(await (await f.host.remoteResource(run,new Request(url))).text(),/__lingxi_local_app_sdk/);
+  f.host.services.fetch=async()=>new Response(null,{headers:{'content-type':'text/html','content-encoding':'custom'}});
+  assert.equal((await f.host.remoteResource(run,new Request(url,{method:'HEAD'}))).status,502);
 });
 
 test('remote host proxies login cookies, trusted forwarding headers and only local service redirects', async t => {

@@ -990,6 +990,13 @@ export class LocalAppHost {
     }
     let body: BodyInit | null = response.body;
     const injectedHtml = response.status !== 206 && headers.get('content-type')?.toLowerCase().includes('text/html');
+    // Fetch only decodes recognized content codings. A remaining encoding must
+    // never be interpreted as UTF-8 and advertised as a newly injected document.
+    if (injectedHtml && ![204, 205, 304].includes(response.status)
+      && headers.get('content-encoding')?.split(',').some(coding => coding.trim().toLowerCase() !== 'identity')) {
+      await response.body?.cancel();
+      return new Response('Unsupported application HTML encoding', { status: 502, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+    }
     if (injectedHtml) for (const name of ['etag', 'content-md5', 'digest', 'content-digest', 'repr-digest']) headers.delete(name);
     if (request.method === 'HEAD' || [204, 205, 304].includes(response.status)) {
       await response.body?.cancel(); body = null;
@@ -1021,6 +1028,7 @@ export class LocalAppHost {
     }
   }
   private async remoteInvoke(run: RemoteRun, method: string, args: Record<string, unknown>, signal: AbortSignal, sessionId: string): Promise<unknown> {
+    const agentEpoch = this.agentEpochs.get(run.appId) ?? 0;
     if (signal.aborted || !await this.remoteCurrent(run) || signal.aborted) throw new Error('Application operation is no longer active');
     const row = await this.store.getRevision(run.appId, run.revision);
     if (method === 'info') return { id: run.appId, name: row.name, runId: run.runId, revision: run.revision, platform: 'browser' };
@@ -1030,7 +1038,8 @@ export class LocalAppHost {
     if (!broker || !active || active.releaseDigest !== row.releaseDigest) throw new Error('Application Agent host is unavailable');
     const owner: LocalAppAgentOwner = { appId: run.appId, releaseDigest: active.releaseDigest, invocationId: run.runId, remoteSessionId: sessionId };
     await this.authorizeAgent(owner);
-    if (signal.aborted || !await this.remoteCurrent(run) || signal.aborted) throw new Error('Application operation is no longer active');
+    if (signal.aborted || !await this.remoteCurrent(run) || signal.aborted || this.blockedAgentApps.has(run.appId)
+      || (this.agentEpochs.get(run.appId) ?? 0) !== agentEpoch) throw new Error('Application operation is no longer active');
     const cancelSession = async () => {
       try { await broker.cancelRemoteSession(owner); }
       finally {
@@ -1574,6 +1583,7 @@ export class LocalAppHost {
     const pair = [...this.windows].find(([, window]) => window.webContents === event.sender);
     if (!pair || event.senderFrame !== event.sender.mainFrame || !event.senderFrame?.url.startsWith(`${LOCAL_APP_SCHEME}://${pair[0]}/`)) throw new Error('Unauthorized application caller');
     const id = pair[0], invocation = this.windowRuns.get(pair[1]), epoch = this.navigationEpoch.get(event.sender.id), revision = this.runtime.revision(id), args = input.args ?? {};
+    const agentEpoch = this.agentEpochs.get(id) ?? 0;
     if (!revision) throw new Error('Application operation is no longer active');
     const row = await this.store.getRevision(id, revision);
     const current = () => {
@@ -1584,7 +1594,7 @@ export class LocalAppHost {
     if (input.method === 'info') return { id, name: row.name, runId: invocation, revision: this.runtime.revision(id), platform: process.platform, dataDirectory: this.store.dataPath(id) };
     if (input.method.startsWith('agent.')) {
       need('agent');
-      if (this.blockedAgentApps.has(id)) throw new Error('Application Agent access is no longer active');
+      if (this.blockedAgentApps.has(id) || (this.agentEpochs.get(id) ?? 0) !== agentEpoch) throw new Error('Application Agent access is no longer active');
       const broker = this.agentBroker, activeOwner = this.runtime.owner(id);
       if (!broker || !invocation || !activeOwner || activeOwner.releaseDigest !== row.releaseDigest) throw new Error('Application Agent host is unavailable');
       const owner: LocalAppAgentOwner = { appId: id, releaseDigest: activeOwner.releaseDigest, invocationId: invocation, webContentsId: event.sender.id };

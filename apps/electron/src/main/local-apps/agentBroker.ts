@@ -184,11 +184,18 @@ export class LocalAppAgentBroker {
   private readonly chats = new Map<string, ChatRecord>();
   private readonly active = new Map<string, ActiveRun>();
   private readonly epochs = new Map<string, number>();
+  private readonly appOperations = new Map<string, AbortController>();
   private stopped = false;
   constructor(private readonly options: LocalAppAgentBrokerOptions) {}
   hasActiveApp(appId: string): boolean { return [...this.active.values()].some(active => active.record.owner.appId === appId); }
   private now(): number { return this.options.now?.() ?? Date.now(); }
   private uuid(): string { return this.options.uuid?.() ?? randomUUID(); }
+  private operationSignal(appId: string, signal?: AbortSignal): AbortSignal {
+    if (this.stopped) throw new LocalAppAgentError('host_stopped', 'The Agent host is stopping.');
+    let controller = this.appOperations.get(appId);
+    if (!controller) { controller = new AbortController(); this.appOperations.set(appId, controller); }
+    return signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+  }
   private exclusive<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.queue.then(operation, operation);
     this.queue = result.then(() => undefined, () => undefined);
@@ -387,13 +394,13 @@ export class LocalAppAgentBroker {
     return { events, sequence: afterSequence + events.length };
   }
   async run(caller: LocalAppAgentOwner, value: unknown, signal?: AbortSignal): Promise<{ runId: string }> {
-    const principal = owner(caller); await this.initialize();
+    const principal = owner(caller); signal = this.operationSignal(principal.appId, signal); await this.initialize();
     const threadId = messageRecord(value)?.threadId;
     const chat = typeof threadId === 'string' ? this.chats.get(this.chatKey(principal.appId, threadId)) : undefined;
     return this.admit(principal, value, chat, signal);
   }
   async sendChat(caller: LocalAppAgentOwner, chatId: string, value: unknown, signal?: AbortSignal): Promise<{ runId: string }> {
-    const principal = owner(caller); await this.initialize();
+    const principal = owner(caller); signal = this.operationSignal(principal.appId, signal); await this.initialize();
     const chat = this.getChatRecord(principal, chatId);
     return this.admit(principal, value, chat, signal);
   }
@@ -582,40 +589,43 @@ export class LocalAppAgentBroker {
     return this.exclusive(async () => this.eventPage(this.lookup(principal, runId), afterSequence));
   }
   async cancel(caller: LocalAppAgentOwner, runId: string, signal?: AbortSignal): Promise<void> {
-    const principal = owner(caller); await this.initialize(); signal?.throwIfAborted(); this.lookup(principal, runId);
+    const principal = owner(caller); signal = this.operationSignal(principal.appId, signal); await this.initialize(); signal.throwIfAborted(); this.lookup(principal, runId);
     await this.terminate(requestKey(principal, runId), 'cancelled', { code: 'cancelled', message: 'The Agent task was cancelled.' });
   }
   private summary(chat: ChatRecord): LocalAppAgentChatSummary {
     return { chatId: chat.chatId, title: chat.title, createdAt: chat.createdAt, updatedAt: chat.updatedAt, archived: chat.archived, state: chat.state };
   }
   async createChat(caller: LocalAppAgentOwner, value: unknown = {}, signal?: AbortSignal): Promise<LocalAppAgentChatSummary> {
-    const principal = owner(caller); await this.initialize();
-    const input = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-    if (!input || Object.keys(input).some(key => key !== 'title') || (input.title !== undefined && (typeof input.title !== 'string' || input.title.trim().length > 160))) throw new LocalAppAgentError('invalid_input', 'Invalid Agent chat title.');
-    const authorization = await this.options.authorize(caller); validateAgentSettings(authorization.settings);
-    signal?.throwIfAborted();
-    const chatId = this.uuid(), sessionId = this.uuid(), now = this.now();
-    if (!CHAT_ID.test(chatId) || !CHAT_ID.test(sessionId)) throw new LocalAppAgentError('id_conflict', 'Could not allocate an Agent chat identifier.');
-    const chat: ChatRecord = { schema: 1, appId: principal.appId, chatId, sessionId,
-      title: typeof input.title === 'string' && input.title.trim() ? input.title.trim() : 'New chat', createdAt: now, updatedAt: now,
-      archived: false, state: 'idle', messages: [] };
-    await this.ensureAgentRoot(principal.appId);
-    await this.safeDirectory(join(this.appRoot(principal.appId), 'chats'));
-    signal?.throwIfAborted();
-    const directory = this.chatDirectory(principal, chatId);
-    try { await fs.mkdir(directory, { mode: 0o700 }); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new LocalAppAgentError('id_conflict', 'Could not allocate an Agent chat identifier.');
-      throw error;
-    }
-    try {
-      await this.safeDirectory(join(directory, 'assets'));
-      await this.saveChat(chat, signal);
-      return this.summary(chat);
-    } catch (error) {
-      await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined);
-      throw error;
-    }
+    const principal = owner(caller); signal = this.operationSignal(principal.appId, signal); await this.initialize();
+    return this.exclusive(async () => {
+      signal.throwIfAborted();
+      const input = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+      if (!input || Object.keys(input).some(key => key !== 'title') || (input.title !== undefined && (typeof input.title !== 'string' || input.title.trim().length > 160))) throw new LocalAppAgentError('invalid_input', 'Invalid Agent chat title.');
+      const authorization = await this.options.authorize(caller); validateAgentSettings(authorization.settings);
+      signal?.throwIfAborted();
+      const chatId = this.uuid(), sessionId = this.uuid(), now = this.now();
+      if (!CHAT_ID.test(chatId) || !CHAT_ID.test(sessionId)) throw new LocalAppAgentError('id_conflict', 'Could not allocate an Agent chat identifier.');
+      const chat: ChatRecord = { schema: 1, appId: principal.appId, chatId, sessionId,
+        title: typeof input.title === 'string' && input.title.trim() ? input.title.trim() : 'New chat', createdAt: now, updatedAt: now,
+        archived: false, state: 'idle', messages: [] };
+      await this.ensureAgentRoot(principal.appId);
+      await this.safeDirectory(join(this.appRoot(principal.appId), 'chats'));
+      signal?.throwIfAborted();
+      const directory = this.chatDirectory(principal, chatId);
+      try { await fs.mkdir(directory, { mode: 0o700 }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new LocalAppAgentError('id_conflict', 'Could not allocate an Agent chat identifier.');
+        throw error;
+      }
+      try {
+        await this.safeDirectory(join(directory, 'assets'));
+        await this.saveChat(chat, signal);
+        return this.summary(chat);
+      } catch (error) {
+        await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
+    });
   }
   async getChat(caller: LocalAppAgentOwner, chatId: string): Promise<LocalAppAgentChatSummary> {
     const principal = owner(caller); await this.initialize();
@@ -633,7 +643,7 @@ export class LocalAppAgentBroker {
     });
   }
   async archiveChat(caller: LocalAppAgentOwner, chatId: string, signal?: AbortSignal): Promise<void> {
-    const principal = owner(caller); await this.initialize();
+    const principal = owner(caller); signal = this.operationSignal(principal.appId, signal); await this.initialize();
     await this.exclusive(async () => {
       signal?.throwIfAborted();
       const chat = this.getChatRecord(principal, chatId);
@@ -642,7 +652,7 @@ export class LocalAppAgentBroker {
     });
   }
   async deleteChat(caller: LocalAppAgentOwner, chatId: string, signal?: AbortSignal): Promise<void> {
-    const principal = owner(caller); await this.initialize();
+    const principal = owner(caller); signal = this.operationSignal(principal.appId, signal); await this.initialize();
     await this.exclusive(async () => {
       signal?.throwIfAborted();
       const chat = this.getChatRecord(principal, chatId);
@@ -667,12 +677,15 @@ export class LocalAppAgentBroker {
     });
   }
   async cancelChat(caller: LocalAppAgentOwner, chatId: string, signal?: AbortSignal): Promise<void> {
-    const principal = owner(caller); await this.initialize(); signal?.throwIfAborted();
+    const principal = owner(caller); signal = this.operationSignal(principal.appId, signal); await this.initialize(); signal.throwIfAborted();
     const chat = this.getChatRecord(principal, chatId);
     if (chat.activeRunId) await this.cancel(principal, chat.activeRunId, signal);
   }
   async cancelApp(appId: string, reason = 'Application Agent access changed.'): Promise<void> {
     this.epochs.set(appId, (this.epochs.get(appId) ?? 0) + 1);
+    const operations = this.appOperations.get(appId);
+    this.appOperations.delete(appId);
+    operations?.abort(new LocalAppAgentError('permission_revoked', 'Application Agent access was revoked or changed.'));
     const runs = [...this.active.values()].filter(active => active.record.owner.appId === appId);
     for (const active of runs) active.controller.abort();
     await Promise.all(runs.map(active => this.terminate(requestKey(active.record.owner, active.record.publicRunId), 'cancelled', { code: 'application_stopped', message: reason.slice(0, 1024) })));
@@ -759,8 +772,14 @@ export class LocalAppAgentBroker {
     });
   }
   async dispose(): Promise<void> {
-    this.stopped = true; await this.initialize();
-    const runs = await this.exclusive(async () => [...this.active.keys()]);
-    await Promise.all(runs.map(recordKey => this.terminate(recordKey, 'interrupted', { code: 'host_stopped', message: 'The Agent host stopped before this task completed.' })));
+    this.stopped = true;
+    const operations = [...this.appOperations.values()];
+    this.appOperations.clear();
+    for (const controller of operations) controller.abort(new LocalAppAgentError('host_stopped', 'The Agent host is stopping.'));
+    const runs = [...this.active.entries()];
+    for (const [, active] of runs) active.controller.abort();
+    const terminations = runs.map(([recordKey]) => this.terminate(recordKey, 'interrupted', { code: 'host_stopped', message: 'The Agent host stopped before this task completed.' }));
+    const drained = this.exclusive(async () => {});
+    await Promise.all([this.initialize(), drained, ...terminations]);
   }
 }

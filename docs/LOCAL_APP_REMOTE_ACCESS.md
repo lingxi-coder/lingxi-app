@@ -63,6 +63,11 @@ authorization at queue admission and immediately before dispatching their
 filesystem commit; an OS operation already dispatched can finish. Once the last
 session's Agent cancellation settles, the unused run is reconciled again. Idle
 Local App RTC windows close before the process lifetime check.
+Application permission withdrawal also invalidates pending mutations and
+admissions while their browser session remains valid. Broker shutdown aborts
+pending operations and active executors synchronously, and rejects new writes.
+It waits for queued rollback and terminal persistence before returning; chat
+creation shares that queue so its incomplete directory is cleaned before exit.
 
 ## HTTP, browser SDK and RTC
 
@@ -111,6 +116,7 @@ are limited to 1 MiB. HTTP application and service uploads stream with a 64 MiB
 per-request limit. Disconnecting a browser request aborts its upstream transfer.
 Each browser session allows 32 active HTTP requests and 32 browser WebSocket
 connections, including upgrades still awaiting authorization or port resolution.
+HTTP requests awaiting authorization count toward the same 32-request bound.
 Pending WebSocket input is buffered up to 1 MiB per connection and forwarded in
 order when the connection starts. Disconnected authorization attempts release
 their slots, and unconsumed response bodies are cancelled on disconnect or a
@@ -126,6 +132,8 @@ HTML partial responses are forwarded without script injection. Full HTML
 injection removes validators/digests for the unmodified upstream body. HEAD
 retains a correct length for unchanged representations and omits upstream
 lengths for injected HTML or decoded compression.
+Full HTML that still carries an unsupported content coding receives a 502
+response before injection; encoded bytes are never rewritten as UTF-8 HTML.
 
 Trusted optional ICE configuration is provided as JSON in
 `LINGXI_LOCAL_APP_ICE_SERVERS`, for example an array containing a STUN entry and
@@ -236,3 +244,6 @@ predate the new `listApps` / `openApp` exports and must not be treated as matchi
 The optional iOS in-app browser also needs physical acceptance; Mobile Agent wake
 cannot silently move pending IndexedDB input into a different browser. See the
 [Mobile lifetime contract](MOBILE_LOCAL_APP_AGENT.md).
+An already presented iOS remote browser is owned by the host view and remains
+open across ordinary control reconnects. Pending launches are invalidated when
+their catalog disappears; explicit dismissal clears the presented browser.

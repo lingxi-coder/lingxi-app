@@ -136,8 +136,7 @@ export class LocalAppRemoteGateway {
     const session = value && this.sessions.get(value);
     return session && this.requestOrigin(req, session) ? session : undefined;
   }
-  private async authorized(req: IncomingMessage): Promise<Session | undefined> {
-    const session = this.cookie(req);
+  private async authorized(req: IncomingMessage, session = this.cookie(req)): Promise<Session | undefined> {
     if (!session || session.controller.signal.aborted) return;
     if (!await this.adapter.current(session)) { this.revokeApp(session.appId, session.runId); return; }
     if (session.controller.signal.aborted || session.expires <= Date.now()) return;
@@ -182,13 +181,23 @@ export class LocalAppRemoteGateway {
         const secure = ticket.session.origin.startsWith('https:');
         res.writeHead(204, { 'set-cookie': `${secure ? COOKIE : DEV_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}; Max-Age=${Math.floor(SESSION_LIFETIME / 1000)}`, 'cache-control': 'no-store' }).end(); return;
       }
-      let countedSession: Session | undefined;
-      res.once('close', () => { if (countedSession) countedSession.active--; });
-      const session = await this.authorized(req);
+      const candidate = this.cookie(req);
+      if (!candidate || candidate.controller.signal.aborted) { res.writeHead(401, { 'cache-control': 'no-store' }).end('Session expired'); return; }
+      if (candidate.active >= 32) { res.writeHead(429).end('Too many requests'); return; }
+      // Reserve before asynchronous authorization so pending requests also count.
+      candidate.active++;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true; candidate.active--;
+        res.removeListener('close', release);
+        candidate.controller.signal.removeEventListener('abort', release);
+      };
+      res.once('close', release);
+      candidate.controller.signal.addEventListener('abort', release, { once: true });
+      const session = await this.authorized(req, candidate);
       if (res.destroyed || req.aborted) return;
       if (!session) { res.writeHead(401, { 'cache-control': 'no-store' }).end('Session expired'); return; }
-      if (session.active >= 32) { res.writeHead(429).end('Too many requests'); return; }
-      session.active++; countedSession = session;
       if (req.headers.origin && req.headers.origin !== session.origin) { res.writeHead(403).end(); return; }
       if (path === '/__lingxi_remote_invoke' && req.method === 'POST') {
         if (req.headers.origin !== session.origin || req.headers['content-type']?.split(';')[0] !== 'application/json') { res.writeHead(403).end(); return; }

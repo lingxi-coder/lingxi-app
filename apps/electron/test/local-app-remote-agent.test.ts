@@ -205,3 +205,148 @@ test('chat reads wait for aborted admission rollback before exposing history', a
   assert.equal(observed,0,'readers must not observe provisional chat state');
   assert.equal((await summary).state,'idle');assert.equal((await list).chats[0].state,'idle');assert.deepEqual((await history).messages,[]);
 });
+
+test('app withdrawal fences queued chat mutations and permits calls after regrant', async t => {
+  const root=await fs.mkdtemp(join(tmpdir(),'agent-app-mutation-fence-'));
+  const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
+  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
+  let release!:()=>void, entered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;}), locked=new Promise<void>(resolve=>{entered=resolve;});
+  t.after(async()=>{release();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
+  const first=await broker.createChat(owner,{title:'Keep'}), second=await broker.createChat(owner,{title:'Keep too'});
+  const blocker=(broker as any).exclusive(async()=>{entered();await gate;});await locked;
+  const session=new AbortController();
+  const archive=broker.archiveChat(owner,first.chatId,session.signal), remove=broker.deleteChat(owner,second.chatId,session.signal);
+  const archiveRejected=assert.rejects(archive), removeRejected=assert.rejects(remove);
+  await broker.cancelApp(owner.appId);release();await Promise.all([blocker,archiveRejected,removeRejected]);
+  assert.equal(session.signal.aborted,false);
+  assert.equal((await broker.getChat(owner,first.chatId)).archived,false);
+  assert.equal((await broker.getChat(owner,second.chatId)).archived,false);
+  await broker.archiveChat(owner,first.chatId,session.signal);
+  assert.equal((await broker.getChat(owner,first.chatId)).archived,true);
+});
+
+test('app withdrawal before task commit prevents durable admission', async t => {
+  const root=await fs.mkdtemp(join(tmpdir(),'agent-app-admission-fence-'));
+  const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
+  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
+  let release!:()=>void, entered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;}), waiting=new Promise<void>(resolve=>{entered=resolve;});
+  t.after(async()=>{release();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
+  await broker.initialize();
+  const writable=fs as any, writeFile=writable.writeFile;
+  writable.writeFile=async (...args:any[])=>{
+    const result=await writeFile(...args);
+    if(typeof args[0]==='string' && args[0].includes('/agent/tasks/') && args[0].endsWith('.tmp')){entered();await gate;}
+    return result;
+  };
+  try {
+    const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
+    const pending=assert.rejects(broker.run(owner,input,new AbortController().signal));
+    await waiting;await broker.cancelApp(owner.appId);release();await pending;
+    assert.deepEqual((await broker.list(owner)).tasks,[]);
+    assert.deepEqual(await fs.readdir(join(root,'apps',owner.appId,'agent','tasks')),[]);
+  } finally {release();writable.writeFile=writeFile;}
+});
+
+test('app withdrawal before chat rename cancels creation and archive', async t => {
+  const root=await fs.mkdtemp(join(tmpdir(),'agent-app-chat-commit-fence-'));
+  const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
+  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
+  t.after(async()=>{await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
+  await broker.initialize();
+  const writable=fs as any, writeFile=writable.writeFile;
+  let release!:()=>void, entered!:()=>void, gate:Promise<void>, waiting:Promise<void>;
+  const block=()=>{gate=new Promise<void>(resolve=>{release=resolve;});waiting=new Promise<void>(resolve=>{entered=resolve;});};
+  writable.writeFile=async (...args:any[])=>{
+    const result=await writeFile(...args);
+    if(typeof args[0]==='string' && args[0].includes('/agent/chats/') && args[0].includes('/chat.json.') && args[0].endsWith('.tmp')){entered();await gate;}
+    return result;
+  };
+  try {
+    block();const creation=assert.rejects(broker.createChat(owner,{title:'Revoked'}));
+    await waiting!;await broker.cancelApp(owner.appId);release();await creation;
+    assert.deepEqual((await broker.listChats(owner)).chats,[]);
+    assert.deepEqual(await fs.readdir(join(root,'apps',owner.appId,'agent','chats')),[]);
+    writable.writeFile=writeFile;
+    const chat=await broker.createChat(owner,{title:'Keep'});
+    block();writable.writeFile=async (...args:any[])=>{
+      const result=await writeFile(...args);
+      if(typeof args[0]==='string' && args[0].includes('/chat.json.') && args[0].endsWith('.tmp')){entered();await gate;}
+      return result;
+    };
+    const archive=assert.rejects(broker.archiveChat(owner,chat.chatId));
+    await waiting!;await broker.cancelApp(owner.appId);release();await archive;
+    assert.equal((await broker.getChat(owner,chat.chatId)).archived,false);
+  } finally {release();writable.writeFile=writeFile;}
+});
+
+test('broker shutdown aborts pending and future mutations before commit', async t => {
+  const root=await fs.mkdtemp(join(tmpdir(),'agent-shutdown-mutation-fence-'));
+  const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
+  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
+  const chat=await broker.createChat(owner,{title:'Keep'});
+  let releaseWrite!:()=>void, writeEntered!:()=>void;
+  const writeGate=new Promise<void>(resolve=>{releaseWrite=resolve;}), writing=new Promise<void>(resolve=>{writeEntered=resolve;});
+  const writable=fs as any, writeFile=writable.writeFile;
+  t.after(async()=>{releaseWrite();writable.writeFile=writeFile;await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
+  writable.writeFile=async (...args:any[])=>{
+    const result=await writeFile(...args);
+    if(typeof args[0]==='string' && args[0].includes('/agent/chats/') && args[0].includes('/chat.json.') && args[0].endsWith('.tmp')){writeEntered();await writeGate;}
+    return result;
+  };
+  const create=assert.rejects(broker.createChat(owner,{title:'Revoked'}));await writing;
+  const archive=assert.rejects(broker.archiveChat(owner,chat.chatId));
+  const disposing=broker.dispose();
+  releaseWrite();await Promise.all([archive,create,disposing]);
+  assert.equal((await broker.getChat(owner,chat.chatId)).archived,false);
+  assert.equal((await broker.listChats(owner)).chats.length,1);
+  await assert.rejects(broker.createChat(owner,{title:'After shutdown'}));
+  await assert.rejects(broker.deleteChat(owner,chat.chatId));
+});
+
+test('broker shutdown aborts active execution while another app holds the ledger lock', async t => {
+  const root=await fs.mkdtemp(join(tmpdir(),'agent-shutdown-active-fence-'));
+  const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)}, other={...owner,appId:`a${'2'.repeat(32)}`};
+  let release!:()=>void, entered!:()=>void, started!:(signal:AbortSignal)=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;}), locked=new Promise<void>(resolve=>{entered=resolve;}), executing=new Promise<AbortSignal>(resolve=>{started=resolve;});
+  const broker=new LocalAppAgentBroker({root,authorize:async principal=>{if(principal.appId===other.appId){entered();await gate;}return authorization;},revalidate:async()=>true,execute:async execution=>{
+    if(execution.owner.appId===owner.appId){started(execution.signal);await new Promise<void>((_resolve,reject)=>execution.signal.addEventListener('abort',()=>reject(execution.signal.reason),{once:true}));}
+    return {result:{text:'done',attachments:[],messageId:'m'},usage:{turns:1}};
+  }});
+  t.after(async()=>{release();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
+  const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
+  const run=await broker.run(owner,{...input,runId:'active'});const signal=await executing;
+  const blocker=broker.run(other,{...input,runId:'blocker'});const rejected=assert.rejects(blocker);await locked;
+  const disposing=broker.dispose();const abortedBeforeUnlock=signal.aborted;
+  release();await Promise.all([disposing,rejected]);
+  assert.equal(abortedBeforeUnlock,true);
+  assert.equal((await broker.get(owner,run.runId)).state,'interrupted');
+});
+
+for (const kind of ['admission', 'chat creation'] as const) {
+  test(`broker shutdown waits for ${kind} rollback with no active task`, async t => {
+    const root=await fs.mkdtemp(join(tmpdir(),'agent-shutdown-drain-'));
+    const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
+    const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
+    await broker.initialize();
+    let release!:()=>void, entered!:()=>void;
+    const gate=new Promise<void>(resolve=>{release=resolve;}), waiting=new Promise<void>(resolve=>{entered=resolve;});
+    const writable=fs as any, writeFile=writable.writeFile;
+    writable.writeFile=async (...args:any[])=>{
+      const result=await writeFile(...args), path=args[0];
+      if(typeof path==='string' && path.endsWith('.tmp') && (kind==='admission' ? path.includes('/agent/tasks/') : path.includes('/agent/chats/') && path.includes('/chat.json.'))){entered();await gate;}
+      return result;
+    };
+    t.after(async()=>{release();writable.writeFile=writeFile;await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
+    const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
+    const rejected=assert.rejects(kind==='admission' ? broker.run(owner,input) : broker.createChat(owner,{title:'Revoked'}));
+    await waiting;
+    let disposed=false;const disposing=broker.dispose().then(()=>{disposed=true;});
+    await new Promise(resolve=>setImmediate(resolve));const returnedBeforeRollback=disposed;
+    release();await Promise.all([rejected,disposing]);
+    assert.equal(returnedBeforeRollback,false);
+    const directory=join(root,'apps',owner.appId,'agent',kind==='admission'?'tasks':'chats');
+    assert.deepEqual(await fs.readdir(directory),[]);
+  });
+}

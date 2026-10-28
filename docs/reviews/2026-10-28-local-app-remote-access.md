@@ -311,3 +311,56 @@ Recommendation: **COMMENT**. No confirmed source findings remain unaddressed in
 this review scope. Matching Mobile native builds, installed-device behavior,
 public tunnel/TURN and long-duration acceptance remain pending; passing source
 checks do not establish release readiness or exhaustive absence of defects.
+
+## Fourth independent review
+
+Reviewed the cumulative 85-file feature through `1f39809d5` and the final repair
+diff. Stage 1 checked Desktop hosting, retained Mobile hosting and browser choice
+before three independent GPT-6.1 Terra xhigh lanes examined the gateway,
+Agent authority and client/lifecycle paths. The parent reproduced the HTML
+encoding case and integrated verification. Five findings were confirmed and
+fixed: **two HIGH and three MEDIUM**, with no CRITICAL or LOW findings.
+
+| Severity | Corrected location | Trigger, impact and correction |
+| --- | --- | --- |
+| HIGH | `apps/electron/src/main/local-apps/agentBroker.ts:193`, `apps/electron/src/main/local-apps/host.ts:1031` | Disabling/changing Agent permissions cancels app access while preserving the browser session. A queued archive/delete or disk-blocked task admission checked only the still-live session signal and could commit after withdrawal. Capture an app-level operation signal before awaits, cancel it with app access, and combine it with the session signal through existing commit guards. Check the host Agent epoch across asynchronous authorization so stale requests cannot join a newly granted epoch. Regrant creates fresh operation authority. |
+| HIGH | `apps/electron/src/main/local-apps/agentBroker.ts:774` | Broker shutdown left pending mutations alive and waited for the ledger lock before aborting active executors. Abort all app operation controllers and active executor controllers synchronously before shutdown awaits, then settle terminal records through the queue; reject new mutations once stopped. Wait for a ledger barrier and rollback before returning, including serialized chat creation with no active run. |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteGateway.ts:184` | The HTTP quota was counted only after asynchronous authorization, so 64 pending requests could all enter storage checks with active count zero. Reserve capacity after cookie/session identification and before any authorization await, with idempotent close/revocation release. The regression proves that only 32 checks enter and the other 32 requests receive 429. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:993` | Unknown Content-Encoding values intentionally preserved by the service proxy reached HTML injection, which interpreted encoded bytes as UTF-8 and removed the encoding header. Reject unsupported full-HTML codings with 502 and cancel the body; identity HTML still receives the SDK, and partial response semantics stay intact. |
+| MEDIUM | `apps/ios/native/Sources/Remote/RemoteControlView.swift:121`, `apps/ios/native/Sources/Remote/RemoteAppLaunchURL.swift:5` | The optional in-app browser belonged to the ready-only app catalog and disappeared on ordinary reconnect even though its gateway grant remained valid. Move browser presentation to the stable host view; invalidate pending launches independently, retain a presented ticket across catalog loss, and clear it on explicit dismissal. |
+
+The authority regressions hold the ledger queue or a temporary file write
+across app withdrawal/shutdown, check that no unauthorized archive/delete/task
+record commits, and verify later regrant. An active executor is also checked
+before an unrelated lock is released. Cross-review caught a shutdown-drain
+regression during repair: synchronous abort must be followed by waiting for
+queued rollback. Two regressions now prove shutdown waits for held admission
+and chat-creation cleanup even with no active run. The HTML regression failed with a 200
+corrupted representation before the fix and now returns 502. HTTP quota tests
+use both controlled authorization gates and the actual loopback gateway.
+
+Final verification:
+
+- Feature/gateway/peer/real-Chrome/atomic/store regression suite:
+  **148 passed**, zero failed, cancelled or skipped.
+- Existing Agent/authoring regressions: **56 passed**, zero failed, cancelled
+  or skipped.
+- Desktop Node/renderer typechecks and production JS build passed.
+- Swift frontend parsing passed for changed production/test files. A compiled
+  standalone executable used the production browser-lifetime helper and URL
+  validator to check reconnect invalidation, stale-launch rejection, explicit
+  dismissal, reopening and expiry. These checks establish state behavior, not
+  actual SFSafariViewController presentation.
+- AST traversal of **45 changed TS/TSX files** found no syntax errors or matches
+  for the reviewed console.log/literal-secret patterns; `git diff --check`
+  passed. Unavailable LSP tooling is still substituted with compiler checks.
+
+Receipts: `/private/tmp/lingxi-local-app-review-round4-final.log`,
+`/private/tmp/lingxi-local-app-review-round4-agent.log`,
+`/private/tmp/lingxi-local-app-review-round4-build.log`, and
+`/private/tmp/lingxi-local-app-review-round4-swift.log`.
+
+Recommendation: **COMMENT**. The confirmed findings in this scope are addressed;
+matching Mobile native builds, actual SwiftUI/device behavior, public tunnel,
+real TURN and long-duration acceptance remain unverified. This source review
+does not establish release readiness or exhaustive absence of defects.

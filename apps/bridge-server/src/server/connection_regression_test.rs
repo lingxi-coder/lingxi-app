@@ -1329,12 +1329,27 @@ async fn real_mod_worker_async_input_results_cross_bridge_socket_without_false_c
     let response:serde_json::Value=serde_json::from_str(&response).unwrap();
     assert_eq!(response["tree"]["props"]["value"],"typed");
     let next_handle = response["tree"]["press"]["handle"].as_u64().unwrap();
+    async fn next_live_wire(socket: &mut Socket) -> (Frame, String) {
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(2), socket.next()).await
+                .unwrap().unwrap().unwrap();
+            if let Message::Text(text) = message {
+                return (serde_json::from_str(&text).unwrap(), text);
+            }
+        }
+    }
     send_live_command(&mut socket, 8, request("failed-live", "fail", next_handle)).await;
     let failed_response = loop {
-        match next_frame(&mut socket).await {
+        let (frame, wire) = next_live_wire(&mut socket).await;
+        match frame {
             Frame::Event(ClientEvent::UiClientFrame {..}) => {}
             Frame::Event(ClientEvent::UiControlResult {request_id,response_json:Some(response),error:None,..})
-                if request_id=="failed-live" => break serde_json::from_str::<serde_json::Value>(&response).unwrap(),
+                if request_id=="failed-live" => {
+                    if let Some(dir) = std::env::var_os("LINGXI_TEST_CAPTURE_MOD_BRIDGE") {
+                        std::fs::write(std::path::Path::new(&dir).join("unknown.json"), wire).unwrap();
+                    }
+                    break serde_json::from_str::<serde_json::Value>(&response).unwrap();
+                }
             other => panic!("unexpected real Worker bridge event: {other:?}"),
         }
     };
@@ -1344,10 +1359,16 @@ async fn real_mod_worker_async_input_results_cross_bridge_socket_without_false_c
     assert_eq!(failed_response["outcome"],serde_json::json!({"status":"unknown","runtime":"unavailable"}));
     send_live_command(&mut socket, 9, request("refused-live", "again", next_handle)).await;
     let refused = loop {
-        match next_frame(&mut socket).await {
+        let (frame, wire) = next_live_wire(&mut socket).await;
+        match frame {
             Frame::Event(ClientEvent::UiClientFrame {..}) => {}
             Frame::Event(ClientEvent::UiControlResult {request_id,response_json:Some(response),error:None,..})
-                if request_id=="refused-live" => break serde_json::from_str::<serde_json::Value>(&response).unwrap(),
+                if request_id=="refused-live" => {
+                    if let Some(dir) = std::env::var_os("LINGXI_TEST_CAPTURE_MOD_BRIDGE") {
+                        std::fs::write(std::path::Path::new(&dir).join("not-started.json"), wire).unwrap();
+                    }
+                    break serde_json::from_str::<serde_json::Value>(&response).unwrap();
+                }
             other => panic!("unexpected fenced Worker bridge event: {other:?}"),
         }
     };

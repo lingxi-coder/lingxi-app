@@ -9,7 +9,7 @@ import tomllib
 
 workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
 harness = Path(os.environ["RUNNER_TEMP"]).resolve() / "frame-receipt-harness"
-expected = "40ecece294bd562bfd858c9881a50f326a3804cf"
+expected = "02c0beac6b3e17632f44e7bff0b2c03cb6600b20"
 actual = subprocess.check_output(["git", "-C", str(harness), "rev-parse", "HEAD"], text=True).strip()
 if actual != expected:
     raise SystemExit(f"diagnostic Harness head mismatch: {actual} != {expected}")

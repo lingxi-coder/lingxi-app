@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  CLIENT_PROTOCOL_MAJOR,
   OFFER_ANSWER_TIMEOUT_MS,
+  REMOTE_PROTOCOL_MAJOR,
   RemoteRpcError,
   b64uEncode,
   offerPath,
@@ -10,6 +12,7 @@ import {
   type SessionsListResult,
 } from '@lingxi/bridge-client/remote';
 import { backoffMs, type ConnectionState } from '../src/remote/viewerConnection';
+import { reconnect } from './support/botHost';
 import { drive, harness, settle, UID } from './support/remoteHarness';
 
 const phases = (states: ConnectionState[]): string[] => states.map((state) => state.phase);
@@ -473,5 +476,22 @@ test('file operations keep their control peer when the viewer reconnects', async
   assert.equal(old.channel.closedSignal.aborted, true);
   assert.notEqual(connection.fileSession().channel, old.channel);
   assert.deepEqual(await connection.request('sessions.list', {}), { sessions: [] });
+  connection.stop();
+});
+
+test('every handshake says the viewer knows Bots; the rest of what it says about itself is as it was', async () => {
+  const h = await harness();
+  await h.trustDevice();
+  const connection = h.connect();
+  connection.start();
+  await h.until(connection, 'ready');
+  await reconnect(h, connection);
+
+  const handshakes = h.host.requests.filter((request) => request.method === 'initialize');
+  assert.equal(handshakes.length, 2, 'the connection was made twice');
+  for (const { params } of handshakes) {
+    // The literal is the wire name: it is what a desktop looks for, so a change of the constant must not change it unnoticed.
+    assert.deepEqual(params, { protocol: REMOTE_PROTOCOL_MAJOR, client_protocol_version: CLIENT_PROTOCOL_MAJOR, app: { version: 'test', platform: 'web', features: ['bots'] } });
+  }
   connection.stop();
 });

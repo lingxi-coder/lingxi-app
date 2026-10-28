@@ -4,12 +4,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Locale } from '../utils/locale';
 import { Composer } from './Composer';
 import { Controls } from './Controls';
+import { requestErrorStringKey } from './failureText';
 import { PendingPrompts } from './Prompts';
-import type { RemoteClient, SessionState } from './remoteClient';
+import { knownBots, type RemoteClient, type SessionState } from './remoteClient';
 import { TranscriptView } from './Transcript';
 import { t } from './strings';
 import { displayText } from './text';
-import { useStore } from './useRemote';
+import { useStore } from './useStore';
 import type { ConnectionState } from './viewerConnection';
 
 interface SessionViewProps {
@@ -21,23 +22,20 @@ interface SessionViewProps {
   onBack(): void;
 }
 
-const ERROR_KEYS = {
-  unknown_session: 'errUnknownSession',
-  not_remote_enabled: 'errNotRemoteEnabled',
-  capacity: 'errCapacity',
-  forbidden: 'errForbidden',
-} as const;
-
 function errorText(locale: Locale, state: SessionState): string {
-  const key = ERROR_KEYS[(state.error?.code ?? '') as keyof typeof ERROR_KEYS];
-  return t(locale, key ?? 'errGeneric');
+  return t(locale, requestErrorStringKey(state.error?.code ?? ''));
 }
 
 export function SessionView({ locale, client, sessionId, connection, deviceName, onBack }: SessionViewProps) {
   const controller = useMemo(() => client.session(sessionId), [client, sessionId]);
   const state = useStore(controller)!;
   const list = useStore(client)!;
-  const summary = list.sessions?.find((session) => session.session_id === sessionId);
+  // A Bot's chat is in its Bot's list, not in the sessions': the page that opened it said which Bot that is.
+  const botId = client.botOfThread(sessionId);
+  const botThreads = useMemo(() => (botId === undefined ? null : client.botThreads(botId)), [client, botId]);
+  const threads = useStore(botThreads);
+  const summary = list.sessions?.find((session) => session.session_id === sessionId) ?? threads?.threads?.find((thread) => thread.session_id === sessionId);
+  const botName = knownBots(list).find((bot) => bot.bot_id === botId)?.name;
   const scroller = useRef<HTMLDivElement>(null);
   const [attachments, setAttachments] = useState<FileReceipt[]>([]);
   const stickToBottom = useRef(true);
@@ -54,6 +52,12 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
     };
   }, [controller]);
 
+  // Keeps the chat's title current while it is open: the Bot's list is asked for again as the Bot's activity changes.
+  useEffect(() => {
+    botThreads?.activate();
+    return () => botThreads?.deactivate();
+  }, [botThreads]);
+
   // Follow new content while the reader is at the bottom; leave them alone once they scroll up.
   useLayoutEffect(() => {
     const element = scroller.current;
@@ -66,12 +70,12 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
   return (
     <div className="rc-session">
       <header className="rc-session-head">
-        <button type="button" className="rc-back" onClick={onBack} aria-label={t(locale, 'back')}>
+        <button type="button" className="rc-back" onClick={onBack} aria-label={botName === undefined ? t(locale, 'back') : t(locale, 'backToBot', { name: botName })}>
           ‹
         </button>
         <div className="rc-session-title">
           <h1>{displayText(summary?.title ?? '', 120) || t(locale, 'untitled')}</h1>
-          {summary?.project_label ? <p>{summary.project_label}</p> : null}
+          {summary?.project_label || botName ? <p>{summary?.project_label || botName}</p> : null}
         </div>
         <TransportBadge locale={locale} transport={connection.transport} />
       </header>

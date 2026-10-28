@@ -259,6 +259,8 @@ struct ResumingHandle {
     permission_mode: Mutex<Option<String>>,
     plan_mode: Mutex<bool>,
     operation_log: Mutex<Vec<String>>,
+    session_mode: Mutex<lingxi_core::host::session_context::SessionModeSnapshot>,
+    mode_turn_active: Mutex<bool>,
     resume_error: Mutex<Option<String>>,
     permission_mode_error: Mutex<Option<String>>,
     plan_mode_error: Mutex<Option<String>>,
@@ -273,6 +275,10 @@ impl ResumingHandle {
             permission_mode: Mutex::new(Some("default".to_string())),
             plan_mode: Mutex::new(false),
             operation_log: Mutex::new(Vec::new()),
+            session_mode: Mutex::new(
+                lingxi_core::host::session_context::SessionModeSnapshot::default(),
+            ),
+            mode_turn_active: Mutex::new(false),
             resume_error: Mutex::new(None),
             permission_mode_error: Mutex::new(None),
             plan_mode_error: Mutex::new(None),
@@ -316,6 +322,32 @@ impl ResumingHandle {
 impl lingxi_core::host::OrchestratorHandle for ResumingHandle {
     async fn current_session_id(&self) -> lingxi_core::types::SessionId {
         self.session_id
+    }
+    async fn conversation_mode(&self) -> lingxi_core::host::session_context::SessionModeSnapshot {
+        self.session_mode.lock().await.clone()
+    }
+    async fn restore_conversation_mode(
+        &self,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
+        let mut snapshot = self.session_mode.lock().await;
+        snapshot.active = mode;
+        snapshot.selected = mode;
+        snapshot.pending = false;
+        Ok(snapshot.clone())
+    }
+    async fn set_conversation_mode(
+        &self,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
+        let mut snapshot = self.session_mode.lock().await;
+        snapshot.selected = mode;
+        snapshot.revision += 1;
+        snapshot.pending = *self.mode_turn_active.lock().await && snapshot.active != mode;
+        if !snapshot.pending {
+            snapshot.active = mode;
+        }
+        Ok(snapshot.clone())
     }
     async fn clear_session(&self) -> Result<(), HandleError> {
         Ok(())
@@ -429,6 +461,7 @@ impl lingxi_core::host::OrchestratorHandle for ResumingHandle {
         if let Some(reason) = self.resume_error.lock().await.take() {
             return Err(HandleError::ActionFailed(reason));
         }
+        self.session_mode.lock().await.session_id = session_id.as_uuid().to_string();
         *self.resumed.lock().await =
             Some((session_id, history, last_jsonl_uuid, active_goal, runtime));
         Ok(())
@@ -2524,6 +2557,7 @@ async fn new_session_clears_applies_model_and_emits_started() {
     let handle = Arc::new(MockOrchestratorHandle::new());
     let expected_id = lingxi_core::host::OrchestratorHandle::current_session_id(&*handle)
         .await
+        .as_uuid()
         .to_string();
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
     let sink = CapturingSink::arc();
@@ -2557,10 +2591,18 @@ async fn new_session_clears_applies_model_and_emits_started() {
     );
     assert_eq!(
         sink.events().await,
-        vec![ClientEvent::SessionStarted {
-            session_id: expected_id,
-            mode: SessionModeDto::Code,
-        }]
+        vec![
+            ClientEvent::SessionStarted {
+                session_id: expected_id.clone(),
+                mode: SessionModeDto::Code,
+            },
+            ClientEvent::SessionModeChanged {
+                session_id: expected_id,
+                mode: SessionModeDto::Code,
+                pending_mode: None,
+                revision: 0,
+            },
+        ]
     );
 }
 
@@ -2965,7 +3007,7 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
         session_id: emitted_id,
         mode,
         messages,
-    }, ClientEvent::UsageUpdate {
+    }, ClientEvent::SessionModeChanged { .. }, ClientEvent::UsageUpdate {
         is_snapshot: Some(true),
         input_tokens: 1200,
         output_tokens: 80,
@@ -3058,6 +3100,7 @@ async fn resume_session_sets_plan_state_before_replay() {
         sink.events().await.as_slice(),
         [
             ClientEvent::SessionResumed { .. },
+            ClientEvent::SessionModeChanged { .. },
             ClientEvent::StatusSnapshot { .. },
             ClientEvent::ModelChanged { .. }
         ]
@@ -4591,4 +4634,159 @@ fn bridge_source<T: serde::Serialize>(
     let json = serde_json::to_string(value).expect("serialize bridge payload");
     lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&json)
         .expect("serialized bridge payload is valid JSON")
+}
+
+#[tokio::test]
+async fn conversation_mode_routes_during_turn_and_manifest_reports_pending_selection() {
+    use lingxi_core::host::session_context::ConversationMode;
+    let handle = Arc::new(ResumingHandle::new());
+    handle.session_mode.lock().await.session_id = handle.session_id.as_uuid().to_string();
+    *handle.mode_turn_active.lock().await = true;
+    let router = EngineCommandRouter::new(
+        handle.clone(),
+        Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+        None,
+        None,
+    );
+    router.set_turn_active(true);
+    let sink = CapturingSink::arc();
+    router
+        .route(
+            ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            },
+            sink.clone(),
+        )
+        .await;
+    router
+        .route(ClientCommand::GetContextManifest, sink.clone())
+        .await;
+    let events = sink.events().await;
+    let [ClientEvent::SessionModeChanged {
+        mode,
+        pending_mode,
+        revision,
+        ..
+    }, ClientEvent::SessionModeChanged { .. }, ClientEvent::ContextManifest { manifest_json }] =
+        events.as_slice()
+    else {
+        panic!("unexpected mode response: {events:?}");
+    };
+    assert_eq!(*mode, SessionModeDto::Code);
+    assert_eq!(*pending_mode, Some(SessionModeDto::Chat));
+    assert_eq!(*revision, 1);
+    let manifest: serde_json::Value = serde_json::from_str(manifest_json).unwrap();
+    assert_eq!(manifest["session"]["active"], "code");
+    assert_eq!(manifest["session"]["selected"], "chat");
+    assert_eq!(
+        handle.conversation_mode().await.selected,
+        ConversationMode::Chat
+    );
+    assert_eq!(
+        handle.current_permission_mode().await.as_deref(),
+        Some("default")
+    );
+}
+
+#[tokio::test]
+async fn resumed_chat_restores_mode_from_same_transcript_as_messages() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let session_id = seed_replay_session(root.path());
+    let cwd = root.path().to_string_lossy().into_owned();
+    let home = root.path().join(".lingxi");
+    let path = home
+        .join("projects")
+        .join(session::jsonl::project_dir_name(&cwd))
+        .join(format!("{session_id}.jsonl"));
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({"type":"session-mode", "sessionId":session_id, "sessionMode":"chat"})
+    )
+    .unwrap();
+    let handle = Arc::new(ResumingHandle::new());
+    let router = EngineCommandRouter::new(
+        handle.clone(),
+        Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+        None,
+        None,
+    )
+    .with_session_store(SessionStoreContext::new(
+        home,
+        cwd,
+        Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
+    ));
+    let sink = CapturingSink::arc();
+    router
+        .route(
+            ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+                cwd: None,
+            },
+            sink.clone(),
+        )
+        .await;
+    let events = sink.events().await;
+    assert!(
+        matches!(events.first(), Some(ClientEvent::SessionResumed { session_id: id, mode: SessionModeDto::Chat, .. }) if id == &session_id)
+    );
+    assert!(events.iter().any(|event| matches!(event, ClientEvent::SessionModeChanged { session_id: id, mode: SessionModeDto::Chat, pending_mode: None, .. } if id == &session_id)));
+}
+
+#[tokio::test]
+async fn session_started_reports_admitted_mode_before_pending_selection() {
+    use lingxi_core::host::session_context::ConversationMode;
+    let handle = Arc::new(ResumingHandle::new());
+    {
+        let mut mode = handle.session_mode.lock().await;
+        mode.session_id = handle.session_id.as_uuid().to_string();
+        mode.active = ConversationMode::Code;
+        mode.selected = ConversationMode::Chat;
+        mode.pending = true;
+        mode.revision = 4;
+    }
+    let router = EngineCommandRouter::new(
+        handle,
+        Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+        None,
+        None,
+    );
+    let sink = CapturingSink::arc();
+    router
+        .route(
+            ClientCommand::NewSession {
+                cwd: None,
+                model: None,
+            },
+            sink.clone(),
+        )
+        .await;
+    let events = sink.events().await;
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                ClientEvent::SessionStarted {
+                    mode: SessionModeDto::Code,
+                    ..
+                },
+                ClientEvent::SessionModeChanged {
+                    mode: SessionModeDto::Code,
+                    pending_mode: Some(SessionModeDto::Chat),
+                    revision: 4,
+                    ..
+                },
+                ..
+            ]
+        ),
+        "{events:?}"
+    );
 }

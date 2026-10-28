@@ -67,7 +67,7 @@ export function resolveActiveDraftSession(
     || !draftRef || draftRef.projectPath !== requested.projectPath || draftRef.sessionId !== requested.sessionId
     || !runtime || activeRuntimeSessionId !== requested.sessionId
     || runtime.projectPath !== requested.projectPath || runtime.sessionId !== requested.sessionId
-    || runtime.sessionMode !== 'code' || runtime.connectionState.status !== 'connected'
+    || (runtime.sessionMode !== 'code' && runtime.sessionMode !== 'chat') || runtime.connectionState.status !== 'connected'
     || typeof runtime.engineWorkspacePath !== 'string' || !runtime.engineWorkspacePath) return undefined;
   return { projectPath: runtime.projectPath, sessionId: runtime.sessionId, mode: runtime.sessionMode,
     engineCwd: runtime.engineWorkspacePath };
@@ -287,7 +287,6 @@ export class SessionRuntimeManager {
     const existing = this.runtimes.get(ref.sessionId);
     if (existing) {
       if (existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
-      if (sessionMode !== undefined && existing.sessionMode !== sessionMode) throw new Error('session runtime mode does not match the requested session');
       if (start) await existing.start();
       this.touch(existing.sessionId);
       return existing;
@@ -483,7 +482,7 @@ export class SessionRuntimeManager {
     if (pendingDraft) return pendingDraft;
     const draft = this.draftSessions.get(projectPath);
     if (draft) {
-      const runtime = await this.ensure(draft, true, model, undefined, 'code');
+      const runtime = await this.ensure(draft, true, model);
       this.activate(runtime);
       return { ...draft };
     }
@@ -513,10 +512,20 @@ export class SessionRuntimeManager {
     if (!ref) throw new Error('could not allocate a new session id');
     this.draftSessions.set(projectPath, ref);
     try {
-      const runtime = await this.ensure(ref, true, model, undefined, 'code');
+      const mode = this.opts.getSavedSessionMode?.() ?? 'code';
+      const runtime = await this.ensure(ref, true, model, undefined, mode);
+      if (mode !== 'code') await runtime.initializeSessionMode(mode);
       this.activate(runtime);
     } catch (error) {
       this.clearDraftSession(ref);
+      const failedRuntime = this.runtimes.get(ref.sessionId);
+      if (failedRuntime) {
+        this.runtimes.delete(ref.sessionId);
+        this.visualizations.forgetSession(ref.sessionId);
+        this.lastUsed.delete(ref.sessionId);
+        this.sessionModelHints.delete(ref.sessionId);
+        await failedRuntime.dispose().catch(() => undefined);
+      }
       throw error;
     }
     // The boot argument is the source of truth for a new session. Sending a

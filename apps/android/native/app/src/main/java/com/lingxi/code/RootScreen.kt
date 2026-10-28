@@ -110,7 +110,6 @@ import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.SessionRow
 import com.lingxi.code.model.conversationScopeFromKey
 import com.lingxi.code.model.persistenceKey
-import com.lingxi.code.model.persistedSessionTarget
 import com.lingxi.code.model.sessionStateKey
 import com.lingxi.code.model.toDto
 import com.lingxi.code.model.toUi
@@ -153,6 +152,7 @@ import android.widget.Toast
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -217,12 +217,28 @@ internal data class SessionCatalogLookup<T>(
     val value: T? = null,
 )
 
-internal fun isBoundToScopeMode(
+internal fun isBoundToScope(
     boundScope: ConversationScope,
-    boundMode: SessionMode,
     targetScope: ConversationScope,
-    targetMode: SessionMode,
-): Boolean = boundScope == targetScope && boundMode == targetMode
+): Boolean = boundScope == targetScope
+
+internal fun isRestorableSession(
+    expectedId: String,
+    candidateId: String,
+    candidateDirectory: String? = null,
+    activeDirectory: String? = null,
+): Boolean = canonicalSessionId(expectedId) == canonicalSessionId(candidateId) &&
+    (activeDirectory == null || candidateDirectory == activeDirectory)
+
+internal fun shouldAttemptModeRestore(
+    ready: Boolean,
+    transitioning: Boolean,
+    streaming: Boolean,
+    engineMode: SessionMode,
+    activeMode: SessionMode,
+    restoreKey: String,
+    completedKey: String?,
+): Boolean = ready && !transitioning && !streaming && engineMode == activeMode && restoreKey != completedKey
 
 /**
  * Root composable for the app shell.
@@ -317,6 +333,9 @@ fun RootScreen(
     val appContext = context.applicationContext
     val lifecycleOwner = LocalLifecycleOwner.current
     var activeSessionMode by rememberSaveable { mutableStateOf(SessionMode.Code) }
+    var lastSelectedMode by rememberSaveable { mutableStateOf(SessionMode.Code) }
+    val scopeStore = remember(appContext) { ScopeStateStore(appContext) }
+    var drawerBootstrapComplete by rememberSaveable { mutableStateOf(false) }
     val chatViewModel: ChatViewModel = viewModel ?: viewModel(
         key = "chat",
         factory = viewModelFactory {
@@ -331,8 +350,15 @@ fun RootScreen(
             }
         },
     )
-    LaunchedEffect(chatViewModel, reconnectToken) {
+    LaunchedEffect(chatViewModel, reconnectToken, drawerBootstrapComplete) {
+        if (!drawerBootstrapComplete) return@LaunchedEffect
         if (viewModel == null) {
+                val launchWorkspaceKey = projectState.activeProject?.record?.id?.let { "project.$it" } ?: "global"
+                val launchScope = projectState.activeProject?.record?.id?.let { ConversationScope.Project(it) } ?: ConversationScope.Global
+                val launchSessionId = scopeStore.read(launchScope.sessionStateKey(activeSessionMode))?.lastActiveSessionId
+                val ownerMode = com.lingxi.code.conversation.DurableConversationTurnClientStore.ownerModeForSession(
+                    appContext, launchWorkspaceKey, launchSessionId,
+                ) ?: activeSessionMode
                 val replacing = chatViewModel.engineSource.value !is com.lingxi.code.conversation.ConnectingConversationSource
                 chatViewModel.ensureSourceInBackground(reconnectToken) {
                     EngineConversationSource.create(
@@ -341,10 +367,11 @@ fun RootScreen(
                         workspaceKey = projectState.activeProject?.record?.id
                             ?.let { "project.$it" }
                             ?: "global",
-                        sessionMode = activeSessionMode,
+                        sessionMode = ownerMode,
                         linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
                             ?: com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux,
                         replaceProcessSource = replacing,
+                        expectedSessionId = launchSessionId,
                     )
             }
         }
@@ -408,16 +435,35 @@ fun RootScreen(
     val sideChats by chatViewModel.sideChats.chats.collectAsState()
     val hasActiveEngineWork = state.blocksEngineReconnect(hasPendingPermission = pendingPermission != null)
     LaunchedEffect(hasActiveEngineWork) { onConversationBusyChanged(hasActiveEngineWork) }
-    val scopeStore = remember(appContext) { ScopeStateStore(appContext) }
     val drawerUi = rememberDrawerUiState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    var drawerBootstrapComplete by rememberSaveable { mutableStateOf(false) }
+    var selectionWrite by remember { mutableStateOf<Job?>(null) }
 
     // The conversation mode follows the session the user opens or starts; the
     // drawer's Chat/Code chips are only a list filter and never decide it.
     fun setConversationMode(mode: SessionMode) {
         activeSessionMode = mode
+    }
+
+    fun rememberModeSelection(mode: SessionMode) {
+        lastSelectedMode = mode
+        val previous = selectionWrite
+        selectionWrite = scope.launch {
+            previous?.join()
+            try {
+                scopeStore.persistSelectedMode(mode)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                chatViewModel.reportHostError(error.message.orEmpty())
+            }
+        }
+    }
+
+    fun selectSessionMode(mode: SessionMode) {
+        rememberModeSelection(mode)
+        chatViewModel.setSessionMode(mode)
     }
 
     fun projectSnapshotForScope(scope: ConversationScope): ProjectSnapshot? = when (scope) {
@@ -438,42 +484,6 @@ fun RootScreen(
             guestPath = com.lingxi.code.project.MobileUserStorage.directories(appContext).scheduledGuestCwd,
         )
         is ConversationScope.Project -> projectSnapshotForScope(scope)?.workspace
-    }
-
-    fun restorableSession(
-        scope: ConversationScope,
-        sessionId: String,
-        mode: SessionMode,
-    ): SessionRow? = when (scope) {
-        ConversationScope.Scheduled -> cronState.generatedSessions.firstOrNull { it.projectId == null && it.sessionId == sessionId }?.let {
-            SessionRow(uuid = sessionId, title = it.prompt.take(120), messageCount = 2, relativeTime = "", mode = mode)
-        }
-        ConversationScope.Global -> projectState.globalSessions
-            .firstOrNull { it.sessionId == sessionId && it.mode == mode }
-            ?.let {
-                SessionRow(
-                    uuid = it.sessionId,
-                    title = it.title,
-                    messageCount = it.messageCount,
-                    relativeTime = it.relativeTime,
-                    mode = it.mode,
-                    modifiedAtEpochSeconds = it.updatedAtEpochMillis / 1000L,
-                )
-            }
-        is ConversationScope.Project -> projectState.projects
-            .firstOrNull { it.record.id == scope.projectId }
-            ?.sessions
-            ?.firstOrNull { it.sessionId == sessionId && it.mode == mode }
-            ?.let {
-                SessionRow(
-                    uuid = it.sessionId,
-                    title = it.title,
-                    messageCount = it.messageCount,
-                    relativeTime = it.relativeTime,
-                    mode = it.mode,
-                    modifiedAtEpochSeconds = it.updatedAtEpochMillis / 1000L,
-                )
-            }
     }
 
     DisposableEffect(chatViewModel, context) {
@@ -548,6 +558,7 @@ fun RootScreen(
     LaunchedEffect(scopeStore) {
         val restoredMode = scopeStore.readActiveMode() ?: SessionMode.Code
         activeSessionMode = restoredMode
+        lastSelectedMode = scopeStore.readSelectedMode() ?: SessionMode.Code
         drawerUi.replaceSessionPins(scopeStore.readPinnedSessions())
         // Results that already exist when this first runs are not "new".
         cronResultsSeenAt = scopeStore.readCronResultsSeenAt().takeIf { it > 0L }
@@ -749,14 +760,9 @@ fun RootScreen(
     LaunchedEffect(engineMcp) {
         resolvedSettingsStore.setMcpServers(engineMcp)
     }
-    fun currentEngineMode(): SessionMode = currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code
+    fun currentEngineMode(): SessionMode = state.sessionMode ?: currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code
 
-    fun sourceMatches(scope: ConversationScope, mode: SessionMode): Boolean = isBoundToScopeMode(
-        boundScope = sourceScope,
-        boundMode = currentEngineMode(),
-        targetScope = scope,
-        targetMode = mode,
-    )
+    fun sourceMatches(scope: ConversationScope): Boolean = isBoundToScope(sourceScope, scope)
 
     // The composer draft is hoisted here so a voice transcription (the
     // hold-to-talk release) can route its recognized text straight into the
@@ -776,6 +782,38 @@ fun RootScreen(
     // Which scope's draft the composer is currently showing — guards the
     // restore effect below against unrelated recompositions.
     var draftScopeKey by remember { mutableStateOf<String?>(null) }
+    var restoredModeSessionKey by rememberSaveable { mutableStateOf<String?>(null) }
+
+    fun startCurrentScopeSession(mode: SessionMode) {
+        val previousKey = restoredModeSessionKey
+        val previousSessionId = chatViewModel.state.value.session.id
+        restoredModeSessionKey = sourceScope.sessionStateKey(mode)
+        chatViewModel.startNewSession(mode)
+        if (!chatViewModel.state.value.sessionTransitioning && chatViewModel.state.value.session.id == previousSessionId) {
+            restoredModeSessionKey = previousKey
+        }
+    }
+
+    // Mode changes do not replace the source or the current session. Preserve
+    // its draft and owner before updating the mode-scoped presentation keys.
+    LaunchedEffect(drawerBootstrapComplete, state.sessionMode, state.pendingSessionMode, state.session.id, state.sessionReady, sourceScope) {
+        if (!drawerBootstrapComplete || !state.sessionReady || state.sessionTransitioning) return@LaunchedEffect
+        val mode = state.sessionMode ?: return@LaunchedEffect
+        state.pendingSessionMode?.let { pending ->
+            val key = sourceScope.sessionStateKey(pending)
+            scopeStore.persistDraft(key, draft)
+            if (state.session.id != "new") scopeStore.persistLastActiveSession(key, state.session.id)
+        }
+        if (mode != activeSessionMode) {
+            val key = sourceScope.sessionStateKey(mode)
+            scopeStore.persistDraft(key, draft)
+            if (state.session.id != "new") scopeStore.persistLastActiveSession(key, state.session.id)
+            draftScopeKey = key
+            restoredModeSessionKey = key
+            activeSessionMode = mode
+            chatViewModel.refreshSessions()
+        }
+    }
 
     // Swap the visible draft whenever workspace OR mode changes. Keyed on the
     // durable session-state key so Chat and Code can never overwrite each
@@ -891,11 +929,16 @@ fun RootScreen(
             target = destination,
             newSession = newSession,
             newSessionDirectory = newSessionDirectory,
+            newSessionMode = sessionModeOverride.takeIf { newSession },
             resumeEmpty = resumeEmpty,
             replacePendingTransition = replacePendingTransition,
             allowInactiveWaitingRecovery = allowInactiveWaitingRecovery,
             scope = engineScope,
             createSource = {
+                val sessionId = if (newSession) null else target?.id
+                val ownerMode = com.lingxi.code.conversation.DurableConversationTurnClientStore.ownerModeForSession(
+                    appContext, engineScope.persistenceKey(), sessionId,
+                ) ?: sessionModeOverride
                 EngineConversationSource.createInBackground(
                     context = appContext,
                     projectWorkspace = when (engineScope) {
@@ -904,10 +947,11 @@ fun RootScreen(
                         is ConversationScope.Project -> project?.workspace
                     },
                     workspaceKey = engineScope.persistenceKey(),
-                    sessionMode = sessionModeOverride,
+                    sessionMode = ownerMode,
                     linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
                     reuseProcessSource = true,
                     currentSource = chatViewModel.engineSource.value,
+                    expectedSessionId = sessionId,
                 )
             },
             persistSelection = {
@@ -938,6 +982,7 @@ fun RootScreen(
             onCommitted = {
                 projectStore.publishActive(checkNotNull(persisted))
                 drawerUi.selectSession(destination.id)
+                if (newSession) restoredModeSessionKey = engineScope.sessionStateKey(sessionModeOverride)
             },
         )
     }
@@ -994,8 +1039,7 @@ fun RootScreen(
             return@LaunchedEffect
         }
         val targetMode = request.sessionMode
-        val boundMode = currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code
-        val alreadyBound = sourceScope == targetScope && boundMode == targetMode
+        val alreadyBound = sourceScope == targetScope
         var routed = false
         var attempt = 0
         while (!routed && attempt < CONVERSATION_LAUNCH_ATTEMPTS) {
@@ -1019,7 +1063,7 @@ fun RootScreen(
             }
         }
         if (routed) {
-            setConversationMode(targetMode)
+            if (!alreadyBound) setConversationMode(targetMode)
         } else {
             chatViewModel.reportConversationLaunchFailed()
         }
@@ -1031,6 +1075,11 @@ fun RootScreen(
         forkedSessionId: String,
     ) {
         pendingForkRequest = null
+        if (sourceScope == request.scope) {
+            chatViewModel.openSession(SessionRef(forkedSessionId, request.sourceSessionTitle))
+            closeDrawer()
+            return
+        }
         val switched = switchEngineScope(
             engineScope = request.scope,
             project = projectSnapshotForScope(request.scope),
@@ -1061,9 +1110,7 @@ fun RootScreen(
             chatViewModel.reportHostError(resources.getString(R.string.drawer_continue_session_in_progress))
             return
         }
-        val activeSourceMatchesScope =
-            sourceScope == sessionScope &&
-                (currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code) == row.mode
+        val activeSourceMatchesScope = sourceScope == sessionScope
         if (activeSourceMatchesScope) {
             pendingForkRequest = request
             runCatching {
@@ -1145,44 +1192,6 @@ fun RootScreen(
         }
     }
 
-    LaunchedEffect(
-        activeSessionMode,
-        sourceScope,
-        currentEngineSource,
-        drawerBootstrapComplete,
-        state.streaming,
-        state.sessionTransitioning,
-        state.session.id,
-        state.sessionReady,
-        projectState.loading,
-        projectState.projects,
-        projectState.globalSessions,
-    ) {
-        if (!drawerBootstrapComplete || state.streaming || state.sessionTransitioning) return@LaunchedEffect
-        val engineMode = currentEngineMode()
-        if (engineMode == activeSessionMode) return@LaunchedEffect
-        val savedSessionId = scopeStore.read(sourceScope.sessionStateKey(activeSessionMode))
-            ?.lastActiveSessionId
-        val target = persistedSessionTarget(
-            sessionId = savedSessionId,
-            catalogRow = savedSessionId?.let {
-                val project = projectSnapshotForScope(sourceScope)
-                restorableSession(sourceScope, it, activeSessionMode).takeIf { _ ->
-                    project == null || project.sessions.any { row -> canonicalSessionId(row.sessionId) == canonicalSessionId(it) && row.workspaceDirectory == project.record.activeDirectory }
-                }
-            },
-        )
-        switchEngineScope(
-            engineScope = sourceScope,
-            project = projectSnapshotForScope(sourceScope),
-            target = target?.ref,
-            newSession = target == null,
-            resumeEmpty = target?.resumeEmpty == true,
-            replacePendingTransition = true,
-            sessionModeOverride = activeSessionMode,
-        )
-    }
-
     // Recover the last active Project after process start. The Activity-scoped
     // ChatViewModel survives rotation, so sourceProjectId prevents a needless
     // rebuild on configuration changes. A process-restored global Resume is
@@ -1206,8 +1215,9 @@ fun RootScreen(
                 ConversationScope.Project(project.record.id).sessionStateKey(activeSessionMode),
             )?.lastActiveSessionId
             val lastSummary = scopedLastActiveSessionId
-                ?.let { id -> project.sessions.firstOrNull { it.sessionId == id } }
-                ?.takeIf { it.mode == activeSessionMode && it.workspaceDirectory == project.record.activeDirectory }
+                ?.let { id -> project.sessions.firstOrNull {
+                    isRestorableSession(id, it.sessionId, it.workspaceDirectory, project.record.activeDirectory)
+                } }
             val last = lastSummary?.let {
                 SessionRef(id = it.sessionId, title = it.title)
             }
@@ -1230,7 +1240,7 @@ fun RootScreen(
         state.sessionReady,
     ) {
         val active = sourceScope
-        val engineMode = currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code
+        val engineMode = currentEngineMode()
         if (
             engineMode == activeSessionMode &&
             state.sessionReady &&
@@ -1293,7 +1303,7 @@ fun RootScreen(
         sourceScope,
         currentEngineSource,
     ) {
-        val engineMode = currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code
+        val engineMode = currentEngineMode()
         if (
             engineMode == activeSessionMode &&
             state.sessionReady &&
@@ -1383,16 +1393,16 @@ fun RootScreen(
     fun sessionRowLookup(
         scope: ConversationScope,
         sessionId: String,
-        mode: SessionMode,
     ): SessionCatalogLookup<SessionRow> {
         val row = when (scope) {
-            ConversationScope.Scheduled -> scheduledSessionRows.firstOrNull { it.uuid == sessionId }
+            ConversationScope.Scheduled -> scheduledSessionRows.firstOrNull { isRestorableSession(sessionId, it.uuid) }
             ConversationScope.Global -> globalDrawerSessions.rows
-                .firstOrNull { it.uuid == sessionId && it.mode == mode }
+                .firstOrNull { isRestorableSession(sessionId, it.uuid) }
             is ConversationScope.Project -> projectState.projects
                 .firstOrNull { it.record.id == scope.projectId }
-                ?.sessions
-                ?.firstOrNull { it.sessionId == sessionId && it.mode == mode }
+                ?.let { project -> project.sessions.firstOrNull {
+                    isRestorableSession(sessionId, it.sessionId, it.workspaceDirectory, project.record.activeDirectory)
+                } }
                 ?.let {
                     SessionRow(
                         uuid = it.sessionId,
@@ -1418,24 +1428,24 @@ fun RootScreen(
             }
         }
     }
-    var restoredModeSessionKey by rememberSaveable { mutableStateOf<String?>(null) }
     LaunchedEffect(
         activeSessionMode,
         sourceScope,
         drawerBootstrapComplete,
         state.streaming,
         state.sessionTransitioning,
+        state.sessionReady,
+        state.sessionMode,
         currentEngineSource,
         globalDrawerSessions.phase,
         globalDrawerSessions.rows,
         projectState.loading,
         projectState.projects,
     ) {
-        if (!drawerBootstrapComplete || state.streaming || state.sessionTransitioning) return@LaunchedEffect
-        val engineMode = currentEngineMode()
-        if (engineMode != activeSessionMode) return@LaunchedEffect
+        if (!drawerBootstrapComplete) return@LaunchedEffect
         val restoreKey = sourceScope.sessionStateKey(activeSessionMode)
-        if (restoreKey == restoredModeSessionKey) return@LaunchedEffect
+        if (!shouldAttemptModeRestore(state.sessionReady, state.sessionTransitioning, state.streaming,
+                currentEngineMode(), activeSessionMode, restoreKey, restoredModeSessionKey)) return@LaunchedEffect
         val sessionId = scopeStore.read(restoreKey)?.lastActiveSessionId
         if (sessionId == null) {
             restoredModeSessionKey = restoreKey
@@ -1446,11 +1456,11 @@ fun RootScreen(
             return@LaunchedEffect
         }
         val project = projectSnapshotForScope(sourceScope)
-        if (project != null && project.sessions.none { canonicalSessionId(it.sessionId) == canonicalSessionId(sessionId) && it.workspaceDirectory == project.record.activeDirectory }) {
+        if (project != null && project.sessions.none { isRestorableSession(sessionId, it.sessionId, it.workspaceDirectory, project.record.activeDirectory) }) {
             restoredModeSessionKey = restoreKey
             return@LaunchedEffect
         }
-        val restoredRowLookup = sessionRowLookup(sourceScope, sessionId, activeSessionMode)
+        val restoredRowLookup = sessionRowLookup(sourceScope, sessionId)
         if (restoredRowLookup.state == SessionCatalogLookupState.Pending) return@LaunchedEffect
         val restoredRow = restoredRowLookup.value ?: run {
             restoredModeSessionKey = restoreKey
@@ -1568,7 +1578,7 @@ fun RootScreen(
     var approvedDraftLink by remember { mutableStateOf<com.lingxi.code.navigation.DeepLink?>(null) }
     var routingDeepLink by remember { mutableStateOf(false) }
     val latestRequestedDeepLink by rememberUpdatedState(requestedDeepLink)
-    val latestScopeModeKey by rememberUpdatedState(sourceScope.sessionStateKey(activeSessionMode))
+    val latestScopeModeKey by rememberUpdatedState(sourceScope.persistenceKey())
     val latestSessionId by rememberUpdatedState(state.session.id.removePrefix("sess:"))
     androidx.compose.runtime.SideEffect {
         onDeepLinkBlockingChanged(linkedTargetError != null || linkedMessageUuid != null || draftLinkReview != null || routingDeepLink)
@@ -1649,13 +1659,17 @@ fun RootScreen(
                             val scheduled = if (targetScope == ConversationScope.Scheduled) cronState.generatedSessions.firstOrNull { it.projectId == null && it.sessionId?.removePrefix("sess:") == id.removePrefix("sess:") } else null
                             check(row != null || scheduled != null) { resources.getString(R.string.deep_link_conversation_workspace_missing) }
                             val storedMode = row?.mode ?: SessionMode.Code
-                            val mode = link.params["mode"]?.let { com.lingxi.code.model.sessionModeFromWireValue(it) } ?: storedMode
-                            check(mode == storedMode) { resources.getString(R.string.deep_link_mode_mismatch) }
+                            // A link may retain the mode at the time it was made.
+                            // The indexed session and current owner determine the mode now.
+                            val sameSession = targetScope == sourceScope && canonicalSessionId(state.session.id) == canonicalSessionId(id)
+                            val mode = if (sameSession) activeSessionMode else storedMode
                             scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
-                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), SessionRef(id, row?.title ?: scheduled?.prompt.orEmpty().take(120)), false, sessionModeOverride = mode)) { resources.getString(R.string.deep_link_busy) }
-                            setConversationMode(mode)
+                            if (!sameSession) {
+                                check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), SessionRef(id, row?.title ?: scheduled?.prompt.orEmpty().take(120)), false, sessionModeOverride = mode)) { resources.getString(R.string.deep_link_busy) }
+                                setConversationMode(mode)
+                            }
                             linkedSessionId = id.removePrefix("sess:")
-                            linkedScopeModeKey = targetScope.sessionStateKey(mode)
+                            linkedScopeModeKey = targetScope.persistenceKey()
                             linkedMessageSource = chatViewModel.engineSource.value
                             linkedMessageRequest += 1
                             linkedMessageUuid = link.params["message"]
@@ -1832,7 +1846,7 @@ fun RootScreen(
         val session = project.sessions.firstOrNull { it.sessionId == ref.id } ?: return
         val resumeTarget = SessionRef(session.sessionId, session.title)
         val targetScope = ConversationScope.Project(projectId)
-        if (sourceMatches(targetScope, session.mode)) {
+        if (sourceMatches(targetScope)) {
             drawerUi.selectSession(resumeTarget.id)
             chatViewModel.openSession(resumeTarget, empty = session.messageCount == 0)
             closeDrawer()
@@ -1858,22 +1872,22 @@ fun RootScreen(
     }
 
     /**
-     * Start a new conversation in [target] in [mode]. The mode is part of the
-     * engine binding, so a different mode (or workspace) rebinds the engine, and
-     * the conversation mode is then set explicitly. [carryDraft] moves what the
+     * Start a new conversation in [target] in [mode]. A workspace change
+     * rebinds the engine; a mode change keeps the current workspace source.
+     * [carryDraft] moves what the
      * user already typed into the destination's draft slot, which is keyed per
      * (workspace, mode), so picking a mode on the new-chat page keeps the text.
      */
     fun startNewSessionIn(
         target: ConversationScope,
-        mode: SessionMode = activeSessionMode,
+        mode: SessionMode = lastSelectedMode,
         carryDraft: Boolean = false,
     ) {
         val project = projectSnapshotForScope(target)
         if (target is ConversationScope.Project && project == null) return
         val carried = draft
-        if (sourceMatches(target, mode)) {
-            chatViewModel.startNewSession()
+        if (sourceMatches(target)) {
+            startCurrentScopeSession(mode)
             closeDrawer()
             closeProjectPages()
         } else {
@@ -1899,8 +1913,8 @@ fun RootScreen(
         }
     }
 
-    /** Start a new conversation in a project, in [mode] (default: the current mode). */
-    fun startProjectSession(projectId: String, mode: SessionMode = activeSessionMode) =
+    /** Start a new conversation in a project, in the last explicitly selected mode. */
+    fun startProjectSession(projectId: String, mode: SessionMode = lastSelectedMode) =
         startNewSessionIn(ConversationScope.Project(projectId), mode)
 
     fun openAppAuthoring(appId: String?, name: String, createdDirectory: String) {
@@ -2028,7 +2042,7 @@ fun RootScreen(
                             val row = globalDrawerSessions.rows.firstOrNull { it.uuid == ref.id }
                             val targetMode = row?.mode ?: activeSessionMode
                             val targetScope = ConversationScope.Global
-                            val switched = if (sourceMatches(targetScope, targetMode)) {
+                            val switched = if (sourceMatches(targetScope)) {
                                 drawerUi.selectSession(ref.id)
                                 chatViewModel.openSession(ref, empty = row?.messageCount == 0)
                                 true
@@ -2070,7 +2084,7 @@ fun RootScreen(
                                 // the global scope — a Project
                                 // scope must rebind first, or the session would
                                 // resume against the wrong cwd.
-                                if (sourceMatches(targetScope, row.mode)) {
+                                if (sourceMatches(targetScope)) {
                                     drawerUi.selectSession(uuid)
                                     chatViewModel.resumeSession(row)
                                     closeDrawer()
@@ -2214,9 +2228,9 @@ fun RootScreen(
                             // it shows up in the recents and matches the workspace
                             // the new-chat bar names.
                             if (sourceScope == ConversationScope.Scheduled) {
-                                startNewSessionIn(newChatScope, activeSessionMode)
+                                startNewSessionIn(newChatScope)
                             } else {
-                                chatViewModel.startNewSession()
+                                startCurrentScopeSession(lastSelectedMode)
                             }
                         }
                     },
@@ -2228,10 +2242,10 @@ fun RootScreen(
                     onOpenSessionPanel = { sessionPanelOpen = true },
                     onOpenSideChats = if (chatViewModel.supportsSideChats) chatViewModel::openSideChats else null,
                     onSelectNewChatMode = { mode ->
-                        if (mode != activeSessionMode) {
-                            startNewSessionIn(newChatScope, mode, carryDraft = true)
-                        }
+                        selectSessionMode(mode)
                     },
+                    modeSelectionEnabled = currentEngineSource.supportsSessionModeChanges &&
+                        (state.sessionReady || state.awaitingNewSessionMode) && !state.sessionTransitioning,
                     onPickWorkspace = { workspacePickerOpen = true },
                     onOpenDrawer = { scope.launch { drawerState.open() } },
                     // Ordinary mic and Flow Mode are separate controls.
@@ -2304,11 +2318,16 @@ fun RootScreen(
                     onDraftChange = {
                         draft = it
                         val active = sourceScope
+                        val mode = activeSessionMode
+                        val pending = state.pendingSessionMode
                         scope.launch {
                             scopeStore.persistDraft(
-                                active.sessionStateKey(activeSessionMode),
+                                active.sessionStateKey(mode),
                                 it,
                             )
+                            if (pending != null && pending != mode) {
+                                scopeStore.persistDraft(active.sessionStateKey(pending), it)
+                            }
                         }
                         // Keep only the legacy Code slot mirrored for old
                         // process-state restores; mode-scoped storage above
@@ -2426,7 +2445,12 @@ fun RootScreen(
                     crons = drawerProductionData.crons.orEmpty().filter { it.id.startsWith("${shown.id}:") },
                     activeSession = drawerUi.activeSession,
                     onBack = { projectPageId = null },
-                    onNewSession = { mode -> startProjectSession(shown.id, mode ?: activeSessionMode) },
+                    onNewSession = { mode ->
+                        if (mode != null) {
+                            rememberModeSelection(mode)
+                        }
+                        startProjectSession(shown.id, mode ?: lastSelectedMode)
+                    },
                     onOpenSession = { ref -> openProjectSession(shown.id, ref) },
                     onOpenCron = { taskKey ->
                         markCronResultsSeen()
@@ -2516,6 +2540,8 @@ fun RootScreen(
                 model = SessionPanelModel(
                     title = state.session.title,
                     mode = activeSessionMode,
+                    pendingMode = state.pendingSessionMode,
+                    canSwitchMode = currentEngineSource.supportsSessionModeChanges && (state.sessionReady || state.awaitingNewSessionMode) && !state.sessionTransitioning,
                     workspaceName = currentWorkspaceName,
                     modelName = state.model.name,
                     effortLabel = state.reasoning?.let { effortLabel(it.selection) },
@@ -2524,7 +2550,8 @@ fun RootScreen(
                     canArchive = sourceScope != ConversationScope.Scheduled,
                 ),
                 onDismiss = { sessionPanelOpen = false },
-                // Changing a conversation's mode forks it into a new session.
+                onSelectMode = ::selectSessionMode,
+                // Fork remains an explicit, separate action.
                 onContinueInOtherMode = {
                     sessionPanelOpen = false
                     scope.launch { continueSessionInMode(sourceScope, panelRow, otherMode) }
@@ -2556,7 +2583,7 @@ fun RootScreen(
                     val projectId = (sourceScope as? ConversationScope.Project)?.projectId
                     scope.launch {
                         runCatching { projectStore.setSessionArchived(projectId, id, true) }
-                            .onSuccess { chatViewModel.startNewSession() }
+                            .onSuccess { startCurrentScopeSession(lastSelectedMode) }
                             .onFailure {
                                 chatViewModel.reportHostError(
                                     resources.getString(R.string.session_index_save_failed_fmt, it.message.orEmpty()),
@@ -2617,7 +2644,7 @@ fun RootScreen(
                 },
                 onPick = { target ->
                     workspacePickerOpen = false
-                    if (target != newChatScope) startNewSessionIn(target, activeSessionMode, carryDraft = true)
+                    if (target != newChatScope) startNewSessionIn(target, lastSelectedMode, carryDraft = true)
                 },
             )
         }

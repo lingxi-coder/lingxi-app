@@ -715,6 +715,8 @@ mod tests {
             session_id: "current-session".into(),
             profile_name: Some("current-profile".into()),
             account_scope: Some("profile:current-profile".into()),
+            conversation_mode: lingxi_core::host::session_context::SessionModeSnapshot::default(),
+            conversation_profile_epoch: 0,
             instructions: String::new(),
             history: vec![],
             tools: vec![],

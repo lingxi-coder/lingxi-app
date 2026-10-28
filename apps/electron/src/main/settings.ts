@@ -438,6 +438,18 @@ export class SettingsStore {
     }
   }
 
+  /** New chats inherit the last conversation mode selected on this device. */
+  getLastSessionMode(): 'chat' | 'code' {
+    return this.settings.lastSessionMode ?? 'code';
+  }
+
+  setLastSessionMode(mode: 'chat' | 'code'): void {
+    if (mode !== 'chat' && mode !== 'code') throw new Error('invalid session mode');
+    const previous = this.settings;
+    this.settings = { ...previous, lastSessionMode: mode };
+    try { this.persist(); } catch (error) { this.settings = previous; throw error; }
+  }
+
   /** Return the last explicitly selected Fast mode state, if any. */
   getLastFastMode(): boolean | undefined {
     return this.settings.fastMode;

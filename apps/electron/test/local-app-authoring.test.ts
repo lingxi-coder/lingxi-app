@@ -26,14 +26,15 @@ test('Desktop authoring resolves only the real Code session cwd matching its sel
   assert.deepEqual(result, { sourceDirectory: canonicalPath, projectRef: { kind: 'desktopPath', path: canonicalPath }, authoringSessionId: sessionId });
 });
 
-test('Desktop authoring rejects chat sessions and Code sessions whose cwd differs from the source Project', async t => {
+test('Desktop authoring accepts either mode while enforcing the source Project cwd', async t => {
   const projectPath = await directory(t, 'project');
   const otherPath = await directory(t, 'other');
-  await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => ({ uuid: sessionId, mode: 'chat', workspace_path: projectPath } as never) },
-    { projectPath, sessionId }), /Code session/);
+  const chat = await resolveDesktopAuthoringBinding({ find: async () => ({ uuid: sessionId, mode: 'chat', workspace_path: projectPath } as never) },
+    { projectPath, sessionId });
+  assert.equal(chat.sourceDirectory, await fs.realpath(projectPath));
   await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => ({ uuid: sessionId, mode: 'code', workspace_path: otherPath } as never) },
-    { projectPath, sessionId }), /dedicated Code Project cwd/);
-  await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => undefined }, { projectPath, sessionId }), /Code session/);
+    { projectPath, sessionId }), /dedicated Project cwd/);
+  await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => undefined }, { projectPath, sessionId }), /session/);
 });
 
 test('a host-created Code draft binds before its first prompt persists a catalog row', async t => {
@@ -45,17 +46,18 @@ test('a host-created Code draft binds before its first prompt persists a catalog
   assert.deepEqual(result, { sourceDirectory: canonicalPath, projectRef: { kind: 'desktopPath', path: canonicalPath }, authoringSessionId: sessionId });
 });
 
-test('unpersisted chat drafts, unrelated locators and mismatched engine cwd cannot bind', async t => {
+test('unpersisted drafts in either mode bind only the matching locator and cwd', async t => {
   const projectPath = await directory(t, 'project');
   const otherPath = await directory(t, 'other');
   const noCatalogRow = { find: async () => undefined };
   const locator = { projectPath, sessionId };
   const codeDraft = { projectPath, sessionId, mode: 'code' as const, engineCwd: projectPath };
-  await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, mode: 'chat' }), /Code session/);
-  await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }), /Code session/);
-  await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, projectPath: otherPath }), /dedicated Code Project cwd/);
-  await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, engineCwd: otherPath }), /dedicated Code Project cwd/);
-  await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator), /Code session/);
+  const chat = await resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, mode: 'chat' });
+  assert.equal(chat.authoringSessionId, sessionId);
+  await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }), /session/);
+  await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, projectPath: otherPath }), /dedicated Project cwd/);
+  await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator, { ...codeDraft, engineCwd: otherPath }), /dedicated Project cwd/);
+  await assert.rejects(resolveDesktopAuthoringBinding(noCatalogRow, locator), /session/);
 });
 
 test('a persisted invalid or mismatched row cannot fall back to a live draft', async t => {
@@ -64,14 +66,14 @@ test('a persisted invalid or mismatched row cannot fall back to a live draft', a
   const liveDraft = { projectPath, sessionId, mode: 'code' as const, engineCwd: projectPath };
   const locator = { projectPath, sessionId };
   await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => ({
-    uuid: sessionId, mode: 'chat', workspace_path: projectPath,
-  } as never) }, locator, liveDraft), /Code session/);
+    uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', mode: 'chat', workspace_path: projectPath,
+  } as never) }, locator, liveDraft), /session/);
   await assert.rejects(resolveDesktopAuthoringBinding({ find: async () => ({
     uuid: sessionId, mode: 'code', workspace_path: otherPath,
-  } as never) }, locator, liveDraft), /dedicated Code Project cwd/);
+  } as never) }, locator, liveDraft), /dedicated Project cwd/);
 });
 
-test('only the exact active connected Code draft runtime can supply a missing catalog row', () => {
+test('only the exact active connected draft runtime can supply a missing catalog row', () => {
   const ref = { projectPath: '/project', sessionId };
   const runtime = { ...ref, sessionMode: 'code' as const, engineWorkspacePath: '/project', connectionState: { status: 'connected' } } as never;
   assert.deepEqual(resolveActiveDraftSession(ref, ref, ref, runtime, sessionId), {
@@ -80,7 +82,7 @@ test('only the exact active connected Code draft runtime can supply a missing ca
   assert.equal(resolveActiveDraftSession(ref, undefined, ref, runtime, sessionId), undefined);
   assert.equal(resolveActiveDraftSession(ref, ref, undefined, runtime, sessionId), undefined);
   assert.equal(resolveActiveDraftSession(ref, ref, ref, undefined, sessionId), undefined);
-  assert.equal(resolveActiveDraftSession(ref, ref, ref, { ...runtime, sessionMode: 'chat' }, sessionId), undefined);
+  assert.deepEqual(resolveActiveDraftSession(ref, ref, ref, { ...runtime, sessionMode: 'chat' }, sessionId), { ...ref, mode: 'chat', engineCwd: '/project' });
   assert.equal(resolveActiveDraftSession(ref, ref, ref, { ...runtime, sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }, sessionId), undefined);
   assert.equal(resolveActiveDraftSession(ref, ref, ref, { ...runtime, engineWorkspacePath: undefined }, sessionId), undefined);
   assert.equal(resolveActiveDraftSession(ref, ref, ref, { ...runtime, connectionState: { status: 'idle' } }, sessionId), undefined);

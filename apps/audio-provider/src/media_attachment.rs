@@ -108,6 +108,13 @@ impl AppMediaConversationAttachment {
             session_id: context.session_id.clone(),
             profile_name: context.profile_name.clone(),
             account_scope: context.account_scope.clone(),
+            // This is a route-capability probe, never an admitted Agent query.
+            // request_from_snapshot reads identity/configuration, not behavior.
+            conversation_mode: lingxi_core::host::session_context::SessionModeSnapshot {
+                session_id: context.session_id.clone(),
+                ..Default::default()
+            },
+            conversation_profile_epoch: 0,
             instructions: String::new(),
             history: Vec::new(),
             tools: Vec::new(),

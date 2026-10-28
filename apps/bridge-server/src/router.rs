@@ -87,6 +87,7 @@ use command_api::registry::CommandRegistry;
 use lingxi_core::host::auth::{AuthHandle, LoginInfo};
 use lingxi_core::host::orchestrator::HandleError;
 use lingxi_core::host::orchestrator::OrchestratorHandle;
+use lingxi_core::host::session_context::{ConversationMode, SessionModeSnapshot};
 use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
 use lingxi_core::host::SlashCommandDispatcher;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -95,6 +96,34 @@ use tokio_util::sync::CancellationToken;
 
 use crate::mcp_bridge::McpPaths;
 use crate::settings_bridge::SettingsContext;
+
+fn lower_conversation_mode(mode: ConversationMode) -> SessionModeDto {
+    match mode {
+        ConversationMode::Chat => SessionModeDto::Chat,
+        ConversationMode::Code => SessionModeDto::Code,
+    }
+}
+
+fn conversation_mode_event(snapshot: SessionModeSnapshot) -> ClientEvent {
+    ClientEvent::SessionModeChanged {
+        session_id: snapshot.session_id,
+        mode: lower_conversation_mode(snapshot.active),
+        pending_mode: snapshot
+            .pending
+            .then(|| lower_conversation_mode(snapshot.selected)),
+        revision: snapshot.revision,
+    }
+}
+
+fn replayed_conversation_mode(replayed: &orchestrator::ReplayedSession) -> ConversationMode {
+    replayed
+        .transcript_metadata
+        .iter()
+        .find(|row| row.string_at("/type") == Some("session-mode"))
+        .and_then(|row| row.string_at("/sessionMode"))
+        .and_then(ConversationMode::from_str)
+        .unwrap_or_default()
+}
 
 /// Default number of recent sessions returned when `ListSessions` omits its
 /// explicit limit. This matches the CLI `/resume` picker and the mobile host.
@@ -736,6 +765,7 @@ impl EngineCommandRouter {
             workspace.discard_cold_resume();
         }
         let resume_plan_mode = replayed.state.plan_mode;
+        let resumed_mode = replayed_conversation_mode(&replayed);
         let previous_session_id = self.handle.current_session_id().await;
         let previous_permission_mode = self
             .handle
@@ -786,6 +816,10 @@ impl EngineCommandRouter {
             }
             return Err(format!("resume_session failed: {error}"));
         }
+        self.handle
+            .restore_conversation_mode(resumed_mode)
+            .await
+            .map_err(|error| format!("restore conversation mode failed: {error}"))?;
         if let Some(workspace) = &self.workspace_commands {
             workspace.session_facts().reset(true);
             // Owned resume may append deferred tool results. Publish them with
@@ -822,12 +856,14 @@ impl EngineCommandRouter {
         sink: Arc<dyn ClientEventSink>,
     ) {
         self.refresh_media_cloud_audio_binding().await;
+        let mode = self.handle.conversation_mode().await;
         sink.emit(ClientEvent::SessionResumed {
             session_id: uuid.to_string(),
-            mode: SessionModeDto::Code,
+            mode: lower_conversation_mode(mode.active),
             messages,
         })
         .await;
+        sink.emit(conversation_mode_event(mode)).await;
         if let Some(usage) = restored_usage {
             sink.emit(client::adapter::lowering::lower_current_usage(usage))
                 .await;
@@ -1234,6 +1270,10 @@ impl CommandRouter for EngineCommandRouter {
             .ok_or("resume_selected_session requires an absolute transcript_path")?;
         if let Some(workspace) = &self.workspace_commands {
             if let Some(proof) = workspace.complete_cold_resume(id, &path).await? {
+                self.handle
+                    .restore_conversation_mode(proof.mode)
+                    .await
+                    .map_err(|error| format!("restore conversation mode failed: {error}"))?;
                 self.emit_resumed_session(id, proof.messages, proof.current_usage, None, sink)
                     .await;
                 return Utf16JsonProjection::parse(r#"{"status":"ok"}"#)
@@ -2025,6 +2065,40 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Permission mode ────────────────────────────────────────────
+            ClientCommand::SetSessionMode { mode } => {
+                let mode = match mode {
+                    SessionModeDto::Chat => ConversationMode::Chat,
+                    SessionModeDto::Code => ConversationMode::Code,
+                };
+                match self.handle.set_conversation_mode(mode).await {
+                    Ok(snapshot) => sink.emit(conversation_mode_event(snapshot)).await,
+                    Err(error) => {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: format!("set_session_mode failed: {error}").into(),
+                        })
+                        .await
+                    }
+                }
+            }
+            ClientCommand::GetContextManifest => {
+                let manifest = self.handle.context_manifest().await;
+                match serde_json::to_string(&manifest) {
+                    Ok(manifest_json) => {
+                        sink.emit(conversation_mode_event(manifest.session)).await;
+                        sink.emit(ClientEvent::ContextManifest { manifest_json })
+                            .await;
+                    }
+                    Err(error) => {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: format!("context manifest serialization failed: {error}")
+                                .into(),
+                        })
+                        .await
+                    }
+                }
+            }
             ClientCommand::SetPermissionMode { mode } => {
                 match self.handle.set_permission_mode(&mode).await {
                     Ok(()) => {
@@ -2572,12 +2646,13 @@ impl CommandRouter for EngineCommandRouter {
                 let _ = self.restore_persisted_reasoning_selection().await;
 
                 self.refresh_media_cloud_audio_binding().await;
-                let session_id = self.handle.current_session_id().await.to_string();
+                let mode = self.handle.conversation_mode().await;
                 sink.emit(ClientEvent::SessionStarted {
-                    session_id,
-                    mode: SessionModeDto::Code,
+                    session_id: mode.session_id.clone(),
+                    mode: lower_conversation_mode(mode.active),
                 })
                 .await;
+                sink.emit(conversation_mode_event(mode)).await;
                 if let Some(message) = presence_warning {
                     sink.emit(ClientEvent::SystemNotice {
                         message: message.into(),

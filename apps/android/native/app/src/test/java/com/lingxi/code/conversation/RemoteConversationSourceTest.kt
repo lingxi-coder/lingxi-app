@@ -82,6 +82,14 @@ class RemoteConversationSourceTest {
         assertFalse(readiness.ready)
     }
 
+    @Test fun snapshotPreservesRemoteChatModeAndLiveModeEvents() {
+        val snapshot = mapper.map(remoteUpdate(replace = true, sessionMode = com.lingxi.code.bindings.client.SessionModeDto.CHAT))
+        assertEquals(com.lingxi.code.model.SessionMode.Chat, snapshot.filterIsInstance<ExternalFeedItem.Base>().single().session.mode)
+        val event = ClientEvent.SessionModeChanged("s1", com.lingxi.code.bindings.client.SessionModeDto.CODE, null, 1uL)
+        val live = mapper.map(remoteUpdate(records = listOf(RemoteRecordFfi.Event(event, false))))
+        assertTrue(live.any { it is ExternalFeedItem.Event && it.event == event })
+    }
+
     @Test fun metaFieldsFollowTheRecordsSoTheyWin() {
         val items = mapper.map(
             remoteUpdate(

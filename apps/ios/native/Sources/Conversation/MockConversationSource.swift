@@ -15,7 +15,7 @@ import harness_runtimeFFI
 @MainActor
 final class MockConversationSource: ConversationSource {
     let model = ConversationModel(messages: MockData.messagesDefault)
-    let sessionMode: SessionMode
+    var sessionMode: SessionMode { model.sessionMode }
     private var cannedReplyDelay: TimeInterval = 1.1
     #if canImport(harness_runtimeFFI)
         private var mockProviderCatalog: [ProviderCatalogEntry] = []
@@ -30,7 +30,12 @@ final class MockConversationSource: ConversationSource {
     private var turnSpeechSequence: UInt64 = 0
 
     init(sessionMode: SessionMode = .code) {
-        self.sessionMode = sessionMode
+        model.sessionMode = sessionMode
+    }
+
+    func setSessionMode(_ mode: SessionMode) {
+        model.sessionMode = mode
+        model.pendingSessionMode = nil
     }
 
     #if DEBUG

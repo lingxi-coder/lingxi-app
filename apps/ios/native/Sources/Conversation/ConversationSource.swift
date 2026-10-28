@@ -33,8 +33,11 @@ protocol ConversationSource: AnyObject {
     var hasLiveSideChats: Bool { get }
     /// Capability profile for this source instance.
     var sessionMode: SessionMode { get }
+    /// Request a mode for this same conversation; the engine confirms when it applies.
+    func setSessionMode(_ mode: SessionMode)
     /// Begin a fresh, empty conversation (the "edit / new chat" affordance).
     func startNewConversation()
+    func startNewConversation(mode: SessionMode)
     func updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Bool, pendingPermission: Bool)
     func promptSuggestionFeedback(sessionId: String, uuid: String, action: String)
     /// Submit a user prompt. Appends the user message, flips `streaming`, and
@@ -196,6 +199,11 @@ extension ConversationSource {
     func updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Bool, pendingPermission: Bool) {}
     func promptSuggestionFeedback(sessionId: String, uuid: String, action: String) {}
     var sessionMode: SessionMode { .code }
+    func setSessionMode(_ mode: SessionMode) {}
+    func startNewConversation(mode: SessionMode) {
+        startNewConversation()
+        setSessionMode(mode)
+    }
     var isTemporaryConversation: Bool { false }
     var hasLiveSideChats: Bool { false }
 

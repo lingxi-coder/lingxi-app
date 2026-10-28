@@ -2,6 +2,24 @@ import XCTest
 @testable import LingxiCode
 
 final class ProjectScopedPreferencesTests: XCTestCase {
+    func testResumingDifferentModeInSameWorkspaceKeepsTheSource() {
+        XCTAssertTrue(reusesConversationSource(currentScope: .project("a"), targetScope: .project("a"),
+                                               currentMode: .code, targetMode: .chat, startsNew: false, resumesSession: true))
+        XCTAssertFalse(reusesConversationSource(currentScope: .project("a"), targetScope: .project("b"),
+                                                currentMode: .code, targetMode: .chat, startsNew: false, resumesSession: true))
+    }
+    func testLastModeDefaultsToCodeAndPersistsTheSelection() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        XCTAssertEqual(preferences.lastMode(), .code)
+        preferences.setLastMode(.chat)
+        XCTAssertEqual(ProjectScopedPreferences(defaults: defaults).lastMode(), .chat)
+        preferences.setCurrentMode(.code)
+        XCTAssertEqual(preferences.currentMode(), .code)
+        XCTAssertEqual(preferences.lastMode(), .chat)
+    }
     #if DEBUG
     func testUITestSessionsAndDraftsCannotOverwriteUserPreferences() {
         let appSuite = "ProjectScopedPreferencesTests.app.\(UUID().uuidString)"

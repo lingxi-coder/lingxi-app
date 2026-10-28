@@ -107,6 +107,8 @@ export interface PersistedSettings {
   lastPermissionMode?: PermissionModeId;
   /** Last user-selected fast-mode state on this device. */
   fastMode?: boolean;
+  /** Last explicitly selected conversation mode, used for new chats. */
+  lastSessionMode?: 'chat' | 'code';
   /** Whether this computer accepts Remote Control connections. Off until the user turns it on. */
   remoteControlEnabled?: boolean;
   /** The sessions viewers may see and drive (`/remote-control`, or the session menu's switch). */
@@ -226,6 +228,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
   if (isPermissionModeId(value['lastPermissionMode'])) {
     settings.lastPermissionMode = value['lastPermissionMode'];
+  }
+  if (value['lastSessionMode'] === 'chat' || value['lastSessionMode'] === 'code') {
+    settings.lastSessionMode = value['lastSessionMode'];
   }
   if (typeof value['fastMode'] === 'boolean') {
     settings.fastMode = value['fastMode'];

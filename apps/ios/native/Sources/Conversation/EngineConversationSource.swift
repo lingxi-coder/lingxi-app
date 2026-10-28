@@ -36,7 +36,12 @@ final class EngineConversationSource: ConversationSource {
     ) throws -> MobileEngineHandle
 
     let model: ConversationModel
-    let sessionMode: SessionMode
+    var sessionMode: SessionMode { model.sessionMode }
+    private var bufferedModeEvent: (sessionID: String, mode: SessionMode, pending: SessionMode?, revision: UInt64)?
+    private var modeOwnerSessionID = ""
+    private var modeRequestTask: Task<Void, Never>?
+    private var pendingNewConversationMode: SessionMode?
+    private var requiredNewSessionMode: (sessionID: String, mode: SessionMode)?
 
     private let isRemoteProjection: Bool
     private let config: EngineConfig
@@ -208,7 +213,6 @@ final class EngineConversationSource: ConversationSource {
     ) {
         self.isRemoteProjection = remoteProjection
         self.config = config
-        sessionMode = config.sessionMode
         self.mediaHostComposition = mediaHostComposition
         self.durableTurns = (memoryOnly || remoteProjection) ? nil : DurableConversationTurnClientStore(config: config)
         self.handleBuilder = handleBuilder
@@ -222,6 +226,8 @@ final class EngineConversationSource: ConversationSource {
             messages: [],
             model: MockData.models.first(where: { $0.id == config.model })
                 ?? MockData.models[0], persistDisclosures: !(memoryOnly || remoteProjection))
+        self.model.sessionMode = config.sessionMode
+        self.model.sessionModeKnown = !remoteProjection
         // Out-of-band model state: the configured id (empty ⇒ engine default,
         // filled by the first `ModelList`). Never a branded mock id here.
         self.model.activeModelId = config.model
@@ -276,7 +282,12 @@ final class EngineConversationSource: ConversationSource {
         // Desktop lifecycle is already represented by the snapshot. Never let
         // its local session IDs/configuration drive the phone's engine.
         switch event {
-        case .sessionStarted, .sessionResumed, .sessionEnded, .turnRecoveryState:
+        case let .sessionStarted(sessionId, mode), let .sessionResumed(sessionId, mode, _):
+            guard sessionId == model.activeSessionId else { return }
+            if model.sessionModeRevision == nil { model.sessionMode = SessionMode(dto: mode) }
+            model.sessionModeKnown = true
+            return
+        case .sessionEnded, .turnRecoveryState:
             return
         case let .slashCommandResult(turnID, display, isError):
             // Configuration commands can finish while a different desktop turn
@@ -294,6 +305,10 @@ final class EngineConversationSource: ConversationSource {
 
     func reconcileRemoteState(_ update: RemoteSessionUpdateFfi) {
         precondition(isRemoteProjection)
+        if update.sessionId == model.activeSessionId, let mode = update.sessionMode {
+            model.sessionMode = SessionMode(dto: mode)
+            model.sessionModeKnown = true
+        }
         model.pendingPermissions = update.pending.permissions.map { request in
             var request = request
             request.suppressAlwaysAllowRule = true
@@ -368,6 +383,12 @@ final class EngineConversationSource: ConversationSource {
             transitionOperationID: transitionOperationID,
             isNew: true
         )
+    }
+
+    func startNewConversation(mode: SessionMode) {
+        pendingNewConversationMode = mode
+        startNewConversation()
+        if pendingSessionTransition != .new { pendingNewConversationMode = nil }
     }
 
     /// Creates an ordinary authoring session with an explicit guest cwd. The
@@ -454,6 +475,9 @@ final class EngineConversationSource: ConversationSource {
                 }
                 self.resetTranscriptForSessionSwitch(isNew: isNew)
             }
+            // A mode command targets the engine's current session. Let an
+            // already-submitted request finish before replacing that owner.
+            await self.modeRequestTask?.value
             guard self.activeSessionTransitionOperationID == transitionOperationID else {
                 return
             }
@@ -547,12 +571,16 @@ final class EngineConversationSource: ConversationSource {
         model.sessionTransitionPending = transition != nil
         if transition == nil {
             activeSessionTransitionOperationID = nil
+            pendingNewConversationMode = nil
         }
     }
 
     private func beginSessionTransition(
         _ transition: PendingSessionTransition
     ) -> UInt64 {
+        requiredNewSessionMode = nil
+        model.awaitingNewSessionMode = false
+        model.newSessionModeFailed = false
         let operationID = nextSessionTransitionOperationID
         nextSessionTransitionOperationID &+= 1
         activeSessionTransitionOperationID = operationID
@@ -1433,6 +1461,7 @@ final class EngineConversationSource: ConversationSource {
             !model.isCancelling,
             !model.slashCommandPending,
             !model.sessionTransitionPending,
+            !model.awaitingNewSessionMode,
             pauseAcknowledgements.isEmpty,
             unresolvedRecoveryTurnID == nil,
             !model.isSelectedAgentReadOnly
@@ -3245,6 +3274,36 @@ final class EngineConversationSource: ConversationSource {
         model.controlsError = nil
     }
 
+    private func applySessionMode(_ value: (sessionID: String, mode: SessionMode, pending: SessionMode?, revision: UInt64)) {
+        guard acceptsSessionModeRevision(previous: model.sessionModeRevision, previousPending: model.pendingSessionMode,
+                                         incoming: value.revision, incomingPending: value.pending) else { return }
+        model.sessionModeRevision = value.revision
+        model.sessionMode = value.mode
+        model.sessionModeKnown = true
+        model.pendingSessionMode = value.pending
+        if let required = requiredNewSessionMode, required.sessionID == value.sessionID,
+           required.mode == value.mode, value.pending == nil {
+            requiredNewSessionMode = nil
+            model.awaitingNewSessionMode = false
+            model.newSessionModeFailed = false
+        }
+    }
+
+    private func confirmSessionMode(sessionId: String, mode: SessionMode) {
+        if modeOwnerSessionID != sessionId {
+            modeOwnerSessionID = sessionId
+            model.sessionModeRevision = nil
+            model.pendingSessionMode = nil
+            model.sessionMode = mode
+        } else if model.sessionModeRevision == nil {
+            model.sessionMode = mode
+        }
+        if let value = bufferedModeEvent, value.sessionID == sessionId {
+            bufferedModeEvent = nil
+            applySessionMode(value)
+        }
+    }
+
     /// Map one inbound `ClientEvent` onto the published state.
     func apply(_ event: ClientEvent) {
         guard !sideEnded else { return }
@@ -4323,6 +4382,29 @@ final class EngineConversationSource: ConversationSource {
                 messageIndex: row.messageIndex
             )
 
+        case let .sessionModeChanged(sessionId, mode, pendingMode, revision):
+            let value = (sessionID: sessionId, mode: SessionMode(dto: mode),
+                         pending: pendingMode.map(SessionMode.init(dto:)), revision: revision)
+            if model.activeSessionId.isEmpty && !model.sessionTransitionPending {
+                // A fresh engine has an owner before it emits SessionStarted.
+                // This event identifies it without replacing any transcript.
+                model.activeSessionId = sessionId
+                hasConfirmedSessionState = true
+                confirmSessionMode(sessionId: sessionId, mode: value.mode)
+                applySessionMode(value)
+            } else if sessionId == model.activeSessionId && !model.sessionTransitionPending {
+                applySessionMode(value)
+            } else if model.activeSessionId.isEmpty || model.sessionTransitionPending {
+                if case let .resume(expected) = pendingSessionTransition, expected != sessionId { break }
+                if pendingSessionTransition == .new, !model.activeSessionId.isEmpty, model.activeSessionId == sessionId { break }
+                if let current = bufferedModeEvent, current.sessionID == sessionId,
+                   !acceptsSessionModeRevision(previous: current.revision, previousPending: current.pending,
+                                               incoming: revision, incomingPending: value.pending) {
+                    break
+                }
+                bufferedModeEvent = value
+            }
+
         case let .sessionStarted(sessionId, mode):
             if isSideChat {
                 model.activeSessionId = sessionId
@@ -4332,7 +4414,6 @@ final class EngineConversationSource: ConversationSource {
             model.promptSuggestion = nil
             model.promptSuggestionSourceCodeUnits = nil
             model.promptSuggestionUuid = nil
-            guard SessionMode(dto: mode) == sessionMode else { return }
             // A fresh session began on the connection (1:1 with a successful
             // `NewSession`). Adopt it as active. Reset the transcript ONLY
             // when this is genuinely a new id AND no turn is streaming — so an
@@ -4342,6 +4423,7 @@ final class EngineConversationSource: ConversationSource {
             // case; this confirms + adopts the engine-assigned id.
             let isSwitch = !sessionId.isEmpty && sessionId != model.activeSessionId
             let confirmedNewSession = pendingSessionTransition == .new
+            let requestedNewMode = confirmedNewSession ? pendingNewConversationMode : nil
             let hadVisibleTranscript = !model.items.isEmpty || !model.messages.isEmpty
             // Resume is confirmed only by SessionResumed, because that event
             // atomically carries the replacement transcript. A bootstrap
@@ -4367,6 +4449,12 @@ final class EngineConversationSource: ConversationSource {
                 resetTranscriptForSessionSwitch(isNew: true)
             }
             model.activeSessionId = sessionId
+            confirmSessionMode(sessionId: sessionId, mode: SessionMode(dto: mode))
+            if let requestedNewMode, requestedNewMode != model.sessionMode {
+                requiredNewSessionMode = (sessionID: sessionId, mode: requestedNewMode)
+                model.awaitingNewSessionMode = true
+                model.newSessionModeFailed = false
+            }
             hasConfirmedSessionState = true
             setPendingSessionTransition(nil)
             refreshAudioSessionContext()
@@ -4374,12 +4462,14 @@ final class EngineConversationSource: ConversationSource {
                 model.sessionRefreshRevision &+= 1
             }
             refreshSessionAgentsAfterTransition()
+            if let requestedNewMode, requestedNewMode != model.sessionMode {
+                setSessionMode(requestedNewMode)
+            }
 
         case let .sessionResumed(sessionId, mode, messages):
             model.promptSuggestion = nil
             model.promptSuggestionSourceCodeUnits = nil
             model.promptSuggestionUuid = nil
-            guard SessionMode(dto: mode) == sessionMode else { return }
             // A prior session was resumed (1:1 with a successful
             // `ResumeSession`). Adopt it as active AND surface the restored
             // transcript the engine just hot-loaded into the running
@@ -4395,6 +4485,7 @@ final class EngineConversationSource: ConversationSource {
             replayProjectionState = nil
             model.clearAgentState()
             model.activeSessionId = sessionId
+            confirmSessionMode(sessionId: sessionId, mode: SessionMode(dto: mode))
             hasConfirmedSessionState = true
             setPendingSessionTransition(nil)
             refreshAudioSessionContext()
@@ -4439,6 +4530,12 @@ final class EngineConversationSource: ConversationSource {
             // The current session ended (e.g. cleared). Drop the active id;
             // the next `SessionStarted`/`SessionResumed` re-establishes one.
             model.activeSessionId = ""
+            modeOwnerSessionID = ""
+            model.sessionModeRevision = nil
+            model.pendingSessionMode = nil
+            requiredNewSessionMode = nil
+            model.awaitingNewSessionMode = false
+            model.newSessionModeFailed = false
             hasConfirmedSessionState = false
             model.clearAgentState()
             model.backgroundTasks = []
@@ -5648,6 +5745,29 @@ final class EngineConversationSource: ConversationSource {
                 try await self.submitCommand(.setModel(model: id.clientTextDto))
             } catch {
                 self.model.controlsError = String(localized: "chat_switch_model_failed \(error)")
+            }
+        }
+    }
+
+    func setSessionMode(_ mode: SessionMode) {
+        guard !isSideChat, !isRemoteProjection, !model.sessionTransitionPending else { return }
+        if let required = requiredNewSessionMode {
+            requiredNewSessionMode = (sessionID: required.sessionID, mode: mode)
+            model.newSessionModeFailed = false
+        }
+        let previous = modeRequestTask
+        let requestedEpoch = sessionEpoch
+        modeRequestTask = Task { [weak self] in
+            await previous?.value
+            guard let self, self.sessionEpoch == requestedEpoch, !self.model.sessionTransitionPending else { return }
+            do {
+                try await self.submitCommand(.setSessionMode(mode: mode.dto))
+            } catch {
+                guard self.sessionEpoch == requestedEpoch, !self.model.sessionTransitionPending else { return }
+                if self.requiredNewSessionMode?.mode == mode {
+                    self.model.newSessionModeFailed = true
+                }
+                self.model.error = ConversationError(kind: .host, message: error.localizedDescription)
             }
         }
     }

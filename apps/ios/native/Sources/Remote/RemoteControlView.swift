@@ -208,6 +208,25 @@ private struct RemoteConnectionSection: View {
 }
 
 @MainActor
+private struct RemoteSessionModeLabel: View {
+    @ObservedObject var model: ConversationModel
+
+    var body: some View {
+        if model.sessionModeKnown {
+            VStack(spacing: 2) {
+                Text(model.sessionMode.title)
+                if let pending = model.pendingSessionMode {
+                    Text(String(localized: "session_mode_pending \(pending.title)"))
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(8)
+            .accessibilityIdentifier("remote.session-mode")
+        }
+    }
+}
+
 private struct RemoteSessionView: View {
     let title: String
     let manager: RemoteControlManager
@@ -229,6 +248,7 @@ private struct RemoteSessionView: View {
                     .font(.caption).foregroundStyle(.secondary).padding(8)
             }
             if source.hasOmittedContent { Text("remote_omitted_note").font(.caption).padding(8) }
+            RemoteSessionModeLabel(model: source.model)
             if source.computerAccessPending { Text("remote_computer_access_note").font(.caption).padding(8) }
             if source.answeredElsewhere { Text("remote_answered_elsewhere").font(.caption).padding(8) }
             if source.hasOlder {
@@ -239,7 +259,7 @@ private struct RemoteSessionView: View {
                 enabled: source.phase == .live && manager.connection?.transport == .webrtc)
                 .id("\(manager.uid ?? "")/\(source.hostID)/\(source.sessionID)")
             ChatView(session: SessionRef(id: source.sessionID, title: title), draft: $draft,
-                voiceInteraction: voice, source: source, workspaceName: title,
+                voiceInteraction: voice, source: source, sessionMode: source.sessionMode, workspaceName: title,
                 workspaceKey: ConversationScope.remote(hostID: source.hostID, sessionID: source.sessionID).workspaceKey)
                 .disabled(source.phase != .live)
                 .background {

@@ -463,40 +463,43 @@ pub(super) async fn mount_resumed_tui_inner(
                 return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
             }
         };
-    // ENGINE seed: replay the transcript into the orchestrator's session so a
-    // live turn continues the prior conversation.
-    let effective_permission_mode = match seed_orchestrator_session(
-        &tui_build.runtime.orchestrator,
-        session_id,
-        &messages,
-        tui_build.initial_permission_mode,
-        explicit_permission_mode,
-        resume_has_model_override(argv, tui_build.runtime.model_provenance),
-    )
-    .await
-    {
-        Ok(mode) => mode,
-        Err(error) => {
-            eprintln!("lingxi-cli: resume permission mode failed: {error}");
-            return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
-        }
+    let (messages, entries) = if let Some(captured) = tui_build.captured_resume.take() {
+        // Assembly mounted this exact claimed revision before startup hooks;
+        // reuse it for the UI and deferred replay without overwriting hook rows.
+        (captured.messages, captured.entries)
+    } else {
+        // A caller without a captured boot source uses the in-hand messages.
+        let effective_permission_mode = match seed_orchestrator_session(
+            &tui_build.runtime.orchestrator,
+            session_id,
+            &messages,
+            tui_build.initial_permission_mode,
+            explicit_permission_mode,
+            resume_has_model_override(argv, tui_build.runtime.model_provenance),
+        )
+        .await
+        {
+            Ok(mode) => mode,
+            Err(error) => {
+                eprintln!("lingxi-cli: resume permission mode failed: {error}");
+                return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+            }
+        };
+        tui_build.initial_permission_mode = effective_permission_mode;
+        let entries = match load_resume_entries(session_id).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("lingxi-cli: resume deferred tools failed: {error}");
+                return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+            }
+        };
+        tui_build
+            .runtime
+            .orchestrator
+            .restore_resume_prompt_metadata(&entries)
+            .await;
+        (messages, entries)
     };
-    tui_build.initial_permission_mode = effective_permission_mode;
-    let entries = match load_resume_entries(session_id).await {
-        Ok(entries) => entries,
-        Err(error) => {
-            eprintln!("lingxi-cli: resume deferred tools failed: {error}");
-            return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
-        }
-    };
-    // Restore off-chain prompt/skill metadata from the full routed entry set;
-    // usage and compaction counters were already restored from the normalized
-    // chain and must not be recomputed from preserved raw rows.
-    tui_build
-        .runtime
-        .orchestrator
-        .restore_resume_prompt_metadata(&entries)
-        .await;
     if let Err(error) = orchestrator::replay_deferred_tools_after_resume(
         &tui_build.runtime.orchestrator,
         orchestrator::deferred_tool_replays_from_messages(&entries),
@@ -1198,6 +1201,7 @@ pub(crate) async fn seed_orchestrator_session(
     session.virtual_user_messages = replayed.virtual_user_messages;
     session.transcript_only_messages = replayed.transcript_only_messages;
     session.compact_summary_messages = replayed.compact_summary_messages;
+    session.model_context_excluded_messages = replayed.model_context_excluded_messages;
     session.active_goal = replayed.active_goal;
     // A picker choice is durable before the next assistant response exists.
     // Explicit/configured boot selections therefore win over stale transcript
@@ -1216,6 +1220,10 @@ pub(crate) async fn seed_orchestrator_session(
         .sync_active_goal_stop_hook_for_current_state()
         .await;
     orchestrator.restore_resume_runtime_metadata(messages).await;
+    orchestrator
+        .restore_conversation_mode(lingxi_core::host::session_context::ConversationMode::Code)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(effective_permission_mode)
 }
 

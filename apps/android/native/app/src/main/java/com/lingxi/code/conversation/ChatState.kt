@@ -6,6 +6,7 @@ import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.SessionRef
+import com.lingxi.code.model.SessionMode
 
 /**
  * Immutable UI state for the conversation surface. Hoisted out of the
@@ -130,6 +131,11 @@ data class ChatState(
     val visualizationChip: VisualizationContextChip? = null,
     /** A widget's drafted follow-up, waiting for the composer to take it. */
     val visualizationFollowup: VisualizationFollowup? = null,
+    val sessionMode: SessionMode? = null,
+    val pendingSessionMode: SessionMode? = null,
+    val sessionModeRevision: ULong? = null,
+    val awaitingNewSessionMode: Boolean = false,
+    val newSessionModeFailed: Boolean = false,
 ) {
     /** True while a turn is in flight or a live executor is waiting for input. */
     val isStreaming: Boolean get() = streaming || liveTurnWaitingForUser

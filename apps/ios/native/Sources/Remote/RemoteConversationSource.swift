@@ -12,7 +12,7 @@ final class RemoteConversationSource: ConversationSource {
     let hostID: String
     let sessionID: String
     let uid: String
-    let sessionMode: SessionMode = .code
+    var sessionMode: SessionMode { model.sessionMode }
     let isTemporaryConversation = true
     var model: ConversationModel { projection.model }
     private(set) var phase: RemoteSessionPhaseFfi = .loading
@@ -96,6 +96,9 @@ final class RemoteConversationSource: ConversationSource {
         answeredElsewhere = update.answeredElsewhere
         computerAccessPending = !update.pending.computerAccess.isEmpty
         if update.replace {
+            model.sessionModeKnown = false
+            model.sessionModeRevision = nil
+            model.pendingSessionMode = nil
             imageEpoch &+= 1
             hasOmittedContent = false
             history = update.messages

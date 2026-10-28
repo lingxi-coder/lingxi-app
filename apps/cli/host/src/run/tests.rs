@@ -490,6 +490,16 @@ async fn seed_orchestrator_session_replays_history_and_id() {
             .unwrap(),
         )
         .unwrap();
+    virtual_user
+        .extra
+        .set_field(
+            "isModelContextExcluded",
+            harness_runtime::headless::Utf16JsonProjection::from_serde_value(&serde_json::json!(
+                true
+            ))
+            .unwrap(),
+        )
+        .unwrap();
     let virtual_id =
         lingxi_core::types::MessageId::from_uuid(Uuid::parse_str(&virtual_user.uuid).unwrap());
     let messages = vec![
@@ -517,6 +527,11 @@ async fn seed_orchestrator_session_replays_history_and_id() {
     );
     assert_eq!(s.history.len(), 3, "all transcript lines replayed");
     assert!(s.virtual_user_messages.contains(&virtual_id));
+    assert!(s.model_context_excluded_messages.contains(&virtual_id));
+    assert!(s
+        .model_context_history()
+        .iter()
+        .all(|row| row.id() != virtual_id));
     assert_eq!(s.real_user_turns(), 1);
     match &s.history[0] {
         lingxi_core::types::ConversationMessage::User { content, .. } => {

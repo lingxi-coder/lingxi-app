@@ -359,6 +359,9 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       if (result.durable === false) throw new Error('scheduled tasks must be durable');
       return { type, request_id, request: result };
     }
+    case 'set_session_mode':
+      exactKeys(input, ['type', 'mode']);
+      return { type, mode: enumValue(input['mode'], 'session mode', ['chat', 'code']) };
     case 'set_model':
       exactKeys(input, ['type', 'model']);
       return { type, model: string(input['model'], 'model', 256) };

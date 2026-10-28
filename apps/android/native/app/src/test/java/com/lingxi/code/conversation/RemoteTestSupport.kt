@@ -14,6 +14,7 @@ import com.lingxi.code.bindings.android.RemoteTurnFfi
 import com.lingxi.code.bindings.client.MessageBlockDto
 import com.lingxi.code.bindings.client.MessageDto
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
+import com.lingxi.code.bindings.client.SessionModeDto
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -30,8 +31,10 @@ internal fun remoteUpdate(
     outgoing: List<RemoteOutgoingPromptFfi> = emptyList(),
     hasOlder: Boolean = false,
     answeredElsewhere: Boolean = false,
+    sessionMode: SessionModeDto? = null,
 ) = RemoteSessionUpdateFfi(
     sessionId = sessionId,
+    sessionMode = sessionMode,
     phase = phase,
     error = null,
     replace = replace,

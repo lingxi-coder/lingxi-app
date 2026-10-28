@@ -2133,6 +2133,7 @@ export function useBridge(): UseBridge {
     await openSession(projectPath, sessionId);
   }, [activeSession?.projectPath, bootstrap?.settings.activeProject, host, openSession]);
 
+  const setSessionMode = useCallback((mode: 'chat' | 'code') => command({ type: 'set_session_mode', mode }), [command]);
   const setModel = useCallback((model: string) => command({ type: 'set_model', model }), [command]);
   const setReasoningSelection = useCallback((selection: ReasoningSelectionDto) => command({ type: 'set_reasoning_selection', selection }), [command]);
   const setFastMode = useCallback((enabled: boolean) => command({ type: 'set_fast_mode', enabled }), [command]);
@@ -2600,6 +2601,7 @@ export function useBridge(): UseBridge {
     refresh,
     newSession,
     resumeSession,
+    setSessionMode,
     setModel,
     setReasoningSelection,
     setFastMode,

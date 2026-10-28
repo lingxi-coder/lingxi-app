@@ -55,6 +55,143 @@ visionDelegationEnabled: true)
             ClientTextDto(codeUnits: Array(value.utf16))
         }
 
+        func testModeSwitchKeepsSessionAndTranscriptAndRejectsStaleEvents() {
+            let source = makeSource()
+            source.expectSessionResumeForTesting(uuid())
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [
+                MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: sourceText("hello"))])
+            ]))
+            let rows = source.model.messages
+            source.applyForTesting(.sessionModeChanged(sessionId: uuid(), mode: .code, pendingMode: .chat, revision: 1))
+            XCTAssertEqual(source.model.sessionMode, .code)
+            XCTAssertEqual(source.model.pendingSessionMode, .chat)
+            source.applyForTesting(.sessionModeChanged(sessionId: uuid(), mode: .chat, pendingMode: nil, revision: 1))
+            source.applyForTesting(.sessionModeChanged(sessionId: uuid(), mode: .code, pendingMode: .chat, revision: 1))
+            source.applyForTesting(.sessionModeChanged(sessionId: "other", mode: .code, pendingMode: nil, revision: 9))
+            XCTAssertEqual(source.model.sessionMode, .chat)
+            XCTAssertNil(source.model.pendingSessionMode)
+            XCTAssertEqual(source.model.activeSessionId, uuid())
+            XCTAssertEqual(source.model.messages.map(\.text), rows.map(\.text))
+        }
+
+        func testModeEventBeforeResumeIsAppliedToItsConfirmedOwner() {
+            let source = makeSource()
+            source.expectSessionResumeForTesting(uuid())
+            source.applyForTesting(.sessionModeChanged(sessionId: uuid(), mode: .chat, pendingMode: nil, revision: 4))
+            source.applyForTesting(.sessionModeChanged(sessionId: "old-session", mode: .code, pendingMode: nil, revision: 9))
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .chat, messages: []))
+            XCTAssertEqual(source.model.sessionMode, .chat)
+            XCTAssertEqual(source.model.sessionModeRevision, 4)
+        }
+
+        func testModeRequestSubmitsWithoutReplacingTheSession() async {
+            let source = makeSource()
+            source.beginTurnForTesting(sessionId: uuid())
+            let submitted = expectation(description: "mode command")
+            source.setCommandSubmitterForTesting { command in
+                guard case .setSessionMode(mode: .chat) = command else {
+                    return XCTFail("expected same-session mode command")
+                }
+                submitted.fulfill()
+            }
+            source.setSessionMode(.chat)
+            await fulfillment(of: [submitted], timeout: 1)
+            XCTAssertEqual(source.model.activeSessionId, uuid())
+            XCTAssertTrue(source.model.streaming)
+        }
+
+        func testNewSessionUsesExplicitDefaultWithoutReplacingTheSource() async {
+            let source = makeSource()
+            let selected = expectation(description: "new session mode command")
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case .newSession:
+                    source.applyForTesting(.sessionStarted(sessionId: self.uuid(), mode: .code))
+                case .setSessionMode(mode: .chat):
+                    selected.fulfill()
+                default:
+                    break
+                }
+            }
+            source.startNewConversation(mode: .chat)
+            await fulfillment(of: [selected], timeout: 1)
+            XCTAssertEqual(source.model.activeSessionId, uuid())
+            XCTAssertTrue(source.model.awaitingNewSessionMode)
+            XCTAssertNil(source.send("first prompt"))
+            XCTAssertTrue(source.model.messages.isEmpty)
+            source.applyForTesting(.sessionModeChanged(sessionId: uuid(), mode: .chat, pendingMode: nil, revision: 1))
+            XCTAssertFalse(source.model.awaitingNewSessionMode)
+            XCTAssertNotNil(source.send("first prompt"))
+        }
+
+        func testNewSessionModeFailureKeepsSendingBlockedUntilRetryConfirms() async {
+            let source = makeSource()
+            let failed = expectation(description: "mode request failed")
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case .newSession:
+                    source.applyForTesting(.sessionStarted(sessionId: self.uuid(), mode: .code))
+                case .setSessionMode(mode: .chat):
+                    failed.fulfill()
+                    throw NSError(domain: "mode-test", code: 1)
+                default:
+                    break
+                }
+            }
+            source.startNewConversation(mode: .chat)
+            await fulfillment(of: [failed], timeout: 1)
+            for _ in 0..<20 where !source.model.newSessionModeFailed { await Task.yield() }
+            XCTAssertTrue(source.model.newSessionModeFailed)
+            XCTAssertTrue(source.model.awaitingNewSessionMode)
+            XCTAssertNil(source.send("first prompt"))
+            let retry = expectation(description: "mode retry submitted")
+            source.setCommandSubmitterForTesting { command in
+                if case .setSessionMode(mode: .chat) = command { retry.fulfill() }
+            }
+            source.setSessionMode(.chat)
+            await fulfillment(of: [retry], timeout: 1)
+            source.applyForTesting(.sessionModeChanged(sessionId: uuid(), mode: .chat, pendingMode: nil, revision: 1))
+            XCTAssertFalse(source.model.awaitingNewSessionMode)
+        }
+
+        func testAnOldModeFailureDoesNotFailTheNextSession() async {
+            let source = makeSource()
+            source.applyForTesting(.sessionStarted(sessionId: "old-session", mode: .code))
+            let firstStarted = expectation(description: "old mode request started")
+            let newStarted = expectation(description: "new session started")
+            let nextStarted = expectation(description: "new mode request started")
+            var release: CheckedContinuation<Void, Never>?
+            var requests = 0
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case .setSessionMode(mode: .chat):
+                    requests += 1
+                    if requests == 1 {
+                        firstStarted.fulfill()
+                        await withCheckedContinuation { release = $0 }
+                        throw NSError(domain: "old-mode-test", code: 1)
+                    }
+                    nextStarted.fulfill()
+                case .newSession:
+                    source.applyForTesting(.sessionStarted(sessionId: self.uuid(), mode: .code))
+                    newStarted.fulfill()
+                default:
+                    break
+                }
+            }
+            source.setSessionMode(.chat)
+            await fulfillment(of: [firstStarted], timeout: 1)
+            source.startNewConversation(mode: .chat)
+            XCTAssertTrue(source.model.sessionTransitionPending)
+            release?.resume()
+            await fulfillment(of: [newStarted], timeout: 1)
+            await fulfillment(of: [nextStarted], timeout: 1)
+            XCTAssertFalse(source.model.newSessionModeFailed)
+            XCTAssertTrue(source.model.awaitingNewSessionMode)
+            source.applyForTesting(.sessionModeChanged(sessionId: uuid(), mode: .chat, pendingMode: nil, revision: 1))
+            XCTAssertFalse(source.model.awaitingNewSessionMode)
+        }
+
         /// An empty array before the first `SessionList` means "not loaded";
         /// the same array after the event is an authoritative empty catalog.
         /// Persisting code relies on this distinction to avoid erasing a cached

@@ -745,6 +745,11 @@
     <string name="session_index_save_new_failed_fmt">Failed to save new session index: %1$s</string>
     <string name="session_mode_chat">Chat</string>
     <string name="session_mode_code">Code</string>
+    <string name="session_mode_chat_description">General assistant</string>
+    <string name="session_mode_code_description">Software engineering assistant</string>
+    <string name="session_mode_pending">Switching to %1$s after this reply</string>
+    <string name="session_mode_setting">Setting the conversation mode…</string>
+    <string name="session_mode_retry">Could not set the mode. Choose a mode to retry.</string>
     <string name="session_panel_make_scheduled">Make it a scheduled task</string>
     <string name="session_panel_mode_hint">Changing the mode continues in a new, forked chat</string>
     <string name="session_relative_days_ago_fmt">%1$d days ago</string>

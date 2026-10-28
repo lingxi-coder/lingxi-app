@@ -623,3 +623,19 @@ test('sidebar uses indeterminate progress for main turns and background agents',
     assert.doesNotMatch(markup, /aria-label="Running" title="Running"/);
   }
 });
+
+test('the conversation mode control shows the active and next-turn profiles while a turn runs', () => {
+  const bridge = composerBridgeFixture() as any;
+  bridge.hosted = true;
+  bridge.loading = false;
+  bridge.sessionLoading = false;
+  bridge.desktop.sessionMode = { sessionId: bridge.activeSession.sessionId, active: 'code', pending: 'chat', revision: 2 };
+  const markup = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) },
+    React.createElement(BetaComposer, { bridge, ready: true, onOpenSettings: () => undefined,
+      onOpenSettingsPage: () => undefined, onSetTheme: () => undefined, onOpenProviderSettings: () => undefined })));
+  const marker = 'aria-label="Conversation mode: Code · Chat applies to the next turn"';
+  const button = openingTag(markup, marker);
+  assert.doesNotMatch(button, /\bdisabled\b/);
+  assert.match(button, /aria-haspopup="menu"/);
+  assert.match(markup, /Next: Chat/);
+});

@@ -5,6 +5,13 @@ enum SessionMode: String, CaseIterable, Codable, Hashable, Sendable {
     case code
 }
 
+/// An applied event may reuse the pending request's revision. Once applied,
+/// a delayed copy of that pending event must not roll the UI backwards.
+func acceptsSessionModeRevision(previous: UInt64?, previousPending: SessionMode?, incoming: UInt64, incomingPending: SessionMode?) -> Bool {
+    guard let previous else { return true }
+    return incoming > previous || (incoming == previous && (previousPending != nil || incomingPending == nil))
+}
+
 #if canImport(harness_runtimeFFI)
     extension SessionMode {
         init(dto: SessionModeDto) {
@@ -76,4 +83,10 @@ enum ConversationScope: Equatable, Hashable, Sendable {
         case let .remote(hostID, sessionID): "remote.\(hostID).\(sessionID)"
         }
     }
+}
+
+func reusesConversationSource(currentScope: ConversationScope, targetScope: ConversationScope,
+                              currentMode: SessionMode, targetMode: SessionMode,
+                              startsNew: Bool, resumesSession: Bool) -> Bool {
+    currentScope == targetScope && (currentMode == targetMode || startsNew || resumesSession)
 }

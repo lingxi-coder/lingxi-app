@@ -43,6 +43,9 @@ import kotlinx.coroutines.flow.flow
  * fail-closed unavailable state when the engine can't build.
  */
 interface ConversationSource {
+    val supportsSessionModeChanges: Boolean get() = false
+    val sessionModeState: StateFlow<SessionModeSnapshot?>
+        get() = MutableStateFlow<SessionModeSnapshot?>(null).asStateFlow()
 
     /** Process-redelivery context for the engine this source owns. */
     val recoverySpec: ConversationRecoverySpec?

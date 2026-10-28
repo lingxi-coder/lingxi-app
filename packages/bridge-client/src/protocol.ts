@@ -732,6 +732,8 @@ export type ClientCommand =
   | { type: 'resume_session'; session_id: string; cwd?: string }
   | { type: 'list_sessions'; limit?: number }
   | { type: 'fork_session'; session_id: string; target_mode: SessionModeDto }
+  | { type: 'set_session_mode'; mode: SessionModeDto }
+  | { type: 'get_context_manifest' }
   // Explicit UI mount lifecycle; transport hello/close does not imply an attach.
   | { type: 'ui_attach'; surface: 'desktop' | 'mobile' | 'vscode'; client_id: string }
   | { type: 'ui_detach'; client_id: string }
@@ -1315,7 +1317,7 @@ export interface ComputerAccessResponseDto {
 // listings.rs
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Which capability profile a mobile session runs under (listings.rs `SessionModeDto`). */
+/** The conversation profile selected for a session (listings.rs `SessionModeDto`). */
 export type SessionModeDto = 'chat' | 'code';
 
 /** One resumable-session row (listings.rs `SessionRowDto`). */
@@ -1792,6 +1794,8 @@ export type ClientEvent =
   | { type: 'session_ended' }
   | { type: 'session_resumed'; session_id: string; mode: SessionModeDto; messages: MessageDto[] }
   | { type: 'session_forked'; source_session_id: string; session_id: string; mode: SessionModeDto }
+  | { type: 'session_mode_changed'; session_id: string; mode: SessionModeDto; pending_mode?: SessionModeDto; revision: number }
+  | { type: 'context_manifest'; manifest_json: string }
   | { type: 'session_list'; sessions: SessionRowDto[] }
   | { type: 'session_agent_list'; session_id: string; agents: SessionAgentSummaryDto[] }
   | {

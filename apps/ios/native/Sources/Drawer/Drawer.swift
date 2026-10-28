@@ -636,6 +636,13 @@ extension RecentBucket {
 }
 
 extension SessionMode {
+    var modeDescription: String {
+        switch self {
+        case .chat: String(localized: "session_mode_chat_description")
+        case .code: String(localized: "session_mode_code_description")
+        }
+    }
+
     var title: String {
         switch self {
         case .chat: String(localized: "session_mode_chat")

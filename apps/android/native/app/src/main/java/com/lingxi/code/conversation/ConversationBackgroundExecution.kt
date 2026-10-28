@@ -542,6 +542,16 @@ internal fun shouldStopConversationService(
  * from its durable client cursor. A UI-created source is registered here too,
  * so service-only restarts reuse it instead of creating a second engine.
  */
+internal fun matchesRetainedConversationOwner(
+    candidate: ConversationRecoverySpec,
+    candidateSessionId: String?,
+    requested: ConversationRecoverySpec,
+    requestedSessionId: String,
+): Boolean = candidate.copy(sessionMode = requested.sessionMode) == requested &&
+    candidateSessionId?.let {
+        com.lingxi.code.model.canonicalSessionId(it) == com.lingxi.code.model.canonicalSessionId(requestedSessionId)
+    } == true
+
 internal object ConversationHeadlessRecovery {
     internal sealed interface UiSourceClaim {
         data class Existing(val source: EngineConversationSource) : UiSourceClaim
@@ -554,6 +564,7 @@ internal object ConversationHeadlessRecovery {
     ) {
         val pending = CompletableDeferred<EngineConversationSource?>()
         @Volatile var source: EngineConversationSource? = null
+        @Volatile var recoverySessionId: String? = null
         @Volatile var monitorJob: Job? = null
         @Volatile var pendingCancellation: ConversationBackgroundSnapshot? = null
         val cancellationInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -608,9 +619,23 @@ internal object ConversationHeadlessRecovery {
     fun acquireForUi(
         recoverySpec: ConversationRecoverySpec,
         strings: ConversationStrings,
+        sessionId: String? = null,
     ): UiSourceClaim {
         val scopeKey = recoverySpec.scopeKey
-        val owner = owners[scopeKey]
+        // The immutable owner key contains its launch mode. A session may
+        // subsequently switch modes, so claim that exact retained session by
+        // identity and matching workspace before building another engine.
+        val retained = sessionId?.let { expected ->
+            owners.values.firstOrNull { candidate ->
+                matchesRetainedConversationOwner(
+                    candidate.source?.recoverySpec ?: candidate.recoverySpec,
+                    candidate.recoverySessionId ?: candidate.source?.activeSessionState?.value?.sessionId,
+                    recoverySpec,
+                    expected,
+                )
+            }
+        }
+        val owner = retained ?: owners[scopeKey]
         owner?.source?.let {
             owner.claimForUi()
             return UiSourceClaim.Existing(it)
@@ -625,7 +650,7 @@ internal object ConversationHeadlessRecovery {
                 ),
             )
         }
-        if (owner != null) owners.remove(scopeKey, owner)
+        if (owner != null) owners.remove(owner.recoverySpec.scopeKey, owner)
         val reservation = RecoveryOwner(recoverySpec)
         reservation.claimForUi()
         owners[scopeKey] = reservation
@@ -699,6 +724,7 @@ internal object ConversationHeadlessRecovery {
     fun recover(context: Context, snapshot: ConversationBackgroundSnapshot) {
         val spec = snapshot.recoverySpec ?: return
         val owner = RecoveryOwner(spec)
+        owner.recoverySessionId = snapshot.sessionId
         val pendingCancellation = pendingCancellations.remove(spec.scopeKey)
         owner.pendingCancellation = pendingCancellation
         if (owners.putIfAbsent(spec.scopeKey, owner) != null) {
@@ -749,7 +775,10 @@ internal object ConversationHeadlessRecovery {
         snapshot: ConversationBackgroundSnapshot,
         source: EngineConversationSource,
     ) {
-        owners[source.recoverySpec.scopeKey]?.releaseToBackground()
+        owners[source.recoverySpec.scopeKey]?.let {
+            it.recoverySessionId = snapshot.sessionId
+            it.releaseToBackground()
+        }
         startMonitor(
             context = context,
             snapshot = snapshot,

@@ -137,6 +137,20 @@ class ConversationSourceRecoveryTest {
     }
 
     @Test
+    fun retainedOwnerMatchesSameSessionAcrossModesButNeverAnotherWorkspace() {
+        val code = ConversationRecoverySpec(
+            projectId = "weather", hostPath = "/same/path", sessionMode = SessionMode.Code,
+            linuxRuntimeMode = LinuxRuntimeMode.MobileLinux, workspaceKey = "project.weather",
+        )
+        val chat = code.copy(sessionMode = SessionMode.Chat)
+        val sessionId = "19587a33-0725-48db-abca-8a2aed345f6b"
+        assertTrue(matchesRetainedConversationOwner(code, "sess:$sessionId", chat, sessionId))
+        assertFalse(matchesRetainedConversationOwner(code, sessionId, chat, "another"))
+        assertFalse(matchesRetainedConversationOwner(code, sessionId, chat.copy(hostPath = "/other/path"), sessionId))
+        assertFalse(matchesRetainedConversationOwner(code, sessionId, chat.copy(workspaceKey = "project.other"), sessionId))
+    }
+
+    @Test
     fun durableResumePolicyDistinguishesFreshUiRetainedTakeoverAndHeadless() {
         // A newly built UI source has no existing executor and must Resume.
         assertTrue(shouldResumeUiAttach(hadHeadlessExecutor = false, wasAlreadyUiOwned = false))

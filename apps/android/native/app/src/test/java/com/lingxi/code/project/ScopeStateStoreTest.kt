@@ -37,6 +37,16 @@ class ScopeStateStoreTest {
     }
 
     @Test
+    fun `restoring a session mode does not replace the selected mode for new chats`() = runTest {
+        val first = store()
+        first.persistSelectedMode(SessionMode.Chat)
+        first.persistActiveMode(SessionMode.Code)
+        val reopened = store()
+        assertEquals(SessionMode.Chat, reopened.readSelectedMode())
+        assertEquals(SessionMode.Code, reopened.readActiveMode())
+    }
+
+    @Test
     fun `last-active session and draft persist per scope across store instances`() = runTest {
         val first = store()
         first.persistActiveScope("app.tracker")
@@ -81,6 +91,7 @@ class ScopeStateStoreTest {
         assertEquals(emptyMap<String, Long>(), store.readPinnedSessions())
         assertEquals(0L, store.readCronResultsSeenAt())
         assertEquals(SessionMode.Chat, store.readActiveMode())
+        assertNull(store.readSelectedMode())
     }
 
     @Test

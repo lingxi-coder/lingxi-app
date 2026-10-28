@@ -933,6 +933,13 @@ function validateCommand(name: string, v: unknown): void {
     case 'list_sessions':
       if ('limit' in o) assert.ok(isNumber(o['limit']));
       break;
+    case 'set_session_mode':
+      exactObjectKeys(o, ['type', 'mode']);
+      assert.ok(['chat', 'code'].includes(String(o['mode'])));
+      break;
+    case 'get_context_manifest':
+      exactObjectKeys(o, ['type']);
+      break;
     case 'fork_session':
       assert.ok(
         isString(o['session_id']) &&
@@ -1293,6 +1300,10 @@ function validateEvent(name: string, v: unknown): void {
           isNumber(o['bytes_saved']) &&
           isString(o['summary']),
       );
+      break;
+    case 'session_mode_changed':
+    case 'context_manifest':
+      assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'session_started':
       assert.ok(isString(o['session_id']) && ['chat', 'code'].includes(String(o['mode'])));

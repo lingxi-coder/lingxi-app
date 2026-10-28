@@ -142,8 +142,9 @@ fun ChatScreen(
     onOpenSideChats: (() -> Unit)? = null,
     showTopBar: Boolean = true,
     showNewChatControls: Boolean = true,
-    /** New-chat mode bar: start a fresh conversation in this mode. */
+    /** Select the current conversation's mode from the new-chat bar. */
     onSelectNewChatMode: (SessionMode) -> Unit = {},
+    modeSelectionEnabled: Boolean = true,
     /** New-chat workspace capsule: choose where the conversation runs. */
     onPickWorkspace: () -> Unit = {},
     onMicClick: () -> Unit = {},
@@ -478,6 +479,21 @@ fun ChatScreen(
                     workspaceName = workspaceName,
                     onSelectMode = onSelectNewChatMode,
                     onPickWorkspace = onPickWorkspace,
+                    modeSelectionEnabled = modeSelectionEnabled,
+                )
+            }
+            state.pendingSessionMode?.let { pending ->
+                Text(
+                    text = stringResource(R.string.session_mode_pending, sessionModeLabel(pending)),
+                    color = t.text3,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
+            if (state.awaitingNewSessionMode) {
+                Text(
+                    text = stringResource(if (state.newSessionModeFailed) R.string.session_mode_retry else R.string.session_mode_setting),
+                    color = t.text3,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 )
             }
             Composer(

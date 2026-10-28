@@ -24,6 +24,7 @@ import com.lingxi.code.model.Message
 import com.lingxi.code.model.ReasoningControl
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.canonicalSessionId
+import com.lingxi.code.model.toUi
 import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.project.ProjectWorkspace
 import com.lingxi.code.settings.LinuxRuntimeMode
@@ -121,6 +122,7 @@ class EngineConversationSource private constructor(
     private val sessions: MutableStateFlow<EngineSessionState>,
     private val workspace: MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>,
     private val activeSession: MutableStateFlow<ActivatedSession?>,
+    private val modeState: MutableStateFlow<SessionModeSnapshot?>,
     private val mcp: MutableStateFlow<List<MCPServer>>,
     private val strings: ConversationStrings,
     private val durableTurns: DurableConversationTurnClientStore,
@@ -142,6 +144,8 @@ class EngineConversationSource private constructor(
         }
 
     override val workspaceState = workspace.asStateFlow()
+    override val supportsSessionModeChanges = true
+    override val sessionModeState = modeState.asStateFlow()
 
     internal fun newSideChatSource() = SideChatSource(handle)
 
@@ -582,6 +586,7 @@ class EngineConversationSource private constructor(
             linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
             reuseProcessSource: Boolean = true,
             currentSource: ConversationSource? = null,
+            expectedSessionId: String? = null,
         ): ConversationSource {
             val spec = ConversationRecoverySpec(
                 projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
@@ -594,7 +599,7 @@ class EngineConversationSource private constructor(
             )
             if (reuseProcessSource) {
                 if (currentSource?.recoverySpec == spec) return currentSource
-                when (val claim = ConversationHeadlessRecovery.acquireForUi(spec, conversationStrings(context))) {
+                when (val claim = ConversationHeadlessRecovery.acquireForUi(spec, conversationStrings(context), expectedSessionId)) {
                     is ConversationHeadlessRecovery.UiSourceClaim.Existing -> return claim.source
                     is ConversationHeadlessRecovery.UiSourceClaim.Pending -> return claim.source
                     ConversationHeadlessRecovery.UiSourceClaim.Build -> Unit
@@ -602,7 +607,8 @@ class EngineConversationSource private constructor(
             }
             return prepareConversationSource {
                 create(context, projectWorkspace, workspaceKey, sessionMode, linuxRuntimeMode,
-                    reuseProcessSource = reuseProcessSource, replaceProcessSource = true)
+                    reuseProcessSource = reuseProcessSource, replaceProcessSource = true,
+                    expectedSessionId = expectedSessionId)
             }
         }
 
@@ -623,6 +629,7 @@ class EngineConversationSource private constructor(
              * moves the scope to the new source, so closing the old one is safe.
              */
             replaceProcessSource: Boolean = false,
+            expectedSessionId: String? = null,
         ): ConversationSource {
             val recoverySpec = ConversationRecoverySpec(
                 projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
@@ -638,6 +645,7 @@ class EngineConversationSource private constructor(
                     val claim = ConversationHeadlessRecovery.acquireForUi(
                         recoverySpec = recoverySpec,
                         strings = conversationStrings(context),
+                        sessionId = expectedSessionId,
                     )
                 ) {
                     is ConversationHeadlessRecovery.UiSourceClaim.Existing -> return claim.source
@@ -683,6 +691,8 @@ class EngineConversationSource private constructor(
             // owner; explicit New/Resume events subsequently replace it with
             // the confirmed session id and any restored transcript.
             val activeSession = MutableStateFlow<ActivatedSession?>(null)
+            val modeState = MutableStateFlow<SessionModeSnapshot?>(null)
+            val modeSnapshots = SessionModeSnapshotCache()
             // The engine's REAL MCP listing (sibling of `models`). The listener
             // folds every inbound `McpServers` into this StateFlow; empty until a
             // `RefreshListings(Mcp)` reply lands (settings shows the mock list).
@@ -723,6 +733,17 @@ class EngineConversationSource private constructor(
                     val previousActiveSessionId = activeSession.value?.sessionId
                     activeSession.update { current ->
                         reduceActivatedSession(current, event, sessionMode, strings)
+                    }
+                    when (event) {
+                        is ClientEvent.SessionModeChanged -> {
+                            val next = SessionModeSnapshot(canonicalSessionId(event.sessionId), event.mode.toUi(), event.pendingMode?.toUi(), event.revision)
+                            val latest = modeSnapshots.record(next)
+                            val active = activeSession.value?.sessionId?.let(::canonicalSessionId)
+                            if (active == null || active == next.sessionId) modeState.value = latest
+                        }
+                        is ClientEvent.SessionStarted -> modeState.value = modeSnapshots.forSession(canonicalSessionId(event.sessionId))
+                        is ClientEvent.SessionResumed -> modeState.value = modeSnapshots.forSession(canonicalSessionId(event.sessionId))
+                        else -> Unit
                     }
                     when (event) {
                         is ClientEvent.SessionStarted,
@@ -888,6 +909,7 @@ class EngineConversationSource private constructor(
                 sessions = sessions,
                 workspace = workspace,
                 activeSession = activeSession,
+                modeState = modeState,
                 mcp = mcp,
                 strings = strings,
                 durableTurns = durableTurns,

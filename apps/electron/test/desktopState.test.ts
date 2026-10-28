@@ -223,3 +223,20 @@ test('authoritative controls restore the displayed permission after runtime stat
     assert.equal(restored.conversationControls, controls);
   }
 });
+
+test('mode selections keep the current turn, then apply at the boundary without changing conversation controls', () => {
+  const original = { ...emptyDesktopState(), currentModel: 'provider/model', permissionMode: 'plan' as const };
+  const resumed = reduceDesktopEvent(original, { type: 'session_resumed', session_id: 's1', mode: 'code', messages: [] });
+  const pending = reduceDesktopEvent(resumed, { type: 'session_mode_changed', session_id: 's1', mode: 'code', pending_mode: 'chat', revision: 4 });
+  assert.deepEqual(pending.sessionMode, { sessionId: 's1', active: 'code', pending: 'chat', revision: 4 });
+  assert.equal(pending.currentModel, original.currentModel);
+  assert.equal(pending.permissionMode, original.permissionMode);
+  const applied = reduceDesktopEvent(pending, { type: 'session_mode_changed', session_id: 's1', mode: 'chat', revision: 4 });
+  assert.deepEqual(applied.sessionMode, { sessionId: 's1', active: 'chat', pending: null, revision: 4 });
+  assert.equal(reduceDesktopEvent(applied, { type: 'session_mode_changed', session_id: 's1', mode: 'code', pending_mode: 'chat', revision: 4 }), applied);
+  assert.equal(reduceDesktopEvent(applied, { type: 'session_mode_changed', session_id: 's1', mode: 'code', revision: 3 }), applied);
+  const remounted = reduceDesktopEvent(applied, { type: 'session_resumed', session_id: 's1', mode: 'code', messages: [] });
+  assert.deepEqual(remounted.sessionMode, { sessionId: 's1', active: 'code', pending: null, revision: 0 });
+  const nextSession = reduceDesktopEvent(applied, { type: 'session_resumed', session_id: 's2', mode: 'code', messages: [] });
+  assert.deepEqual(nextSession.sessionMode, { sessionId: 's2', active: 'code', pending: null, revision: 0 });
+});

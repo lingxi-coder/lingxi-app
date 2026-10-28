@@ -1450,6 +1450,26 @@ export function validateClientEvent(value: unknown): ClientEvent {
         mode: sessionMode(input['mode'], 'mode'),
         messages: input['messages'] as ClientEvent & { messages: unknown[] }['messages'],
       } as ClientEvent;
+    case 'session_mode_changed':
+      exactKeys(input, ['type', 'session_id', 'mode', 'pending_mode', 'revision'], 'client event');
+      return {
+        type,
+        session_id: string(input['session_id'], 'session_id'),
+        mode: sessionMode(input['mode'], 'mode'),
+        ...(input['pending_mode'] === undefined ? {} : { pending_mode: sessionMode(input['pending_mode'], 'pending_mode') }),
+        revision: integer(input['revision'], 'revision'),
+      };
+    case 'context_manifest': {
+      exactKeys(input, ['type', 'manifest_json'], 'client event');
+      const manifest_json = string(input['manifest_json'], 'manifest_json');
+      // This private response contains inventory metadata, never prompt bodies.
+      // Reject unbounded strings before JSON parsing or retaining their contents.
+      if (manifest_json.length > 256 * 1024) throw new Error('context manifest is too large');
+      let manifest: unknown;
+      try { manifest = JSON.parse(manifest_json); } catch { throw new Error('invalid context manifest JSON'); }
+      object(manifest, 'context manifest');
+      return { type, manifest_json };
+    }
     case 'session_forked':
       exactKeys(input, ['type', 'source_session_id', 'session_id', 'mode'], 'client event');
       return {

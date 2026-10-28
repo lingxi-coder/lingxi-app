@@ -28,6 +28,9 @@ import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
+import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.toDto
+import com.lingxi.code.model.toUi
 import com.lingxi.code.model.SessionRow
 import com.lingxi.code.model.canonicalSessionId
 import java.security.SecureRandom
@@ -105,6 +108,9 @@ class ChatViewModel(
     private val backgroundExecution: ConversationBackgroundExecution =
         ConversationBackgroundExecution.None,
 ) : ViewModel() {
+    private var bufferedModeUpdate: SessionModeSnapshot? = null
+    private var modeOwnerSessionId: String? = null
+    private val modeRequestMutex = Mutex()
     internal val sideChats = SideChatManager(viewModelScope)
 
     internal val supportsSideChats: Boolean get() = source is EngineConversationSource
@@ -286,6 +292,8 @@ class ChatViewModel(
 
     /** True while the current transition expects SessionStarted. */
     private var pendingNewSession: Boolean = false
+    private var pendingNewSessionMode: SessionMode? = null
+    private var requiredNewSessionMode: Pair<String, SessionMode>? = null
 
     init {
         // Compatibility migration from builds that serialized every message into
@@ -360,6 +368,11 @@ class ChatViewModel(
                             }.onFailure(::preserveDurableRecoveryAfterAttachFailure)
                         }
                     }
+                }
+            }
+            launch {
+                boundSource.sessionModeState.collect { mode ->
+                    if (sourceGeneration == generation && mode != null) acceptModeUpdate(mode)
                 }
             }
             launch {
@@ -471,6 +484,9 @@ class ChatViewModel(
             return
         }
         when (event) {
+            is ClientEvent.SessionModeChanged -> {
+                acceptModeUpdate(SessionModeSnapshot(canonicalSessionId(event.sessionId), event.mode.toUi(), event.pendingMode?.toUi(), event.revision))
+            }
             is ClientEvent.UserTranscriptRowIdentity -> {
                 if (!event.rowToken.startsWith("client-turn:")) return
                 val rowIds = event.rowToken.removePrefix("client-turn:").split(',')
@@ -1589,8 +1605,12 @@ class ChatViewModel(
             return
         }
         val previous = source
+        val selectedConversationMode = _state.value.pendingSessionMode ?: _state.value.sessionMode
         reconnectGeneration = generation
         sourceGeneration++
+        bufferedModeUpdate = null
+        modeOwnerSessionId = null
+        requiredNewSessionMode = null
 
         abandonLocalTurn()?.cancel()
         explicitCancellation?.cancel()
@@ -1619,12 +1639,15 @@ class ChatViewModel(
                 workflowResumeState = WorkflowResumeUiState.Idle,
                 workflowRuns = emptyMap(),
                 liveTurnWaitingForUser = false,
+                sessionMode = null, pendingSessionMode = null, sessionModeRevision = null,
+                awaitingNewSessionMode = false, newSessionModeFailed = false,
             )
         }
         bindSource()
         previous.close()
 
         val visibleSession = _state.value.session
+        pendingNewSessionMode = selectedConversationMode.takeIf { visibleSession.id == "new" }
         beginSessionTransition(
             target = visibleSession,
             newSession = visibleSession.id == "new",
@@ -1651,6 +1674,7 @@ class ChatViewModel(
         ),
         newSession: Boolean = target.id == "new",
         newSessionDirectory: String? = null,
+        newSessionMode: SessionMode? = null,
         resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
         allowInactiveWaitingRecovery: Boolean = false,
@@ -1780,6 +1804,9 @@ class ChatViewModel(
         }
 
         sourceGeneration++
+        bufferedModeUpdate = null
+        modeOwnerSessionId = null
+        requiredNewSessionMode = null
         sourceBindingJob?.cancel()
         sideChats.release()
         source = replacement
@@ -1800,11 +1827,14 @@ class ChatViewModel(
                 sessionAgents = emptyList(),
                 workflowResumeState = WorkflowResumeUiState.Idle,
                 workflowRuns = emptyMap(),
+                sessionMode = null, pendingSessionMode = null, sessionModeRevision = null,
+                awaitingNewSessionMode = false, newSessionModeFailed = false,
             )
         }
         bindSource()
         onCommitted()
         if (previous !== replacement) previous.close()
+        pendingNewSessionMode = newSessionMode.takeIf { newSession }
         beginSessionTransition(
             target = target,
             newSession = newSession,
@@ -1826,6 +1856,7 @@ class ChatViewModel(
         sessionTransitionJob = null
         pendingResumeId = null
         pendingNewSession = false
+        pendingNewSessionMode = null
         _state.update {
             it.copy(
                 sessionTransitioning = false,
@@ -1892,6 +1923,9 @@ class ChatViewModel(
      */
     internal fun applyActivatedSession(restored: ActivatedSession) {
         val current = _state.value
+        val selectedNewMode = pendingNewSessionMode.takeIf {
+            pendingNewSession && restored.kind == SessionActivationKind.Started
+        }
         if (current.sessionTransitioning) {
             val matchesPendingResume =
                 pendingResumeId != null &&
@@ -1915,8 +1949,12 @@ class ChatViewModel(
                     val catalogTitle = _sessions.value.rows.firstOrNull { row ->
                         canonicalSessionId(row.uuid) == canonicalSessionId(restored.sessionId)
                     }?.title
-                    it.copy(session = it.session.copy(id = restored.sessionId, title = catalogTitle ?: it.session.title), sessionReady = true)
+                    it.copy(session = it.session.copy(id = restored.sessionId, title = catalogTitle ?: it.session.title), sessionReady = true,
+                        sessionMode = if (restored.kind == SessionActivationKind.Bootstrap) it.sessionMode else restored.mode,
+                        pendingSessionMode = null, sessionModeRevision = null)
                 }
+                modeOwnerSessionId = canonicalSessionId(restored.sessionId)
+                applyBufferedMode(restored.sessionId)
                 reportBackgroundTurnState()
                 return
             }
@@ -1930,6 +1968,7 @@ class ChatViewModel(
         abandonLocalTurn()
         pendingResumeId = null
         pendingNewSession = false
+        pendingNewSessionMode = null
         // The previous local/recovered turn belongs to the session being
         // replaced.  Let the next recovery checkpoint establish its own id;
         // otherwise a reconnect that resumes the same session could be
@@ -1941,9 +1980,15 @@ class ChatViewModel(
         val title = _sessions.value.rows.firstOrNull { canonicalSessionId(it.uuid) == canonicalSessionId(restored.sessionId) }?.title
             ?: _state.value.session.takeIf { canonicalSessionId(it.id) == canonicalSessionId(restored.sessionId) }?.title
             ?: _state.value.session.title
+        val needsModeConfirmation = selectedNewMode != null && selectedNewMode != restored.mode
+        requiredNewSessionMode = selectedNewMode?.takeIf { needsModeConfirmation }
+            ?.let { canonicalSessionId(restored.sessionId) to it }
         _state.update {
             it.copy(
                 session = SessionRef(id = restored.sessionId, title = title),
+                sessionMode = restored.mode,
+                pendingSessionMode = null,
+                sessionModeRevision = null,
                 promptSuggestion = null, promptSuggestionUuid = null,
                 messages = restored.transcript, // clear-then-restore (oldest-first)
                 visualizationChip = null,
@@ -1953,7 +1998,9 @@ class ChatViewModel(
                 streaming = false,
                 liveTurnWaitingForUser = false,
                 sessionTransitioning = false,
-                sessionReady = true,
+                sessionReady = !needsModeConfirmation,
+                awaitingNewSessionMode = needsModeConfirmation,
+                newSessionModeFailed = false,
                 statusLine = null,
                 shellTools = emptyList(),
                 agentRun = null,
@@ -1973,7 +2020,72 @@ class ChatViewModel(
                 workflowRuns = workflowRunsBySession[canonicalSessionId(restored.sessionId)].orEmpty(),
             )
         }
+        modeOwnerSessionId = canonicalSessionId(restored.sessionId)
+        applyBufferedMode(restored.sessionId)
         reportBackgroundTurnState()
+        if (requiredNewSessionMode != null && selectedNewMode != null) setSessionMode(selectedNewMode)
+    }
+
+    private fun applyBufferedMode(sessionId: String) {
+        bufferedModeUpdate?.takeIf { it.sessionId == canonicalSessionId(sessionId) }?.let {
+            bufferedModeUpdate = null
+            applyModeUpdate(it)
+        }
+    }
+
+    private fun acceptModeUpdate(update: SessionModeSnapshot) {
+        val current = _state.value
+        if (!current.sessionTransitioning && current.session.id == "new") {
+            applyActivatedSession(ActivatedSession(update.sessionId, emptyList(), SessionActivationKind.Bootstrap, update.mode))
+            applyModeUpdate(update)
+        } else if (!current.sessionTransitioning && canonicalSessionId(current.session.id) == update.sessionId) {
+            applyModeUpdate(update)
+        } else if (current.sessionTransitioning || current.session.id == "new") {
+            if (pendingResumeId != null && canonicalSessionId(pendingResumeId!!) != update.sessionId) return
+            if (pendingNewSession && modeOwnerSessionId == update.sessionId) return
+            val old = bufferedModeUpdate
+            if (old == null || old.sessionId != update.sessionId ||
+                acceptsSessionModeRevision(old.revision, old.pending, update.revision, update.pending)) bufferedModeUpdate = update
+        }
+    }
+
+    private fun applyModeUpdate(update: SessionModeSnapshot) {
+        val current = _state.value
+        if (!acceptsSessionModeRevision(current.sessionModeRevision, current.pendingSessionMode, update.revision, update.pending)) return
+        val required = requiredNewSessionMode
+        val confirmed = required != null && required.first == update.sessionId && required.second == update.mode && update.pending == null
+        if (confirmed) requiredNewSessionMode = null
+        _state.update {
+            it.copy(sessionMode = update.mode, pendingSessionMode = update.pending, sessionModeRevision = update.revision,
+                sessionReady = if (confirmed) true else it.sessionReady,
+                awaitingNewSessionMode = if (confirmed) false else it.awaitingNewSessionMode,
+                newSessionModeFailed = if (confirmed) false else it.newSessionModeFailed)
+        }
+    }
+
+    fun setSessionMode(mode: SessionMode) {
+        if (source is ExternalTurnConversationSource || source is SideChatSource || _state.value.sessionTransitioning) return
+        requiredNewSessionMode?.let { required ->
+            requiredNewSessionMode = required.first to mode
+            _state.update { it.copy(newSessionModeFailed = false) }
+        }
+        val owner = source
+        val requestedSessionToken = sessionToken
+        viewModelScope.launch {
+            modeRequestMutex.withLock {
+                if (source !== owner || sessionToken != requestedSessionToken || _state.value.sessionTransitioning) return@withLock
+                try {
+                    owner.submitClientCommand(ClientCommand.SetSessionMode(mode.toDto()))
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (source === owner && sessionToken == requestedSessionToken && !_state.value.sessionTransitioning) {
+                        if (requiredNewSessionMode?.second == mode) _state.update { it.copy(newSessionModeFailed = true) }
+                        reportHostError(error.message.orEmpty())
+                    }
+                }
+            }
+        }
     }
 
     /** Confirm the ordinary engine's UUID and actual cwd before associating
@@ -2173,6 +2285,7 @@ class ChatViewModel(
         // is accepted but its SessionResumed/SessionStarted event is still in
         // flight. Those events do not carry a client operation id.
         if (_state.value.sessionTransitioning && sessionTransitionJob != null) return
+        requiredNewSessionMode = null
         sessionToken++
         val token = sessionToken
         pendingResumeId = target.id.takeUnless { newSession }
@@ -2181,6 +2294,8 @@ class ChatViewModel(
         _state.update {
             it.copy(
                 session = target,
+                awaitingNewSessionMode = false,
+                newSessionModeFailed = false,
                 promptSuggestion = null, promptSuggestionUuid = null,
                 messages = emptyList(),
                 visualizationChip = null,
@@ -2210,11 +2325,16 @@ class ChatViewModel(
                 explicitCancellation = null
                 _state.update { it.copy(cancellationInFlight = false) }
                 cancelEngineTurn(detachedTurn)
-                when {
-                    newSession && newSessionDirectory != null -> source.newSession(newSessionDirectory)
-                    newSession -> source.newSession()
-                    resumeEmpty -> source.resumeEmptySession(target.id, target.title)
-                    else -> source.resumeSession(target.id)
+                // A mode command targets the engine's current session. Let an
+                // already-submitted request finish before replacing that owner.
+                modeRequestMutex.withLock {
+                    if (token != sessionToken) return@withLock
+                    when {
+                        newSession && newSessionDirectory != null -> source.newSession(newSessionDirectory)
+                        newSession -> source.newSession()
+                        resumeEmpty -> source.resumeEmptySession(target.id, target.title)
+                        else -> source.resumeSession(target.id)
+                    }
                 }
                 // Success here means the command was accepted. sessionReady remains
                 // false until SessionStarted/SessionResumed is observed.
@@ -2224,6 +2344,7 @@ class ChatViewModel(
                 if (token == sessionToken) {
                     pendingResumeId = null
                     pendingNewSession = false
+                    pendingNewSessionMode = null
                     _state.update {
                         it.copy(
                             streaming = false,
@@ -2302,8 +2423,11 @@ class ChatViewModel(
      * Start a fresh engine session. [newChat] clears the visible transcript and
      * submits `NewSession`; `SessionStarted` confirms the new session id.
      */
-    fun startNewSession() {
+    fun startNewSession(mode: SessionMode? = null) {
+        if (_state.value.sessionTransitioning) return
+        pendingNewSessionMode = mode
         newChat()
+        if (!_state.value.sessionTransitioning) pendingNewSessionMode = null
     }
 
     /** A widget drafted a follow-up: the screen moves it into the composer. */
@@ -2364,6 +2488,7 @@ class ChatViewModel(
         val submittedText = if (isBashInput) text.substring(1) else trimmed
         val promptMode = if (isBashInput) PromptModeDto.BASH else null
         if (!admitComposerSend(trimmed, images.isNotEmpty())) return
+        if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
         sideChatInput(trimmed)?.let { input ->
             val parent = source as? EngineConversationSource
             if (parent == null) {

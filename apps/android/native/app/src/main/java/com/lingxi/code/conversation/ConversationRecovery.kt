@@ -66,6 +66,15 @@ internal class DurableConversationTurnClientStore(
     private val scope: String,
     latestExit: ApplicationExitInfo? = null,
 ) {
+    companion object {
+        /** Recover the original source identity only for the exact saved session. */
+        fun ownerModeForSession(context: Context, workspaceKey: String, sessionId: String?): SessionMode? {
+            if (sessionId.isNullOrBlank()) return null
+            val preferences = context.applicationContext.getSharedPreferences("durable_conversation_turn", Context.MODE_PRIVATE)
+            if (!preferences.contains("turn_id")) return null
+            return ownerModeForSavedRecord(workspaceKey, sessionId, preferences.getString("session_id", null), preferences.getString("scope", null))
+        }
+    }
     init {
         val handledAt = preferences.getLong("handled_exit_timestamp", 0L)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && latestExit != null && latestExit.timestamp > handledAt) {
@@ -146,6 +155,11 @@ internal class DurableConversationTurnClientStore(
             .remove("last_sequence")
             .commit()
     }
+}
+
+internal fun ownerModeForSavedRecord(workspaceKey: String, sessionId: String, savedSession: String?, scope: String?): SessionMode? {
+    if (savedSession == null || canonicalSessionId(savedSession) != canonicalSessionId(sessionId)) return null
+    return SessionMode.entries.firstOrNull { scope == "$workspaceKey#${it.wireValue}" }
 }
 
 internal class DurableTurnReplayGate {
@@ -310,6 +324,7 @@ internal class RecoveringConversationSource(
     private val models = MutableStateFlow(EngineModelState())
     private val sessions = MutableStateFlow(EngineSessionState.loading())
     private val activeSession = MutableStateFlow<ActivatedSession?>(null)
+    private val modeState = MutableStateFlow<SessionModeSnapshot?>(null)
     private val permissions = MutableStateFlow<PermissionPromptState?>(null)
     private val mcp = MutableStateFlow(emptyList<MCPServer>())
     @Volatile private var retainedSource: ConversationSource? = null
@@ -330,6 +345,7 @@ internal class RecoveringConversationSource(
             launch { delegate.modelState.collect { models.value = it } }
             launch { delegate.sessionState.collect { sessions.value = it } }
             launch { delegate.activeSessionState.collect { activeSession.value = it } }
+            launch { delegate.sessionModeState.collect { modeState.value = it } }
             launch { delegate.pendingPermission.collect { permissions.value = it } }
             launch { delegate.mcpServers.collect { mcp.value = it } }
         }
@@ -347,6 +363,8 @@ internal class RecoveringConversationSource(
     override val modelState: StateFlow<EngineModelState> = models.asStateFlow()
     override val sessionState: StateFlow<EngineSessionState> = sessions.asStateFlow()
     override val activeSessionState: StateFlow<ActivatedSession?> = activeSession.asStateFlow()
+    override val supportsSessionModeChanges = true
+    override val sessionModeState: StateFlow<SessionModeSnapshot?> = modeState.asStateFlow()
     override val mcpServers: StateFlow<List<MCPServer>> = mcp.asStateFlow()
 
     override suspend fun submitClientCommand(command: ClientCommand) {

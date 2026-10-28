@@ -459,6 +459,7 @@ fn seq_prompt(seq: u64) -> RemoteSeqRecord {
 fn state_with(status: SessionStatus, first: u64, messages: usize, seqs: &[u64]) -> SessionState {
     SessionState {
         session_id: "s1".into(),
+        session_mode: Some(SessionModeDto::Chat),
         status,
         error: None,
         messages: (0..messages).map(|i| message(&i.to_string())).collect(),
@@ -482,6 +483,7 @@ fn the_first_content_replaces_and_later_records_are_appended() {
     assert_eq!(loading.phase, RemoteSessionPhaseFfi::Loading);
 
     let first = session_update(&mut marker, &state_with(SessionStatus::Live, 5, 2, &[1, 2]));
+    assert_eq!(first.session_mode, Some(SessionModeDto::Chat));
     assert!(first.replace);
     assert_eq!((first.messages.len(), first.records.len()), (2, 2));
     assert_eq!(first.first_message_index, 5);

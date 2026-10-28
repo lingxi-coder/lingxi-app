@@ -133,6 +133,33 @@ fn attach_snapshot(
     }
 }
 
+#[tokio::test]
+async fn snapshot_and_live_events_preserve_the_remote_session_mode() {
+    use client::protocol::listings::SessionModeDto;
+    let controller = SessionController::new("s1", FakeIo::new(attach_snapshot("e1")));
+    let mut parts = full_snapshot("e1", 0, 2);
+    if let SessionSnapshotParams::Begin { session_mode, .. } = &mut parts[0] {
+        *session_mode = Some(SessionModeDto::Chat);
+    } else {
+        panic!("expected snapshot begin");
+    }
+    feed(&controller, parts);
+    assert_eq!(controller.state().session_mode, Some(SessionModeDto::Chat));
+    controller.handle_event(event(3, json!({"type":"session_mode_changed", "session_id":"s1", "mode":"code", "pending_mode":null, "revision":1})));
+    assert_eq!(controller.state().session_mode, Some(SessionModeDto::Code));
+    controller.handle_event(event(4, json!({"type":"session_mode_changed", "session_id":"s1", "mode":"chat", "pending_mode":"code", "revision":1})));
+    controller.handle_event(event(5, json!({"type":"session_mode_changed", "session_id":"other", "mode":"chat", "pending_mode":null, "revision":2})));
+    controller.handle_event(event(
+        6,
+        json!({"type":"session_started", "session_id":"s1", "mode":"chat"}),
+    ));
+    assert_eq!(controller.state().session_mode, Some(SessionModeDto::Code));
+    controller.handle_event(event(7, json!({"type":"session_mode_changed", "session_id":"s1", "mode":"code", "pending_mode":"chat", "revision":2})));
+    assert_eq!(controller.state().session_mode, Some(SessionModeDto::Code));
+    controller.handle_event(event(8, json!({"type":"session_mode_changed", "session_id":"s1", "mode":"chat", "pending_mode":null, "revision":2})));
+    assert_eq!(controller.state().session_mode, Some(SessionModeDto::Chat));
+}
+
 #[tokio::test(start_paused = true)]
 async fn overflowing_live_records_during_a_snapshot_requests_a_fresh_base() {
     let io = FakeIo::new(attach_snapshot("e1"));

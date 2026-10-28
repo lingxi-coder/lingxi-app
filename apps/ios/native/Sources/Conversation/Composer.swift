@@ -114,8 +114,7 @@ struct Composer: View {
     /// Owned by the chat so the session panel can open the same pickers.
     @Binding var modelOpen: Bool
     @Binding var controlsOpen: Bool
-    /// A Chat session has no file permissions to ask about, so only Code
-    /// sessions get the permission chip.
+    /// Permission controls are independent of conversation mode.
     var showsPermissionChip: Bool = true
     @State private var holding = false
     @State private var cancellingHold = false

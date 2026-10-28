@@ -49,10 +49,13 @@ internal fun sessionModeLabel(mode: SessionMode): String = stringResource(
     },
 )
 
+@Composable
+internal fun sessionModeDescription(mode: SessionMode): String = stringResource(
+    if (mode == SessionMode.Chat) R.string.session_mode_chat_description else R.string.session_mode_code_description,
+)
+
 /**
- * The new-chat page's mode bar, just above the composer: one tap starts a fresh
- * conversation in that mode in the current workspace (a mode never changes
- * under a running conversation — that is a fork). The capsule next to it shows
+ * The new-chat page's mode bar, just above the composer. The capsule next to it shows
  * the workspace the conversation will run in and opens the workspace picker.
  */
 @Composable
@@ -61,6 +64,7 @@ internal fun NewChatBar(
     workspaceName: String,
     onSelectMode: (SessionMode) -> Unit,
     onPickWorkspace: () -> Unit,
+    modeSelectionEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val t = LingXiTheme.palette
@@ -95,7 +99,7 @@ internal fun NewChatBar(
                         .background(if (active) tint.copy(alpha = 0.16f) else t.surface)
                         .border(0.5.dp, if (active) tint.copy(alpha = 0.45f) else t.border, shape)
                         .testTag(UiTags.newChatMode(option.wireKey))
-                        .clickable { onSelectMode(option) }
+                        .clickable(enabled = modeSelectionEnabled) { onSelectMode(option) }
                         .padding(horizontal = 14.dp, vertical = 8.dp),
                 ) {
                     if (!compact) Box(Modifier.size(7.dp).clip(CircleShape).background(tint))

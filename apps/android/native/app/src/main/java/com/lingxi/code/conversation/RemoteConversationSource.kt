@@ -19,6 +19,8 @@ import com.lingxi.code.bindings.client.MessageDto
 import com.lingxi.code.bindings.client.PermissionKindDto
 import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
+import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.toUi
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.ReasoningControl
 import kotlinx.coroutines.CancellationException
@@ -58,6 +60,7 @@ data class RemoteSessionMeta(
     val hasOlder: Boolean = false,
     val loadingOlder: Boolean = false,
     val controls: ConversationControlsDto? = null,
+    val sessionMode: SessionMode? = null,
 )
 
 /** Largest picture and most pictures the desktop accepts in a prompt. */
@@ -108,6 +111,7 @@ class RemoteConversationSource(
                 hasOlder = update.hasOlder,
                 loadingOlder = update.loadingOlder,
                 controls = update.controls,
+                sessionMode = update.sessionMode?.toUi(),
             )
             mutablePermission.value = mapper.permissionPrompt(update)
             applyModelEvents(update)
@@ -274,6 +278,7 @@ class RemoteFeedMapper(
                     sessionId = update.sessionId,
                     transcript = transcriptFromDtos(update.messages, strings),
                     kind = SessionActivationKind.Resumed,
+                    mode = update.sessionMode?.toUi() ?: SessionMode.Code,
                 ),
                 title = null,
             )

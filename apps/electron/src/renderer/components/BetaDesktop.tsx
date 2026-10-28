@@ -1740,6 +1740,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const [modelQuery, setModelQuery] = useState('');
   const [submenuBounds, setSubmenuBounds] = useState<ModelPickerSubmenuBounds | null>(null);
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const [modeOpen, setModeOpen] = useState(false);
   const [fusionChoice, setFusionChoice] = useState<{ sessionId: string | null; reference: FusionStrategyRefDto | null } | null>(null);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null);
@@ -1765,6 +1766,8 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const fileButton = useRef<HTMLButtonElement>(null);
   const fileSearchInput = useRef<HTMLInputElement>(null);
   const imageFileInput = useRef<HTMLInputElement>(null);
+  const modeControl = useRef<HTMLDivElement>(null);
+  const modeButton = useRef<HTMLButtonElement>(null);
   const permissionControl = useRef<HTMLDivElement>(null);
   const permissionButton = useRef<HTMLButtonElement>(null);
   const modelControl = useRef<HTMLDivElement>(null);
@@ -1944,6 +1947,25 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
    * switch would actually land.
    */
   const modelControlReady = Boolean(bridge.hosted && !bridge.loading && bridge.connected && activeSessionId);
+  const sessionMode = bridge.desktop.sessionMode?.sessionId === activeSessionId ? bridge.desktop.sessionMode : null;
+  const modeControlReady = modelControlReady && !bridge.sessionLoading && sessionMode !== null;
+
+  useEffect(() => { if (!modeControlReady) setModeOpen(false); }, [modeControlReady]);
+  useEffect(() => {
+    if (!modeOpen) return;
+    const pointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !modeControl.current?.contains(event.target)) setModeOpen(false);
+    };
+    const keyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setModeOpen(false);
+      modeButton.current?.focus();
+    };
+    document.addEventListener('pointerdown', pointerDown);
+    document.addEventListener('keydown', keyDown);
+    return () => { document.removeEventListener('pointerdown', pointerDown); document.removeEventListener('keydown', keyDown); };
+  }, [modeOpen]);
 
   useEffect(() => {
     if (ready) return;
@@ -3603,6 +3625,38 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           <input ref={imageFileInput} type="file" multiple onChange={(event) => { void addFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
           <button type="button" disabled={!ready} className="composer-icon-action" aria-label={tr('desktop_attach_files')} title={tr('desktop_attach_files_images')} onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
           <button ref={fileButton} type="button" disabled={!ready} className="composer-icon-action" aria-label={tr('desktop_add_context')} aria-expanded={fileMenuOpen} title={tr('desktop_add_context_shortcut')} onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
+          <div ref={modeControl} style={{ position: 'relative' }}>
+            <button ref={modeButton} type="button" disabled={!modeControlReady} aria-haspopup="menu" aria-expanded={modeOpen}
+              aria-label={`${tr('desktop_chat_conversation_mode')}: ${sessionMode?.active === 'chat' ? 'Chat' : sessionMode?.active === 'code' ? 'Code' : ''}${sessionMode?.pending ? ` · ${tr('desktop_chat_mode_next_turn', sessionMode.pending === 'chat' ? 'Chat' : 'Code')}` : ''}`}
+              onClick={() => { setModeOpen((open) => !open); setPermissionOpen(false); setModelOpen(false); setModelSubmenu(null); }}
+              style={{ ...composerPillStyle(t, modeOpen), color: modeOpen ? t.accent : t.text2 }}>
+              <span>{sessionMode ? (sessionMode.active === 'chat' ? 'Chat' : 'Code') : tr('desktop_chat_conversation_mode')}</span>
+              {sessionMode?.pending && <span style={{ color: t.text3, fontSize: 11 }}>· {tr('desktop_chat_mode_next_short', sessionMode.pending === 'chat' ? 'Chat' : 'Code')}</span>}
+              <Icon name="chevron" size={12} color="currentColor" stroke={1.8} />
+            </button>
+            {modeControlReady && modeOpen && sessionMode && (
+              <div role="menu" aria-label={tr('desktop_chat_conversation_mode')} style={{ ...composerMenuStyle(t, 'left'), width: 330, maxWidth: 'calc(100vw - 44px)' }}>
+                {(['chat', 'code'] as const).map((mode) => {
+                  const active = mode === sessionMode.active;
+                  const name = mode === 'chat' ? 'Chat' : 'Code';
+                  return <button key={mode} type="button" role="menuitemradio" aria-checked={active}
+                    onClick={() => { invoke(() => bridge.setSessionMode(mode)); setModeOpen(false); }}
+                    style={{ width: '100%', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 18px', alignItems: 'center', gap: 8,
+                      padding: '9px 10px', border: 0, borderRadius: 9, background: active ? t.accentBg : 'transparent', color: t.text,
+                      textAlign: 'left', cursor: 'pointer', font: 'inherit' }}>
+                    <span><span style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>{name}</span>
+                      <span style={{ display: 'block', marginTop: 3, color: t.text3, fontSize: 11, lineHeight: 1.35 }}>
+                        {tr(mode === 'chat' ? 'desktop_chat_mode_chat_description' : 'desktop_chat_mode_code_description')}
+                      </span></span>
+                    {active && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
+                  </button>;
+                })}
+                {sessionMode.pending && <div role="status" style={{ padding: '8px 10px 4px', color: t.text3, fontSize: 11 }}>
+                  {tr('desktop_chat_mode_next_turn', sessionMode.pending === 'chat' ? 'Chat' : 'Code')}
+                </div>}
+              </div>
+            )}
+          </div>
           <div ref={permissionControl} style={{ position: 'relative' }}>
             <button
               ref={permissionButton}
@@ -3613,7 +3667,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               aria-label={tr('desktop_chat_permission_label', permissionMode.label)}
               title={tr('desktop_change_permissions')}
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
-              onClick={() => { setPermissionOpen((open) => !open); setModelOpen(false); setModelSubmenu(null); }}
+              onClick={() => { setPermissionOpen((open) => !open); setModeOpen(false); setModelOpen(false); setModelSubmenu(null); }}
               style={{
                 ...composerPillStyle(t, permissionOpen),
                 color: permissionMode.danger ? t.danger : permissionOpen ? t.accent : t.text2,
@@ -3740,7 +3794,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               aria-expanded={modelOpen}
               aria-label={tr(fastModeAvailable && bridge.desktop.fastMode ? 'desktop_chat_fast_model_label' : 'desktop_chat_model_label', activeModelLabel(bridge.desktop.currentModel, bridge.desktop.currentModelSource), reasoningSelectionLabel(selectedReasoning))}
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
-              onClick={() => { setModelOpen((open) => !open); setModelSubmenu(null); setPermissionOpen(false); }}
+              onClick={() => { setModelOpen((open) => !open); setModelSubmenu(null); setPermissionOpen(false); setModeOpen(false); }}
               style={{ ...composerPillStyle(t, modelOpen), maxWidth: '100%', width: '100%', color: t.text }}
             >
               {fastModeAvailable && <Icon name="bolt" size={18} color={t.text} stroke={2.1} />}

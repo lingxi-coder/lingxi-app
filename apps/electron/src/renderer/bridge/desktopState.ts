@@ -24,6 +24,7 @@ export interface TaskOutputState {
 export interface DesktopState {
   readonly sessions: SessionRowDto[];
   readonly activeSessionId: string | null;
+  readonly sessionMode: { sessionId: string; active: SessionRowDto['mode']; pending: SessionRowDto['mode'] | null; revision: number } | null;
   readonly models: string[];
   readonly modelDetails: ModelDetailsDto[];
   readonly providerModelCatalog: ProviderModelCatalogEntryDto[];
@@ -61,6 +62,7 @@ export function emptyDesktopState(): DesktopState {
   return {
     sessions: [],
     activeSessionId: null,
+    sessionMode: null,
     models: [],
     modelDetails: [],
     providerModelCatalog: [],
@@ -118,7 +120,9 @@ function startSession(
         // the first turn creates the durable JSONL transcript.
         path: '',
       }, ...state.sessions];
-  return { ...state, sessions, activeSessionId: sessionId, conversationControls: null, currentModelSource: null };
+  return { ...state, sessions, activeSessionId: sessionId,
+    sessionMode: { sessionId, active: mode, pending: null, revision: 0 },
+    conversationControls: null, currentModelSource: null };
 }
 
 export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): DesktopState {
@@ -128,9 +132,20 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'session_started':
       return startSession({ ...state, lastCost: null, status: null, apiRetry: null, storagePaused: false }, event.session_id, event.mode);
     case 'session_resumed':
-      return { ...state, activeSessionId: event.session_id, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null, storagePaused: false };
+      return { ...state, activeSessionId: event.session_id,
+        sessionMode: { sessionId: event.session_id, active: event.mode, pending: null, revision: 0 },
+        conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null, storagePaused: false };
+    case 'session_mode_changed': {
+      const previous = state.sessionMode;
+      if (previous?.sessionId === event.session_id && event.revision < previous.revision) return state;
+      // An applied boundary at the same revision wins over a delayed pending echo.
+      if (previous?.sessionId === event.session_id && event.revision === previous.revision
+        && previous.pending === null && event.pending_mode !== undefined && previous.active === event.pending_mode) return state;
+      return { ...state, sessionMode: { sessionId: event.session_id, active: event.mode, pending: event.pending_mode ?? null, revision: event.revision },
+        sessions: state.sessions.map((row) => row.uuid === event.session_id ? { ...row, mode: event.pending_mode ?? event.mode } : row) };
+    }
     case 'session_ended':
-      return { ...state, activeSessionId: null, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null, storagePaused: false };
+      return { ...state, activeSessionId: null, sessionMode: null, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null, storagePaused: false };
     case 'session_storage_state':
       return { ...state, storagePaused: event.disk_full };
     case 'model_list':

@@ -292,7 +292,9 @@ export function buildSnapshot(view: RemoteRuntimeView): SessionSnapshotParams[] 
   if (all.length > INITIAL_HISTORY_TAIL_MESSAGES && jsonBytes(all) > INITIAL_HISTORY_MAX_BYTES) {
     first = all.length - INITIAL_HISTORY_TAIL_MESSAGES;
   }
-  const mode = view.base?.event.type === 'session_started' || view.base?.event.type === 'session_resumed' ? view.base.event.mode : undefined;
+  const latestMode = view.state.find((entry) => entry.event.type === 'session_mode_changed' && entry.sequence > view.baseSequence)?.event;
+  const mode = latestMode?.type === 'session_mode_changed' ? latestMode.mode
+    : view.base?.event.type === 'session_started' || view.base?.event.type === 'session_resumed' ? view.base.event.mode : undefined;
   const frames: SessionSnapshotParams[] = [{
     phase: 'begin',
     session_id: sessionId,

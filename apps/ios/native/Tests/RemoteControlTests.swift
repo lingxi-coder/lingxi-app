@@ -55,6 +55,27 @@ final class RemoteControlTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteSnapshotAndLiveModeDoNotReplaceTheTranscript() {
+        let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
+            appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
+        source.replaceRemoteTranscript([MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "hello".clientTextDto)])], sessionID: session)
+        let update = RemoteSessionUpdateFfi(
+            sessionId: session, sessionMode: .chat, phase: .live, error: nil, replace: true,
+            messages: [], olderMessages: [], firstMessageIndex: 0, records: [],
+            pending: RemotePendingFfi(permissions: [], questions: [], computerAccess: []),
+            turn: RemoteTurnFfi(running: false, turnId: nil), controls: nil, outgoing: [],
+            hasOlder: false, loadingOlder: false, answeredElsewhere: false)
+        source.reconcileRemoteState(update)
+        XCTAssertTrue(source.model.sessionModeKnown)
+        XCTAssertEqual(source.model.sessionMode, .chat)
+        let rows = source.model.messages.map(\.text)
+        source.applyRemoteEvent(.sessionModeChanged(sessionId: session, mode: .code, pendingMode: nil, revision: 1))
+        XCTAssertEqual(source.model.sessionMode, .code)
+        XCTAssertEqual(source.model.messages.map(\.text), rows)
+        XCTAssertEqual(source.model.activeSessionId, session)
+    }
+
+    @MainActor
     func testRemoteHistoryImageHydrationPreservesRowsAndAccountInvalidationClearsData() {
         let source = EngineConversationSource(config: EngineConfig(apiBase: "", apiKey: "", model: "",
             appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)

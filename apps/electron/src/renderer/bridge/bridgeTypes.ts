@@ -327,6 +327,7 @@ export interface UseBridge {
   refresh(): Promise<void>;
   newSession(projectPath?: string): Promise<import("../../shared/settings").SessionRef | undefined>;
   resumeSession(sessionId: string): Promise<void>;
+  setSessionMode(mode: 'chat' | 'code'): Promise<void>;
   setModel(model: string): Promise<void>;
   setReasoningSelection(selection: ReasoningSelectionDto): Promise<void>;
   setFastMode(enabled: boolean): Promise<void>;

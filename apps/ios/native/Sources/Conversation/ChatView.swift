@@ -28,6 +28,7 @@ struct ChatView: View {
     /// An existing (not brand-new) session can be archived.
     var canArchive = false
     var onSelectNewChatMode: (SessionMode) -> Void = { _ in }
+    var onSelectSessionMode: (SessionMode) -> Void = { _ in }
     var onPickWorkspace: () -> Void = {}
     var onContinueInOtherMode: () -> Void = {}
     var onTogglePinned: () -> Void = {}
@@ -46,6 +47,7 @@ struct ChatView: View {
     var onOpenSessionDetails: () -> Void = {}
     var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
     @ObservedObject private var convo: ConversationModel
+    private var displayedSessionMode: SessionMode { source.isTemporaryConversation ? convo.sessionMode : sessionMode }
 
     @State private var latestMessageRequestRevision: UInt64 = 0
     @State private var pendingAgentDetailID: String?
@@ -119,6 +121,7 @@ struct ChatView: View {
          isPinned: Bool = false,
          canArchive: Bool = false,
          onSelectNewChatMode: @escaping (SessionMode) -> Void = { _ in },
+         onSelectSessionMode: @escaping (SessionMode) -> Void = { _ in },
          onPickWorkspace: @escaping () -> Void = {},
          onContinueInOtherMode: @escaping () -> Void = {},
          onTogglePinned: @escaping () -> Void = {},
@@ -140,6 +143,7 @@ struct ChatView: View {
         self.isPinned = isPinned
         self.canArchive = canArchive
         self.onSelectNewChatMode = onSelectNewChatMode
+        self.onSelectSessionMode = onSelectSessionMode
         self.onPickWorkspace = onPickWorkspace
         self.onContinueInOtherMode = onContinueInOtherMode
         self.onTogglePinned = onTogglePinned
@@ -196,11 +200,27 @@ struct ChatView: View {
                 }
                 if showsNewChatBar {
                     NewChatBar(
-                        mode: sessionMode,
+                        mode: displayedSessionMode,
                         workspaceName: workspaceName,
                         onSelectMode: onSelectNewChatMode,
                         onPickWorkspace: onPickWorkspace
                     )
+                }
+                if let pending = convo.pendingSessionMode {
+                    Text(String(localized: "session_mode_pending \(pending.title)"))
+                        .font(.caption)
+                        .foregroundStyle(t.text3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 4)
+                }
+                if convo.awaitingNewSessionMode {
+                    Text(String(localized: convo.newSessionModeFailed ? "session_mode_retry" : "session_mode_setting"))
+                        .font(.caption)
+                        .foregroundStyle(t.text3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 4)
                 }
                 Group {
                     Composer(model: $convo.model,
@@ -264,6 +284,7 @@ struct ChatView: View {
                          showDiscardRecovery: convo.hasInactiveDurableRecovery,
                          isCancelling: convo.isCancelling,
                          sendEnabled: !convo.sessionTransitionPending
+                             && !convo.awaitingNewSessionMode
                              && !convo.slashCommandPending
                              && voiceInteraction.mode != .flow,
                          onStop: stop,
@@ -283,7 +304,7 @@ struct ChatView: View {
                          voiceInteractionMode: voiceInteraction.mode,
                          modelOpen: $modelPickerOpen,
                          controlsOpen: $permissionSheetOpen,
-                         showsPermissionChip: sessionMode == .code)
+                         showsPermissionChip: true)
                     .preserveConversationDraft()
                 }
             }
@@ -403,12 +424,14 @@ struct ChatView: View {
         .sheet(isPresented: $sessionPanelOpen, onDismiss: runSessionPanelFollowUp) {
             SessionPanelSheet(
                 title: sessionTitle,
-                mode: sessionMode,
+                mode: displayedSessionMode,
+                pendingMode: convo.pendingSessionMode,
+                canSwitchMode: !source.isTemporaryConversation && !convo.sessionTransitionPending,
                 workspaceName: workspaceName,
                 messageCount: convo.messages.count,
                 modelName: activeModelName,
                 effortLabel: effortLabel,
-                permissionLabel: sessionMode == .code ? permissionLabel : nil,
+                permissionLabel: permissionLabel,
                 isPinned: isPinned,
                 canPin: !convo.isNew,
                 canArchive: canArchive && !convo.isNew,
@@ -501,7 +524,7 @@ struct ChatView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(sessionTitle)
                     .accessibilityHint(String(localized: "chat_session_panel_a11y"))
-                    .accessibilityValue("\(sessionTitle), \(sessionMode.title) · \(workspaceName)")
+                    .accessibilityValue("\(sessionTitle), \(displayedSessionMode.title) · \(workspaceName)")
                     .accessibilityIdentifier("conversation.project-context")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -581,6 +604,7 @@ struct ChatView: View {
         case .togglePinned: onTogglePinned()
         case .makeScheduled: onMakeScheduled()
         case .terminal: onOpenTerminal()
+        case let .setMode(mode): onSelectSessionMode(mode)
         case .continueInOtherMode: onContinueInOtherMode()
         case .archive: onArchive()
         }

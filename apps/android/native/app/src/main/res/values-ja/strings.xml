@@ -745,6 +745,11 @@
     <string name="session_index_save_new_failed_fmt">新しい会話インデックスの保存に失敗しました：%1$s</string>
     <string name="session_mode_chat">Chat</string>
     <string name="session_mode_code">Code</string>
+    <string name="session_mode_chat_description">汎用アシスタント</string>
+    <string name="session_mode_code_description">ソフトウェア開発アシスタント</string>
+    <string name="session_mode_pending">現在の応答後に %1$s に切り替えます</string>
+    <string name="session_mode_setting">会話モードを設定しています…</string>
+    <string name="session_mode_retry">モードを設定できませんでした。選び直して再試行してください。</string>
     <string name="session_panel_make_scheduled">定時タスクにする</string>
     <string name="session_panel_mode_hint">モードを変えると新しい会話に分岐して続けます</string>
     <string name="session_relative_days_ago_fmt">%1$d 日前</string>

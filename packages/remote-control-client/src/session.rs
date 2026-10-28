@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use client::protocol::commands::ImageRefDto;
 use client::protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
 use client::protocol::events::ClientEvent;
+use client::protocol::listings::SessionModeDto;
 use client::protocol::message::MessageDto;
 use client::protocol::permission::PermissionResponseDto;
 use serde::de::DeserializeOwned;
@@ -154,6 +155,8 @@ pub struct OutgoingPrompt {
 pub struct SessionState {
     /// The session.
     pub session_id: String,
+    /// Conversation mode from the authoritative snapshot or later live events.
+    pub session_mode: Option<SessionModeDto>,
     /// Where it stands.
     pub status: SessionStatus,
     /// Why the attach failed.
@@ -184,6 +187,7 @@ impl SessionState {
     fn new(session_id: &str) -> Self {
         Self {
             session_id: session_id.to_owned(),
+            session_mode: None,
             status: SessionStatus::Loading,
             error: None,
             messages: Vec::new(),
@@ -211,6 +215,7 @@ struct Cursor(RemoteCursor);
 
 struct Assembly {
     epoch: String,
+    session_mode: Option<SessionModeDto>,
     first: u64,
     messages: Vec<MessageDto>,
     records: Vec<RemoteSeqRecord>,
@@ -218,6 +223,8 @@ struct Assembly {
 
 struct Core {
     state: SessionState,
+    mode_revision: Option<u64>,
+    mode_pending: bool,
     active: bool,
     attach_id: u64,
     cursor: Option<Cursor>,
@@ -267,6 +274,8 @@ impl SessionController {
         let inner = Arc::new(SessionInner {
             core: Mutex::new(Core {
                 state: SessionState::new(&session_id),
+                mode_revision: None,
+                mode_pending: false,
                 active: false,
                 attach_id: 0,
                 cursor: None,
@@ -419,11 +428,13 @@ impl SessionController {
         match params {
             SessionSnapshotParams::Begin {
                 epoch,
+                session_mode,
                 first_message_index,
                 ..
             } => {
                 core.assembly = Some(Assembly {
                     epoch,
+                    session_mode,
                     first: first_message_index,
                     messages: Vec::new(),
                     records: Vec::new(),
@@ -478,12 +489,17 @@ impl SessionController {
                     self.inner.images.lock().expect("images").clear();
                 }
                 core.cursor = Some(Cursor(cursor));
+                // The snapshot carries the actual mode, but not its revision.
+                core.mode_revision = None;
+                core.mode_pending = false;
                 let seen = core.seen_turns.clone();
                 let controls = controls.or_else(|| controls_from_records(&records));
                 let first = assembly.first;
+                let session_mode = assembly.session_mode;
                 let messages = assembly.messages;
                 self.inner.commit(&mut core, move |s| {
                     s.status = SessionStatus::Live;
+                    s.session_mode = session_mode;
                     s.error = None;
                     s.messages = messages;
                     s.first_message_index = first;
@@ -1038,8 +1054,40 @@ impl SessionInner {
             core.seen_turns.push(*turn_id);
         }
         let record = item.record.clone();
+        let session_mode = match &record {
+            RemoteRecord::Event { event, .. } => match event.known() {
+                Some(ClientEvent::SessionModeChanged {
+                    session_id,
+                    mode,
+                    pending_mode,
+                    revision,
+                }) if session_id == &self.session_id => {
+                    let pending = pending_mode.is_some();
+                    let accepted = core.mode_revision.is_none_or(|previous| {
+                        *revision > previous
+                            || (*revision == previous && (core.mode_pending || !pending))
+                    });
+                    if accepted {
+                        core.mode_revision = Some(*revision);
+                        core.mode_pending = pending;
+                        Some(*mode)
+                    } else {
+                        None
+                    }
+                }
+                Some(ClientEvent::SessionStarted { session_id, mode })
+                | Some(ClientEvent::SessionResumed {
+                    session_id, mode, ..
+                }) if session_id == &self.session_id && core.mode_revision.is_none() => Some(*mode),
+                _ => None,
+            },
+            _ => None,
+        };
         self.commit(core, move |s| {
             s.records.push(item);
+            if let Some(mode) = session_mode {
+                s.session_mode = Some(mode);
+            }
             match &record {
                 RemoteRecord::Prompt { turn_id, .. } => {
                     s.outgoing.retain(|p| p.turn_id != Some(*turn_id));

@@ -128,6 +128,8 @@ export interface BridgeManagerOptions {
   getSavedModel?: () => string | undefined;
   getSavedPermissionMode?: () => PermissionModeId | undefined;
   onPermissionModeSelected?: (mode: PermissionModeId) => void;
+  getSavedSessionMode?: () => RuntimeSessionMode;
+  onSessionModeSelected?: (mode: RuntimeSessionMode) => void;
   getSavedFastMode?: () => boolean | undefined;
   onFastModeSelected?: (enabled: boolean) => void;
   /**

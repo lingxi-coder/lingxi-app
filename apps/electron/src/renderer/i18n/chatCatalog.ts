@@ -1006,5 +1006,20 @@ export const chatCatalog: Record<string, Record<string, string>> = {
     "en": "Unrestricted access to tools and files on this computer",
     "ja": "このコンピュータのツールとファイルに制限なくアクセス",
     "ko": "이 컴퓨터의 도구 및 파일에 제한 없이 접근"
+  },
+  "desktop_chat_conversation_mode": {
+    "zh-Hans": "会话模式", "zh-Hant": "對話模式", "en": "Conversation mode", "ja": "会話モード", "ko": "대화 모드"
+  },
+  "desktop_chat_mode_chat_description": {
+    "zh-Hans": "通用助手，适合研究、写作和日常任务", "zh-Hant": "通用助理，適合研究、寫作和日常工作", "en": "A general assistant for research, writing, and everyday tasks", "ja": "調査、執筆、日常の作業に対応するアシスタント", "ko": "조사, 글쓰기, 일상 작업을 위한 범용 어시스턴트"
+  },
+  "desktop_chat_mode_code_description": {
+    "zh-Hans": "专注于软件开发和工程任务", "zh-Hant": "專注於軟體開發和工程工作", "en": "Focused on software development and engineering", "ja": "ソフトウェア開発とエンジニアリングに特化", "ko": "소프트웨어 개발과 엔지니어링에 집중"
+  },
+  "desktop_chat_mode_next_short": {
+    "zh-Hans": "下一回合：%1$s", "zh-Hant": "下一回合：%1$s", "en": "Next: %1$s", "ja": "次: %1$s", "ko": "다음: %1$s"
+  },
+  "desktop_chat_mode_next_turn": {
+    "zh-Hans": "下一回合切换到 %1$s", "zh-Hant": "下一回合切換至 %1$s", "en": "%1$s applies to the next turn", "ja": "次のターンから %1$s を適用", "ko": "다음 턴부터 %1$s 적용"
   }
 };

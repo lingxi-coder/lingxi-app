@@ -301,6 +301,47 @@ export class SessionRuntime {
     fail(error: Error): void;
   } | undefined;
 
+  private pendingSessionModeSwitch: {
+    mode: RuntimeSessionMode;
+    complete(): void;
+    fail(error: Error): void;
+  } | undefined;
+
+  /** Initialize a fresh draft only; existing conversations restore their own metadata. */
+  initializeSessionMode(mode: RuntimeSessionMode): Promise<void> {
+    return this.applySessionMode(mode, false);
+  }
+
+  private applySessionMode(mode: RuntimeSessionMode, persist: boolean): Promise<void> {
+    if (this.pendingSessionModeSwitch) return Promise.reject(new Error('A conversation mode change is already in progress.'));
+    const client = this.requireClient();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => pending.fail(new Error('Conversation mode change timed out.')), 10_000);
+      timer.unref();
+      const finish = (error?: Error) => {
+        if (this.pendingSessionModeSwitch !== pending) return;
+        this.pendingSessionModeSwitch = undefined;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve();
+      };
+      const pending = {
+        mode,
+        complete: () => {
+          try {
+            if (persist) this.opts.onSessionModeSelected?.(mode);
+            finish();
+          } catch (error) {
+            finish(new Error(`Could not save conversation mode: ${sanitizeDiagnostic(error)}`));
+          }
+        },
+        fail: (error: Error) => finish(error),
+      };
+      this.pendingSessionModeSwitch = pending;
+      try { client.sendCommand({ type: 'set_session_mode', mode }); }
+      catch (error) { pending.fail(error instanceof Error ? error : new Error(String(error))); }
+    });
+  }
+
   private pendingFastModeSwitch: {
     enabled: boolean;
     complete(): void;
@@ -664,7 +705,11 @@ export class SessionRuntime {
   private readonly mediaConnectionRequestListeners = new Set<(request: MediaConnectionRequestDto) => void>();
   private readonly mediaControlRequestListeners = new Set<(request: MediaControlRequestDto) => void>();
 
-  constructor(private readonly opts: BridgeManagerOptions, readonly sessionMode?: RuntimeSessionMode) {
+  sessionMode?: RuntimeSessionMode;
+  private sessionModeSnapshot?: Extract<ClientEvent, { type: 'session_mode_changed' }>;
+
+  constructor(private readonly opts: BridgeManagerOptions, sessionMode?: RuntimeSessionMode) {
+    this.sessionMode = sessionMode;
     this.sessionId = opts.sessionId ?? randomUUID();
     this.ownedTranscriptPath = opts.resumeTranscriptPath;
     this.remountControls = opts.remountControls;
@@ -1038,7 +1083,13 @@ export class SessionRuntime {
   }
 
   replaySnapshot(): readonly SequencedRuntimeEventEnvelope<ClientEvent>[] {
-    return Object.freeze(this.replayEvents.map((envelope) => Object.freeze({
+    // Fresh drafts have no transcript base yet. Keep the latest authoritative
+    // mode separately so renderer reloads can still reconstruct their control.
+    const mode = this.latestState.get('session_mode_changed');
+    const replay = mode && mode.sequence > this.remoteBaseSequence
+      ? [...this.replayEvents, mode].sort((a, b) => a.sequence - b.sequence)
+      : this.replayEvents;
+    return Object.freeze(replay.map((envelope) => Object.freeze({
       sessionId: envelope.sessionId,
       sequence: envelope.sequence,
       event: structuredClone(envelope.event),
@@ -1734,6 +1785,7 @@ export class SessionRuntime {
     }
     assertCurrentConnection();
     client.sendCommand({ type: 'get_audio_session_context' });
+    client.sendCommand({ type: 'get_context_manifest' });
     const currentAudioCapabilities = this.opts.audioService?.getCapabilities();
     if (
       currentAudioCapabilities
@@ -2310,12 +2362,26 @@ export class SessionRuntime {
       if (event.type === 'provider_connection_tested') {
         this.handleProviderConnectionTested(event);
       }
+      if (event.type === 'context_manifest') return;
+      if (event.type === 'session_mode_changed') {
+        if (event.session_id !== this.sessionId) return;
+        const previous = this.sessionModeSnapshot;
+        if (previous && (event.revision < previous.revision
+          || (event.revision === previous.revision && previous.pending_mode === undefined
+            && event.pending_mode !== undefined && previous.mode === event.pending_mode))) return;
+        this.sessionModeSnapshot = event;
+        this.sessionMode = event.mode;
+        if ((event.pending_mode ?? event.mode) === this.pendingSessionModeSwitch?.mode) this.pendingSessionModeSwitch.complete();
+      }
       if (event.type === 'session_resumed') {
         if (event.session_id !== this.sessionId) {
           this.rejectPendingSessionResume(new Error('engine resumed a different session id'));
           this.fail('engine resumed a different session id');
           return;
         }
+        this.sessionModeSnapshot = undefined;
+        this.latestState.delete('session_mode_changed');
+        this.sessionMode = event.mode;
         void this.updateNativeMediaOwner(event.session_id);
         this.sessionHasHistory = true;
         this.sessionIdentityCommitted = true;
@@ -2325,6 +2391,9 @@ export class SessionRuntime {
         }
       }
       if (event.type === 'session_started') {
+        this.sessionModeSnapshot = undefined;
+        this.latestState.delete('session_mode_changed');
+        this.sessionMode = event.mode;
         void this.updateNativeMediaOwner(event.session_id);
       }
       if (event.type === 'permission_mode_changed' && event.mode === this.pendingPermissionSwitch?.mode) {
@@ -2335,6 +2404,9 @@ export class SessionRuntime {
       }
       if (event.type === 'error' && event.message.startsWith('set_permission_mode failed:')) {
         this.pendingPermissionSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
+      }
+      if (event.type === 'error' && event.message.startsWith('set_session_mode failed:')) {
+        this.pendingSessionModeSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
       }
       if (event.type === 'error' && event.message.startsWith('set_fast_mode failed:')) {
         this.pendingFastModeSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
@@ -3030,6 +3102,7 @@ export class SessionRuntime {
     if (validated.type === 'set_permission_mode' && (this.opts.getSavedPermissionMode || this.opts.onPermissionModeSelected)) {
       return this.applyPermissionMode(validated.mode, true);
     }
+    if (validated.type === 'set_session_mode') return this.applySessionMode(validated.mode, true);
     if (validated.type === 'set_fast_mode' && (this.opts.getSavedFastMode || this.opts.onFastModeSelected)) {
       return this.applyFastMode(validated.enabled, true);
     }
@@ -3493,6 +3566,7 @@ export class SessionRuntime {
     if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
       this.telemetry?.interrupt(next.status === 'error' ? 'error' : 'interrupted');
       this.disconnectedForegroundPending ||= this.activeTurn || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
+      this.pendingSessionModeSwitch?.fail(new Error('Conversation mode change was interrupted.'));
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
       this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
       this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
@@ -3541,6 +3615,7 @@ export class SessionRuntime {
     for (const pending of this.pendingRunBindings.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled execution interrupted.')); }
     this.pendingRunBindings.clear();
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
+    this.pendingSessionModeSwitch?.fail(new Error('Conversation mode change was interrupted.'));
     this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
     this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
     this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));

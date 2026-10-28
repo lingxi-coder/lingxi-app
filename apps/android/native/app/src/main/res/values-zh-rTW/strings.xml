@@ -745,6 +745,11 @@
     <string name="session_index_save_new_failed_fmt">新會話索引儲存失敗：%1$s</string>
     <string name="session_mode_chat">Chat</string>
     <string name="session_mode_code">Code</string>
+    <string name="session_mode_chat_description">通用助理</string>
+    <string name="session_mode_code_description">軟體工程助理</string>
+    <string name="session_mode_pending">將在目前回覆結束後切換為 %1$s</string>
+    <string name="session_mode_setting">正在設定會話模式…</string>
+    <string name="session_mode_retry">無法設定模式，請選擇模式重試。</string>
     <string name="session_panel_make_scheduled">設為定時任務</string>
     <string name="session_panel_mode_hint">換模式會分叉成新會話繼續</string>
     <string name="session_relative_days_ago_fmt">%1$d 天前</string>

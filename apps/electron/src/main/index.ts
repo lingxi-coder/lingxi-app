@@ -453,6 +453,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     appVersion: app.getVersion(),
     getSavedPermissionMode: () => settings.getLastPermissionMode(),
     onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
+    getSavedSessionMode: () => settings.getLastSessionMode(),
+    onSessionModeSelected: (mode) => settings.setLastSessionMode(mode),
     getSavedFastMode: () => settings.getLastFastMode(),
     onFastModeSelected: (enabled) => settings.setLastFastMode(enabled),
     notifier,

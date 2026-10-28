@@ -211,3 +211,18 @@ test('records are paged in snapshots too, in sequence order', () => {
   assert.equal(seqs.length, 12);
   assert.deepEqual(all.map((frame) => frame.phase).filter((phase, i, list) => list.indexOf(phase) === i), ['begin', 'records', 'end']);
 });
+
+
+test('snapshot mode follows the latest session state and ignores state from an older base', () => {
+  const runtime = new FakeRuntime();
+  runtime.resume();
+  runtime.base = { ...runtime.base!, event: { ...runtime.base!.event, mode: 'code' } as any };
+  runtime.state = [{ sessionId: SESSION_A, sequence: runtime.baseSequence + 1,
+    event: { type: 'session_mode_changed', session_id: SESSION_A, mode: 'chat', revision: 2 } as any }];
+  const current = frames(runtime)[0] as any;
+  assert.equal(current.session_mode, 'chat');
+  runtime.state = [{ sessionId: SESSION_A, sequence: runtime.baseSequence - 1,
+    event: { type: 'session_mode_changed', session_id: SESSION_A, mode: 'chat', revision: 2 } as any }];
+  const stale = frames(runtime)[0] as any;
+  assert.equal(stale.session_mode, 'code');
+});

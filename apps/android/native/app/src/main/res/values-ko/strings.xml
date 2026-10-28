@@ -745,6 +745,11 @@
     <string name="session_index_save_new_failed_fmt">새 세션 인덱스 저장 실패: %1$s</string>
     <string name="session_mode_chat">Chat</string>
     <string name="session_mode_code">Code</string>
+    <string name="session_mode_chat_description">범용 어시스턴트</string>
+    <string name="session_mode_code_description">소프트웨어 개발 어시스턴트</string>
+    <string name="session_mode_pending">현재 응답이 끝나면 %1$s로 전환됩니다</string>
+    <string name="session_mode_setting">대화 모드를 설정하는 중…</string>
+    <string name="session_mode_retry">모드를 설정할 수 없습니다. 모드를 선택해 다시 시도하세요.</string>
     <string name="session_panel_make_scheduled">예약 작업으로 만들기</string>
     <string name="session_panel_mode_hint">모드를 바꾸면 새 대화로 분기해 이어갑니다</string>
     <string name="session_relative_days_ago_fmt">%1$d일 전</string>

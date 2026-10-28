@@ -891,3 +891,90 @@ async fn fresh_private_cd_does_not_create_a_conversation_transcript() {
     let report = lifecycle.shutdown_and_drain().await;
     assert!(report.complete, "{:?}", report.errors);
 }
+
+#[tokio::test]
+async fn cold_resume_reports_admitted_mode_and_preserves_pending_selection() {
+    use client::protocol::commands::ClientCommand;
+    use client::protocol::listings::SessionModeDto;
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("config");
+    let id = uuid::Uuid::new_v4();
+    let user = uuid::Uuid::new_v4();
+    let selected = cwd.join(format!("{id}.jsonl"));
+    let rows = [
+        serde_json::json!({"type":"user","uuid":user,"sessionId":id,"cwd":cwd,"parentUuid":null,"message":{"role":"user","content":"resume the existing conversation"}}),
+        serde_json::json!({"type":"session-mode","sessionId":id,"sessionMode":"chat","contextRevision":1,"profileEpoch":1,"admittedMode":"code","admittedEpoch":0,"pending":true}),
+    ];
+    std::fs::write(
+        &selected,
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mut cfg = isolated_config(&cwd, &home);
+    cfg.session_id_override = Some(id.to_string());
+    cfg.session_transcript_path = Some(selected.clone());
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    let (events, response) = call(
+        &mut socket,
+        2,
+        "resume_selected_session",
+        projection(serde_json::json!({"session_id":id,"transcript_path":selected})),
+    )
+    .await;
+    assert!(response.error.is_none(), "{response:?}");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::SessionResumed {
+        session_id, mode: SessionModeDto::Code, ..
+    } if session_id == &id.to_string())),
+        "{events:?}"
+    );
+    assert!(events.iter().any(|event| matches!(event, ClientEvent::SessionModeChanged {
+        session_id, mode: SessionModeDto::Code, pending_mode: Some(SessionModeDto::Chat), revision: 1,
+    } if session_id == &id.to_string())), "{events:?}");
+
+    send(
+        &mut socket,
+        3,
+        "command",
+        client_command(ClientCommand::GetContextManifest),
+    )
+    .await;
+    let mut mode_reported = false;
+    loop {
+        match next_frame(&mut socket).await {
+            Frame::Event(ClientEvent::SessionModeChanged {
+                session_id,
+                mode: SessionModeDto::Code,
+                pending_mode: Some(SessionModeDto::Chat),
+                revision: 1,
+            }) if session_id == id.to_string() => mode_reported = true,
+            Frame::Event(ClientEvent::ContextManifest { manifest_json }) => {
+                let manifest: serde_json::Value = serde_json::from_str(&manifest_json).unwrap();
+                assert!(
+                    mode_reported,
+                    "manifest request first publishes the pending mode snapshot"
+                );
+                assert_eq!(manifest["session"]["active"], "code");
+                assert_eq!(manifest["session"]["selected"], "chat");
+                assert_eq!(manifest["session"]["pending"], true);
+                assert_eq!(manifest["projected"], false);
+                break;
+            }
+            _ => {}
+        }
+    }
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}

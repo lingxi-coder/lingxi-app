@@ -54,6 +54,48 @@ pub struct CliBgSessionForker {
     >,
 }
 
+/// Write the same transcript and host metadata the cold-resume loader reads.
+async fn write_background_snapshot(
+    writer: &session::jsonl::writer::JsonlWriter,
+    conversation: &BgSessionSnapshot,
+    session_id: &str,
+    cwd: &str,
+    version: &str,
+    model: &str,
+) -> Result<(), BgForkError> {
+    let excluded = conversation
+        .model_context_excluded_messages
+        .iter()
+        .map(|id| id.as_uuid().to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let lines = orchestrator::bg_snapshot::history_to_jsonl_lines(
+        conversation,
+        session_id,
+        cwd,
+        version,
+        model,
+    );
+    for mut line in lines {
+        if excluded.contains(&line.uuid) {
+            line.extra
+                .set_field(
+                    "isModelContextExcluded",
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse("true")
+                        .expect("true is valid JSON"),
+                )
+                .expect("transcript metadata is an object");
+        }
+        writer
+            .append(&line)
+            .await
+            .map_err(|e| BgForkError::Snapshot(e.to_string()))?;
+    }
+    writer
+        .append_session_mode_transition(session_id, &conversation.profile)
+        .await
+        .map_err(|e| BgForkError::Snapshot(e.to_string()))
+}
+
 impl CliBgSessionForker {
     /// Construct a forker over the resolved config-home + daemon runtime dir.
     #[must_use]
@@ -144,21 +186,17 @@ impl CliBgSessionForker {
         // 2. SNAPSHOT the conversation into the new session's transcript.
         let session_path =
             session::jsonl::path::session_path(&self.config_home, &cwd, &new_session_id);
-        let lines = orchestrator::bg_snapshot::history_to_jsonl_lines(
+        let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd_pb.clone()));
+        let writer = session::jsonl::writer::JsonlWriter::new(session_path, fs);
+        write_background_snapshot(
+            &writer,
             conversation,
             &new_session_id,
             &cwd,
             &self.version,
             model,
-        );
-        let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd_pb.clone()));
-        let writer = session::jsonl::writer::JsonlWriter::new(session_path, fs);
-        for line in &lines {
-            writer
-                .append(line)
-                .await
-                .map_err(|e| BgForkError::Snapshot(e.to_string()))?;
-        }
+        )
+        .await?;
         // 3. Dispatch a detached daemon worker that resumes the copied session.
         launch_context.model = Some(model.to_string());
         launch_context.handoff = handoff.cloned();
@@ -287,6 +325,11 @@ impl BgSessionForker for CliBgSessionForker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::host::orchestrator::OrchestratorHandle;
+    use lingxi_core::host::session_context::{ConversationMode, SessionModeTransition};
+    use lingxi_core::types::{
+        utf16_json::Utf16JsonProjection as Source, ConversationMessage, MessageId,
+    };
 
     #[test]
     fn unbound_background_forker_rejects_startup_authority() {
@@ -330,5 +373,301 @@ mod tests {
             context.resolved_permission_mode,
             Some(permission::PermissionMode::Plan)
         );
+    }
+
+    #[tokio::test]
+    async fn background_snapshot_cold_resume_preserves_context_and_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config_home = root.path().join("config");
+        let cwd_string = cwd.to_string_lossy().into_owned();
+        let options = crate::background_launch::BackgroundLaunchOptions {
+            allowed_tools: Some(vec!["Read".into()]),
+            disallowed_tools: Some(vec!["Write".into()]),
+            tools: Some(vec!["Read".into()]),
+            add_dir: Some(vec![root.path().join("authorized")]),
+            permission_mode: Some("plan".into()),
+            ..Default::default()
+        };
+        let forker = CliBgSessionForker::new(
+            config_home.clone(),
+            root.path().join("runtime"),
+            options,
+            permission::PermissionMode::Plan,
+        );
+        let before = forker.launch_context(permission::PermissionMode::Plan);
+
+        // Exercise both transition directions. The epoch is carried even when
+        // no foreground pending selection belongs to this independent copy.
+        for (mode, epoch) in [(ConversationMode::Chat, 1), (ConversationMode::Code, 2)] {
+            let session_id = uuid::Uuid::new_v4();
+            let old_id = MessageId::new();
+            let passive_old_id = MessageId::new();
+            let user_id = MessageId::new();
+            let current_id = MessageId::new();
+            let excluded_attachment_id = MessageId::new();
+            let visible_attachment_id = MessageId::new();
+            let old_origin =
+                Source::parse(r#"{"type":"skill_activation","context_epoch":0}"#).unwrap();
+            let current_origin = Source::parse(&format!(
+                r#"{{"type":"skill_activation","context_epoch":{epoch}}}"#
+            ))
+            .unwrap();
+            let old = ConversationMessage::user_meta(old_id, "old instruction".into())
+                .with_origin(old_origin.clone());
+            let passive_old =
+                ConversationMessage::user_meta(passive_old_id, "other old instruction".into())
+                    .with_origin(old_origin);
+            // Identical prose without host origin remains ordinary user input.
+            let user = ConversationMessage::user(user_id, "old instruction".into());
+            let current = ConversationMessage::user_meta(current_id, "current instruction".into())
+                .with_origin(current_origin);
+            let excluded_attachment =
+                ConversationMessage::user_meta(excluded_attachment_id, "same evidence".into());
+            let visible_attachment =
+                ConversationMessage::user_meta(visible_attachment_id, "same evidence".into());
+            let attachment = Source::parse(r#"{"type":"environment","snapshot":{}}"#).unwrap();
+            let profile = SessionModeTransition {
+                selected: mode,
+                active: mode,
+                revision: epoch,
+                selected_epoch: epoch,
+                active_epoch: epoch,
+                pending: false,
+            };
+            let conversation = BgSessionSnapshot {
+                history: vec![
+                    old,
+                    passive_old,
+                    user,
+                    current,
+                    excluded_attachment,
+                    visible_attachment,
+                ],
+                model_context_excluded_messages: [old_id, excluded_attachment_id]
+                    .into_iter()
+                    .collect(),
+                profile: profile.clone(),
+                model_reminder_attachments: vec![
+                    (excluded_attachment_id, attachment.clone()),
+                    (visible_attachment_id, attachment),
+                ],
+                ..Default::default()
+            };
+            let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.clone()));
+            let path = session::jsonl::path::session_path(
+                &config_home,
+                &cwd_string,
+                &session_id.to_string(),
+            );
+            let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+                path.clone(),
+                fs.clone(),
+            ));
+            write_background_snapshot(
+                &writer,
+                &conversation,
+                &session_id.to_string(),
+                &cwd_string,
+                "test",
+                "model",
+            )
+            .await
+            .unwrap();
+            let raw = std::fs::read_to_string(&path).unwrap();
+            assert!(raw.contains("old instruction"));
+            assert!(raw.contains("isModelContextExcluded"));
+
+            let reopened = Arc::new(session::jsonl::writer::JsonlWriter::new(
+                path.clone(),
+                fs.clone(),
+            ));
+            assert_eq!(
+                reopened.persisted_session_mode_transition().await,
+                Some(profile)
+            );
+            let mut cfg = harness_runtime::desktop::DesktopConfig::default();
+            cfg.cwd = cwd.clone();
+            cfg.lingxi_home = config_home.clone();
+            let captured = crate::init::capture_tui_resume(&mut cfg, session_id)
+                .await
+                .unwrap();
+            assert_eq!(cfg.session_transcript_path.as_deref(), Some(path.as_path()));
+            let resumed = orchestrator::ConversationOrchestrator::new(
+                orchestrator::OrchestratorConfig::default(),
+                Arc::new(orchestrator::test_support::MockApiClient::new(vec![])),
+                Arc::new(tool_api::ToolRegistry::new()),
+                orchestrator::test_support::noop_hook_executor(),
+                Arc::new(orchestrator::test_support::NoOpPermissionGate),
+                Arc::new(orchestrator::test_support::MockOutputStream::new()),
+                Arc::new(orchestrator::test_support::StaticMemoryProvider::empty()),
+                cwd.clone(),
+            )
+            .with_session_id(lingxi_core::types::SessionId::from_uuid(session_id))
+            .with_jsonl_writer(reopened);
+            resumed
+                .restore_captured_session_history(
+                    session_id,
+                    &captured.messages,
+                    &captured.entries,
+                    false,
+                    permission::PermissionMode::Plan,
+                    session::JsonlWriter::session_mode_transition_from_source(
+                        &cfg.session_resume_snapshot.as_ref().unwrap().content,
+                        &session_id.to_string(),
+                    ),
+                )
+                .await
+                .unwrap();
+            // This is the state desktop assembly exposes before SessionStart.
+            let restored = resumed.conversation_mode().await;
+            assert_eq!(
+                (restored.active, restored.selected, restored.pending),
+                (mode, mode, false)
+            );
+            let session = resumed.session();
+            let state = session.lock().await;
+            assert_eq!(state.history.len(), 6, "audit transcript is retained");
+            let ids = state
+                .model_context_history()
+                .iter()
+                .map(ConversationMessage::id)
+                .collect::<std::collections::HashSet<_>>();
+            assert!(
+                !ids.contains(&old_id),
+                "explicit model exclusion survives serialization"
+            );
+            assert!(
+                !ids.contains(&passive_old_id),
+                "the restored epoch retires older skills"
+            );
+            assert!(ids.contains(&user_id), "user evidence is retained");
+            assert!(ids.contains(&current_id), "current skill is retained");
+            assert!(!ids.contains(&excluded_attachment_id));
+            assert!(ids.contains(&visible_attachment_id));
+        }
+
+        let after = forker.launch_context(permission::PermissionMode::Plan);
+        assert_eq!(after.options, before.options);
+        assert_eq!(
+            after.resolved_permission_mode,
+            before.resolved_permission_mode
+        );
+    }
+
+    #[tokio::test]
+    async fn nonpersistent_cold_resume_restores_captured_profile_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config_home = root.path().join("config");
+        let cwd_string = cwd.to_string_lossy().into_owned();
+        let session_id = uuid::Uuid::new_v4();
+        let old_id = MessageId::new();
+        let current_id = MessageId::new();
+        let user_id = MessageId::new();
+        let excluded_id = MessageId::new();
+        let old = ConversationMessage::user_meta(old_id, "same evidence".into()).with_origin(
+            Source::parse(r#"{"type":"skill_activation","context_epoch":1}"#).unwrap(),
+        );
+        let current = ConversationMessage::user_meta(current_id, "current instruction".into())
+            .with_origin(
+                Source::parse(
+                    r#"{"type":"skill_activation","context_epoch":2,"skill_name":"current"}"#,
+                )
+                .unwrap(),
+            );
+        let user = ConversationMessage::user(user_id, "same evidence".into());
+        let excluded = ConversationMessage::user_meta(excluded_id, "excluded evidence".into());
+        let conversation = BgSessionSnapshot {
+            history: vec![old, current, user, excluded],
+            model_context_excluded_messages: [excluded_id].into_iter().collect(),
+            profile: SessionModeTransition {
+                active: ConversationMode::Chat,
+                selected: ConversationMode::Code,
+                revision: 3,
+                active_epoch: 2,
+                selected_epoch: 3,
+                pending: true,
+            },
+            ..Default::default()
+        };
+        let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.clone()));
+        let path =
+            session::jsonl::path::session_path(&config_home, &cwd_string, &session_id.to_string());
+        let writer = session::JsonlWriter::new(path.clone(), fs);
+        write_background_snapshot(
+            &writer,
+            &conversation,
+            &session_id.to_string(),
+            &cwd_string,
+            "test",
+            "model",
+        )
+        .await
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut cfg = harness_runtime::desktop::DesktopConfig::default();
+        cfg.cwd = cwd.clone();
+        cfg.lingxi_home = config_home.clone();
+        cfg.session_persistence = false;
+        let captured = crate::init::capture_tui_resume(&mut cfg, session_id)
+            .await
+            .unwrap();
+        assert!(cfg.session_writer_lease.is_none());
+        assert!(cfg.session_resume_cost.is_none());
+        let source = &cfg.session_resume_snapshot.as_ref().unwrap().content;
+        let profile = session::JsonlWriter::session_mode_transition_from_source(
+            source,
+            &session_id.to_string(),
+        );
+        let resumed = orchestrator::ConversationOrchestrator::new(
+            orchestrator::OrchestratorConfig::default(),
+            Arc::new(orchestrator::test_support::MockApiClient::new(vec![])),
+            Arc::new(tool_api::ToolRegistry::new()),
+            orchestrator::test_support::noop_hook_executor(),
+            Arc::new(orchestrator::test_support::NoOpPermissionGate),
+            Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            Arc::new(orchestrator::test_support::StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_session_id(lingxi_core::types::SessionId::from_uuid(session_id));
+        resumed
+            .restore_captured_session_history(
+                session_id,
+                &captured.messages,
+                &captured.entries,
+                false,
+                permission::PermissionMode::Default,
+                profile,
+            )
+            .await
+            .unwrap();
+        let mode = resumed.conversation_mode().await;
+        assert_eq!(
+            (mode.active, mode.selected, mode.revision, mode.pending),
+            (ConversationMode::Chat, ConversationMode::Code, 3, true)
+        );
+        let session = resumed.session();
+        let state = session.lock().await;
+        assert_eq!(state.history.len(), 4);
+        let ids = state
+            .model_context_history()
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(!ids.contains(&old_id));
+        assert!(!ids.contains(&excluded_id));
+        assert!(ids.contains(&current_id));
+        assert!(ids.contains(&user_id));
+        assert!(
+            matches!(state.history.iter().find(|row| row.id() == current_id),
+            Some(ConversationMessage::User { origin: Some(origin), .. })
+                if origin.number_at("/context_epoch") == Some(2.0))
+        );
+        drop(state);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!config_home.join("sessions").exists());
     }
 }

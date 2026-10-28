@@ -245,7 +245,8 @@ struct RootView: View {
         let snapshot = providers.makeLaunchSnapshot()
         let activeProject = projects.activeProject
         let initialScope = ConversationScope(projectID: activeProject?.record.id)
-        let initialMode: SessionMode = .code
+        let preferences = ProjectScopedPreferences.forRuntime()
+        let initialMode = preferences.currentMode()
         let initialProjectMountGrants: [String]
         if let activeProject {
             initialProjectMountGrants = (try? MobileUserStorage.projectMountGrantPaths(for: activeProject)) ?? []
@@ -326,7 +327,6 @@ struct RootView: View {
             try await cron.pauseTasksForArchivedSession(projectID: projectID, sessionID: sessionID)
         }
         cron.defaultModel = snapshot.defaultModelID
-        let preferences = ProjectScopedPreferences.forRuntime()
         if preferences.cronResultsSeenAt() == nil {
             preferences.setCronResultsSeenAt(Date())
         }
@@ -603,6 +603,9 @@ struct RootView: View {
         let stateLifecycle = backgroundLifecycle
             .onChange(of: draft) { _, value in
                 scopedPreferences.setDraft(value, scope: activeScope, mode: activeMode)
+                if let pending = source.model.pendingSessionMode, pending != activeMode {
+                    scopedPreferences.setDraft(value, scope: activeScope, mode: pending)
+                }
             }
             .onChange(of: providerRepository.syncRevision) { _, _ in
                 settingsStore.llmProviders = providerRepository.legacyProviders()
@@ -911,7 +914,8 @@ struct RootView: View {
                 onDraftMediaChanged: { hasUnsavedConversationMedia = $0 },
                 isPinned: !activeSession.isEmpty && sessionPinnedAt[activeSession] != nil,
                 canArchive: !activeSession.isEmpty && activeScope != .scheduled,
-                onSelectNewChatMode: { startNewChat(in: activeScope, mode: $0) },
+                onSelectNewChatMode: selectSessionMode,
+                onSelectSessionMode: selectSessionMode,
                 onPickWorkspace: {
                     workspacePickerSource = source
                     workspacePickerSessionID = source.model.workspaceState?.sessionId ?? ""
@@ -925,9 +929,10 @@ struct RootView: View {
                 onArchive: archiveCurrentSession,
                 // A scheduled run's workspace never indexes its sessions, so a
                 // chat started there would be missing from the drawer.
-                onNewChat: activeScope == .scheduled
-                    ? { startNewChat(in: .global, mode: activeMode) }
-                    : nil,
+                onNewChat: {
+                    startNewChat(in: activeScope == .scheduled ? .global : activeScope,
+                                 mode: scopedPreferences.lastMode())
+                },
                 onOpenVoiceSettings: { navigation.showSettings(.voice) },
                 onOpenSessionDetails: {
                     if workspaceWidth >= 840 {
@@ -959,6 +964,7 @@ struct RootView: View {
                 onSessionChanged: adoptEngineSession,
                 onUnavailableSession: clearUnavailableSession,
                 onSessionTransitionFailed: rollbackFailedSession,
+                onModeChanged: adoptSessionMode,
                 onRefreshSessions: { source.listSessions() },
                 onWorkspaceChanged: { liveWorkspaceState = $0 }
             )
@@ -1019,7 +1025,7 @@ struct RootView: View {
                 protectedPaths: { workspaceProtectedDirectories },
                 canMutate: { !source.model.requiresBackgroundExecution && !source.model.isCancelling && !source.model.sessionTransitionPending },
                 runtimeStatus: settingsStore.linuxRuntime.rootfsState.label,
-                onSelectScope: { scope in startNewChat(in: scope, mode: activeMode) },
+                onSelectScope: { scope in startNewChat(in: scope, mode: scopedPreferences.lastMode()) },
                 onPickDirectory: { path in
                     guard let pickerSource = workspacePickerSource, pickerSource === source else {
                         throw WorkspaceDirectoryError.sessionChanged
@@ -1072,6 +1078,27 @@ struct RootView: View {
         switchScope(to: scope, mode: mode, startNew: true)
     }
 
+    private func adoptSessionMode(_ mode: SessionMode, pending: SessionMode?) {
+        if case .remote = activeScope { return }
+        scopedPreferences.setCurrentMode(mode)
+        if let pending {
+            scopedPreferences.setDraft(draft, scope: activeScope, mode: pending)
+            scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: pending)
+        }
+        guard activeMode != mode else { return }
+        // Carry the draft and confirmed owner without replacing the source.
+        scopedPreferences.setDraft(draft, scope: activeScope, mode: mode)
+        scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: mode)
+        activeMode = mode
+        triggerPendingForkIfReady(for: confirmedSession)
+        source.listSessions()
+    }
+
+    private func selectSessionMode(_ mode: SessionMode) {
+        scopedPreferences.setLastMode(mode)
+        source.setSessionMode(mode)
+    }
+
     private func continueCurrentSessionInOtherMode() {
         let target: SessionMode = activeMode == .chat ? .code : .chat
         let sessionID = confirmedSession.isEmpty ? activeSession : confirmedSession
@@ -1105,7 +1132,7 @@ struct RootView: View {
                     sessionId: sessionID,
                     archived: true
                 )
-                switchScope(to: activeScope, mode: activeMode, startNew: true)
+                switchScope(to: activeScope, mode: scopedPreferences.lastMode(), startNew: true)
             } catch {
                 projectStore.errorMessage = error.localizedDescription
             }
@@ -1196,7 +1223,8 @@ struct RootView: View {
                 activeSession: activeSession,
                 onTogglePinned: { toggleWorkspacePinned(ConversationScope.project(projectID).workspaceKey) },
                 onNewSession: { mode in
-                    switchScope(to: .project(projectID), mode: mode ?? activeMode, startNew: true)
+                    if let mode { scopedPreferences.setLastMode(mode) }
+                    switchScope(to: .project(projectID), mode: mode ?? scopedPreferences.lastMode(), startNew: true)
                 },
                 onOpenSession: { mode, sessionID in
                     switchScope(to: .project(projectID), mode: mode, resumeSessionID: sessionID)
@@ -1278,11 +1306,9 @@ struct RootView: View {
         private func handleExternalEvent(_ event: ClientEvent) {
             providerRepository.handle(event: event)
             switch event {
-            case let .sessionStarted(sessionId, mode):
-                guard SessionMode(dto: mode) == activeMode else { return }
+            case let .sessionStarted(sessionId, _):
                 triggerPendingForkIfReady(for: sessionId)
-            case let .sessionResumed(sessionId, mode, _):
-                guard SessionMode(dto: mode) == activeMode else { return }
+            case let .sessionResumed(sessionId, _, _):
                 triggerPendingForkIfReady(for: sessionId)
             case let .sessionForked(sourceSessionId, sessionId, mode):
                 let targetMode = SessionMode(dto: mode)
@@ -1585,7 +1611,10 @@ struct RootView: View {
                   isCancelling: source.model.isCancelling
               )
         else { return false }
-        if scope != activeScope || targetMode != activeMode {
+        let reusesSource = reusesConversationSource(currentScope: activeScope, targetScope: scope,
+                                                    currentMode: activeMode, targetMode: targetMode,
+                                                    startsNew: startNew, resumesSession: resumeSessionID != nil)
+        if !reusesSource {
             guard !source.hasLiveSideChats else {
                 projectStore.errorMessage = String(localized: "side_chat_end_before_restart")
                 return false
@@ -1602,7 +1631,7 @@ struct RootView: View {
         // Pushed pages (scheduled tasks, projects) sit above the chat; picking a
         // conversation must land on it.
         navigation.path.removeAll()
-        if scope == activeScope && targetMode == activeMode {
+        if reusesSource {
             navigation.closeSidebar()
             if let resumeSessionID {
                 pendingSessionRestoreID = resumeSessionID
@@ -1618,7 +1647,11 @@ struct RootView: View {
                 activeSession = ""
                 confirmedSession = ""
                 scopedPreferences.setActiveSessionID("", scope: scope, mode: targetMode)
-                source.startNewConversation()
+                source.startNewConversation(mode: targetMode)
+                if let pendingDraft = pendingBeginActionDraft {
+                    pendingBeginActionDraft = nil
+                    draft = pendingDraft
+                }
             }
             return true
         }
@@ -1653,6 +1686,7 @@ struct RootView: View {
                 try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
                 activeScope = scope
                 activeMode = targetMode
+                scopedPreferences.setCurrentMode(targetMode)
                 draft = scopedPreferences.draft(scope: scope, mode: targetMode)
                 let restoredSession = restoredSessionID(scope: scope, mode: targetMode)
                 confirmedSession = restoredSession
@@ -1667,7 +1701,7 @@ struct RootView: View {
                     activeSession = ""
                     confirmedSession = ""
                     scopedPreferences.setActiveSessionID("", scope: scope, mode: targetMode)
-                    replacement.startNewConversation()
+                    replacement.startNewConversation(mode: targetMode)
                     if let pendingDraft = pendingBeginActionDraft {
                         pendingBeginActionDraft = nil
                         draft = pendingDraft
@@ -1723,6 +1757,10 @@ struct RootView: View {
         activeSession = sessionID
         confirmedSession = sessionID
         scopedPreferences.setActiveSessionID(sessionID, scope: activeScope, mode: activeMode)
+        if let pending = source.model.pendingSessionMode {
+            scopedPreferences.setActiveSessionID(sessionID, scope: activeScope, mode: pending)
+            scopedPreferences.setDraft(draft, scope: activeScope, mode: pending)
+        }
         if pendingSessionRestoreID == sessionID {
             pendingSessionRestoreID = nil
         }
@@ -1958,7 +1996,7 @@ struct RootView: View {
             activeSession = ""
             confirmedSession = ""
             scopedPreferences.setActiveSessionID("", scope: snapshot.scope, mode: snapshot.mode)
-            source.startNewConversation()
+            source.startNewConversation(mode: snapshot.mode)
             return
         }
 
@@ -2149,7 +2187,7 @@ struct RootView: View {
                     return true
                 }
             }
-            if targetScope == activeScope, mode == activeMode {
+            if targetScope == activeScope {
                 let currentSessionID = source.model.activeSessionId.isEmpty
                     ? confirmedSession
                     : source.model.activeSessionId
@@ -2214,7 +2252,7 @@ struct RootView: View {
             let text = target.payload["prompt"] as? String ?? ""
             if let workspace = target.params["workspace"], let scope = ConversationScope(workspaceKey: workspace), scope != activeScope {
                 pendingBeginActionDraft = text
-                return switchScope(to: scope, mode: target.params["mode"].flatMap(SessionMode.init(rawValue:)) ?? activeMode, startNew: true)
+                return switchScope(to: scope, mode: target.params["mode"].flatMap(SessionMode.init(rawValue:)) ?? scopedPreferences.lastMode(), startNew: true)
             }
             if let mode = target.params["mode"].flatMap(SessionMode.init(rawValue:)), mode != activeMode {
                 pendingBeginActionDraft = text
@@ -2346,9 +2384,10 @@ struct RootView: View {
         pendingSessionRestoreID = nil
         activeSession = ""
         confirmedSession = ""
-        scopedPreferences.setActiveSessionID("", scope: activeScope, mode: activeMode)
+        let newMode = scopedPreferences.lastMode()
+        scopedPreferences.setActiveSessionID("", scope: activeScope, mode: newMode)
         draft = draftText
-        source.startNewConversation()
+        source.startNewConversation(mode: newMode)
         return true
     }
 
@@ -2677,6 +2716,7 @@ private struct ConversationProjectBridge: View {
     let onSessionChanged: (String) -> Bool
     let onUnavailableSession: (String) -> Bool
     let onSessionTransitionFailed: (String) -> Bool
+    let onModeChanged: (SessionMode, SessionMode?) -> Void
     let onRefreshSessions: () -> Void
     var onWorkspaceChanged: (SessionWorkspaceState?) -> Void = { _ in }
     @State private var sessionSyncTask: Task<Void, Never>?
@@ -2688,6 +2728,7 @@ private struct ConversationProjectBridge: View {
         Color.clear
             .frame(width: 0, height: 0)
             .onAppear {
+                onModeChanged(model.sessionMode, model.pendingSessionMode)
                 consumeRestoreRecovery(model.sessionRestoreRecovery)
                 consumeSessionTransitionFailure(model.sessionTransitionFailure)
                 handleActiveSession(model.activeSessionId)
@@ -2697,6 +2738,12 @@ private struct ConversationProjectBridge: View {
             }
             .onChange(of: model.workspaceState) { _, _ in
                 synchronizeWorkspace()
+            }
+            .onChange(of: model.sessionMode) { _, mode in
+                onModeChanged(mode, model.pendingSessionMode)
+            }
+            .onChange(of: model.pendingSessionMode) { _, pending in
+                onModeChanged(model.sessionMode, pending)
             }
             .onChange(of: model.sessionRestoreRecovery) { _, recovery in
                 consumeRestoreRecovery(recovery)

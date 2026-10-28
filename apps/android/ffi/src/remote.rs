@@ -33,7 +33,7 @@ use client::protocol::commands::ImageRefDto;
 use client::protocol::computer_access::ComputerAccessRequestDto;
 use client::protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
 use client::protocol::events::ClientEvent;
-use client::protocol::listings::ModelDetailsDto;
+use client::protocol::listings::{ModelDetailsDto, SessionModeDto};
 use client::protocol::message::MessageDto;
 use client::protocol::permission::PermissionRequest;
 use remote_control_client::clock::{system_clock, Clock};
@@ -801,6 +801,8 @@ pub struct RemoteOutgoingPromptFfi {
 pub struct RemoteSessionUpdateFfi {
     /// The session.
     pub session_id: String,
+    /// The desktop's authoritative conversation mode, when supplied.
+    pub session_mode: Option<SessionModeDto>,
     /// Where it stands.
     pub phase: RemoteSessionPhaseFfi,
     /// Why the attach failed.
@@ -1092,6 +1094,7 @@ impl SentMarker {
 fn session_update(marker: &mut SentMarker, state: &SessionState) -> RemoteSessionUpdateFfi {
     let mut update = RemoteSessionUpdateFfi {
         session_id: state.session_id.clone(),
+        session_mode: state.session_mode,
         phase: match state.status {
             SessionStatus::Loading => RemoteSessionPhaseFfi::Loading,
             SessionStatus::Live => RemoteSessionPhaseFfi::Live,

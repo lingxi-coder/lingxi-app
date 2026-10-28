@@ -50,11 +50,13 @@ pub(crate) struct ColdBootResume {
     session_id: uuid::Uuid,
     transcript_path: PathBuf,
     replayed: Option<orchestrator::ReplayedSession>,
+    mode: lingxi_core::host::session_context::ConversationMode,
 }
 
 pub(crate) struct ColdResumeProof {
     pub(crate) messages: Vec<client::protocol::message::MessageDto>,
     pub(crate) current_usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
+    pub(crate) mode: lingxi_core::host::session_context::ConversationMode,
 }
 
 impl ColdBootResume {
@@ -76,6 +78,11 @@ impl ColdBootResume {
             return Err("cold resume snapshot does not match the active session".into());
         }
         let loaded = session::jsonl::route_lines(&snapshot.content);
+        let mode = loaded
+            .session_modes
+            .get(&session_id.to_string())
+            .and_then(|value| lingxi_core::host::session_context::ConversationMode::from_str(value))
+            .unwrap_or_default();
         let (messages, _) =
             session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
         // Explicit mobile draft anchors are allowed by the cold loader and
@@ -101,6 +108,7 @@ impl ColdBootResume {
             session_id,
             transcript_path: path.clone(),
             replayed,
+            mode,
         }))
     }
 }
@@ -280,6 +288,7 @@ impl WorkspaceCommands {
         Ok(Some(ColdResumeProof {
             messages,
             current_usage: runtime.orchestrator.snapshot_cost().await.current_usage,
+            mode: captured.mode,
         }))
     }
 

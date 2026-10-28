@@ -55,7 +55,9 @@ import com.lingxi.code.conversation.PermissionPromptDialog
 import com.lingxi.code.conversation.REMOTE_MAX_PROMPT_IMAGES
 import com.lingxi.code.conversation.RemoteConversationSource
 import com.lingxi.code.conversation.conversationStrings
+import com.lingxi.code.conversation.sessionModeLabel
 import com.lingxi.code.model.SessionRef
+import com.lingxi.code.model.SessionMode
 import com.lingxi.code.theme.LingXiTheme
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewmodel.initializer
@@ -204,7 +206,8 @@ internal fun RemoteSessionScreen(
             }
             Column(Modifier.weight(1f)) {
                 Text(state.session.title, color = t.text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(hostName, color = t.text3, fontSize = 12.sp, maxLines = 1)
+                val modeLabel = meta.sessionMode?.let { sessionModeLabel(it) }
+                Text(listOfNotNull(hostName, modeLabel).joinToString(" · "), color = t.text3, fontSize = 12.sp, maxLines = 1)
             }
         }
         if (meta.hasOlder) {
@@ -230,6 +233,7 @@ internal fun RemoteSessionScreen(
             remoteModelSelection = true,
             onSelectReasoning = chat::selectReasoning,
             isDark = isDark,
+            sessionMode = meta.sessionMode ?: SessionMode.Code,
             showTopBar = false,
             showNewChatControls = false,
             // Voice belongs to the local engine; a remote session takes typed text.

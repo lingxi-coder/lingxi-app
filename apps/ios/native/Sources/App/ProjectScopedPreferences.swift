@@ -9,6 +9,8 @@ struct ProjectScopedPreferences {
     private static let workspacePinnedAtKey = "conversation.workspace.pinned-at"
     private static let sessionPinnedAtKey = "conversation.session.pinned-at"
     private static let cronResultsSeenAtKey = "conversation.cron.results-seen-at"
+    private static let lastModeKey = "conversation.last-mode"
+    private static let currentModeKey = "conversation.current-mode"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -33,6 +35,22 @@ struct ProjectScopedPreferences {
     }
 
     // MARK: scope-keyed accessors
+
+    func lastMode() -> SessionMode {
+        defaults.string(forKey: Self.lastModeKey).flatMap(SessionMode.init(rawValue:)) ?? .code
+    }
+
+    func setLastMode(_ mode: SessionMode) {
+        defaults.set(mode.rawValue, forKey: Self.lastModeKey)
+    }
+
+    func currentMode() -> SessionMode {
+        defaults.string(forKey: Self.currentModeKey).flatMap(SessionMode.init(rawValue:)) ?? lastMode()
+    }
+
+    func setCurrentMode(_ mode: SessionMode) {
+        defaults.set(mode.rawValue, forKey: Self.currentModeKey)
+    }
 
     func draft(scope: ConversationScope) -> String {
         defaults.string(forKey: key("draft", scope: scope)) ?? ""

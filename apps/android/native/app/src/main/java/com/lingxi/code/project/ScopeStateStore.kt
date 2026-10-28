@@ -51,6 +51,10 @@ class ScopeStateStore internal constructor(
         mutex.withLock { load().activeMode }
     }
 
+    suspend fun readSelectedMode(): SessionMode? = withContext(Dispatchers.IO) {
+        mutex.withLock { load().selectedMode }
+    }
+
     suspend fun read(scopeKey: String): ScopeState? = withContext(Dispatchers.IO) {
         mutex.withLock { load().scopes[scopeKey] }
     }
@@ -75,6 +79,10 @@ class ScopeStateStore internal constructor(
 
     suspend fun persistActiveMode(mode: SessionMode) {
         mutate { it.copy(activeMode = mode) }
+    }
+
+    suspend fun persistSelectedMode(mode: SessionMode) {
+        mutate { it.copy(selectedMode = mode) }
     }
 
     suspend fun persistLastActiveSession(scopeKey: String, sessionId: String?) {
@@ -135,6 +143,7 @@ class ScopeStateStore internal constructor(
     private data class Snapshot(
         val activeScopeKey: String? = null,
         val activeMode: SessionMode = SessionMode.Code,
+        val selectedMode: SessionMode? = null,
         val scopes: Map<String, ScopeState> = emptyMap(),
         val workspacePresentation: Map<String, WorkspacePresentationState> = emptyMap(),
         val pinnedSessions: Map<String, Long> = emptyMap(),
@@ -162,6 +171,7 @@ class ScopeStateStore internal constructor(
         .put("version", 1)
         .put("activeScopeKey", snapshot.activeScopeKey)
         .put("activeMode", snapshot.activeMode.wireKey)
+        .put("selectedMode", snapshot.selectedMode?.wireKey)
         .put(
             "scopes",
             JSONObject().also { scopes ->
@@ -249,6 +259,11 @@ class ScopeStateStore internal constructor(
             activeMode = when (json.optString("activeMode")) {
                 SessionMode.Chat.wireValue -> SessionMode.Chat
                 else -> SessionMode.Code
+            },
+            selectedMode = when (json.optString("selectedMode")) {
+                SessionMode.Chat.wireValue -> SessionMode.Chat
+                SessionMode.Code.wireValue -> SessionMode.Code
+                else -> null
             },
             scopes = scopes,
             workspacePresentation = workspacePresentation,

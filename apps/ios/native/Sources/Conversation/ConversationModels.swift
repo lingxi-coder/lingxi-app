@@ -528,6 +528,14 @@ final class ConversationModel: ObservableObject {
     @Published var visualizationChip: VisualizationContextChip?
 
     @Published var contextUsage: ConversationUsageSnapshot? = nil
+    /// The engine owns the actual mode and, during a turn, its next mode.
+    @Published var sessionMode: SessionMode = .code
+    @Published var sessionModeKnown = true
+    @Published var pendingSessionMode: SessionMode?
+    /// A new session cannot send until its requested initial mode is confirmed.
+    @Published var awaitingNewSessionMode = false
+    @Published var newSessionModeFailed = false
+    var sessionModeRevision: UInt64?
     @Published var activeSessionId: String = "" {
         didSet {
             promptSuggestion = nil

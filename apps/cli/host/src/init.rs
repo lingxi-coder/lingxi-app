@@ -223,12 +223,19 @@ pub struct Runtime {
 
 /// Build-result for the TUI startup path. (M6-03)
 ///
+pub(crate) struct CapturedTuiResume {
+    pub messages: Vec<session::jsonl::JsonlMessage>,
+    pub entries: Vec<session::jsonl::JsonlMessage>,
+}
+
 /// Returns the standard [`Runtime`] plus the bridge receiver the TUI
 /// drains for streaming events. The orchestrator inside `runtime` is
 /// constructed with a [`tui_core::orchestrator_bridge::BridgeOutputStream`] as its `output`,
 /// so every `emit_text` / `emit_tool_call` / `emit_end_turn` lands on
 /// `bridge_rx` as a [`tui_core::orchestrator_bridge::TurnEvent`].
 pub struct TuiBuild {
+    /// Exact transcript used to hydrate a resumed runtime before startup hooks.
+    pub(crate) captured_resume: Option<CapturedTuiResume>,
     pub initial_draft: Option<String>,
     pub message_anchor: Option<String>,
     /// Reload the exact Fusion sources admitted by this CLI session.
@@ -1779,6 +1786,7 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         resume_session_id,
         parent_session_id,
         None,
+        false,
     ))
     .await
 }
@@ -1796,8 +1804,74 @@ pub(crate) async fn build_runtime_for_tui_inner_with_parent_and_native_settings_
         resume_session_id,
         parent_session_id,
         Some(native_settings_agent_context),
+        true,
     ))
     .await
+}
+
+/// Capture one source revision before desktop assembly can run hooks. A
+/// persistent mount holds the session writer claim; a non-persistent mount is
+/// read-only and does not acquire that authority.
+pub(crate) async fn capture_tui_resume(
+    cfg: &mut DesktopConfig,
+    session_id: uuid::Uuid,
+) -> Result<CapturedTuiResume, InitError> {
+    let lease = if cfg.session_persistence {
+        Some(
+            lingxi_core::host::live_sessions::LiveSessionDir::at_live(
+                cfg.lingxi_home.join("sessions"),
+            )
+            .claim_session_id(&session_id.to_string(), std::process::id())
+            .map_err(|error| InitError::DurableSession(error.to_string()))?
+            .into_shared(),
+        )
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let fs = Arc::new(platform_posix::PosixFileSystem::new(cfg.cwd.clone()));
+    #[cfg(windows)]
+    let fs = Arc::new(platform_windows::WindowsFileSystem::new(cfg.cwd.clone()));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = fs;
+    let path = session::jsonl::resolve_session_path_across_worktrees(
+        &cfg.lingxi_home,
+        &cfg.cwd.to_string_lossy(),
+        session_id,
+    )
+    .await
+    .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    let (_, content, loaded) =
+        session::jsonl::load_routed_session_from_path_with_source(&path, session_id, fs)
+            .await
+            .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
+    if messages.is_empty() {
+        return Err(InitError::Orchestrator(
+            "resume transcript has no conversation".into(),
+        ));
+    }
+    cfg.session_resume_cost = if let Some(lease) = &lease {
+        harness_runtime::desktop::session_state::capture_resume_cost(
+            &cfg.lingxi_home,
+            session_id,
+            lease.clone(),
+            &content,
+        )
+        .await
+        .map_err(InitError::DurableSession)?
+    } else {
+        None
+    };
+    cfg.session_transcript_path = Some(path);
+    cfg.session_resume_snapshot = Some(harness_runtime::desktop::DesktopSessionResumeSnapshot {
+        source_session_id: session_id.to_string(),
+        content: content.into(),
+    });
+    cfg.session_writer_lease = lease;
+    Ok(CapturedTuiResume {
+        messages,
+        entries: loaded.messages_in_order,
+    })
 }
 
 async fn build_runtime_for_tui_inner_with_parent_impl(
@@ -1805,6 +1879,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     resume_session_id: Option<uuid::Uuid>,
     parent_session_id: Option<String>,
     native_settings_agent_context: Option<lingxi_core::host::NativeSettingsAgentContext>,
+    capture_resume: bool,
 ) -> Result<TuiBuild, InitError> {
     crate::startup_trace::mark("tui_runtime_build_start");
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1839,6 +1914,17 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
         cfg.session_id_override = Some(id.to_string());
     }
     cfg.parent_session_id = parent_session_id;
+    let captured_resume = if capture_resume {
+        let id = resume_session_id.ok_or_else(|| {
+            InitError::Orchestrator("resumed runtime requires a session id".into())
+        })?;
+        cfg.permission_mode_cli_explicit = argv.permission_mode.is_some()
+            || argv.dangerously_skip_permissions
+            || crate::permission_mode_preference::load(argv).is_some();
+        Some(capture_tui_resume(&mut cfg, id).await?)
+    } else {
+        None
+    };
 
     // Interactive permission gate: an unresolved mutating `Ask` surfaces the
     // TUI dialog over this channel instead of auto-allowing. AllowAlways
@@ -1930,6 +2016,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
         .map(permission::permission_mode_from_cli_string)
         .unwrap_or(permission_mode);
     Ok(TuiBuild {
+        captured_resume,
         initial_draft: argv.resolve_prefill(),
         message_anchor: argv.deep_link_message.clone(),
         fusion_layers,

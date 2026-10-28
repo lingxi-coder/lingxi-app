@@ -15,10 +15,15 @@ export function ComposerSlashArgumentHint({ editor, text, hint, color }: {
     const container = target?.parentElement;
     if (!input || !target || !container) return;
     const measure = () => {
-      // Hint eligibility requires a trailing space, so the final editable leaf
-      // is a text node even when contentEditable has inserted block elements.
-      let last: Node = input;
-      while (last.lastChild) last = last.lastChild;
+      // Range.insertNode can leave empty text siblings after the command, and
+      // their collapsed ranges have no geometry. Measure the last text that
+      // contributes to the draft instead of the last editable leaf.
+      const walker = document.createTreeWalker(input, NodeFilter.SHOW_TEXT);
+      let last: Node | null = null;
+      while (walker.nextNode()) {
+        if ((walker.currentNode.nodeValue ?? '').replace(/\u200b/g, '')) last = walker.currentNode;
+      }
+      if (!last) { target.style.visibility = 'hidden'; return; }
       const range = document.createRange();
       range.selectNodeContents(last);
       range.collapse(false);

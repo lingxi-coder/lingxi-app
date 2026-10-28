@@ -1,7 +1,7 @@
 name: macOS staged media strip diagnostic
 on:
   push:
-    branches: [codex/media-macos-strip-diagnostic-20261028]
+    branches: [codex/media-macos-strip-diagnostic-v2-20261028]
 jobs:
   staged-media:
     strategy:

@@ -21,6 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
@@ -45,7 +48,7 @@ jobs:
           python3 - "$RUNNER_TEMP/harness-source.json" <<'PY'
           import json, sys
           source = json.load(open(sys.argv[1], encoding='utf8'))
-          expected = 'e4ca39042782efdddc01b0f93589b1b8063f7b81'
+          expected = '143e97e8fc6b59505a168f537a45446d758c29f2'
           assert source['revision'] == expected, source
           assert source['development'] is False, source
           print('Verified canonical locked Harness revision', source['revision'])
@@ -67,6 +70,8 @@ jobs:
           cargo test --locked -p remote-control-client --features native-media --test remote_media_loopback _isolated -- --test-threads=1 --nocapture --color never 2>&1 | tee "$test_log"
           grep -F "Using actual Bridge codec worker: $LINGXI_TEST_CODEC_WORKER_BINARY" "$test_log"
           grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' "$test_log"
+      - name: Exercise official SDK GIO and installer paths under the real worker launch
+        run: python3 scripts/ci/probe_codec_worker_gio.py --bridge "$GITHUB_WORKSPACE/target/debug/bridge-server" --expect blocked
       - name: Negative control rejects a missing Bridge worker binary
         shell: bash
         run: |
@@ -79,3 +84,36 @@ jobs:
           fi
           cat "$test_log"
           grep -F 'assertion failed: executable.is_absolute() && executable.is_file()' "$test_log"
+      - name: Verify timestamp and environment tests reject controlled regressions
+        run: python3 scripts/ci/probe_codec_negative_controls.py "$GITHUB_WORKSPACE/target/debug/bridge-server"
+
+  linux-static:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore pinned Linux GStreamer static SDK cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gstreamer-sdk/linux-static
+          key: gstreamer-linux-static-jammy-${{ hashFiles('scripts/ci/gstreamer-sdk-lock.json', 'scripts/ci/build_gstreamer_linux.py', 'scripts/ci/gstreamer_sdk.py', 'scripts/ci/gstreamer-linux-meson-requirements.txt') }}
+      - name: Install GStreamer source-build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex libglib2.0-dev libopus-dev libvpx-dev ninja-build pkg-config
+      - name: Install pinned Meson
+        run: python3 -m pip install --no-deps --require-hashes -r scripts/ci/gstreamer-linux-meson-requirements.txt
+      - name: Build and validate the pinned GStreamer static SDK
+        run: python3 scripts/ci/build_gstreamer_linux.py --root "$RUNNER_TEMP/gstreamer-sdk/linux-static" --static-plugins
+      - name: Test static worker without a configured dynamic plugin directory
+        shell: bash
+        run: |
+          unset LINGXI_GSTREAMER_PLUGIN_DIR
+          set -o pipefail
+          cargo test --locked -p remote-control-client --features static-media --test codec_worker static_plugins_start_without_a_dynamic_plugin_directory -- --exact --test-threads=1 --nocapture --color never 2>&1 | tee "$RUNNER_TEMP/static-worker-test.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/static-worker-test.log"

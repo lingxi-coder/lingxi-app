@@ -37,6 +37,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(15);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOCK_MARGIN: Duration = Duration::from_secs(60);
+const CLOCK_SYNC_ROUNDS: usize = 5;
+const CLOCK_MAX_UNCERTAINTY: Duration = Duration::from_millis(50);
+const BOOTSTRAP_VERSION: &[u8; 8] = b"LXCODEC1";
 
 #[derive(Clone, Debug)]
 pub struct CodecLaunch {
@@ -44,16 +47,23 @@ pub struct CodecLaunch {
     pub executable: PathBuf,
     /// Product-owned worker-mode arguments; tests may supply an explicit fixture.
     pub arguments: Vec<OsString>,
-    /// Product-selected immutable plugin directory.
-    pub plugin_directory: PathBuf,
+    /// Product-selected dynamic plugin directory, absent for static plugins.
+    pub plugin_directory: Option<PathBuf>,
+    /// Host-selected shared-core loader directory, independent of plugin mode.
+    pub loader_directory: Option<PathBuf>,
     /// Host-owned temporary parent, independent of workspace TMPDIR.
     pub private_root: PathBuf,
 }
 
 /// Resolve the same configured distribution that the worker will initialize.
-pub fn configured_plugin_directory() -> io::Result<PathBuf> {
+pub fn configured_plugin_directory() -> io::Result<Option<PathBuf>> {
     lingxi_webrtc_media::configured_codec_plugin_directory()
         .map_err(|_| failure("media plugin directory is unavailable"))
+}
+
+/// SDK library location selected by the host, if an explicit path is needed.
+pub fn configured_loader_directory() -> Option<PathBuf> {
+    lingxi_webrtc_media::configured_codec_loader_directory()
 }
 
 #[derive(Clone, Copy)]
@@ -68,10 +78,10 @@ impl Clock {
                 .ok_or_else(|| failure("clock origin unavailable"))?,
         })
     }
-    fn child(parent_elapsed: u64) -> io::Result<Self> {
+    fn child_at(received_at: Instant, parent_midpoint_elapsed: u64) -> io::Result<Self> {
         Ok(Self {
-            origin: Instant::now()
-                .checked_sub(Duration::from_nanos(parent_elapsed))
+            origin: received_at
+                .checked_sub(Duration::from_nanos(parent_midpoint_elapsed))
                 .ok_or_else(|| failure("clock origin unavailable"))?,
         })
     }
@@ -299,14 +309,14 @@ fn audio_lane(
                 Request::AudioEncode { rate, at_ns }
                     if payload.len().is_multiple_of(4) && !payload.is_empty() =>
                 {
+                    let requested_at = clock.decode(at_ns)?;
                     if encoder.as_ref().is_none_or(|(r, _)| *r != rate) {
                         encoder = Some((
                             rate,
-                            AudioProcessor::new(rate, rate)
+                            AudioProcessor::new_with_capture_start(rate, rate, requested_at)
                                 .map_err(|_| failure("audio encoder unavailable"))?,
                         ));
                     }
-                    let _requested_at = clock.decode(at_ns)?;
                     let samples = payload
                         .chunks_exact(4)
                         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
@@ -317,9 +327,15 @@ fn audio_lane(
                     let mut encoded = Vec::new();
                     let mut packets = Vec::new();
                     let processor = &mut encoder.as_mut().unwrap().1;
-                    for chunk in samples.chunks(256) {
+                    for (index, chunk) in samples.chunks(256).enumerate() {
+                        let offset_ns = (index as u128 * 256 * 1_000_000_000) / u128::from(rate);
+                        let offset_ns = u64::try_from(offset_ns)
+                            .map_err(|_| failure("audio sample timestamp overflow"))?;
+                        let chunk_at = requested_at
+                            .checked_add(Duration::from_nanos(offset_ns))
+                            .ok_or_else(|| failure("audio sample timestamp overflow"))?;
                         for packet in processor
-                            .capture(chunk, Instant::now())
+                            .capture(chunk, chunk_at)
                             .map_err(|_| failure("audio encoding failed"))?
                         {
                             if encoded
@@ -430,6 +446,74 @@ fn video_lane(
     }
 }
 
+// Calibration brackets the child's sampling instant between the parent's
+// request and reply. The midpoint has a measured maximum error of RTT/2;
+// selecting the best of several probes avoids startup/scheduling delay bias.
+fn calibrate_worker_clock(control: &mut StdStream) -> io::Result<Clock> {
+    let mut best: Option<(u64, Instant, u64)> = None;
+    loop {
+        let mut command = [0u8; 1];
+        control.read_exact(&mut command)?;
+        match command[0] {
+            b'P' => {
+                let sampled = Instant::now();
+                control.write_all(b"P")?;
+                control.flush()?;
+                let mut timing = [0u8; 16];
+                control.read_exact(&mut timing)?;
+                let midpoint = u64::from_be_bytes(timing[..8].try_into().unwrap());
+                let uncertainty = u64::from_be_bytes(timing[8..].try_into().unwrap());
+                if best
+                    .as_ref()
+                    .is_none_or(|(previous, _, _)| uncertainty < *previous)
+                {
+                    best = Some((uncertainty, sampled, midpoint));
+                }
+            }
+            b'F' => {
+                let (uncertainty, sampled, midpoint) =
+                    best.ok_or_else(|| failure("clock calibration missing"))?;
+                if Duration::from_nanos(uncertainty) > CLOCK_MAX_UNCERTAINTY {
+                    return Err(failure("clock calibration uncertainty exceeded"));
+                }
+                return Clock::child_at(sampled, midpoint);
+            }
+            _ => return Err(failure("invalid clock calibration")),
+        }
+    }
+}
+
+async fn calibrate_parent_clock(control: &mut TcpStream, clock: Clock) -> io::Result<Duration> {
+    let mut best = Duration::MAX;
+    for _ in 0..CLOCK_SYNC_ROUNDS {
+        let start = Instant::now();
+        control.write_all(b"P").await?;
+        let mut response = [0u8; 1];
+        control.read_exact(&mut response).await?;
+        if response[0] != b'P' {
+            return Err(failure("invalid clock calibration reply"));
+        }
+        let elapsed = Instant::now().duration_since(start);
+        let midpoint = start
+            .checked_add(elapsed / 2)
+            .ok_or_else(|| failure("clock midpoint overflow"))?;
+        let uncertainty_ns = u64::try_from((elapsed.as_nanos() + 1) / 2)
+            .map_err(|_| failure("clock uncertainty overflow"))?;
+        let uncertainty = Duration::from_nanos(uncertainty_ns);
+        best = best.min(uncertainty);
+        control
+            .write_all(&clock.encode(midpoint)?.to_be_bytes())
+            .await?;
+        control.write_all(&uncertainty_ns.to_be_bytes()).await?;
+    }
+    if best > CLOCK_MAX_UNCERTAINTY {
+        return Err(failure("clock calibration uncertainty exceeded"));
+    }
+    control.write_all(b"F").await?;
+    control.flush().await?;
+    Ok(best)
+}
+
 /// Entry point used exclusively by the product's dedicated worker invocation.
 /// Bootstrap credentials arrive through the inherited private stdin pipe.
 pub fn run_worker() -> io::Result<()> {
@@ -439,10 +523,11 @@ pub fn run_worker() -> io::Result<()> {
     let audio_port = u16::from_be_bytes(bootstrap[2..4].try_into().unwrap());
     let video_port = u16::from_be_bytes(bootstrap[4..6].try_into().unwrap());
     let token = &bootstrap[6..38];
-    let elapsed = u64::from_be_bytes(bootstrap[38..46].try_into().unwrap());
+    if &bootstrap[38..46] != BOOTSTRAP_VERSION {
+        return Err(failure("codec bootstrap version mismatch"));
+    }
     let audio_enabled = bootstrap[46] == 1;
     let video_enabled = bootstrap[47] == 1;
-    let clock = Clock::child(elapsed)?;
     lingxi_webrtc_media::runtime::initialize_configured(video_enabled)
         .map_err(|_| failure("codec runtime initialization failed"))?;
     fn connect(port: u16, kind: u8, token: &[u8]) -> io::Result<StdStream> {
@@ -456,6 +541,7 @@ pub fn run_worker() -> io::Result<()> {
     let mut control = connect(control_port, b'C', token)?;
     let audio = connect(audio_port, b'A', token)?;
     let video = connect(video_port, b'V', token)?;
+    let clock = calibrate_worker_clock(&mut control)?;
     let control_writer = control.try_clone()?;
     let control_audio = control.try_clone()?;
     let control_video = control.try_clone()?;
@@ -539,6 +625,7 @@ struct Inner {
     state: Arc<Shared>,
     next: AtomicU64,
     clock: Clock,
+    clock_uncertainty: Duration,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -598,10 +685,13 @@ async fn accept_authenticated(
 }
 fn add_system_environment(
     command: &mut Command,
-    plugin_directory: &std::path::Path,
+    plugin_directory: Option<&std::path::Path>,
+    loader_directory: Option<&std::path::Path>,
 ) -> io::Result<()> {
     // Only host-selected OS support variables; no inherited GST, loader, PATH,
     // credentials, workspace settings or project-controlled cwd.
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let _ = loader_directory;
     for key in [
         "HOME",
         "USERPROFILE",
@@ -615,23 +705,24 @@ fn add_system_environment(
             command.env(key, value);
         }
     }
-    command.env("LINGXI_GSTREAMER_PLUGIN_DIR", plugin_directory);
+    if let Some(path) = plugin_directory {
+        command.env("LINGXI_GSTREAMER_PLUGIN_DIR", path);
+    }
     command.env("GST_PLUGIN_PATH_1_0", "");
     command.env("GST_PLUGIN_SYSTEM_PATH_1_0", "");
     command.env("GST_REGISTRY_DISABLE", "yes");
     command.env("GST_REGISTRY_UPDATE", "no");
     command.env("GST_REGISTRY_FORK", "no");
     #[cfg(target_os = "linux")]
-    if let Some(path) = plugin_directory.parent() {
+    if let Some(path) = loader_directory {
         command.env("LD_LIBRARY_PATH", path);
     }
     #[cfg(windows)]
     {
-        let root = plugin_directory
-            .parent()
-            .and_then(|p| p.parent())
-            .ok_or_else(|| failure("media distribution path invalid"))?;
-        let mut paths = vec![root.join("bin")];
+        let mut paths = Vec::new();
+        if let Some(path) = loader_directory {
+            paths.push(path.to_path_buf());
+        }
         if let Some(system) = std::env::var_os("SystemRoot") {
             paths.push(PathBuf::from(system).join("System32"));
         }
@@ -649,20 +740,44 @@ impl CodecClient {
         video_enabled: bool,
     ) -> io::Result<Self> {
         if !launch.executable.is_absolute()
-            || !launch.plugin_directory.is_absolute()
+            || launch
+                .plugin_directory
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
+            || launch
+                .loader_directory
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
             || !launch.private_root.is_absolute()
+            || (!lingxi_webrtc_media::codec_uses_static_plugins()
+                && launch.plugin_directory.is_none())
         {
             return Err(failure(
                 "codec executable, plugin and private paths must be absolute",
             ));
         }
         let executable = launch.executable.canonicalize()?;
-        let plugin_directory = launch.plugin_directory.canonicalize()?;
+        let plugin_directory = launch
+            .plugin_directory
+            .map(|path| path.canonicalize())
+            .transpose()?;
+        let loader_directory = launch
+            .loader_directory
+            .map(|path| path.canonicalize())
+            .transpose()?;
         let private_root = launch.private_root.canonicalize()?;
         let directory = tempfile::Builder::new()
             .prefix("lingxi-codec-")
             .tempdir_in(private_root)?;
         let registry = directory.path().join("registry.bin");
+        // GIO can otherwise auto-relocate modules next to libgio or fall back
+        // to a build-machine path. The codec does not need external GIO
+        // modules or plugin installation; keep both searches inside this
+        // private process-owned directory, not the user's environment.
+        let gio_modules = directory.path().join("gio-modules");
+        let disabled_installer = directory.path().join("disabled-installer");
+        std::fs::create_dir(&gio_modules)?;
+        std::fs::create_dir(&disabled_installer)?;
         let control_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let audio_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let video_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -680,8 +795,15 @@ impl CodecClient {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
-        add_system_environment(&mut command, &plugin_directory)?;
+        add_system_environment(
+            &mut command,
+            plugin_directory.as_deref(),
+            loader_directory.as_deref(),
+        )?;
         command.env("GST_REGISTRY_1_0", &registry);
+        command.env("GIO_MODULE_DIR", &gio_modules);
+        // A directory cannot be executed as the plugin installer helper.
+        command.env("GST_INSTALL_PLUGINS_HELPER", &disabled_installer);
         let mut child = command.spawn()?;
         let input = child.stdin.take();
         let (exit_tx, _) = watch::channel(None);
@@ -738,7 +860,7 @@ impl CodecClient {
         bootstrap.extend_from_slice(&audio_listener.local_addr()?.port().to_be_bytes());
         bootstrap.extend_from_slice(&video_listener.local_addr()?.port().to_be_bytes());
         bootstrap.extend_from_slice(&token);
-        bootstrap.extend_from_slice(&clock.encode(Instant::now())?.to_be_bytes());
+        bootstrap.extend_from_slice(BOOTSTRAP_VERSION);
         bootstrap.push(u8::from(audio_enabled));
         bootstrap.push(u8::from(video_enabled));
         let mut input = input.ok_or_else(|| failure("codec bootstrap unavailable"))?;
@@ -750,10 +872,13 @@ impl CodecClient {
             accept_authenticated(audio_listener, token, b'A'),
             accept_authenticated(video_listener, token, b'V')
         );
-        let (control, audio, video) = match (control, audio, video) {
+        let (mut control, audio, video) = match (control, audio, video) {
             (Ok(c), Ok(a), Ok(v)) => (c, a, v),
             _ => return Err(failure("codec worker failed to start")),
         };
+        let clock_uncertainty = timeout(START_TIMEOUT, calibrate_parent_clock(&mut control, clock))
+            .await
+            .map_err(|_| failure("clock calibration timed out"))??;
         let (mut control_read, mut control_write) = control.into_split();
         tokio::spawn(async move {
             if control_rx.recv().await.is_some() {
@@ -813,8 +938,14 @@ impl CodecClient {
                 state,
                 next: AtomicU64::new(1),
                 clock,
+                clock_uncertainty,
             }),
         })
+    }
+
+    /// Worst-case cross-process clock mapping error from the best startup probe.
+    pub fn clock_uncertainty(&self) -> Duration {
+        self.inner.clock_uncertainty
     }
 
     async fn request(
@@ -930,6 +1061,19 @@ impl CodecClient {
         }
     }
     pub async fn encode_audio(&self, rate: u32, samples: &[f32]) -> io::Result<Vec<EncodedAudio>> {
+        self.encode_audio_at(rate, samples, Instant::now()).await
+    }
+    /// Encode samples whose first-sample monotonic timestamp was captured by
+    /// the host before a request could be delayed in the IPC queue.
+    pub async fn encode_audio_at(
+        &self,
+        rate: u32,
+        samples: &[f32],
+        first_sample_at: Instant,
+    ) -> io::Result<Vec<EncodedAudio>> {
+        if first_sample_at > Instant::now() {
+            return Err(failure("audio capture timestamp is in the future"));
+        }
         let mut bytes = Vec::with_capacity(samples.len().saturating_mul(4));
         for sample in samples {
             bytes.extend_from_slice(&sample.to_le_bytes());
@@ -939,7 +1083,7 @@ impl CodecClient {
                 false,
                 Request::AudioEncode {
                     rate,
-                    at_ns: self.inner.clock.encode(Instant::now())?,
+                    at_ns: self.inner.clock.encode(first_sample_at)?,
                 },
                 &bytes,
             )

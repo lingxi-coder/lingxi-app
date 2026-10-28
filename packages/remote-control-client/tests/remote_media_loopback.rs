@@ -928,6 +928,33 @@ fn camera_frame(sequence: u64) -> MediaFrame {
     }
 }
 
+// Model a live camera, not a short burst that stops before the next VP8
+// keyframe. The observation deadline and real frame assertions remain strict.
+fn start_camera_capture(
+    ports: Arc<LoopbackPorts>,
+) -> (
+    tokio_util::sync::CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        let mut sequence = 1u64;
+        loop {
+            tokio::select! {
+                _ = task_cancel.cancelled() => break,
+                _ = ports.send_capture(camera_frame(sequence)) => {}
+            }
+            sequence += 1;
+            tokio::select! {
+                _ = task_cancel.cancelled() => break,
+                _ = sleep(Duration::from_millis(100)) => {}
+            }
+        }
+    });
+    (cancel, task)
+}
+
 fn media_sources() -> Vec<MediaSource> {
     vec![
         MediaSource {
@@ -1009,6 +1036,7 @@ fn worker_launch(root: &std::path::Path) -> remote_control_client::isolated_code
         executable,
         arguments,
         plugin_directory: lingxi_webrtc_media::configured_codec_plugin_directory().unwrap(),
+        loader_directory: lingxi_webrtc_media::configured_codec_loader_directory(),
         private_root: root.to_path_buf(),
     }
 }
@@ -1281,10 +1309,7 @@ async fn production_audio_video_observation_keeps_uplink_without_native_playback
             ports.send_capture(microphone_frame(sequence)).await;
             sleep(Duration::from_millis(20)).await;
         }
-        for sequence in 1..=6 {
-            ports.send_capture(camera_frame(sequence)).await;
-            sleep(Duration::from_millis(100)).await;
-        }
+        let (camera_cancel, camera_task) = start_camera_capture(ports.clone());
         let captured_audio = timeout(Duration::from_secs(10), audio.read())
             .await
             .unwrap_or_else(|_| {
@@ -1327,8 +1352,15 @@ async fn production_audio_video_observation_keeps_uplink_without_native_playback
                 }
             }
         })
-        .await
-        .expect("observation camera input should produce a persisted host frame");
+        .await;
+        camera_cancel.cancel();
+        camera_task.await.expect("camera producer must stop");
+        let asset = asset.unwrap_or_else(|_| {
+            let native_status = service.attached.lock().unwrap_or_else(|error| error.into_inner())
+                .first().map(|(_, session)| session.status());
+            panic!("observation camera input should produce a persisted host frame; host={:?}, native={native_status:?}, input video frames={}",
+                session.status(), ports.input_video_frames.load(Ordering::Acquire));
+        });
         assert_eq!(asset.metadata.mime_type, "image/png");
         assert_eq!(asset.metadata.width_px, Some(320));
         assert_eq!(asset.metadata.height_px, Some(240));
@@ -1438,10 +1470,7 @@ async fn production_camera_peer_is_observed_and_persisted_as_png_on_the_host_iso
         .await
         .expect("camera loopback peer should reach Ready");
 
-        for sequence in 1..=6 {
-            ports.send_capture(camera_frame(sequence)).await;
-            sleep(Duration::from_millis(100)).await;
-        }
+        let (camera_cancel, camera_task) = start_camera_capture(ports.clone());
         let asset = timeout(Duration::from_secs(15), async {
             let mut after = None;
             loop {
@@ -1460,8 +1489,15 @@ async fn production_camera_peer_is_observed_and_persisted_as_png_on_the_host_iso
                 }
             }
         })
-        .await
-        .expect("real VP8 camera ingress should produce an observed host frame");
+        .await;
+        camera_cancel.cancel();
+        camera_task.await.expect("camera producer must stop");
+        let asset = asset.unwrap_or_else(|_| {
+            let native_status = service.attached.lock().unwrap_or_else(|error| error.into_inner())
+                .first().map(|(_, session)| session.status());
+            panic!("real VP8 camera ingress should produce an observed host frame; host={:?}, native={native_status:?}, input video frames={}",
+                session.status(), ports.input_video_frames.load(Ordering::Acquire));
+        });
         assert_eq!(asset.metadata.mime_type, "image/png");
         assert_eq!(asset.metadata.width_px, Some(320));
         assert_eq!(asset.metadata.height_px, Some(240));
@@ -1751,10 +1787,7 @@ async fn production_audio_video_observation_keeps_uplink_without_native_playback
             ports.send_capture(microphone_frame(sequence)).await;
             sleep(Duration::from_millis(20)).await;
         }
-        for sequence in 1..=6 {
-            ports.send_capture(camera_frame(sequence)).await;
-            sleep(Duration::from_millis(100)).await;
-        }
+        let (camera_cancel, camera_task) = start_camera_capture(ports.clone());
         let captured_audio = timeout(Duration::from_secs(10), audio.read())
             .await
             .unwrap_or_else(|_| {
@@ -1797,8 +1830,15 @@ async fn production_audio_video_observation_keeps_uplink_without_native_playback
                 }
             }
         })
-        .await
-        .expect("observation camera input should produce a persisted host frame");
+        .await;
+        camera_cancel.cancel();
+        camera_task.await.expect("camera producer must stop");
+        let asset = asset.unwrap_or_else(|_| {
+            let native_status = service.attached.lock().unwrap_or_else(|error| error.into_inner())
+                .first().map(|(_, session)| session.status());
+            panic!("observation camera input should produce a persisted host frame; host={:?}, native={native_status:?}, input video frames={}",
+                session.status(), ports.input_video_frames.load(Ordering::Acquire));
+        });
         assert_eq!(asset.metadata.mime_type, "image/png");
         assert_eq!(asset.metadata.width_px, Some(320));
         assert_eq!(asset.metadata.height_px, Some(240));
@@ -1901,10 +1941,7 @@ async fn production_camera_peer_is_observed_and_persisted_as_png_on_the_host() {
         .await
         .expect("camera loopback peer should reach Ready");
 
-        for sequence in 1..=6 {
-            ports.send_capture(camera_frame(sequence)).await;
-            sleep(Duration::from_millis(100)).await;
-        }
+        let (camera_cancel, camera_task) = start_camera_capture(ports.clone());
         let asset = timeout(Duration::from_secs(15), async {
             let mut after = None;
             loop {
@@ -1923,8 +1960,15 @@ async fn production_camera_peer_is_observed_and_persisted_as_png_on_the_host() {
                 }
             }
         })
-        .await
-        .expect("real VP8 camera ingress should produce an observed host frame");
+        .await;
+        camera_cancel.cancel();
+        camera_task.await.expect("camera producer must stop");
+        let asset = asset.unwrap_or_else(|_| {
+            let native_status = service.attached.lock().unwrap_or_else(|error| error.into_inner())
+                .first().map(|(_, session)| session.status());
+            panic!("real VP8 camera ingress should produce an observed host frame; host={:?}, native={native_status:?}, input video frames={}",
+                session.status(), ports.input_video_frames.load(Ordering::Acquire));
+        });
         assert_eq!(asset.metadata.mime_type, "image/png");
         assert_eq!(asset.metadata.width_px, Some(320));
         assert_eq!(asset.metadata.height_px, Some(240));

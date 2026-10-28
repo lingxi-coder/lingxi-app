@@ -208,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
         arguments: vec![std::ffi::OsString::from("--desktop-codec-worker")],
         plugin_directory: remote_control_client::isolated_codec::configured_plugin_directory()
             .unwrap_or_default(),
+        loader_directory: remote_control_client::isolated_codec::configured_loader_directory(),
         private_root: codec_root,
     };
     #[cfg(not(any(target_os = "android", target_os = "ios")))]

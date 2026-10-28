@@ -259,6 +259,9 @@ fn launch(root: &std::path::Path) -> CodecLaunch {
                 OsString::from("--ignored"),
                 OsString::from("--exact"),
                 OsString::from("codec_worker_entry"),
+                // Diagnostic-only: otherwise libtest captures the child's
+                // stage messages until exit, and a timed-out child emits none.
+                OsString::from("--nocapture"),
             ],
         ),
     };

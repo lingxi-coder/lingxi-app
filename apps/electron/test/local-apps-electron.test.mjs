@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -11,7 +12,25 @@ import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const workspace = resolve(root, '../..');
+function fixtureBridgeServer() {
+  const explicit = process.env.LINGXI_BRIDGE_SERVER_BIN;
+  if (explicit) {
+    if (!existsSync(explicit)) throw new Error(`LINGXI_BRIDGE_SERVER_BIN does not exist: ${explicit}`);
+    return resolve(explicit);
+  }
+  // The fixture main process is bundled into a temporary directory, so normal
+  // module-relative workspace discovery cannot find the build output there.
+  const target = resolve(workspace, process.env.CARGO_TARGET_DIR || 'target');
+  const name = process.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server';
+  for (const profile of ['debug', 'release']) {
+    const candidate = join(target, profile, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`Build bridge-server in ${target}, or set LINGXI_BRIDGE_SERVER_BIN`);
+}
 test('real Electron Local Apps: tool transport, library, independent windows, backends, permissions and durable updates', { timeout: 120000 }, async () => {
+  const serverBin = fixtureBridgeServer();
   const temp = await mkdtemp(join(tmpdir(), 'lingxi-local-app-electron-'));
   const bundle = (entry, name) => build({ entryPoints: [join(root, entry)], outfile: join(temp, name), bundle: true, platform: 'node', format: 'cjs', external: ['electron'] });
   await Promise.all([bundle('test/fixtures/local-apps-electron.ts', 'main.cjs'), bundle('src/preload/localApp.ts', 'localApp.cjs'), bundle('src/preload/index.ts', 'preload.cjs')]);
@@ -20,7 +39,7 @@ test('real Electron Local Apps: tool transport, library, independent windows, ba
   try {
     await vite.listen();
     const port = vite.httpServer.address().port;
-    const env = { ...process.env, LINGXI_TEST_USER_DATA: temp, LINGXI_TEST_LIBRARY_URL: `http://127.0.0.1:${port}/local-apps-fixture.html` };
+    const env = { ...process.env, LINGXI_BRIDGE_SERVER_BIN: serverBin, LINGXI_TEST_USER_DATA: temp, LINGXI_TEST_LIBRARY_URL: `http://127.0.0.1:${port}/local-apps-fixture.html` };
     delete env.ELECTRON_RUN_AS_NODE;
     child = spawn(createRequire(import.meta.url)('electron'), [join(temp, 'main.cjs')], {
       cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'],

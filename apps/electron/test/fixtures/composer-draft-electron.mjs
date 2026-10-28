@@ -132,8 +132,8 @@ async function main() {
       return;
     }
 
-    await waitFor(webContents, `Boolean(document.querySelector('[aria-label="开启心流模式"]'))`);
-    const flowBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="开启心流模式"]').getBoundingClientRect().toJSON()`);
+    await waitFor(webContents, `Boolean(document.querySelector('[aria-label="Turn On Flow Mode"]'))`);
+    const flowBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="Turn On Flow Mode"]').getBoundingClientRect().toJSON()`);
     assert.equal(await webContents.executeJavaScript(`getComputedStyle(document.querySelector('.composer-submit-actions')).display`), 'none');
     await webContents.insertText('Hello');
     await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).transform === 'matrix(1, 0, 0, 1, 0, 0)'`);
@@ -152,7 +152,7 @@ async function main() {
     }
     const sendBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="Send prompt"]').getBoundingClientRect().toJSON()`);
     assert.equal(sendBounds.x, flowBounds.x, 'flow and send share the same trailing slot');
-    assert.equal(await webContents.executeJavaScript(`Boolean(document.querySelector('[aria-label="开启心流模式"]'))`), false);
+    assert.equal(await webContents.executeJavaScript(`Boolean(document.querySelector('[aria-label="Turn On Flow Mode"]'))`), false);
     await setPrompt(webContents, '');
     await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-send-presence')).visibility === 'hidden'`);
     await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(true)`);
@@ -354,15 +354,15 @@ async function main() {
       await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
       await setPrompt(webContents, '');
       await webContents.executeJavaScript(`window.__composerDraftTest.setRunning(false)`);
-      await waitFor(webContents, `Boolean(document.querySelector('[aria-label="开启心流模式"]'))`);
+      await waitFor(webContents, `Boolean(document.querySelector('[aria-label="Turn On Flow Mode"]'))`);
       await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
-      await webContents.executeJavaScript(`document.querySelector('[aria-label="开启心流模式"]').click()`);
-      await waitFor(webContents, `Boolean(document.querySelector('[role="group"][aria-label="心流模式"]'))`);
+      await webContents.executeJavaScript(`document.querySelector('[aria-label="Turn On Flow Mode"]').click()`);
+      await waitFor(webContents, `Boolean(document.querySelector('[role="group"][aria-label="Flow Mode"]'))`);
       await waitFor(webContents, `window.__composerDraftTest.audioOperationTypes().includes('listen')`);
       const flowStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioOperationTypes()`);
       const audioInteraction = { dictationStartRequests, dictatedText, flowStartRequests };
-      await webContents.executeJavaScript(`document.querySelector('[aria-label="关闭心流模式"]').click()`);
-      await waitFor(webContents, `!document.querySelector('[role="group"][aria-label="心流模式"]')`);
+      await webContents.executeJavaScript(`document.querySelector('[aria-label="Close Flow Mode"]').click()`);
+      await waitFor(webContents, `!document.querySelector('[role="group"][aria-label="Flow Mode"]')`);
 
       await webContents.executeJavaScript(`document.querySelector('button[aria-label^="Model:"]').click()`);
       await waitFor(webContents, `Boolean(document.querySelector('[aria-label="Model settings"]'))`);
@@ -498,12 +498,12 @@ async function main() {
     assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`), cancellationsBeforeBtw);
     assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.sendPending()`), false);
     assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.lastSentPrompt()`), sentPending);
-    assert.equal(await webContents.executeJavaScript(`document.body.textContent.includes('当前任务完成后才能运行 / 命令。')`), false);
+    assert.equal(await webContents.executeJavaScript(`document.body.textContent.includes('Wait for the current task to finish before running a / command.')`), false);
 
     await setPrompt(webContents, '/status');
     await waitFor(webContents, `document.querySelector('[aria-label="Send pending message"]')?.disabled === false`);
     await webContents.executeJavaScript(`document.querySelector('[aria-label="Send pending message"]').click()`);
-    await waitFor(webContents, `document.body.textContent.includes('当前任务完成后才能运行 / 命令。')`);
+    await waitFor(webContents, `document.body.textContent.includes('Wait for the current task to finish before running a / command.')`);
     assert.deepEqual(await webContents.executeJavaScript(`window.__composerDraftTest.slashCommands()`), [...commandsBeforeBtw, btwCommand]);
     assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]')?.textContent`), '/status');
     assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`), cancellationsBeforeBtw);

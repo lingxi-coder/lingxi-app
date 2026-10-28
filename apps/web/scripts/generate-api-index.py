@@ -298,7 +298,7 @@ def selected(sdk: str, file: str) -> bool:
             file in ("crates/runtime/src/lib.rs", "crates/runtime/src/api.rs")
             or file.startswith("crates/runtime/src/models/")
             or file.startswith("crates/client/src/protocol/")
-            or file in ("crates/client/src/lib.rs", "crates/client/src/adapter/mod.rs", "crates/client/src/adapter/listener.rs", "crates/client/src/adapter/sink.rs", "crates/client/src/adapter/controls.rs", "crates/client/src/adapter/turn.rs")
+            or file in ("crates/client/src/lib.rs", "crates/client/src/turn_journal.rs", "crates/client/src/adapter/mod.rs", "crates/client/src/adapter/listener.rs", "crates/client/src/adapter/sink.rs", "crates/client/src/adapter/controls.rs", "crates/client/src/adapter/turn.rs")
             or file.startswith("crates/tool-api/src/")
             or file.startswith("crates/skill/src/")
             or file.startswith("crates/plugin/src/")

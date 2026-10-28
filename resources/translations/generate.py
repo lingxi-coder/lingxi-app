@@ -263,8 +263,8 @@ def write_android(locales: dict[str, dict], out_dir: Path | str) -> None:
 # apps/android/native/app/src/main/res/values/strings_conversation_extra.xml's own
 # header comment for why a separate file exists). Excluded from the orphan
 # scan below so they don't get flagged as stray generator output.
-# ⚠️ Mirror this against ANDROID_COMPANION_STRINGS_FILES in
-# scripts/checks/check_i18n_pairing.py if it changes.
+# The pairing gate independently discovers default hand-maintained resources;
+# this allowlist only excludes the strings*.xml family from orphan detection.
 ANDROID_KNOWN_COMPANION_BASENAMES = {"strings_conversation_extra.xml"}
 
 

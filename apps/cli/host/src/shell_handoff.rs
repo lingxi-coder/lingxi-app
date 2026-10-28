@@ -504,6 +504,7 @@ mod tests {
                 supervisor_start_identity: None,
                 process_start_identity: None,
                 owner: None,
+                require_group_cleanup_on_exit: false,
                 socket_path: "/private/supervisor/socket".into(),
                 receipt_path: "/private/supervisor/receipt".into(),
                 output_path: "/private/tasks/bshell001.output".into(),

@@ -5,10 +5,19 @@ export class GitActivityTracker {
   private readonly agents = new Map<string, boolean>();
   private readonly workers = new Map<string, boolean>();
   private readonly tasks = new Set<string>();
+  private readonly exitedUnknownTasks = new Set<string>();
   private workerCount = 0;
   get active(): boolean { return this.tasks.size > 0 || this.workerCount > 0 || [...this.agents.values(), ...this.workers.values()].some(Boolean); }
+  hasExitedUnknown(taskId: string): boolean { return this.exitedUnknownTasks.has(taskId); }
 
   private taskStatus(taskId: string, status: string): void {
+    if (status === 'exited_unknown') this.exitedUnknownTasks.add(taskId);
+    // The engine never reuses a task ID or reopens this terminal status. A
+    // delayed row or lifecycle event must not reacquire worktree ownership.
+    if (this.exitedUnknownTasks.has(taskId)) {
+      this.tasks.delete(taskId);
+      return;
+    }
     if (['pending', 'running', 'paused'].includes(status)) this.tasks.add(taskId);
     else if (['completed', 'failed', 'cancelled', 'killed', 'stopped'].includes(status)) this.tasks.delete(taskId);
   }
@@ -22,7 +31,7 @@ export class GitActivityTracker {
       || events.filter((event) => event.type === 'coordinator_status').length !== 1) {
       throw new Error('Runtime background snapshot is incomplete.');
     }
-    this.reset();
+    this.clearActivity();
     for (const event of events) this.accept(event);
   }
 
@@ -33,7 +42,7 @@ export class GitActivityTracker {
     // the session's engine runtime for the life of the app, with no way to clear
     // it. Worker labels are open-ended, so everything else still defaults to
     // active.
-    const running = (status: string) => !['completed', 'failed', 'killed', 'cancelled', 'idle', 'stopped', 'unknown'].includes(status);
+    const running = (status: string) => !['completed', 'failed', 'killed', 'cancelled', 'exited_unknown', 'idle', 'stopped', 'unknown'].includes(status);
     // `main` is the conversation's own turn, not a worker that outlives it, and
     // this tracker exists only for the ones that DO. The roster reports it as
     // `running` whenever a turn is active, but the engine never emits
@@ -66,7 +75,7 @@ export class GitActivityTracker {
       if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return;
       const task = receipt as Record<string, unknown>;
       if (task.type !== 'system' || typeof task.task_id !== 'string' || !task.task_id) return;
-      if (task.subtype === 'task_started') this.tasks.add(task.task_id);
+      if (task.subtype === 'task_started') this.taskStatus(task.task_id, 'running');
       else if (task.subtype === 'task_notification' && typeof task.status === 'string') this.taskStatus(task.task_id, task.status);
       else if (task.subtype === 'task_updated' && task.patch && typeof task.patch === 'object' && !Array.isArray(task.patch)) {
         const status = (task.patch as Record<string, unknown>).status;
@@ -74,5 +83,6 @@ export class GitActivityTracker {
       }
     }
   }
-  reset(): void { this.agents.clear(); this.workers.clear(); this.tasks.clear(); this.workerCount = 0; }
+  private clearActivity(): void { this.agents.clear(); this.workers.clear(); this.tasks.clear(); this.workerCount = 0; }
+  reset(): void { this.clearActivity(); this.exitedUnknownTasks.clear(); }
 }

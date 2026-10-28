@@ -2,7 +2,10 @@ package com.lingxi.code.apps
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.lingxi.code.BuildConfig
 import com.lingxi.code.MainActivity
+import com.lingxi.code.acceptance.acceptanceArgument
+import com.lingxi.code.acceptance.requireAcceptanceOptIn
 import com.lingxi.code.bindings.android.*
 import com.lingxi.code.project.MobileUserStorage
 import com.lingxi.code.settings.LinuxRuntimeBridge
@@ -15,6 +18,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -118,6 +122,7 @@ class UnifiedLocalAppsAcceptanceTest {
 
     @Test
     fun backgroundOptInOwnsForegroundServiceAndOptOutSuspendsOnlyThisRun() = runBlocking<Unit> {
+        assumeTrue("Python Local Apps require Direct", BuildConfig.MOBILE_LINUX_FULL)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val apps = UnifiedLocalApps.get(context)
@@ -167,10 +172,14 @@ class UnifiedLocalAppsAcceptanceTest {
 
     @Test
     fun marketInstallUpdateRemixReviewAndTakedown() = runBlocking<Unit> {
+        requireAcceptanceOptIn(
+            "localAppMarketAcceptance", "The isolated HTTPS market fixture is required",
+            "com.lingxi.code.apps.UnifiedLocalAppsAcceptanceTest#marketInstallUpdateRemixReviewAndTakedown", "localAppMarketRoot",
+        )
+        check(BuildConfig.MOBILE_LINUX_FULL) { "Market acceptance requires the Direct package" }
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
-        val endpoint = InstrumentationRegistry.getArguments().getString("localAppMarketRoot")
-            ?: error("Start the isolated TLS market fixture and pass localAppMarketRoot")
+        val endpoint = acceptanceArgument("localAppMarketRoot")
         require(URI(endpoint).host == "127.0.0.1")
         val certificate = File(context.filesDir, "local-app-acceptance-fixtures/market-ca.pem")
         val ca = certificate.inputStream().use { java.security.cert.CertificateFactory.getInstance("X.509").generateCertificate(it) }
@@ -339,6 +348,7 @@ class UnifiedLocalAppsAcceptanceTest {
 
     @Test
     fun staticPythonNodeAndOwnedLifecycle() = runBlocking<Unit> {
+        assumeTrue("Python and Node Local Apps require Direct", BuildConfig.MOBILE_LINUX_FULL)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val fixtures = File(context.filesDir, "local-app-acceptance-fixtures")

@@ -220,6 +220,9 @@ pub(super) fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<Fu
                 None => FusionPrintOutcome::Failed(reason),
             }
         }
+        tasks::state::TaskStatus::ExitedUnknown => {
+            FusionPrintOutcome::Other("exited; result unknown".to_string())
+        }
         other => FusionPrintOutcome::Other(format!("{other:?}")),
     })
 }

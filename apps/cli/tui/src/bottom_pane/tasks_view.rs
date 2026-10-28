@@ -76,8 +76,9 @@ impl TasksView {
 
     /// Whether `status` denotes a still-running task that can be stopped.
     fn is_killable(&self, row: &TaskRow) -> bool {
-        row.status == "running"
-            || (row.task_type == "local_agent" && self.parked_agents.contains(&row.task_id))
+        row.status != "exited_unknown"
+            && (row.status == "running"
+                || (row.task_type == "local_agent" && self.parked_agents.contains(&row.task_id)))
     }
 
     /// Keep the mounted dialog synchronized with completion and rest transitions.
@@ -114,11 +115,13 @@ impl TasksView {
             return;
         };
         // 2.1.263 Cj/Vp: completed resumable agents are the explicit
-        // exception; terminal shells and foreground-only rows are hidden.
+        // exception; surface unknown exits so their outcome is not lost.
         records.retain(|record| {
             record.completed_agent_visible
-                || (matches!(record.status.as_str(), "running" | "pending")
-                    && record.is_backgrounded != Some(false))
+                || (matches!(
+                    record.status.as_str(),
+                    "running" | "pending" | "exited_unknown"
+                ) && record.is_backgrounded != Some(false))
         });
         self.monitors = records
             .iter()
@@ -165,6 +168,7 @@ impl TasksView {
             "completed" => "\u{2713}",
             "failed" => "\u{2717}",
             "killed" => "\u{2298}",
+            "exited_unknown" => "?",
             _ => "\u{2022}",
         }
     }
@@ -238,6 +242,8 @@ impl TasksView {
                 "awaiting approval"
             } else if r.task_type == "local_agent" && r.status == "completed" {
                 "done"
+            } else if r.status == "exited_unknown" {
+                "exited (result unknown)"
             } else {
                 &r.status
             };
@@ -280,11 +286,20 @@ impl TasksView {
             } else {
                 String::new()
             };
+            let observation = r
+                .observation_error
+                .as_deref()
+                .map(sanitize_task_text)
+                .filter(|error| !error.is_empty())
+                .map(|error| format!(" — {error}"))
+                .unwrap_or_default();
             // A Fusion row's stage is the point of the row, and it renders
             // after the label. An unbounded label pushes it past the right
             // edge at ordinary terminal widths, so bound it the way
             // `local_agent` rows are already bounded.
-            let label = if r.task_type == "local_fusion" && !fusion.is_empty() {
+            let label = if (r.task_type == "local_fusion" && !fusion.is_empty())
+                || !observation.is_empty()
+            {
                 tui_core::render::truncate_to_width_ellipsis(&label, 40)
             } else {
                 label
@@ -307,7 +322,7 @@ impl TasksView {
                 (label, String::new())
             };
             let text = format!(
-                "{marker}{label} {} {status}{unread}{fusion}{model}",
+                "{marker}{label} {} {status}{unread}{fusion}{model}{observation}",
                 Self::glyph(&r.status)
             );
             let style = if i == self.selected {
@@ -465,6 +480,7 @@ mod tests {
             command: None,
             stage: None,
             error: None,
+            observation_error: None,
         }
     }
 
@@ -719,6 +735,17 @@ mod tests {
     }
 
     #[test]
+    fn running_shell_observation_is_visible_and_task_stays_stoppable() {
+        let mut task = row("b00000001", "running", "build");
+        task.observation_error = Some("wait\n\u{1b}[31munverified\u{1b}[0m".into());
+        let v = view(vec![task]);
+        assert!(v.is_killable(&v.rows()[0]));
+        let rendered = rendered_buffer(&v, 100, v.desired_height(100));
+        assert!(rendered.contains("wait unverified"), "{rendered}");
+        assert!(!rendered.contains('\u{1b}'));
+    }
+
+    #[test]
     fn ordinary_failed_rows_keep_the_existing_compact_rendering() {
         let mut ordinary = row("a00000001", "failed", "agent task");
         ordinary.task_type = "local_agent".into();
@@ -908,6 +935,7 @@ mod tests {
                 command: None,
                 stage: Some("Running panels 2/3".into()),
                 error: None,
+                observation_error: None,
             },
         ]));
 
@@ -1007,5 +1035,27 @@ mod tests {
             .lines()
             .iter()
             .any(|line| line.to_string() == "No tasks currently running"));
+    }
+
+    #[test]
+    fn unknown_exit_is_visible_and_cannot_be_stopped_again() {
+        let record = lingxi_core::host::task_registry::TaskRecord {
+            task_id: "shell-unknown".into(),
+            task_type: "local_bash".into(),
+            status: "exited_unknown".into(),
+            description: "background command".into(),
+            is_backgrounded: Some(true),
+            ..Default::default()
+        };
+        let registry = Arc::new(LiveRegistry(std::sync::Mutex::new(vec![record])));
+        let mut view = TasksView::new(vec![], Theme::dark()).with_registry(registry);
+        assert_eq!(view.rows().len(), 1);
+        assert_eq!(view.rows()[0].status, "exited_unknown");
+        assert!(!view.is_killable(&view.rows()[0]));
+        assert!(rendered_buffer(&view, 100, 8).contains("exited (result unknown)"));
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Char('x'))),
+            ViewOutcome::Pending
+        ));
     }
 }

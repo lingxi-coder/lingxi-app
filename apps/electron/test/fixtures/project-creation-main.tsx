@@ -20,6 +20,7 @@ const fixture = {
   bootstrapErrorOnce: false, rendererErrors: [] as string[],
   defaults: 0, defaultError: '', appsRoot: '/fixture/.current-product/.apps', pickerPurposes: [] as string[], newSessions: [] as string[],
   holdDefaults: false, defaultWaiters: [] as (() => void)[],
+  authoring: [] as Array<{ appId?: string; projectPath: string; sessionId: string }>,
   requestEdit: undefined as ((request: LocalAppEditRequest) => void) | undefined,
 };
 window.addEventListener('error', event => fixture.rendererErrors.push(event.message));
@@ -80,10 +81,18 @@ function snapshot() {
   },
   localApps: {
     list: async () => [], legacyEntries: async () => [], onChanged: () => () => {},
-    prepareAuthoring: async (session: typeof ref) => ({ workspaceId: 'fixture-workspace', sourceDirectory: session.projectPath,
-      projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId }),
-    bindAuthoring: async (appId: string, session: typeof ref) => ({ appId, workspaceId: 'fixture-workspace', sourceDirectory: session.projectPath,
-      projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId }),
+    prepareAuthoring: async (session: { projectPath: string; sessionId: string }) => {
+      if (session.projectPath !== ref.projectPath || session.sessionId !== ref.sessionId) throw new Error('Authoring must use the active Code session');
+      fixture.authoring.push(session);
+      return { workspaceId: `fixture-${session.sessionId}`, sourceDirectory: session.projectPath,
+        projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId };
+    },
+    bindAuthoring: async (appId: string, session: { projectPath: string; sessionId: string }) => {
+      if (session.projectPath !== ref.projectPath || session.sessionId !== ref.sessionId) throw new Error('Authoring must use the active Code session');
+      fixture.authoring.push({ appId, ...session });
+      return { appId, workspaceId: `fixture-${session.sessionId}`, sourceDirectory: session.projectPath,
+        projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId };
+    },
   },
   command: async () => {},
   listProjectSessions: async (path: string) => ({ projectPath: path, sessions: [] }),

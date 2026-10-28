@@ -205,9 +205,11 @@ class DurableRecoveryAdversarialTest {
         vm.applyActivatedSession(
             ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
         )
+        vm.noteDurableAttach("session-a", 93L, true)
         vm.reduceClientEvent(
             ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.WAITING_FOR_USER)),
         )
+        vm.finishDurableAttachReplay(ConversationDelivery.AttachReplayEnded("session-a", 93L, true))
         vm.reduceClientEvent(
             ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.WAITING_FOR_USER)),
         )
@@ -218,10 +220,14 @@ class DurableRecoveryAdversarialTest {
     private fun snapshot(state: TurnRecoveryStateDto) = TurnRecoverySnapshotDto(
         sessionId = "session-a",
         turnId = 93u,
+        revision = if (state in setOf(
+            TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED,
+        )) 2uL else 1uL,
         state = state,
         firstSequence = 0u,
         lastSequence = 1u,
         safeToResume = false,
+        projectionUncertain= false,
         reason = null,
     )
 

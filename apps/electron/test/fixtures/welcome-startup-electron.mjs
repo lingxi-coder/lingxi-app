@@ -1,5 +1,4 @@
 import { app, BrowserWindow } from 'electron';
-import { writeFileSync } from 'node:fs';
 
 const url = process.argv.find(value => value.startsWith('http://'));
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
@@ -7,7 +6,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: false, width: 1362, height: 900, webPreferences: { sandbox: true } });
+  const window = new BrowserWindow({ show: false, width: 1362, height: 900, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
     const run = script => window.webContents.executeJavaScript(script);
@@ -40,7 +39,6 @@ async function main() {
     await wait('window.welcomeStartupFixture.newSessionPending');
     await wait(`document.querySelector('main').innerText.includes('What should we build in LingXi-Next?') && ${send}.disabled`);
     result.pendingWelcome = await run(`document.body.innerText.includes('What should we build in LingXi-Next?') && !document.querySelector('main').innerText.includes('Previous session message')`);
-    writeFileSync('/tmp/lingxi-new-session-welcome.png', (await window.webContents.capturePage()).toPNG());
     result.pendingEditable = await run(`${prompt}.isContentEditable && ${prompt}.getAttribute('aria-disabled') === 'false'`);
     await enter('Draft while new session starts');
     result.pendingBlocked = await run(`${send}.disabled && window.welcomeStartupFixture.sent.length === 1 && ${prompt}.textContent === 'Draft while new session starts'`);
@@ -58,8 +56,7 @@ async function main() {
     await run('window.welcomeStartupFixture.failNewSession()');
     await wait(`!document.querySelector('.sidebar-primary-action').disabled && document.body.innerText.includes('fixture engine startup failed')`);
     result.failureRestoresDraft = await run(`${prompt}.textContent === 'Draft in the existing session' && !document.querySelector('main').innerText.includes('Draft belonging to the failed session')`);
-    console.log(JSON.stringify(result));
-  } catch (error) { console.error(error); process.exitCode = 1; }
-  finally { window.destroy(); app.quit(); }
+    await new Promise(resolve => process.stdout.write(`${JSON.stringify(result)}\n`, resolve));
+  } finally { window.destroy(); }
 }
-void main().catch(error => { console.error(error); app.exit(1); });
+void main().then(() => app.exit(0)).catch(error => { console.error(error); app.exit(1); });

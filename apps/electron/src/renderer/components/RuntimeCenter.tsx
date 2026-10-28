@@ -49,6 +49,7 @@ const statusRank: Record<string, number> = {
   pending: 1,
   idle: 2,
   failed: 3,
+  exited_unknown: 4,
   killed: 4,
   cancelled: 5,
   completed: 6,
@@ -259,7 +260,8 @@ function agentStatusSummary(statuses: readonly string[]): string {
   const awaiting = statuses.filter((status) => status === 'awaiting approval').length;
   const done = statuses.filter((status) => status === 'completed').length;
   const failed = statuses.filter((status) => ['failed', 'killed', 'cancelled'].includes(status)).length;
-  return [running > 0 ? tr('desktop_runtime_count_running', running) : '', awaiting > 0 ? tr('desktop_runtime_count_awaiting', awaiting) : '', done > 0 ? tr('desktop_runtime_count_done', done) : '', failed > 0 ? tr('desktop_runtime_count_failed', failed) : ''].filter(Boolean).join(' · ') || tr('desktop_runtime_count_idle', statuses.length);
+  const unknown = statuses.filter((status) => status === 'exited_unknown').length;
+  return [running > 0 ? tr('desktop_runtime_count_running', running) : '', awaiting > 0 ? tr('desktop_runtime_count_awaiting', awaiting) : '', done > 0 ? tr('desktop_runtime_count_done', done) : '', failed > 0 ? tr('desktop_runtime_count_failed', failed) : '', unknown > 0 ? tr('desktop_runtime_count_exited_unknown', unknown) : ''].filter(Boolean).join(' · ') || tr('desktop_runtime_count_idle', statuses.length);
 }
 
 const PLAN_STATUS_KEYS = { submitted: 'desktop_runtime_plan_submitted', pending: 'desktop_runtime_plan_pending', approved: 'desktop_runtime_plan_approved', rejected: 'desktop_runtime_plan_rejected', failed: 'chat_status_failed' };
@@ -693,7 +695,7 @@ function SubmittedPlanDetail({ plan }: { plan: SubmittedPlan | null | undefined 
 
 function SubagentGroups({ agents, bridge }: { agents: SessionAgentSummaryDto[]; bridge: UseBridge }) {
   const t = useT();
-  const doneStatuses = new Set(['completed', 'failed', 'killed', 'cancelled', 'idle']);
+  const doneStatuses = new Set(['completed', 'failed', 'killed', 'cancelled', 'exited_unknown', 'idle']);
   const sorted = [...agents].sort((a, b) => (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0));
   const groups = [
     { label: tr('cron_task_status_active'), agents: sorted.filter((agent) => !doneStatuses.has(agent.status)), empty: tr('desktop_runtime_active_subagents_empty') },
@@ -751,6 +753,7 @@ function runtimeStatusLabel(status: string, kind: 'agent' | 'shell' = 'agent'): 
     pending: 'desktop_runtime_status_pending', running: 'desktop_runtime_status_running', idle: 'desktop_runtime_status_idle',
     done: 'desktop_runtime_status_done', error: 'desktop_runtime_status_error', stopped: 'desktop_runtime_status_stopped',
     failed: 'desktop_runtime_status_failed', killed: 'desktop_runtime_status_killed', cancelled: 'desktop_runtime_status_cancelled',
+    exited_unknown: 'chat_status_exited_unknown',
     in_progress: 'desktop_runtime_status_in_progress', paused: 'desktop_runtime_status_paused', 'awaiting approval': 'desktop_runtime_status_awaiting',
   };
   return keys[label] ? tr(keys[label]!) : label;

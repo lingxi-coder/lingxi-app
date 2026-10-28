@@ -85,6 +85,7 @@ class SideChatCommandTest {
         )
 
         assertEquals(rawText.map { it.code.toUShort() }, command.text.codeUnits)
+        assertNull(command.sessionId)
         assertEquals(PromptModeDto.BASH, command.promptMode)
         assertEquals(42uL, command.turnId)
         assertEquals("widget-a", command.visualizationContext?.id)
@@ -92,7 +93,7 @@ class SideChatCommandTest {
     }
 
     @Test fun sideCancelPreservesOptionalTurnIdentity() {
-        assertEquals(ClientCommand.Cancel(42uL), sideChatCancelCommand(42L))
-        assertEquals(ClientCommand.Cancel(null), sideChatCancelCommand(null))
+        assertEquals(ClientCommand.Cancel(sessionId = null, turnId = 42uL), sideChatCancelCommand(42L))
+        assertEquals(ClientCommand.Cancel(sessionId = null, turnId = null), sideChatCancelCommand(null))
     }
 }

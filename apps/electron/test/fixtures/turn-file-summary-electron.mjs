@@ -7,7 +7,8 @@ app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function main() {
   await app.whenReady();
-  const win = new BrowserWindow({ show: false, width: 1300, height: 700, webPreferences: { sandbox: true, backgroundThrottling: false } });
+  const nativeWidth = process.env.LINGXI_TEST_CONSTRAINED_WIDTH === '1' ? 1000 : 1300;
+  const win = new BrowserWindow({ show: false, width: nativeWidth, height: 700, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     const run = script => win.webContents.executeJavaScript(script);
     const waitFor = async script => {
@@ -19,14 +20,24 @@ async function main() {
     };
     await win.loadURL(url);
     await configureFixtureWindow(win);
+    // A hosted macOS display can constrain the native window below the CSS
+    // breakpoint. Test the wide and narrow layouts at explicit viewport sizes.
+    const setViewport = async (width, height) => {
+      await win.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
+        width, height, deviceScaleFactor: 1, mobile: false,
+      });
+      await waitFor(`innerWidth === ${width} && innerHeight === ${height}`);
+    };
+    await setViewport(1300, 700);
     await waitFor('Boolean(document.querySelector(".turn-file-review"))');
     const result = await run(`({ files: document.querySelectorAll('.turn-file-summary li').length, initiallyClosed: !document.querySelector('#runtime-inspector'), inlineDiffs: document.querySelectorAll('main .turn-file-diffs').length })`);
     await run(`document.querySelector('.turn-file-review').click()`);
     await waitFor(`document.querySelector('#runtime-inspector-panel')?.textContent.includes('Historical stylesheet change')`);
     await settleFixtureAnimations(win.webContents, '#runtime-inspector');
     result.allFilesVisible = await run(`['Historical component change', 'Historical stylesheet change'].every(text => document.querySelector('#runtime-inspector-panel').textContent.includes(text))`);
-    result.rightPanel = await run(`document.querySelector('#runtime-inspector').getBoundingClientRect().left >= document.querySelector('main').getBoundingClientRect().right - 1`);
-    await writeFile('/tmp/lingxi-turn-files-light.png', (await win.webContents.capturePage()).toPNG());
+    result.wideGeometry = await run(`({ viewport: innerWidth, panelLeft: document.querySelector('#runtime-inspector').getBoundingClientRect().left, mainRight: document.querySelector('main').getBoundingClientRect().right, position: getComputedStyle(document.querySelector('#runtime-inspector')).position })`);
+    result.rightPanel = result.wideGeometry.position !== 'absolute' && result.wideGeometry.panelLeft >= result.wideGeometry.mainRight - 1;
+    await writeFile('/tmp/lingxi-turn-files-light.png', (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
     await run(`document.querySelectorAll('.turn-file-path')[1].click()`);
     await waitFor(`!document.querySelector('#runtime-inspector-panel')?.textContent.includes('Historical component change')`);
     result.selectedFileOnly = await run(`document.querySelector('#runtime-inspector-panel').textContent.includes('Historical stylesheet change') && !document.querySelector('#runtime-inspector-panel').textContent.includes('Historical component change')`);
@@ -41,15 +52,17 @@ async function main() {
     await waitFor(`!document.querySelector('#runtime-inspector')`);
     result.closedWithoutInlineDiffs = await run(`!document.querySelector('#runtime-inspector') && !document.querySelector('main .turn-file-diffs')`);
     win.setSize(360, 480);
+    await setViewport(360, 480);
     await win.loadURL(`${url}?dark`);
     await waitFor('Boolean(document.querySelector(".turn-file-review"))');
     await run(`document.querySelector('.turn-file-review').click()`);
     await waitFor(`document.querySelector('#runtime-inspector-panel')?.textContent.includes('Historical stylesheet change')`);
     await settleFixtureAnimations(win.webContents, '#runtime-inspector');
+    result.narrowGeometry = await run(`({ viewport: innerWidth, position: getComputedStyle(document.querySelector('#runtime-inspector')).position })`);
     result.darkNarrowVisible = await run(`document.querySelector('#runtime-inspector').getBoundingClientRect().right <= innerWidth + 1 && document.querySelector('#runtime-inspector').getBoundingClientRect().left >= -1`);
     result.darkHeadingMatchesTheme = await run(`getComputedStyle(document.querySelector('.turn-file-diffs h3')).color === getComputedStyle(document.querySelector('.turn-file-summary-heading strong')).color`);
     result.narrowOverflow = await run(`document.documentElement.scrollWidth > innerWidth`);
-    await writeFile('/tmp/lingxi-turn-files-dark.png', (await win.webContents.capturePage()).toPNG());
+    await writeFile('/tmp/lingxi-turn-files-dark.png', (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG());
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally { win.destroy(); app.quit(); }
 }

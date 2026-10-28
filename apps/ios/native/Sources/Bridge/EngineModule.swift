@@ -62,7 +62,7 @@ enum EngineModuleLinkageSmoke {
     /// Never executed; exists purely so the type references are emitted.
     private static func _typeAnchors() {
         let _: MobileEngineHandle.Type = MobileEngineHandle.self
-        let _: ClientCommand = .cancel(turnId: nil)
+        let _: ClientCommand = .cancel(sessionId: nil, turnId: nil)
         let _: ClientError.Type = ClientError.self
         let _: MobileEngineError.Type = MobileEngineError.self
     }

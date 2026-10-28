@@ -127,7 +127,17 @@ data class ActivatedSession(
     val transcript: List<Message>,
     val kind: SessionActivationKind,
     val mode: SessionMode = SessionMode.Code,
+    val fullyVisibleUserUuids: Set<String> = emptySet(),
 )
+
+/** The constructed engine's workspace owner exists before async listings. */
+internal fun bootstrapWorkspaceSession(
+    current: ActivatedSession?,
+    owner: String,
+    mode: SessionMode,
+): ActivatedSession? = current ?: canonicalSessionId(owner)
+    .takeIf { it.isNotBlank() && it != "new" }
+    ?.let { ActivatedSession(it, emptyList(), SessionActivationKind.Bootstrap, mode) }
 
 /**
  * Lower one [McpServerDto] to the UI [MCPServer] model. The DTO is thinner than
@@ -165,12 +175,16 @@ fun sessionActivationFrom(
         transcript = emptyList(),
         kind = SessionActivationKind.Started,
     )
-    is ClientEvent.SessionResumed -> ActivatedSession(
-        sessionId = canonicalSessionId(event.sessionId),
-        mode = event.mode.toUi(),
-        transcript = transcriptFromDtos(event.messages, strings),
-        kind = SessionActivationKind.Resumed,
-    )
+    is ClientEvent.SessionResumed -> {
+        val projected = transcriptFromDtos(event.messages, strings)
+        ActivatedSession(
+            sessionId = canonicalSessionId(event.sessionId),
+            mode = event.mode.toUi(),
+            transcript = projected,
+            kind = SessionActivationKind.Resumed,
+            fullyVisibleUserUuids = fullyVisibleUserTranscriptUuids(event.messages, projected),
+        )
+    }
     else -> null
 }
 

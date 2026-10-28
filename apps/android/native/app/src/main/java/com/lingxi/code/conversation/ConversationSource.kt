@@ -23,6 +23,59 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
+
+enum class QueuedRecoveryResolution { Delivered, CancelledBeforeStart, Terminal }
+
+/** Ordered internal boundaries share the same delivery queue as engine events. */
+sealed interface ConversationDelivery {
+    data class Event(val event: ClientEvent) : ConversationDelivery
+    data class RecoveryState(
+        val snapshot: com.lingxi.code.bindings.client.TurnRecoverySnapshotDto,
+        val isActive: () -> Boolean = { true },
+    ) : ConversationDelivery
+    /** Payload decoded once from an identity-bearing durable delivery. */
+    data class TurnEvent(
+        val sessionId: String,
+        val turnId: ULong,
+        val sequence: ULong?,
+        val event: ClientEvent,
+        val attachRequestId: String? = null,
+        val excludedAttachRequestId: String? = null,
+        val isActive: () -> Boolean = { true },
+    ) : ConversationDelivery
+    data class TurnEventDecodeFailed(val sessionId: String, val turnId: ULong,
+        val attachRequestId: String? = null, val isActive: () -> Boolean = { true }) : ConversationDelivery
+    /** A submitted next turn could not safely cross the preceding turn boundary. */
+    data class QueuedTurnIncomplete(val sessionId: String, val turnId: ULong) : ConversationDelivery
+    /** Source verified this identity against its persisted pending queue. */
+    data class QueuedTurnRegistered(val sessionId: String, val turnId: ULong) : ConversationDelivery
+    data class QueuedTurnSettled(val sessionId: String, val turnId: ULong, val reviewRequired: Boolean = false,
+        val cancelledBeforeStart: Boolean = false) : ConversationDelivery
+    data class CancellationDrained(val sessionId: String, val turnId: Long, val terminalObserved: Boolean) : ConversationDelivery
+    data class CancellationAborted(val sessionId: String, val turnId: Long, val terminalObserved: Boolean) : ConversationDelivery
+    data class AttachStarted(
+        val requestId: String, val snapshot: com.lingxi.code.bindings.client.TurnRecoverySnapshotDto,
+        val isActive: () -> Boolean = { true },
+        val admissionPending: Boolean = false,
+    ) : ConversationDelivery
+    data class AdmissionPending(val sessionId: String, val turnId: Long, val requestId: String,
+        val isActive: () -> Boolean = { true }) : ConversationDelivery
+    data class RecoveryInterestEnded(val barrier: RecoveryRetirementBarrier) : ConversationDelivery
+    data class AttachReplayEnded(
+        val sessionId: String, val turnId: Long, val expectsResume: Boolean,
+        val requestId: String? = null,
+        val acknowledged: kotlinx.coroutines.CompletableDeferred<Boolean?>? = null,
+        val barrier: AttachConsumptionBarrier? = null,
+        val isActive: () -> Boolean = { true },
+    ) : ConversationDelivery
+    data class AttachFailed(val sessionId: String, val turnId: Long, val error: Throwable,
+        val requestId: String? = null) : ConversationDelivery
+    data class ReconciliationNotFound(val sessionId: String, val turnId: Long, val requestId: String,
+        val barrier: AttachConsumptionBarrier, val acknowledged: kotlinx.coroutines.CompletableDeferred<Boolean?>? = null,
+        val isActive: () -> Boolean = { true }) : ConversationDelivery
+    data object RecoveryStorageFailed : ConversationDelivery
+}
 
 /**
  * The seam between the [ChatViewModel] and whatever produces turns. The
@@ -43,6 +96,12 @@ import kotlinx.coroutines.flow.flow
  * fail-closed unavailable state when the engine can't build.
  */
 interface ConversationSource {
+    /** True when Cancel completion is delivered as a marker on conversationDeliveries. */
+    val orderedCancellationBoundaries: Boolean get() = false
+    val supportsSubmissionAdmission: Boolean get() = false
+
+    /** Resolve the initial workspace owner before submitting a fresh turn. */
+    suspend fun submissionSession(): String? = activeSessionState.value?.sessionId
 
     /** Process-redelivery context for the engine this source owns. */
     val recoverySpec: ConversationRecoverySpec?
@@ -57,6 +116,9 @@ interface ConversationSource {
      */
     val clientEvents: Flow<ClientEvent>
         get() = emptyFlow()
+
+    val conversationDeliveries: Flow<ConversationDelivery>
+        get() = clientEvents.map { ConversationDelivery.Event(it) }
 
     /** Structured workflow/subagent updates, pushed directly by the engine. */
     val workflowProgress: Flow<WorkflowProgressUpdate>
@@ -78,7 +140,26 @@ interface ConversationSource {
     suspend fun refreshExecutionStatus() {}
 
     /** Attach the durable active turn when a new UI owner binds this source. */
-    suspend fun attachDurableTurnForUi(afterSequence: Long = 0L) {}
+    suspend fun attachDurableTurnForUi(
+        afterSequence: Long = 0L,
+        onAttach: (sessionId: String, turnId: Long, expectsResume: Boolean, requestId: String) -> Unit = { _, _, _, _ -> },
+    ) {}
+
+    /** Query one uncertain submission without resuming or replacing its owner. */
+    suspend fun reconcileDurableTurnForUi(
+        sessionId: String, turnId: Long, afterSequence: Long, trustNotFound: Boolean,
+        onAttach: (String, Long, Boolean, String) -> Unit,
+    ) { error("Recovery query is unavailable") }
+
+    suspend fun terminalRecoveryReceipts(sessionId: String): List<Long> = emptyList()
+    suspend fun cancelledQueuedReceipts(sessionId: String): List<Long> = emptyList()
+    suspend fun pendingQueuedRecoveryTurns(sessionId: String): List<Long> = emptyList()
+    suspend fun queryQueuedRecovery(sessionId: String, turnId: Long, requestId: String) {
+        submitClientCommand(ClientCommand.QueryQueuedTurn(sessionId = sessionId, turnId = turnId.toULong(), requestId = requestId))
+    }
+    suspend fun resolveQueuedRecovery(sessionId: String, turns: List<Long>, resolution: QueuedRecoveryResolution): Boolean = false
+    suspend fun acknowledgeTerminalRecovery(sessionId: String, turns: List<Long>): Boolean = false
+    suspend fun recoveryStorageAvailable(): Boolean = true
 
     /** Apply the persisted permission-mode preference to the live engine. */
     suspend fun setPermissionMode(mode: String) {
@@ -121,6 +202,12 @@ interface ConversationSource {
         promptMode: PromptModeDto?,
     ): Flow<ReplyEvent> = submit(text, images, turnId, visualizationContext)
 
+    fun submit(text: String, images: List<ImageRefDto>, turnId: Long, visualizationContext: VisualizationRef?,
+        promptMode: PromptModeDto?, sessionId: String, admission: TurnSubmissionAdmission): Flow<ReplyEvent> =
+        submit(text, images, turnId, visualizationContext, promptMode)
+
+    suspend fun abandonUnsubmittedTurn(sessionId: String?, turnId: Long) {}
+
     /** Serves the dedicated visualization WebView; null without an engine. */
     val visualizationHost: com.lingxi.code.bindings.runtime.VisualizationHost? get() = null
 
@@ -136,6 +223,11 @@ interface ConversationSource {
 
     /** Cancel exactly one durable turn, including from a notification route. */
     suspend fun cancel(turnId: Long?) = cancel()
+
+    /** Captured origin session for mobile cancellation across session switches. */
+    suspend fun cancelForSession(sessionId: String, turnId: Long?) = cancel(turnId)
+
+    suspend fun discardDurableTurnForSession(sessionId: String, turnId: Long) = discardDurableTurn(turnId)
 
     /**
      * Discard a recovered checkpoint by correlated turn id. Implementations
@@ -287,6 +379,9 @@ interface SlashCommandConversationSource {
         images: List<ImageRefDto>,
         turnId: Long,
     ): Flow<ReplyEvent>
+
+    fun submitSlashCommand(raw: ClientTextDto, images: List<ImageRefDto>, turnId: Long,
+        sessionId: String, admission: TurnSubmissionAdmission): Flow<ReplyEvent> = submitSlashCommand(raw, images, turnId)
 }
 
 /** Match the host parser's ECMAScript trim-before-slash rule without decoding UTF-16. */

@@ -455,7 +455,7 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       const filter = object(status);
       exactKeys(filter, ['type']);
       const filterType = string(filter['type'], 'task status', 32);
-      if (!['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(filterType)) {
+      if (!['pending', 'running', 'paused', 'completed', 'failed', 'cancelled', 'exited_unknown'].includes(filterType)) {
         throw new Error('invalid task status');
       }
       return { type, ...request, status_filter: { type: filterType } as Extract<ClientCommand, { type: 'task_list' }>['status_filter'] };

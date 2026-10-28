@@ -150,6 +150,47 @@ mod process_io {
             assert_eq!(self.response("ready")["response"]["subtype"], "success");
         }
 
+        fn wait_for_clear_output(
+            &mut self,
+            mut read_output: impl FnMut(&mut Vec<u8>) -> std::io::Result<bool>,
+        ) {
+            const CLEAR_OUTPUT: &[u8] = b"Conversation cleared.";
+            let has_clear_output = |output: &[u8]| {
+                output
+                    .windows(CLEAR_OUTPUT.len())
+                    .any(|window| window == CLEAR_OUTPUT)
+            };
+            // Match the existing control-receipt deadline: runtime startup and
+            // command execution are separate from the shutdown check below.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                read_output(&mut self.output).expect("read child command output");
+                if has_clear_output(&self.output) {
+                    return;
+                }
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    // The child may have emitted the receipt and exited after
+                    // our previous read. Drain once more before diagnosing it.
+                    let read_more =
+                        read_output(&mut self.output).expect("read final child command output");
+                    if has_clear_output(&self.output) {
+                        return;
+                    }
+                    assert!(
+                        read_more,
+                        "child exited {status} before clear output: {}",
+                        String::from_utf8_lossy(&self.output)
+                    );
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "child did not produce clear output within 20 seconds; output: {}",
+                    String::from_utf8_lossy(&self.output)
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
         fn exited(&mut self) -> ExitStatus {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
@@ -158,7 +199,8 @@ mod process_io {
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "headless process retained blocked IO after shutdown"
+                    "headless process did not exit within 10 seconds after its final receipt or signal; output: {}",
+                    String::from_utf8_lossy(&self.output)
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -253,6 +295,24 @@ mod process_io {
             _home: home,
             output: Vec::new(),
         };
+        reader.set_nonblocking(true).unwrap();
+        process.wait_for_clear_output(|output| {
+            let mut bytes = [0_u8; 8192];
+            loop {
+                match reader.read(&mut bytes) {
+                    Ok(0) => return Ok(false),
+                    Ok(count) => {
+                        output.extend_from_slice(&bytes[..count]);
+                        return Ok(true);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        return Ok(false)
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        });
         let status = process.exited();
         assert!(status.success());
         let restored = rustix::fs::fcntl_getfl(&output).unwrap();
@@ -265,12 +325,7 @@ mod process_io {
             (restored & !was_written, flags & !was_written)
         };
         assert_eq!(restored, flags);
-        reader
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
-        let mut bytes = [0_u8; 8192];
-        let count = reader.read(&mut bytes).unwrap();
-        assert!(String::from_utf8_lossy(&bytes[..count]).contains("Conversation cleared."));
+        assert!(String::from_utf8_lossy(&process.output).contains("Conversation cleared."));
     }
 
     #[test]
@@ -294,6 +349,12 @@ mod process_io {
             _home: home,
             output: Vec::new(),
         };
+        process.wait_for_clear_output(|captured| {
+            let bytes = std::fs::read(output.path())?;
+            let changed = *captured != bytes;
+            *captured = bytes;
+            Ok(changed)
+        });
         assert!(process.exited().success());
         assert!(std::fs::read_to_string(output.path())
             .unwrap()

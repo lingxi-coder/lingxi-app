@@ -59,24 +59,48 @@ final class ConversationTurnCompletionTests: XCTestCase {
             formatted: "$0.00"
         )
 
-        private func makeSource() -> EngineConversationSource {
+        private func makeSource(
+            appSandboxRoot: String = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true).path
+        ) -> EngineConversationSource {
             let config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: "",
-                appSandboxRoot: FileManager.default.temporaryDirectory
-                    .appendingPathComponent(UUID().uuidString, isDirectory: true).path,
+                appSandboxRoot: appSandboxRoot,
                 projectCwd: nil,
                 sessionMode: .code,
                 visionDelegationEnabled: true
             )
-            let source = EngineConversationSource(config: config)
+            let source = EngineConversationSource(config: config, recoveryStoreRootForTesting: appSandboxRoot)
             source.setCommandSubmitterForTesting { _ in }
             return source
         }
 
         private func flushTasks(_ count: Int = 6) async {
             for _ in 0..<count { await Task.yield() }
+        }
+
+        private func recoverySnapshot(
+            sessionID: String,
+            turnID: UInt64,
+            revision: UInt64,
+            state: TurnRecoveryStateDto,
+            lastSequence: UInt64 = 0,
+            projectionUncertain: Bool = false,
+            reason: String? = nil
+        ) -> TurnRecoverySnapshotDto {
+            TurnRecoverySnapshotDto(
+                sessionId: sessionID,
+                turnId: turnID,
+                revision: revision,
+                state: state,
+                firstSequence: 0,
+                lastSequence: lastSequence,
+                safeToResume: false,
+                projectionUncertain: projectionUncertain,
+                reason: reason
+            )
         }
 
         func testEnginePublishesTrimmedFinalTextForMatchingCompletedTurn() {
@@ -115,7 +139,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             ))
             await flushTasks()
 
-            guard case let .sendPrompt(text, _, _, _, _) = submitted.first else {
+            guard case let .sendPrompt(_, text, _, _, _, _) = submitted.first else {
                 return XCTFail("accepted suggestion must submit SendPrompt")
             }
             XCTAssertEqual(text.codeUnits, sourceUnits)
@@ -152,7 +176,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertTrue(source.model.streaming)
             XCTAssertEqual(source.model.messages.suffix(2).map(\.text), ["first", "pending 🧭"])
             XCTAssertEqual(submitted.count, 2)
-            guard case let .sendPrompt(text, _, images, _, _) = submitted.last else {
+            guard case let .sendPrompt(_, text, _, images, _, _) = submitted.last else {
                 return XCTFail("pending send must use SendPrompt")
             }
             XCTAssertEqual(text.codeUnits, Array("pending 🧭".utf16))
@@ -174,7 +198,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             await flushTasks()
 
             XCTAssertEqual(source.model.messages.suffix(2).map(\.text), ["first", "!  printf !!  "])
-            guard case let .sendPrompt(text, mode, _, _, _) = submitted.last else {
+            guard case let .sendPrompt(_, text, mode, _, _, _) = submitted.last else {
                 return XCTFail("queued bang input must use SendPrompt")
             }
             XCTAssertEqual(text.displayText, "  printf !!  ")
@@ -189,7 +213,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertNotNil(source.send("!  printf !!  "))
             await flushTasks()
 
-            guard case let .sendPrompt(text, mode, _, _, _) = submitted.first else {
+            guard case let .sendPrompt(_, text, mode, _, _, _) = submitted.first else {
                 return XCTFail("leading bang must submit a SendPrompt")
             }
             XCTAssertEqual(text.displayText, "  printf !!  ")
@@ -206,7 +230,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertNotNil(source.send(input))
             await flushTasks()
 
-            guard case let .sendPrompt(text, mode, _, _, _) = submitted.first else {
+            guard case let .sendPrompt(_, text, mode, _, _, _) = submitted.first else {
                 return XCTFail("leading UTF-16 bang must submit a SendPrompt")
             }
             XCTAssertEqual(mode, .bash)
@@ -234,18 +258,21 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 1,
                 state: .pausedRecoverable,
                 firstSequence: 0,
                 lastSequence: 0,
                 safeToResume: true,
+                projectionUncertain: false,
                 reason: "background_time_expired"
             )))
             try await pauseTask.value
             XCTAssertFalse(source.model.streaming, "only PausedRecoverable makes the turn sendable")
-            guard case let .pauseTurn(turnId, reason) = commands[0] else {
+            guard case let .pauseTurn(sessionID, turnId, reason) = commands[0] else {
                 return XCTFail("expected PauseTurn, got \(commands[0])")
             }
             XCTAssertEqual(turnId, token.clientTurnId)
+            XCTAssertEqual(sessionID, "test-session")
             XCTAssertEqual(reason, "background_time_expired")
         }
 
@@ -283,14 +310,22 @@ final class ConversationTurnCompletionTests: XCTestCase {
             var commands: [ClientCommand] = []
             source.setCommandSubmitterForTesting { command in
                 commands.append(command)
-                if case let .resumeTurn(turnId) = command {
+                if case let .attachTurn(sessionID, turnID, _, requestID) = command {
+                    source.applyForTesting(.turnAttachStarted(requestId: requestID, snapshot: self.recoverySnapshot(
+                        sessionID: sessionID, turnID: turnID, revision: 1, state: .pausedRecoverable
+                    )))
+                    source.applyForTesting(.turnAttachFinished(requestId: requestID, sessionId: sessionID, turnId: turnID))
+                }
+                if case let .resumeTurn(_, turnId) = command {
                     source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                         sessionId: "test-session",
                         turnId: turnId,
+                        revision: 2,
                         state: .running,
                         firstSequence: 1,
                         lastSequence: 7,
                         safeToResume: true,
+                        projectionUncertain: false,
                         reason: nil
                     )))
                 }
@@ -304,10 +339,12 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 1,
                 state: .pausedRecoverable,
                 firstSequence: 1,
                 lastSequence: 7,
                 safeToResume: true,
+                projectionUncertain: false,
                 reason: "background_time_expired"
             )))
 
@@ -325,15 +362,18 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 }
             }
             XCTAssertEqual(recoveryCommands.count, 2)
-            guard case let .attachTurn(turnId, afterSequence) = recoveryCommands[0] else {
+            guard case let .attachTurn(owner, turnId, afterSequence, requestID) = recoveryCommands[0] else {
                 return XCTFail("expected AttachTurn first, got \(recoveryCommands)")
             }
             XCTAssertEqual(turnId, token.clientTurnId)
+            XCTAssertEqual(owner, "test-session")
+            XCTAssertFalse(requestID.isEmpty)
             XCTAssertEqual(afterSequence, 7)
-            guard case let .resumeTurn(resumedTurnID) = recoveryCommands[1] else {
+            guard case let .resumeTurn(resumeOwner, resumedTurnID) = recoveryCommands[1] else {
                 return XCTFail("expected ResumeTurn second, got \(recoveryCommands)")
             }
             XCTAssertEqual(resumedTurnID, token.clientTurnId)
+            XCTAssertEqual(resumeOwner, "test-session")
             XCTAssertTrue(source.model.streaming, "the resumed turn owns the slot again")
         }
 
@@ -346,14 +386,16 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.setCommandSubmitterForTesting { command in
                 commands.append(command)
                 switch command {
-                case let .attachTurn(turnID, _):
-                    source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                case let .attachTurn(_, turnID, _, requestID):
+                    source.applyForTesting(.turnAttachStarted(requestId: requestID, snapshot: TurnRecoverySnapshotDto(
                         sessionId: "test-session",
                         turnId: turnID,
+                        revision: 2,
                         state: .running,
                         firstSequence: 1,
                         lastSequence: 2,
                         safeToResume: true,
+                        projectionUncertain: false,
                         reason: nil
                     )))
                     source.applyForTesting(.turnEventReplay(
@@ -362,6 +404,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                         sequence: 2,
                         eventJson: #"{"type":"text_delta","text":"replayed"}"#
                     ))
+                    source.applyForTesting(.turnAttachFinished(requestId: requestID, sessionId: "test-session", turnId: turnID))
                 case .resumeTurn:
                     throw ResumeFailure.rejected
                 default:
@@ -372,13 +415,16 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
+            source.recordDurableSequenceForTesting(turnId: token.clientTurnId, sequence: 1)
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 1,
                 state: .pausedRecoverable,
                 firstSequence: 1,
                 lastSequence: 1,
                 safeToResume: true,
+                projectionUncertain: false,
                 reason: "background_time_expired"
             )))
 
@@ -403,14 +449,16 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.setCommandSubmitterForTesting { command in
                 commands.append(command)
                 switch command {
-                case let .attachTurn(turnID, _):
-                    source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                case let .attachTurn(_, turnID, _, requestID):
+                    source.applyForTesting(.turnAttachStarted(requestId: requestID, snapshot: TurnRecoverySnapshotDto(
                         sessionId: "test-session",
                         turnId: turnID,
+                        revision: 1,
                         state: .pausedRecoverable,
                         firstSequence: 1,
                         lastSequence: 3,
                         safeToResume: true,
+                        projectionUncertain: false,
                         reason: "background_time_expired"
                     )))
                     source.applyForTesting(.turnEventReplay(
@@ -419,6 +467,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                         sequence: 3,
                         eventJson: #"{"type":"tool_use_started","id":"replayed-tool","tool":"Read","input_json":"{}","header":{"verb":"read","label":"Read","title":"Read"}}"#
                     ))
+                    source.applyForTesting(.turnAttachFinished(requestId: requestID, sessionId: "test-session", turnId: turnID))
                 case .resumeTurn:
                     throw ResumeFailure.rejected
                 default:
@@ -429,13 +478,16 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 return XCTFail("expected a turn token")
             }
             await flushTasks()
+            source.recordDurableSequenceForTesting(turnId: token.clientTurnId, sequence: 2)
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 1,
                 state: .pausedRecoverable,
                 firstSequence: 1,
                 lastSequence: 2,
                 safeToResume: true,
+                projectionUncertain: false,
                 reason: "background_time_expired"
             )))
 
@@ -467,10 +519,12 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 1,
                 state: .pausedRecoverable,
                 firstSequence: 1,
                 lastSequence: 1,
                 safeToResume: true,
+                projectionUncertain: false,
                 reason: "background_time_expired"
             )))
 
@@ -482,10 +536,12 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 2,
                 state: .completed,
                 firstSequence: 1,
                 lastSequence: 1,
                 safeToResume: false,
+                projectionUncertain: false,
                 reason: nil
             )))
             XCTAssertNotNil(source.send("after recovery"))
@@ -497,14 +553,22 @@ final class ConversationTurnCompletionTests: XCTestCase {
             var commands: [ClientCommand] = []
             source.setCommandSubmitterForTesting { command in
                 commands.append(command)
-                if case let .resumeTurn(turnId) = command {
+                if case let .attachTurn(sessionID, turnID, _, requestID) = command {
+                    source.applyForTesting(.turnAttachStarted(requestId: requestID, snapshot: self.recoverySnapshot(
+                        sessionID: sessionID, turnID: turnID, revision: 1, state: .pausedRecoverable
+                    )))
+                    source.applyForTesting(.turnAttachFinished(requestId: requestID, sessionId: sessionID, turnId: turnID))
+                }
+                if case let .resumeTurn(_, turnId) = command {
                     source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                         sessionId: "test-session",
                         turnId: turnId,
+                        revision: 2,
                         state: .waitingForUser,
                         firstSequence: 1,
                         lastSequence: 1,
                         safeToResume: false,
+                        projectionUncertain: false,
                         reason: "replay_boundary_requires_user"
                     )))
                 }
@@ -517,10 +581,12 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 1,
                 state: .pausedRecoverable,
                 firstSequence: 1,
                 lastSequence: 1,
                 safeToResume: true,
+                projectionUncertain: false,
                 reason: "background_time_expired"
             )))
 
@@ -547,16 +613,18 @@ final class ConversationTurnCompletionTests: XCTestCase {
             var commands: [ClientCommand] = []
             source.setCommandSubmitterForTesting { command in
                 commands.append(command)
-                guard case let .cancel(turnId?) = command else { return }
+                guard case let .cancel(_, turnId?) = command else { return }
                 // The host terminalizes the matching inactive checkpoint before
                 // the cancel command's completion is observed by the caller.
                 source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                     sessionId: "test-session",
                     turnId: turnId,
+                    revision: 3,
                     state: .cancelled,
                     firstSequence: 1,
                     lastSequence: 1,
                     safeToResume: false,
+                    projectionUncertain: false,
                     reason: "user_discarded"
                 )))
             }
@@ -572,19 +640,23 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 1,
                 state: .pausedRecoverable,
                 firstSequence: 1,
                 lastSequence: 1,
                 safeToResume: false,
+                projectionUncertain: false,
                 reason: "background_time_expired"
             )))
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 2,
                 state: .waitingForUser,
                 firstSequence: 1,
                 lastSequence: 1,
                 safeToResume: false,
+                projectionUncertain: false,
                 reason: "permission_required"
             )))
             XCTAssertFalse(source.model.streaming)
@@ -593,10 +665,11 @@ final class ConversationTurnCompletionTests: XCTestCase {
 
             try await source.cancelAndWait()
 
-            guard case let .cancel(cancelledTurnID) = commands.first else {
+            guard case let .cancel(owner, cancelledTurnID) = commands.first else {
                 return XCTFail("expected Cancel for the inactive durable turn, got \(commands)")
             }
             XCTAssertEqual(cancelledTurnID, token.clientTurnId)
+            XCTAssertEqual(owner, "test-session")
             XCTAssertFalse(source.model.streaming)
             XCTAssertFalse(source.model.isCancelling)
             XCTAssertFalse(source.model.hasInactiveDurableRecovery)
@@ -617,10 +690,12 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 1,
                 state: .pausedRecoverable,
                 firstSequence: 0,
                 lastSequence: 0,
                 safeToResume: false,
+                projectionUncertain: false,
                 reason: "background_time_expired"
             )))
 
@@ -629,17 +704,19 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertTrue(source.model.isCancelling)
             XCTAssertTrue(source.model.hasInactiveDurableRecovery)
             XCTAssertTrue(commands.contains {
-                if case let .cancel(turnID) = $0 { return turnID == token.clientTurnId }
+                if case let .cancel(_, turnID) = $0 { return turnID == token.clientTurnId }
                 return false
             })
 
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId + 1,
+                revision: 2,
                 state: .cancelled,
                 firstSequence: 0,
                 lastSequence: 0,
                 safeToResume: false,
+                projectionUncertain: false,
                 reason: "stale"
             )))
             await flushTasks(8)
@@ -649,16 +726,843 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "test-session",
                 turnId: token.clientTurnId,
+                revision: 2,
                 state: .cancelled,
                 firstSequence: 0,
                 lastSequence: 0,
                 safeToResume: false,
+                projectionUncertain: false,
                 reason: "user_discarded"
             )))
             try await cancellation.value
             XCTAssertFalse(source.model.isCancelling)
             XCTAssertFalse(source.model.hasInactiveDurableRecovery)
             XCTAssertNotNil(source.send("after discard"))
+        }
+
+        func testCancellationBeatsLatePauseAndFailsItsAcknowledgement() async throws {
+            let source = makeSource()
+            source.model.activeSessionId = "revision-race"
+            guard let token = source.send("question") else { return XCTFail("expected a turn") }
+            await flushTasks()
+            var received: [TurnRecoveryStateDto] = []
+            source.setExternalEventHandler { event in
+                if case let .turnRecoveryState(snapshot) = event { received.append(snapshot.state) }
+            }
+            let pause = Task { try await source.markActiveTurnPausedRecoverable(token) }
+            await flushTasks()
+            let cancel = Task { try await source.cancelAndWait() }
+            await flushTasks(8)
+            let terminal = recoverySnapshot(sessionID: "revision-race", turnID: token.clientTurnId,
+                                            revision: 2, state: .cancelled)
+            source.applyForTesting(.turnRecoveryState(snapshot: terminal))
+            do {
+                try await pause.value
+                XCTFail("a terminal state must fail the pending pause acknowledgement")
+            } catch { }
+            try await cancel.value
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "revision-race", turnID: token.clientTurnId,
+                revision: 1, state: .pausedRecoverable
+            )))
+            XCTAssertEqual(received, [.cancelled])
+            XCTAssertEqual(source.model.notice, .cancelled)
+            XCTAssertFalse(source.model.hasInactiveDurableRecovery)
+            XCTAssertFalse(source.model.hasUnresolvedTurnRecovery)
+            XCTAssertNotNil(source.send("after cancellation"))
+        }
+
+        func testReentrantRecoveryCallbackIsAppliedAfterCurrentProjection() {
+            let source = makeSource()
+            let session = "reentrant-\(UUID().uuidString)"
+            source.beginTurnForTesting(turnId: 71, sessionId: session)
+            var order: [String] = []
+            source.setExternalEventHandler { event in
+                guard case let .turnRecoveryState(snapshot) = event else { return }
+                if snapshot.state == .pausedRecoverable {
+                    order.append("pause-enter")
+                    source.applyForTesting(.turnRecoveryState(snapshot: self.recoverySnapshot(
+                        sessionID: session, turnID: 71, revision: 2, state: .cancelled
+                    )))
+                    order.append("pause-return")
+                } else if snapshot.state == .cancelled {
+                    order.append("cancelled")
+                }
+            }
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 1, state: .pausedRecoverable
+            )))
+            XCTAssertEqual(order, ["pause-enter", "pause-return", "cancelled"])
+            XCTAssertEqual(source.model.notice, .cancelled)
+        }
+
+        func testExternalHandlerRejectsReplayForAnotherSessionOrTurn() {
+            let source = makeSource()
+            let session = "replay-owner-\(UUID().uuidString)"
+            source.beginTurnForTesting(turnId: 71, sessionId: session)
+            var forwarded: [String] = []
+            source.setExternalEventHandler { event in
+                if case let .textDelta(text) = event { forwarded.append(text.displayText) }
+            }
+            let payload = #"{"type":"text_delta","text":"accepted"}"#
+            source.applyForTesting(.turnEventReplay(sessionId: "other", turnId: 71, sequence: 1, eventJson: payload))
+            source.applyForTesting(.turnEventReplay(sessionId: session, turnId: 72, sequence: 1, eventJson: payload))
+            source.applyForTesting(.turnEventReplay(sessionId: session, turnId: 71, sequence: 1, eventJson: payload))
+            XCTAssertEqual(forwarded, ["accepted"])
+        }
+
+        func testReentrantRecoveryAcrossSourcesSharesTheSamePump() {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true).path
+            let older = makeSource(appSandboxRoot: root)
+            let newer = makeSource(appSandboxRoot: root)
+            let session = "cross-source-\(UUID().uuidString)"
+            older.beginTurnForTesting(turnId: 71, sessionId: session)
+            newer.beginTurnForTesting(turnId: 71, sessionId: session)
+            var order: [String] = []
+            newer.setExternalEventHandler { event in
+                if case .turnRecoveryState = event { order.append("cancelled") }
+            }
+            older.setExternalEventHandler { event in
+                guard case .turnRecoveryState = event else { return }
+                order.append("pause-enter")
+                newer.applyForTesting(.turnRecoveryState(snapshot: self.recoverySnapshot(
+                    sessionID: session, turnID: 71, revision: 2, state: .cancelled
+                )))
+                order.append("pause-return")
+            }
+            older.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 1, state: .pausedRecoverable
+            )))
+            XCTAssertEqual(order, ["pause-enter", "pause-return", "cancelled"])
+            XCTAssertEqual(newer.model.notice, .cancelled)
+        }
+
+        func testRecoveryVersionsSurviveSourceReplacementAndProtectCheckpointIdentity() {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true).path
+            let previous = makeSource(appSandboxRoot: root)
+            let replacement = makeSource(appSandboxRoot: root)
+            previous.beginTurnForTesting(turnId: 71, sessionId: "session-a")
+            replacement.beginTurnForTesting(turnId: 71, sessionId: "session-a")
+            previous.beginDurableTurnForTesting(turnId: 71, sessionId: "session-a")
+            var forwarded: [String?] = []
+            previous.setExternalEventHandler { event in
+                if case let .turnRecoveryState(snapshot) = event { forwarded.append(snapshot.reason) }
+            }
+
+            replacement.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "session-a", turnID: 71, revision: 8, state: .cancelled
+            )))
+            previous.beginDurableTurnForTesting(turnId: 71, sessionId: "session-b")
+            previous.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "session-a", turnID: 71, revision: 7, state: .pausedRecoverable
+            )))
+            previous.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "session-a", turnID: 71, revision: 8, state: .pausedRecoverable
+            )))
+            XCTAssertTrue(previous.model.streaming)
+            XCTAssertTrue(forwarded.isEmpty)
+            XCTAssertNotNil(previous.durableAttachCursorForTesting())
+
+            // Equal revision/state is a valid repeat with a different reason
+            // and window. Its session cannot clear session-b's checkpoint.
+            previous.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "session-a", turnID: 71, revision: 8, state: .cancelled,
+                lastSequence: 90, reason: "replay_history_truncated"
+            )))
+            XCTAssertEqual(forwarded, ["replay_history_truncated"])
+            XCTAssertNotNil(previous.durableAttachCursorForTesting())
+        }
+
+        func testSameRevisionReasonsAndWindowsDoNotAdvanceTheReplayCursor() {
+            let source = makeSource()
+            source.model.activeSessionId = "same-revision"
+            guard let token = source.send("question") else { return XCTFail("expected a turn") }
+            source.recordDurableSequenceForTesting(turnId: token.clientTurnId, sequence: 1)
+            source.recordDurableSequenceForTesting(turnId: token.clientTurnId, sequence: 2)
+            source.recordDurableSequenceForTesting(turnId: token.clientTurnId, sequence: 3)
+            var reasons: [String?] = []
+            source.setExternalEventHandler { event in
+                if case let .turnRecoveryState(snapshot) = event { reasons.append(snapshot.reason) }
+            }
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "same-revision", turnID: token.clientTurnId,
+                revision: 4, state: .pausedRecoverable, lastSequence: 100, reason: "attach"
+            )))
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "same-revision", turnID: token.clientTurnId,
+                revision: 4, state: .pausedRecoverable, lastSequence: 50, reason: "resume"
+            )))
+            XCTAssertEqual(reasons, ["attach", "resume"])
+            XCTAssertEqual(source.durableAttachCursorForTesting(), 3)
+        }
+
+        func testOnlyProjectedRetainedEventsAdvanceTheSourceLocalCursor() async {
+            let source = makeSource()
+            source.model.activeSessionId = "replay-cursor"
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case let .attachTurn(_, turnID, _, requestID):
+                    source.applyForTesting(.turnAttachStarted(requestId: requestID, snapshot: self.recoverySnapshot(
+                        sessionID: "replay-cursor", turnID: turnID, revision: 1, state: .pausedRecoverable
+                    )))
+                    source.applyForTesting(.turnEventReplay(
+                        sessionId: "replay-cursor", turnId: turnID, sequence: 2,
+                        eventJson: #"{"type":"text_delta","text":"retained"}"#
+                    ))
+                    source.applyForTesting(.turnEventReplay(
+                        sessionId: "replay-cursor", turnId: turnID, sequence: 1,
+                        eventJson: #"{"type":"text_delta","text":"first"}"#
+                    ))
+                    source.applyForTesting(.turnEventReplay(
+                        sessionId: "replay-cursor", turnId: turnID, sequence: 99,
+                        eventJson: "invalid JSON"
+                    ))
+                    source.applyForTesting(.turnEventReplay(
+                        sessionId: "replay-cursor", turnId: turnID + 1, sequence: 100,
+                        eventJson: #"{"type":"text_delta","text":"wrong turn"}"#
+                    ))
+                    source.applyForTesting(.turnAttachFinished(requestId: requestID, sessionId: "replay-cursor", turnId: turnID))
+                case let .resumeTurn(_, turnID):
+                    source.applyForTesting(.turnRecoveryState(snapshot: self.recoverySnapshot(
+                        sessionID: "replay-cursor", turnID: turnID, revision: 2, state: .running
+                    )))
+                default: break
+                }
+            }
+            guard let token = source.send("question") else { return XCTFail("expected a turn") }
+            await flushTasks()
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "replay-cursor", turnID: token.clientTurnId,
+                revision: 1, state: .pausedRecoverable, lastSequence: 50
+            )))
+            source.handleForeground()
+            await flushTasks(24)
+            XCTAssertEqual(source.durableAttachCursorForTesting(), 2)
+            XCTAssertTrue(source.model.messages.contains(where: { $0.text.contains("retained") }))
+        }
+
+        func testLiveEnvelopesProjectOnceAndAdvanceOnlyContiguousSequences() {
+            let session = "live-cursor-\(UUID().uuidString)"
+            func readySource() -> EngineConversationSource {
+                let source = makeSource()
+                source.beginTurnForTesting(turnId: 71, sessionId: session)
+                source.beginDurableTurnForTesting(turnId: 71, sessionId: session)
+                return source
+            }
+            func envelope(_ owner: String, _ turn: UInt64, _ sequence: UInt64, _ text: String) -> ClientEvent {
+                .turnEventReplay(sessionId: owner, turnId: turn, sequence: sequence,
+                                 eventJson: "{\"type\":\"text_delta\",\"text\":\"\(text)\"}")
+            }
+
+            let missingRaw = readySource()
+            missingRaw.applyForTesting(.turnEventReplay(sessionId: session, turnId: 71, sequence: 99, eventJson: "invalid"))
+            XCTAssertEqual(missingRaw.durableAttachCursorForTesting(), 0)
+            XCTAssertNotNil(missingRaw.model.error)
+
+            let unprojected = readySource()
+            unprojected.applyForTesting(envelope(session, 71, 1, "only-envelope"))
+            XCTAssertEqual(unprojected.durableAttachCursorForTesting(), 1)
+            XCTAssertTrue(unprojected.model.messages.contains(where: { $0.text == "only-envelope" }))
+
+            let blocked = readySource()
+            blocked.model.streaming = false
+            blocked.applyForTesting(envelope(session, 71, 1, "blocked"))
+            XCTAssertEqual(blocked.durableAttachCursorForTesting(), 0)
+            XCTAssertFalse(blocked.model.messages.contains(where: { $0.text.contains("blocked") }))
+
+            let source = readySource()
+            source.applyForTesting(envelope("other-session", 71, 100, "second"))
+            source.applyForTesting(envelope(session, 72, 200, "second"))
+            source.applyForTesting(envelope(session, 71, 2, "second"))
+            XCTAssertEqual(source.durableAttachCursorForTesting(), 0)
+            XCTAssertFalse(source.model.messages.contains(where: { $0.text.contains("second") }))
+            source.applyForTesting(envelope(session, 71, 1, "first"))
+            XCTAssertEqual(source.durableAttachCursorForTesting(), 2)
+            XCTAssertTrue(source.model.messages.contains(where: { $0.text == "firstsecond" }))
+            source.applyForTesting(envelope(session, 71, 1, "first"))
+            XCTAssertTrue(source.model.messages.contains(where: { $0.text == "firstsecond" }))
+        }
+
+        func testColdThenWarmAttachAdvancesAcrossHandledTurnBoundaryAndTools() async {
+            let source = makeSource()
+            let session = "ordered-replay-\(UUID().uuidString)"
+            source.model.activeSessionId = session
+            var attachCursors: [UInt64?] = []
+            var resumeCount = 0
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case let .attachTurn(_, turnID, afterSequence, requestID):
+                    attachCursors.append(afterSequence)
+                    source.applyForTesting(.turnAttachStarted(requestId: requestID, snapshot: self.recoverySnapshot(
+                        sessionID: session, turnID: turnID, revision: UInt64(resumeCount * 2 + 1), state: .pausedRecoverable
+                    )))
+                    if afterSequence == 0 {
+                        let retained = [
+                            "{\"type\":\"turn_started\",\"turn_id\":\(turnID)}",
+                            #"{"type":"text_delta","text":"first"}"#,
+                            #"{"type":"tool_use_started","id":"read-1","tool":"Read","input_json":"{}","header":{"verb":"read","label":"Read","title":"Read"}}"#,
+                            #"{"type":"tool_use_result","id":"read-1","tool":"Read","result_json":"{}","is_error":false,"display":{"body_lines":0}}"#,
+                            #"{"type":"text_delta","text":"last"}"#,
+                        ]
+                        for (index, json) in retained.enumerated() {
+                            source.applyForTesting(.turnEventReplay(
+                                sessionId: session, turnId: turnID, sequence: UInt64(index + 1), eventJson: json
+                            ))
+                        }
+                    }
+                    source.applyForTesting(.turnAttachFinished(requestId: requestID, sessionId: session, turnId: turnID))
+                case let .resumeTurn(_, turnID):
+                    resumeCount += 1
+                    source.applyForTesting(.turnRecoveryState(snapshot: self.recoverySnapshot(
+                        sessionID: session, turnID: turnID, revision: UInt64(resumeCount * 2), state: .running
+                    )))
+                default: break
+                }
+            }
+            guard let token = source.send("question") else { return XCTFail("expected a turn") }
+            await flushTasks()
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: token.clientTurnId, revision: 1, state: .pausedRecoverable
+            )))
+            source.handleForeground()
+            await flushTasks(24)
+            XCTAssertEqual(source.durableAttachCursorForTesting(), 5)
+            let messages = source.model.messages.map(\.text)
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: token.clientTurnId, revision: 3, state: .pausedRecoverable
+            )))
+            source.handleForeground()
+            await flushTasks(24)
+            XCTAssertEqual(attachCursors, [0, 5])
+            XCTAssertEqual(source.model.messages.map(\.text), messages)
+            XCTAssertNil(source.model.error)
+        }
+
+        func testLiveOnlyDeliveryRendersButRequiresReopeningBeforeAttach() async {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true).path
+            let session = "unretained-\(UUID().uuidString)"
+            let source = makeSource(appSandboxRoot: root)
+            source.beginTurnForTesting(turnId: 71, sessionId: session)
+            source.beginDurableTurnForTesting(turnId: 71, sessionId: session)
+            source.applyForTesting(.turnEventReplay(
+                sessionId: session, turnId: 71, sequence: 1,
+                eventJson: #"{"type":"text_delta","text":"retained"}"#
+            ))
+            source.applyForTesting(.turnEventLiveUnretained(
+                sessionId: "other", turnId: 71,
+                eventJson: #"{"type":"text_delta","text":"wrong"}"#
+            ))
+            source.applyForTesting(.turnEventLiveUnretained(
+                sessionId: session, turnId: 71,
+                eventJson: #"{"type":"text_delta","text":"live-only"}"#
+            ))
+            XCTAssertEqual(source.durableAttachCursorForTesting(), 1)
+            XCTAssertTrue(source.model.messages.contains(where: { $0.text == "retainedlive-only" }))
+            XCTAssertNotNil(source.model.error)
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 1, state: .pausedRecoverable
+            )))
+            var warmAttachCount = 0
+            source.setCommandSubmitterForTesting { command in
+                if case .attachTurn = command { warmAttachCount += 1 }
+            }
+            source.handleForeground()
+            await flushTasks()
+            XCTAssertEqual(warmAttachCount, 0)
+
+            // Simulates a crash before any extra degradation marker could be
+            // saved: a fresh source does not reuse the previous UI cursor.
+            let reopened = makeSource(appSandboxRoot: root)
+            reopened.beginTurnForTesting(turnId: 71, sessionId: session)
+            var attachedAfter: UInt64?
+            reopened.setCommandSubmitterForTesting { command in
+                if case let .attachTurn(_, _, afterSequence, _) = command { attachedAfter = afterSequence }
+            }
+            reopened.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 1, state: .pausedRecoverable
+            )))
+            reopened.handleForeground()
+            await flushTasks(24)
+            XCTAssertEqual(attachedAfter, 0)
+            reopened.retireRecoveryIngress()
+        }
+
+        func testFirstPromptBindsSessionStartedBeforeProjectingItsJournal() async {
+            let source = makeSource()
+            guard let token = source.send("first prompt") else { return XCTFail("expected a turn") }
+            await flushTasks()
+            XCTAssertNil(source.durableAttachCursorForTesting())
+            source.applyForTesting(.sessionStarted(sessionId: "fresh-session", mode: .code))
+            source.applyForTesting(.turnEventReplay(
+                sessionId: "fresh-session", turnId: token.clientTurnId, sequence: 1,
+                eventJson: "{\"type\":\"turn_started\",\"turn_id\":\(token.clientTurnId)}"
+            ))
+            source.applyForTesting(.turnEventReplay(
+                sessionId: "fresh-session", turnId: token.clientTurnId, sequence: 2,
+                eventJson: #"{"type":"text_delta","text":"first answer"}"#
+            ))
+            XCTAssertEqual(source.durableAttachCursorForTesting(), 2)
+            XCTAssertTrue(source.model.messages.contains(where: { $0.text == "first answer" }))
+        }
+
+        func testSlashPromotedToTurnCreatesCheckpointButLocalSlashDoesNot() async {
+            let source = makeSource()
+            source.model.activeSessionId = "slash-session"
+            source.model.slashCommandsLoaded = true
+            source.model.slashCommands = [ConversationSlashCommand(
+                name: "skill", description: "skill", aliases: [], argumentHint: nil,
+                menuDescription: nil, source: "builtin", hidden: false
+            )]
+            guard let token = source.send("/skill") else { return XCTFail("expected slash token") }
+            await flushTasks()
+            XCTAssertNil(source.durableAttachCursorForTesting())
+            source.applyForTesting(.turnEventReplay(
+                sessionId: "slash-session", turnId: token.clientTurnId, sequence: 1,
+                eventJson: "{\"type\":\"turn_started\",\"turn_id\":\(token.clientTurnId)}"
+            ))
+            source.applyForTesting(.turnEventReplay(
+                sessionId: "slash-session", turnId: token.clientTurnId, sequence: 2,
+                eventJson: #"{"type":"text_delta","text":"skill output"}"#
+            ))
+            XCTAssertEqual(source.durableAttachCursorForTesting(), 2)
+            XCTAssertTrue(source.model.messages.contains(where: { $0.text == "skill output" }))
+            source.applyForTesting(.turnEventReplay(
+                sessionId: "slash-session", turnId: token.clientTurnId, sequence: 3,
+                eventJson: #"{"type":"turn_ended","outcome":{"type":"end_turn"},"cost":{"total_usd":0,"input_tokens":0,"output_tokens":0,"api_calls":0,"session_duration_secs":0,"formatted":"$0"}}"#
+            ))
+            XCTAssertNotNil(source.durableAttachCursorForTesting())
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "slash-session", turnID: token.clientTurnId, revision: 1, state: .completed
+            )))
+            XCTAssertNil(source.durableAttachCursorForTesting())
+
+            let local = makeSource()
+            local.model.activeSessionId = "local-slash"
+            local.model.slashCommandsLoaded = true
+            local.model.slashCommands = source.model.slashCommands
+            guard let localToken = local.send("/skill") else { return XCTFail("expected local slash token") }
+            local.applyForTesting(.slashCommandResult(turnId: localToken.clientTurnId, display: "done".clientTextDto, isError: false))
+            XCTAssertNil(local.durableAttachCursorForTesting())
+        }
+
+        func testExplicitQueuedPromptAndBashAdoptOnlyTheirOwnNextTurn() async {
+            for queuedText in ["queued prompt", "!printf hi"] {
+                let source = makeSource()
+                let session = "queued-\(UUID().uuidString)"
+                source.model.activeSessionId = session
+                var submitted: [ClientCommand] = []
+                source.setCommandSubmitterForTesting { submitted.append($0) }
+                guard let first = source.send("first") else { return XCTFail("expected first turn") }
+                XCTAssertNotNil(source.send(queuedText))
+                await flushTasks()
+                let turns = submitted.compactMap { command -> UInt64? in
+                    if case let .sendPrompt(_, _, _, _, turnID, _) = command { return turnID }
+                    return nil
+                }
+                guard turns.count == 2 else { return XCTFail("expected both submitted ids") }
+                let queued = turns[1]
+                source.applyForTesting(.turnEventReplay(
+                    sessionId: session, turnId: first.clientTurnId, sequence: 1,
+                    eventJson: "{\"type\":\"turn_started\",\"turn_id\":\(first.clientTurnId)}"
+                ))
+                source.applyForTesting(.turnEventReplay(
+                    sessionId: session, turnId: first.clientTurnId, sequence: 2,
+                    eventJson: #"{"type":"turn_ended","outcome":{"type":"end_turn"},"cost":{"total_usd":0,"input_tokens":0,"output_tokens":0,"api_calls":0,"session_duration_secs":0,"formatted":"$0"}}"#
+                ))
+                source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                    sessionID: session, turnID: first.clientTurnId, revision: 1, state: .completed
+                )))
+                source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                    sessionID: session, turnID: queued + 100, revision: 1, state: .running
+                )))
+                XCTAssertFalse(source.model.streaming)
+                source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                    sessionID: session, turnID: queued, revision: 1, state: .running
+                )))
+                source.applyForTesting(.turnEventReplay(
+                    sessionId: session, turnId: queued, sequence: 1,
+                    eventJson: "{\"type\":\"turn_started\",\"turn_id\":\(queued)}"
+                ))
+                source.applyForTesting(.turnEventReplay(
+                    sessionId: session, turnId: queued, sequence: 2,
+                    eventJson: #"{"type":"text_delta","text":"queued output"}"#
+                ))
+                XCTAssertEqual(source.durableAttachCursorForTesting(), 2)
+                XCTAssertTrue(source.model.messages.contains(where: { $0.text == "queued output" }))
+                source.applyForTesting(.turnEventReplay(
+                    sessionId: session, turnId: queued, sequence: 3,
+                    eventJson: #"{"type":"turn_ended","outcome":{"type":"end_turn"},"cost":{"total_usd":0,"input_tokens":0,"output_tokens":0,"api_calls":0,"session_duration_secs":0,"formatted":"$0"}}"#
+                ))
+                XCTAssertFalse(source.model.streaming)
+            }
+        }
+
+        func testQueuedTurnWaitsForPriorTerminalAndTimesOutVisibly() async {
+            let source = makeSource()
+            let session = "queue-reordered-\(UUID().uuidString)"
+            source.model.activeSessionId = session
+            var commands: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { commands.append($0) }
+            guard let first = source.send("first") else { return XCTFail("expected first") }
+            XCTAssertNotNil(source.send("!queued"))
+            await flushTasks()
+            let turns = commands.compactMap { command -> UInt64? in
+                if case let .sendPrompt(_, _, _, _, turnID, _) = command { return turnID }
+                return nil
+            }
+            guard turns.count == 2 else { return XCTFail("expected queued turn") }
+            let queued = turns[1]
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: queued, revision: 1, state: .running
+            )))
+            source.applyForTesting(.turnEventReplay(
+                sessionId: session, turnId: queued, sequence: 1,
+                eventJson: "{\"type\":\"turn_started\",\"turn_id\":\(queued)}"
+            ))
+            XCTAssertEqual(source.model.activeTurnToken?.clientTurnId, first.clientTurnId)
+            source.applyForTesting(.turnEventReplay(
+                sessionId: session, turnId: first.clientTurnId, sequence: 1,
+                eventJson: #"{"type":"turn_ended","outcome":{"type":"end_turn"},"cost":{"total_usd":0,"input_tokens":0,"output_tokens":0,"api_calls":0,"session_duration_secs":0,"formatted":"$0"}}"#
+            ))
+            XCTAssertNil(source.model.activeTurnToken)
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: first.clientTurnId, revision: 1, state: .completed
+            )))
+            XCTAssertEqual(source.model.activeTurnToken?.clientTurnId, queued)
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: first.clientTurnId, revision: 2, state: .cancelled
+            )))
+            XCTAssertEqual(source.model.activeTurnToken?.clientTurnId, queued)
+            XCTAssertTrue(source.model.streaming)
+
+            let stalled = makeSource()
+            stalled.model.activeSessionId = "stalled-\(UUID().uuidString)"
+            var stalledCommands: [ClientCommand] = []
+            stalled.setCommandSubmitterForTesting { stalledCommands.append($0) }
+            guard let owner = stalled.send("owner") else { return XCTFail("expected owner") }
+            XCTAssertNotNil(stalled.send("!next"))
+            await flushTasks()
+            let pending = stalledCommands.compactMap { command -> UInt64? in
+                if case let .sendPrompt(_, _, _, _, turnID, _) = command { return turnID }
+                return nil
+            }.last!
+            stalled.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: stalled.model.activeSessionId, turnID: pending, revision: 1, state: .running
+            )))
+            XCTAssertNotNil(stalled.recoveryWatermarkForTesting(sessionID: stalled.model.activeSessionId, turnID: pending))
+            stalled.expireDeferredQueuedTurnsForTesting()
+            XCTAssertNotNil(stalled.recoveryWatermarkForTesting(sessionID: stalled.model.activeSessionId, turnID: pending))
+            XCTAssertEqual(try? stalled.pendingSubmissionsForTesting().first?.projectionIncomplete, true)
+            XCTAssertNotNil(stalled.model.error)
+            XCTAssertEqual(stalled.model.activeTurnToken?.clientTurnId, owner.clientTurnId)
+        }
+
+        func testQueuedSubmissionKeepsAuthorityWhenPreviousTurnEndsDuringSubmit() async {
+            let source = makeSource()
+            let session = "late-submit-\(UUID().uuidString)"
+            source.model.activeSessionId = session
+            var submitted: [UInt64] = []
+            var release: CheckedContinuation<Void, Never>?
+            source.setCommandSubmitterForTesting { command in
+                guard case let .sendPrompt(_, _, _, _, turnID?, _) = command else { return }
+                submitted.append(turnID)
+                if submitted.count == 2 {
+                    await withCheckedContinuation { release = $0 }
+                }
+            }
+            guard let first = source.send("first") else { return XCTFail("expected first") }
+            XCTAssertNotNil(source.send("queued"))
+            await flushTasks()
+            guard submitted.count == 2 else { return XCTFail("expected queued submit") }
+            source.applyForTesting(.turnEventReplay(
+                sessionId: session, turnId: first.clientTurnId, sequence: 1,
+                eventJson: #"{"type":"turn_ended","outcome":{"type":"end_turn"},"cost":{"total_usd":0,"input_tokens":0,"output_tokens":0,"api_calls":0,"session_duration_secs":0,"formatted":"$0"}}"#
+            ))
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: first.clientTurnId, revision: 1, state: .completed
+            )))
+            XCTAssertTrue(source.maySubmitPromptForTesting(owner: session, turnID: submitted[1]))
+            release?.resume()
+            await flushTasks()
+            XCTAssertNil(source.model.error)
+        }
+
+        func testUnretainedCrashUsesPersistentUncertaintyOnColdAttach() async {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+            let session = "uncertain-\(UUID().uuidString)"
+            let prior = makeSource(appSandboxRoot: root)
+            prior.beginTurnForTesting(turnId: 71, sessionId: session)
+            prior.beginDurableTurnForTesting(turnId: 71, sessionId: session)
+            prior.applyForTesting(.turnEventReplay(sessionId: session, turnId: 71, sequence: 1,
+                eventJson: #"{"type":"turn_started","turn_id":71}"#))
+            prior.applyForTesting(.turnEventLiveUnretained(sessionId: session, turnId: 71,
+                eventJson: #"{"type":"text_delta","text":"visible before crash"}"#))
+            XCTAssertTrue(prior.model.messages.contains { $0.text == "visible before crash" })
+            let reopened = makeSource(appSandboxRoot: root)
+            reopened.setCommandSubmitterForTesting { command in
+                if case let .attachTurn(_, _, _, requestID) = command {
+                    reopened.applyForTesting(.turnAttachStarted(requestId: requestID, snapshot: self.recoverySnapshot(
+                        sessionID: session, turnID: 71, revision: 2, state: .pausedRecoverable,
+                        lastSequence: 1, projectionUncertain: true
+                    )))
+                    reopened.applyForTesting(.turnEventReplay(sessionId: session, turnId: 71, sequence: 1,
+                        eventJson: #"{"type":"turn_started","turn_id":71}"#))
+                    reopened.applyForTesting(.turnAttachFinished(requestId: requestID, sessionId: session, turnId: 71))
+                }
+            }
+            reopened.expectSessionResumeForTesting(session)
+            reopened.applyForTesting(.sessionResumed(sessionId: session, mode: .code, messages: [
+                MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "authoritative".clientTextDto)])
+            ]))
+            await flushTasks(24)
+            XCTAssertNotNil(reopened.model.error)
+            XCTAssertEqual(reopened.model.messages.map(\.text), ["authoritative"])
+            XCTAssertEqual(reopened.durableAttachCursorForTesting(), 1)
+        }
+
+        func testHealthyLiveProjectionUncertaintyDoesNotShowWarning() {
+            let source = makeSource()
+            let session = "live-uncertain-\(UUID().uuidString)"
+            source.beginTurnForTesting(turnId: 71, sessionId: session)
+            source.beginDurableTurnForTesting(turnId: 71, sessionId: session)
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 1, state: .running, projectionUncertain: true
+            )))
+            source.applyForTesting(.turnEventReplay(sessionId: session, turnId: 71, sequence: 1,
+                eventJson: #"{"type":"text_delta","text":"live"}"#))
+            XCTAssertNil(source.model.error)
+            XCTAssertTrue(source.model.messages.contains { $0.text == "live" })
+        }
+
+        func testRetiredSourceCannotMutateSharedCheckpointOrRevision() {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+            let session = "retired-\(UUID().uuidString)"
+            let old = makeSource(appSandboxRoot: root)
+            old.beginTurnForTesting(turnId: 71, sessionId: session)
+            old.beginDurableTurnForTesting(turnId: 71, sessionId: session)
+            var observed = 0
+            old.setExternalEventHandler { _ in observed += 1 }
+            old.retireRecoveryIngress()
+            old.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 9, state: .cancelled
+            )))
+            old.applyForTesting(.turnEventReplay(sessionId: session, turnId: 71, sequence: 1,
+                eventJson: #"{"type":"text_delta","text":"stale"}"#))
+            XCTAssertEqual(observed, 0)
+            XCTAssertEqual(old.durableAttachCursorForTesting(), 0)
+
+            let replacement = makeSource(appSandboxRoot: root)
+            replacement.beginTurnForTesting(turnId: 71, sessionId: session)
+            replacement.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 1, state: .running
+            )))
+            replacement.applyForTesting(.turnEventReplay(sessionId: session, turnId: 71, sequence: 1,
+                eventJson: #"{"type":"text_delta","text":"current"}"#))
+            XCTAssertTrue(replacement.model.messages.contains { $0.text == "current" })
+            XCTAssertEqual(replacement.durableAttachCursorForTesting(), 1)
+        }
+
+        func testDurableCheckpointsPartitionScopesAndMigrateMatchingLegacyRecord() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            func config(_ cwd: String) -> EngineConfig {
+                EngineConfig(apiBase: "https://example.invalid", apiKey: "", model: "", appSandboxRoot: root.path,
+                             projectCwd: cwd, sessionMode: .code, visionDelegationEnabled: false)
+            }
+            let legacyURL = root.appendingPathComponent("durable-conversation-turn.json")
+            try JSONEncoder().encode(DurableConversationTurnRecord(
+                scope: "/project-a", sessionID: "legacy-a", turnID: 11, lastSequence: 0
+            )).write(to: legacyURL, options: .atomic)
+            let a = DurableConversationTurnClientStore(config: config("/project-a"))
+            let b = DurableConversationTurnClientStore(config: config("/project-b"))
+            b.begin(sessionID: "session-b", turnID: 22)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: legacyURL.path))
+            XCTAssertEqual(a.load()?.sessionID, "legacy-a")
+            XCTAssertEqual(b.load()?.sessionID, "session-b")
+            let stores = [a, b]
+            DispatchQueue.concurrentPerform(iterations: 2) { index in
+                stores[index].begin(sessionID: index == 0 ? "new-a" : "new-b", turnID: UInt64(31 + index))
+            }
+            let reopenedA = DurableConversationTurnClientStore(config: config("/project-a"))
+            let reopenedB = DurableConversationTurnClientStore(config: config("/project-b"))
+            XCTAssertEqual(reopenedA.load()?.sessionID, "new-a")
+            XCTAssertEqual(reopenedB.load()?.sessionID, "new-b")
+            reopenedA.clear(turnID: 31, sessionID: "new-a")
+            XCTAssertNil(reopenedA.load())
+            XCTAssertEqual(reopenedB.load()?.sessionID, "new-b")
+        }
+
+        func testDetachedModNotificationIsSessionScopedAndIndependentOfRun() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 71, sessionId: "session-b")
+            let initial = source.model.items
+            source.applyForTesting(.modSessionEvent(sessionId: "session-a", modTurnId: "opaque", payload:
+                .notice(message: "old".clientTextDto, isError: false)))
+            XCTAssertEqual(source.model.items, initial)
+            source.applyForTesting(.modSessionEvent(sessionId: "session-b", modTurnId: "opaque", payload:
+                .notify(plugin: "plugin", text: "hello".clientTextDto)))
+            XCTAssertTrue(source.model.items.contains { item in
+                if case let .notice(notice) = item { return notice.text == "plugin: hello" }
+                return false
+            })
+        }
+
+        func testCancelledSnapshotKeepsOwnerUntilLateBlockResultIsProjected() async {
+            let source = makeSource()
+            let session = "stop-block-\(UUID().uuidString)"
+            source.beginTurnForTesting(turnId: 71, sessionId: session)
+            source.beginDurableTurnForTesting(turnId: 71, sessionId: session)
+            source.applyForTesting(.turnEventReplay(sessionId: session, turnId: 71, sequence: 1,
+                eventJson: #"{"type":"tool_use_started","id":"block-1","tool":"Read","input_json":"{}","header":{"verb":"read","label":"Read","title":"Read"}}"#))
+            var release: CheckedContinuation<Void, Never>?
+            source.setCommandSubmitterForTesting { command in
+                if case .cancel = command { await withCheckedContinuation { release = $0 } }
+            }
+            let stopping = Task { try? await source.cancelAndWait() }
+            await flushTasks()
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 2, state: .cancelled
+            )))
+            source.applyForTesting(.turnEventLiveUnretained(sessionId: session, turnId: 71,
+                eventJson: #"{"type":"tool_use_result","id":"block-1","tool":"Read","result_json":"{}","is_error":false,"display":{"body_lines":0}}"#))
+            guard case let .run(run)? = source.model.items.first(where: { if case .run = $0 { return true }; return false }) else {
+                release?.resume()
+                return XCTFail("expected original run")
+            }
+            XCTAssertEqual(run.tools.first(where: { $0.id == "block-1" })?.status, .completed)
+            XCTAssertTrue(source.model.isCancelling)
+            XCTAssertEqual(source.model.error?.message, String(localized: "chat_recovery_projection_uncertain"))
+            release?.resume()
+            await stopping.value
+            XCTAssertFalse(source.model.streaming)
+            XCTAssertEqual(source.model.notice, .cancelled)
+        }
+
+        func testColdRestoreDoesNotAppendAnUnprovenOverlappingJournal() async {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true).path
+            let session = "cold-overlap-\(UUID().uuidString)"
+            let previous = makeSource(appSandboxRoot: root)
+            previous.beginDurableTurnForTesting(turnId: 71, sessionId: session)
+            let reopened = makeSource(appSandboxRoot: root)
+            reopened.setCommandSubmitterForTesting { command in
+                switch command {
+                case let .attachTurn(_, _, _, requestID):
+                    reopened.applyForTesting(.turnAttachStarted(requestId: requestID, snapshot: self.recoverySnapshot(
+                        sessionID: session, turnID: 71, revision: 1, state: .pausedRecoverable
+                    )))
+                    reopened.applyForTesting(.turnEventReplay(
+                        sessionId: session, turnId: 71, sequence: 1,
+                        eventJson: #"{"type":"text_delta","text":"already restored"}"#
+                    ))
+                    reopened.applyForTesting(.turnAttachFinished(requestId: requestID, sessionId: session, turnId: 71))
+                case .resumeTurn:
+                    reopened.applyForTesting(.turnRecoveryState(snapshot: self.recoverySnapshot(
+                        sessionID: session, turnID: 71, revision: 2, state: .running
+                    )))
+                default: break
+                }
+            }
+            reopened.expectSessionResumeForTesting(session)
+            reopened.applyForTesting(.sessionResumed(
+                sessionId: session, mode: .code,
+                messages: [MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
+                    .text(text: "already restored".clientTextDto),
+                ])]
+            ))
+            await flushTasks(24)
+            XCTAssertEqual(reopened.model.messages.map(\.text), ["already restored"])
+            XCTAssertEqual(reopened.durableAttachCursorForTesting(), 0)
+            XCTAssertNotNil(reopened.model.error)
+        }
+
+        func testTerminalEnvelopeKeepsIdentityForFollowingRecoveryState() {
+            let source = makeSource()
+            let session = "terminal-envelope-\(UUID().uuidString)"
+            source.beginTurnForTesting(turnId: 71, sessionId: session)
+            source.beginDurableTurnForTesting(turnId: 71, sessionId: session)
+            var recoveryStates: [TurnRecoveryStateDto] = []
+            source.setExternalEventHandler { event in
+                if case let .turnRecoveryState(snapshot) = event { recoveryStates.append(snapshot.state) }
+            }
+            source.applyForTesting(.turnEventReplay(
+                sessionId: session, turnId: 71, sequence: 1,
+                eventJson: #"{"type":"turn_ended","outcome":{"type":"end_turn"},"cost":{"total_usd":0,"input_tokens":0,"output_tokens":0,"api_calls":0,"session_duration_secs":0,"formatted":"$0"}}"#
+            ))
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 2, state: .completed
+            )))
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 1, state: .pausedRecoverable
+            )))
+            XCTAssertEqual(recoveryStates, [.completed])
+            XCTAssertFalse(source.model.streaming)
+            XCTAssertFalse(source.model.hasUnresolvedTurnRecovery)
+        }
+
+        func testReplayOverflowShowsErrorAndReopeningCanAttachAgain() async {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true).path
+            let session = "overflow-\(UUID().uuidString)"
+            let source = makeSource(appSandboxRoot: root)
+            source.beginTurnForTesting(turnId: 71, sessionId: session)
+            source.beginDurableTurnForTesting(turnId: 71, sessionId: session)
+            for sequence in 2...514 {
+                source.applyForTesting(.turnEventReplay(
+                    sessionId: session, turnId: 71, sequence: UInt64(sequence),
+                    eventJson: #"{"type":"text_delta","text":"x"}"#
+                ))
+            }
+            XCTAssertNotNil(source.model.error)
+            source.applyForTesting(.turnEventReplay(
+                sessionId: session, turnId: 71, sequence: 1,
+                eventJson: #"{"type":"text_delta","text":"x"}"#
+            ))
+            XCTAssertEqual(source.durableAttachCursorForTesting(), 0)
+
+            let reopened = makeSource(appSandboxRoot: root)
+            reopened.beginTurnForTesting(turnId: 71, sessionId: session)
+            var attachedAfter: UInt64?
+            reopened.setCommandSubmitterForTesting { command in
+                if case let .attachTurn(_, _, afterSequence, _) = command { attachedAfter = afterSequence }
+            }
+            reopened.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 1, state: .pausedRecoverable
+            )))
+            reopened.handleForeground()
+            await flushTasks(24)
+            XCTAssertEqual(attachedAfter, 0)
+
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: session, turnID: 71, revision: 2, state: .cancelled
+            )))
+            XCTAssertEqual(source.model.notice, .cancelled)
+            XCTAssertNotNil(source.model.error, "terminal state must not erase the replay-gap warning")
+            reopened.retireRecoveryIngress()
+        }
+
+        func testRecoveryVersionKeysIncludeSessionAndTurn() {
+            let source = makeSource()
+            var forwarded = 0
+            source.setExternalEventHandler { event in
+                if case .turnRecoveryState = event { forwarded += 1 }
+            }
+            source.beginTurnForTesting(turnId: 71, sessionId: "session-a")
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "session-a", turnID: 71, revision: 9, state: .cancelled
+            )))
+            source.beginTurnForTesting(turnId: 71, sessionId: "session-b")
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "session-b", turnID: 71, revision: 1, state: .pausedRecoverable
+            )))
+            source.beginTurnForTesting(turnId: 72, sessionId: "session-a")
+            source.applyForTesting(.turnRecoveryState(snapshot: recoverySnapshot(
+                sessionID: "session-a", turnID: 72, revision: 1, state: .pausedRecoverable
+            )))
+            XCTAssertEqual(forwarded, 3)
         }
 
         func testEngineListenerPreservesFIFOEventOrder() async {

@@ -9,6 +9,14 @@ import UIKit
 import harness_runtimeFFI
 #endif
 
+struct ConversationRecoveryEvidence: Equatable {
+    let sessionID: String
+    let turnID: UInt64
+    let projectionUncertain: Bool
+    let liveOnlyOutput: Bool
+    let queuedCancelled: Bool?
+    let version: String?
+}
 
 /// A persistent, dismissible, kind-aware error surfaced in the chat view (PR-4
 /// item 4). Unlike the dim `statusLine` (tool activity), this is a banner the
@@ -437,6 +445,9 @@ final class ConversationModel: ObservableObject {
     /// Resume is accepted; the Composer uses the more specific inactive flag
     /// for its visible Discard affordance.
     @Published var hasUnresolvedTurnRecovery: Bool = false
+    /// Evidence shown for the current session; confirmation snapshots these
+    /// identities so later arrivals are never included in an earlier action.
+    @Published var recoveryEvidenceForReview: [ConversationRecoveryEvidence] = []
     /// True after Stop is requested and until the engine confirms that the
     /// matching turn released its owner slot. The composer remains editable but
     /// cannot submit another turn during this interval.
@@ -722,9 +733,9 @@ final class ConversationModel: ObservableObject {
         incoming: ConversationAgentSummary
     ) -> ConversationAgentSummary {
         let incomingIsCurrent = incoming.updatedAtMs >= current.updatedAtMs
-        let currentIsTerminal = ["completed", "failed", "killed", "cancelled"]
+        let currentIsTerminal = ["completed", "failed", "killed", "cancelled", "exited_unknown"]
             .contains(current.status.lowercased())
-        let incomingIsTerminal = ["completed", "failed", "killed", "cancelled"]
+        let incomingIsTerminal = ["completed", "failed", "killed", "cancelled", "exited_unknown"]
             .contains(incoming.status.lowercased())
         let name = incomingIsCurrent
             ? (incoming.name.isEmpty ? current.name : incoming.name)

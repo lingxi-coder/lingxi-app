@@ -22,6 +22,7 @@
  * OS grant" are only distinguishable against a real machine's real TCC state.
  */
 import { StrictMode } from 'react';
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
 import { createRoot } from 'react-dom/client';
 
 import { hostMicrophonePermissionReader } from '../../src/shared/microphoneAccess';
@@ -31,6 +32,8 @@ import { tokens } from '@renderer/theme/tokens';
 import { audioConfigurationDefaults } from '../../src/shared/generatedAudioConfiguration';
 import { defaultNativeAudioSnapshot, type NativeAudioCommand, type NativeAudioResponse } from '../../src/shared/nativeAudio';
 import type { PageContentProps } from '@renderer/components/settings/SettingsScreen';
+
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'zh-Hans');
 
 declare global {
   interface Window {

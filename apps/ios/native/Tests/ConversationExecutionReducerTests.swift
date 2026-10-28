@@ -22,7 +22,8 @@ import SwiftUI
 
         private func makeSource(
             permissionModeRepository: PermissionModeConfigurationRepository? = nil,
-            appSandboxRoot: String = NSTemporaryDirectory()
+            appSandboxRoot: String = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true).path
         ) -> EngineConversationSource {
             let config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
@@ -34,7 +35,8 @@ import SwiftUI
                 visionDelegationEnabled: true)
             return EngineConversationSource(
                 config: config,
-                permissionModeRepository: permissionModeRepository
+                permissionModeRepository: permissionModeRepository,
+                recoveryStoreRootForTesting: appSandboxRoot
             )
         }
 
@@ -147,7 +149,7 @@ import SwiftUI
             XCTAssertNotNil(source.send("same"))
             for _ in 0..<10 { await Task.yield() }
             let turnIDs = commands.compactMap { command -> UInt64? in
-                if case let .sendPrompt(_, _, _, turnID, _) = command { return turnID }
+                if case let .sendPrompt(_, _, _, _, turnID, _) = command { return turnID }
                 return nil
             }
             XCTAssertEqual(turnIDs.count, 2)
@@ -203,6 +205,7 @@ import SwiftUI
         func testRetractionUsesExactIdentityAndPreservesLaterResponseAndNotice() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 901, sessionId: "retraction")
+            source.beginDurableTurnForTesting(turnId: 901, sessionId: "retraction")
             source.applyForTesting(.turnStarted(turnId: 901))
             source.applyForTesting(.thinkingDelta(thinking: "failed reasoning", signature: nil))
             source.applyForTesting(.textDelta(text: "failed".clientTextDto))
@@ -210,7 +213,8 @@ import SwiftUI
             source.applyForTesting(.messageComplete(stopReason: "max_tokens", message: MessageDto(transcriptUuid: nil,
                 role: "assistant", blocks: [.text(text: "failed".clientTextDto)]
             )))
-            source.applyForTesting(.systemNotice(message: "unrelated notice".clientTextDto, isError: false))
+            source.applyForTesting(.turnEventReplay(sessionId: "retraction", turnId: 901, sequence: 1,
+                eventJson: #"{"type":"system_notice","message":"unrelated notice","is_error":false}"#))
             source.applyForTesting(.thinkingDelta(thinking: "retained reasoning", signature: nil))
             source.applyForTesting(.textDelta(text: "retained".clientTextDto))
             source.applyForTesting(.messageIdentity(messageId: "retained-id"))
@@ -560,13 +564,15 @@ import SwiftUI
         func testLiveActivityLedgerPreservesWireOrderAndTextBoundaries() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 8, sessionId: "session-a")
+            source.beginDurableTurnForTesting(turnId: 8, sessionId: "session-a")
             source.applyForTesting(.turnStarted(turnId: 8))
             source.applyForTesting(.thinkingDelta(thinking: "inspect ", signature: nil))
             source.applyForTesting(.thinkingDelta(thinking: "workspace", signature: nil))
             source.applyForTesting(.toolUseStarted(
                 id: "tool-a", tool: "Read", inputJson: #"{"path":"a"}"#, header: currentToolHeader()))
             source.applyForTesting(.textDelta(text: "result text".clientTextDto))
-            source.applyForTesting(.systemNotice(message: "waiting".clientTextDto, isError: false))
+            source.applyForTesting(.turnEventReplay(sessionId: "session-a", turnId: 8, sequence: 1,
+                eventJson: #"{"type":"system_notice","message":"waiting","is_error":false}"#))
 
             guard case let .run(run)? = source.model.items.first(where: {
                 if case .run = $0 { return true }
@@ -725,10 +731,12 @@ import SwiftUI
         func testTelemetryAndCoordinatorEventsAccumulateOnActiveRun() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 3, sessionId: "session-a")
+            source.beginDurableTurnForTesting(turnId: 3, sessionId: "session-a")
 
             source.applyForTesting(.turnStarted(turnId: 3))
             source.applyForTesting(.thinkingDelta(thinking: "reasoning", signature: nil))
-            source.applyForTesting(.systemNotice(message: "still working".clientTextDto, isError: false))
+            source.applyForTesting(.turnEventReplay(sessionId: "session-a", turnId: 3, sequence: 1,
+                eventJson: #"{"type":"system_notice","message":"still working","is_error":false}"#))
             source.applyForTesting(
                 .usageUpdate(isSnapshot: nil, inputTokens: 11, outputTokens: 22, cacheReadTokens: 3, cacheCreationTokens: 4))
             source.applyForTesting(.apiRetry(message: "429", attempt: 2, maxRetries: 5, delayMs: 1200))
@@ -901,7 +909,7 @@ import SwiftUI
             XCTAssertTrue(source.model.streaming, "the current owner remains live while Cancel awaits Block tools")
             XCTAssertEqual(source.model.statusLine, "正在停止…")
             XCTAssertEqual(submittedCommands.count, 1, "the next prompt must stay local while Cancel is pending")
-            if case let .cancel(turnId)? = submittedCommands.first {
+            if case let .cancel(_, turnId)? = submittedCommands.first {
                 XCTAssertEqual(turnId, 1)
             } else {
                 XCTFail("expected the matching cancel submission")
@@ -929,10 +937,12 @@ import SwiftUI
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "session-a",
                 turnId: 1,
+                revision: 1,
                 state: .cancelled,
                 firstSequence: 0,
                 lastSequence: 0,
                 safeToResume: false,
+                projectionUncertain: false,
                 reason: "user_cancelled"
             )))
             await flushTasks(8)
@@ -942,7 +952,7 @@ import SwiftUI
             await flushTasks()
 
             XCTAssertEqual(submittedCommands.count, 2, "B should submit exactly once after cancellation returns")
-            if case let .sendPrompt(text, _, _, turnId, _)? = submittedCommands.last {
+            if case let .sendPrompt(_, text, _, _, turnId, _)? = submittedCommands.last {
                 XCTAssertEqual(text.codeUnits, Array("B prompt".utf16))
                 XCTAssertEqual(turnId, 2)
             } else {
@@ -1215,10 +1225,12 @@ import SwiftUI
                     source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                         sessionId: "session-a",
                         turnId: 702,
+                        revision: 1,
                         state: .completed,
                         firstSequence: 1,
                         lastSequence: 3,
                         safeToResume: false,
+                        projectionUncertain: false,
                         reason: nil
                     )))
                     source.applyForTesting(.turnEventReplay(
@@ -1580,10 +1592,12 @@ import SwiftUI
             source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                 sessionId: "session-a",
                 turnId: 47,
+                revision: 1,
                 state: .cancelled,
                 firstSequence: 0,
                 lastSequence: 0,
                 safeToResume: false,
+                projectionUncertain: false,
                 reason: "user_cancelled"
             )))
             releaseCancellation?.resume()
@@ -1617,7 +1631,7 @@ import SwiftUI
             XCTAssertEqual(source.model.items, originalItems)
             XCTAssertEqual(commands.count, 1)
             guard let first = commands.first else { return }
-            guard case let .cancel(turnId) = first else {
+            guard case let .cancel(_, turnId) = first else {
                 return XCTFail("a failed cancellation must not submit ResumeSession")
             }
             XCTAssertEqual(turnId, 45)
@@ -1641,14 +1655,16 @@ import SwiftUI
             var submittedCommands: [ClientCommand] = []
             source.setCommandSubmitterForTesting { command in
                 await MainActor.run { submittedCommands.append(command) }
-                if case let .cancel(turnId?) = command {
+                if case let .cancel(_, turnId?) = command {
                     source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                         sessionId: "session-a",
                         turnId: turnId,
+                        revision: 1,
                         state: .cancelled,
                         firstSequence: 0,
                         lastSequence: 0,
                         safeToResume: false,
+                        projectionUncertain: false,
                         reason: "user_cancelled"
                     )))
                 }
@@ -1660,7 +1676,7 @@ import SwiftUI
 
             XCTAssertEqual(submittedCommands.count, 2)
             guard submittedCommands.count == 2 else { return }
-            if case let .cancel(turnId) = submittedCommands[0] {
+            if case let .cancel(_, turnId) = submittedCommands[0] {
                 XCTAssertEqual(turnId, 17)
             } else {
                 XCTFail("the old turn must be cancelled first")
@@ -1683,14 +1699,16 @@ import SwiftUI
                     await withCheckedContinuation { continuation in
                         releaseCancellation = continuation
                     }
-                    if case let .cancel(turnId?) = command {
+                    if case let .cancel(_, turnId?) = command {
                         source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                             sessionId: "session-a",
                             turnId: turnId,
+                            revision: 1,
                             state: .cancelled,
                             firstSequence: 0,
                             lastSequence: 0,
                             safeToResume: false,
+                            projectionUncertain: false,
                             reason: "user_cancelled"
                         )))
                     }
@@ -1709,7 +1727,7 @@ import SwiftUI
 
             XCTAssertEqual(submittedCommands.count, 2)
             guard submittedCommands.count == 2 else { return }
-            if case let .cancel(turnId) = submittedCommands[0] {
+            if case let .cancel(_, turnId) = submittedCommands[0] {
                 XCTAssertEqual(turnId, 18)
             } else {
                 XCTFail("the shared cancellation must be submitted first")
@@ -1727,14 +1745,16 @@ import SwiftUI
             var submittedCommands: [ClientCommand] = []
             source.setCommandSubmitterForTesting { command in
                 await MainActor.run { submittedCommands.append(command) }
-                if case let .cancel(turnId?) = command {
+                if case let .cancel(_, turnId?) = command {
                     source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
                         sessionId: "session-a",
                         turnId: turnId,
+                        revision: 1,
                         state: .cancelled,
                         firstSequence: 0,
                         lastSequence: 0,
                         safeToResume: false,
+                        projectionUncertain: false,
                         reason: "user_cancelled"
                     )))
                 }
@@ -1746,7 +1766,7 @@ import SwiftUI
 
             XCTAssertEqual(submittedCommands.count, 2)
             guard submittedCommands.count == 2 else { return }
-            if case let .cancel(turnId) = submittedCommands[0] {
+            if case let .cancel(_, turnId) = submittedCommands[0] {
                 XCTAssertEqual(turnId, 23)
             } else {
                 XCTFail("the old turn must be cancelled first")

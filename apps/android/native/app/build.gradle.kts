@@ -37,6 +37,9 @@ val localReleaseSigningFile = rootProject.file(".signing/release-signing.propert
 val localReleaseSigning = localReleaseSigningFile.takeIf { it.isFile }?.let { file ->
     Properties().apply { file.inputStream().use { load(it) } }
 }
+// CI creates a throwaway debug key outside the checkout. Local debug builds
+// continue to use the project-specific Firebase-registered certificate.
+val debugKeystoreOverride = providers.gradleProperty("lingxiDebugKeystore")
 
 // Release verification may build one architecture explicitly; never package a
 // stale second JNI library while waiting for its current SDK build.
@@ -118,7 +121,9 @@ android {
             }
         }
         getByName("debug") {
-            storeFile = rootProject.file(".signing/lingxi-5e4b2-debug.keystore")
+            storeFile = debugKeystoreOverride.map { rootProject.file(it) }
+                .getOrElse(rootProject.file(".signing/lingxi-5e4b2-debug.keystore"))
+            if (debugKeystoreOverride.isPresent) storeType = "PKCS12"
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"

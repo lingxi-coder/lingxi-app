@@ -16,7 +16,7 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 use serde::ser::SerializeStruct as _;
 use serde::{Deserialize, Serialize};
-use serde_yaml::{Mapping, Value as YamlValue};
+use yaml_serde::{Mapping, Value as YamlValue};
 
 use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 
@@ -2796,6 +2796,109 @@ fn scaffold_denied_read_paths(cwd: &Path) -> Vec<PathBuf> {
     denied
 }
 
+// Dropping a future must not release sandbox resources while its child may
+// still be running. If we cannot verify its exit, retain both the lease and
+// its runner for the lifetime of the process rather than cleaning up early.
+#[cfg(not(windows))]
+struct ScaffoldResources {
+    lease: Option<tool_api::sandbox_runner::SandboxLease>,
+    runner: Option<std::sync::Arc<dyn tool_api::SandboxRunner>>,
+}
+
+#[cfg(not(windows))]
+impl ScaffoldResources {
+    async fn release(mut self) {
+        drop(self.lease.take());
+        if let Some(runner) = self.runner.take() {
+            runner.reset().await;
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for ScaffoldResources {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            eprintln!("scaffold child exit was not verified; retaining sandbox resources");
+            std::mem::forget(lease);
+            if let Some(runner) = self.runner.take() {
+                std::mem::forget(runner);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+async fn run_scaffold_command(
+    mut command: tokio::process::Command,
+    lease: tool_api::sandbox_runner::SandboxLease,
+    runner: std::sync::Arc<dyn tool_api::SandboxRunner>,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    use tokio::io::AsyncReadExt as _;
+
+    command.kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            drop(lease);
+            runner.reset().await;
+            return Err(format!("failed to run scaffold script: {error}"));
+        }
+    };
+    let resources = ScaffoldResources {
+        lease: Some(lease),
+        runner: Some(runner),
+    };
+    let mut stdout = child.stdout.take().expect("scaffold stdout is piped");
+    let mut stderr = child.stderr.take().expect("scaffold stderr is piped");
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let result = tokio::time::timeout(timeout, async {
+        tokio::try_join!(
+            child.wait(),
+            stdout.read_to_end(&mut stdout_bytes),
+            stderr.read_to_end(&mut stderr_bytes),
+        )
+    })
+    .await;
+    let reason = match result {
+        Ok(Ok((status, _, _))) => {
+            resources.release().await;
+            return Ok(std::process::Output {
+                status,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+            });
+        }
+        Ok(Err(error)) => format!("failed to run scaffold script: {error}"),
+        Err(_) => "scaffold script timed out".to_owned(),
+    };
+
+    // Request termination first, but only a successful wait proves that the
+    // child actually exited. A failed request may race with natural exit.
+    let kill_error = child.start_kill().err();
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(_)) => {
+            resources.release().await;
+            Err(reason)
+        }
+        outcome => {
+            let detail = match outcome {
+                Ok(Err(error)) => error.to_string(),
+                Err(_) => "wait timed out".to_owned(),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            let kill_detail = kill_error.map_or_else(String::new, |error| {
+                format!("; termination request failed: {error}")
+            });
+            Err(format!(
+                "{reason}; scaffold child termination is unverified: {detail}{kill_detail}"
+            ))
+        }
+    }
+}
+
 async fn run_scaffold(script: &str, cwd: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -2823,7 +2926,7 @@ async fn run_scaffold(script: &str, cwd: &Path) -> Result<(), String> {
     let runner = harness_runtime::desktop::new_live_sandbox_runner();
     #[cfg(not(windows))]
     let wrapped = runner
-        .wrap(
+        .wrap_with_lease(
             script,
             &policy,
             platform,
@@ -2835,7 +2938,7 @@ async fn run_scaffold(script: &str, cwd: &Path) -> Result<(), String> {
     #[cfg(not(windows))]
     let mut command = {
         let mut command = tokio::process::Command::new("/bin/sh");
-        command.args(["-c", &wrapped]);
+        command.args(["-c", &wrapped.command]);
         command
     };
     #[cfg(not(windows))]
@@ -2857,19 +2960,13 @@ async fn run_scaffold(script: &str, cwd: &Path) -> Result<(), String> {
         .env("HOME", &canonical_cwd)
         .env("TMPDIR", &canonical_cwd);
     #[cfg(not(windows))]
-    let output_result = tokio::time::timeout(
+    let output = run_scaffold_command(
+        command,
+        wrapped.lease,
+        runner,
         Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
-        command.output(),
     )
-    .await;
-    #[cfg(not(windows))]
-    runner.cleanup_after_command().await;
-    #[cfg(not(windows))]
-    runner.reset().await;
-    #[cfg(not(windows))]
-    let output = output_result
-        .map_err(|_| "scaffold script timed out".to_string())?
-        .map_err(|error| format!("failed to run scaffold script: {error}"))?;
+    .await?;
     #[cfg(not(windows))]
     if output.status.success() {
         Ok(())
@@ -3200,7 +3297,7 @@ fn collect_eval_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), Strin
 
 fn parse_case_yaml(path: &Path) -> Result<EvalCase, String> {
     let raw = read_bounded(path, MAX_PROMPT_BYTES)?;
-    let value: YamlValue = serde_yaml::from_str(&raw)
+    let value: YamlValue = yaml_serde::from_str(&raw)
         .map_err(|error| format!("invalid {}: {error}", path.display()))?;
     let map = value
         .as_mapping()
@@ -3586,7 +3683,7 @@ fn parse_markdown_frontmatter(raw: &str, path: &Path) -> Result<(Mapping, String
             path.display()
         ));
     };
-    let frontmatter: YamlValue = serde_yaml::from_str(&rest[..end])
+    let frontmatter: YamlValue = yaml_serde::from_str(&rest[..end])
         .map_err(|error| format!("invalid frontmatter in {}: {error}", path.display()))?;
     let mapping = frontmatter
         .as_mapping()
@@ -5006,6 +5103,56 @@ mod tests {
             "."
         ])
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scaffold_timeout_reaps_child_before_releasing_lease() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("started.pid");
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let reaped_at_cleanup = Arc::new(AtomicBool::new(false));
+        let lease = tool_api::sandbox_runner::SandboxLease::new({
+            let pid_path = pid_path.clone();
+            let cleaned = cleaned.clone();
+            let reaped_at_cleanup = reaped_at_cleanup.clone();
+            move || {
+                let reaped = fs::read_to_string(pid_path)
+                    .ok()
+                    .and_then(|pid| pid.parse::<i32>().ok())
+                    .is_some_and(|pid| {
+                        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None)
+                            == Err(nix::errno::Errno::ESRCH)
+                    });
+                reaped_at_cleanup.store(reaped, Ordering::SeqCst);
+                cleaned.store(true, Ordering::SeqCst);
+            }
+        });
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("printf '%s' $$ > \"$1\"; exec sleep 30")
+            .arg("scaffold-test")
+            .arg(&pid_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let error = run_scaffold_command(
+            command,
+            lease,
+            tool_api::sandbox_runner::default_sandbox_runner(),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("the long-running child must time out");
+        assert_eq!(error, "scaffold script timed out");
+        assert!(cleaned.load(Ordering::SeqCst));
+        assert!(
+            reaped_at_cleanup.load(Ordering::SeqCst),
+            "sandbox lease was released before the child was reaped"
+        );
     }
 
     #[test]

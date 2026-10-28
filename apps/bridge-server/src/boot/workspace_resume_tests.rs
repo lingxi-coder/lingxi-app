@@ -406,7 +406,10 @@ async fn private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
                 &mut socket,
                 3,
                 "command",
-                client_command(ClientCommand::Cancel { turn_id: None }),
+                client_command(ClientCommand::Cancel {
+                    session_id: None,
+                    turn_id: None,
+                }),
             )
             .await;
             let (events, response) =

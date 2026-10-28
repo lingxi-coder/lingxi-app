@@ -9,6 +9,7 @@ on:
       - 'resources/**'
       - 'tools/**'
       - 'build-support/**'
+      - 'infra/firebase/database.rules.json'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -23,12 +24,19 @@ on:
       - 'resources/**'
       - 'tools/**'
       - 'build-support/**'
+      - 'infra/firebase/database.rules.json'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'scripts/**'
       - 'packaging/**'
   workflow_dispatch:
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
 
 concurrency:
   group: desktop-packages-${{ github.workflow }}-${{ github.ref }}
@@ -54,17 +62,47 @@ jobs:
             platform: linux
             arch: x64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    env:
-      RUST_MIN_STACK: "16777216"
-
+    # The Windows release Rust build alone took over 50 minutes; the cold Intel
+    # macOS job reached shared SDK tests only at its 90-minute limit. Leave
+    # room for the remaining native, Electron, and packaged smoke tests.
+    timeout-minutes: ${{ matrix.platform == 'darwin' && matrix.arch == 'x64' && 180 || matrix.platform == 'win32' && 120 || 90 }}
     steps:
+      - name: Enable Windows long paths and Git symlinks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git config --global core.symlinks true
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
       - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          # Match rust-toolchain.toml during setup, before native build steps
+          # invoke rustup proxies and try to add components on demand.
+          components: rustfmt, clippy
+
+      - name: Ensure Windows crypto assembler is available
+        if: matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Verify Windows crypto assembler
+        if: matrix.platform == 'win32'
+        run: nasm -v
+
+      - name: Verify the Windows Askama Git checkout
+        if: matrix.platform == 'win32'
+        run: python scripts/checks/audit_askama_upstream.py --checkout-only
 
       - name: Restore the pinned Linux GStreamer runtime SDK cache
         if: matrix.platform == 'linux'
@@ -124,15 +162,56 @@ jobs:
       - name: Remap build-machine paths
         shell: bash
         run: |
-          echo "RUSTFLAGS=--remap-path-prefix=${GITHUB_WORKSPACE}=/workspace --remap-path-prefix=${CARGO_HOME}=/cargo" >> "$GITHUB_ENV"
+          rust_flags="--remap-path-prefix=${GITHUB_WORKSPACE}=/workspace --remap-path-prefix=${CARGO_HOME}=/cargo"
+          if [[ '${{ matrix.platform }}' == 'darwin' ]]; then
+            rustup_home="${RUSTUP_HOME:-${HOME}/.rustup}"
+            cargo_target="${CARGO_TARGET_DIR:-${GITHUB_WORKSPACE}/target}"
+            case "$cargo_target" in
+              /*) ;;
+              *) cargo_target="${GITHUB_WORKSPACE}/${cargo_target}" ;;
+            esac
+            rust_flags+=" --remap-path-prefix=${rustup_home}=/rustup --remap-path-prefix=${cargo_target}=/cargo-target"
+            # Native dependencies can embed __FILE__ independently of rustc.
+            # Reuse the same compiler mappings as the signed macOS build.
+            source apps/electron/scripts/native-path-remapping.sh
+            configure_native_path_remapping "$GITHUB_WORKSPACE" "$CARGO_HOME" "$rustup_home" "$cargo_target"
+            sdk_lib="${LINGXI_GSTREAMER_SDK_MACOS:?macOS GStreamer SDK was not configured}/lib"
+            case '${{ matrix.arch }}' in
+              arm64) sdk_arch=arm64 ;;
+              x64) sdk_arch=x86_64 ;;
+              *) echo 'Unsupported macOS GStreamer architecture' >&2; exit 1 ;;
+            esac
+            for dylib in libgstreamer-1.0.0.dylib libgstbase-1.0.0.dylib \
+              libgstapp-1.0.0.dylib libgstaudio-1.0.0.dylib libgstvideo-1.0.0.dylib; do
+              test -f "$sdk_lib/$dylib"
+              /usr/bin/lipo "$sdk_lib/$dylib" -verify_arch "$sdk_arch"
+            done
+            # The unpackaged Rust executables need the SDK to resolve @rpath.
+            # Packaging removes this absolute rpath and installs a bundle-relative one.
+            rust_flags+=" -C link-arg=-Wl,-rpath,$sdk_lib"
+            printf 'CFLAGS=%s\nCXXFLAGS=%s\n' "$CFLAGS" "$CXXFLAGS" >> "$GITHUB_ENV"
+          fi
+          printf 'RUSTFLAGS=%s\n' "$rust_flags" >> "$GITHUB_ENV"
 
       - name: Install shared SDK
         working-directory: packages/bridge-client
         run: npm ci
 
+      - name: Build fresh shared SDK before Desktop installation
+        shell: bash
+        working-directory: packages/bridge-client
+        run: |
+          rm -rf dist
+          npm run build
+
       - name: Install Desktop dependencies
         working-directory: apps/electron
-        run: npm ci
+        shell: bash
+        run: |
+          npm ci
+          # npm may link file: dependencies or copy them. Either form must
+          # contain exactly the SDK produced from this checkout above.
+          diff -r ../../packages/bridge-client/dist node_modules/@lingxi/bridge-client/dist
 
       - name: Check and test native Rust host
         shell: bash
@@ -143,12 +222,70 @@ jobs:
           cargo test --locked --manifest-path "${runtime_root}/Cargo.toml" -p client
           cargo build --locked --release -p bridge-server --bin bridge-server
 
+      - name: Test the Local Apps service probe
+        working-directory: .
+        run: python scripts/tests/test_probe_local_app_service.py
+
+      - name: Verify the native Local Apps service
+        working-directory: .
+        run: python scripts/ci/probe_local_app_service.py
+
       - name: Test POSIX secure storage
         if: matrix.platform != 'win32'
         working-directory: .
         run: |
           runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
           cargo test --locked --manifest-path "${runtime_root}/Cargo.toml" -p platform-posix secure_storage --lib
+
+      - name: Test Windows terminal shell selection
+        if: matrix.platform == 'win32'
+        working-directory: .
+        shell: bash
+        run: |
+          set -o pipefail
+          test_log="$RUNNER_TEMP/windows-terminal-tests.log"
+          cargo test --locked -p bridge-server --lib desktop_terminal::tests -- --test-threads=1 --color never | tee "$test_log"
+          tr -d '\r' < "$test_log" > "$test_log.normalized"
+          for test_name in \
+            unpackaged_windows_shell_search_preserves_drive_relative_paths \
+            unpackaged_windows_shell_search_resolves_current_drive_relative_path \
+            packaged_windows_fallback_resolves_original_cwd_and_user_path \
+            packaged_windows_fallback_preserves_drive_relative_semantics \
+            windows_accepts_only_an_absolute_existing_expected_shell_file \
+            shell_selection_fields_are_rejected_outside_create \
+            shell_path_is_restored_without_native_loader_environment \
+            windows_shell_selection_uses_original_directory_and_safe_fallback \
+            stdin_reader_distinguishes_eof_error_and_receiver_close \
+            eof_ack_requires_confirmed_clean_input_and_not_signal_shutdown; do
+            matches="$(grep -Fxc "test desktop_terminal::tests::${test_name} ... ok" "$test_log.normalized" || true)"
+            if [[ "$matches" != 1 ]]; then
+              printf 'Required Windows terminal test did not pass exactly once: %s\n' "$test_name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Verify Windows terminal EOF after accepted input
+        if: matrix.platform == 'win32'
+        shell: bash
+        working-directory: apps/electron
+        run: |
+          set -o pipefail
+          export LINGXI_TERMINAL_TEST_BIN="$GITHUB_WORKSPACE/target/release/bridge-server.exe"
+          test_log="$RUNNER_TEMP/windows-terminal-eof-node.log"
+          node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs \
+            --test --test-reporter=tap \
+            --test-name-pattern='^raw Rust broker (acknowledges real stdin EOF after terminal cleanup|rejects input probe after shell exit)$' \
+            test/terminal-manager.integration.test.ts | tee "$test_log"
+          tr -d '\r' < "$test_log" > "$test_log.normalized"
+          for test_name in \
+            'raw Rust broker acknowledges real stdin EOF after terminal cleanup' \
+            'raw Rust broker rejects input probe after shell exit'; do
+            matches="$(grep -Ec "^ok [0-9]+ - ${test_name}$" "$test_log.normalized" || true)"
+            if [[ "$matches" != 1 ]]; then
+              printf 'Required Windows terminal test did not pass exactly once: %s\n' "$test_name" >&2
+              exit 1
+            fi
+          done
 
       - name: Test Windows Credential Manager storage
         if: matrix.platform == 'win32'
@@ -158,6 +295,57 @@ jobs:
           runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
           cargo test --locked --manifest-path "${runtime_root}/Cargo.toml" -p platform-windows --lib
 
+      - name: Test Windows Local App process ownership
+        if: matrix.platform == 'win32'
+        working-directory: .
+        shell: bash
+        run: |
+          cargo test --locked -p bridge-server --bin bridge-server local_app_process::tests -- --test-threads=1
+          cargo test --locked -p bridge-server --test local_app_process_windows
+
+      - name: Test Linux terminal EOF acknowledgement
+        if: matrix.platform == 'linux'
+        working-directory: .
+        shell: bash
+        run: |
+          set -o pipefail
+          test_log="$RUNNER_TEMP/linux-terminal-eof-test.log"
+          cargo test --locked -p bridge-server --lib desktop_terminal::tests -- --test-threads=1 --color never | tee "$test_log"
+          tr -d '\r' < "$test_log" > "$test_log.normalized"
+          for test_name in \
+            stdin_reader_distinguishes_eof_error_and_receiver_close \
+            eof_ack_requires_confirmed_clean_input_and_not_signal_shutdown \
+            eof_closes_real_terminal; do
+            matches="$(grep -Fxc "test desktop_terminal::tests::${test_name} ... ok" "$test_log.normalized" || true)"
+            if [[ "$matches" != 1 ]]; then
+              printf 'Required Linux terminal test did not pass exactly once: %s\n' "$test_name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Test Windows MCP cancellation and transport cleanup
+        if: matrix.platform == 'win32'
+        working-directory: .
+        shell: bash
+        run: |
+          set -o pipefail
+          test_log="$RUNNER_TEMP/windows-mcp-serve-tests.log"
+          cargo test --locked --all-features -p cli --test mcp_serve windows_ -- --test-threads=1 --color never | tee "$test_log"
+          tr -d '\r' < "$test_log" > "$test_log.normalized"
+          for test_name in \
+            windows_duplicate_call_cancellation_reaps_the_started_process_tree \
+            windows_full_stdout_does_not_block_cancellation_or_eof_cleanup \
+            windows_broken_stdout_cancels_open_stdin_and_reaps_the_running_shell; do
+            if ! grep -Fxq "test ${test_name} ... ok" "$test_log.normalized"; then
+              printf 'Required Windows MCP test did not pass: %s\n' "$test_name" >&2
+              exit 1
+            fi
+          done
+          if ! grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$test_log.normalized"; then
+            printf 'Windows MCP test summary did not report a clean run\n' >&2
+            exit 1
+          fi
+
       - name: Test public Windows file handle operations
         if: matrix.platform == 'win32'
         working-directory: .
@@ -166,11 +354,10 @@ jobs:
           sdk_root="$(python3 scripts/lib/mobile_linux_source.py --root)"
           cargo test --locked --manifest-path "${sdk_root}/Cargo.toml" -p platform-pty --test windows_file_exports
 
-      - name: Build and test shared SDK
+      - name: Test shared SDK
+        if: matrix.platform != 'linux'
         working-directory: packages/bridge-client
-        run: |
-          npm run build
-          npm test
+        run: npm test
 
       - name: Install macOS test search tool
         if: matrix.platform == 'darwin'
@@ -182,7 +369,21 @@ jobs:
 
       - name: Install Linux test search tool and GUI display
         if: matrix.platform == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb ripgrep
+        run: sudo apt-get update && sudo apt-get install -y xvfb ripgrep vim
+
+      - name: Install Java for the Linux RTDB emulator
+        if: matrix.platform == 'linux'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install and check the Linux RTDB test harness
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          python3 -B scripts/tests/test_verify_desktop_test_log.py
+          npm install --prefix "$RUNNER_TEMP/firebase-cli" --no-save --no-audit --no-fund firebase-tools@15.34.0
 
       - name: Typecheck, test, and build Desktop
         shell: bash
@@ -190,16 +391,59 @@ jobs:
         run: |
           npm run typecheck
           if [[ '${{ matrix.platform }}' == 'linux' ]]; then
-            xvfb-run --auto-servernum npm test
+            bash ../../scripts/ci/test_desktop_with_rtdb.sh
           else
             npm test
           fi
           npm run build
 
+      - name: Verify native Windows terminal shell discovery
+        if: matrix.platform == 'win32'
+        shell: bash
+        working-directory: apps/electron
+        run: |
+          set -o pipefail
+          test_log="$RUNNER_TEMP/windows-terminal-node.log"
+          node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs \
+            --test --test-reporter=tap \
+            --test-name-pattern='^Windows shell discovery finds a real file in a cwd-relative PATH$' \
+            test/terminal-manager.test.ts | tee "$test_log"
+          tr -d '\r' < "$test_log" > "$test_log.normalized"
+          matches="$(grep -Ec '^ok [0-9]+ - Windows shell discovery finds a real file in a cwd-relative PATH$' "$test_log.normalized" || true)"
+          if [[ "$matches" != 1 ]]; then
+            printf 'Required native Windows shell discovery test did not pass exactly once\n' >&2
+            exit 1
+          fi
+
+      - name: Save Linux Desktop test evidence
+        if: always() && matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-desktop-integration-evidence
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/lingxi-desktop-test-evidence
+
       - name: Package native Desktop target
         shell: bash
         working-directory: apps/electron
-        run: node scripts/package-desktop.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+        run: |
+          if node scripts/package-desktop.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'; then
+            exit 0
+          else
+            package_result=$?
+          fi
+          if [[ '${{ matrix.platform }}' == 'darwin' ]]; then
+            sidecar="${LINGXI_BRIDGE_SERVER_BIN:-${CARGO_TARGET_DIR:-$GITHUB_WORKSPACE/target}/release/bridge-server}"
+            if [[ -f "$sidecar" ]]; then
+              echo 'Release sidecar signature and build-source path diagnostics:'
+              /usr/bin/codesign --verify --strict "$sidecar" || true
+              /usr/bin/codesign -dv --verbose=2 "$sidecar" 2>&1 || true
+              # Bound diagnostics to source/object filenames under this CI
+              # user; do not print arbitrary neighboring binary strings.
+              /usr/bin/strings "$sidecar" | LC_ALL=C grep -oE '/Users/runner/[A-Za-z0-9_./-]*\.(cpp|hpp|cc|rs|mm|c|h|m|o|a)(:[0-9]+)?' | sort -u | head -30 || true
+            fi
+          fi
+          exit "$package_result"
         env:
           # Explicitly test package layout without pretending an ad-hoc build
           # can access Data Protection Keychain. Release packaging uses the
@@ -214,7 +458,17 @@ jobs:
       - name: Keyless packaged sidecar and cleanup smoke
         shell: bash
         working-directory: apps/electron
-        run: node scripts/packaged-sidecar-smoke.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+        run: |
+          if [[ '${{ matrix.platform }}' == 'darwin' ]]; then
+            for name in "${!DYLD_@}"; do unset "$name"; done
+          fi
+          node scripts/packaged-sidecar-smoke.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+
+      - name: Packaged terminal broker smoke
+        if: matrix.platform == 'linux' || matrix.platform == 'win32'
+        shell: bash
+        working-directory: apps/electron
+        run: node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs scripts/packaged-terminal-smoke.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
 
       - uses: actions/upload-artifact@v4
         with:

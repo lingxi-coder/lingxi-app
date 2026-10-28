@@ -21,10 +21,11 @@ test('terminal IPC validates sender, scope and window attachment without a conne
   const bridge = { registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, get: (id: string) => id === sessionId ? { projectPath: project, connectionState: { status: 'idle' } } : { projectPath: '/another' } };
   const rows = new Map<string, TerminalSnapshot>();
   const input: string[] = [];
+  const creationScopes: TerminalScope[] = [];
   const manager = {
     setOutputPaused() {}, onEvent: () => () => {}, get: (id: string) => rows.get(id),
     list: (owner: TerminalScope) => [...rows.values()].filter(row => row.scope.sessionId === owner.sessionId),
-    create: async (owner: TerminalScope) => { const row: TerminalSnapshot = { id: 'terminal-a', scope: owner, title: 'test', status: 'running', output: '', sequence: 0, exitCode: null }; rows.set(row.id, row); return row; },
+    create: async (owner: TerminalScope) => { creationScopes.push(owner); const row: TerminalSnapshot = { id: 'terminal-a', scope: owner, title: 'test', status: 'running', output: '', sequence: 0, exitCode: null }; rows.set(row.id, row); return row; },
     input: async (_id: string, data: string) => { input.push(data); }, resize: async () => {}, close: async (id: string) => { rows.delete(id); },
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
@@ -37,8 +38,9 @@ test('terminal IPC validates sender, scope and window attachment without a conne
     await assert.rejects(invoke({ kind: 'create', scope }, { ...event, senderFrame: { url: event.senderFrame.url } }), /unauthorized/);
     await assert.rejects(invoke({ kind: 'create', scope: { ...scope, sessionId: '22222222-3333-4444-8555-666666666666' } }), /different project/);
     await assert.rejects(invoke({ kind: 'create', scope: { ...scope, sessionId: '__draft__' } }), /active session/);
-    const terminal = await invoke({ kind: 'create', scope });
+    const terminal = await invoke({ kind: 'create', scope: { ...scope, shellProgram: '/injected', shellLaunchCwd: '/injected' }, shellSelection: true, shellProgram: '/injected', shellLaunchCwd: '/injected' });
     assert.equal(terminal.scope.sessionId, sessionId);
+    assert.deepEqual(creationScopes, [scope], 'renderer-provided shell selection never reaches the terminal manager');
     await assert.rejects(invoke({ kind: 'input', terminalId: terminal.id, data: 'pwd\r' }, second), /not attached/);
     await invoke({ kind: 'input', terminalId: terminal.id, data: 'pwd\r' });
     assert.deepEqual(input, ['pwd\r']);

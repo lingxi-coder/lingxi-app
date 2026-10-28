@@ -125,15 +125,24 @@ async function main() {
       const hit = document.elementFromPoint(Math.round(rect.x + rect.width / 2), Math.round(rect.y + rect.height / 2));
       return hit?.closest('[data-session-id]') === button;
     })()`;
-    const input = async (type, p, extra = {}) => {
+    const sendInput = (type, p, extra = {}) => {
       const event = { type, ...p, ...extra };
       if (type.startsWith('mouse') && Number.isFinite(event.x) && Number.isFinite(event.y)) lastSentMouse = { x: event.x, y: event.y, type };
       traceInput('sendInputEvent', { type, x: event.x, y: event.y, button: event.button, modifiers: event.modifiers });
       window.webContents.sendInputEvent(event);
-      await delay(40);
     };
+    const input = async (type, p, extra = {}) => { sendInput(type, p, extra); await delay(40); };
     const down = p => input('mouseDown', p, { button: 'left', clickCount: 1 });
     const up = p => input('mouseUp', p, { button: 'left', clickCount: 1 });
+    const beginDrag = p => {
+      // Chromium can align a mouse move to a delayed frame. Send a Shift key
+      // stroke after the real move to flush that queue before the 500 ms hold
+      // timer can turn this drag into a long press on a saturated CI runner.
+      sendInput('mouseDown', p, { button: 'left', clickCount: 1 });
+      sendInput('mouseMove', { x: p.x + 12, y: p.y }, { button: 'left', modifiers: ['leftButtonDown'] });
+      sendInput('keyDown', {}, { keyCode: 'Shift', modifiers: ['leftButtonDown'] });
+      sendInput('keyUp', {}, { keyCode: 'Shift', modifiers: ['leftButtonDown'] });
+    };
     const click = async id => { await wait(hitTargetExpression(id)); const p = await point(id); await input('mouseMove', p); await down(p); await up(p); };
     const opened = () => run('window.sessionGesturesFixture.opened');
     await wait(`Boolean(${selector('gamma')})`);
@@ -193,11 +202,13 @@ async function main() {
     await wait(visibleHitTargetExpression('gamma'));
     alpha = await point('alpha');
     const gamma = await point('gamma');
+    const projectSessionOrder = `[...document.querySelectorAll('[data-session-project-path="/fixture"]')].map(button => button.dataset.sessionId)`;
+    assert.deepEqual(await run(projectSessionOrder), ['alpha', 'beta', 'gamma'], 'drag starts in updated order');
     await input('mouseMove', gamma);
     await wait(hitTargetExpression('gamma'));
-    await down(gamma);
-    await input('mouseMove', { x: gamma.x + 12, y: gamma.y }, { button: 'left', modifiers: ['leftButtonDown'] });
+    beginDrag(gamma);
     await wait(`${selector('gamma')}.closest('.sidebar-tree-row')?.dataset.dragging === 'true'`);
+    assert.equal(await run(`Boolean(document.querySelector('[role="menu"][aria-label="Actions for gamma"]'))`), false, 'drag activation does not open the long-press menu');
     // The feedback marks the source during initialization; the sensor accepts
     // moves only after the renderer completes that phase. Advance rendered
     // frames before sending the destination move instead of racing activation.
@@ -210,7 +221,10 @@ async function main() {
     })()`);
     assert.equal(alphaHit.sessionId, 'alpha', `drag pointer did not resolve to alpha: ${JSON.stringify(alphaHit)}`);
     await input('mouseMove', alpha, { button: 'left', modifiers: ['leftButtonDown'] });
-    await wait(`Array.from(document.querySelectorAll('.sidebar-tree-row')).some(row => row.dataset.dragTarget === 'true')`);
+    // The source is already a drop target on activation. Wait for the actual
+    // sortable preview to reach alpha before releasing; otherwise a delayed
+    // mouseMove can arrive together with mouseUp and drop on the source.
+    await wait(`JSON.stringify(${projectSessionOrder}) === JSON.stringify(['gamma', 'alpha', 'beta']) && ${selector('gamma')}.closest('.sidebar-tree-row')?.dataset.dragTarget === 'true'`);
     const dropIndicators = await run(`Array.from(document.querySelectorAll('.sidebar-tree-row[data-drag-target="true"] [data-session-id]')).map(button => button.dataset.sessionId)`);
     assert.deepEqual(dropIndicators, ['gamma'], 'the sortable placeholder marks the dragged item at its preview position');
     await up(alpha);
@@ -220,16 +234,52 @@ async function main() {
     const preferences = await run('window.sessionGesturesFixture.preferences[0]');
     assert.equal(preferences.chatSort, 'manual', 'drag automatically selects manual sorting');
     assert.deepEqual(preferences.manualSessionOrder['/fixture'], ['gamma', 'alpha', 'beta']);
-    assert.deepEqual(await run(`[...document.querySelectorAll('[data-session-project-path="/fixture"]')].map(button => button.dataset.sessionId)`), ['gamma', 'alpha', 'beta'], 'DOM follows saved order');
+    assert.deepEqual(await run(projectSessionOrder), ['gamma', 'alpha', 'beta'], 'DOM follows saved order');
+    await wait(`typeof window.sessionGesturesFixture.finishTouch === 'function'`);
+    await run(`window.sessionGesturesFixture.finishTouch()`);
+    await wait(`window.sessionGesturesFixture.sessions.find(session => session.uuid === 'gamma')?.modified_rfc3339 === '2026-09-23T00:00:00Z'`);
     assert.equal(await run(`window.sessionGesturesFixture.sessions.find(session => session.uuid === 'gamma').modified_rfc3339`), '2026-09-23T00:00:00Z', 'drag updates session timestamp');
     assert.deepEqual(await opened(), ['alpha'], 'drag does not open a session');
     await click('gamma');
     assert.deepEqual(await opened(), ['alpha', 'gamma'], 'click works immediately after drag');
+    await focusForInput('gamma same-row drag');
+    // The first drag animates rows into their new positions. Their visible
+    // bounds can overlap until the sortable animations finish, so a new
+    // center-point press may otherwise hit a different row.
+    await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    await wait(`Array.from(document.querySelectorAll('.sidebar-session-row[data-session-reorderable="true"]')).every(row => row.getAnimations().every(animation => animation.playState === 'finished' || animation.playState === 'idle'))`);
+    await wait(hitTargetExpression('gamma'));
     const currentGamma = await point('gamma');
-    await down(currentGamma);
-    await input('mouseMove', { x: currentGamma.x + 12, y: currentGamma.y }, { button: 'left', modifiers: ['leftButtonDown'] });
+    await input('mouseMove', currentGamma);
+    await run(`(() => {
+      window.fixtureSameRowDown = null;
+      window.fixtureSameRowMove = null;
+      window.fixtureSameRowKeys = [];
+      document.addEventListener('pointerdown', event => {
+        window.fixtureSameRowDown = { trusted: event.isTrusted, sessionId: event.target instanceof Element ? event.target.closest('[data-session-id]')?.dataset.sessionId ?? null : null };
+      }, { capture: true, once: true });
+      document.addEventListener('pointermove', function recordMove(event) {
+        if (event.buttons !== 1 || event.clientX !== ${currentGamma.x + 12} || event.clientY !== ${currentGamma.y}) return;
+        window.fixtureSameRowMove = { trusted: event.isTrusted, sessionId: event.target instanceof Element ? event.target.closest('[data-session-id]')?.dataset.sessionId ?? null : null };
+        document.removeEventListener('pointermove', recordMove, true);
+      }, true);
+      for (const type of ['keydown', 'keyup']) document.addEventListener(type, event => {
+        window.fixtureSameRowKeys.push({ type: event.type, key: event.key, trusted: event.isTrusted });
+      }, { capture: true, once: true });
+    })()`);
+    beginDrag(currentGamma);
+    await wait('Boolean(window.fixtureSameRowDown && window.fixtureSameRowMove && window.fixtureSameRowKeys.length === 2)');
+    assert.deepEqual(await run('window.fixtureSameRowDown'), { trusted: true, sessionId: 'gamma' }, 'same-row drag starts on gamma');
+    assert.deepEqual(await run('window.fixtureSameRowMove'), { trusted: true, sessionId: 'gamma' }, 'same-row drag moves the captured pointer');
+    assert.deepEqual(await run('window.fixtureSameRowKeys'), [{ type: 'keydown', key: 'Shift', trusted: true }, { type: 'keyup', key: 'Shift', trusted: true }], 'drag input queue is flushed by a real key stroke');
+    await wait(`${selector('gamma')}.closest('.sidebar-tree-row')?.dataset.dragging === 'true' && ${selector('gamma')}.closest('.sidebar-tree-row')?.dataset.dragTarget === 'true' && JSON.stringify(${projectSessionOrder}) === JSON.stringify(['gamma', 'alpha', 'beta'])`);
+    assert.equal(await run(`Boolean(document.querySelector('[role="menu"][aria-label="Actions for gamma"]'))`), false, 'same-row drag does not open the long-press menu');
     await up({ x: currentGamma.x + 12, y: currentGamma.y });
+    await wait(`!document.querySelector('.sidebar-session-row[data-dragging="true"]')`);
+    await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     assert.equal(await run('window.sessionGesturesFixture.preferences.length'), 1, 'same-row drag does not persist an order');
+    assert.deepEqual(await run('window.sessionGesturesFixture.touched'), ['gamma'], 'same-row drag does not touch the session');
+    assert.deepEqual(await run(projectSessionOrder), ['gamma', 'alpha', 'beta'], 'same-row drag keeps the saved order');
     await click('gamma');
     assert.deepEqual(await opened(), ['alpha', 'gamma', 'gamma']);
     await focusForInput('pinned session long press');
@@ -263,6 +313,12 @@ async function main() {
     await focusForInput('click after cancellation');
     await click('gamma');
     assert.equal((await opened()).length, opensBeforeClick + 1, 'new click works after cancellation');
+    // Optimistic sorting moves the live DOM during dragover. Recreate the
+    // sidebar from the saved preferences with a newer alpha, so neither that
+    // preview nor the updated timestamp order can satisfy this assertion.
+    await run(`window.gestureBeforeRemount = ${selector('gamma')}; window.sessionGesturesFixture.remountWithNewerAlpha()`);
+    await wait(`window.sessionGesturesFixture.sessions.find(session => session.uuid === 'alpha')?.modified_rfc3339 === '2026-09-24T00:00:00Z' && Boolean(${selector('gamma')}) && ${selector('gamma')} !== window.gestureBeforeRemount`);
+    assert.deepEqual(await run(projectSessionOrder), ['gamma', 'alpha', 'beta'], 'manual order survives a sidebar remount when updated order differs');
     process.stdout.write(`${JSON.stringify({ passed: true })}\n`);
   } finally { window.destroy(); app.quit(); }
 }

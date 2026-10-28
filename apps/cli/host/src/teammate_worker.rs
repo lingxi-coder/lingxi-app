@@ -629,6 +629,8 @@ mod unix {
                 .is_some_and(|status| matches!(status, "Idle" | "AwaitingMessage"))
         {
             "idle".into()
+        } else if task == tasks::state::TaskStatus::ExitedUnknown {
+            "exited_unknown".into()
         } else {
             format!("{task:?}").to_lowercase()
         }
@@ -918,6 +920,10 @@ mod unix {
             assert_eq!(
                 reported_status(tasks::state::TaskStatus::Failed, Some(&idle)),
                 "failed"
+            );
+            assert_eq!(
+                reported_status(tasks::state::TaskStatus::ExitedUnknown, Some(&idle)),
+                "exited_unknown"
             );
             assert_eq!(
                 reported_status(

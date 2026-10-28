@@ -71,6 +71,7 @@ async fn custom_compact_turn_releases_admission_before_starting_turn() {
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
         connection.dispatch(ClientCommand::RunSlashCommand {
+            session_id: None,
             raw: "/compact custom prompt".into(),
             images: Vec::new(),
             turn_id: Some(18),
@@ -114,6 +115,7 @@ async fn compact_cannot_enter_during_transient_idle_handoff() {
         let command = || {
             if slash {
                 ClientCommand::RunSlashCommand {
+                    session_id: None,
                     raw: "/compact preserve decisions".into(),
                     images: Vec::new(),
                     turn_id: Some(17),

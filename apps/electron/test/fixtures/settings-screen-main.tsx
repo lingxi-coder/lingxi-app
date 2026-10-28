@@ -368,7 +368,7 @@ function Fixture() {
       // standard workaround.
       setFieldValue: (selector: string, value: string) => {
         const field = document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null;
-        if (!field) return;
+        if (!field) throw new Error(`Missing settings fixture field: ${selector}`);
         const proto = field.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
         setter?.call(field, value);

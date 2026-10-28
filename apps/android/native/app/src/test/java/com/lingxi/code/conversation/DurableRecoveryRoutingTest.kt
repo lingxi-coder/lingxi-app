@@ -87,7 +87,7 @@ class DurableRecoveryRoutingTest {
     }
 
     @Test
-    fun anAcceptedDiscardThatIsNeverConfirmedStopsBlockingTheComposer() = runTest(dispatcher) {
+    fun anAcceptedDiscardThatIsNeverConfirmedRemainsBlockedAndCanBeRetried() = runTest(dispatcher) {
         val ids = mutableListOf<Int>()
         val source = ParkedTurnSource()
         val vm = parkedViewModel(source, ids)
@@ -107,18 +107,15 @@ class DurableRecoveryRoutingTest {
         advanceTimeBy(ChatViewModel.DISCARD_CONFIRMATION_TIMEOUT_MS + 1)
         advanceUntilIdle()
 
-        assertFalse(
-            "the composer must not stay blocked on a confirmation the host never sends",
-            vm.state.value.durableRecoveryBlocked,
-        )
+        assertTrue(vm.state.value.durableRecoveryBlocked)
         assertNotNull(vm.state.value.error)
         assertTrue(
-            "the release must be explained with chat_error_discard_unconfirmed: $ids",
+            "the unconfirmed discard must be explained: $ids",
             ids.contains(R.string.chat_error_discard_unconfirmed),
         )
-        vm.send("now unblocked")
+        vm.cancel()
         runCurrent()
-        assertEquals(listOf("now unblocked"), source.submitted)
+        assertEquals(listOf(93L, 93L), source.discarded)
     }
 
     @Test
@@ -142,6 +139,30 @@ class DurableRecoveryRoutingTest {
             vm.state.value.error,
         )
         assertFalse(ids.contains(R.string.chat_error_discard_unconfirmed))
+    }
+
+    @Test
+    fun cancelledRecoveryCannotBeReopenedByAnOlderOrConflictingPause() = runTest(dispatcher) {
+        val source = ParkedTurnSource()
+        val vm = parkedViewModel(source, mutableListOf())
+        vm.cancel()
+        runCurrent()
+        val terminal = snapshot(TurnRecoveryStateDto.CANCELLED)
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal))
+        val settled = vm.state.value
+        assertFalse(settled.durableRecoveryBlocked)
+
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(
+            snapshot(TurnRecoveryStateDto.PAUSED_RECOVERABLE),
+        ))
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(
+            snapshot(TurnRecoveryStateDto.PAUSED_RECOVERABLE).copy(revision = terminal.revision),
+        ))
+        assertFalse(vm.state.value.durableRecoveryBlocked)
+        assertEquals(settled.statusLine, vm.state.value.statusLine)
+        vm.send("after terminal")
+        runCurrent()
+        assertEquals(listOf("after terminal"), source.submitted)
     }
 
     @Test
@@ -264,6 +285,7 @@ class DurableRecoveryRoutingTest {
         )
 
         // AttachTurn: terminal state first ...
+        vm.noteDurableAttach("session-a", 93L, true)
         vm.reduceClientEvent(
             ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.COMPLETED)),
         )
@@ -313,11 +335,13 @@ class DurableRecoveryRoutingTest {
         vm.applyActivatedSession(
             ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
         )
+        vm.noteDurableAttach("session-a", 93L, true)
         // Attach's snapshot arms the recovered token; ResumeTurn's repeat is what
         // marks the checkpoint inactive-and-parked.
         vm.reduceClientEvent(
             ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.WAITING_FOR_USER)),
         )
+        vm.finishDurableAttachReplay(ConversationDelivery.AttachReplayEnded("session-a", 93L, true))
         vm.reduceClientEvent(
             ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.WAITING_FOR_USER)),
         )
@@ -328,10 +352,14 @@ class DurableRecoveryRoutingTest {
     private fun snapshot(state: TurnRecoveryStateDto) = TurnRecoverySnapshotDto(
         sessionId = "session-a",
         turnId = 93u,
+        revision = if (state in setOf(
+            TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED,
+        )) 2uL else 1uL,
         state = state,
         firstSequence = 0u,
         lastSequence = 1u,
         safeToResume = false,
+        projectionUncertain= false,
         reason = null,
     )
 

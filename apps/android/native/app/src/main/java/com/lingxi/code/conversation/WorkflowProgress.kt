@@ -223,6 +223,7 @@ internal fun TaskStatusDto.isActivelyExecutingWorkflow(): Boolean = when (this) 
     TaskStatusDto.COMPLETED,
     TaskStatusDto.FAILED,
     TaskStatusDto.CANCELLED,
+    TaskStatusDto.EXITED_UNKNOWN,
     -> false
 }
 

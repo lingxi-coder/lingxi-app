@@ -11,6 +11,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 
 sys.dont_write_bytecode = True
 from gstreamer_sdk import SetupError, _require_runner_temp_root, _run_pkg_config, download_artifact, export_environment, load_lock, safe_extract_tar  # noqa: E402
@@ -59,7 +60,11 @@ MESON_OPTIONS = (
 )
 
 
-def build_identity(lock: dict) -> str:
+def meson_options(static_plugins: bool) -> tuple[str, ...]:
+    return (*MESON_OPTIONS, *(["--default-library=both"] if static_plugins else []))
+
+
+def build_identity(lock: dict, static_plugins: bool = False) -> str:
     builder_digest = hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()
     sdk_helper = pathlib.Path(__file__).with_name("gstreamer_sdk.py")
     sdk_helper_digest = hashlib.sha256(sdk_helper.read_bytes()).hexdigest()
@@ -74,7 +79,8 @@ def build_identity(lock: dict) -> str:
         f"meson-requirements={requirements_digest}",
         "build-platform=ubuntu-22.04-x86_64",
         f"libdir={LIBDIR}",
-        *MESON_OPTIONS,
+        f"static-plugins={static_plugins}",
+        *meson_options(static_plugins),
     ]
     return hashlib.sha256("\n".join(values).encode("utf-8")).hexdigest()[:24]
 
@@ -119,7 +125,15 @@ def _copy_source_notices(source_root: pathlib.Path, prefix: pathlib.Path) -> Non
             shutil.copy2(source, destination)
 
 
-def _validate_prefix(prefix: pathlib.Path, version: str) -> None:
+def _remove_static_core_archives(prefix: pathlib.Path) -> None:
+    # The Rust plugin probe requests --static and links every non-system .a it
+    # finds. Keep the plugins static, but bind their GStreamer core dependencies
+    # to the same shared libraries used by the Rust GStreamer crates.
+    for archive in (prefix / LIBDIR).glob("*.a"):
+        archive.unlink()
+
+
+def _validate_prefix(prefix: pathlib.Path, version: str, static_plugins: bool = False) -> None:
     library_dir = prefix / LIBDIR
     pkgconfig_dir = library_dir / "pkgconfig"
     plugin_dir = library_dir / "gstreamer-1.0"
@@ -131,28 +145,74 @@ def _validate_prefix(prefix: pathlib.Path, version: str) -> None:
     missing = [f"libgst{name}.so" for name in PLUGIN_NAMES if not (plugin_dir / f"libgst{name}.so").is_file()]
     if missing:
         raise SetupError(f"GStreamer source build is missing required plugins: {missing}")
+    plugin_pkgconfig_dir = plugin_dir / "pkgconfig"
+    if static_plugins:
+        core_archives = sorted(path.name for path in library_dir.glob("*.a"))
+        if core_archives:
+            raise SetupError(f"static core archives would cause mixed GStreamer linking: {core_archives}")
+        missing = [
+            path.name
+            for name in PLUGIN_NAMES
+            for path in (plugin_dir / f"libgst{name}.a", plugin_pkgconfig_dir / f"gst{name}.pc")
+            if not path.is_file()
+        ]
+        if missing:
+            raise SetupError(f"GStreamer source build is missing static plugins or metadata: {missing}")
     pkg_config = _require_system_tool("pkg-config")
     system_pc_dirs = (
         "/usr/lib/x86_64-linux-gnu/pkgconfig",
         "/usr/lib/pkgconfig",
         "/usr/share/pkgconfig",
     )
-    pkg_config_libdir = os.pathsep.join(
-        (str(pkgconfig_dir), *(path for path in system_pc_dirs if pathlib.Path(path).is_dir()))
-    )
+    sdk_pc_dirs = [str(pkgconfig_dir)]
+    if static_plugins:
+        sdk_pc_dirs.append(str(plugin_pkgconfig_dir))
+    pkg_config_libdir = os.pathsep.join((*sdk_pc_dirs, *(path for path in system_pc_dirs if pathlib.Path(path).is_dir())))
     _run_pkg_config(
         pkg_config,
         pkg_config_libdir,
         expected_plugins=tuple(f"libgst{name}.so" for name in PLUGIN_NAMES),
         expected_version=version,
     )
+    if static_plugins:
+        environment = dict(os.environ, PKG_CONFIG_PATH="", PKG_CONFIG_LIBDIR=pkg_config_libdir)
+        for name in PLUGIN_NAMES:
+            module = f"gst{name}"
+            pc_dir = subprocess.run(
+                [pkg_config, "--variable=pcfiledir", module], env=environment,
+                text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            if pathlib.Path(pc_dir).resolve() != plugin_pkgconfig_dir.resolve():
+                raise SetupError(f"static {module} metadata resolved outside the pinned SDK: {pc_dir}")
+            subprocess.run([pkg_config, "--static", "--libs", module], env=environment, check=True,
+                           stdout=subprocess.DEVNULL)
     if not (prefix / "share/licenses/GStreamer-1.28.8").is_dir():
         raise SetupError("GStreamer source license notices were not staged into the SDK prefix")
 
 
-def _environment(prefix: pathlib.Path) -> dict[str, str]:
+def source_sdk_environment(prefix: pathlib.Path) -> dict[str, str]:
+    """Return the source SDK export shared with consumers of this build."""
+    return {
+        "LINGXI_GSTREAMER_SDK_LINUX_SOURCE": str(prefix),
+    }
+
+
+def source_sdk_prefix(environment: Mapping[str, str]) -> str | None:
+    """Read the source SDK export without maintaining a second environment key."""
+    name, = source_sdk_environment(pathlib.Path())
+    return environment.get(name)
+
+
+def source_sdk_marker(output: pathlib.Path) -> pathlib.Path:
+    """Locate the identity marker written by the source SDK builder."""
+    marker = output / ".lingxi-gstreamer-linux-source-sdk"
+    return marker
+
+
+def _environment(prefix: pathlib.Path, static_plugins: bool = False) -> dict[str, str]:
     library_dir = prefix / LIBDIR
     pkgconfig_dir = library_dir / "pkgconfig"
+    plugin_pkgconfig_dir = library_dir / "gstreamer-1.0/pkgconfig"
     current_loader_path = os.environ.get("LD_LIBRARY_PATH", "")
     loader_path = str(library_dir)
     if current_loader_path:
@@ -162,25 +222,36 @@ def _environment(prefix: pathlib.Path) -> dict[str, str]:
         "/usr/lib/pkgconfig",
         "/usr/share/pkgconfig",
     )
-    pkg_config_libdir = os.pathsep.join(
-        (str(pkgconfig_dir), *(path for path in system_pc_dirs if pathlib.Path(path).is_dir()))
-    )
-    return {
-        "LINGXI_GSTREAMER_SDK_LINUX_SOURCE": str(prefix),
-        "PKG_CONFIG_PATH": str(pkgconfig_dir),
+    sdk_pc_dirs = [str(pkgconfig_dir)]
+    if static_plugins:
+        sdk_pc_dirs.append(str(plugin_pkgconfig_dir))
+    pkg_config_path = os.pathsep.join(sdk_pc_dirs)
+    pkg_config_libdir = os.pathsep.join((*sdk_pc_dirs, *(path for path in system_pc_dirs if pathlib.Path(path).is_dir())))
+    environment = {
+        **source_sdk_environment(prefix),
+        "PKG_CONFIG_PATH": pkg_config_path,
         "PKG_CONFIG_LIBDIR": pkg_config_libdir,
         "LD_LIBRARY_PATH": loader_path,
     }
+    if static_plugins:
+        # This SDK also retains shared plugin files for distribution checks.
+        # Static test binaries register those same plugins themselves; letting
+        # GStreamer discover the shared copies registers duplicate GObject types.
+        for suffix in ("", "_1_0"):
+            environment[f"GST_PLUGIN_PATH{suffix}"] = ""
+            environment[f"GST_PLUGIN_SYSTEM_PATH{suffix}"] = ""
+            environment[f"GST_REGISTRY{suffix}"] = str(prefix / "static-plugin-registry.bin")
+    return environment
 
 
-def _build_sdk(root: pathlib.Path, lock: dict) -> pathlib.Path:
-    identity = build_identity(lock)
+def _build_sdk(root: pathlib.Path, lock: dict, static_plugins: bool = False) -> pathlib.Path:
+    identity = build_identity(lock, static_plugins)
     output = root / f"gstreamer-1.28.8-{identity}"
-    marker = output / ".lingxi-gstreamer-linux-source-sdk"
+    marker = source_sdk_marker(output)
     prefix = output / "prefix"
     if output.exists():
         if marker.is_file() and marker.read_text(encoding="ascii").strip() == identity:
-            _validate_prefix(prefix, lock["version"])
+            _validate_prefix(prefix, lock["version"], static_plugins)
             return prefix
         raise SetupError(f"Linux GStreamer source build directory is incomplete or stale: {output}")
 
@@ -215,13 +286,15 @@ def _build_sdk(root: pathlib.Path, lock: dict) -> pathlib.Path:
         f"--libdir={LIBDIR}",
         "--buildtype=release",
         "--wrap-mode=nodownload",
-        *MESON_OPTIONS,
+        *meson_options(static_plugins),
     ]
     subprocess.run(configure, check=True)
     subprocess.run([*meson, "compile", "-C", str(build_dir), "--jobs", "2"], check=True)
     subprocess.run([*meson, "install", "-C", str(build_dir)], check=True)
     _copy_source_notices(source_root, prefix)
-    _validate_prefix(prefix, lock["version"])
+    if static_plugins:
+        _remove_static_core_archives(prefix)
+    _validate_prefix(prefix, lock["version"], static_plugins)
     # Keep only the verified runtime SDK in the Actions cache.
     shutil.rmtree(build_dir)
     shutil.rmtree(source_stage)
@@ -233,18 +306,19 @@ def _build_sdk(root: pathlib.Path, lock: dict) -> pathlib.Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=pathlib.Path, required=True)
+    parser.add_argument("--static-plugins", action="store_true", help="also build and validate static plugin archives for all-features tests")
     args = parser.parse_args()
     root = _require_runner_temp_root(args.root)
     lock = load_lock()
     if not sys.platform.startswith("linux") or platform.machine() != "x86_64":
         raise SetupError("the pinned Linux SDK build currently targets x86_64 Linux CI")
     root.mkdir(parents=True, exist_ok=True)
-    prefix = _build_sdk(root, lock)
+    prefix = _build_sdk(root, lock, args.static_plugins)
     shutil.rmtree(root / "downloads", ignore_errors=True)
-    values = _environment(prefix)
+    values = _environment(prefix, args.static_plugins)
     # Confirm pkg-config selects the built SDK in this step before exporting it.
     os.environ.update(values)
-    _validate_prefix(prefix, lock["version"])
+    _validate_prefix(prefix, lock["version"], args.static_plugins)
     export_environment(values)
 
 

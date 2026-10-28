@@ -53,6 +53,7 @@ import {
 import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
 import { stageCrashlytics, signCrashlytics } from './desktop-crashlytics.mjs';
 import { prepareMacGStreamerRuntime, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { buildFreshBridgeClient } from './bridge-client-dist.mjs';
 
 function log(message) {
   process.stdout.write(`[package:mac] ${message}\n`);
@@ -224,7 +225,10 @@ async function main() {
     );
   }
 
-  run('npm', ['run', 'build'], join(repoRoot, 'packages', 'bridge-client'));
+  const sharedSdkRoot = join(repoRoot, 'packages', 'bridge-client');
+  const sharedSdkName = readJson(join(sharedSdkRoot, 'package.json')).name;
+  buildFreshBridgeClient(sharedSdkRoot, join(packageRoot, 'node_modules', ...sharedSdkName.split('/')),
+    () => run('npm', ['run', 'build'], sharedSdkRoot));
   run('npm', ['run', 'build'], packageRoot);
 
   resetMacPackageArtifacts(paths);

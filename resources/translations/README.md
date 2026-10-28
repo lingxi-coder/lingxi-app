@@ -71,7 +71,7 @@ Android call sites). Grep before inventing a new key.
   block; its `app_name` comes from the top-level key.
 - `app_name`: zh-Hans/zh-Hant/ja/ko = "灵犀" (kept as the Chinese name
   across every locale by design — this is not a translation gap), en =
-  "Lingxi".
+  "LingXi".
 
 ### Placeholders — the two conventions are platform-specific, not interchangeable
 

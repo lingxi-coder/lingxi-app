@@ -83,7 +83,7 @@ async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_
 test('all settings pages fit macOS windows and name their switches', async () => {
   for (const theme of ['light', 'dark']) {
     const states = await runScenario('macos-audit', theme);
-    assert.equal(states.length, 38);
+    assert.equal(states.length, 40);
     assert.deepEqual(states.filter(state => state.overflow || state.bottomOverflow || state.unnamedSwitches || state.placeholder), [], `${theme}: layout or accessible names`);
   }
 });
@@ -412,7 +412,7 @@ test('provider region saves a layer and applies only through reconnect', async (
 test('Plugins, MCP and Skills share settings chrome while preserving catalogs, drafts and responsive layout', async () => {
   for (const theme of ['light', 'dark']) {
     const { baseline, shell, beforeConfirm, afterConfirm, ...checks } = await runScenario('customize', theme);
-    for (const [name, passed] of Object.entries(checks)) assert.equal(passed, true, `${theme}: ${name}`);
+    assert.deepEqual(Object.entries(checks).filter(([, passed]) => !passed).map(([name]) => name), [], `${theme}: failed checks`);
     for (const [page, state] of Object.entries(shell)) {
       const context = `${theme}: ${page}`;
       assert.deepEqual(state.geometry, baseline.geometry, `${context}: sidebar, insets, title and navigation match General`);

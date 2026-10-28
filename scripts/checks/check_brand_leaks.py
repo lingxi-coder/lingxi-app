@@ -47,7 +47,7 @@
   * 每条规则「至少能开火一次」由本文件的 `--selftest` 在合成树上兜底 ——
     它不依赖真实仓库恰好含有某类内容，所以「绿」不会与「探针根本没跑」混淆。
 
-本门自身的三个产出物（引擎源码、baseline、frozen 清单）被排除在扫描之外
+本门自身的产出物（引擎源码、baseline、frozen 与审核来源清单）被排除在扫描之外
 （见 SELF_ARTIFACTS）。这不是降噪，是正确性：引擎源码里的品牌 token 是
 needle 定义本身，不是泄漏；baseline 的内容按定义就是品牌 token 命中的列表；
 frozen 清单存在的意义就是逐字写出那些标识符。更关键的是，若不排除
@@ -62,6 +62,8 @@ baseline 会移动那些行号，下一次扫描又会得到不同的自我引�
 两次（一次是本门自身的测试文件），下一个人不该再摔第三次。
 """
 import argparse
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -351,6 +353,7 @@ EXCLUDED_PREFIXES = (
 #                                 命中源，而重写它又会移动那些命中的行号，
 #                                 自扫描没有不动点，门永远无法收敛到绿。
 #   brand_frozen_identities.txt  frozen 清单，逐字写出标识符正是它的本职。
+#   brand_reviewed_sources.json 精确审核记录，保存被审核规则及命中行摘要。
 #   accepted_divergences.json    同一形状的第四份：它逐条记录「上游用
 #                                 CLAUDE.md / ~/.claude，本端口用自己的」这类
 #                                 决定，而要写清楚一条 divergence 就必须把两边
@@ -360,6 +363,7 @@ SELF_ARTIFACTS = frozenset({
     "scripts/checks/check_brand_leaks.py",
     "scripts/checks/brand_leak_baseline.txt",
     "scripts/checks/brand_frozen_identities.txt",
+    "scripts/checks/brand_reviewed_sources.json",
     "crates/test-harness/src/parity/fixtures/accepted_divergences.json",
 })
 
@@ -667,10 +671,137 @@ def scan(root, exempt=None):
     return findings
 
 
+REVIEWED_SOURCES = "scripts/checks/brand_reviewed_sources.json"
+
+
+class ReviewedSourceError(ValueError):
+    """A reviewed source, its exact findings, or its receipt has changed."""
+
+
+def apply_reviewed_sources(root, findings, registry_path=None):
+    """Remove only reviewed findings from individually named files.
+
+    A receipt records the exact count and digest of the matched source lines
+    per rule and needle. Changed or extra occurrences require a new review;
+    unrelated edits and line movement do not invalidate it. Another file,
+    rule, or needle is never covered by the receipt.
+    """
+    registry_path = registry_path or os.path.join(root, REVIEWED_SOURCES)
+    try:
+        with open(registry_path, encoding="utf-8") as fh:
+            registry = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ReviewedSourceError(f"cannot read reviewed sources: {exc}") from exc
+    if not isinstance(registry, dict) or registry.get("version") != 1 or not isinstance(registry.get("entries"), list):
+        raise ReviewedSourceError("invalid reviewed source registry")
+    approved, seen_paths, seen_keys = set(), set(), set()
+    root_real = os.path.realpath(root)
+    for entry in registry["entries"]:
+        if not isinstance(entry, dict):
+            raise ReviewedSourceError("reviewed source entry must be an object")
+        rel = entry.get("path")
+        reason = entry.get("reason")
+        records = entry.get("findings")
+        if (not isinstance(rel, str) or not rel or os.path.isabs(rel) or "\\" in rel
+                or ".." in rel.split("/") or rel in seen_paths
+                or not isinstance(reason, str) or not reason.strip()
+                or not isinstance(records, list) or not records):
+            raise ReviewedSourceError(f"invalid reviewed source entry: {rel!r}")
+        seen_paths.add(rel)
+        target = os.path.realpath(os.path.join(root_real, rel))
+        if os.path.commonpath((root_real, target)) != root_real:
+            raise ReviewedSourceError(f"reviewed source escapes root: {rel}")
+        try:
+            with open(target, encoding="utf-8") as fh:
+                content = fh.read()
+        except (OSError, UnicodeError) as exc:
+            raise ReviewedSourceError(f"cannot read reviewed source {rel}: {exc}") from exc
+        lines = text_lines(content)
+        for record in records:
+            if not isinstance(record, dict):
+                raise ReviewedSourceError(f"invalid reviewed finding in {rel}")
+            rule, needle, count = record.get("rule"), record.get("needle"), record.get("count")
+            digest = record.get("line_sha256")
+            key = (rel, rule, needle)
+            if (not isinstance(rule, str) or rule not in {"G1", "G2", "G3", "G7"} or not isinstance(needle, str)
+                    or not needle or type(count) is not int or count <= 0
+                    or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                    or key in seen_keys):
+                raise ReviewedSourceError(f"invalid reviewed finding {key!r}")
+            seen_keys.add(key)
+            matches = {f for f in findings if (f[1], f[0], f[3]) == key}
+            if len(matches) != count:
+                raise ReviewedSourceError(f"reviewed finding drift in {rel}: {rule} {needle!r}; expected {count}, got {len(matches)}")
+            if reviewed_line_digest(lines, matches) != digest:
+                raise ReviewedSourceError(f"reviewed lines changed in {rel}: {rule} {needle!r}")
+            approved.update(matches)
+    return findings - approved
+
+
+def reviewed_line_digest(lines, matches):
+    """Hash a sorted multiset of matched lines so moving a line is harmless."""
+    hashes = sorted(hashlib.sha256(lines[f[2] - 1].encode("utf-8")).hexdigest() for f in matches)
+    return hashlib.sha256(("\n".join(hashes) + "\n").encode("ascii")).hexdigest()
+
+
+def selftest_reviewed_sources(root, findings):
+    """Check receipts cannot exempt other rules, files, or altered sources."""
+    rel = "crates/st/g3.rs"
+    marker = next(f for f in findings if f[0] == "G3" and f[1] == rel)
+    target = os.path.join(root, rel)
+    with open(target, encoding="utf-8") as fh:
+        source = fh.read()
+    receipt = {"version": 1, "entries": [{
+        "path": rel, "reason": "Synthetic reviewed identity for the self-test",
+        "findings": [{"rule": marker[0], "needle": marker[3], "count": 1,
+                      "line_sha256": reviewed_line_digest(text_lines(source), {marker})}],
+    }]}
+    receipt_path = os.path.join(root, "reviewed-selftest.json")
+    with open(receipt_path, "w", encoding="utf-8") as fh:
+        json.dump(receipt, fh)
+    extra = ("G1", rel, 10000, "unreviewed-needle")
+    sibling = ("G3", "crates/st/other.rs", 1, marker[3])
+    remaining = apply_reviewed_sources(root, findings | {extra, sibling}, receipt_path)
+    if marker in remaining or extra not in remaining or sibling not in remaining:
+        raise AssertionError("reviewed source exemption escaped its exact finding")
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(source + "// changed after review\n")
+    apply_reviewed_sources(root, findings, receipt_path)
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write("\n" + source)
+    moved = {(rule, name, line + (name == rel), needle) for rule, name, line, needle in findings}
+    remaining = apply_reviewed_sources(root, moved, receipt_path)
+    if (marker[0], rel, marker[2] + 1, marker[3]) in remaining:
+        raise AssertionError("moving a reviewed source line changed its approval")
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(source.replace(".lingxi/state", ".lingxi/changed"))
+    try:
+        try:
+            apply_reviewed_sources(root, findings, receipt_path)
+        except ReviewedSourceError:
+            pass
+        else:
+            raise AssertionError("changed reviewed line was accepted")
+    finally:
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(source)
+    try:
+        apply_reviewed_sources(root, findings | {(marker[0], rel, 10000, marker[3])}, receipt_path)
+    except ReviewedSourceError:
+        pass
+    else:
+        raise AssertionError("an extra occurrence of a reviewed finding was accepted")
+
+
 BRANDING_LIB = "crates/branding/src/lib.rs"
-BRANDING_CONST = re.compile(r"^pub const ([A-Z][A-Z0-9_]*): &str")
+BRANDING_CONST = re.compile(
+    r'^pub const ([A-Z][A-Z0-9_]*): &str(?:\s*=\s*"([^"]*)")?'
+)
 # 故意不属于本产品命名空间的常量。
 G6_ALLOWLIST = {"LEGACY_GLOBAL_CONFIG_FILE"}
+# The upstream plugin directory is an input format, not a LingXi namespace.
+# Keep this in sync with the Harness gate and check its exact value and exclusion.
+G6_EXTERNAL_FORMAT_CONSTANTS = {"CLAUDE_PLUGIN_MANIFEST_DIR": ".claude-plugin"}
 
 
 def check_namespace_coverage(root):
@@ -694,7 +825,7 @@ def check_namespace_coverage(root):
     for i, line in enumerate(lines, start=1):
         m = BRANDING_CONST.match(line)
         if m:
-            declared.append((m.group(1), i))
+            declared.append((m.group(1), i, m.group(2)))
         if line.startswith("pub const NAMESPACE_VALUES"):
             in_list = True
             continue
@@ -704,8 +835,19 @@ def check_namespace_coverage(root):
             else:
                 listed.add(line.strip().rstrip(","))
 
-    for name, lineno in declared:
-        if name in G6_ALLOWLIST or name in listed:
+    declared_names = {name for name, _, _ in declared}
+    for name in G6_EXTERNAL_FORMAT_CONSTANTS.keys() - declared_names:
+        findings.add(("G6", BRANDING_LIB, 1, f"{name} external-format constant missing"))
+
+    for name, lineno, literal in declared:
+        if name in G6_ALLOWLIST:
+            continue
+        external_literal = G6_EXTERNAL_FORMAT_CONSTANTS.get(name)
+        if external_literal is not None:
+            if literal != external_literal or name in listed:
+                findings.add(("G6", BRANDING_LIB, lineno, f"{name} external-format value drift"))
+            continue
+        if name in listed:
             continue
         findings.add(("G6", BRANDING_LIB, lineno, f"{name} not in NAMESPACE_VALUES"))
     return findings
@@ -784,6 +926,7 @@ SELFTEST_FILES = {
     "crates/st/g4.rs": '// upstream: process.env.LINGXI_FAKE_CITATION\n',
     "crates/branding/src/lib.rs": (
         'pub const ST_UNLISTED: &str = "x";\n'
+        'pub const CLAUDE_PLUGIN_MANIFEST_DIR: &str = ".claude-plugin";\n'
         'pub const NAMESPACE_VALUES: &[&str] = &[\n];\n'
     ),
     # G7 的四种**不带引号**的到达形态。这四条正是 P0a.0 写作阶段漏掉的洞：
@@ -839,6 +982,8 @@ SELFTEST_CASES = [
      [("G4", "crates/st/g4.rs", "LINGXI_FAKE_CITATION")], []),
     ("G6 fires on a branding const missing from NAMESPACE_VALUES",
      [("G6", "crates/branding/src/lib.rs", "ST_UNLISTED")], []),
+    ("G6 accepts the exact upstream plugin input format outside the product namespace",
+     [], [("G6", "crates/branding/src/lib.rs", "CLAUDE_PLUGIN_MANIFEST_DIR")]),
     ("G7 fires on a BARE $CLAUDE_PLUGIN_ROOT in a hook script",
      [("G7", "crates/st/hook.sh", "CLAUDE_PLUGIN_")], []),
     ("G7 fires on .claude-plugin in markdown prose (no quotes)",
@@ -905,6 +1050,30 @@ def run_selftest():
         findings = scan(tmp, exemptions_by_path(entries))
         findings |= check_frozen(tmp, frozen, entries)
         findings |= check_namespace_coverage(tmp)
+        selftest_reviewed_sources(tmp, findings)
+
+        branding_fixture = os.path.join(tmp, BRANDING_LIB)
+        with open(branding_fixture, encoding="utf-8") as fh:
+            branding_source = fh.read()
+        for drifted in (
+            branding_source.replace('".claude-plugin"', '".wrong-plugin"'),
+            branding_source.replace('pub const NAMESPACE_VALUES: &[&str] = &[\n',
+                                    'pub const NAMESPACE_VALUES: &[&str] = &[\n    CLAUDE_PLUGIN_MANIFEST_DIR,\n'),
+        ):
+            with open(branding_fixture, "w", encoding="utf-8") as fh:
+                fh.write(drifted)
+            if not _selftest_matches(check_namespace_coverage(tmp), "G6", BRANDING_LIB,
+                                     "CLAUDE_PLUGIN_MANIFEST_DIR external-format value drift"):
+                print("  FAIL G6 external-format value or namespace drift was not detected")
+                return 1
+        with open(branding_fixture, "w", encoding="utf-8") as fh:
+            fh.write(branding_source.replace('pub const CLAUDE_PLUGIN_MANIFEST_DIR: &str = ".claude-plugin";\n', ''))
+        if not _selftest_matches(check_namespace_coverage(tmp), "G6", BRANDING_LIB,
+                                 "CLAUDE_PLUGIN_MANIFEST_DIR external-format constant missing"):
+            print("  FAIL G6 missing external-format constant was not detected")
+            return 1
+        with open(branding_fixture, "w", encoding="utf-8") as fh:
+            fh.write(branding_source)
 
         cases = list(SELFTEST_CASES) + [
             ("G5 fires on a frozen entry whose target file is gone",
@@ -979,6 +1148,10 @@ def main():
 
     frozen_entries = parse_frozen(frozen_path)
     findings = scan(root, exemptions_by_path(frozen_entries))
+    try:
+        findings = apply_reviewed_sources(root, findings)
+    except ReviewedSourceError as exc:
+        raise SystemExit(f"check_brand_leaks: {exc}") from exc
     findings |= check_frozen(root, frozen_path, frozen_entries)
     findings |= check_namespace_coverage(root)
 

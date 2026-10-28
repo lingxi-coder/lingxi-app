@@ -1,10 +1,15 @@
 //! Side-effect-free product URL validation and construction.
 use std::collections::BTreeMap;
 use url::Url;
+
+/// A validated product destination and its optional query and draft payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
+    /// Decoded destination path, such as `session/abc` or `new`.
     pub route: String,
+    /// Validated query parameters, ordered by name.
     pub params: BTreeMap<String, String>,
+    /// JSON object supplied in the `payload` fragment, when permitted.
     pub payload: Option<serde_json::Value>,
 }
 fn valid_route(route: &str) -> bool {
@@ -18,19 +23,33 @@ fn valid_route(route: &str) -> bool {
     }) {
         return false;
     }
-    match s.as_slice() {
-        ["new"] => true,
-        ["session" | "project" | "settings" | "provider" | "terminal" | "apps" | "market", _] => {
-            true
-        }
-        ["extensions", "mcp" | "skill" | "plugin", _] => true,
-        ["cron", "job" | "run", _] => true,
-        ["runtime", "agent" | "task" | "plan" | "review" | "activity", _] => true,
-        ["import", "mcp" | "plugin" | "skill" | "provider"] => true,
-        ["remote", _, _] => true,
-        _ => false,
-    }
+    matches!(
+        s.as_slice(),
+        ["new"]
+            | [
+                "session" | "project" | "settings" | "provider" | "terminal" | "apps" | "market",
+                _
+            ]
+            | ["extensions", "mcp" | "skill" | "plugin", _]
+            | ["cron", "job" | "run", _]
+            | [
+                "runtime",
+                "agent" | "task" | "plan" | "review" | "activity",
+                _
+            ]
+            | ["import", "mcp" | "plugin" | "skill" | "provider"]
+            | ["remote", _, _]
+    )
 }
+/// Parses and validates a `lingxi://` or `https://lingxios.net/open/` link.
+///
+/// Destination segments, allowed query parameters, and any JSON fragment are
+/// checked before the resulting target is returned.
+///
+/// # Errors
+///
+/// Returns a descriptive error when the link or its destination, parameters,
+/// or payload do not satisfy the accepted format.
 pub fn parse(raw: &str) -> Result<Target, &'static str> {
     if raw.len() > 32768 || raw.chars().any(|c| c.is_control() || c == ' ') {
         return Err("Invalid link");
@@ -197,6 +216,14 @@ fn validate_import(value: &serde_json::Value, depth: usize) -> Result<(), &'stat
     }
     Ok(())
 }
+/// Constructs a validated link for `target`.
+///
+/// When `scheme` is true the result uses `lingxi://`; otherwise it uses the
+/// HTTPS universal-link origin. Message UUIDs are normalized to lowercase.
+///
+/// # Errors
+///
+/// Returns an error if the target cannot be represented as an accepted link.
 pub fn build(target: &Target, scheme: bool) -> Result<String, &'static str> {
     if !valid_route(&target.route) {
         return Err("Unsupported destination");

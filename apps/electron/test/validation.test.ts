@@ -46,6 +46,7 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
     { type: 'load_session_agent_transcript', agent_id: 'agent:11111111-2222-4333-8444-555555555555' },
   );
   assert.deepEqual(validateClientCommand({ type: 'task_list', status_filter: { type: 'paused' } }), { type: 'task_list', status_filter: { type: 'paused' } });
+  assert.deepEqual(validateClientCommand({ type: 'task_list', status_filter: { type: 'exited_unknown' } }), { type: 'task_list', status_filter: { type: 'exited_unknown' } });
   assert.deepEqual(validateClientCommand({ type: 'set_permission_mode', mode: 'auto' }), { type: 'set_permission_mode', mode: 'auto' });
   assert.deepEqual(validateClientCommand({ type: 'initialize_proactivity', proactivity: true }), { type: 'initialize_proactivity', proactivity: true });
   assert.deepEqual(validateClientCommand({ type: 'set_proactivity_level', level: 'proactive' }), { type: 'set_proactivity_level', level: 'proactive' });

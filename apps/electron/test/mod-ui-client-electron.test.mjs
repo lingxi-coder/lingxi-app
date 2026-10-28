@@ -62,6 +62,8 @@ test('Electron renders Native Client input and Select held events while keeping 
       });
     });
 
+    assert.equal(result.initialStatusMountSuperseded, true);
+    assert.equal(result.initialSiblingMountSuperseded, true);
     assert.equal(result.parentElementsRendered, true);
     assert.equal(result.parentControlRequestsMatchNativeBodies, true, JSON.stringify({
       press: result.parentButtonRequest,

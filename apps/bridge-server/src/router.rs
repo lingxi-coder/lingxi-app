@@ -2759,15 +2759,15 @@ impl CommandRouter for EngineCommandRouter {
                 .await;
             }
 
-            // Durable turn recovery (`attach_turn` / `resume_turn` /
-            // `pause_turn`) is a MOBILE host capability: it needs the retained
+            // Durable turn recovery and queue inspection are MOBILE host
+            // capabilities: they need the retained
             // per-turn event log and the recovery state machine that
             // `harness-runtime::mobile`'s host owns (`host.rs`'s `AttachTurn` /
             // `ResumeTurn` / `PauseTurn` arms). This bridge keeps no retained
             // event window and no `TurnRecoverySnapshotDto` state, so there is
             // nothing here to attach to, resume, or pause.
             //
-            // Each of the three is a REQUEST-REPLY command on the mobile host —
+            // Each is a REQUEST-REPLY command on the mobile host —
             // the client sends it and waits for a `turn_recovery_state` (and,
             // for `attach_turn`, a `turn_event_replay` burst). Dropping them in
             // the catch-all below leaves such a client waiting forever for a
@@ -2796,6 +2796,15 @@ impl CommandRouter for EngineCommandRouter {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Rejected,
                     message: "pause_turn is unavailable on this bridge"
+                        .to_string()
+                        .into(),
+                })
+                .await;
+            }
+            ClientCommand::QueryQueuedTurn { .. } => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "query_queued_turn is unavailable on this bridge"
                         .to_string()
                         .into(),
                 })

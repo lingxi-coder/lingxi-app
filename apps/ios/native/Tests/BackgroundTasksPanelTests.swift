@@ -462,6 +462,7 @@ visionDelegationEnabled: true
                 (.completed, .completed),
                 (.failed, .failed),
                 (.cancelled, .cancelled),
+                (.exitedUnknown, .exitedUnknown),
             ]
 
             for (terminalWireStatus, terminalSnapshotStatus) in terminalCases {
@@ -959,7 +960,7 @@ visionDelegationEnabled: true
 
         func testTaskCountsSeparatePausedAndTerminalOutcomes() {
             let statuses: [BackgroundTaskSnapshot.Status] = [
-                .pending, .running, .paused, .completed, .failed, .cancelled,
+                .pending, .running, .paused, .completed, .failed, .cancelled, .exitedUnknown,
             ]
             let tasks = statuses.enumerated().map { index, status in
                 BackgroundTaskSnapshot(
@@ -972,15 +973,39 @@ visionDelegationEnabled: true
             XCTAssertEqual(
                 TasksStatusPanel.taskCounts(tasks),
                 TasksStatusPanel.TaskCounts(
-                    total: 6,
+                    total: 7,
                     queued: 1,
                     running: 1,
                     succeeded: 1,
                     failed: 1,
                     paused: 1,
-                    cancelled: 1
+                    cancelled: 1,
+                    exitedUnknown: 1
                 )
             )
+        }
+
+        func testUnknownExitIsTerminalWithoutClaimingSuccessOrFailure() {
+            let task = BackgroundTaskSnapshot(id: "unknown", descriptionText: "Command", status: .exitedUnknown)
+            XCTAssertTrue(task.status.isTerminal)
+            XCTAssertFalse(task.status.requiresExecutionLease)
+            XCTAssertFalse(TasksStatusPanel.workflowTaskIsSuccessfullyComplete(task))
+            XCTAssertEqual(TasksStatusPanel.workflowSteps(for: task).map(\.state), [.exitedUnknown])
+        }
+
+        func testUnknownExitCannotBeReopenedOrReportedAsSuccessByLateEvents() {
+            let source = makeSource()
+            source.applyForTesting(.taskStatusChanged(
+                taskId: "shell", status: .exitedUnknown, originSessionId: nil, error: nil
+            ))
+            let noticeCount = source.model.items.count
+            source.applyForTesting(.taskRow(task: row(id: "shell", status: .running)))
+            source.applyForTesting(.taskRow(task: row(id: "shell", status: .completed)))
+            source.applyForTesting(.taskStatusChanged(
+                taskId: "shell", status: .completed, originSessionId: nil, error: nil
+            ))
+            XCTAssertEqual(source.model.backgroundTasks.first?.status, .exitedUnknown)
+            XCTAssertEqual(source.model.items.count, noticeCount)
         }
 
         func testWorkflowStepsFlattenPhasesAndDeriveStatuses() {

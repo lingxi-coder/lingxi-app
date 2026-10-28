@@ -80,6 +80,7 @@ async fn active_force_compact_refuses_while_slash_text_queues_and_ws_liveness_su
         None,
     ));
     let connection = BridgeConnection::new();
+    let queue = connection.queue_handle();
     let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
     let driver = Arc::new(PermissionTurn {
         gate: gate.clone(),
@@ -98,6 +99,7 @@ async fn active_force_compact_refuses_while_slash_text_queues_and_ws_liveness_su
     send_command(
         &mut ws,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "permission-gated turn".into(),
             prompt_mode: None,
             images: vec![],
@@ -106,6 +108,10 @@ async fn active_force_compact_refuses_while_slash_text_queues_and_ws_liveness_su
         },
     )
     .await;
+    assert!(matches!(
+        next_frame(&mut ws).await,
+        Frame::Event(ClientEvent::TurnStarted { turn_id: Some(91) })
+    ));
     let request_id = match next_frame(&mut ws).await {
         Frame::PermissionRequest(request) => request.request_id,
         other => panic!("expected pending permission, got {other:?}"),
@@ -119,12 +125,33 @@ async fn active_force_compact_refuses_while_slash_text_queues_and_ws_liveness_su
         send_command(
             &mut ws,
             &ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: raw.into(),
                 images: Vec::new(),
                 turn_id: Some(turn_id),
             },
         )
         .await;
+    }
+    // Approval and cancellation use a priority lane that may overtake the
+    // ordinary slash commands. Wait until both are actually queued while the
+    // permission-gated turn still owns the connection.
+    let pending = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = queue.snapshot().await;
+            if pending.len() >= queued_slashes.len() {
+                break pending;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("both slash commands must enter the active-turn queue");
+    assert_eq!(pending.len(), queued_slashes.len());
+    for (command, (_, raw)) in pending.iter().zip(queued_slashes) {
+        assert!(command.is_main_thread());
+        assert!(command.is_slash_command());
+        assert_eq!(command.text(), Some(raw));
     }
     assert!(
         !router.is_turn_active(),
@@ -151,7 +178,14 @@ async fn active_force_compact_refuses_while_slash_text_queues_and_ws_liveness_su
         .lock()
         .expect("dispatcher raw-input lock poisoned")
         .is_empty());
-    send_command(&mut ws, &ClientCommand::Cancel { turn_id: Some(91) }).await;
+    send_command(
+        &mut ws,
+        &ClientCommand::Cancel {
+            session_id: None,
+            turn_id: Some(91),
+        },
+    )
+    .await;
     tokio::time::timeout(Duration::from_secs(3), driver.canceled.notified())
         .await
         .expect("Cancel must still reach the active turn");
@@ -214,6 +248,7 @@ async fn active_force_compact_refuses_while_slash_text_queues_and_ws_liveness_su
     send_command(
         &mut ws,
         &ClientCommand::RunSlashCommand {
+            session_id: None,
             raw: idle_raw.into(),
             images: Vec::new(),
             turn_id: Some(94),

@@ -7,6 +7,8 @@ import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.MainActivity
+import com.lingxi.code.acceptance.acceptanceArgument
+import com.lingxi.code.acceptance.requireAcceptanceOptIn
 import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
@@ -1523,8 +1525,11 @@ class LocalAppAgentAcceptanceTest {
     }
 
     @Test fun cleanupInterruptedSkillFixtureProvider() = runBlocking<Unit> {
-        val providerId = InstrumentationRegistry.getArguments().getString("fixtureCleanupProviderId")
-            ?: error("Pass the exact interrupted test-fixture provider ID for cleanup.")
+        requireAcceptanceOptIn(
+            "localAppAgentCleanup", "Interrupted fixture cleanup requires the exact provider ID",
+            "com.lingxi.code.apps.LocalAppAgentAcceptanceTest#cleanupInterruptedSkillFixtureProvider", "fixtureCleanupProviderId",
+        )
+        val providerId = acceptanceArgument("fixtureCleanupProviderId")
         val journal = File(context.filesDir, "ag-ui-android-skill-fixture-provider.json")
         if (journal.isFile) {
             assertEquals(providerId, JSONObject(journal.readText()).getString("providerId"))
@@ -1605,6 +1610,10 @@ class LocalAppAgentAcceptanceTest {
     }
 
     @Test fun stageCalorieAppForInteractiveAcceptance() = runBlocking<Unit> {
+        requireAcceptanceOptIn(
+            "localAppAgentInteractive", "Interactive agent setup requires a configured model",
+            "com.lingxi.code.apps.LocalAppAgentAcceptanceTest#stageCalorieAppForInteractiveAcceptance", "agentProvider", "agentModel",
+        )
         val apps = UnifiedLocalApps.get(context)
         val sources = mutableListOf<File>()
         val app = publish(apps, sources)
@@ -1618,6 +1627,10 @@ class LocalAppAgentAcceptanceTest {
 
     /** Requires a real installed browser and a configured vision-capable model. */
     @Test fun externalBrowserFileTaskUsesPublicFileApi() = runBlocking<Unit> {
+        requireAcceptanceOptIn(
+            "localAppAgentLive", "Live agent acceptance requires a configured provider",
+            "com.lingxi.code.apps.LocalAppAgentAcceptanceTest#externalBrowserFileTaskUsesPublicFileApi", "agentProvider", "agentModel",
+        )
         val apps = UnifiedLocalApps.get(context)
         val sources = mutableListOf<File>(); val ids = mutableListOf<String>()
         val photo = File(context.filesDir, "local-app-acceptance-fixtures/test-photo.jpg").readBytes()
@@ -1835,6 +1848,10 @@ class LocalAppAgentAcceptanceTest {
     }
 
     @Test fun externalBrowserPersistentChatStoresHistoryAndIsolatesThreads() = runBlocking<Unit> {
+        requireAcceptanceOptIn(
+            "localAppAgentLive", "Live agent acceptance requires a configured provider",
+            "com.lingxi.code.apps.LocalAppAgentAcceptanceTest#externalBrowserPersistentChatStoresHistoryAndIsolatesThreads", "agentProvider", "agentModel",
+        )
         val apps = UnifiedLocalApps.get(context)
         val sources = mutableListOf<File>(); val ids = mutableListOf<String>()
         val runId = "external-chat-" + UUID.randomUUID()
@@ -2057,6 +2074,10 @@ class LocalAppAgentAcceptanceTest {
     }
 
     @Test fun nativeQuestionApprovalAndTaskCancellationAreTaskScoped() = runBlocking<Unit> {
+        requireAcceptanceOptIn(
+            "localAppAgentLive", "Live agent acceptance requires a configured provider",
+            "com.lingxi.code.apps.LocalAppAgentAcceptanceTest#nativeQuestionApprovalAndTaskCancellationAreTaskScoped", "agentProvider", "agentModel",
+        )
         val apps = UnifiedLocalApps.get(context); val sources = mutableListOf<File>()
         val tools = setOf("builtin:AskUserQuestion")
         val app = publish(apps, sources, tools); val other = publish(apps, sources)
@@ -2147,11 +2168,14 @@ class LocalAppAgentAcceptanceTest {
     }
 
     @Test fun externalBrowserApprovedSkillRunsInBackgroundAndRecoversThroughNativeWakeLink() = runBlocking<Unit> {
+        requireAcceptanceOptIn(
+            "localAppAgentSkillFixture", "Skill acceptance requires its deterministic provider fixture",
+            "com.lingxi.code.apps.LocalAppAgentAcceptanceTest#externalBrowserApprovedSkillRunsInBackgroundAndRecoversThroughNativeWakeLink",
+            "fixtureProviderUrl", "fixtureProviderKey", "fixtureProviderModel",
+        )
         val arguments = InstrumentationRegistry.getArguments()
-        val providerBaseUrl = arguments.getString("fixtureProviderUrl")
-            ?: error("Pass fixtureProviderUrl from the loopback test provider.")
-        val providerKey = arguments.getString("fixtureProviderKey")
-            ?: error("Pass the synthetic fixture key from the loopback test provider.")
+        val providerBaseUrl = acceptanceArgument("fixtureProviderUrl")
+        val providerKey = acceptanceArgument("fixtureProviderKey")
         val providerModel = arguments.getString("fixtureProviderModel") ?: "lingxi-local-app-fixture"
         val scenario = createSkillAcceptanceScenario()
         val fixtureJournal = File(context.filesDir, "ag-ui-android-skill-fixture-provider.json")
@@ -2177,6 +2201,10 @@ class LocalAppAgentAcceptanceTest {
     }
 
     @Test fun externalGatewayRejectsInvalidRunAgentInput() = runBlocking<Unit> {
+        requireAcceptanceOptIn(
+            "localAppAgentLive", "Agent gateway acceptance requires a configured provider",
+            "com.lingxi.code.apps.LocalAppAgentAcceptanceTest#externalGatewayRejectsInvalidRunAgentInput", "agentProvider", "agentModel",
+        )
         val apps = UnifiedLocalApps.get(context); val sources = mutableListOf<File>()
         val app = publish(apps, sources)
         try {
@@ -2222,6 +2250,12 @@ class LocalAppAgentAcceptanceTest {
 
     /** Run with adb reverse tcp:18867 tcp:18867 and the public MCP fixture. */
     @Test fun exactMcpGrantRequiresNativeApprovalAndRevokeFencesTask() = runBlocking<Unit> {
+        requireAcceptanceOptIn(
+            "localAppAgentMcpFixture", "MCP acceptance requires the external nonce fixture",
+            "com.lingxi.code.apps.LocalAppAgentAcceptanceTest#exactMcpGrantRequiresNativeApprovalAndRevokeFencesTask",
+            "fixtureNonce", "mcpDiscovery", "agentProvider", "agentModel",
+        )
+        val expected = acceptanceArgument("fixtureNonce")
         val apps = UnifiedLocalApps.get(context); val sources = mutableListOf<File>(); val ids = mutableListOf<String>()
         val config = File(com.lingxi.code.project.MobileUserStorage.directories(context).configHome, "mcp-config.json")
         val original = config.takeIf { it.exists() }?.readText()
@@ -2267,7 +2301,6 @@ class LocalAppAgentAcceptanceTest {
             }
             assertEquals(result.toString(), "succeeded", result.getString("state"))
             assertTrue("MCP calls require native approval", approvals > 0)
-            val expected = InstrumentationRegistry.getArguments().getString("fixtureNonce") ?: error("Pass fixtureNonce from the local server receipt")
             val finished = terminalEvent(launch, runId)
             assertEquals("RUN_FINISHED", finished.getString("type"))
             assertEquals(expected, finished.getJSONObject("result").getString("nonce"))

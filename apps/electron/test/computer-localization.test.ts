@@ -7,25 +7,16 @@ import { ComputerAccessPrompt } from '../src/renderer/components/ComputerAccessP
 import { ComputerUse } from '../src/renderer/components/settings/pages/ComputerUse';
 import { GoogleChromeSettings } from '../src/renderer/components/settings/pages/ComputerUseBrowser';
 import { computerCatalog } from '../src/renderer/i18n/computerCatalog';
-import { DESKTOP_LOCALES, LANGUAGE_STORAGE_KEY, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
+import { DESKTOP_LOCALES, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
+import { withDesktopLocale } from './support/language';
 
 (globalThis as { React?: typeof React }).React = React;
 const escaped = (text: string) => renderToStaticMarkup(React.createElement(React.Fragment, null, text));
 
 function renderInLocale(locale: DesktopLocale, element: React.ReactElement): string {
-  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
-  Object.defineProperty(globalThis, 'localStorage', {
-    configurable: true,
-    value: { getItem: (key: string) => key === LANGUAGE_STORAGE_KEY ? locale : null },
-  });
-  try {
-    return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, element));
-  } finally {
-    if (previous) Object.defineProperty(globalThis, 'localStorage', previous);
-    else Reflect.deleteProperty(globalThis, 'localStorage');
-  }
+  return withDesktopLocale(locale, () => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, element)));
 }
 
 const request: ComputerAccessRequestDto = {
@@ -33,20 +24,23 @@ const request: ComputerAccessRequestDto = {
   tier: 'read', clipboard_read: true, clipboard_write: true, system_key_combos: true,
 };
 
-test('read-only computer settings render localized copy and preserve unavailable integration controls', () => {
+test('computer settings render localized copy and disable controls until host capabilities load', () => {
   for (const locale of DESKTOP_LOCALES) {
     const settings = renderInLocale(locale, React.createElement(ComputerUse));
     assert.ok(settings.includes(`<h1>${translate('desktop_computer_title', locale)}</h1>`), locale);
-    assert.ok(settings.includes(escaped(translate('desktop_computer_readonly_any_app_description', locale))), locale);
-    assert.ok(settings.includes(escaped(translate('desktop_computer_readonly_permanent_access', locale))), locale);
-    const anyAppLabel = translate('desktop_computer_readonly_any_app_label', locale);
+    assert.ok(settings.includes(escaped(translate('desktop_computer_any_app_description', locale))), locale);
+    assert.ok(settings.includes(escaped(translate('desktop_computer_no_always_apps', locale))), locale);
+    assert.ok(settings.includes(escaped(translate('desktop_computer_app_ask_description', locale))), locale);
+    const anyAppLabel = translate('desktop_computer_enable', locale);
     const anyAppToggle = (settings.match(/<button\b[^>]*>/g) ?? []).find(tag => tag.includes(`aria-label="${anyAppLabel}"`));
     assert.ok(anyAppToggle, locale);
     assert.match(anyAppToggle, /disabled/, locale);
-    const browser = renderInLocale(locale, React.createElement(GoogleChromeSettings, { onBack: () => {} }));
+    const browser = renderInLocale(locale, React.createElement(GoogleChromeSettings, {
+      onBack: () => {}, settings: { state: null, pending: false, error: null, refresh: async () => {}, execute: async () => false },
+    }));
     assert.ok(browser.includes(translate('desktop_computer_website_permissions', locale)), locale);
-    assert.ok(browser.includes(escaped(translate('desktop_computer_readonly_full_cdp_description', locale))), locale);
-    assert.ok(browser.includes(escaped(translate('desktop_computer_readonly_browser_settings', locale))), locale);
+    assert.ok(browser.includes(escaped(translate('desktop_computer_full_cdp_description', locale))), locale);
+    assert.ok(browser.includes(escaped(translate('desktop_computer_website_description', locale))), locale);
     assert.match(browser, /<select[^>]*disabled/);
     const prompt = renderInLocale(locale, React.createElement(ComputerAccessPrompt, {
       request, onSubmit: () => {}, onDeny: () => {}, onOpenSystemSettings: () => {},

@@ -17,24 +17,25 @@ async function waitFor(webContents, expression, timeout = 8000) {
     if (await webContents.executeJavaScript(expression)) return;
     await delay(25);
   }
-  throw new Error(`timed out waiting for: ${expression}`);
+  const details = await webContents.executeJavaScript(`({ alerts: [...document.querySelectorAll('[role="alert"]')].map(e => e.textContent), buttons: [...document.querySelectorAll('button')].map(e => e.textContent.trim()).filter(Boolean) })`);
+  throw new Error(`timed out waiting for: ${expression}; state: ${JSON.stringify(details)}`);
 }
 
 async function runProviderRegionScenario(window, webContents) {
   const run = (expression) => webContents.executeJavaScript(expression);
   await run('window.__settingsScreenTest.setLayeredSnapshot({user:{},project:{},local:{}},{providerRegion:"international"})');
   await run('window.__settingsScreenTest.selectPage("custom-providers")');
-  await waitFor(webContents, `Boolean(document.querySelector('[aria-label="模型使用区域"]'))`);
-  const initial = await run('document.body.textContent.includes("当前运行：国际") && !document.body.textContent.includes("应用并重新连接")');
-  await run(`(() => { const select=document.querySelector('[aria-label="模型使用区域"]'); select.value='china_mainland'; select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+  await waitFor(webContents, `Boolean(document.querySelector('[aria-label="模型区域"]'))`);
+  const initial = await run('document.body.textContent.includes("当前运行：国际") && !document.body.textContent.includes("应用并重连")');
+  await run(`(() => { const select=document.querySelector('[aria-label="模型区域"]'); select.value='china_mainland'; select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
   await waitFor(webContents, 'window.__settingsScreenTest.state().lastEngineSettingsPatch?.patch.providerRegion === "china_mainland"');
   const saved = await run('window.__settingsScreenTest.state().lastEngineSettingsPatch');
   await run('window.__settingsScreenTest.setLayeredSnapshot({user:{providerRegion:"china_mainland"},project:{},local:{}},{providerRegion:"international"})');
-  await waitFor(webContents, 'document.body.textContent.includes("应用并重新连接")');
+  await waitFor(webContents, 'document.body.textContent.includes("应用并重连")');
   const pending = await run('document.body.textContent.includes("当前运行：国际")');
   const folder=process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
   if(folder){window.showInactive(); await delay(350); mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'provider-region.png'),(await window.capturePage()).toPNG()); window.hide();}
-  await run(`[...document.querySelectorAll('button')].find(b=>b.textContent==='应用并重新连接').click()`);
+  await run(`[...document.querySelectorAll('button')].find(b=>b.textContent==='应用并重连').click()`);
   await waitFor(webContents, 'window.__settingsScreenTest.state().navCalls.includes("restart")');
   return {initial,saved,pending,restarted:true};
 }
@@ -342,7 +343,7 @@ async function runLayerReseedScenario(webContents) {
     'window.__settingsScreenTest.setLayeredSnapshot({ user: { pluginConfigs: { "a@b": { from: "user" } } }, project: { pluginConfigs: { "a@b": { from: "project" } } } })',
   );
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("plugins")');
-  await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === 'Personal').click()`);
+  await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === '个人').click()`);
   await webContents.executeJavaScript(`(() => {
     const row = document.querySelector('.configuration-entry .extension-hub-row-open');
     if (!row) throw new Error('missing installed plugin configuration row');
@@ -355,7 +356,7 @@ async function runLayerReseedScenario(webContents) {
   const configDirty = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
   await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
   await waitFor(webContents, '!document.querySelector(".extension-plugin-page")');
-  await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === 'Personal').click()`);
+  await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === '个人').click()`);
   await webContents.executeJavaScript(`document.querySelector('.configuration-entry .extension-hub-row-open').click()`);
   await webContents.executeJavaScript(`document.querySelector('.extension-plugin-configuration summary').click()`);
   await waitFor(webContents, 'Boolean(document.querySelector(\'[aria-label="a@b 配置"]\'))');
@@ -520,6 +521,7 @@ async function runVisualAdminScenario(window, webContents) {
     await webContents.executeJavaScript(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
     await delay(100);
     if (page === 'mcp') {
+      await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === '个人').click()`);
       await webContents.executeJavaScript(`(() => {
         const row = document.querySelector('.configuration-entry .extension-hub-row-open');
         if (!row) throw new Error('missing MCP configuration row');
@@ -528,7 +530,7 @@ async function runVisualAdminScenario(window, webContents) {
       await delay(50);
     }
     if (page === 'plugins') {
-      await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === 'Personal').click()`);
+      await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === '个人').click()`);
       await webContents.executeJavaScript(`(() => {
         const row = document.querySelector('.configuration-entry .extension-hub-row-open');
         if (!row) throw new Error('missing installed plugin configuration row');
@@ -537,7 +539,7 @@ async function runVisualAdminScenario(window, webContents) {
       await waitFor(webContents, 'Boolean(document.querySelector("[aria-label=\\\"REGION option\\\"]"))');
     }
     if (page === 'hooks') {
-      for (const label of ['PreToolUse', 'Group 1', 'Handler 1']) {
+      for (const label of ['PreToolUse', '分组 1', '处理器 1']) {
         await webContents.executeJavaScript(`(() => {
           const button = [...document.querySelectorAll('button')].find((candidate) => candidate.textContent?.includes(${JSON.stringify(label)}));
           button?.click();
@@ -553,9 +555,9 @@ async function runVisualAdminScenario(window, webContents) {
       return {
         ...state,
         horizontalOverflow: dialog ? dialog.scrollWidth > dialog.clientWidth + 1 : true,
-        structuredHookEditor: Boolean(document.querySelector('[aria-label="hook type"]')),
-        advancedHookJson: Boolean(document.querySelector('[aria-label="hooks-json"]')),
-        structuredMcpEditor: Boolean(document.querySelector('[aria-label="MCP transport type"]')),
+        structuredHookEditor: Boolean(document.querySelector('[aria-label="执行类型"]')),
+        advancedHookJson: Boolean(document.querySelector('[aria-label="当前层 hooks JSON"]')),
+        structuredMcpEditor: Boolean(document.querySelector('[aria-label="MCP 传输类型"]')),
         manifestPluginEditor: Boolean(document.querySelector('[aria-label="REGION option"]')),
       };
     })()`);
@@ -593,7 +595,7 @@ async function runCustomProvidersScenario(window, webContents) {
   await click('＋ 新增 Provider');
   await fill('Profile 名称', 'customlab');
   await fill('baseUrl', 'https://example.com/v1');
-  await fill('API Key', 'test-only-secret-1234');
+  await fill('API 密钥', 'test-only-secret-1234');
   await fill('模型 ID 1', 'model-a');
   await capture('editor');
   await run('window.__settingsScreenTest.holdSettingsWrite()');
@@ -668,7 +670,7 @@ async function runCustomProvidersScenario(window, webContents) {
   await click('导入 JSON');
   await fill('JSON 配置', JSON.stringify({ providers: { dual: { type: 'openai', baseUrl: 'https://example.com', apiKeyEnv: 'FALLBACK_KEY', apiKey: 'test-only-explicit-key', models: [{ id: 'm' }] } } }));
   await click('解析并预览');
-  const dualAuth = await run('({ mode:document.querySelector(\'[aria-label="认证方式"]\').value, keyPresent:Boolean(document.querySelector(\'[aria-label="API Key"]\')) })');
+  const dualAuth = await run('({ mode:document.querySelector(\'[aria-label="认证方式"]\').value, keyPresent:Boolean(document.querySelector(\'[aria-label="API 密钥"]\')) })');
   await click('← 返回 Provider 列表');
   await run('window.__settingsScreenTest.setLayeredSnapshot({user:{providers:{Legacy:{type:"openai",baseUrl:"https://legacy.example",apiKeyEnv:"LEGACY_KEY",models:["legacy-model"]}}},project:{},local:{}})');
   await delay(35);
@@ -719,7 +721,7 @@ async function runProviderSessionIsolation(webContents) {
   await click('＋ 新增 Provider');
   await fill('Profile 名称', 'pending-key');
   await fill('baseUrl', 'https://example.com');
-  await fill('API Key', 'test-only-key');
+  await fill('API 密钥', 'test-only-key');
   await fill('模型 ID 1', 'model');
   await run('window.__settingsScreenTest.holdSettingsWrite()');
   await click('保存 Provider');
@@ -754,7 +756,8 @@ async function runConfigurationNavigation(window, webContents) {
     const initialList = page === 'skills'
       ? await run(`Boolean(document.querySelector('.extension-hub-page')) && !document.querySelector('.extension-detail-dialog')`)
       : await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.configuration-detail')`);
-    const searchLabel = page === 'skills' ? 'Search skills' : 'Search mcp 服务器';
+    if (page === 'mcp') await button('个人');
+    const searchLabel = page === 'skills' ? '搜索 Skills' : '搜索 MCP 服务器';
     const query = page === 'skills' ? 'release-notes' : 'context7';
     await run(`window.__settingsScreenTest.setFieldValue(${JSON.stringify(`[aria-label="${searchLabel}"]`)}, ${JSON.stringify(query)})`);
     await delay(40);
@@ -764,23 +767,23 @@ async function runConfigurationNavigation(window, webContents) {
       ? await run(`Boolean(document.querySelector('.extension-detail-dialog'))`)
       : await run(`Boolean(document.querySelector('.configuration-detail')) && !document.querySelector('.configuration-list')`);
     await capture(`${page}-detail`);
-    await click(page === 'skills' ? '[aria-label="Close details"]' : '.configuration-back');
+    await click(page === 'skills' ? '[aria-label="关闭详情"]' : '.configuration-back');
     const searchRetained = await run(`document.querySelector(${JSON.stringify(`[aria-label="${searchLabel}"]`)}).value === ${JSON.stringify(query)}`);
-    await button('Add');
+    await button('添加');
     await capture(`${page}-create`);
-    const nameLabel = page === 'skills' ? 'skill-create-name' : 'mcp-name';
+    const nameLabel = page === 'skills' ? '称呼' : 'MCP 服务器名称';
     const createOpened = page === 'skills'
       ? await run(`Boolean(document.querySelector(${JSON.stringify(`[aria-label="${nameLabel}"]`)})) && Boolean(document.querySelector('.extension-detail-dialog'))`)
       : await run(`Boolean(document.querySelector(${JSON.stringify(`[aria-label="${nameLabel}"]`)})) && !document.querySelector('.configuration-list')`);
     await run(`window.__settingsScreenTest.setFieldValue(${JSON.stringify(`[aria-label="${nameLabel}"]`)}, 'draft-test')`);
     await delay(40);
-    await click(page === 'skills' ? '[aria-label="Close details"]' : '.configuration-back');
+    await click(page === 'skills' ? '[aria-label="关闭详情"]' : '.configuration-back');
     const guarded = page === 'skills'
       ? await run(`Boolean(document.querySelector('.extension-detail-dialog')) && document.body.textContent.includes('丢弃并切换')`)
       : await run(`Boolean(document.querySelector('.configuration-detail')) && document.body.textContent.includes('丢弃并切换')`);
     await button('继续编辑');
     const draftRetained = await run(`document.querySelector(${JSON.stringify(`[aria-label="${nameLabel}"]`)}).value === 'draft-test'`);
-    await click(page === 'skills' ? '[aria-label="Close details"]' : '.configuration-back');
+    await click(page === 'skills' ? '[aria-label="关闭详情"]' : '.configuration-back');
     await button('丢弃并切换');
     const returned = page === 'skills'
       ? await run(`Boolean(document.querySelector('.extension-hub-page')) && !document.querySelector('.extension-detail-dialog')`)
@@ -792,15 +795,15 @@ async function runConfigurationNavigation(window, webContents) {
   const hooksList = await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.hooks-editor')`);
   await capture('hooks-list');
   await button('添加');
-  const hooksDetail = await run(`Boolean(document.querySelector('[aria-label="hook command"]')) && !document.querySelector('.configuration-list')`);
-  await run(`window.__settingsScreenTest.setFieldValue('[aria-label="hook command"]', 'echo hook-test')`);
+  const hooksDetail = await run(`Boolean(document.querySelector('[aria-label="命令"]')) && !document.querySelector('.configuration-list')`);
+  await run(`window.__settingsScreenTest.setFieldValue('[aria-label="命令"]', 'echo hook-test')`);
   await delay(50);
   await capture('hooks-create');
   await click('.configuration-back');
   await click('.configuration-entry');
   const hooksGuarded = await run(`document.body.textContent.includes('丢弃并切换')`);
   await button('继续编辑');
-  const hooksDraftRetained = await run(`document.querySelector('[aria-label="hook command"]').value === 'echo hook-test'`);
+  const hooksDraftRetained = await run(`document.querySelector('[aria-label="命令"]').value === 'echo hook-test'`);
   results.hooks = { initialList: hooksList, detailOnly: hooksDetail, guarded: hooksGuarded, draftRetained: hooksDraftRetained };
   return results;
 }
@@ -891,12 +894,17 @@ async function runCustomizeScenario(window, webContents) {
   await waitFor(webContents, 'Boolean(document.querySelector(".extension-hub-list"))');
   await capture('plugins');
   shell.plugins = await measureShell('plugins');
-  const publicCatalog = await run('document.querySelectorAll(".extension-hub-main .extension-hub-row").length === 8');
+  // The public directory also includes featured recommendations; check all
+  // eight fixture catalog entries specifically rather than counting those.
+  const publicCatalog = await run(`(() => {
+    const names = [...document.querySelectorAll('.extension-hub-main .extension-hub-row-open .extension-hub-row-title')].map(element => element.textContent);
+    return names.length === 8 && ${JSON.stringify(available.map(item => item.name))}.every(name => names.includes(name));
+  })()`);
   const twoColumns = await run('getComputedStyle(document.querySelector(".extension-hub-list")).gridTemplateColumns.split(" ").length === 2');
   await click('.extension-hub-row-open');
   const inlineDetail = await run('Boolean(document.querySelector(".extension-plugin-page")) && !document.querySelector(".extension-detail-dialog")');
   await capture('plugin-detail');
-  await button('Install plugin');
+  await button('安装插件');
   const beforeConfirm = await run('window.__settingsScreenTest.state().extensionCalls');
   await button('确认执行');
   const afterConfirm = await run('window.__settingsScreenTest.state().extensionCalls');
@@ -907,12 +915,13 @@ async function runCustomizeScenario(window, webContents) {
   const installedPreview = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 6');
   await click('.extension-skills-installed .extension-see-more');
   const expanded = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 8');
-  await button('Project');
-  const sourceFilter = await run('document.querySelectorAll(".extension-skills-sources .extension-hub-row").length === 1 && document.querySelector(".extension-skills-sources").textContent.includes("Project Review")');
-  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="Search skills"]\', "contrast-missing")');
+  await run(`[...document.querySelectorAll('.extension-skills-sources .extension-catalog-tabs button')].find(el => el.textContent.trim() === '项目').click()`);
   await delay(40);
-  const emptySearch = await run('document.querySelectorAll(".extension-hub-main .extension-hub-row").length === 0 && document.body.textContent.includes("No skills match")');
-  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="Search skills"]\', "")');
+  const sourceFilter = await run('document.querySelectorAll(".extension-skills-sources .extension-hub-row").length === 1 && document.querySelector(".extension-skills-sources").textContent.includes("Project Review")');
+  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="搜索 Skills"]\', "contrast-missing")');
+  await delay(40);
+  const emptySearch = await run('document.querySelectorAll(".extension-hub-main .extension-hub-row").length === 0 && document.body.textContent.includes("没有匹配的 Skill")');
+  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="搜索 Skills"]\', "")');
   await delay(40);
   await click('.extension-skills-installed .extension-hub-row');
   await capture('skill-detail');
@@ -922,37 +931,38 @@ async function runCustomizeScenario(window, webContents) {
   await webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
   await delay(50);
   const trappedFocus = await run('document.querySelector(".extension-skill-dialog").contains(document.activeElement)');
-  await click('[aria-label="Skill actions"]');
-  await button('Edit skill');
-  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="Accessibility markdown"]\', "# Edited instructions")');
+  await click('[aria-label="Skill 操作"]');
+  await button('编辑 Skill');
+  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="Accessibility 的 Markdown"]\', "# Edited instructions")');
   await delay(40);
-  await click('[aria-label="Close details"]');
+  await click('[aria-label="关闭详情"]');
   const dirtyGuard = await run('Boolean(document.querySelector(".extension-skill-dialog")) && document.body.textContent.includes("丢弃并切换")');
   await button('继续编辑');
-  const retainedDraft = await run('document.querySelector(\'[aria-label="Accessibility markdown"]\').value === "# Edited instructions"');
+  const retainedDraft = await run('document.querySelector(\'[aria-label="Accessibility 的 Markdown"]\').value === "# Edited instructions"');
   await click('[data-nav-page="general"]');
-  const skillNavigationGuard = await run('document.body.textContent.includes("Discard and switch") && Boolean(document.querySelector(".extension-skill-dialog")) && document.querySelector(".settings-page-title").textContent === "Skills"');
-  await button('Continue editing');
-  const skillNavigationRetainedDraft = await run('document.querySelector(\'[aria-label="Accessibility markdown"]\').value === "# Edited instructions"');
-  await click('[aria-label="Close details"]');
+  const skillNavigationGuard = await run('document.body.textContent.includes("丢弃并切换") && Boolean(document.querySelector(".extension-skill-dialog")) && document.querySelector(".settings-page-title").textContent === "Skills"');
+  await button('继续编辑');
+  const skillNavigationRetainedDraft = await run('document.querySelector(\'[aria-label="Accessibility 的 Markdown"]\').value === "# Edited instructions"');
+  await click('[aria-label="关闭详情"]');
   await button('丢弃并切换');
   await click('[data-nav-page="mcp"]');
   await capture('tools');
   shell.mcp = await measureShell('mcp');
+  await button('个人');
   const tools = await run('document.querySelector(".settings-page-title").textContent === "MCP 服务器" && Boolean(document.querySelector(".configuration-entry"))');
-  await button('Add');
-  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="mcp-name"]\', "draft-mcp")');
+  await button('添加');
+  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="MCP 服务器名称"]\', "draft-mcp")');
   await delay(40);
   await click('[data-nav-page="plugins"]');
-  const mcpNavigationGuard = await run('document.body.textContent.includes("Discard and switch") && Boolean(document.querySelector(".configuration-detail")) && document.querySelector(".settings-page-title").textContent === "MCP 服务器"');
-  await button('Continue editing');
-  const mcpNavigationRetainedDraft = await run('document.querySelector(\'[aria-label="mcp-name"]\').value === "draft-mcp"');
+  const mcpNavigationGuard = await run('document.body.textContent.includes("丢弃并切换") && Boolean(document.querySelector(".configuration-detail")) && document.querySelector(".settings-page-title").textContent === "MCP 服务器"');
+  await button('继续编辑');
+  const mcpNavigationRetainedDraft = await run('document.querySelector(\'[aria-label="MCP 服务器名称"]\').value === "draft-mcp"');
   await click('[data-nav-page="general"]');
-  const mcpNormalNavigationGuard = await run('document.body.textContent.includes("Discard and switch") && document.querySelector(".settings-page-title").textContent === "MCP 服务器"');
-  await button('Discard and switch');
+  const mcpNormalNavigationGuard = await run('document.body.textContent.includes("丢弃并切换") && document.querySelector(".settings-page-title").textContent === "MCP 服务器"');
+  await button('丢弃并切换');
   const normalNavigation = await run('document.querySelector(".settings-page-title").textContent === "通用"');
   await click('[data-nav-page="plugins"]');
-  await button('Personal');
+  await button('个人');
   await run('(() => { const row = [...document.querySelectorAll(".configuration-entry .extension-hub-row-open")].find(el => el.textContent.includes("Secure Tools")); if (!row) throw new Error("missing Personal catalog Secure Tools row"); row.click(); })()');
   await delay(60);
   const personalCatalogDetail = await run('document.querySelector(".extension-plugin-title-row h1")?.textContent === "Secure Tools"');
@@ -960,12 +970,12 @@ async function runCustomizeScenario(window, webContents) {
   await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="secure@acme 配置"]\', \'{"option":"draft"}\')');
   await delay(40);
   await click('[data-nav-page="general"]');
-  const pluginNormalNavigationGuard = await run('document.body.textContent.includes("Discard and switch") && Boolean(document.querySelector(".extension-plugin-page")) && document.querySelector(".settings-page-title").textContent === "插件与市场"');
-  await button('Continue editing');
+  const pluginNormalNavigationGuard = await run('document.body.textContent.includes("丢弃并切换") && Boolean(document.querySelector(".extension-plugin-page")) && document.querySelector(".settings-page-title").textContent === "插件与市场"');
+  await button('继续编辑');
   const pluginNavigationRetainedDraft = await run('document.querySelector(\'[aria-label="secure@acme 配置"]\').value.includes("draft")');
   await click('[data-nav-page="skills"]');
-  const pluginDraftGuard = await run('document.body.textContent.includes("Discard and switch") && Boolean(document.querySelector(".extension-plugin-page"))');
-  await button('Discard and switch');
+  const pluginDraftGuard = await run('document.body.textContent.includes("丢弃并切换") && Boolean(document.querySelector(".extension-plugin-page"))');
+  await button('丢弃并切换');
   window.setSize(760, 720);
   await delay(80);
   await capture('narrow');
@@ -999,7 +1009,7 @@ async function runMacosAudit(window, webContents) {
         return {
           overflow: scroll.scrollWidth > scroll.clientWidth + 1,
           unnamedSwitches: switches.filter(el => !el.getAttribute('aria-label') && !el.getAttribute('aria-labelledby')).length,
-          title: document.querySelector('.settings-page-title').textContent,
+          title: document.querySelector('.settings-page-title, .computer-use-page-heading h1').textContent,
           placeholder: !!document.querySelector('[data-testid="page-placeholder"]'),
           overflowElements: [...scroll.querySelectorAll('*')].filter(el => visible(el) && el.getBoundingClientRect().right > scroll.getBoundingClientRect().right + 1).slice(0, 8).map(el => el.tagName + '.' + el.className),
         };
@@ -1118,7 +1128,7 @@ async function runMacosEditors(window, webContents) {
       await run(`[...document.querySelectorAll('.settings-content-inner button')].find(button => button.textContent.trim() === '取消').click()`);
       await waitFor(webContents, `!document.querySelector('[aria-label="Profile 名称"]')`);
     } else if (page === 'skills') {
-      await run('document.querySelector(\'[aria-label="Close details"]\').click()');
+      await run('document.querySelector(\'[aria-label="关闭详情"]\').click()');
     }
   }
   return results;
@@ -1156,7 +1166,7 @@ async function runLocalizationScenario(window, webContents) {
 
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true } });
+  const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
     const { webContents } = window;
@@ -1189,8 +1199,10 @@ async function main() {
     await new Promise(resolve => process.stdout.write(`${JSON.stringify(result)}\n`, resolve));
   } finally {
     if (!window.isDestroyed()) window.destroy();
-    if (app.isReady()) await app.quit();
   }
 }
 
-main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`); app.exit(1); });
+// This fixture checks settings interactions. Once its flushed result and window
+// teardown complete, exit deterministically rather than waiting for Chromium's
+// asynchronous app.quit shutdown (which can retain the process under load).
+main().then(() => app.exit(0)).catch((error) => { process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`); app.exit(1); });

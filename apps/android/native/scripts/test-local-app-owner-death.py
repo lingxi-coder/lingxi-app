@@ -12,6 +12,22 @@ import subprocess
 import time
 
 
+def instrumentation_args(test_class, component, phase):
+    if phase not in ("prepare", "recover"):
+        raise ValueError("owner-death phase must be prepare or recover")
+    return ["shell", "am", "instrument", "-w", "-r", "-e", "class", test_class,
+            "-e", "ownerDeathAcceptance", "true", "-e", "ownerDeathPhase", phase, component]
+
+
+def recovery_passed(output):
+    # An assumed/skipped JUnit test can also report OK (1 test). Require a
+    # result emitted only after recovery assertions and cleanup complete.
+    lines = output.splitlines()
+    return ("OK (1 test)" in lines
+            and "INSTRUMENTATION_RESULT: ownerDeathResult=RECOVERED" in lines
+            and "FAILURES!!!" not in lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", required=True)
@@ -49,8 +65,7 @@ def main():
             raise RuntimeError("Recover the existing receipt with --recover-only first")
         log = args.output_dir / "owner-death-prepare.log"
         with log.open("w") as output:
-            prepare = subprocess.Popen(adb + ["shell", "am", "instrument", "-w", "-r",
-                "-e", "class", test_class, "-e", "ownerDeathPhase", "prepare", component],
+            prepare = subprocess.Popen(adb + instrumentation_args(test_class, component, "prepare"),
                 stdout=output, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 100
             while time.monotonic() < deadline:
@@ -102,10 +117,10 @@ def main():
             or stopped["starts"] != saved["buildStarts"]):
         raise RuntimeError("Candidate build restarted before cold recovery")
     (args.output_dir / "owner-death-stopped-build.json").write_text(json.dumps(stopped, indent=2) + "\n")
-    result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class", test_class,
-        "-e", "ownerDeathPhase", "recover", component], text=True, capture_output=True, timeout=120)
+    result = subprocess.run(adb + instrumentation_args(test_class, component, "recover"),
+                            text=True, capture_output=True, timeout=120)
     (args.output_dir / "owner-death-recover.log").write_text(result.stdout + result.stderr)
-    if result.returncode != 0 or "OK (1 test)" not in result.stdout:
+    if result.returncode != 0 or not recovery_passed(result.stdout):
         raise RuntimeError("Cold recovery failed: " + result.stdout[-6000:] + result.stderr[-1000:])
     print("PASS: actual candidate build, exact host PID SIGKILL, cold recovery, retained old release and data")
 

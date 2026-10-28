@@ -957,9 +957,10 @@ pub fn run_app(
     }
     let startup_theme = tui_core::theme_persist::load_theme_setting()
         .unwrap_or(tui_core::theme::ThemeSetting::Auto);
-    let fullscreen = message_anchor.is_some() || std::env::var("LINGXI_TUI_FULLSCREEN")
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
+    let fullscreen = message_anchor.is_some()
+        || std::env::var("LINGXI_TUI_FULLSCREEN")
+            .ok()
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
     // Guard first, terminal second: locals drop in reverse order, so the
     // terminal resets the cursor while raw mode is still active, then the
     // guard restores cooked mode + bracketed paste.
@@ -1124,8 +1125,12 @@ pub fn run_app(
             (app.callbacks.on_submit)(prompt, row_token, images, token);
         }
     }
-    if let Some(draft) = initial_draft { app.chat_widget.restore_link_draft(&draft); }
-    if let Some(uuid) = message_anchor { app.chat_widget.anchor_message(uuid); }
+    if let Some(draft) = initial_draft {
+        app.chat_widget.restore_link_draft(&draft);
+    }
+    if let Some(uuid) = message_anchor {
+        app.chat_widget.anchor_message(uuid);
+    }
     let mut event_driver = CrosstermEventDriver;
     let result = app.run_inner(
         &mut terminal,

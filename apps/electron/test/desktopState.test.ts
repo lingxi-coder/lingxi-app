@@ -124,6 +124,23 @@ test('unknown task status update is ignored without inventing mock rows', () => 
   assert.equal(after, before);
 });
 
+test('an unknown exit survives late status and task rows, including a refresh', () => {
+  let state = reduceDesktopEvent(emptyDesktopState(), {
+    type: 'task_status_changed', task_id: 'shell', status: { type: 'exited_unknown' },
+  });
+  state = reduceDesktopEvent(state, {
+    type: 'task_row', task: { task_id: 'shell', task_type: 'local_bash', status: { type: 'running' }, description: 'Shell' },
+  });
+  assert.equal(state.tasks.shell?.status.type, 'exited_unknown');
+  state = reduceDesktopEvent(state, { type: 'task_status_changed', task_id: 'shell', status: { type: 'completed' } });
+  assert.equal(state.tasks.shell?.status.type, 'exited_unknown');
+  state = beginTaskRefresh(state);
+  state = reduceDesktopEvent(state, {
+    type: 'task_row', task: { task_id: 'shell', task_type: 'local_bash', status: { type: 'pending' }, description: 'Shell' },
+  });
+  assert.equal(state.tasks.shell?.status.type, 'exited_unknown');
+});
+
 test('slash command catalogs replace stale commands for initial and live updates', () => {
   const initial = reduceDesktopEvent(emptyDesktopState(), {
     type: 'slash_command_catalog',

@@ -5,6 +5,9 @@ import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import type { FusionCatalog, FusionStrategyEntry } from '../../src/renderer/components/settings/pages/FusionCatalog';
 import '../../src/renderer/global.css';
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
+
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'zh-Hans');
 
 const initialCatalog: FusionCatalog = {
   scopes: ['user', 'project', 'local'].map((scope) => ({ scope: scope as 'user' | 'project' | 'local', admitted: scope !== 'local', path: `/fixture/${scope}/settings.json`, revision: 'r1',

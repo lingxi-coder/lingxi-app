@@ -8,9 +8,47 @@ import { FakeWebRtcNetwork } from './fakeWebRtc';
 export const UID = 'uid-1';
 export const START_TIME = 1_700_000_000_000;
 
+// WebCrypto executes outside the promise microtask queue. Keep a record of its
+// real work so a test can distinguish a busy crypto worker from a timer that
+// should be advanced by the fake clock.
+const pendingRealWork = new Set<Promise<unknown>>();
+
+export function trackRealWork<T>(operation: Promise<T>): Promise<T> {
+  pendingRealWork.add(operation);
+  void operation.then(() => pendingRealWork.delete(operation), () => pendingRealWork.delete(operation));
+  return operation;
+}
+
+const nativeSubtle = crypto.subtle;
+for (const name of ['generateKey', 'exportKey', 'importKey', 'sign', 'verify', 'deriveBits', 'digest', 'encrypt', 'decrypt'] as const) {
+  const original = nativeSubtle[name];
+  Object.defineProperty(nativeSubtle, name, {
+    configurable: true,
+    writable: true,
+    value: (...args: unknown[]) => trackRealWork(Reflect.apply(original, nativeSubtle, args) as Promise<unknown>),
+  });
+}
+
+async function waitForRealWork(label: string): Promise<boolean> {
+  const pending = [...pendingRealWork];
+  if (pending.length === 0) return false;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error(`real async work stalled while waiting for ${label}`)), 10_000);
+      }),
+    ]);
+  } finally {
+    if (watchdog !== undefined) clearTimeout(watchdog);
+  }
+  return true;
+}
+
 /**
  * Advance fake time in small steps, yielding to the event loop between them so
- * the real asynchronous work (WebCrypto) can finish, until `done()` holds.
+ * WebCrypto finishes before its pending work can consume simulated deadlines.
  */
 export async function drive(
   clock: ManualClock,
@@ -23,6 +61,7 @@ export async function drive(
   for (let turn = 0; turn < limit; turn++) {
     if (done()) return;
     await new Promise<void>((resolve) => setImmediate(resolve));
+    if (await waitForRealWork(label)) continue;
     clock.advance(step);
   }
   throw new Error(`timed out waiting for ${label}`);

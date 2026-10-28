@@ -114,10 +114,10 @@ impl PeerConnector for NativePeerConnector {
         tokio::spawn(run(session, requests, events, closed.clone()));
         Ok(PeerOfferer {
             peer: Arc::new(NativePeer {
-                commands,
-                closed,
                 files,
                 file_limit,
+                commands,
+                closed,
             }),
             events: receiver,
         })
@@ -188,6 +188,7 @@ fn state(value: RTCPeerConnectionState) -> PeerConnectionState {
         RTCPeerConnectionState::Disconnected => PeerConnectionState::Disconnected,
         RTCPeerConnectionState::Failed => PeerConnectionState::Failed,
         RTCPeerConnectionState::Closed => PeerConnectionState::Closed,
+        _ => PeerConnectionState::Failed,
     }
 }
 

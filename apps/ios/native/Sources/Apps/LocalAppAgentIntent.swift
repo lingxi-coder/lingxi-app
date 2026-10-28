@@ -102,7 +102,7 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
             throw LocalAppServiceFailure("INVALID_AGENT_INPUT", "The Local App ID is invalid.")
         }
         let input = try LocalAppAgentIntentInput.runAgentInput(inputJSON)
-        let client = LocalApps.library.client
+        let client = await LocalApps.library.client
         let cancellation = LocalAppAgentIntentCancellation(client: client, appID: appID, revision: revisionValue)
         let taskProgress = progress
 

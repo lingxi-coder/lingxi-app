@@ -19,6 +19,8 @@ import {
   type PendingConfigurationOperations,
 } from '../src/renderer/bridge/configurationOperations';
 import type { ConfigurationOperationEvent } from '../src/renderer/bridge/bridgeTypes';
+import { tr } from '../src/renderer/i18n/locale';
+import { withDesktopLocale } from './support/language';
 
 // Node's TSX loader uses the classic JSX transform for source imports.
 (globalThis as unknown as { React: typeof React }).React = React;
@@ -48,16 +50,18 @@ function settingsMarkup(snapshot: unknown): string {
       onTheme: () => {}, onClose: () => {} })));
 }
 test('connected layered settings wait for a valid snapshot and offer retry after parse failure', () => {
-  const loading = settingsMarkup(null);
-  assert.match(loading, /settings-snapshot-loading/);
-  assert.doesNotMatch(loading, /aria-label="enabledTools"/);
-  const invalid = settingsMarkup({ type: 'settings_snapshot', effective_json: '{', provenance_json: '{}' });
-  assert.match(invalid, /settings-snapshot-error/); assert.match(invalid, /重试/);
-  assert.doesNotMatch(invalid, /aria-label="enabledTools"/);
-  const ready = settingsMarkup({ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}',
-    layers_json: JSON.stringify({ user: { enabledTools: ['Read'], outputStyle: 'Explanatory' } }) });
-  assert.match(ready, /aria-label="enabledTools"[^>]*value="Read"/);
-  assert.match(ready, /aria-label="outputStyle"[^>]*value="Explanatory"/);
+  withDesktopLocale('en', () => {
+    const loading = settingsMarkup(null);
+    assert.match(loading, /settings-snapshot-loading/);
+    assert.doesNotMatch(loading, /aria-label="enabledTools"/);
+    const invalid = settingsMarkup({ type: 'settings_snapshot', effective_json: '{', provenance_json: '{}' });
+    assert.match(invalid, /settings-snapshot-error/); assert.match(invalid, /Retry/);
+    assert.doesNotMatch(invalid, /aria-label="enabledTools"/);
+    const ready = settingsMarkup({ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}',
+      layers_json: JSON.stringify({ user: { enabledTools: ['Read'], outputStyle: 'Explanatory' } }) });
+    assert.match(ready, /aria-label="enabledTools"[^>]*value="Read"/);
+    assert.match(ready, /aria-label="outputStyle"[^>]*value="Explanatory"/);
+  });
 });
 
 /** Persistent hook cells exercise the actual ToolsAgent, including its effect dependencies. */
@@ -85,6 +89,7 @@ function toolsHarness() {
     react: hooks, 'react/jsx-runtime': require('react/jsx-runtime'), '../layerFields': layerFields,
     '../rows': { Card: 'Card', Row: 'Row', FieldProvenanceNotice: 'Notice' },
     '../../../theme/ThemeContext': { useT: () => tokens('light') }, '../primitives': { Toggle: 'Toggle' },
+    '../../../i18n/useI18n': { useI18n: () => ({}) }, '../../../i18n/locale': { tr },
     './ghostButton': { ghostButtonStyle: () => ({}), inputStyle: () => ({}) },
   };
   evaluate(readFileSync(resolve('src/renderer/components/settings/pages/ToolsAgent.tsx'), 'utf8'),
@@ -138,6 +143,7 @@ function imageHarness() {
   let current: any[] = [];
   const revoked: string[] = [], notices: unknown[] = [];
   const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() },
+    tr,
     ready: true, activeSessionId: 'A', imageAttachments: [], MAX_IMAGE_ATTACHMENTS: 4,
     draftSessionId: { current: 'A' }, imageDraftGeneration: { current: 1 }, composerDraftRevision: { current: 0 }, imageFileToAttachment,
     URL: { revokeObjectURL: (url: string) => revoked.push(url) },

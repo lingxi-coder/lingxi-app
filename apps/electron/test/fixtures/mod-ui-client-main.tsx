@@ -65,6 +65,9 @@ interface FixtureApi {
   disableLateRender(): void;
   holdNextFrameOperation(): void;
   releaseHeldFrameOperations(): void;
+  initialStatusResizeHeld(): boolean;
+  initialMountsHeld(): boolean;
+  releaseInitialMounts(): void;
   emitNewerAsyncFrame(): void;
   emitHighSequenceFrameForFailedRuntime(runtimeId: string): void;
   reloadStatusPluginEnvironment(): void;
@@ -117,6 +120,8 @@ let noParent = false;
 let statusPluginLoaded = true;
 let asyncFaultClientEnabled = false;
 let holdInitialResize = true;
+let initialStatusMountRelease: (() => void) | null = null;
+let initialSiblingMountRelease: (() => void) | null = null;
 let holdNextFrame = false;
 let nextRuntimeId = 1;
 let setRapidInputEnabled!: (enabled: boolean) => void;
@@ -400,6 +405,13 @@ const host: ModUiClientHostApi = {
         failedRuntimeIds.add(runtimeId);
         emitWorkerFaultFrame(session, runtimeId, request.render_revision, 'fixture pre-registration worker fault');
       }
+      // Hold both first responses across one controlled viewport update. This
+      // makes their stale cleanup deterministic even on slow hosts.
+      if (session === sessionId && runtimeId === 'runtime-status') {
+        await new Promise<void>(resolve => { initialStatusMountRelease = resolve; });
+      } else if (session === sessionId && runtimeId === 'runtime-sibling-1') {
+        await new Promise<void>(resolve => { initialSiblingMountRelease = resolve; });
+      }
       return mountFrame as UiClientOperationResponseFor<T>;
     }
     if (request.type === 'runHeld' && failRunInWorker) {
@@ -471,13 +483,13 @@ const host: ModUiClientHostApi = {
       return frame as UiClientOperationResponseFor<T>;
     }
     const runtimeId = request.runtimeId;
-    const tree = request.type === 'setProps' && runtimeId === 'runtime-status'
+    const tree = request.type === 'setProps' && frameIdentityByRuntime.get(runtimeId)?.client.key === 'status'
       ? surfaceTree(title)
-      : runtimeFrames.get(runtimeId)?.tree ?? (runtimeId === 'runtime-status' ? surfaceTree() : { type: 'Text', children: ['Sibling Alive'] });
+      : runtimeFrames.get(runtimeId)?.tree ?? (frameIdentityByRuntime.get(runtimeId)?.client.key === 'status' ? surfaceTree() : { type: 'Text', children: ['Sibling Alive'] });
     const frame = makeRuntimeFrame(runtimeId, request.render_revision, tree);
     call.returnedRevision = frame.renderRevision;
     call.returnedFrameSequence = frame.frameSequence;
-    if (request.type === 'resize' && holdInitialResize) {
+    if (request.type === 'resize' && holdInitialResize && runtimeId === currentStatusRuntimeId) {
       holdInitialResize = false;
       return await holdFrameResult(frame) as UiClientOperationResponseFor<T>;
     }
@@ -602,6 +614,8 @@ window.__modUiClientFixture = {
     return {
       currentStatusRuntimeId,
       statusEpochs: [...statusMountCountsByEpoch.entries()],
+      initialStatusResizeHeld: !holdInitialResize && heldFrameOperationReleases.length > 0,
+      heldFrameOperations: heldFrameOperationReleases.length,
       statusDom: [...document.querySelectorAll('[data-client="status"]')].map((element) => ({
         text: element.textContent,
         module: element.getAttribute('data-module'),
@@ -673,14 +687,14 @@ window.__modUiClientFixture = {
     });
   },
   emitStaleFrame() {
-    emitSnapshotFrame(sessionId, 'runtime-status', {
+    emitSnapshotFrame(sessionId, currentStatusRuntimeId, {
       renderRevision: revision - 1,
       frameSequence: 10_000,
       tree: { type: 'Text', children: ['Stale revision frame'] },
       hasPointerListener: false,
       hasKeyListener: false,
     });
-    emitSnapshotFrame('old-session', 'runtime-status', {
+    emitSnapshotFrame('old-session', currentStatusRuntimeId, {
       renderRevision: revision,
       frameSequence: 10_001,
       tree: { type: 'Text', children: ['Old session frame'] },
@@ -718,10 +732,18 @@ window.__modUiClientFixture = {
   disableLateRender() { setLateEnabled(false); },
   holdNextFrameOperation() { holdNextFrame = true; },
   releaseHeldFrameOperations() { for (const release of heldFrameOperationReleases.splice(0)) release(); },
+  initialStatusResizeHeld() { return !holdInitialResize && heldFrameOperationReleases.length > 0; },
+  initialMountsHeld() { return initialStatusMountRelease !== null && initialSiblingMountRelease !== null; },
+  releaseInitialMounts() {
+    initialStatusMountRelease?.();
+    initialSiblingMountRelease?.();
+    initialStatusMountRelease = null;
+    initialSiblingMountRelease = null;
+  },
   emitNewerAsyncFrame() {
-    const setPropsCall = [...calls].reverse().find((call) => call.kind === 'operation' && call.request.type === 'setProps' && call.request.runtimeId === 'runtime-status');
+    const setPropsCall = [...calls].reverse().find((call) => call.kind === 'operation' && call.request.type === 'setProps' && call.request.runtimeId === currentStatusRuntimeId);
     if (!setPropsCall || setPropsCall.kind !== 'operation' || setPropsCall.request.type !== 'setProps') return;
-    emitRuntimeFrame(sessionId, makeRuntimeFrame('runtime-status', setPropsCall.request.render_revision, surfaceTree('Newest asynchronous frame')));
+    emitRuntimeFrame(sessionId, makeRuntimeFrame(currentStatusRuntimeId, setPropsCall.request.render_revision, surfaceTree('Newest asynchronous frame')));
   },
   emitHighSequenceFrameForFailedRuntime(runtimeId) {
     if (!failedRuntimeIds.has(runtimeId)) return;

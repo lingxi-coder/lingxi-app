@@ -1,0 +1,13 @@
+[package]
+name = "lingxi-async-owned-fd"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[target.'cfg(unix)'.dependencies]
+tokio = { workspace = true, features = ["net", "io-util"] }
+
+[lints]
+workspace = true

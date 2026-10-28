@@ -641,6 +641,8 @@ fn run_command_stdout(
 ) -> Option<String> {
     use std::io::Write;
 
+    #[cfg(unix)]
+    let start = Instant::now();
     let mut cmd = build_shell_command(command);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -674,11 +676,34 @@ fn run_command_stdout(
         }
         let _ = stdout_tx.send(Some((output, overflowed)));
     });
+    // A command may never read stdin. On Unix, write incrementally to the
+    // original pipe without blocking the deadline loop or leaving a detached
+    // writer thread behind if a descendant keeps the pipe open.
+    #[cfg(unix)]
+    let mut stdin = child.stdin.take();
+    #[cfg(unix)]
+    if let Some(stdin) = &stdin {
+        let nonblocking = rustix::fs::fcntl_getfl(stdin)
+            .and_then(|flags| rustix::fs::fcntl_setfl(stdin, flags | rustix::fs::OFlags::NONBLOCK));
+        if nonblocking.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    }
+    #[cfg(unix)]
+    let mut remaining_input = stdin_json.as_bytes();
+
+    // Windows anonymous pipes do not expose a nonblocking mode through std.
+    // This remains synchronous until a platform-owned cancellable pipe is
+    // available; a detached writer could otherwise leak indefinitely.
+    #[cfg(not(unix))]
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(stdin_json.as_bytes());
     }
-
+    #[cfg(not(unix))]
     let start = Instant::now();
+
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -698,6 +723,36 @@ fn run_command_stdout(
                     let _ = child.wait();
                     return None;
                 }
+
+                #[cfg(unix)]
+                if let Some(pipe) = &mut stdin {
+                    if remaining_input.is_empty() {
+                        stdin = None;
+                    } else {
+                        match pipe.write(remaining_input) {
+                            Ok(0) => stdin = None,
+                            Ok(written) => {
+                                remaining_input = &remaining_input[written..];
+                                if remaining_input.is_empty() {
+                                    stdin = None;
+                                }
+                                continue;
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                continue;
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            // Preserve the existing behavior for a command
+                            // that closes stdin before consuming the payload.
+                            Err(_) => stdin = None,
+                        }
+                    }
+                }
+                #[cfg(unix)]
+                std::thread::sleep(
+                    Duration::from_millis(10).min(timeout.saturating_sub(start.elapsed())),
+                );
+                #[cfg(not(unix))]
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(_) => return None,
@@ -1006,6 +1061,34 @@ mod tests {
         // `cat` echoes the JSON payload back; confirms stdin is fed + closed.
         let out = run_status_line_command("cat", "{\"k\":1}", STATUS_LINE_TIMEOUT);
         assert_eq!(out.as_deref(), Some("{\"k\":1}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_status_line_command_streams_large_stdin_while_draining_stdout() {
+        let input = "x".repeat(512 * 1024);
+        let out = run_status_line_command("cat", &input, Duration::from_secs(3));
+        assert_eq!(out.as_deref(), Some(input.as_str()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_status_line_command_times_out_when_stdin_is_not_read() {
+        // The shell replaces itself, so this exercises the blocked-input path
+        // without introducing an unrelated descendant-cleanup dependency.
+        let input = "x".repeat(4 * 1024 * 1024);
+        let started = Instant::now();
+        let out = run_status_line_command("exec sleep 3", &input, Duration::from_millis(100));
+        assert!(out.is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_status_line_command_accepts_success_after_stdin_is_closed_early() {
+        let input = "x".repeat(512 * 1024);
+        let out = run_status_line_command("exec 0<&-; printf done", &input, Duration::from_secs(3));
+        assert_eq!(out.as_deref(), Some("done"));
     }
 
     #[cfg(unix)]

@@ -4,6 +4,10 @@ import '../../src/renderer/global.css';
 import { ProviderCredentials } from '../../src/renderer/components/settings/pages/ProviderCredentials';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
+
+// This scenario asserts the Chinese labels, independent of the host locale.
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'zh-Hans');
 
 function Fixture() {
   const [configured, setConfigured] = useState(false);

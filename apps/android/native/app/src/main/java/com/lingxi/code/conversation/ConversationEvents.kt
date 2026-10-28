@@ -102,9 +102,13 @@ sealed interface ReplyEvent {
 
     /** Internal-only: the matching raw event already reduced and can advance. */
     data class DurableTurnReplayAcknowledged(
+        val sessionId: String,
         val turnId: Long,
         val sequence: Long,
     ) : ReplyEvent
+
+    /** The ordered delivery collector performs the terminal projection. */
+    data object DurableTurnStreamEnded : ReplyEvent
 
     /** A terminal error to surface (engine `Error`, or a build/submit failure). */
     data class Error(val message: String) : ReplyEvent
@@ -559,15 +563,17 @@ fun mapReplyStream(
     events: Flow<ClientEvent>,
     strings: ConversationStrings = DefaultConversationStrings,
     acceptSlashCommandResults: Boolean = false,
+    acceptsDurableReplay: (ClientEvent.TurnEventReplay) -> Boolean = { true },
 ): Flow<ReplyEvent> = flow {
     emit(ReplyEvent.Thinking)
     var awaitingDurableReplayAck = false
     emitAll(
         events.transformWhile { event ->
             if (event is ClientEvent.TurnEventReplay) {
-                if (awaitingDurableReplayAck) {
+                if (awaitingDurableReplayAck && acceptsDurableReplay(event)) {
                     emit(
                         ReplyEvent.DurableTurnReplayAcknowledged(
+                            sessionId = event.sessionId,
                             turnId = event.turnId.toLong(),
                             sequence = event.sequence.toLong(),
                         ),
@@ -590,4 +596,43 @@ fun mapReplyStream(
             !terminal // keep collecting until a terminal reply
         },
     )
+}
+
+/**
+ * Engine durable events are projected by the single ordered ViewModel ingress.
+ * This stream still maps connection-scoped raw events and closes its collector
+ * when that same turn's durable terminal event is observed.
+ */
+internal fun mapDeliveryReplyStream(
+    deliveries: Flow<ConversationDelivery>,
+    strings: ConversationStrings = DefaultConversationStrings,
+    acceptsTurn: (String, ULong) -> Boolean,
+    acceptSlashCommandResults: Boolean = false,
+    acceptsRaw: (ClientEvent) -> Boolean = { true },
+): Flow<ReplyEvent> = flow {
+    emit(ReplyEvent.Thinking)
+    emitAll(deliveries.transformWhile { delivery ->
+        when (delivery) {
+            is ConversationDelivery.TurnEvent -> {
+                if (!delivery.isActive() || !acceptsTurn(delivery.sessionId, delivery.turnId)) return@transformWhile true
+                val terminal = delivery.event is ClientEvent.TurnEnded ||
+                    (delivery.event is ClientEvent.Error && !isCompactTurnRejection(delivery.event.message.displayText()))
+                if (terminal) emit(ReplyEvent.DurableTurnStreamEnded)
+                !terminal
+            }
+            is ConversationDelivery.Event -> {
+                val event = delivery.event
+                if (!acceptsRaw(event) || (event is ClientEvent.SlashCommandResult && !acceptSlashCommandResults)) {
+                    return@transformWhile true
+                }
+                val reply = clientEventToReply(event, strings) ?: return@transformWhile true
+                emit(reply)
+                val terminal = reply is ReplyEvent.End || reply is ReplyEvent.Error ||
+                    reply is ReplyEvent.Completed || reply is ReplyEvent.CommandOutput
+                if (reply is ReplyEvent.Error) emit(ReplyEvent.End)
+                !terminal
+            }
+            else -> true
+        }
+    })
 }

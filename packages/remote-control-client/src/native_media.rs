@@ -872,11 +872,9 @@ impl NativeRemoteMediaSession {
                         rendered_at: self.rendered_at_unix_ms.load(Ordering::Acquire),
                     };
                     self.progress_tx.send_replace(progress);
-                    if played > 0 {
-                        if self.send_playback_receipt(progress).await.is_err() {
-                            cancel.cancel();
-                            break;
-                        }
+                    if played > 0 && self.send_playback_receipt(progress).await.is_err() {
+                        cancel.cancel();
+                        break;
                     }
                 }
             }
@@ -934,7 +932,7 @@ impl NativeRemoteMediaSession {
                     }
                 }
                 input = self.device.next_input() => {
-                    let frame = input.map_err(|error| error)?;
+                    let frame = input?;
                     let Some(frame) = frame else { break; };
                     frame.validate(self.context.max_payload_bytes)?;
                     if let Some(previous) = last_sequence.get(&frame.source) {
@@ -1413,6 +1411,7 @@ impl NativeRemoteMediaSession {
                 MediaSessionState::Ended
             }
             webrtc::peer_connection::RTCPeerConnectionState::Closed => MediaSessionState::Failed,
+            _ => MediaSessionState::Failed,
         };
         self.set_state(mapped);
     }

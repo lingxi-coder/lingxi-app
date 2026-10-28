@@ -54,6 +54,7 @@ mod tests {
                     command: None,
                     stage: None,
                     error: None,
+                    observation_error: None,
                 })
                 .collect(),
         )]

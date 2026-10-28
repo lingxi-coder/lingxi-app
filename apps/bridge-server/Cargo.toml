@@ -90,7 +90,7 @@ cost = { workspace = true }
 # S2: resolve `~/.claude` (claude_home) + the global `.mcp.json` path, and the
 # F2-04 `~/.claude/bridge/<port>.lock` discovery dir.
 dirs = "5"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "io-util", "io-std"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "io-util", "io-std", "process"] }
 # `CancellationToken` (the per-turn cancel seam) is available in the default
 # surface of tokio-util 0.7 — no extra feature needed.
 tokio-util = { workspace = true }

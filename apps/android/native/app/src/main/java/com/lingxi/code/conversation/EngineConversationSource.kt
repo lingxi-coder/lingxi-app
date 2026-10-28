@@ -5,6 +5,7 @@ import android.os.Build
 import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientException
 import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
@@ -17,6 +18,7 @@ import com.lingxi.code.bindings.runtime.VisualizationHost
 import com.lingxi.code.bindings.android.AndroidNativeMediaHost
 import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.bindings.client.TurnRecoveryStateDto
+import com.lingxi.code.bindings.client.decodeTurnEventEnvelope
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.MCPServer
@@ -33,8 +35,12 @@ import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
 import com.lingxi.code.voice.resolveEngineEnvironmentOverrides
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -43,9 +49,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.onSubscription
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -71,8 +80,8 @@ import kotlinx.coroutines.sync.withLock
  * exercised by JVM unit tests. The pure [clientEventToReply] mapper carries the
  * mapping coverage; this wiring is covered by the on-device integration build.
  */
-private class MediaAudioSessionContextBindings(
-    private val mediaHost: AndroidNativeMediaHost,
+internal class MediaAudioSessionContextBindings(
+    private val removeContext: (String, ULong) -> Unit,
 ) {
     private val lock = Any()
     private val generations = mutableMapOf<String, ULong>()
@@ -86,13 +95,13 @@ private class MediaAudioSessionContextBindings(
             }
         }
         if (removeImmediately) {
-            runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
+            runCatching { removeContext(sessionId, generation) }
         }
     }
 
     fun remove(sessionId: String) {
         val generation = synchronized(lock) { generations.remove(sessionId) } ?: return
-        runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
+        runCatching { removeContext(sessionId, generation) }
     }
 
     fun close() {
@@ -101,7 +110,7 @@ private class MediaAudioSessionContextBindings(
             generations.toList().also { generations.clear() }
         }
         registrations.forEach { (sessionId, generation) ->
-            runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
+            runCatching { removeContext(sessionId, generation) }
         }
     }
 }
@@ -110,8 +119,8 @@ class EngineConversationSource private constructor(
     private val handle: MobileEngineHandle,
     private val mediaHost: AndroidNativeMediaHost,
     private val mediaContextBindings: MediaAudioSessionContextBindings,
-    private val events: SharedFlow<ClientEvent>,
-    private val eventRelay: LosslessEventRelay<ClientEvent>,
+    private val events: Flow<ClientEvent>,
+    private val eventRelay: LosslessEventRelay<ConversationDelivery>,
     private val workflowEvents: SharedFlow<WorkflowProgressUpdate>,
     private val workflowRelay: LosslessEventRelay<WorkflowProgressUpdate>,
     private val eventScope: CoroutineScope,
@@ -125,12 +134,23 @@ class EngineConversationSource private constructor(
     private val strings: ConversationStrings,
     private val durableTurns: DurableConversationTurnClientStore,
     private val durableReplayGate: DurableTurnReplayGate,
+    private val eventIngress: DurableRecoveryIngress.Source,
+    private val turnIngressInterest: DurableTurnIngressInterest,
+    private val attachIngress: DurableAttachIngress,
+    private val attachConsumers: AttachConsumerRegistry,
+    private val beginTurnInterest: (String, Long, Boolean) -> Boolean,
+    private val retireTurnInterest: (String, ULong) -> Unit,
+    private val finishAttachInterest: (DurableAttachIngress.Attempt) -> Unit,
+    private val onCancellationDrained: (String, Long) -> Unit,
+    private val onCancellationFailed: (String, Long) -> Unit,
     private val autoAttachDurableTurns: Boolean,
     @Volatile private var resumeOnUiAttach: Boolean,
     private val initialRecoverySpec: ConversationRecoverySpec,
     private val userHomePath: String,
     private val userHomeGuestPath: String,
 ) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource {
+    override val orderedCancellationBoundaries: Boolean get() = true
+    override val supportsSubmissionAdmission: Boolean get() = true
 
     override val recoverySpec: ConversationRecoverySpec
         get() {
@@ -185,10 +205,40 @@ class EngineConversationSource private constructor(
     }
 
     override val clientEvents: Flow<ClientEvent> = events
+    override val conversationDeliveries: Flow<ConversationDelivery> = attachConsumers.track(eventRelay.events)
     override val workflowProgress: Flow<WorkflowProgressUpdate> = workflowEvents
 
     override suspend fun submitClientCommand(command: ClientCommand) {
-        handle.submit(command)
+        val queuedPrompt = command as? ClientCommand.SendPrompt
+        val queuedTurn = queuedPrompt?.turnId
+        if (queuedTurn != null) {
+            val owner = queuedPrompt.sessionId?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("A main conversation prompt needs its origin session")
+            val prepared = kotlinx.coroutines.CompletableDeferred<Boolean>()
+            if (!eventIngress.dispatchBoundary {
+                val valid = queuedTurn <= Long.MAX_VALUE.toULong() &&
+                    activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(owner) &&
+                    durableTurns.enqueue(owner, queuedTurn.toLong())
+                if (valid) {
+                    turnIngressInterest.enqueue(owner, queuedTurn)
+                }
+                prepared.complete(valid)
+            }) prepared.complete(false)
+            if (!prepared.await()) {
+                if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                throw ClientException.SubmissionNotAdmitted("The queued prompt was not submitted")
+            }
+        }
+        try {
+            handle.submit(command)
+        } catch (error: Throwable) {
+            if (queuedTurn != null && error is ClientException.SubmissionNotAdmitted) eventIngress.dispatchBoundary {
+                turnIngressInterest.removeQueued(queuedTurn)
+                queuedPrompt.sessionId?.let { durableTurns.removeQueued(it, queuedTurn.toLong()) }
+                if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+            }
+            throw error
+        }
     }
 
     override suspend fun testProviderConnection(
@@ -206,22 +256,92 @@ class EngineConversationSource private constructor(
         handle.submit(ClientCommand.ListSessionAgents)
     }
 
-    override suspend fun attachDurableTurnForUi(afterSequence: Long) {
+    override suspend fun attachDurableTurnForUi(
+        afterSequence: Long,
+        onAttach: (String, Long, Boolean, String) -> Unit,
+    ) {
         val record = durableTurns.load() ?: return
         if (
             activeSession.value?.let { canonicalSessionId(it.sessionId) } ==
                 canonicalSessionId(record.sessionId)
         ) {
-            attachAndResume(record, forceAttach = true, afterSequence = afterSequence)
+            attachAndResume(record, forceAttach = true, afterSequence = afterSequence, onAttach = onAttach)
         }
+    }
+
+    override suspend fun reconcileDurableTurnForUi(sessionId: String, turnId: Long, afterSequence: Long, trustNotFound: Boolean,
+        onAttach: (String, Long, Boolean, String) -> Unit) {
+        val record = durableTurns.load()?.takeIf {
+            it.turnId == turnId && canonicalSessionId(it.sessionId) == canonicalSessionId(sessionId)
+        } ?: error("The recovery record is unavailable")
+        check(activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(sessionId)) {
+            "Session changed before recovery query"
+        }
+        attachAndResume(record, forceAttach = true, afterSequence = afterSequence, onAttach = onAttach,
+            resumeOverride = false, trustNotFound = trustNotFound)
+    }
+
+    override suspend fun terminalRecoveryReceipts(sessionId: String): List<Long> =
+        durableTurns.terminalReceipts(sessionId).map { it.turnId }
+    override suspend fun cancelledQueuedReceipts(sessionId: String): List<Long> =
+        durableTurns.terminalReceipts(sessionId).filter { it.cancelledBeforeStart }.map { it.turnId }
+    override suspend fun recoveryStorageAvailable(): Boolean = durableTurns.isHealthy()
+
+    override suspend fun pendingQueuedRecoveryTurns(sessionId: String): List<Long> =
+        durableTurns.queued(sessionId).map { it.turnId }
+
+    override suspend fun queryQueuedRecovery(sessionId: String, turnId: Long, requestId: String) {
+        withTimeout(10_000) { attachConsumers.awaitSubscriber() }
+        handle.submit(ClientCommand.QueryQueuedTurn(sessionId = sessionId, turnId = turnId.toULong(), requestId = requestId))
+    }
+
+    override suspend fun resolveQueuedRecovery(sessionId: String, turns: List<Long>, resolution: QueuedRecoveryResolution): Boolean {
+        val result = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        if (!eventIngress.dispatchBoundary {
+            val active = activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(sessionId)
+            val saved = active && turns.all { turn ->
+                val done = when (resolution) {
+                    QueuedRecoveryResolution.Delivered -> durableTurns.removeDeliveredQueued(sessionId, turn)
+                    QueuedRecoveryResolution.CancelledBeforeStart -> durableTurns.finishQueued(sessionId, turn, cancelledBeforeStart = true)
+                    QueuedRecoveryResolution.Terminal -> durableTurns.finishQueued(sessionId, turn)
+                }
+                if (done) {
+                    turnIngressInterest.removeQueued(turn.toULong())
+                    eventRelay.offer(ConversationDelivery.QueuedTurnSettled(sessionId, turn.toULong(),
+                        reviewRequired = resolution != QueuedRecoveryResolution.Delivered,
+                        cancelledBeforeStart = resolution == QueuedRecoveryResolution.CancelledBeforeStart))
+                }
+                done
+            }
+            if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+            result.complete(saved)
+        }) result.complete(false)
+        return result.await()
+    }
+
+    override suspend fun acknowledgeTerminalRecovery(sessionId: String, turns: List<Long>): Boolean {
+        val result = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        if (!eventIngress.dispatchBoundary {
+            val current = turnIngressInterest.currentIdentity()
+            val ready = turns.filterNot { current == (canonicalSessionId(sessionId) to it.toULong()) }
+            val saved = durableTurns.acknowledgeTerminals(sessionId, ready)
+            if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+            result.complete(saved)
+        }) result.complete(false)
+        return result.await()
     }
 
     private suspend fun attachAndResume(
         record: DurableConversationTurnRecord,
         forceAttach: Boolean,
         afterSequence: Long = 0L,
+        onAttach: (String, Long, Boolean, String) -> Unit = { _, _, _, _ -> },
+        resumeOverride: Boolean? = null,
+        trustNotFound: Boolean = false,
     ) = durableAttachMutex.withLock {
-        val latest = durableTurns.load()?.takeIf { it.turnId == record.turnId } ?: record
+        val latest = durableTurns.load()?.takeIf {
+            it.turnId == record.turnId && canonicalSessionId(it.sessionId) == canonicalSessionId(record.sessionId)
+        } ?: return@withLock
         // A second Activity can claim the shared source while AttachTurn is
         // suspended. Snapshot the first claim's disposition before yielding;
         // that claim must still consume its required Resume exactly once.
@@ -233,35 +353,101 @@ class EngineConversationSource private constructor(
             afterSequence = afterSequence.coerceAtLeast(0L),
         )
         if (!durableAttachCoordinator.reserve(request, owner)) return@withLock
+        val expectsResume = resumeOverride ?: shouldResumeDurableTurn(forceAttach, resumeForThisAttach, latest.admissionPending)
+        val requestId = java.util.UUID.randomUUID().toString()
+        val begun = kotlinx.coroutines.CompletableDeferred<DurableAttachIngress.Attempt>()
+        if (!eventIngress.dispatchBoundary {
+            val existingOwner = attachIngress.hasEstablishedOwner(latest.sessionId, latest.turnId.toULong())
+            if (!beginTurnInterest(latest.sessionId, latest.turnId, true)) {
+                begun.completeExceptionally(IllegalStateException("Cannot acquire recovery interest"))
+                return@dispatchBoundary
+            }
+            begun.complete(attachIngress.begin(latest.sessionId, latest.turnId.toULong(), requestId, forceAttach,
+                expectsResume, existingOwner, latest.admissionPending))
+        }) begun.completeExceptionally(IllegalStateException("Recovery source has retired"))
+        val attempt = try { begun.await() } catch (error: Throwable) {
+            durableAttachCoordinator.rollback(request, owner)
+            throw DurableAttachFailure(latest.turnId, "attach", error)
+        }
+        if (forceAttach) onAttach(latest.sessionId, latest.turnId, expectsResume, requestId)
         durableReplayGate.noteAttachRequested(
+            sessionId = latest.sessionId,
             turnId = latest.turnId,
             activation = activeSession.value?.takeIf { canonicalSessionId(it.sessionId) == canonicalSessionId(latest.sessionId) },
             afterSequence = request.afterSequence,
         )
         try {
+            if (forceAttach) withTimeout(10_000) { attachConsumers.awaitSubscriber() }
+            if (forceAttach && latest.admissionPending) eventIngress.dispatchBoundary {
+                eventRelay.offer(ConversationDelivery.AdmissionPending(latest.sessionId, latest.turnId, requestId,
+                    eventIngress.fence(latest.sessionId, latest.turnId.toULong())))
+            }
             handle.submit(
                 ClientCommand.AttachTurn(
+                    sessionId = latest.sessionId,
                     turnId = latest.turnId.toULong(),
                     afterSequence = request.afterSequence.toULong(),
+                    requestId = requestId,
                 ),
             )
+            check(withTimeout(10_000) { attempt.consumed.await() }) { "Attach replay was not safely consumed" }
         } catch (error: Throwable) {
-            durableReplayGate.cancelAttach(latest.turnId)
+            if (forceAttach && trustNotFound && error is ClientException.NotFound) {
+                val offered = eventIngress.dispatchBoundary {
+                    val barrier = attachConsumers.barrier(attempt.consumed)
+                    attempt.barrier = barrier
+                    if (!eventRelay.offer(ConversationDelivery.ReconciliationNotFound(
+                            latest.sessionId, latest.turnId, requestId, barrier,
+                            isActive = eventIngress.fence(latest.sessionId, latest.turnId.toULong()),
+                        ))) attempt.consumed.complete(false)
+                }
+                val consumed = offered && withContext(NonCancellable) {
+                    withTimeoutOrNull(10_000) { attempt.consumed.await() } == true
+                }
+                if (consumed) {
+                    eventIngress.dispatchBoundary {
+                        if (durableTurns.clear(latest.sessionId, latest.turnId)) {
+                            attachIngress.end(attempt)
+                            retireTurnInterest(latest.sessionId, latest.turnId.toULong())
+                        } else if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                    }
+                    attachConsumers.forget(attempt.barrier)
+                    durableReplayGate.cancelAttach(latest.sessionId, latest.turnId)
+                    durableAttachCoordinator.rollback(request, owner)
+                    return@withLock
+                }
+            }
+            attachConsumers.forget(attempt.barrier)
+            eventIngress.dispatchBoundary { finishAttachInterest(attempt) }
+            durableReplayGate.cancelAttach(latest.sessionId, latest.turnId)
             durableAttachCoordinator.rollback(request, owner)
             ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.scopeKey, this)
-            throw DurableAttachFailure(latest.turnId, "attach", error)
+            val failure = DurableAttachFailure(latest.turnId, "attach", error)
+            if (forceAttach) failure.orderedDelivery = eventIngress.dispatchBoundary {
+                eventRelay.offer(ConversationDelivery.AttachFailed(latest.sessionId, latest.turnId, failure, requestId))
+            }
+            throw failure
         }
         // Cold-process recovery needs ResumeTurn. A UI takeover resumes only
         // when the process coordinator reports that no headless/UI executor is
         // already attached to this source; retained-live sources only Attach.
-        if (shouldResumeDurableTurn(forceAttach, resumeForThisAttach)) {
+        if (expectsResume) {
             try {
-                handle.submit(ClientCommand.ResumeTurn(latest.turnId.toULong()))
+                if (activeSession.value?.sessionId?.let(::canonicalSessionId) != canonicalSessionId(latest.sessionId)) {
+                    throw IllegalStateException("Session changed during recovery")
+                }
+                handle.submit(ClientCommand.ResumeTurn(sessionId = latest.sessionId, turnId = latest.turnId.toULong()))
             } catch (error: Throwable) {
-                durableReplayGate.cancelAttach(latest.turnId)
+                attachConsumers.forget(attempt.barrier)
+                eventIngress.dispatchBoundary { finishAttachInterest(attempt) }
+                durableReplayGate.cancelAttach(latest.sessionId, latest.turnId)
                 durableAttachCoordinator.rollback(request, owner)
                 ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.scopeKey, this)
-                throw DurableAttachFailure(latest.turnId, "resume", error)
+                val failure = DurableAttachFailure(latest.turnId, "resume", error)
+                if (forceAttach) failure.orderedDelivery = eventIngress.dispatchBoundary {
+                    eventRelay.offer(ConversationDelivery.AttachFailed(latest.sessionId, latest.turnId, failure, requestId))
+                }
+                throw failure
             }
             if (forceAttach) {
                 ConversationHeadlessRecovery.markDurableUiExecutorActive(
@@ -269,6 +455,12 @@ class EngineConversationSource private constructor(
                     this,
                 )
             }
+        }
+        eventIngress.dispatchBoundary {
+            if (attempt.admissionPending && !durableTurns.confirmAdmission(attempt.sessionId, attempt.turnId.toLong())) {
+                eventRelay.offer(ConversationDelivery.TurnEventDecodeFailed(attempt.sessionId, attempt.turnId))
+            }
+            finishAttachInterest(attempt)
         }
     }
 
@@ -342,10 +534,7 @@ class EngineConversationSource private constructor(
 
     override suspend fun resumeSession(uuid: String) {
         if (uuid.isBlank()) return
-        val record = durableTurns.load()
-        if (record != null && canonicalSessionId(uuid) != canonicalSessionId(record.sessionId)) {
-            durableTurns.clear()
-        }
+        checkRecoveryStorage(durableTurns.restoreParked(uuid))
         // Propagate command failures: the ViewModel must keep the composer gated
         // and surface an explicit session error instead of pretending the locally
         // selected transcript was resumed.
@@ -364,6 +553,7 @@ class EngineConversationSource private constructor(
 
     override suspend fun resumeEmptySession(uuid: String, title: String) {
         if (uuid.isBlank()) return
+        checkRecoveryStorage(durableTurns.restoreParked(uuid))
         handle.resumeEmptySession(
             sessionId = canonicalSessionId(uuid),
             title = title.ifBlank { strings.resolve(R.string.chat_new_conversation, "新对话") },
@@ -371,12 +561,12 @@ class EngineConversationSource private constructor(
     }
 
     override suspend fun newSession() {
-        durableTurns.clear()
+        checkRecoveryStorage(durableTurns.parkCurrent())
         handle.submit(ClientCommand.NewSession(cwd = null, model = null))
     }
 
     override suspend fun newSession(cwd: String) {
-        durableTurns.clear()
+        checkRecoveryStorage(durableTurns.parkCurrent())
         handle.submit(ClientCommand.NewSession(cwd = cwd, model = null))
     }
 
@@ -385,6 +575,12 @@ class EngineConversationSource private constructor(
         // Let the caller surface delivery/rejection errors; only ModelChanged
         // advances modelState, so a failed switch retains the confirmed model.
         handle.submit(ClientCommand.SetModel(model = id.toClientTextDto()))
+    }
+
+    private fun checkRecoveryStorage(saved: Boolean) {
+        if (saved) return
+        if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+        throw IllegalStateException("Unable to preserve the previous conversation")
     }
 
     override suspend fun setReasoningSelection(id: String) {
@@ -432,8 +628,11 @@ class EngineConversationSource private constructor(
         }
     }
 
-    override fun submit(text: String, images: List<ImageRefDto>): Flow<ReplyEvent> =
-        submit(text, images, nextFallbackTurnId())
+    override fun submit(text: String, images: List<ImageRefDto>): Flow<ReplyEvent> {
+        val turn = DurableConversationTurnIds.next()
+            ?: return flow { emit(ReplyEvent.Error(strings.resolve(R.string.chat_engine_unavailable, "移动端引擎当前不可用"))); emit(ReplyEvent.End) }
+        return submit(text, images, turn)
+    }
 
     override fun submit(text: String, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> =
         submit(text, images, turnId, null, null)
@@ -448,6 +647,15 @@ class EngineConversationSource private constructor(
         turnId: Long,
         visualizationContext: VisualizationRef?,
         promptMode: PromptModeDto?,
+    ): Flow<ReplyEvent> {
+        val owner = activeSession.value?.sessionId?.takeIf(String::isNotBlank)
+            ?: return flow { emit(ReplyEvent.Error("Cannot start a turn without a session owner")); emit(ReplyEvent.End) }
+        return submit(text, images, turnId, visualizationContext, promptMode, owner, TurnSubmissionAdmission())
+    }
+
+    override fun submit(
+        text: String, images: List<ImageRefDto>, turnId: Long, visualizationContext: VisualizationRef?,
+        promptMode: PromptModeDto?, sessionId: String, admission: TurnSubmissionAdmission,
     ): Flow<ReplyEvent> =
         // Subscribe-before-submit: the returned reply stream maps the shared
         // engine flow through `mapReplyStream`, but the `SendPrompt` is fired
@@ -457,79 +665,170 @@ class EngineConversationSource private constructor(
         // `TextDelta` emitted by the engine's listener thread in the window between
         // `submit` returning and the collector subscribing is no longer dropped,
         // because the collector is already subscribed before the turn is spawned.
-        mapReplyStream(
-            events.onSubscription {
+        mapDeliveryReplyStream(
+            attachConsumers.track(eventRelay.events, ui = false, onSubscribed = {
                 try {
                     permissionIngress.beginTurn()
-                    activeSession.value?.sessionId?.let { sessionId ->
-                        durableTurns.begin(sessionId, turnId)
+                    val owner = prepareTurnOwner(turnId, sessionId)
+                    if (!admission.begin(owner)) {
+                        abandonUnsubmittedTurn(owner, turnId)
+                    } else {
+                        val submission = eventScope.async {
+                            handle.submit(ClientCommand.SendPrompt(
+                                sessionId = owner,
+                                text = text.toClientTextDto(),
+                                promptMode = promptMode,
+                                images = images,
+                                turnId = turnId.toULong(),
+                                visualizationContext = visualizationContext?.toDto(),
+                            ))
+                            if (!durableTurns.confirmAdmission(owner, turnId)) {
+                                if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                                error("Unable to save the submission state")
+                            }
+                        }
+                        submission.invokeOnCompletion { admission.finished(it) }
+                        submission.await()
                     }
-                    handle.submit(
-                        ClientCommand.SendPrompt(
-                            text = text.toClientTextDto(),
-                            promptMode = promptMode,
-                            images = images,
-                            turnId = turnId.toULong(),
-                            visualizationContext = visualizationContext?.toDto(),
-                        ),
-                    )
                 } catch (t: Throwable) {
                     permissionIngress.endTurn()
-                    durableTurns.clear(turnId)
+                    if (t is ClientException.SubmissionNotAdmitted) abandonUnsubmittedTurn(sessionId, turnId)
+                    // A failed/cancelled submit can race host admission. Preserve
+                    // any checkpoint already written until a correlated terminal.
                     // Inject the build/submit failure into the same stream the
                     // collector is already reading, so the mapper terminates it.
                     emit(
-                        ClientEvent.Error(
+                        ConversationDelivery.Event(ClientEvent.Error(
                             kind = ErrorKindDto.TRANSPORT,
                             message = strings.resolve(
                                 R.string.chat_error_engine_submit_failed,
                                 "引擎错误：%1\$s",
                                 "${t.message ?: t::class.simpleName}",
                             ).toClientTextDto(),
-                        ),
+                        )),
                     )
                 }
-            },
+            }),
             strings,
+            acceptsTurn = { eventSession, durableTurnId ->
+                durableTurnId == turnId.toULong() && canonicalSessionId(eventSession) == canonicalSessionId(sessionId) &&
+                    activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(sessionId)
+            },
+            acceptsRaw = { it !is ClientEvent.SystemNotice },
         )
 
     override fun submitSlashCommand(
         raw: ClientTextDto,
         images: List<ImageRefDto>,
         turnId: Long,
-    ): Flow<ReplyEvent> =
-        mapReplyStream(
-            events.onSubscription {
+    ): Flow<ReplyEvent> {
+        val owner = activeSession.value?.sessionId?.takeIf(String::isNotBlank)
+            ?: return flow { emit(ReplyEvent.Error("Cannot start a turn without a session owner")); emit(ReplyEvent.End) }
+        return submitSlashCommand(raw, images, turnId, owner, TurnSubmissionAdmission())
+    }
+
+    override fun submitSlashCommand(raw: ClientTextDto, images: List<ImageRefDto>, turnId: Long,
+        sessionId: String, admission: TurnSubmissionAdmission): Flow<ReplyEvent> =
+        mapDeliveryReplyStream(
+            attachConsumers.track(eventRelay.events, ui = false, onSubscribed = {
                 try {
                     permissionIngress.beginTurn()
-                    activeSession.value?.sessionId?.let { sessionId ->
-                        durableTurns.begin(sessionId, turnId)
+                    val owner = prepareTurnOwner(turnId, sessionId)
+                    if (!admission.begin(owner)) {
+                        abandonUnsubmittedTurn(owner, turnId)
+                    } else {
+                        val submission = eventScope.async {
+                            handle.submit(runSlashCommandClientCommand(owner, raw, images, turnId))
+                            if (!durableTurns.confirmAdmission(owner, turnId)) {
+                                if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                                error("Unable to save the submission state")
+                            }
+                        }
+                        submission.invokeOnCompletion { admission.finished(it) }
+                        submission.await()
                     }
-                    handle.submit(runSlashCommandClientCommand(raw, images, turnId))
                 } catch (t: Throwable) {
                     permissionIngress.endTurn()
-                    durableTurns.clear(turnId)
+                    if (t is ClientException.SubmissionNotAdmitted) abandonUnsubmittedTurn(sessionId, turnId)
                     emit(
-                        ClientEvent.Error(
+                        ConversationDelivery.Event(ClientEvent.Error(
                             kind = ErrorKindDto.TRANSPORT,
                             message = strings.resolve(
                                 R.string.chat_error_engine_submit_failed,
                                 "引擎错误：%1\$s",
                                 "${t.message ?: t::class.simpleName}",
                             ).toClientTextDto(),
-                        ),
+                        )),
                     )
                 }
-            }.filter { event -> slashCommandEventBelongsToTurn(event, turnId) },
+            }),
             strings,
             acceptSlashCommandResults = true,
+            acceptsRaw = { event -> event !is ClientEvent.SystemNotice && slashCommandEventBelongsToTurn(event, turnId) },
+            acceptsTurn = { eventSession, durableTurnId ->
+                durableTurnId == turnId.toULong() && canonicalSessionId(eventSession) == canonicalSessionId(sessionId) &&
+                    activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(sessionId)
+            },
         )
+
+    private suspend fun prepareTurnOwner(turnId: Long, sessionId: String): String {
+        val session = sessionId.takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("Cannot start a turn without a session owner")
+        val prepared = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        if (!eventIngress.dispatchBoundary {
+                val confirmedOwner = activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(session)
+                val restored = confirmedOwner && durableTurns.restoreParked(session)
+                val existing = durableTurns.load()
+                val available = restored &&
+                    (existing == null || (existing.turnId == turnId &&
+                        canonicalSessionId(existing.sessionId) == canonicalSessionId(session)))
+                if (!available || !beginTurnInterest(session, turnId, false)) {
+                    if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                    prepared.complete(false)
+                }
+                else {
+                    val saved = durableTurns.begin(session, turnId, admissionPending = true)
+                    val stored = durableTurns.load()
+                    val matches = saved && stored != null && stored.turnId == turnId && stored.admissionPending &&
+                        canonicalSessionId(stored.sessionId) == canonicalSessionId(session)
+                    if (!matches) {
+                        if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                        retireTurnInterest(session, turnId.toULong())
+                    }
+                    else attachIngress.noteLiveOwnership(session, turnId.toULong())
+                    prepared.complete(matches)
+                }
+            }) prepared.complete(false)
+        check(prepared.await()) { "A previous durable turn still owns this scope" }
+        return session
+    }
+
+    override suspend fun abandonUnsubmittedTurn(sessionId: String?, turnId: Long) {
+        val completed = kotlinx.coroutines.CompletableDeferred<Unit>()
+        if (!eventIngress.dispatchBoundary {
+                val record = durableTurns.load()
+                if (record != null && record.turnId == turnId &&
+                    (sessionId == null || canonicalSessionId(record.sessionId) == canonicalSessionId(sessionId))
+                ) {
+                    if (durableTurns.clear(record.sessionId, turnId)) retireTurnInterest(record.sessionId, turnId.toULong())
+                    else if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                }
+                completed.complete(Unit)
+            }) completed.complete(Unit)
+        completed.await()
+    }
 
     override suspend fun cancel() {
         cancel(null)
     }
 
     override suspend fun cancel(turnId: Long?) {
+        val owner = activeSession.value?.sessionId?.takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("Cannot cancel without a session owner")
+        cancelForSession(owner, turnId)
+    }
+
+    override suspend fun cancelForSession(sessionId: String, turnId: Long?) {
         // Narrow `Cancel(turnId = null)` cancels the current turn (bindings doc:
         // "None cancels the current one"). The engine emits `TurnEnded`, which
         // flows back through the active `submit` stream as `ReplyEvent.End`.
@@ -541,16 +840,34 @@ class EngineConversationSource private constructor(
         // active.  A successful command submission therefore is not evidence
         // that this durable checkpoint was cancelled.  Keep the client record
         // until its correlated terminal TurnRecoveryState arrives.
-        submitTurnCancellation(permissionIngress) {
-            handle.submit(ClientCommand.Cancel(turnId = turnId?.toULong()))
+        val record = durableTurns.load()
+        val owner = canonicalSessionId(sessionId).takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("Cannot cancel without a session owner")
+        val target = turnId ?: record?.takeIf { canonicalSessionId(it.sessionId) == owner }?.turnId
+        if (target != null) eventIngress.dispatchBoundary {
+            turnIngressInterest.beginCancellation(owner, target.toULong())
         }
+        try {
+            submitTurnCancellation(permissionIngress) {
+                handle.submit(ClientCommand.Cancel(sessionId = owner, turnId = turnId?.toULong()))
+            }
+        } catch (error: Throwable) {
+            if (target != null) eventIngress.dispatchBoundary { onCancellationFailed(owner, target) }
+            throw error
+        }
+        if (target != null) eventIngress.dispatchBoundary { onCancellationDrained(owner, target) }
     }
 
     override suspend fun discardDurableTurn(turnId: Long) {
         cancel(turnId)
     }
 
+    override suspend fun discardDurableTurnForSession(sessionId: String, turnId: Long) {
+        cancelForSession(sessionId, turnId)
+    }
+
     override fun close() {
+        eventIngress.retire()
         com.lingxi.code.voice.audio.AndroidAudioSessionContext.detach(handle)
         mediaContextBindings.close()
         ConversationHeadlessRecovery.unregister(recoverySpec.scopeKey, this)
@@ -565,11 +882,9 @@ class EngineConversationSource private constructor(
     override fun engineSourceForBackgroundRetention(): EngineConversationSource = this
 
     companion object {
-        private val fallbackTurnIds = java.util.concurrent.atomic.AtomicLong(
-            (System.currentTimeMillis() * 1_000L).coerceAtLeast(1L),
-        )
-
-        private fun nextFallbackTurnId(): Long = fallbackTurnIds.incrementAndGet()
+        // Keep terminal versions across source replacement and session changes.
+        // Old callbacks can remain in flight until their source is destroyed.
+        private val processEventIngress = DurableRecoveryIngress()
 
         /** Claim reusable sources on the UI lane; only a new native engine is
          * constructed in IO. Cancellation owns and closes only that new handle.
@@ -624,6 +939,7 @@ class EngineConversationSource private constructor(
              */
             replaceProcessSource: Boolean = false,
         ): ConversationSource {
+            DurableConversationTurnIds.initialize(context)
             val recoverySpec = ConversationRecoverySpec(
                 projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
                 hostPath = projectWorkspace?.hostPath,
@@ -649,8 +965,9 @@ class EngineConversationSource private constructor(
             // suspend behind a slow collector without ever stalling Rust's event
             // callback or dropping assistant text / terminal events.
             val eventScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-            val eventRelay = LosslessEventRelay<ClientEvent>(eventScope)
+            val eventRelay = LosslessEventRelay<ConversationDelivery>(eventScope)
             val workflowRelay = LosslessEventRelay<WorkflowProgressUpdate>(eventScope)
+            val audioContextUpdates = OrderedSuspendQueue(eventScope)
             // Resolves user-facing copy in the app's actual selected language
             // (via Context.getString, so it honors AppLanguageStore's locale
             // wrap) for every non-Composable emission site below.
@@ -660,6 +977,28 @@ class EngineConversationSource private constructor(
                 scope = recoverySpec.scopeKey,
             )
             val durableReplayGate = DurableTurnReplayGate()
+            // The Host's mobile-turn store is rooted under this app files root;
+            // UI project scopes can share that same underlying store.
+            val eventIngress = processEventIngress.newSource(context.applicationContext.filesDir.canonicalPath)
+            val turnIngressInterest = DurableTurnIngressInterest()
+            val attachIngress = DurableAttachIngress()
+            val attachConsumers = AttachConsumerRegistry()
+            fun retireLease(session: String, turn: ULong) {
+                val lease = eventIngress.detachInterest(session, turn) ?: return
+                attachIngress.forgetIdentity(session, turn)
+                val barrier = attachConsumers.retirement { eventIngress.releaseInterest(lease) }
+                if (barrier != null && !eventRelay.offer(ConversationDelivery.RecoveryInterestEnded(barrier))) barrier.force()
+            }
+            fun beginInterest(session: String, turn: Long, newGeneration: Boolean): Boolean {
+                val old = turnIngressInterest.currentIdentity()
+                val next = canonicalSessionId(session) to turn.toULong()
+                if (old != null && (old != next || newGeneration)) {
+                    turnIngressInterest.retire(old.first, old.second)
+                    retireLease(old.first, old.second)
+                }
+                turnIngressInterest.begin(session, turn)
+                return eventIngress.acquireInterest(session, turn.toULong()) != null
+            }
             // The head parked permission request. The engine's outbound
             // `AndroidPermissionSink.onRequest` pushes each request here (mapped
             // to the UI render model); PermissionIngress retains all concurrent
@@ -683,6 +1022,64 @@ class EngineConversationSource private constructor(
             // owner; explicit New/Resume events subsequently replace it with
             // the confirmed session id and any restored transcript.
             val activeSession = MutableStateFlow<ActivatedSession?>(null)
+            // A later submitted turn can overtake its predecessor if a host
+            // producer is cancelled. Hold only explicitly submitted identities
+            // until the predecessor's terminal checkpoint is released.
+            val deferredQueuedEvents = mutableListOf<ClientEvent>()
+            var deferredQueuedTimeout: Job? = null
+            lateinit var processIncomingEvent: (ClientEvent) -> Unit
+            fun queuedIdentity(event: ClientEvent): Pair<String, ULong>? = when (event) {
+                is ClientEvent.TurnRecoveryState -> event.snapshot.sessionId to event.snapshot.turnId
+                is ClientEvent.TurnAttachStarted -> event.snapshot.sessionId to event.snapshot.turnId
+                is ClientEvent.TurnAttachFinished -> event.sessionId to event.turnId
+                is ClientEvent.TurnEventReplay -> event.sessionId to event.turnId
+                is ClientEvent.TurnEventLiveUnretained -> event.sessionId to event.turnId
+                else -> null
+            }
+            fun failDeferredQueuedEvents() {
+                val identities = deferredQueuedEvents.mapNotNull(::queuedIdentity).toSet()
+                deferredQueuedEvents.clear()
+                deferredQueuedTimeout?.cancel()
+                deferredQueuedTimeout = null
+                identities.forEach { (session, turn) ->
+                    turnIngressInterest.removeQueued(turn)
+                    eventRelay.offer(ConversationDelivery.QueuedTurnIncomplete(session, turn))
+                }
+            }
+            fun deferQueuedEvent(event: ClientEvent) {
+                if (deferredQueuedEvents.size >= 512) {
+                    deferredQueuedEvents.add(event)
+                    failDeferredQueuedEvents()
+                    return
+                }
+                deferredQueuedEvents.add(event)
+                if (deferredQueuedTimeout == null) deferredQueuedTimeout = eventScope.launch {
+                    delay(5_000)
+                    eventIngress.dispatchBoundary { failDeferredQueuedEvents() }
+                }
+            }
+            fun releaseDeferredQueuedEvents() {
+                if (deferredQueuedEvents.isEmpty()) return
+                val pending = deferredQueuedEvents.toList()
+                deferredQueuedEvents.clear()
+                deferredQueuedTimeout?.cancel()
+                deferredQueuedTimeout = null
+                pending.forEach(processIncomingEvent)
+            }
+            fun finishAttach(attempt: DurableAttachIngress.Attempt) {
+                attachIngress.end(attempt)
+                if (attempt.terminalObserved) {
+                    if (!durableTurns.finishTerminal(attempt.sessionId, attempt.turnId.toLong())) {
+                        if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                        eventRelay.offer(ConversationDelivery.TurnEventDecodeFailed(attempt.sessionId, attempt.turnId))
+                        return
+                    }
+                    turnIngressInterest.markSettled(attempt.sessionId, attempt.turnId, recoverySnapshot = true)
+                    turnIngressInterest.retire(attempt.sessionId, attempt.turnId)
+                    retireLease(attempt.sessionId, attempt.turnId)
+                    releaseDeferredQueuedEvents()
+                }
+            }
             // The engine's REAL MCP listing (sibling of `models`). The listener
             // folds every inbound `McpServers` into this StateFlow; empty until a
             // `RefreshListings(Mcp)` reply lands (settings shows the mock list).
@@ -692,16 +1089,335 @@ class EngineConversationSource private constructor(
             val environment = resolveEngineEnvironmentOverrides(System.getenv())
             val providerLaunch = ProviderSettingsRepository(context).engineLaunchConfig()
             val mediaHost = AndroidNativeMediaHostProvider.get(context.applicationContext)
-            val mediaContextBindings = MediaAudioSessionContextBindings(mediaHost)
-            var mediaContextEngine: MobileEngineHandle? = null
+            val mediaContextBindings = MediaAudioSessionContextBindings { sessionId, generation ->
+                mediaHost.removeAudioSessionContext(sessionId, generation)
+            }
+            val mediaContextEngine = java.util.concurrent.atomic.AtomicReference<MobileEngineHandle?>(null)
+            processIncomingEvent = { event ->
+                var finishedAttempt: DurableAttachIngress.Attempt? = null
+                var envelopeRoute: DurableAttachIngress.EnvelopeRoute? = null
+                eventIngress.dispatch(event, admit = {
+                    when (event) {
+                        is ClientEvent.TurnAttachStarted -> {
+                            val snapshot = event.snapshot
+                            val belongs = turnIngressInterest.accepts(snapshot.sessionId, snapshot.turnId, activeSession.value?.sessionId) ||
+                                turnIngressInterest.isQueued(snapshot.sessionId, snapshot.turnId, activeSession.value?.sessionId)
+                            if (!attachIngress.started(event.requestId, snapshot, belongs)) return@dispatch false
+                        }
+                        is ClientEvent.TurnAttachFinished -> {
+                            finishedAttempt = attachIngress.finished(event.requestId, event.sessionId, event.turnId)
+                            if (finishedAttempt == null) return@dispatch false
+                        }
+                        is ClientEvent.TurnRecoveryState -> if (attachIngress.bufferSnapshot(event)) return@dispatch false
+                        is ClientEvent.TurnEventReplay -> {
+                            envelopeRoute = attachIngress.routeEnvelope(event.sessionId, event.turnId)
+                            if (envelopeRoute?.accepted != true) return@dispatch false
+                        }
+                        is ClientEvent.TurnEventLiveUnretained -> {
+                            envelopeRoute = attachIngress.routeEnvelope(event.sessionId, event.turnId)
+                            if (envelopeRoute?.excludedRequestId != null || envelopeRoute?.accepted != true) {
+                                attachIngress.noteUnretainedBeforeBootstrap(event.sessionId, event.turnId)
+                            }
+                            if (envelopeRoute?.accepted != true) return@dispatch false
+                        }
+                        else -> Unit
+                    }
+                    val identity = queuedIdentity(event)
+                    if (identity == null) true else {
+                        val (session, turn) = identity
+                        val active = activeSession.value?.sessionId
+                        when {
+                            turnIngressInterest.accepts(session, turn, active) -> true
+                            !turnIngressInterest.isQueued(session, turn, active) -> false
+                            event is ClientEvent.TurnRecoveryState && event.snapshot.state in setOf(
+                                TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED,
+                            ) -> eventIngress.acquireInterest(session, turn) != null
+                            turnIngressInterest.canAdopt(session, turn, active) && durableTurns.load() == null &&
+                                (event !is ClientEvent.TurnRecoveryState || event.snapshot.state == TurnRecoveryStateDto.RUNNING) -> {
+                                val acquired = eventIngress.acquireInterest(session, turn) != null
+                                if (acquired) eventRelay.offer(ConversationDelivery.QueuedTurnRegistered(session, turn))
+                                acquired
+                            }
+                            else -> { deferQueuedEvent(event); false }
+                        }
+                    }
+                }, onRevisionRejected = {
+                    if (event is ClientEvent.TurnAttachStarted) attachIngress.rejectStarted()
+                }) {
+                        if (event is ClientEvent.TurnRecoveryState && event.snapshot.state in setOf(
+                                TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED,
+                            ) && turnIngressInterest.isQueued(event.snapshot.sessionId, event.snapshot.turnId, activeSession.value?.sessionId)
+                        ) {
+                            val snapshot = event.snapshot
+                            if (snapshot.turnId > Long.MAX_VALUE.toULong() ||
+                                !durableTurns.finishQueued(snapshot.sessionId, snapshot.turnId.toLong())
+                            ) {
+                                if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                                eventRelay.offer(ConversationDelivery.QueuedTurnIncomplete(snapshot.sessionId, snapshot.turnId))
+                                retireLease(snapshot.sessionId, snapshot.turnId)
+                                return@dispatch
+                            }
+                            turnIngressInterest.removeQueued(snapshot.turnId)
+                            eventRelay.offer(ConversationDelivery.QueuedTurnSettled(snapshot.sessionId, snapshot.turnId, reviewRequired = true))
+                            retireLease(snapshot.sessionId, snapshot.turnId)
+                            return@dispatch
+                        }
+                        if (event is ClientEvent.ModSessionEvent &&
+                            activeSession.value?.sessionId?.let { canonicalSessionId(it) == canonicalSessionId(event.sessionId) } != true
+                        ) return@dispatch
+                        if (event is ClientEvent.TurnRecoveryState && event.snapshot.state == TurnRecoveryStateDto.RUNNING &&
+                            turnIngressInterest.canAdopt(event.snapshot.sessionId, event.snapshot.turnId, activeSession.value?.sessionId)
+                        ) {
+                            val checkpoint = durableTurns.load()
+                            if (checkpoint == null || (checkpoint.turnId == event.snapshot.turnId.toLong() &&
+                                    canonicalSessionId(checkpoint.sessionId) == canonicalSessionId(event.snapshot.sessionId))
+                            ) {
+                                if (!durableTurns.promoteQueued(event.snapshot.sessionId, event.snapshot.turnId.toLong())) {
+                                    if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                                    eventRelay.offer(ConversationDelivery.QueuedTurnIncomplete(event.snapshot.sessionId, event.snapshot.turnId))
+                                    retireLease(event.snapshot.sessionId, event.snapshot.turnId)
+                                    return@dispatch
+                                }
+                                turnIngressInterest.adopt(event.snapshot.sessionId, event.snapshot.turnId)
+                                attachIngress.noteLiveOwnership(event.snapshot.sessionId, event.snapshot.turnId)
+                            }
+                        }
+                        val delivery = when (event) {
+                            is ClientEvent.TurnRecoveryState -> ConversationDelivery.RecoveryState(event.snapshot,
+                                eventIngress.fence(event.snapshot.sessionId, event.snapshot.turnId))
+                            is ClientEvent.TurnAttachStarted -> {
+                                attachIngress.confirmStarted(event.snapshot)
+                                ConversationDelivery.AttachStarted(event.requestId, event.snapshot,
+                                    eventIngress.fence(event.snapshot.sessionId, event.snapshot.turnId),
+                                    admissionPending = attachIngress.isAdmissionPending(event.requestId))
+                            }
+                            is ClientEvent.TurnAttachFinished -> {
+                                val attempt = finishedAttempt ?: return@dispatch
+                                if (attempt.incomplete) eventRelay.offer(ConversationDelivery.TurnEventDecodeFailed(event.sessionId, event.turnId,
+                                    attachRequestId = event.requestId, isActive = eventIngress.fence(event.sessionId, event.turnId)))
+                                attempt.pendingSnapshots.toList().forEach(processIncomingEvent)
+                                attempt.pendingSnapshots.clear()
+                                // Reentrant dispatch queues those snapshots. Queue
+                                // the finish boundary after them, so Resume cannot
+                                // overtake an earlier unassociated live state.
+                                eventIngress.dispatchBoundary {
+                                    if (attempt.uiOwner) {
+                                        val barrier = attachConsumers.barrier(attempt.consumed)
+                                        attempt.barrier = barrier
+                                        eventRelay.offer(ConversationDelivery.AttachReplayEnded(event.sessionId, event.turnId.toLong(),
+                                            attempt.expectsResume, event.requestId, barrier = barrier,
+                                            isActive = eventIngress.fence(event.sessionId, event.turnId)))
+                                    } else attempt.consumed.complete(!attempt.incomplete)
+                                }
+                                return@dispatch
+                            }
+                            is ClientEvent.TurnEventReplay, is ClientEvent.TurnEventLiveUnretained -> {
+                                val session = when (event) {
+                                    is ClientEvent.TurnEventReplay -> event.sessionId
+                                    is ClientEvent.TurnEventLiveUnretained -> event.sessionId
+                                    else -> error("unreachable")
+                                }
+                                val turn = when (event) {
+                                    is ClientEvent.TurnEventReplay -> event.turnId
+                                    is ClientEvent.TurnEventLiveUnretained -> event.turnId
+                                    else -> error("unreachable")
+                                }
+                                val decoded = runCatching { decodeTurnEventEnvelope(event) }.getOrElse {
+                                    eventRelay.offer(ConversationDelivery.TurnEventDecodeFailed(session, turn,
+                                        attachRequestId = envelopeRoute?.batchRequestId, isActive = eventIngress.fence(session, turn)))
+                                    return@dispatch
+                                }
+                                if (canonicalSessionId(decoded.sessionId) != canonicalSessionId(session) || decoded.turnId != turn) return@dispatch
+                                if (!turnIngressInterest.accepts(session, turn, activeSession.value?.sessionId)) {
+                                    val started = decoded.event as? ClientEvent.TurnStarted
+                                    if (started == null || (started.turnId != null && started.turnId != turn) ||
+                                        (decoded.sequence != null && decoded.sequence != 1uL) ||
+                                        !turnIngressInterest.canAdopt(session, turn, activeSession.value?.sessionId) || durableTurns.load() != null
+                                    ) {
+                                        eventRelay.offer(ConversationDelivery.QueuedTurnIncomplete(session, turn))
+                                        turnIngressInterest.removeQueued(turn)
+                                        return@dispatch
+                                    }
+                                    if (!durableTurns.promoteQueued(session, turn.toLong())) {
+                                        if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                                        eventRelay.offer(ConversationDelivery.QueuedTurnIncomplete(session, turn))
+                                        retireLease(session, turn)
+                                        return@dispatch
+                                    }
+                                    turnIngressInterest.adopt(session, turn)
+                                    attachIngress.noteLiveOwnership(session, turn)
+                                }
+                                ConversationDelivery.TurnEvent(decoded.sessionId, decoded.turnId, decoded.sequence, decoded.event,
+                                    attachRequestId = envelopeRoute?.batchRequestId,
+                                    excludedAttachRequestId = envelopeRoute?.excludedRequestId,
+                                    isActive = eventIngress.fence(session, turn))
+                            }
+                            else -> ConversationDelivery.Event(event)
+                        }
+                        val projected = when (delivery) {
+                            is ConversationDelivery.Event -> delivery.event
+                            is ConversationDelivery.TurnEvent -> delivery.event
+                            is ConversationDelivery.RecoveryState -> ClientEvent.TurnRecoveryState(delivery.snapshot)
+                            is ConversationDelivery.AttachStarted -> ClientEvent.TurnRecoveryState(delivery.snapshot)
+                            else -> return@dispatch
+                        }
+                        var terminalPersisted = true
+                        if (projected is ClientEvent.TurnRecoveryState && projected.snapshot.state in setOf(
+                                TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED,
+                            )
+                        ) {
+                            terminalPersisted = projected.snapshot.turnId <= Long.MAX_VALUE.toULong() &&
+                                durableTurns.recordTerminalEvidence(projected.snapshot.sessionId, projected.snapshot.turnId.toLong())
+                            if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                            if (!terminalPersisted) eventRelay.offer(ConversationDelivery.TurnEventDecodeFailed(
+                                projected.snapshot.sessionId, projected.snapshot.turnId))
+                        }
+                        if (delivery is ConversationDelivery.TurnEvent &&
+                            (projected is ClientEvent.TurnEnded || (projected is ClientEvent.Error &&
+                                !turnIngressInterest.cancellationHasPendingTerminal(delivery.sessionId, delivery.turnId)))
+                        ) turnIngressInterest.markSettled(delivery.sessionId, delivery.turnId)
+                        val protectedTerminal = event is ClientEvent.TurnRecoveryState && projected is ClientEvent.TurnRecoveryState &&
+                            projected.snapshot.state in setOf(TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED) &&
+                            attachIngress.noteTerminal(projected.snapshot)
+                        if (event is ClientEvent.TurnRecoveryState && projected is ClientEvent.TurnRecoveryState && projected.snapshot.state in setOf(
+                                TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED,
+                            )
+                        ) turnIngressInterest.markSettled(projected.snapshot.sessionId, projected.snapshot.turnId, recoverySnapshot = true)
+                        // A transcript row token is not proof that a queued id
+                        // was durably merged into this turn. Keep the ledger
+                        // until the host supplies a correlated durable outcome.
+                        // The OUT-OF-BAND state paths: fold model catalog + session
+                        // catalog + live-resume events into the StateFlows the picker /
+                        // drawer / conversation observe, BEFORE forwarding to the
+                        // per-turn stream. Every reducer is a no-op for unrelated
+                        // events, so every event still reaches `events` unchanged
+                        // (lifecycle events like SessionStarted ride the per-turn
+                        // stream; the ViewModel acts on them there).
+                        models.value = reduceModelEvent(models.value, projected)
+                        sessions.value = reduceSessionEvent(sessions.value, projected, strings = sessionCatalogStrings(context))
+                        val previousActiveSessionId = activeSession.value?.sessionId
+                        activeSession.update { current ->
+                            reduceActivatedSession(current, projected, sessionMode, strings)
+                        }
+                        if (previousActiveSessionId != null && activeSession.value?.sessionId?.let {
+                                canonicalSessionId(it) != canonicalSessionId(previousActiveSessionId)
+                            } == true
+                        ) {
+                            turnIngressInterest.currentIdentity()?.let { retireLease(it.first, it.second) }
+                            turnIngressInterest.reset()
+                            deferredQueuedEvents.clear()
+                            deferredQueuedTimeout?.cancel()
+                            deferredQueuedTimeout = null
+                        }
+                        activeSession.value?.sessionId?.takeIf { session ->
+                            previousActiveSessionId?.let(::canonicalSessionId) != canonicalSessionId(session)
+                        }?.let { session ->
+                            durableTurns.queued(session).forEach { turnIngressInterest.enqueue(it.sessionId, it.turnId.toULong()) }
+                            if (durableTurns.load() == null) turnIngressInterest.allowQueuedWhenNoOwner()
+                        }
+                        when (projected) {
+                            ClientEvent.SessionEnded -> previousActiveSessionId?.let(mediaContextBindings::remove)
+                            else -> Unit
+                        }
+                        if (projected is ClientEvent.WorkspaceChanged) {
+                            val value = projected.state
+                            workspace.value = com.lingxi.code.project.SessionWorkspaceState(
+                                value.sessionId, value.cwd, value.projectRoot,
+                                value.additionalDirectories, value.transcriptPath,
+                            )
+                        }
+                        // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
+                        if (projected is ClientEvent.McpServers) mcp.value = projected.servers.map { it.toMcpServer() }
+                        if (projected is ClientEvent.SettingsSnapshot) {
+                            runCatching {
+                                val repository = ProviderSettingsRepository(context)
+                                try { repository.recordAudioProviderRegion(projected.effectiveJson) } finally { repository.close() }
+                            }
+                        }
+                        // A StateFlow observer can synchronously close this
+                        // source while the reentrant monitor is still held.
+                        if (!eventIngress.isActive()) return@dispatch
+                        if (projected is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
+                        if (projected is ClientEvent.PermissionRequestResolved) {
+                            permissionIngress.resolve(projected.requestId)
+                        }
+                        if (!eventIngress.isActive()) return@dispatch
+                        if (
+                            event is ClientEvent.TurnRecoveryState && projected is ClientEvent.TurnRecoveryState &&
+                                projected.snapshot.state in setOf(
+                                    TurnRecoveryStateDto.COMPLETED,
+                                    TurnRecoveryStateDto.FAILED,
+                                    TurnRecoveryStateDto.CANCELLED,
+                                )
+                        ) {
+                            if (terminalPersisted && !protectedTerminal && !turnIngressInterest.cancellationHasPendingTerminal(projected.snapshot.sessionId, projected.snapshot.turnId)) {
+                                terminalPersisted = durableTurns.finishTerminal(projected.snapshot.sessionId, projected.snapshot.turnId.toLong())
+                                if (!durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                                if (!terminalPersisted) eventRelay.offer(ConversationDelivery.TurnEventDecodeFailed(
+                                    projected.snapshot.sessionId, projected.snapshot.turnId))
+                            }
+                        }
+                        if (!eventIngress.isActive()) return@dispatch
+                        var slashSaved = true
+                        if (projected is ClientEvent.SlashCommandResult) {
+                            slashSaved = clearDurableSlashCommandCheckpoint(durableTurns, projected)
+                            if (!slashSaved && !durableTurns.isHealthy()) eventRelay.offer(ConversationDelivery.RecoveryStorageFailed)
+                            permissionIngress.endTurn()
+                        }
+                        if (projected is ClientEvent.TurnEnded ||
+                            (projected is ClientEvent.Error && !isCompactTurnRejection(projected.message.displayText()))) {
+                            permissionIngress.endTurn()
+                        }
+                        if (!eventIngress.isActive()) return@dispatch
+                        if (durableReplayGate.shouldForward(event) || delivery is ConversationDelivery.TurnEvent) {
+                            eventRelay.offer(delivery)
+                        }
+                        if (event is ClientEvent.TurnRecoveryState && projected is ClientEvent.TurnRecoveryState && projected.snapshot.state in setOf(
+                                TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED,
+                            )
+                        && terminalPersisted && !protectedTerminal && !turnIngressInterest.cancellationHasPendingTerminal(projected.snapshot.sessionId, projected.snapshot.turnId)
+                        ) {
+                            turnIngressInterest.retire(projected.snapshot.sessionId, projected.snapshot.turnId)
+                            retireLease(projected.snapshot.sessionId, projected.snapshot.turnId)
+                            releaseDeferredQueuedEvents()
+                        }
+                        if (delivery is ConversationDelivery.TurnEvent && projected is ClientEvent.TurnEnded &&
+                            turnIngressInterest.finishFailedCancellationAfterTurnEnd(delivery.sessionId, delivery.turnId)
+                        ) {
+                            val saved = durableTurns.finishTerminal(delivery.sessionId, delivery.turnId.toLong())
+                            eventRelay.offer(ConversationDelivery.CancellationDrained(delivery.sessionId, delivery.turnId.toLong(), saved))
+                            if (saved) {
+                                turnIngressInterest.retire(delivery.sessionId, delivery.turnId)
+                                retireLease(delivery.sessionId, delivery.turnId)
+                                releaseDeferredQueuedEvents()
+                            }
+                        }
+                        if (projected is ClientEvent.SlashCommandResult && slashSaved) {
+                            turnIngressInterest.currentIdentity()?.takeIf { projected.turnId == it.second }?.let {
+                                turnIngressInterest.retire(it.first, it.second)
+                                retireLease(it.first, it.second)
+                            }
+                        }
+                        if (projected is ClientEvent.SessionStarted || projected is ClientEvent.SessionResumed ||
+                            projected is ClientEvent.ModelChanged
+                        ) {
+                            // Schedule the suspending UniFFI call from the queued
+                            // item itself, including for synchronous reentry.
+                            audioContextUpdates.offer {
+                                runCatching {
+                                    mediaContextEngine.get()?.let { engine ->
+                                        val binding = mediaHost.updateAudioSessionContext(engine)
+                                        mediaContextBindings.register(binding.sessionId, binding.generation)
+                                    }
+                                }
+                            }
+                        }
+                    }
+            }
             val handle = buildVoiceEngine(
                 context = context,
                 apiBase = environment.apiBase,
                 apiKey = environment.apiKey,
-                // Empty environment model → use the current provider setting,
-                // which is a real wire id rather than a branded `lx-*` mock id.
-                // The shared engine restores the last confirmed model for an
-                // interactive launch; this is the provider fallback for new installs.
                 model = environment.model.ifBlank { providerLaunch.defaultModel },
                 providerProfilesJson = providerLaunch.providerProfilesJson,
                 routingJson = providerLaunch.routingJson,
@@ -710,76 +1426,7 @@ class EngineConversationSource private constructor(
                 sessionMode = sessionMode,
                 linuxRuntimeMode = linuxRuntimeMode,
                 mediaHost = mediaHost,
-                onEvent = { event ->
-                    // The OUT-OF-BAND state paths: fold model catalog + session
-                    // catalog + live-resume events into the StateFlows the picker /
-                    // drawer / conversation observe, BEFORE forwarding to the
-                    // per-turn stream. Every reducer is a no-op for unrelated
-                    // events, so every event still reaches `events` unchanged
-                    // (lifecycle events like SessionStarted ride the per-turn
-                    // stream; the ViewModel acts on them there).
-                    models.value = reduceModelEvent(models.value, event)
-                    sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
-                    val previousActiveSessionId = activeSession.value?.sessionId
-                    activeSession.update { current ->
-                        reduceActivatedSession(current, event, sessionMode, strings)
-                    }
-                    when (event) {
-                        is ClientEvent.SessionStarted,
-                        is ClientEvent.SessionResumed,
-                        is ClientEvent.ModelChanged -> runCatching {
-                            mediaContextEngine?.let { engine ->
-                                val binding = mediaHost.updateAudioSessionContext(engine)
-                                mediaContextBindings.register(binding.sessionId, binding.generation)
-                            }
-                        }
-                        ClientEvent.SessionEnded -> previousActiveSessionId?.let(mediaContextBindings::remove)
-                        else -> Unit
-                    }
-                    if (event is ClientEvent.WorkspaceChanged) {
-                        val value = event.state
-                        workspace.value = com.lingxi.code.project.SessionWorkspaceState(
-                            value.sessionId, value.cwd, value.projectRoot,
-                            value.additionalDirectories, value.transcriptPath,
-                        )
-                    }
-                    // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
-                    if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
-                    if (event is ClientEvent.SettingsSnapshot) {
-                        runCatching {
-                            val repository = ProviderSettingsRepository(context)
-                            try { repository.recordAudioProviderRegion(event.effectiveJson) } finally { repository.close() }
-                        }
-                    }
-                    if (event is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
-                    if (event is ClientEvent.PermissionRequestResolved) {
-                        permissionIngress.resolve(event.requestId)
-                    }
-                    if (
-                        event is ClientEvent.TurnRecoveryState &&
-                            event.snapshot.state in setOf(
-                                TurnRecoveryStateDto.COMPLETED,
-                                TurnRecoveryStateDto.FAILED,
-                                TurnRecoveryStateDto.CANCELLED,
-                            )
-                    ) {
-                        durableTurns.clear(
-                            sessionId = event.snapshot.sessionId,
-                            turnId = event.snapshot.turnId.toLong(),
-                        )
-                    }
-                    if (event is ClientEvent.SlashCommandResult) {
-                        clearDurableSlashCommandCheckpoint(durableTurns, event)
-                        permissionIngress.endTurn()
-                    }
-                    if (event is ClientEvent.TurnEnded ||
-                        (event is ClientEvent.Error && !isCompactTurnRejection(event.message.displayText()))) {
-                        permissionIngress.endTurn()
-                    }
-                    if (durableReplayGate.shouldForward(event)) {
-                        eventRelay.offer(event)
-                    }
-                },
+                onEvent = processIncomingEvent,
                 onWorkflowProgress = { originSessionId, taskId, runId, progress ->
                     workflowRelay.offer(
                         WorkflowProgressUpdate(
@@ -794,6 +1441,7 @@ class EngineConversationSource private constructor(
                     permissionIngress.publish(request)
                 },
             ) ?: run {
+                eventIngress.retire()
                 if (reuseProcessSource) {
                     ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.scopeKey)
                 }
@@ -804,11 +1452,19 @@ class EngineConversationSource private constructor(
                     context.getString(R.string.chat_engine_build_failed),
                 )
             }
-            mediaContextEngine = handle
+            mediaContextEngine.set(handle)
             val workspaceRestore = runCatching { kotlinx.coroutines.runBlocking {
-                val binding = mediaHost.updateAudioSessionContext(handle)
-                mediaContextBindings.register(binding.sessionId, binding.generation)
+                audioContextUpdates.run {
+                    val binding = mediaHost.updateAudioSessionContext(handle)
+                    mediaContextBindings.register(binding.sessionId, binding.generation)
+                }
                 val owner = handle.workspaceState().sessionId
+                eventIngress.dispatchBoundary {
+                    if (owner.isNotBlank()) check(durableTurns.restoreParked(owner)) { "Unable to restore the conversation owner" }
+                    activeSession.update { current -> bootstrapWorkspaceSession(current, owner, sessionMode) }
+                    durableTurns.queued(owner).forEach { turnIngressInterest.enqueue(it.sessionId, it.turnId.toULong()) }
+                    if (durableTurns.load() == null) turnIngressInterest.allowQueuedWhenNoOwner()
+                }
                 val userDirectories = com.lingxi.code.project.MobileUserStorage.directories(context)
                 val home = userDirectories.guestHome
                 val userHome = userDirectories.home
@@ -819,6 +1475,7 @@ class EngineConversationSource private constructor(
                 }
             } }
             workspaceRestore.exceptionOrNull()?.let { failure ->
+                eventIngress.retire()
                 mediaContextBindings.close()
                 runCatching { handle.destroy() }
                 if (reuseProcessSource) ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.scopeKey)
@@ -877,7 +1534,15 @@ class EngineConversationSource private constructor(
                 handle = handle,
                 mediaHost = mediaHost,
                 mediaContextBindings = mediaContextBindings,
-                events = eventRelay.events,
+                events = attachConsumers.track(eventRelay.events, ui = false).mapNotNull {
+                    when (it) {
+                        is ConversationDelivery.Event -> it.event
+                        is ConversationDelivery.RecoveryState -> if (it.isActive()) ClientEvent.TurnRecoveryState(it.snapshot) else null
+                        is ConversationDelivery.TurnEvent -> if (it.isActive()) it.event else null
+                        is ConversationDelivery.AttachStarted -> if (it.isActive()) ClientEvent.TurnRecoveryState(it.snapshot) else null
+                        else -> null
+                    }
+                },
                 eventRelay = eventRelay,
                 workflowEvents = workflowRelay.events,
                 workflowRelay = workflowRelay,
@@ -892,6 +1557,39 @@ class EngineConversationSource private constructor(
                 strings = strings,
                 durableTurns = durableTurns,
                 durableReplayGate = durableReplayGate,
+                eventIngress = eventIngress,
+                turnIngressInterest = turnIngressInterest,
+                attachIngress = attachIngress,
+                attachConsumers = attachConsumers,
+                beginTurnInterest = ::beginInterest,
+                retireTurnInterest = { session, turn ->
+                    turnIngressInterest.retire(session, turn)
+                    retireLease(session, turn)
+                },
+                finishAttachInterest = ::finishAttach,
+                onCancellationDrained = { session, turn ->
+                    val observed = turnIngressInterest.finishCancellation(session, turn.toULong())
+                    val saved = observed && durableTurns.finishTerminal(session, turn)
+                    eventRelay.offer(ConversationDelivery.CancellationDrained(session, turn, saved))
+                    if (saved) {
+                        turnIngressInterest.retire(session, turn.toULong())
+                        retireLease(session, turn.toULong())
+                        releaseDeferredQueuedEvents()
+                    }
+                },
+                onCancellationFailed = { session, turn ->
+                    val (observed, ended) = turnIngressInterest.abortCancellation(session, turn.toULong())
+                    eventRelay.offer(ConversationDelivery.CancellationAborted(session, turn, observed))
+                    if (observed && ended && turnIngressInterest.finishFailedCancellationAfterTurnEnd(session, turn.toULong())) {
+                        val saved = durableTurns.finishTerminal(session, turn)
+                        eventRelay.offer(ConversationDelivery.CancellationDrained(session, turn, saved))
+                        if (saved) {
+                            turnIngressInterest.retire(session, turn.toULong())
+                            retireLease(session, turn.toULong())
+                            releaseDeferredQueuedEvents()
+                        }
+                    }
+                },
                 autoAttachDurableTurns = !reuseProcessSource,
                 resumeOnUiAttach = reuseProcessSource,
                 initialRecoverySpec = recoverySpec,
@@ -906,11 +1604,12 @@ class EngineConversationSource private constructor(
 
 /** Keep the protocol command construction independently testable on the JVM. */
 internal fun runSlashCommandClientCommand(
+    sessionId: String,
     raw: ClientTextDto,
     images: List<ImageRefDto>,
     turnId: Long,
 ): ClientCommand.RunSlashCommand =
-    ClientCommand.RunSlashCommand(raw = raw, images = images, turnId = turnId.toULong())
+    ClientCommand.RunSlashCommand(sessionId = sessionId, raw = raw, images = images, turnId = turnId.toULong())
 
 internal fun slashCommandEventBelongsToTurn(event: ClientEvent, turnId: Long): Boolean =
     event !is ClientEvent.SlashCommandResult || event.turnId == turnId.toULong()
@@ -918,8 +1617,12 @@ internal fun slashCommandEventBelongsToTurn(event: ClientEvent, turnId: Long): B
 internal fun clearDurableSlashCommandCheckpoint(
     durableTurns: DurableConversationTurnClientStore,
     event: ClientEvent,
-) {
+): Boolean {
     if (event is ClientEvent.SlashCommandResult) {
-        event.turnId?.let { durableTurns.clear(it.toLong()) }
+        val current = durableTurns.load()
+        if (current != null && event.turnId == current.turnId.toULong()) {
+            return durableTurns.finishTerminal(current.sessionId, current.turnId)
+        }
     }
+    return true
 }

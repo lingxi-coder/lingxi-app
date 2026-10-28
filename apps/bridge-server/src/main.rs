@@ -30,8 +30,15 @@ use bridge::McpEndpoint;
 use bridge_server::boot::{self, BridgeArgs};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 
+#[cfg(windows)]
+mod local_app_process;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--local-app-process") {
+        return local_app_process::run().await;
+    }
     if std::env::args().nth(1).as_deref() == Some("--local-app-service-json") {
         return bridge_server::local_app_service::run().await;
     }
@@ -144,9 +151,12 @@ async fn main() -> anyhow::Result<()> {
     {
         telemetry_config.service_name = "lingxi-bridge".into();
     }
-    let _telemetry_guard =
-        telemetry::otel::install_process_with_config_async("bridge-server", false, telemetry_config)
-            .await;
+    let _telemetry_guard = telemetry::otel::install_process_with_config_async(
+        "bridge-server",
+        false,
+        telemetry_config,
+    )
+    .await;
     // Every HTTP and WebSocket client assembly builds trusts the OS store;
     // read it once, off this thread, while config and credentials resolve.
     platform_posix::http::prewarm_native_roots();

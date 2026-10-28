@@ -174,7 +174,7 @@ function validateStringArray(v: unknown): void {
 function validateTaskStatus(v: unknown): void {
   const o = rec(v);
   assert.ok(
-    ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(
+    ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled', 'exited_unknown'].includes(
       o['type'] as string,
     ),
   );
@@ -776,6 +776,7 @@ function validateCommand(name: string, v: unknown): void {
       rec(JSON.parse(o['operation_json'] as string));
       break;
     case 'send_prompt':
+      if ('session_id' in o) assert.ok(isString(o['session_id']));
       assert.ok(isString(o['text']));
       assert.ok(Array.isArray(o['images']));
       for (const img of o['images'] as unknown[]) {
@@ -786,17 +787,21 @@ function validateCommand(name: string, v: unknown): void {
       if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
       break;
     case 'cancel':
+      if ('session_id' in o) assert.ok(isString(o['session_id']));
       if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
       break;
     case 'attach_turn':
-      assert.ok(isNumber(o['turn_id']));
+      assert.ok(isString(o['session_id']) && isNumber(o['turn_id']) && isString(o['request_id']));
       if ('after_sequence' in o) assert.ok(isNumber(o['after_sequence']));
       break;
+    case 'query_queued_turn':
+      assert.ok(isString(o['session_id']) && isNumber(o['turn_id']) && isString(o['request_id']));
+      break;
     case 'resume_turn':
-      assert.ok(isNumber(o['turn_id']));
+      assert.ok(isString(o['session_id']) && isNumber(o['turn_id']));
       break;
     case 'pause_turn':
-      assert.ok(isNumber(o['turn_id']) && isString(o['reason']));
+      assert.ok(isString(o['session_id']) && isNumber(o['turn_id']) && isString(o['reason']));
       break;
     case 'approve_permission':
       assert.ok(isNumber(o['request_id']));
@@ -908,6 +913,7 @@ function validateCommand(name: string, v: unknown): void {
       assert.ok(isBool(o['enabled']));
       break;
     case 'run_slash_command':
+      if ('session_id' in o) assert.ok(isString(o['session_id']));
       assert.ok(isString(o['raw']));
       assert.ok(Array.isArray(o['images']));
       for (const image of o['images'] as unknown[]) validateImageRef(image);
@@ -1248,14 +1254,27 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(
         isString(snapshot['session_id']) &&
           isNumber(snapshot['turn_id']) &&
+          isNumber(snapshot['revision']) &&
           isNumber(snapshot['first_sequence']) &&
           isNumber(snapshot['last_sequence']) &&
-          isBool(snapshot['safe_to_resume']),
+          isBool(snapshot['safe_to_resume']) &&
+          isBool(snapshot['projection_uncertain']),
       );
       validateTurnRecoveryState(snapshot['state']);
       if ('reason' in snapshot) assert.ok(isString(snapshot['reason']));
       break;
     }
+    case 'turn_attach_started':
+      assert.ok(isString(o['request_id']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'turn_attach_finished':
+      assert.ok(isString(o['request_id']) && isString(o['session_id']) && isNumber(o['turn_id']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'queued_turn_status':
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
     case 'turn_event_replay':
       assert.ok(
         isString(o['session_id']) &&
@@ -1263,6 +1282,19 @@ function validateEvent(name: string, v: unknown): void {
           isNumber(o['sequence']) &&
           isString(o['event_json']),
       );
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'turn_event_live_unretained':
+      assert.ok(
+        isString(o['session_id']) &&
+          isNumber(o['turn_id']) &&
+          isString(o['event_json']),
+      );
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'mod_session_event':
+      assert.ok(isString(o['session_id']) && (o['mod_turn_id'] === null || isString(o['mod_turn_id'])));
+      assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'prompt_suggestion_state':
       exactObjectKeys(o, ['type', 'enabled', 'notice'], [], `event snapshot ${name}`);
@@ -1919,7 +1951,7 @@ function validatePermissionResolved(v: unknown): void {
 function validateError(v: unknown): void {
   const e = v as ClientError;
   const o = rec(e);
-  assert.ok(['transport', 'protocol', 'rejected', 'not_found', 'internal'].includes(o['type'] as string));
+  assert.ok(['transport', 'protocol', 'rejected', 'not_found', 'internal', 'submission_not_admitted'].includes(o['type'] as string));
   assert.ok(isString(o['message']));
 }
 
@@ -2038,9 +2070,11 @@ test('turn_recovery_state validates its `state` kind, not just the surrounding f
   const base = {
     session_id: '11111111-1111-4111-8111-111111111111',
     turn_id: 1,
+    revision: 2,
     first_sequence: 1,
     last_sequence: 7,
     safe_to_resume: true,
+    projection_uncertain: false,
   };
   for (const kind of ['running', 'waiting_for_user', 'paused_recoverable', 'completed', 'failed', 'cancelled']) {
     validateEvent(`turn_recovery_state(${kind})`, {
@@ -2055,6 +2089,14 @@ test('turn_recovery_state validates its `state` kind, not just the surrounding f
         snapshot: { ...base, state: { type: 'bogus_state' } },
       }),
     'an unknown TurnRecoveryStateDto kind must be rejected',
+  );
+  const { revision: _revision, ...withoutRevision } = base;
+  assert.throws(
+    () => validateEvent('turn_recovery_state(missing-revision)', {
+      type: 'turn_recovery_state',
+      snapshot: { ...withoutRevision, state: { type: 'paused_recoverable' } },
+    }),
+    'a recovery state must include its durable revision',
   );
 });
 
@@ -2282,7 +2324,7 @@ test('permission snapshots parse as PermissionRequest / PermissionResolved', () 
 
 test('every error snapshot parses as ClientError', () => {
   const files = listSnapshots('error');
-  assert.equal(files.length, 5);
+  assert.equal(files.length, 6);
   for (const file of files) {
     validateError(loadSnapshot('error', file));
   }

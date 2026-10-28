@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 
 import { assertSandboxedPreloadBundle } from '../scripts/verify-package.mjs';
+import { waitForRtcFixture } from './fixtures/remote-rtc-process.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
@@ -17,7 +18,7 @@ const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const node = (entry, out) => build({ entryPoints: [join(root, entry)], outfile: out, bundle: true, platform: 'node', format: 'cjs', external: ['electron'], logLevel: 'error' });
 const browser = (entry, out) => build({ entryPoints: [join(root, entry)], outfile: out, bundle: true, platform: 'browser', format: 'esm', logLevel: 'error' });
 
-test('real Electron Remote Control transport: hidden WebRTC window, MessagePort, 2 MiB both ways, lockdown, RtdbClient over net.fetch', { timeout: 180000 }, async (t) => {
+test('real Electron Remote Control transport: hidden WebRTC window, MessagePort, 2 MiB both ways, lockdown, RtdbClient over net.fetch', { timeout: 180000 }, async () => {
   const temp = await mkdtemp(join(tmpdir(), 'lingxi-remote-rtc-'));
   let child;
   try {
@@ -47,44 +48,17 @@ test('real Electron Remote Control transport: hidden WebRTC window, MessagePort,
     try {
       electron = createRequire(import.meta.url)('electron');
     } catch (error) {
-      t.skip(`Electron is not installed: ${error.message}`);
-      return;
+      throw new Error(`Electron is not installed: ${error.message}`, { cause: error });
     }
-    let out = '', err = '', ready = false, spawnError;
     child = spawn(electron, [join(temp, 'main.cjs')], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    child.stdout.on('data', (chunk) => { out += chunk; if (out.includes('READY')) ready = true; });
-    child.stderr.on('data', (chunk) => { err += chunk; });
-    child.once('error', (error) => { spawnError = error; });
-
-    const result = await new Promise((resolveResult, reject) => {
-      // Electron that cannot start at all (no display, a broken binary) is a skip; once it said READY, anything wrong is a failure.
-      const startTimer = setTimeout(() => { if (!ready) { child.kill(); resolveResult({ skipped: `Electron did not start within 40 s: ${err.trim().slice(0, 500)}` }); } }, 40000);
-      const timer = setTimeout(() => { child.kill(); reject(new Error(`Timed out: ${err}\nOutput: ${out}`)); }, 160000);
-      const finish = (value) => { clearTimeout(startTimer); clearTimeout(timer); resolveResult(value); };
-      // The fixture reports after every assertion. Bare unsigned Electron on this macOS can hang after `quit`, so the first
-      // `passed` line is the end of the test and the process is killed below.
-      child.stdout.on('data', () => {
-        const last = out.trim().split('\n').at(-1);
-        if (!last.startsWith('{')) return;
-        try {
-          const parsed = JSON.parse(last);
-          if (parsed.passed === true) finish(parsed);
-          else if (parsed.passed === false) { clearTimeout(startTimer); clearTimeout(timer); reject(new Error(`Fixture failed: ${parsed.error}\n${err}`)); }
-        } catch { /* incomplete line */ }
-      });
-      child.once('error', (error) => finish({ skipped: `Electron could not be launched: ${error.message}` }));
-      child.once('exit', (code) => {
-        if (!ready) finish({ skipped: `Electron exited ${code} before it was ready: ${err.trim().slice(0, 500)}` });
-        else { clearTimeout(startTimer); clearTimeout(timer); reject(new Error(`Electron exited ${code}: ${err}\n${out}`)); }
-      });
-    });
-    if (spawnError && !result.passed) { t.skip(String(spawnError)); return; }
-    if (result.skipped) { t.skip(result.skipped); return; }
+    // The fixture reports only after its real assertions; an unsigned Electron
+    // may linger after quit, so cleanup terminates it after the passing result.
+    const result = await waitForRtcFixture(child);
     assert.equal(result.passed, true);
     assert.equal(result.bytes, Number(process.env.LINGXI_TEST_BYTES ?? 2 * 1024 * 1024));
     assert.ok(['host', 'prflx', 'srflx'].includes(result.candidate), `candidate type ${result.candidate}`);
   } finally {
-    if (child && child.exitCode === null) {
+    if (child && child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM');
       await new Promise((done) => { const timer = setTimeout(() => { child.kill('SIGKILL'); done(); }, 1500); child.once('exit', () => { clearTimeout(timer); done(); }); });
     }

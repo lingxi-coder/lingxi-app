@@ -482,11 +482,12 @@ struct BackgroundTaskSnapshot: Identifiable, Equatable, Hashable {
         case completed
         case failed
         case cancelled
+        case exitedUnknown
 
         var isTerminal: Bool {
             switch self {
             case .pending, .running, .paused: return false
-            case .completed, .failed, .cancelled: return true
+            case .completed, .failed, .cancelled, .exitedUnknown: return true
             }
         }
 
@@ -496,7 +497,7 @@ struct BackgroundTaskSnapshot: Identifiable, Equatable, Hashable {
         var requiresExecutionLease: Bool {
             switch self {
             case .pending, .running: return true
-            case .paused, .completed, .failed, .cancelled: return false
+            case .paused, .completed, .failed, .cancelled, .exitedUnknown: return false
             }
         }
     }

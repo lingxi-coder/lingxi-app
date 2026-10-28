@@ -68,3 +68,12 @@ test('runtime and scheduling copy covers every supported language with matching 
     }
   }
 });
+
+test('an unknown exit remains distinct from success and failure in every locale', () => {
+  const task = { task_id: 'unknown', task_type: 'local_bash', status: { type: 'exited_unknown' }, description: 'Test command' } as any;
+  for (const locale of DESKTOP_LOCALES) {
+    const html = render(locale, React.createElement(TaskDetail, { task, bridge: { desktop: { taskOutput: {} } } as any }));
+    assert.ok(html.includes(escaped(translate('chat_status_exited_unknown', locale))), locale);
+    assert.doesNotMatch(html, /exited_unknown/);
+  }
+});

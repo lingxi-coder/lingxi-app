@@ -20,7 +20,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
         normal.setDraft("real draft", scope: .global, mode: .code)
 
         let uiTest = ProjectScopedPreferences.forRuntime(
-            environment: ["LINGXI_UI_TESTING": "1"], appDefaults: appDefaults, uiTestSuiteName: testSuite
+            environment: [UITestEnvironment.enabledKey: "1"], appDefaults: appDefaults, uiTestSuiteName: testSuite
         )
         uiTest.setActiveSessionID("ui-files-session", scope: .global, mode: .code)
         uiTest.setDraft("test draft", scope: .global, mode: .code)
@@ -31,7 +31,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
         XCTAssertEqual(reopened.activeSessionID(scope: .global, mode: .code), "real-session")
         XCTAssertEqual(reopened.draft(scope: .global, mode: .code), "real draft")
         let reopenedUITest = ProjectScopedPreferences.forRuntime(
-            environment: ["LINGXI_UI_TESTING": "1"], appDefaults: appDefaults, uiTestSuiteName: testSuite
+            environment: [UITestEnvironment.enabledKey: "1"], appDefaults: appDefaults, uiTestSuiteName: testSuite
         )
         XCTAssertEqual(reopenedUITest.activeSessionID(scope: .global, mode: .code), "ui-files-session")
         XCTAssertEqual(reopenedUITest.draft(scope: .global, mode: .code), "test draft")

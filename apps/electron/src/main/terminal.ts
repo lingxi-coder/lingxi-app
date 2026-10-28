@@ -1,22 +1,26 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
-import { basename, isAbsolute } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { basename, isAbsolute, join, win32 } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { resolveServerBin } from './bridgeDiscovery.js';
 import type { TerminalScope, TerminalSnapshot, TerminalEvent } from '../shared/terminal.js';
 
 const MAX_OUTPUT = 1024 * 1024;
 const MAX_FRAME = 256 * 1024;
+const MAX_REQUEST = 512 * 1024;
 const MAX_PENDING = 128;
 const MAX_TERMINALS = 32;
 const MAX_SCOPE_TERMINALS = 8;
 
 /** Deliberately excludes model credentials, plugin secrets and loader injection variables. */
-export function terminalEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function terminalEnvironment(source: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
+  const windowsSource = platform === 'win32' ? new Map(Object.entries(source).map(([key, value]) => [key.toUpperCase(), value])) : undefined;
   for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TMPDIR', 'TMP', 'TEMP', 'TZ', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'ComSpec', 'PATHEXT', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH', 'SSH_AUTH_SOCK']) {
-    if (source[key] !== undefined) result[key] = source[key];
+    const value = windowsSource ? windowsSource.get(key.toUpperCase()) : source[key];
+    if (value !== undefined) result[key] = value;
   }
   result.TERM = 'xterm-256color';
   result.COLORTERM = 'truecolor';
@@ -29,6 +33,134 @@ export interface TerminalManagerOptions {
   resourcesPath?: string;
   spawnProcess?: typeof spawn;
   requestTimeoutMs?: number;
+  windowsShellFileExists?: (path: string) => boolean | Promise<boolean>;
+  windowsShellSearchTimeoutMs?: number;
+}
+
+/** Match Windows PATH unquoting before resolving entries in the original cwd. */
+export function windowsShellSearchPaths(path: string, cwd: string): string[] {
+  const entries: string[] = [];
+  let entry = ''; let quoted = false;
+  for (const character of path) {
+    if (character === '"') quoted = !quoted;
+    else if (character === ';' && !quoted) { entries.push(entry); entry = ''; }
+    else entry += character;
+  }
+  entries.push(entry);
+  return entries.map(value => {
+    const driveRelative = /^([a-z]):(?![\\/])/i.exec(value);
+    if (!driveRelative) return win32.resolve(cwd, value);
+    const launchDrive = /([a-z]):[\\/]$/i.exec(win32.parse(cwd).root);
+    const base = launchDrive?.[1].toUpperCase() === driveRelative[1].toUpperCase() ? cwd : `${driveRelative[1]}:\\`;
+    // The broker's explicit environment does not inherit Windows' hidden
+    // per-drive cwd entries, so another drive resolves from its root.
+    return win32.resolve(base, value.slice(2));
+  });
+}
+
+const activeWindowsShellProbes = new Set<Promise<void>>();
+const windowsShellProbeWaiters = new Set<() => void>();
+const MAX_WINDOWS_SHELL_PROBES = 2;
+
+function beforeShellSearchDeadline<T>(promise: Promise<T>, deadline: number, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Terminal creation cancelled'));
+  return new Promise((resolve, reject) => {
+    const finish = () => { clearTimeout(timeout); signal?.removeEventListener('abort', abort); };
+    const abort = () => { finish(); reject(signal?.reason instanceof Error ? signal.reason : new Error('Terminal creation cancelled')); };
+    const timeout = setTimeout(() => { finish(); reject(new Error('Windows terminal shell search timed out')); }, Math.max(0, deadline - Date.now()));
+    signal?.addEventListener('abort', abort, { once: true });
+    promise.then(value => { finish(); resolve(value); }, error => { finish(); reject(error); });
+  });
+}
+
+async function probeWindowsShell(candidate: string, isFile: (path: string) => boolean | Promise<boolean>, deadline: number, signal?: AbortSignal): Promise<boolean> {
+  while (activeWindowsShellProbes.size >= MAX_WINDOWS_SHELL_PROBES) {
+    // Do not attach a Promise.race reaction to a potentially permanent UNC
+    // probe on every retry: timed-out waiters must be removable themselves.
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timeout); signal?.removeEventListener('abort', abort); windowsShellProbeWaiters.delete(ready); };
+      const ready = () => { cleanup(); resolve(); };
+      const abort = () => { cleanup(); reject(signal?.reason instanceof Error ? signal.reason : new Error('Terminal creation cancelled')); };
+      const timeout = setTimeout(() => { cleanup(); reject(new Error('Windows terminal shell search timed out')); }, Math.max(0, deadline - Date.now()));
+      windowsShellProbeWaiters.add(ready);
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+    });
+  }
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Terminal creation cancelled');
+  if (Date.now() >= deadline) throw new Error('Windows terminal shell search timed out');
+  const result = Promise.resolve().then(() => isFile(candidate)).catch(() => false);
+  const slot = result.then(() => undefined);
+  activeWindowsShellProbes.add(slot);
+  void slot.then(() => {
+    activeWindowsShellProbes.delete(slot);
+    for (const ready of windowsShellProbeWaiters) ready();
+  });
+  // A timed-out filesystem call keeps its slot until it actually finishes,
+  // bounding stuck UNC probes without blocking Electron's main thread.
+  return beforeShellSearchDeadline(result, deadline, signal);
+}
+
+export async function windowsShellExecutable(
+  path: string | undefined,
+  cwd: string,
+  isFile: (path: string) => boolean | Promise<boolean> = async candidate => {
+    try { return (await stat(candidate)).isFile(); } catch { return false; }
+  },
+  timeoutMs = 5_000,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Terminal creation cancelled');
+  const deadline = Date.now() + timeoutMs;
+  // Windows split_paths treats a missing PATH like an empty entry, which
+  // searches the original cwd. Preserve that selection without setting PATH.
+  const directories = windowsShellSearchPaths(path ?? '', cwd);
+  for (const name of ['pwsh.exe', 'powershell.exe']) {
+    for (const directory of directories) {
+      const candidate = win32.join(directory, name);
+      if (await probeWindowsShell(candidate, isFile, deadline, signal)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/** Add only the packaged application's native loader paths to the broker.
+ * The Rust broker restores the original Windows PATH for its interactive shell. */
+export function terminalBrokerEnvironment(
+  options: Pick<TerminalManagerOptions, 'isPackaged' | 'resourcesPath'>,
+  source: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const environment = terminalEnvironment(source, platform);
+  if (!options.isPackaged) return environment;
+  const resourcesPath = options.resourcesPath ?? process.resourcesPath;
+  if (!resourcesPath || !isAbsolute(resourcesPath)) throw new Error('Packaged terminal resources path must be absolute');
+  if (platform === 'linux') {
+    // The executable is resources/bin/bridge-server. glibc splits this single
+    // entry before expanding $ORIGIN, so separators in the install path are
+    // not interpreted as additional loader search directories.
+    environment.LD_LIBRARY_PATH = '$ORIGIN/../gstreamer/lib';
+  } else if (platform === 'win32') {
+    if (resourcesPath.includes(';')) throw new Error('Packaged terminal resources path cannot contain a Windows PATH separator');
+    // Only the app-owned directory is configured in PATH; the Windows DLL
+    // loader also searches its built-in system locations. The broker restores
+    // the user's original PATH when launching an interactive shell.
+    environment.DESKTOP_TERMINAL_SHELL_PATH_PRESENT = environment.PATH === undefined ? '0' : '1';
+    if (environment.PATH !== undefined) environment.DESKTOP_TERMINAL_SHELL_PATH = environment.PATH;
+    environment.PATH = join(resourcesPath, 'gstreamer', 'bin');
+  }
+  return environment;
+}
+
+export function terminalBrokerLaunchOptions(
+  options: Pick<TerminalManagerOptions, 'isPackaged' | 'resourcesPath'>,
+  source: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): { env: NodeJS.ProcessEnv; cwd?: string } {
+  const env = terminalBrokerEnvironment(options, source, platform);
+  const cwd = options.isPackaged && platform === 'win32'
+    ? join(options.resourcesPath ?? process.resourcesPath, 'bin') : undefined;
+  return { env, cwd };
 }
 
 function sameScope(a: TerminalScope, b: TerminalScope): boolean {
@@ -56,11 +188,15 @@ export class TerminalManager {
   private disposal?: Promise<void>;
   private rows = new Map<string, TerminalSnapshot>();
   private brokerTerminalIds = new Set<string>();
+  private creating = new Map<string, AbortController>();
+  private closing = new Map<string, Promise<void>>();
+  private stopped = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>();
   private listeners = new Set<(event: TerminalEvent) => void>();
   private pending = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private writes: Promise<void> = Promise.resolve();
   private outputPauseOwners = new Set<string>();
   private resumeOutput?: () => void;
+  private windowsShellContext?: { path: string | undefined; cwd: string };
   constructor(private readonly options: TerminalManagerOptions = {}) {}
 
   get(id: string): TerminalSnapshot | undefined { const row = this.rows.get(id); return row && clone(row); }
@@ -83,13 +219,34 @@ export class TerminalManager {
   async create(inputScope: TerminalScope): Promise<TerminalSnapshot> {
     if (this.disposed) throw new Error('Terminal manager is disposed');
     const scope = validateScope(inputScope);
-    if (this.rows.size >= MAX_TERMINALS || this.list(scope).length >= MAX_SCOPE_TERMINALS) throw new Error('Terminal limit reached');
+    // A create may fail while its close is still in flight. Keep that close
+    // counted until it settles so the reserved broker queue stays bounded.
+    if (new Set([...this.rows.keys(), ...this.closing.keys()]).size >= MAX_TERMINALS || this.list(scope).length >= MAX_SCOPE_TERMINALS) throw new Error('Terminal limit reached');
     const id = randomUUID();
     const row: TerminalSnapshot = { id, scope, title: basename(scope.projectPath) || scope.projectPath, status: 'running', exitCode: null, output: '', sequence: 0 };
     this.rows.set(id, row);
-    this.brokerTerminalIds.add(id);
-    try { await this.request({ kind: 'create', terminalId: id, cwd: scope.projectPath, cols: 80, rows: 24 }); }
+    const controller = new AbortController();
+    this.creating.set(id, controller);
+    try {
+      const command: Record<string, unknown> = { kind: 'create', terminalId: id, cwd: scope.projectPath, cols: 80, rows: 24 };
+      if (this.options.isPackaged && process.platform === 'win32') {
+        // The renderer supplies only a scope. Shell selection stays in Desktop
+        // main and is recomputed against the launch-time PATH for each create.
+        const broker = this.start();
+        const context = this.windowsShellContext!;
+        command.shellSelection = true;
+        const selected = await windowsShellExecutable(context.path, context.cwd, this.options.windowsShellFileExists, this.options.windowsShellSearchTimeoutMs, controller.signal);
+        if (this.child !== broker) throw new Error('Terminal service stopped during shell selection');
+        if (selected) command.shellProgram = selected;
+        else command.shellLaunchCwd = context.cwd;
+      }
+      if (this.disposed || controller.signal.aborted || this.rows.get(id) !== row) throw new Error('Terminal creation cancelled');
+      this.brokerTerminalIds.add(id);
+      await this.request(command);
+      if (this.disposed || controller.signal.aborted || this.rows.get(id) !== row) throw new Error('Terminal creation cancelled');
+    }
     catch (error) { this.rows.delete(id); this.brokerTerminalIds.delete(id); throw error; }
+    finally { this.creating.delete(id); }
     return clone(row);
   }
   async input(id: string, data: string): Promise<void> {
@@ -102,19 +259,34 @@ export class TerminalManager {
     if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1 || cols > 1000 || rows > 1000) throw new Error('Invalid terminal dimensions');
     await this.request({ kind: 'resize', terminalId: id, cols, rows });
   }
-  async close(id: string): Promise<void> {
+  close(id: string): Promise<void> {
+    const existing = this.closing.get(id);
+    if (existing) return existing;
+    const operation = this.closeInner(id);
+    this.closing.set(id, operation);
+    const cleanup = () => { if (this.closing.get(id) === operation) this.closing.delete(id); };
+    void operation.then(cleanup, cleanup);
+    return operation;
+  }
+  private async closeInner(id: string): Promise<void> {
     const row = this.rows.get(id);
     if (!row) return;
+    this.creating.get(id)?.abort(new Error('Terminal creation cancelled'));
+    const child = this.child;
     try {
       if (this.brokerTerminalIds.has(id)) await this.request({ kind: 'close', terminalId: id });
     }
-    catch {
-      // The broker answers "unknown terminal" for a shell the user already
-      // exited, because opening the next terminal evicts exited handles from
-      // its map. The terminal is gone either way, so local teardown must still
-      // run: leaving the row would keep the tab alive, count against the
-      // terminal limit forever, and abort `closeScope`/`closeProject` mid-loop
-      // (which is how archiving a chat reported "unknown terminal" instead).
+    catch (error) {
+      // Exited handles may already have been evicted by a later create. Any
+      // other error leaves ownership uncertain, so stop the broker instead of
+      // silently forgetting a potentially live terminal.
+      if (!(error instanceof Error && error.message === 'unknown terminal')) {
+        if (child) {
+          this.fail(child, new Error('Terminal service close failed'));
+          await this.waitForStop(child);
+        }
+        throw error;
+      }
     }
     this.brokerTerminalIds.delete(id);
     this.rows.delete(id);
@@ -139,20 +311,28 @@ export class TerminalManager {
   private start(): ChildProcessWithoutNullStreams {
     if (this.disposed) throw new Error('Terminal manager is disposed');
     if (this.child) return this.child;
-    const child = (this.options.spawnProcess ?? spawn)(resolveServerBin(this.options), ['--desktop-terminal'], { stdio: ['pipe', 'pipe', 'pipe'], env: terminalEnvironment(), windowsHide: true }) as ChildProcessWithoutNullStreams;
+    if (this.options.isPackaged && process.platform === 'win32') this.windowsShellContext = { path: process.env.PATH, cwd: process.cwd() };
+    const child = (this.options.spawnProcess ?? spawn)(resolveServerBin(this.options), ['--desktop-terminal'], { stdio: ['pipe', 'pipe', 'pipe'], ...terminalBrokerLaunchOptions(this.options), windowsHide: true }) as ChildProcessWithoutNullStreams;
     this.child = child;
+    this.stopped.set(child, new Promise(resolve => child.once('close', () => resolve())));
     child.stderr.resume(); // Diagnostics are deliberately kept out of terminal output and secrets are not logged.
     child.on('error', () => this.fail(child, new Error('Terminal service could not start')));
-    child.on('close', () => this.fail(child, new Error('Terminal service stopped')));
+    child.on('close', () => this.fail(child, new Error('Terminal service stopped'), true));
     child.stdin.on('error', () => this.fail(child, new Error('Terminal service input closed')));
     void this.read(child);
     return child;
   }
   private request(command: Record<string, unknown>): Promise<void> {
-    if (this.pending.size >= MAX_PENDING) return Promise.reject(new Error('Too many pending terminal operations'));
+    // Closing must remain possible when ordinary requests fill the queue.
+    // In-flight closes count against the terminal limit, and close()
+    // deduplicates concurrent requests for the same id.
+    const limit = command.kind === 'close' ? MAX_PENDING + MAX_TERMINALS : MAX_PENDING;
+    if (this.pending.size >= limit) return Promise.reject(new Error('Too many pending terminal operations'));
     let child: ChildProcessWithoutNullStreams;
     try { child = this.start(); } catch (error) { return Promise.reject(error); }
     const requestId = randomUUID();
+    const line = JSON.stringify({ ...command, requestId }) + '\n';
+    if (Buffer.byteLength(line) > MAX_REQUEST) return Promise.reject(new Error('Terminal service request exceeds limit'));
     const completion = new Promise<void>((resolve, reject) => {
       const onTimeout = () => {
         if (this.outputPauseOwners.size > 0) {
@@ -164,7 +344,6 @@ export class TerminalManager {
       timer.unref?.();
       this.pending.set(requestId, { resolve, reject, timer });
     });
-    const line = JSON.stringify({ ...command, requestId }) + '\n';
     this.writes = this.writes.then(() => {
       if (this.child !== child || !this.pending.has(requestId)) return;
       return new Promise<void>((resolve, reject) => child.stdin.write(line, error => error ? reject(error) : resolve()));
@@ -204,6 +383,9 @@ export class TerminalManager {
       else pending.resolve();
       return;
     }
+    // The broker emits this host-only frame after EOF cleanup. It is not a
+    // terminal event and must not be forwarded to renderer windows.
+    if (message.kind === 'shutdown' && message.reason === 'eof') return;
     if (typeof message.terminalId !== 'string') throw new Error('Invalid terminal identity');
     const row = this.rows.get(message.terminalId);
     if (!row) return;
@@ -222,16 +404,27 @@ export class TerminalManager {
     // unrecognised frame is ignored. Genuinely corrupt framing is still caught
     // by the JSON/length checks in `read`.
   }
-  private fail(child: ChildProcessWithoutNullStreams, error: Error): void {
+  private async waitForStop(child: ChildProcessWithoutNullStreams): Promise<void> {
+    const stopped = this.stopped.get(child);
+    if (!stopped) throw new Error('Terminal service stop could not be confirmed');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([stopped, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Terminal service stop could not be confirmed')), 8_000); })]);
+    } finally { if (timer) clearTimeout(timer); }
+  }
+  private fail(child: ChildProcessWithoutNullStreams, error: Error, alreadyClosed = false): void {
     if (this.child !== child) return;
     this.child = undefined;
+    for (const controller of this.creating.values()) controller.abort(error);
     this.releaseOutput();
     this.brokerTerminalIds.clear();
     // EOF gives the broker time to terminate/reap PTY process trees even after a protocol error.
-    child.stdin.end();
-    const killTimer = setTimeout(() => child.kill(), 6000);
-    killTimer.unref?.();
-    child.once('close', () => clearTimeout(killTimer));
+    if (!alreadyClosed) {
+      const killTimer = setTimeout(() => child.kill(), 6000);
+      killTimer.unref?.();
+      child.once('close', () => clearTimeout(killTimer));
+      child.stdin.end();
+    }
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
     this.pending.clear();
     for (const row of this.rows.values()) if (row.status === 'running') {
@@ -246,6 +439,7 @@ export class TerminalManager {
   private async disposeInner(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    for (const controller of this.creating.values()) controller.abort(new Error('Terminal creation cancelled'));
     this.releaseOutput();
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error('Terminal manager disposed')); }
     this.pending.clear();

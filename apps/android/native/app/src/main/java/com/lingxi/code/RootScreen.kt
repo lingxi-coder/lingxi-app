@@ -59,6 +59,7 @@ import com.lingxi.code.conversation.effortLabel
 import com.lingxi.code.conversation.ConversationTurnOrigin
 import com.lingxi.code.conversation.ConversationTurnOutcome
 import com.lingxi.code.conversation.ChatViewModel
+import com.lingxi.code.conversation.DurableConversationTurnIds
 import com.lingxi.code.conversation.ConversationLaunchRequest
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.ComputerUseSetupStatus
@@ -315,6 +316,7 @@ fun RootScreen(
     // ViewModel and its live engine remain. Provider reconnects replace the
     // source inside that same ViewModel instead of accumulating keyed VMs.
     val appContext = context.applicationContext
+    remember(appContext) { DurableConversationTurnIds.initialize(appContext) }
     val lifecycleOwner = LocalLifecycleOwner.current
     var activeSessionMode by rememberSaveable { mutableStateOf(SessionMode.Code) }
     val chatViewModel: ChatViewModel = viewModel ?: viewModel(
@@ -2323,6 +2325,8 @@ fun RootScreen(
                     onShare = onShare,
                     onStop = chatViewModel::cancel,
                     onDiscardRecoveredTurn = chatViewModel::discardRecoveredTurn,
+                    onRetryDurableRecovery = chatViewModel::retryDurableRecovery,
+                    onAcknowledgeTerminalRecovery = chatViewModel::acknowledgeTerminalRecovery,
                     onDismissError = chatViewModel::dismissError,
                     onDismissCompactRejection = chatViewModel::dismissCompactRejection,
                     showOfflineBanner = shouldShowOfflineBanner(isOnline, dismissedWhileOffline),

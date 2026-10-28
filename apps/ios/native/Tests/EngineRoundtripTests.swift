@@ -338,7 +338,10 @@ import XCTest
             // SUBMIT: per the binding contract this returns Ok — the turn is
             // spawned on the engine's owned runtime; a turn failure is NOT thrown
             // here, it streams to the listener as a `ClientEvent.error`.
+            let sessionID = await handle.workspaceState().sessionId
+            XCTAssertFalse(sessionID.isEmpty)
             try await handle.submit(command: .sendPrompt(
+                sessionId: sessionID,
                 text: ClientTextDto(codeUnits: Array("Reply with exactly: hello from lingxi".utf16)),
                 promptMode: nil,
                 images: [],

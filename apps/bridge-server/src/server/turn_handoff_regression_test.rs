@@ -520,6 +520,7 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
         2,
         "send_prompt",
         ClientCommand::SendPrompt {
+            session_id: None,
             text: "ask".into(),
             prompt_mode: None,
             images: Vec::new(),
@@ -547,16 +548,19 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
             cwd: None,
         },
         ClientCommand::RunSlashCommand {
+            session_id: None,
             raw: "/clear".into(),
             images: Vec::new(),
             turn_id: Some(11),
         },
         ClientCommand::RunSlashCommand {
+            session_id: None,
             raw: "/new title".into(),
             images: Vec::new(),
             turn_id: Some(12),
         },
         ClientCommand::RunSlashCommand {
+            session_id: None,
             raw: "/reset".into(),
             images: Vec::new(),
             turn_id: Some(13),
@@ -611,6 +615,7 @@ async fn session_replacement_waits_for_settled_turn_handoff() {
             cwd: None,
         },
         ClientCommand::RunSlashCommand {
+            session_id: None,
             raw: "/reset".into(),
             images: Vec::new(),
             turn_id: None,

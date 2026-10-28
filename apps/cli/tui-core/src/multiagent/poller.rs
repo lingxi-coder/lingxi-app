@@ -42,6 +42,11 @@ pub fn task_row_from_record(r: TaskRecord) -> TaskRow {
             .as_deref()
             .map(sanitize_task_text)
             .filter(|value| !value.is_empty()),
+        observation_error: r
+            .observation_error
+            .as_deref()
+            .map(sanitize_task_text)
+            .filter(|value| !value.is_empty()),
     }
 }
 
@@ -63,6 +68,11 @@ pub fn task_row_from_record_ref(r: &TaskRecord) -> TaskRow {
         stage: r.stage.as_deref().map(sanitize_task_text),
         error: r
             .error
+            .as_deref()
+            .map(sanitize_task_text)
+            .filter(|value| !value.is_empty()),
+        observation_error: r
+            .observation_error
             .as_deref()
             .map(sanitize_task_text)
             .filter(|value| !value.is_empty()),
@@ -249,6 +259,7 @@ mod tests {
                 status: "running".into(),
                 description: "cargo build".into(),
                 command: None,
+                observation_error: Some("wait\n\u{1b}[31munverified\u{1b}[0m".into()),
                 ..Default::default()
             },
             TaskRecord {
@@ -275,6 +286,11 @@ mod tests {
                 assert_eq!(rows.len(), 3);
                 assert_eq!(rows[0].task_id, "b00000001");
                 assert_eq!(rows[0].task_type, "local_bash");
+                assert_eq!(
+                    rows[0].observation_error.as_deref(),
+                    Some("wait unverified")
+                );
+                assert!(rows[0].error.is_none());
                 assert_eq!(rows[1].status, "completed");
                 assert_eq!(rows[1].description.display(), "explore");
                 assert_eq!(rows[2].stage.as_deref(), Some("Running panels 2/3"));

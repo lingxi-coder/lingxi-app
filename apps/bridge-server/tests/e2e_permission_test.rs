@@ -294,6 +294,7 @@ async fn permission_request_event_then_approve_resolves_check() {
     send_command(
         &mut ws,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "use a tool".into(),
             prompt_mode: None,
             images: Vec::new(),
@@ -391,6 +392,7 @@ async fn disconnect_mid_permission_denies() {
     send_command(
         &mut ws,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "use a tool".into(),
             prompt_mode: None,
             images: Vec::new(),
@@ -454,6 +456,7 @@ async fn reconnect_does_not_receive_stale_frames_from_aborted_first_turn() {
     send_command(
         &mut first,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "first blocked turn".into(),
             prompt_mode: None,
             images: Vec::new(),
@@ -471,6 +474,7 @@ async fn reconnect_does_not_receive_stale_frames_from_aborted_first_turn() {
     send_command(
         &mut second,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "second fresh turn".into(),
             prompt_mode: None,
             images: Vec::new(),

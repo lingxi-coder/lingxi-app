@@ -54,6 +54,7 @@ fn prompt(id: u64, text: &str, trace_context: Option<SerializedTraceContext>) ->
         id,
         method: "command".into(),
         params: serialize_source(&ClientCommand::SendPrompt {
+            session_id: None,
             text: text.into(),
             images: Vec::new(),
             turn_id: Some(id),

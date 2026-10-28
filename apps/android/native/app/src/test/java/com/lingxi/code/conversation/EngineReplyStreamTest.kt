@@ -228,10 +228,12 @@ class EngineReplyStreamTest {
                         TurnRecoverySnapshotDto(
                             sessionId = "session-a",
                             turnId = 7uL,
+                            revision = 1uL,
                             state = TurnRecoveryStateDto.RUNNING,
                             firstSequence = 1uL,
                             lastSequence = 1uL,
                             safeToResume = true,
+                            projectionUncertain= false,
                             reason = null,
                         ),
                     ),
@@ -360,10 +362,30 @@ class EngineReplyStreamTest {
             listOf(
                 ReplyEvent.Thinking,
                 ReplyEvent.Delta("live"),
-                ReplyEvent.DurableTurnReplayAcknowledged(turnId = 9L, sequence = 1L),
+                ReplyEvent.DurableTurnReplayAcknowledged(sessionId = "session-a", turnId = 9L, sequence = 1L),
                 ReplyEvent.End,
             ),
             stream.toList(),
+        )
+    }
+
+    @Test
+    fun mismatchedReplayIdentityDoesNotConsumePendingRawAcknowledgement() = runTest {
+        val events = flowOf(
+            ClientEvent.TextDelta("live".toClientTextDto()),
+            ClientEvent.TurnEventReplay("session-a", 10u, 100u, "{}"),
+            ClientEvent.TurnEventReplay("session-b", 9u, 200u, "{}"),
+            ClientEvent.TurnEventReplay("session-a", 9u, 1u, "{}"),
+            ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost),
+        )
+        val replies = mapReplyStream(
+            events,
+            acceptsDurableReplay = { it.sessionId == "session-a" && it.turnId == 9uL },
+        ).toList()
+
+        assertEquals(
+            listOf(ReplyEvent.DurableTurnReplayAcknowledged("session-a", 9L, 1L)),
+            replies.filterIsInstance<ReplyEvent.DurableTurnReplayAcknowledged>(),
         )
     }
 }

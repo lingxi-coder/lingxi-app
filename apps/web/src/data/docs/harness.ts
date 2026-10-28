@@ -730,7 +730,7 @@ async fn headless_prompt(
         apis: [
           {
             name: 'CLIENT_PROTOCOL_VERSION',
-            signature: 'pub const CLIENT_PROTOCOL_VERSION: &str = "29.0.0";',
+            signature: 'pub const CLIENT_PROTOCOL_VERSION: &str = "30.0.0";',
             description: t('Protocol version declared in this inspected source tree. Native clients must version-lock generated binding layouts with the host they actually build.', '此检查源码树声明的协议版本。原生客户端生成绑定的布局应与实际构建的宿主版本一致。'),
           },
         ],
@@ -916,7 +916,7 @@ mod lifecycle_example {
         t('Rust enums are non-exhaustive; hosts handle unknown future variants without inventing successes. Native enum and record layouts require matching generated bindings and the protocol contract gate. A JSON payload that deserializes does not establish a compatible UniFFI binary layout or correct transport handshake.', 'Rust enum 是非穷尽类型；宿主处理未来未知变体时不能伪造成功。原生 enum 与 record 布局需要匹配生成绑定及协议契约检查。JSON 载荷可反序列化不代表 UniFFI 二进制布局兼容或传输握手正确。'),
       ],
       code: [{ label: t('Shared client contracts', '共享客户端契约'), language: 'bash', verification: 'manual', code: 'cargo test --locked -p client --features test-support' }],
-      note: t('The inspected client protocol constant is 29.0.0. Always read the baseline and the host pin before connecting a separate client. Device callbacks, ordering under disconnect and replay presentation remain target-host checks.', '本次检查的客户端协议常量为 29.0.0。连接独立客户端前，始终查看基线与宿主固定依赖版本。设备回调、断线时顺序及重放展示仍需目标宿主检查。'),
+      note: t('The inspected client protocol constant is 30.0.0. Always read the baseline and the host pin before connecting a separate client. Device callbacks, ordering under disconnect and replay presentation remain target-host checks.', '本次检查的客户端协议常量为 30.0.0。连接独立客户端前，始终查看基线与宿主固定依赖版本。设备回调、断线时顺序及重放展示仍需目标宿主检查。'),
     },
   ],
 };

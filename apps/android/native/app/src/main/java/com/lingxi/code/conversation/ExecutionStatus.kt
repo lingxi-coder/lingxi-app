@@ -57,4 +57,4 @@ fun SessionAgentSummaryDto.toSessionAgentUi(): SessionAgentUi = SessionAgentUi(
 )
 
 internal fun TaskStatusDto.isAttentionStatus(): Boolean =
-    this == TaskStatusDto.PAUSED || this == TaskStatusDto.FAILED
+    this == TaskStatusDto.PAUSED || this == TaskStatusDto.FAILED || this == TaskStatusDto.EXITED_UNKNOWN

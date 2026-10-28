@@ -5,6 +5,10 @@ import '../../src/renderer/global.css';
 import { SettingsScreen } from '../../src/renderer/components/settings/SettingsScreen';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
+
+// The interaction helpers select the Chinese labels below.
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'zh-Hans');
 
 // Task 20: this fixture used to mount `BetaSettings` directly. That
 // component (and the modal it lived in) is gone — `ProviderCredentials.tsx`

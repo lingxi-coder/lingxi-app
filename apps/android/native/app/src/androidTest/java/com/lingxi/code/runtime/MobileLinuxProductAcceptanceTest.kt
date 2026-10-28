@@ -4,6 +4,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.MainActivity
+import com.lingxi.code.acceptance.requireAcceptanceOptIn
 import com.lingxi.code.bindings.android.*
 import com.lingxi.code.project.ProjectRepository
 import com.lingxi.code.settings.LinuxRuntimeBridge
@@ -21,6 +22,10 @@ import java.util.UUID
 class MobileLinuxProductAcceptanceTest {
     @Test
     fun defaultUserProjectTerminalAndPersistentHome() = runBlocking<Unit> {
+        requireAcceptanceOptIn(
+            "mobileLinuxProductAcceptance", "The product runtime acceptance is run as a staged check",
+            "com.lingxi.code.runtime.MobileLinuxProductAcceptanceTest#defaultUserProjectTerminalAndPersistentHome",
+        )
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val directories = com.lingxi.code.project.MobileUserStorage.directories(context)
@@ -97,6 +102,7 @@ class MobileLinuxProductAcceptanceTest {
                 fixture.deleteRecursively()
             }
         }
+        instrumentation.addResults(android.os.Bundle().apply { putString("mobileLinuxProductResult", "READY") })
     }
 }
 
@@ -105,7 +111,12 @@ class MobileLinuxProductAcceptanceTest {
 class MobileLinuxProductColdStartAcceptanceTest {
     @Test
     fun coldProcessRetainsUserHome() = runBlocking<Unit> {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        requireAcceptanceOptIn(
+            "mobileLinuxColdStartAcceptance", "Cold start requires the preceding product acceptance and a stopped process",
+            "com.lingxi.code.runtime.MobileLinuxProductColdStartAcceptanceTest#coldProcessRetainsUserHome",
+        )
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
         ActivityScenario.launch(MainActivity::class.java).use {
             val config = LinuxRuntimeBridge.configForWorkspace(context, LinuxRuntimeMode.MobileLinux)
             val runtime = buildAndroidMobileLinuxRuntimeHandle(config)
@@ -120,5 +131,6 @@ class MobileLinuxProductColdStartAcceptanceTest {
             runtime.shutdown()
             android.util.Log.i("ProductAcceptance", "PRODUCT_COLD_START_ACCEPTANCE PASS android")
         }
+        instrumentation.addResults(android.os.Bundle().apply { putString("mobileLinuxColdStartResult", "VERIFIED") })
     }
 }

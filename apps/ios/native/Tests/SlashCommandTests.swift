@@ -276,17 +276,18 @@ import XCTest
 
             XCTAssertNotNil(source.send("/help topic"))
             await flushTasks()
-            guard case let .runSlashCommand(raw, _, turnId) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(slashOwner, raw, _, turnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected runSlashCommand")
             }
             XCTAssertEqual(raw.codeUnits, Array("/help topic".utf16))
+            XCTAssertEqual(slashOwner, "session-a")
             XCTAssertNotNil(turnId)
 
             submitted.removeAll()
             source.applyForTesting(.slashCommandResult(turnId: turnId, display: "help output".clientTextDto, isError: false))
             XCTAssertNotNil(source.send("  /help spaced topic  "))
             await flushTasks()
-            guard case let .runSlashCommand(spacedRaw, _, spacedTurnId) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(_, spacedRaw, _, spacedTurnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected normalized runSlashCommand")
             }
             XCTAssertEqual(spacedRaw.codeUnits, Array("/help spaced topic".utf16))
@@ -299,10 +300,11 @@ import XCTest
             ))
             XCTAssertNotNil(source.send("/unknown"))
             await flushTasks()
-            guard case let .sendPrompt(text, _, _, unknownTurnId, _) = try XCTUnwrap(submitted.first) else {
+            guard case let .sendPrompt(promptOwner, text, _, _, unknownTurnId, _) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected sendPrompt for unknown slash")
             }
             XCTAssertEqual(text.codeUnits, Array("/unknown".utf16))
+            XCTAssertEqual(promptOwner, "session-a")
             XCTAssertNotNil(unknownTurnId)
         }
 
@@ -325,7 +327,7 @@ import XCTest
             ))
             await flushTasks()
 
-            guard case let .runSlashCommand(raw, _, _) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(_, raw, _, _) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected a selected slash command")
             }
             XCTAssertEqual(raw.codeUnits, Array("/help ".utf16) + [0xD800] + Array(" tail".utf16))
@@ -352,7 +354,7 @@ import XCTest
             XCTAssertNotNil(source.send("/� topic"))
             await flushTasks()
 
-            guard case let .runSlashCommand(raw, _, _) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(_, raw, _, _) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected selected command to use RunSlashCommand")
             }
             XCTAssertEqual(raw.codeUnits, [0x002f, 0xd800] + Array(" topic".utf16))
@@ -379,7 +381,7 @@ import XCTest
             XCTAssertNotNil(source.send("/� target"))
             await flushTasks()
 
-            guard case let .runSlashCommand(raw, _, _) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(_, raw, _, _) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected selected alias to use RunSlashCommand")
             }
             XCTAssertEqual(raw.codeUnits, [0x002f, 0xd800] + Array(" target".utf16))
@@ -422,7 +424,7 @@ import XCTest
             XCTAssertNotNil(source.send("/� item", sourceCodeUnits: nil, images: [], selectedSlashCommand: selected))
             await flushTasks()
 
-            guard case let .runSlashCommand(raw, _, _) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(_, raw, _, _) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected selected command to use RunSlashCommand")
             }
             XCTAssertEqual(raw.codeUnits, [0x002f, 0xd800] + Array(" item".utf16))
@@ -576,7 +578,7 @@ import XCTest
 
             let token = try XCTUnwrap(source.send("/rv staged"))
             await flushTasks()
-            guard case let .runSlashCommand(raw, _, turnId) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(_, raw, _, turnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected runSlashCommand")
             }
             XCTAssertEqual(raw.codeUnits, Array("/rv staged".utf16))
@@ -633,7 +635,7 @@ import XCTest
             ))
             await flushTasks()
 
-            guard case let .runSlashCommand(raw, images, turnId) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(_, raw, images, turnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected exact selected slash command")
             }
             XCTAssertEqual(raw.codeUnits, [0x002F, 0xD800] + Array(" argument".utf16))

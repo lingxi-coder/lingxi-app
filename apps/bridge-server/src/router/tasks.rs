@@ -21,12 +21,7 @@ pub(super) async fn emit_correlated_task_list(
         Ok(records) => {
             let active_count = records
                 .iter()
-                .filter(|record| {
-                    !matches!(
-                        record.status.as_str(),
-                        "completed" | "failed" | "killed" | "cancelled"
-                    )
-                })
+                .filter(|record| task_is_active(&record.status))
                 .count() as u64;
             for record in &records {
                 sink.emit(ClientEvent::TaskRow {
@@ -44,6 +39,13 @@ pub(super) async fn emit_correlated_task_list(
         error,
     })
     .await;
+}
+
+fn task_is_active(status: &str) -> bool {
+    !matches!(
+        status,
+        "completed" | "failed" | "killed" | "cancelled" | "exited_unknown"
+    )
 }
 
 /// Shared helper: list tasks through the handle and emit one `TaskRow` per task.
@@ -111,6 +113,7 @@ pub(super) fn task_status_wire(status: TaskStatusDto) -> String {
         TaskStatusDto::Paused => "paused",
         TaskStatusDto::Completed => "completed",
         TaskStatusDto::Failed => "failed",
+        TaskStatusDto::ExitedUnknown => "exited_unknown",
         // The DTO's user-stop variant maps to the registry's terminal "killed".
         TaskStatusDto::Cancelled => "killed",
         // `Pending` and the `#[non_exhaustive]` catch-all both map to the safe
@@ -118,6 +121,22 @@ pub(super) fn task_status_wire(status: TaskStatusDto) -> String {
         _ => "pending",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::{task_is_active, task_status_wire};
+    use client::protocol::listings::TaskStatusDto;
+
+    #[test]
+    fn unknown_exit_is_terminal_and_filterable_without_inventing_an_outcome() {
+        assert!(!task_is_active("exited_unknown"));
+        assert!(task_is_active("running"));
+        assert_eq!(
+            task_status_wire(TaskStatusDto::ExitedUnknown),
+            "exited_unknown"
+        );
+    }
 }
 
 impl EngineCommandRouter {

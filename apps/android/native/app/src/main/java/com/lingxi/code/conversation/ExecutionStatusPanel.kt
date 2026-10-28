@@ -289,7 +289,7 @@ private fun BoxStatusDot(status: String) {
 
 private fun TaskStatusDto.isTerminal(): Boolean = when (this) {
     TaskStatusDto.PENDING, TaskStatusDto.RUNNING, TaskStatusDto.PAUSED -> false
-    TaskStatusDto.COMPLETED, TaskStatusDto.FAILED, TaskStatusDto.CANCELLED -> true
+    TaskStatusDto.COMPLETED, TaskStatusDto.FAILED, TaskStatusDto.CANCELLED, TaskStatusDto.EXITED_UNKNOWN -> true
 }
 
 @Composable
@@ -300,6 +300,7 @@ internal fun taskStatusText(status: TaskStatusDto): String = when (status) {
     TaskStatusDto.COMPLETED -> stringResource(R.string.chat_run_status_completed)
     TaskStatusDto.FAILED -> stringResource(R.string.chat_run_status_failed)
     TaskStatusDto.CANCELLED -> stringResource(R.string.chat_run_status_cancelled)
+    TaskStatusDto.EXITED_UNKNOWN -> stringResource(R.string.chat_status_exited_unknown)
 }
 
 /** Long runtime descriptions remain readable without growing the composer panel. */

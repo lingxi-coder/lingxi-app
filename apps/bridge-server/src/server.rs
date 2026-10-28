@@ -73,6 +73,9 @@ use permission::computer_access::ComputerAccessExchange;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tool_api::ask_user_question::AskUserQuestionExchange;
+use tui_core::multiagent::background_uncertainty::{
+    background_uncertainty_message, BackgroundUncertaintyTracker,
+};
 
 fn deserialize_source<T>(source: &Utf16JsonProjection) -> Result<T, String>
 where
@@ -85,6 +88,19 @@ where
 fn serialize_source<T: serde::Serialize>(value: &T) -> Result<Utf16JsonProjection, String> {
     let json = serde_json::to_string(value).map_err(|error| error.to_string())?;
     Utf16JsonProjection::parse(&json).map_err(|error| error.to_string())
+}
+
+async fn emit_background_uncertain(
+    sink: &dyn ClientEventSink,
+    outcome: lingxi_core::host::task_registry::TaskBackgroundBatchOutcome,
+) {
+    if let Some(message) = background_uncertainty_message(outcome) {
+        sink.emit(ClientEvent::SystemNotice {
+            message: message.into(),
+            is_error: true,
+        })
+        .await;
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -312,7 +328,7 @@ type SharedPermissionGate = Arc<StdMutex<Option<Weak<AdapterPermissionGate>>>>;
 type SharedComputerAccessBroker = Arc<StdMutex<Option<Weak<ComputerAccessBroker>>>>;
 type SharedAskUserQuestionBroker = Arc<StdMutex<Option<Weak<AskUserQuestionBroker>>>>;
 type QueuedPromptPayloads = Arc<Mutex<HashMap<String, QueuedPromptPayload>>>;
-type QuestionRejections = Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>;
+type InteractionRejections = Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>;
 
 /// The SDK queue intentionally stores text only. Inputs carrying attachments
 /// or a client turn identity stay whole until a distinct follow-up turn owns
@@ -341,7 +357,7 @@ struct FrameEventSink {
     active_turn: ActiveTurnControl,
     resume_interactions: ActiveTurnControl,
     ask_user_question_broker: SharedAskUserQuestionBroker,
-    question_rejections: QuestionRejections,
+    question_rejections: InteractionRejections,
 }
 
 /// Event sink for connection-level command output (currently display-only slash
@@ -510,6 +526,7 @@ struct FramePermissionSink {
     active_turn: ActiveTurnControl,
     resume_interactions: ActiveTurnControl,
     gate: SharedPermissionGate,
+    permission_rejections: InteractionRejections,
     handshaken: Arc<AtomicBool>,
 }
 
@@ -534,7 +551,7 @@ impl PermissionRequestSink for FramePermissionSink {
             && !self.active_turn.accepts_permission_owner(owner_id)
             && !self.resume_interactions.accepts_permission_owner(owner_id)
         {
-            self.reject(request_id).await;
+            self.reject(gate, request_id);
             return;
         }
         // Record the tool name for the eventual resolve.
@@ -576,7 +593,7 @@ impl PermissionRequestSink for FramePermissionSink {
         drop(out);
         if !delivered {
             self.tool_names.lock().await.remove(&request_id);
-            self.reject(request_id).await;
+            self.reject(gate, request_id);
         } else {
             lingxi_core::host::live_sessions::set_process_status(
                 "waiting",
@@ -587,17 +604,19 @@ impl PermissionRequestSink for FramePermissionSink {
 }
 
 impl FramePermissionSink {
-    async fn reject(&self, request_id: u64) {
-        let gate = self
-            .gate
+    fn reject(&self, gate: Arc<AdapterPermissionGate>, request_id: u64) {
+        // The gate holds this request's publication lock until emit_request
+        // returns. Resolving inline would wait for that same lock forever.
+        // Own the deferred denial so connection teardown can join it.
+        let mut rejections = self
+            .permission_rejections
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_ref()
-            .and_then(Weak::upgrade);
-        if let Some(gate) = gate {
+            .unwrap_or_else(|poison| poison.into_inner());
+        rejections.retain(|task| !task.is_finished());
+        rejections.push(tokio::spawn(async move {
             gate.resolve(request_id, PermissionResponseDto::Deny, "")
                 .await;
-        }
+        }));
     }
 }
 
@@ -741,7 +760,8 @@ pub struct BridgeConnection {
     permission_gate_ref: SharedPermissionGate,
     computer_access_broker_ref: SharedComputerAccessBroker,
     ask_user_question_broker_ref: SharedAskUserQuestionBroker,
-    question_rejections: QuestionRejections,
+    question_rejections: InteractionRejections,
+    permission_rejections: InteractionRejections,
     driver: Option<Arc<dyn TurnDriver>>,
     /// Client ids explicitly attached through this socket, serialized with
     /// attach/detach and close cleanup. A hello alone never populates this set.
@@ -2719,6 +2739,8 @@ impl Drop for BridgeConnection {
         {
             task.abort();
         }
+        // A permission gate can outlive the connection. Dropping its join
+        // handles detaches pending denials so those checks still fail closed.
         self.active_turn.clear();
         self.resume_interactions.clear();
     }
@@ -2750,6 +2772,7 @@ impl BridgeConnection {
             computer_access_broker_ref: Arc::new(StdMutex::new(None)),
             ask_user_question_broker_ref: Arc::new(StdMutex::new(None)),
             question_rejections: Arc::new(StdMutex::new(Vec::new())),
+            permission_rejections: Arc::new(StdMutex::new(Vec::new())),
             driver: None,
             ui_attached_clients: Arc::new(Mutex::new(HashSet::new())),
             ui_lifecycle_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -2841,6 +2864,7 @@ impl BridgeConnection {
         };
         let registry = self.task_notification_registry.clone();
         let watcher = tokio::spawn(async move {
+            let mut background_warnings = BackgroundUncertaintyTracker::default();
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if let Some(refusal) = policy_helper_refusal
@@ -2975,14 +2999,24 @@ impl BridgeConnection {
                     && !lingxi_core::host::env::background_tasks_disabled()
                 {
                     if let Some(registry) = &registry {
-                        registry
-                            .background_all_tasks_with_reason(
+                        let outcome = registry
+                            .background_all_tasks_with_outcome(
                                 lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                             )
                             .await;
+                        if let Some(message) = background_warnings.next_message(outcome) {
+                            mod_drain
+                                .events
+                                .emit(ClientEvent::SystemNotice {
+                                    message: message.into(),
+                                    is_error: true,
+                                })
+                                .await;
+                        }
                     }
                     continue;
                 }
+                background_warnings.reset();
                 // Serialize the idle claim with clear/new/resume, without
                 // marking a transition as an active model turn.
                 let Ok(_handoff) = turn_handoff.try_lock() else {
@@ -3176,6 +3210,7 @@ impl BridgeConnection {
             active_turn: self.active_turn.clone(),
             resume_interactions: self.resume_interactions.clone(),
             gate: self.permission_gate_ref.clone(),
+            permission_rejections: self.permission_rejections.clone(),
             handshaken: self.handshaken.clone(),
         })
     }
@@ -3776,7 +3811,7 @@ impl BridgeConnection {
                 )
                 .await;
             }
-            ClientCommand::Cancel { turn_id } => {
+            ClientCommand::Cancel { turn_id, .. } => {
                 self.cancel_active_turn(turn_id).await;
             }
             ClientCommand::ApprovePermission {
@@ -3863,6 +3898,7 @@ impl BridgeConnection {
                 raw,
                 images,
                 turn_id,
+                ..
             } => {
                 let raw_source = raw.clone().into_projection();
                 let Some(driver) = self.driver.clone() else {
@@ -4332,11 +4368,13 @@ impl BridgeConnection {
                     drop(_handoff);
                     if !lingxi_core::host::env::background_tasks_disabled() {
                         if let Some(registry) = &self.task_notification_registry {
-                            registry
-                                    .background_all_tasks_with_reason(
-                                        lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
-                                    )
-                                    .await;
+                            let outcome = registry
+                                .background_all_tasks_with_outcome(
+                                    lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
+                                )
+                                .await;
+                            emit_background_uncertain(self.unscoped_event_sink().as_ref(), outcome)
+                                .await;
                         }
                     }
                     return;
@@ -4514,16 +4552,18 @@ impl BridgeConnection {
             tracing::debug!(?turn_id, "bridge-server: ignored stale or idle turn cancel");
             return;
         };
+        let mut background_outcome = Default::default();
         if !lingxi_core::host::env::background_tasks_disabled() {
             if let Some(registry) = &self.task_notification_registry {
-                registry
-                    .background_all_tasks_with_reason(
+                background_outcome = registry
+                    .background_all_tasks_with_outcome(
                         lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort,
                     )
                     .await;
             }
         }
         cancel.cancel();
+        emit_background_uncertain(self.unscoped_event_sink().as_ref(), background_outcome).await;
         // Deliver cancellation before waiting for the handoff, so it still
         // bypasses an ordinary control. Cleanup shares owner retirement and
         // admission: none of these awaited broker drains can reach a successor.
@@ -4811,7 +4851,7 @@ impl FramePump for BridgeConnection {
             // A cancel for a prompt still queued behind a slow control must
             // remain behind that prompt. Otherwise it is ignored before the
             // prompt has claimed an owner and the cancelled work starts later.
-            Ok(ClientCommand::Cancel { turn_id }) => {
+            Ok(ClientCommand::Cancel { turn_id, .. }) => {
                 self.active_turn.cancellation_target(turn_id).is_some()
                     || (turn_id.is_none()
                         && self.resume_interactions.cancellation_target(None).is_some())
@@ -5216,11 +5256,10 @@ impl BridgeConnection {
         }
     }
 
-    async fn join_question_rejections(&self) {
+    async fn join_rejections(rejections: &InteractionRejections) {
         loop {
             let tasks = std::mem::take(
-                &mut *self
-                    .question_rejections
+                &mut *rejections
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner()),
             );
@@ -5324,9 +5363,10 @@ impl BridgeConnection {
             }
         }
 
-        // Publication is now complete and the broker's pending map is empty.
+        // Publication is now complete and the brokers' pending maps are empty.
         // Join every deferred rejection before letting a new socket claim.
-        self.join_question_rejections().await;
+        Self::join_rejections(&self.question_rejections).await;
+        Self::join_rejections(&self.permission_rejections).await;
 
         // Audio requests are drained on DISCONNECT only, never at end-of-turn
         // (they are not in `TurnInteractions`): an audio op is a device
@@ -5884,22 +5924,35 @@ mod tests {
         assert!(connection.queue.is_empty().await);
     }
 
-    struct PendingNotificationRegistry(AtomicBool, AtomicBool, Notify);
+    struct PendingNotificationRegistry(AtomicBool, AtomicBool, Notify, AtomicBool, AtomicBool);
     #[async_trait]
     impl lingxi_core::host::task_registry::TaskRegistryHandle for PendingNotificationRegistry {
-        async fn background_all_tasks_with_reason(
+        async fn background_all_tasks_with_outcome(
             &self,
             reason: lingxi_core::host::task_registry::TaskBackgroundReason,
-        ) -> usize {
+        ) -> lingxi_core::host::task_registry::TaskBackgroundBatchOutcome {
+            let unknown = usize::from(self.3.swap(false, Ordering::SeqCst));
+            let capture_unknown = self.4.swap(false, Ordering::SeqCst);
+            if unknown != 0 || capture_unknown {
+                return lingxi_core::host::task_registry::TaskBackgroundBatchOutcome {
+                    backgrounded: 0,
+                    unknown,
+                    capture_unknown,
+                };
+            }
             if self.1.swap(false, Ordering::SeqCst) {
                 assert_eq!(
                     reason,
                     lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage
                 );
                 self.2.notify_one();
-                1
+                lingxi_core::host::task_registry::TaskBackgroundBatchOutcome {
+                    backgrounded: 1,
+                    unknown: 0,
+                    capture_unknown: false,
+                }
             } else {
-                0
+                Default::default()
             }
         }
         async fn has_pending_task_notifications_for(
@@ -6002,6 +6055,8 @@ mod tests {
             AtomicBool::new(true),
             AtomicBool::new(false),
             Notify::new(),
+            AtomicBool::new(false),
+            AtomicBool::new(false),
         ));
         let driver = Arc::new(NotificationDriver {
             started: Notify::new(),
@@ -6050,6 +6105,8 @@ mod tests {
             AtomicBool::new(false),
             AtomicBool::new(false),
             Notify::new(),
+            AtomicBool::new(false),
+            AtomicBool::new(false),
         ));
         let captured = Arc::new(Mutex::new(None));
         let driver = Arc::new(RecordingDriver {
@@ -6168,6 +6225,7 @@ mod tests {
         ];
         connection
             .dispatch(ClientCommand::SendPrompt {
+                session_id: None,
                 text: "look at these".into(),
                 prompt_mode: None,
                 images: images.clone(),
@@ -6281,6 +6339,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: ClientTextDto::from_projection(&raw)
                     .expect("test slash raw text is a root string"),
                 images: Vec::new(),
@@ -6395,6 +6454,7 @@ mod tests {
         let slash = tokio::spawn(async move {
             dispatch_connection
                 .dispatch(ClientCommand::RunSlashCommand {
+                    session_id: None,
                     raw: "/local".into(),
                     images: Vec::new(),
                     turn_id: Some(81),
@@ -6478,6 +6538,7 @@ mod tests {
         let slash = tokio::spawn(async move {
             dispatch_connection
                 .dispatch(ClientCommand::RunSlashCommand {
+                    session_id: None,
                     raw: "/cancel-me".into(),
                     images: Vec::new(),
                     turn_id: Some(83),
@@ -6531,6 +6592,7 @@ mod tests {
         connection.turn_running.store(true, Ordering::SeqCst);
         connection
             .dispatch(ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: "/inspect".into(),
                 images: Vec::new(),
                 turn_id: Some(78),
@@ -6565,6 +6627,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::SendPrompt {
+                session_id: None,
                 text: "must not be admitted".into(),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -6574,6 +6637,7 @@ mod tests {
             .await;
         connection
             .dispatch(ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: "/must-not-expand".into(),
                 images: Vec::new(),
                 turn_id: Some(702),
@@ -6618,6 +6682,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: "/model".into(),
                 images: Vec::new(),
                 turn_id: Some(704),
@@ -6670,6 +6735,7 @@ mod tests {
         let slash = tokio::spawn(async move {
             dispatch_connection
                 .dispatch(ClientCommand::RunSlashCommand {
+                    session_id: None,
                     raw: "/cancel-on-policy-refusal".into(),
                     images: Vec::new(),
                     turn_id: Some(703),
@@ -7278,6 +7344,7 @@ mod tests {
             )));
         connection
             .dispatch(ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: "/origin".into(),
                 images: Vec::new(),
                 turn_id: None,
@@ -7333,6 +7400,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: "/clear".into(),
                 images: Vec::new(),
                 turn_id: None,
@@ -7500,6 +7568,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: "/loop 5m /babysit-prs".into(),
                 images: Vec::new(),
                 turn_id: Some(41),
@@ -7542,6 +7611,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: "/inspect".into(),
                 images: wire_images,
                 turn_id: Some(42),
@@ -7598,6 +7668,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: "/help".into(),
                 images: Vec::new(),
                 turn_id: Some(42),
@@ -7653,8 +7724,11 @@ mod tests {
                 trace_context: None,
                 id: 1,
                 method: "command".into(),
-                params: serialize_source(&ClientCommand::Cancel { turn_id })
-                    .expect("cancel command serializes as source JSON"),
+                params: serialize_source(&ClientCommand::Cancel {
+                    session_id: None,
+                    turn_id,
+                })
+                .expect("cancel command serializes as source JSON"),
             })
         };
         // Slow SetModel -> queued SendPrompt(42) -> Cancel(42): cancellation
@@ -7714,6 +7788,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::SendPrompt {
+                session_id: None,
                 text: "block".into(),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -7724,7 +7799,10 @@ mod tests {
         started.notified().await;
 
         connection
-            .dispatch(ClientCommand::Cancel { turn_id: Some(99) })
+            .dispatch(ClientCommand::Cancel {
+                session_id: None,
+                turn_id: Some(99),
+            })
             .await;
         assert!(
             tokio::time::timeout(
@@ -7737,7 +7815,10 @@ mod tests {
         );
 
         connection
-            .dispatch(ClientCommand::Cancel { turn_id: Some(41) })
+            .dispatch(ClientCommand::Cancel {
+                session_id: None,
+                turn_id: Some(41),
+            })
             .await;
         cancel_observed.notified().await;
         assert!(connection.active_turn.is_active());
@@ -7753,6 +7834,82 @@ mod tests {
         })
         .await
         .expect("turn slot released after Block owner completed");
+    }
+
+    async fn cancel_reports_background_uncertainty(capture_unknown: bool, unknown: bool) -> String {
+        let (endpoint, mut socket, sink) = super::connection_regression_test::captured_sink().await;
+        let started = Arc::new(Notify::new());
+        let cancel_observed = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let driver: Arc<dyn TurnDriver> = Arc::new(CancelAwareBlockDriver {
+            started: started.clone(),
+            cancel_observed: cancel_observed.clone(),
+            release: release.clone(),
+        });
+        let registry = Arc::new(PendingNotificationRegistry(
+            AtomicBool::new(false),
+            AtomicBool::new(false),
+            Notify::new(),
+            AtomicBool::new(unknown),
+            AtomicBool::new(capture_unknown),
+        ));
+        let connection = BridgeConnection::new()
+            .bind(
+                Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink))),
+                driver,
+            )
+            .with_task_notification_registry(registry);
+        assert!(connection.claim_outbound(&sink).await);
+        connection
+            .dispatch(ClientCommand::SendPrompt {
+                session_id: None,
+                text: "block".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(41),
+                visualization_context: None,
+            })
+            .await;
+        started.notified().await;
+        connection.cancel_active_turn(Some(41)).await;
+        cancel_observed.notified().await;
+        let notice = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Frame::Event(ClientEvent::SystemNotice { message, is_error }) =
+                    super::connection_regression_test::next_frame(&mut socket).await
+                {
+                    break (message, is_error);
+                }
+            }
+        })
+        .await
+        .expect("the uncertain background result must be visible");
+        assert!(notice.1);
+        let message = notice.0.display();
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while connection.active_turn.is_active() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cancelled turn must release its owner");
+        drop(endpoint);
+        message
+    }
+
+    #[tokio::test]
+    async fn cancel_reports_an_unconfirmed_background_transition() {
+        let message = cancel_reports_background_uncertainty(false, true).await;
+        assert!(message.contains("Could not confirm backgrounding for 1 task(s)"));
+        assert!(!message.contains("complete set of tasks"));
+    }
+
+    #[tokio::test]
+    async fn cancel_reports_an_uncaptured_task_set_and_still_cancels() {
+        let message = cancel_reports_background_uncertainty(true, false).await;
+        assert!(message.contains("Could not determine the complete set of tasks"));
+        assert!(!message.contains("task(s)"));
     }
 
     #[tokio::test]
@@ -7783,6 +7940,41 @@ mod tests {
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
         assert_eq!(gate.pending_count().await, 0);
         connection.active_turn.finish(generation);
+    }
+
+    #[tokio::test]
+    async fn permission_without_outbound_is_denied_for_foreground_and_background() {
+        for background_owned in [false, true] {
+            let connection = BridgeConnection::new();
+            let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
+            let connection = connection.bind(gate.clone(), Arc::new(NoTurn));
+            let (generation, _) = connection.active_turn.begin(Some(74));
+            connection.handshaken.store(true, Ordering::SeqCst);
+            let input = Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({ "command": "echo unreachable" }),
+            )
+            .unwrap();
+            let context = permission::gate::PermissionCheckContext {
+                background_owned,
+                ..Default::default()
+            };
+            let decision = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                gate.check_with_context("Bash", &input, &context),
+            )
+            .await
+            .expect("an undelivered request must be denied promptly");
+
+            assert!(matches!(
+                decision,
+                permission::gate::PermissionOutcome::Deny { .. }
+            ));
+            assert_eq!(gate.pending_count().await, 0);
+            assert!(gate.session_allow_rules().lock().await.is_empty());
+            assert!(connection.tool_names.lock().await.is_empty());
+            BridgeConnection::join_rejections(&connection.permission_rejections).await;
+            connection.active_turn.finish(generation);
+        }
     }
 
     #[tokio::test]
@@ -8004,6 +8196,7 @@ mod tests {
         // First prompt — wins the run loop and parks on the barrier.
         connection
             .dispatch(ClientCommand::SendPrompt {
+                session_id: None,
                 text: "first".into(),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -8028,6 +8221,7 @@ mod tests {
         assert!(connection.turn_running.load(Ordering::SeqCst));
         connection
             .dispatch(ClientCommand::SendPrompt {
+                session_id: None,
                 text: "second".into(),
                 prompt_mode: None,
                 images: Vec::new(),

@@ -573,22 +573,20 @@ fn build_orchestrator(
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![
         first, second, third,
     ]));
-    let orchestrator =
-        ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig {
-                interactive_permissions: true,
-                ..OrchestratorConfig::default()
-            },
-            Arc::new(MockApiClient::new(Vec::new())),
-            streaming,
-            tools,
-            orchestrator::test_support::noop_hook_executor(),
-            gate as Arc<dyn permission::gate::PermissionGate>,
-            output,
-            Arc::new(StaticMemoryProvider::empty()),
-            std::env::temp_dir(),
-        ));
-    orchestrator
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig {
+            interactive_permissions: true,
+            ..OrchestratorConfig::default()
+        },
+        Arc::new(MockApiClient::new(Vec::new())),
+        streaming,
+        tools,
+        orchestrator::test_support::noop_hook_executor(),
+        gate as Arc<dyn permission::gate::PermissionGate>,
+        output,
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ))
 }
 
 async fn build_rig(
@@ -678,6 +676,7 @@ async fn submit_prompt(socket: &mut Socket) {
     send_command(
         socket,
         &ClientCommand::SendPrompt {
+            session_id: None,
             text: "start a media conversation".into(),
             prompt_mode: None,
             images: Vec::new(),
@@ -886,6 +885,7 @@ async fn conversation_continues_in_the_same_turn_until_realtime_cancel() {
     send_command(
         &mut socket,
         &ClientCommand::Cancel {
+            session_id: None,
             turn_id: Some(TURN_ID),
         },
     )
@@ -987,6 +987,7 @@ async fn cancelling_realtime_continuation_stops_the_in_flight_loop_tick() {
     send_command(
         &mut socket,
         &ClientCommand::Cancel {
+            session_id: None,
             turn_id: Some(TURN_ID),
         },
     )

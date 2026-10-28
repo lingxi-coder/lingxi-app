@@ -63,6 +63,21 @@ use harness_runtime::headless::output::OutputSink;
 use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use tui_core::multiagent::background_uncertainty::{
+    background_uncertainty_message, BackgroundUncertaintyTracker,
+};
+
+fn publish_background_uncertainty(
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    message: Option<String>,
+) {
+    if let Some(message) = message {
+        let _ = tx.send(tui::TurnEvent::SystemNotice {
+            body: message.into(),
+            is_error: true,
+        });
+    }
+}
 
 struct TuiMsgQueueInput {
     queue: Arc<msgqueue::MessageQueueManager>,
@@ -2436,11 +2451,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
         queued_prompt_handle.spawn(async move {
             queue.enqueue(command).await;
             if !lingxi_core::host::env::background_tasks_disabled() {
-                task_registry
-                    .background_all_tasks_with_reason(
+                let outcome = task_registry
+                    .background_all_tasks_with_outcome(
                         lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                     )
                     .await;
+                publish_background_uncertainty(&tx, background_uncertainty_message(outcome));
             }
             drop(publication);
             discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
@@ -3513,6 +3529,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let cancel_reason = queue_cancel_reason.clone();
         let shutdown = pump_shutdown.clone();
         tokio::spawn(async move {
+            let mut background_warnings = BackgroundUncertaintyTracker::default();
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
@@ -3521,11 +3538,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 if queue.has_main_thread_commands().await
                     && !lingxi_core::host::env::background_tasks_disabled()
                 {
-                    registry
-                        .background_all_tasks_with_reason(
+                    let outcome = registry
+                        .background_all_tasks_with_outcome(
                             lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                         )
                         .await;
+                    publish_background_uncertainty(&tx, background_warnings.next_message(outcome));
+                } else {
+                    background_warnings.reset();
                 }
                 if !registry.has_pending_task_notifications_for(None).await {
                     continue;
@@ -4777,8 +4797,12 @@ pub(crate) async fn run_permission_action(
                             let transcript = writer.active_path();
                             if let Some(source) = transcript.parent() {
                                 if let Err(error) = session::jsonl::record_session_alias(
-                                    &paths.lingxi_home, source, std::path::Path::new(&path),
-                                ).await {
+                                    &paths.lingxi_home,
+                                    source,
+                                    std::path::Path::new(&path),
+                                )
+                                .await
+                                {
                                     tracing::warn!(%error, "session alias could not be recorded after /add-dir");
                                 }
                             }
@@ -5177,6 +5201,7 @@ fn forward_desktop_workflow_event(
                         tasks::TaskStatus::Completed => "completed",
                         tasks::TaskStatus::Failed => "failed",
                         tasks::TaskStatus::Killed => "killed",
+                        tasks::TaskStatus::ExitedUnknown => "exited_unknown",
                     }
                     .to_owned(),
                     ended_at_ms: None,
@@ -6011,6 +6036,32 @@ async fn trust_gate() -> TrustGateOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_snapshot_uncertainty_reaches_cli_notice_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = lingxi_core::host::task_registry::TaskBackgroundBatchOutcome {
+            capture_unknown: true,
+            ..Default::default()
+        };
+        publish_background_uncertainty(&tx, background_uncertainty_message(outcome));
+        let tui::TurnEvent::SystemNotice { body, is_error } = rx.try_recv().unwrap() else {
+            panic!("expected an uncertainty notice");
+        };
+        assert!(is_error);
+        let message = body.display();
+        assert!(message.contains("Could not determine the complete set of tasks"));
+        assert!(!message.contains("task(s)"));
+
+        let mut tracker = BackgroundUncertaintyTracker::default();
+        publish_background_uncertainty(&tx, tracker.next_message(outcome));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(tui::TurnEvent::SystemNotice { is_error: true, .. })
+        ));
+        publish_background_uncertainty(&tx, tracker.next_message(outcome));
+        assert!(rx.try_recv().is_err(), "the polling notice is not repeated");
+    }
 
     #[tokio::test]
     async fn cli_composer_and_typed_queue_stamp_only_native_human_inputs() {

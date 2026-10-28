@@ -73,12 +73,14 @@ test('turn file summary opens historical changes in the right panel', async () =
     assert.equal(result.initiallyClosed, true);
     assert.equal(result.inlineDiffs, 0);
     assert.equal(result.allFilesVisible, true);
-    assert.equal(result.rightPanel, true);
+    assert.equal(result.wideGeometry.viewport, 1300);
+    assert.equal(result.rightPanel, true, JSON.stringify(result.wideGeometry));
     assert.equal(result.selectedFileOnly, true);
     assert.equal(result.selectedFileSurvivesTab, true);
     assert.equal(result.reviewResetsAll, true);
     assert.equal(result.tabCount, 1);
     assert.equal(result.closedWithoutInlineDiffs, true);
+    assert.deepEqual(result.narrowGeometry, { viewport: 360, position: 'absolute' });
     assert.equal(result.darkNarrowVisible, true);
     assert.equal(result.darkHeadingMatchesTheme, true);
     assert.equal(result.narrowOverflow, false);

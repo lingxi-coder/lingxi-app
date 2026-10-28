@@ -48,7 +48,8 @@ import harness_runtimeFFI
 final class SideChatConversationSourceTests: XCTestCase {
     private func makeSource(root: URL) -> EngineConversationSource {
         EngineConversationSource(config: EngineConfig(apiBase: "https://api.anthropic.com", apiKey: "", model: "",
-            appSandboxRoot: root.path, projectCwd: nil, sessionMode: .code, visionDelegationEnabled: true), memoryOnly: true)
+            appSandboxRoot: root.path, projectCwd: nil, sessionMode: .code, visionDelegationEnabled: true),
+            memoryOnly: true, recoveryStoreRootForTesting: root.path)
     }
 
     func testOpeningEmptySheetCreatesOneEditableChildAndReopeningPreservesIt() async {
@@ -98,7 +99,7 @@ final class SideChatConversationSourceTests: XCTestCase {
         await fulfillment(of: [created], timeout: 2)
         for _ in 0..<20 { await Task.yield() }
 
-        guard case let .sendPrompt(text, _, _, _, _) = commands.first else {
+        guard case let .sendPrompt(_, text, _, _, _, _) = commands.first else {
             return XCTFail("side child must submit its initial prompt")
         }
         XCTAssertEqual(text.codeUnits, sourceUnits)
@@ -177,12 +178,26 @@ final class SideChatConversationSourceTests: XCTestCase {
         parent.sideChats.cancelCurrentTurns()
         for _ in 0..<20 { await Task.yield() }
         XCTAssertTrue(commands.contains { command in
-            if case let .cancel(turnID) = command { return turnID == 77 }
+            if case let .cancel(_, turnID) = command { return turnID == 77 }
             return false
         })
         XCTAssertEqual(parent.sideChats.entries.count, 1)
         XCTAssertEqual(entry.draft, "keep this unsent draft")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("durable-conversation-turn.json").path))
+    }
+
+    func testSideStopBeforeTurnStartedUsesItsIndependentSideRoute() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = makeSource(root: root)
+        source.setSideIDForTesting("side-owned-route")
+        var cancelled: [(String?, UInt64?)] = []
+        source.setCommandSubmitterForTesting { command in
+            if case let .cancel(sessionID, turnID) = command { cancelled.append((sessionID, turnID)) }
+        }
+        try await source.cancelAndWait()
+        XCTAssertEqual(cancelled.count, 1)
+        XCTAssertNil(cancelled.first?.0)
+        XCTAssertNil(cancelled.first?.1)
     }
 
     func testFailedSubmissionRestoresDraftWhileSideViewIsHidden() {

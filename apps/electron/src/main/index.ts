@@ -724,11 +724,13 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       permission: (input, signal) => localApps!.promptAgentPermission(input, signal),
       question: (input, signal) => localApps!.promptAgentQuestion(input, signal),
     });
+    const localAppBridgeServer = resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
     localApps = new LocalAppHost({
       configHome: productPaths.configHome,
       accountToken: () => account.getIdToken(),
       accountId: () => account.snapshot().user?.uid ?? undefined,
-      core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.configHome, message => diagnostics.add('warn', 'host', message)),
+      core: new LocalAppCoreClient(localAppBridgeServer, productPaths.configHome, message => diagnostics.add('warn', 'host', message)),
+      processHelperExecutable: localAppBridgeServer,
       resolveAuthoringBinding: async (_appId, session) => {
         const activeSession = settings.getPublic().activeSession ?? undefined;
         const liveDraft = bridge?.getActiveDraftSession(session, activeSession);

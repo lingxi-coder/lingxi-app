@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from 'electron';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { configureFixtureWindow, settleFixtureAnimations } from './electron-test-environment.mjs';
 const url = process.argv.find(arg => arg.startsWith('http://'));
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -9,6 +10,7 @@ async function main() {
   const window = new BrowserWindow({ show: false, width: 1200, height: 820, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
     const run = script => window.webContents.executeJavaScript(script);
     const wait = async expr => { trace(`waiting: ${expr}`); for (let n = 0; n < 300; n++) { if (await run(expr)) { trace(`ready: ${expr}`); return; } await delay(20); } throw new Error(`Timeout: ${expr}\n${await run('document.body.innerText')}\n${JSON.stringify(await run('window.terminalFixture?.state()'))}`); };
     const click = selector => run(`document.querySelector(${JSON.stringify(selector)}).click()`);
@@ -29,7 +31,9 @@ async function main() {
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'A' }); window.webContents.sendInputEvent({ type: 'char', keyCode: 'a' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'A' });
     await wait('window.terminalFixture.state().inputs.length > 0'); result.inputWorks = true;
     await run(`(() => { const textarea = document.querySelector('.xterm-helper-textarea'); textarea.value = ''; textarea.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })); textarea.value = '你好'; textarea.dispatchEvent(new CompositionEvent('compositionupdate', { data: '你好', bubbles: true })); textarea.dispatchEvent(new CompositionEvent('compositionend', { data: '你好', bubbles: true })); })()`);
-    await delay(50);
+    // xterm commits a composition on a later task. Do not send the next key
+    // before those actual UTF-8 characters have reached the terminal bridge.
+    await wait(`window.terminalFixture.state().inputs.map(item => item.data).join('').includes('你好')`);
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'C', modifiers: ['control'] });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'C', modifiers: ['control'] });
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
@@ -50,18 +54,24 @@ async function main() {
     await run('document.querySelector("#composer").focus(); window.terminalFixture.session("session-a")'); await delay(80);
     result.restoredSelection = (await state()).selected === second && (await state()).open && await run('document.activeElement.id === "composer"');
     await run('document.querySelector(".terminal-resizer").dispatchEvent(new KeyboardEvent("keydown", { key:"ArrowUp", bubbles:true, cancelable:true }))');
-    await delay(100); result.heightPersisted = await run('localStorage.getItem("lingxi.terminal.height.v1") === "264"');
+    await wait('localStorage.getItem("lingxi.terminal.height.v1") === "264"'); result.heightPersisted = true;
     result.resizeWorks = (await state()).sizes.length > 0;
-    await delay(280);
+    // The panel's height transition may still be in flight in a hidden CI
+    // window even after a fixed delay. Measure only the settled 264 px panel.
+    await settleFixtureAnimations(window.webContents, '#desktop-terminal');
+    await wait(`Math.abs(document.querySelector('#desktop-terminal').getBoundingClientRect().height - 264) < 1`);
     const handle = await run(`(() => { const r = document.querySelector('.terminal-resizer').getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.floor(r.bottom - 1) }; })()`);
     window.webContents.sendInputEvent({ type: 'mouseMove', ...handle });
     window.webContents.sendInputEvent({ type: 'mouseDown', ...handle, button: 'left', clickCount: 1 });
+    // Wait for pointer capture and the move listener before moving outside
+    // the 7 px handle; otherwise a busy renderer can miss the move entirely.
+    await wait(`document.querySelector('#desktop-terminal').dataset.resizing === 'true'`);
     window.webContents.sendInputEvent({ type: 'mouseMove', x: handle.x, y: handle.y - 40, modifiers: ['leftButtonDown'] });
-    await delay(30);
+    await wait(`Math.abs(document.querySelector('#desktop-terminal').getBoundingClientRect().height - 304) < 1`);
     result.dragMetrics = await run(`(() => { const panel = document.querySelector('#desktop-terminal'); const r = document.querySelector('.terminal-resizer').getBoundingClientRect(); return { resizing: panel.dataset.resizing, transition: getComputedStyle(panel).transitionDuration, height: panel.getBoundingClientRect().height, expectedHeight: panel.style.height, handle: {top:r.top, bottom:r.bottom}, active: document.activeElement?.className }; })()`);
     result.directResize = await run(`(() => { const panel = document.querySelector('#desktop-terminal'); return panel.dataset.resizing === 'true' && getComputedStyle(panel).transitionDuration === '0s' && Math.abs(panel.getBoundingClientRect().height - 304) < 1; })()`);
     window.webContents.sendInputEvent({ type: 'mouseUp', x: handle.x, y: handle.y - 40, button: 'left', clickCount: 1 });
-    await delay(30);
+    await wait(`!document.querySelector('#desktop-terminal').hasAttribute('data-resizing')`);
     result.resizeReleased = await run(`!document.querySelector('#desktop-terminal').hasAttribute('data-resizing')`);
     const screenshots = process.env.LINGXI_TERMINAL_SCREENSHOTS || '/tmp/lingxi-terminal-ui'; mkdirSync(screenshots, { recursive: true });
     await run(`window.terminalFixture.output('${second}', '\\r\\n\\x1b[32m✓ Terminal ready\\x1b[0m\\r\\n中文输入 · ANSI colors · session isolation\\r\\n(base) user@MacBook LingXi-Next % ')`); await delay(150);

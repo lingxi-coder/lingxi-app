@@ -135,18 +135,30 @@ struct ConversationNotificationPayload {
         // session collapsed onto ONE identifier and `post`'s delivered-set
         // guard silently swallowed every task after the first.
         discriminator: String? = nil,
-        /// Fills the one parameterized body (`needsPermission`'s tool name).
+        /// Task results use generic text that never exposes task descriptions.
+        isTaskNotification: Bool = false,
+        /// Fills the parameterized permission body with the tool name.
         detail: String? = nil
     ) -> ConversationNotificationPayload {
         let title: String
         let body: String
         switch eventClass {
         case .completed:
-            title = String(localized: "chat_background_completed_title")
-            body = String(localized: "chat_background_completed_text")
+            if isTaskNotification {
+                title = String(localized: "chat_execution_tasks")
+                body = String(localized: "chat_status_completed")
+            } else {
+                title = String(localized: "chat_agent_main")
+                body = String(localized: "chat_run_status_completed")
+            }
         case .failed:
-            title = String(localized: "chat_background_failed_title")
-            body = String(localized: "chat_background_failed_text")
+            if isTaskNotification {
+                title = String(localized: "chat_execution_tasks")
+                body = String(localized: "chat_status_failed")
+            } else {
+                title = String(localized: "chat_agent_main")
+                body = String(localized: "chat_run_status_failed")
+            }
         case .waitingForUser:
             title = String(localized: "chat_background_waiting_title")
             body = String(localized: "chat_background_waiting_text")
@@ -155,9 +167,8 @@ struct ConversationNotificationPayload {
             body = String(localized: "chat_background_paused_text")
         case .needsPermission:
             title = String(localized: "chat_background_permission_title")
-            // The only parameterized body here. `detail` carries the tool name;
-            // it is passed rather than parsed back out of the localized prompt
-            // title, which would give a different answer in each locale.
+            // `detail` carries the tool name; parsing it from the localized
+            // prompt title would give a different answer in each locale.
             body = String(
                 format: String(localized: "chat_background_permission_text %@"),
                 detail ?? ""
@@ -238,7 +249,7 @@ typealias ConversationNotificationSleeper = @Sendable (UInt64) async -> Void
 
 @MainActor
 final class ConversationBackgroundAlertController {
-    private let scheduler: ConversationNotificationScheduling
+    private let dispatchNotification: (ConversationNotificationPayload) -> Void
     private let activityReporter: ConversationActivityReporting
     private var scenePhase: ScenePhase = .active
     private var deliveredNotificationIDs = Set<String>()
@@ -276,9 +287,13 @@ final class ConversationBackgroundAlertController {
         /// production clamp.
         sleeper: @escaping ConversationNotificationSleeper = { try? await Task.sleep(nanoseconds: $0) },
         /// Injected so a test never reads (or writes) the real user defaults.
-        preferences: NotifConfig = NotificationPreferencesStore.load()
+        preferences: NotifConfig = NotificationPreferencesStore.load(),
+        /// Injected to observe notification decisions synchronously in tests.
+        notificationDispatcher: ((ConversationNotificationPayload) -> Void)? = nil
     ) {
-        self.scheduler = scheduler
+        self.dispatchNotification = notificationDispatcher ?? { payload in
+            Task { await scheduler.deliver(payload) }
+        }
         self.activityReporter = activityReporter
         self.sleeper = sleeper
         self.preferences = preferences
@@ -312,6 +327,9 @@ final class ConversationBackgroundAlertController {
         idleTask = nil
         armedIdleCompletion = nil
     }
+
+    /// Allows tests to await the exact delayed alert, including cancellation.
+    var idleAlertTaskForTesting: Task<Void, Never>? { idleTask }
 
     func sync(_ snapshot: ConversationBackgroundSnapshot) {
         activityReporter.sync(snapshot: snapshot, scenePhase: scenePhase)
@@ -413,6 +431,9 @@ final class ConversationBackgroundAlertController {
                     kind: .agentNeedsInput,
                     discriminator: task.id
                 )
+            case .exitedUnknown:
+                // The process exited, but its outcome is not known.
+                break
             case .pending, .running, .cancelled:
                 break
             }
@@ -523,10 +544,11 @@ final class ConversationBackgroundAlertController {
             workspaceKey: workspaceKey,
             sessionMode: sessionMode,
             discriminator: discriminator,
+            isTaskNotification: kind == .agentCompleted,
             detail: detail
         )
         guard deliveredNotificationIDs.insert(payload.identifier).inserted else { return }
-        Task { await scheduler.deliver(payload) }
+        dispatchNotification(payload)
     }
 }
 
@@ -561,6 +583,9 @@ extension ConversationBackgroundSnapshot {
                 sessionMode: sessionMode.rawValue
             )
         }
+        // A turn has its own confirmed outcome. Historical unknown tasks only
+        // prevent deriving a successful aggregate from other task results.
+        let hasUnknownTask = backgroundTasks.contains { $0.status == .exitedUnknown }
         if let completion = turnCompletion {
             let status: ConversationLiveActivitySnapshot.Status?
             switch completion.outcome {
@@ -575,12 +600,10 @@ extension ConversationBackgroundSnapshot {
                 return ConversationLiveActivitySnapshot(
                     sessionID: sessionID,
                     turnID: completion.token.clientTurnId,
-                    title: status == .completed
-                        ? String(localized: "chat_background_completed_title")
-                        : String(localized: "chat_background_failed_title"),
+                    title: String(localized: "chat_agent_main"),
                     subtitle: status == .completed
-                        ? String(localized: "chat_background_completed_text")
-                        : String(localized: "chat_background_failed_text"),
+                        ? String(localized: "chat_run_status_completed")
+                        : String(localized: "chat_run_status_failed"),
                     status: status,
                     updatedAt: .now,
                     workspaceKey: workspaceKey,
@@ -612,6 +635,9 @@ extension ConversationBackgroundSnapshot {
                 sessionMode: sessionMode.rawValue
             )
         }
+        // No unknown-result activity state exists. Keep confirmed failures and
+        // pauses above, but don't let another completed task mask the unknown.
+        if hasUnknownTask { return nil }
         if backgroundTasks.contains(where: { $0.status == .completed }) {
             return ConversationLiveActivitySnapshot(
                 sessionID: sessionID,

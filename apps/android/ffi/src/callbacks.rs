@@ -1141,6 +1141,9 @@ pub trait AndroidEventListener: Send + Sync {
     /// promptly — they must not block the engine turn loop.
     async fn on_event(&self, event: client::protocol::events::ClientEvent);
 
+    /// True only if the native listener admitted the frame into its local queue.
+    async fn on_mod_ui_client_frame(&self, event: client::protocol::events::ClientEvent) -> bool;
+
     /// Deliver one session-owned workflow progress update.
     async fn on_workflow_progress(
         &self,
@@ -1280,6 +1283,10 @@ pub(super) struct AndroidListenerBridge {
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
 impl ClientEventListener for AndroidListenerBridge {
+    async fn on_mod_ui_client_frame(&self, event: client::protocol::events::ClientEvent) -> bool {
+        self.inner.on_mod_ui_client_frame(event).await
+    }
+
     async fn on_event(&self, event: client::protocol::events::ClientEvent) {
         self.inner.on_event(event).await;
     }

@@ -11,6 +11,7 @@ import {
   validateUiControlMetadataJson,
   validateUiClientOperation,
   validateUiClientOperationResponse,
+  validateUiClientOperationResponseJson,
 } from '../src/validation.js';
 import { buildNativeUiControlCommand } from '../src/uiControlCommands.js';
 
@@ -308,6 +309,54 @@ test('Harness VM operations are a separate exact command family with revision-ch
   assert.deepEqual(validateUiClientOperationResponse(unmount, { handled: true, renderRevision: 4 }), {
     handled: true, renderRevision: 4,
   });
+});
+
+test('unavailable runHeld outcome survives serialized event and strict operation validation', () => {
+  const operation = { type: 'runHeld', runtimeId: 'runtime-a', render_revision: 4, handle: 7 } as const;
+  const unavailable = {
+    handled: false, renderRevision: 4, runtimeId: 'runtime-a',
+    outcome: { status: 'unknown', runtime: 'unavailable' },
+    fault: { phase: 'run', reason: 'callback failed after a side effect', source: 'worker' },
+  } as const;
+  // This is the same serialized ClientEvent shape consumed by bridge.ts before
+  // it calls validateUiClientOperationResponseJson on the correlated result.
+  const wire = JSON.stringify({ type: 'ui_control_result', request_id: 'request-a',
+    response_json: JSON.stringify(unavailable) });
+  const event = validateClientEvent(JSON.parse(wire));
+  assert.equal(event.type, 'ui_control_result');
+  if (event.type !== 'ui_control_result' || event.response_json === undefined) throw new Error('missing operation result');
+  assert.deepEqual(validateUiClientOperationResponseJson(operation, event.response_json), unavailable);
+  const notStarted = { ...unavailable, outcome: { status: 'not_started', runtime: 'unavailable' } } as const;
+  const notStartedWire = JSON.stringify({ type: 'ui_control_result', request_id: 'request-b',
+    response_json: JSON.stringify(notStarted) });
+  const notStartedEvent = validateClientEvent(JSON.parse(notStartedWire));
+  if (notStartedEvent.type !== 'ui_control_result' || notStartedEvent.response_json === undefined) {
+    throw new Error('missing not-started operation result');
+  }
+  assert.deepEqual(validateUiClientOperationResponseJson(operation, notStartedEvent.response_json), notStarted);
+  const withoutFault = { handled: false, renderRevision: 4, runtimeId: 'runtime-a',
+    outcome: { status: 'unknown', runtime: 'unavailable' } } as const;
+  assert.deepEqual(validateUiClientOperationResponseJson(operation, JSON.stringify(withoutFault)), withoutFault);
+
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, runtimeId: 'runtime-b' }), /runtime mismatch/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, runtimeId: undefined }), /runtime id/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, renderRevision: 5 }), /revision mismatch/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, handled: true }), /handled flag/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, extra: true }), /unsupported fields/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, outcome: { ...unavailable.outcome, extra: true } }), /unsupported fields/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, outcome: { status: 'success', runtime: 'unavailable' } }), /invalid UI unavailable outcome/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, outcome: { status: 'unknown', runtime: 'available' } }), /invalid UI unavailable outcome/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, outcome: null }), /invalid UI unavailable outcome/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, fault: { ...unavailable.fault, source: 'renderer' } }), /worker fault source/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, fault: { ...unavailable.fault, unexpected: 1 } }), /unsupported fields/);
+  assert.throws(() => validateUiClientOperationResponse(operation, { ...unavailable, fault: undefined }), /invalid UI worker fault/);
+  for (const type of ['pointer', 'key'] as const) {
+    const callback = { type, runtimeId: 'runtime-a', render_revision: 4, event: {} } as const;
+    assert.deepEqual(validateUiClientOperationResponse(callback, unavailable), unavailable);
+    assert.deepEqual(validateUiClientOperationResponse(callback, notStarted), notStarted);
+  }
+  assert.throws(() => validateUiClientOperationResponse({ type: 'render', runtimeId: 'runtime-a', render_revision: 4 }, unavailable), /requires a callback operation/);
+  assert.throws(() => validateUiClientOperationResponseJson(operation, '{'), /JSON/);
 });
 
 test('UI control metadata preserves native render revision and host client lifecycle tokens', () => {

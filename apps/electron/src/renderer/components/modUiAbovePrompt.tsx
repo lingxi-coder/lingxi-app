@@ -237,6 +237,16 @@ function inputValueForElement(tree: UiJsonValue, element: string, plugin: string
   return matches === 1 ? value : undefined;
 }
 
+function clientTreeHasInput(tree: UiJsonValue, plugin: string): boolean {
+  try {
+    const visit = (node: ModUiSurfaceNode | string): boolean => typeof node !== 'string'
+      && (node.type === 'Input' || ('children' in node && (node.children ?? []).some(visit)));
+    return visit(parseModUiClientTree(tree, plugin));
+  } catch {
+    return false;
+  }
+}
+
 function collectInteractiveNodes(tree: UiJsonValue): Array<{ element: string; handle: number }> {
   const result: Array<{ element: string; handle: number }> = [];
   const visit = (value: UiJsonValue): void => {
@@ -301,6 +311,19 @@ function isStaleOperation(value: unknown): value is { handled: false; renderRevi
   return isRecord(value) && value.handled === false
     && typeof value.renderRevision === 'number' && Number.isFinite(value.renderRevision)
     && !('fault' in value);
+}
+
+function isUnavailableOutcome(value: unknown): value is {
+  handled: false;
+  renderRevision: number;
+  runtimeId: string;
+  outcome: { status: 'unknown' | 'not_started'; runtime: 'unavailable' };
+} {
+  return isRecord(value) && value.handled === false
+    && typeof value.renderRevision === 'number' && Number.isFinite(value.renderRevision)
+    && typeof value.runtimeId === 'string' && value.runtimeId.length > 0
+    && isRecord(value.outcome) && (value.outcome.status === 'unknown' || value.outcome.status === 'not_started')
+    && value.outcome.runtime === 'unavailable';
 }
 
 function isWorkerFault(value: unknown): value is {
@@ -820,20 +843,38 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
 
   const queueOperation = useCallback(<T extends UiClientOperation>(operation: T): Promise<UiClientOperationResponseFor<T>> => {
     if (!context) return Promise.reject(new Error('Client surface host is unavailable'));
-    const run = operationTail.current.catch(() => undefined).then(() => context.host.operation(context.site.sessionId, operation));
+    const run = operationTail.current.catch(() => undefined).then(() => {
+      if ('runtimeId' in operation && operation.type !== 'unmount'
+        && (failedRuntimeIdRef.current === operation.runtimeId
+          || (runtimeIdRef.current === operation.runtimeId && failedRuntimeEpochRef.current === runtimeEpochRef.current))) {
+        return { handled: false, renderRevision: operation.render_revision } as UiClientOperationResponseFor<T>;
+      }
+      return context.host.operation(context.site.sessionId, operation);
+    });
     operationTail.current = run.then(() => undefined, () => undefined);
     return run;
   }, [context]);
 
   const queueHeldOperation = useCallback((buildOperation: () => Extract<UiClientOperation, { type: 'runHeld' }> | null) => {
     if (!context) return Promise.reject(new Error('Client surface host is unavailable'));
-    const run = operationTail.current.catch(() => undefined).then(() => {
+    const run = operationTail.current.catch(() => undefined).then(async () => {
       const operation = buildOperation();
-      return operation ? context.host.operation(context.site.sessionId, operation) : null;
+      if (!operation) return null;
+      const result = await context.host.operation(context.site.sessionId, operation);
+      // Fence a confirmed-unavailable runtime before this queue advances to
+      // any already queued render or input, even across a parent revision.
+      if (isUnavailableOutcome(result) && result.runtimeId === operation.runtimeId
+        && result.renderRevision === operation.render_revision && runtimeIdRef.current === operation.runtimeId) {
+        const workerFault = isWorkerFault(result) ? result.fault : null;
+        const reason = workerFault?.reason ?? (result.outcome.status === 'unknown'
+          ? 'Client runtime outcome is unknown' : 'Client runtime is unavailable');
+        showWorkerFault(workerFault?.phase ?? 'run', reason, operation.render_revision, operation.runtimeId);
+      }
+      return result;
     });
     operationTail.current = run.then(() => undefined, () => undefined);
     return run;
-  }, [context]);
+  }, [context, showWorkerFault]);
 
   const reportCurrentFault = useCallback((phase: 'load' | 'render' | 'run', message: string, revision: number) => {
     if (!context || currentRevisionRef.current !== revision || context.site.committedRevision !== revision
@@ -1029,14 +1070,14 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
   }, [descriptor.key, descriptor.module, descriptor.plugin, site?.instanceId, site?.sessionId]);
 
   const onPress = useCallback(async (request: Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>, _handle: number) => {
+    const superseded = request.event.type === 'input' ? nativeInputSuperseded : undefined;
     if (!controlAddressable || !context || !runtimeEpochAvailable
       || failedRuntimeEpochRef.current === runtimeEpochRef.current
       || (fault?.source === 'adapter' && fault.phase === 'run')
-      || !runtimeIdRef.current || !site || site.committedRevision !== site.renderRevision) return;
+      || !runtimeIdRef.current || !site || site.committedRevision !== site.renderRevision) return superseded;
     const runtimeAtStart = runtimeIdRef.current;
     const revision = site.renderRevision;
     const generation = operationGeneration.current;
-    const superseded = request.event.type === 'input' ? nativeInputSuperseded : undefined;
     if (!context.isRevisionCurrent(revision)
       || currentRevisionRef.current !== revision || frameRef.current?.renderRevision !== revision) return superseded;
     const result = await context.host.control(site.sessionId, request).catch(() => null);
@@ -1086,17 +1127,19 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
       if (request.event.type === 'input') return nativeInputSuperseded;
       throw error;
     }
+    if (isUnavailableOutcome(frameResult)) return superseded;
     if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
       || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;
     // Old Hosts can return the same noop after a callback has already run.
     // Never replay it automatically; an Input requires explicit user review.
-    if (frameResult === null || isStaleOperation(frameResult)) return superseded;
+    if (frameResult === null) return superseded;
+    if (isStaleOperation(frameResult)) return superseded;
     if (isWorkerFault(frameResult)) {
       if (frameResult.renderRevision === revision
         && (frameResult.runtimeId === undefined || frameResult.runtimeId === runtimeAtStart)) {
         showWorkerFault(frameResult.fault.phase, frameResult.fault.reason, revision, frameResult.runtimeId ?? runtimeAtStart);
       }
-      return;
+      return superseded;
     }
     if (isFrame(frameResult) && frameResult.runtimeId !== runtimeAtStart) {
       throw new Error('Client module host returned a frame for a different runtime');
@@ -1108,20 +1151,21 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
         // successful runHeld response is in transit. Do not roll that frame
         // back, but do acknowledge the completed callback. This relies on the
         // Host contract that rejected runHeld handles return handled:false,
-        // and that a frame is returned only after acceptance and settlement
-        // of the callback's synchronous posts.
+        // and that a frame is returned only after the accepted callback and
+        // all of its attributed posts have settled, including async handlers.
         if (!latest || latest.renderRevision !== revision || latest.frameSequence < frameResult.frameSequence
-          || failedRuntimeEpochRef.current === runtimeEpochRef.current || failedRuntimeIdRef.current === runtimeAtStart) return;
+          || failedRuntimeEpochRef.current === runtimeEpochRef.current || failedRuntimeIdRef.current === runtimeAtStart) return superseded;
       }
       if (request.event.type !== 'input') return undefined;
-      // The Host returns this frame only after the callback's UI posts have
-      // settled. Its Input value is authoritative even when it transforms or
+      // The Host returns this frame only after the callback and its UI posts
+      // have settled. Its Input value is authoritative even when it transforms or
       // clears the value that Native reached. An omitted value means the
       // Input is uncontrolled and the local draft should be preserved.
       const acknowledgedValue = inputValueForElement(frameResult.tree, request.element, descriptor.plugin);
       return createNativeInputAck(acknowledgedValue, () => {
         if (runtimeIdRef.current !== runtimeAtStart || operationGeneration.current !== generation
-          || currentRevisionRef.current !== revision || !context.isRevisionCurrent(revision)) return nativeInputSuperseded;
+          || currentRevisionRef.current !== revision || !context.isRevisionCurrent(revision)
+          || failedRuntimeEpochRef.current === runtimeEpochRef.current || failedRuntimeIdRef.current === runtimeAtStart) return nativeInputSuperseded;
         const latest = frameRef.current;
         if (latest?.renderRevision === revision && latest.frameSequence > frameResult.frameSequence) {
           return inputValueForElement(latest.tree, request.element, descriptor.plugin);
@@ -1145,23 +1189,30 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
   }
   const frameCurrent = frame?.renderRevision === site?.renderRevision
     && site?.committedRevision === site?.renderRevision;
+  // A worker fault can arrive while a Client Input has an unconfirmed local edit.
+  // Keep the existing tree mounted so the draft remains copyable, while the
+  // failed runtime and all of its controls remain fenced.
+  const preserveFailedInput = visibleFault?.source === 'worker'
+    && frame !== null && clientTreeHasInput(frame.tree, descriptor.plugin);
+  if (preserveFailedInput) style.overflow = 'auto';
   return <div ref={elementRef} className="mod-ui-client-instance" data-client={descriptor.key} data-plugin={descriptor.plugin} data-module={descriptor.module} style={style}>
-    {visibleFault || missingRuntimeEpoch ? <div className="mod-ui-client-fallback" role="status">{tr("desktop_ui_mod_unavailable")}</div>
-      : frame ? <ModUiClientTree
+    {visibleFault || missingRuntimeEpoch ? <div className="mod-ui-client-fallback" role="status">{tr("desktop_ui_mod_unavailable")}</div> : null}
+    {frame && ((!visibleFault && !missingRuntimeEpoch) || preserveFailedInput) ? <ModUiClientTree
         tree={frame.tree}
         inputFrameVersion={`${runtimeId}:${frame.renderRevision}:${frame.frameSequence}`}
-        frameCurrent={frameCurrent}
+        frameCurrent={frameCurrent && !visibleFault}
         dispatchEpoch={JSON.stringify([site?.sessionId, site?.instanceId, runtimeId, site?.renderRevision])}
         site={{ component: site?.component ?? 'AbovePrompt', instanceId: site?.instanceId ?? '' }}
         client={descriptor}
         onPress={onPress}
-        interactionsEnabled={controlAddressable}
+        interactionsEnabled={controlAddressable && !visibleFault}
+        preserveInputOnFault={Boolean(preserveFailedInput)}
         onRunFault={(request, reason) => {
           const revision = site?.instanceId === request.instance_id ? site.renderRevision : -1;
           reportCurrentFault('run', reason, revision);
         }}
         onRenderFault={(reason) => reportCurrentFault('render', reason, site?.renderRevision ?? -1)}
       />
-        : <div className="mod-ui-client-loading" role="status" aria-label={tr("desktop_ui_mod_loading")} />}
+        : !visibleFault && !missingRuntimeEpoch ? <div className="mod-ui-client-loading" role="status" aria-label={tr("desktop_ui_mod_loading")} /> : null}
   </div>;
 }

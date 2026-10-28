@@ -622,10 +622,20 @@ export interface UiClientWorkerFaultResponseDto {
   };
 }
 
+/** The VM is fenced; the current callback either may have run or was refused before it started. */
+export interface UiClientUnavailableOutcomeResponseDto {
+  handled: false;
+  renderRevision: number;
+  runtimeId: string;
+  outcome: { status: 'unknown' | 'not_started'; runtime: 'unavailable' };
+  fault?: UiClientWorkerFaultResponseDto['fault'];
+}
+
 export type UiClientFrameOperationResponseDto =
   | UiClientFrameDto
   | UiClientOperationNoopResponseDto
-  | UiClientWorkerFaultResponseDto;
+  | UiClientWorkerFaultResponseDto
+  | UiClientUnavailableOutcomeResponseDto;
 
 export type UiClientOperationResponse = UiClientFrameOperationResponseDto | UiClientHandledOperationResponseDto;
 

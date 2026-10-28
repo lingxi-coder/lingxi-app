@@ -48,6 +48,8 @@ import type {
   UiClientFrameOperationResponseDto,
   UiClientHandledOperationResponseDto,
   UiClientOperationNoopResponseDto,
+  UiClientUnavailableOutcomeResponseDto,
+  UiClientWorkerFaultResponseDto,
   UiClientWorkerFaultSnapshotDto,
   UiJsonValue,
   ServerHello,
@@ -984,6 +986,17 @@ export function validateUiControlMetadataJson(value: unknown): UiControlMetadata
   };
 }
 
+function validateUiWorkerFault(value: unknown): UiClientWorkerFaultResponseDto['fault'] {
+  const fault = object(value, 'UI worker fault');
+  exactKeys(fault, ['phase', 'reason', 'source'], 'UI worker fault');
+  const phase = fault['phase'];
+  if (phase !== 'load' && phase !== 'render' && phase !== 'run') {
+    throw new Error('invalid UI worker fault phase');
+  }
+  if (fault['source'] !== 'worker') throw new Error('invalid UI worker fault source');
+  return { phase, reason: uiString(fault['reason'], 'UI worker fault reason', 200), source: 'worker' };
+}
+
 export function validateUiClientOperationResponse<T extends UiClientOperation>(
   operation: T,
   value: unknown,
@@ -993,25 +1006,36 @@ export function validateUiClientOperationResponse<T extends UiClientOperation>(
     const input = object(value, 'UI client operation response');
     const renderRevision = positiveInteger(input['renderRevision'], 'UI render revision');
     if (renderRevision !== operation.render_revision) throw new Error('UI operation response revision mismatch');
+    if (Object.hasOwn(input, 'outcome')) {
+      exactKeys(input, ['handled', 'renderRevision', 'runtimeId', 'outcome', 'fault'], 'UI unavailable outcome response');
+      if (operation.type !== 'runHeld' && operation.type !== 'pointer' && operation.type !== 'key') {
+        throw new Error('UI unavailable outcome requires a callback operation');
+      }
+      if (input['handled'] !== false) throw new Error('invalid UI unavailable outcome handled flag');
+      const runtimeId = uiString(input['runtimeId'], 'UI runtime id');
+      if (runtimeId !== operation.runtimeId) throw new Error('UI unavailable outcome runtime mismatch');
+      const outcome = object(input['outcome'], 'UI unavailable outcome');
+      exactKeys(outcome, ['status', 'runtime'], 'UI unavailable outcome');
+      const status = outcome['status'];
+      if ((status !== 'unknown' && status !== 'not_started') || outcome['runtime'] !== 'unavailable') {
+        throw new Error('invalid UI unavailable outcome');
+      }
+      return ({
+        handled: false,
+        renderRevision,
+        runtimeId,
+        outcome: { status, runtime: 'unavailable' },
+        ...(Object.hasOwn(input, 'fault') ? { fault: validateUiWorkerFault(input['fault']) } : {}),
+      } satisfies UiClientUnavailableOutcomeResponseDto) as UiClientOperationResponseFor<T>;
+    }
     if (Object.hasOwn(input, 'fault')) {
       exactKeys(input, ['handled', 'renderRevision', 'runtimeId', 'fault'], 'UI worker fault response');
       if (input['handled'] !== false) throw new Error('invalid UI worker fault handled flag');
-      const fault = object(input['fault'], 'UI worker fault');
-      exactKeys(fault, ['phase', 'reason', 'source'], 'UI worker fault');
-      const phase = fault['phase'];
-      if (phase !== 'load' && phase !== 'render' && phase !== 'run') {
-        throw new Error('invalid UI worker fault phase');
-      }
-      if (fault['source'] !== 'worker') throw new Error('invalid UI worker fault source');
       return ({
         handled: false,
         renderRevision,
         ...(input['runtimeId'] === undefined ? {} : { runtimeId: uiString(input['runtimeId'], 'UI runtime id') }),
-        fault: {
-          phase,
-          reason: uiString(fault['reason'], 'UI worker fault reason', 200),
-          source: 'worker',
-        },
+        fault: validateUiWorkerFault(input['fault']),
       } satisfies UiClientFrameOperationResponseDto) as UiClientOperationResponseFor<T>;
     }
     if (Object.hasOwn(input, 'handled')) {

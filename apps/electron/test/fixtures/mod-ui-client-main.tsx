@@ -88,12 +88,17 @@ interface FixtureApi {
   restoreRapidInput(value: string): void;
   oldHostNoopAfterNextSubmit(): void;
   failAfterNextSubmit(): void;
+  holdNextAsyncInput(mode: 'early' | 'settled' | 'reject' | 'fault' | 'fault-render' | 'fault-load' | 'fault-outcome' | 'outcome' | 'outcome-no-fault' | 'outcome-other' | 'not-started'): void;
+  releaseAsyncInput(): void;
+  releaseAsyncFaultError(): void;
+  emitRapidRunFault(): void;
   emitRapidExternalValue(value: string | undefined): void;
   rapidInputSnapshot(): unknown;
   raceNextRapidAck(value: string): void;
   captureRapidInput(): void;
   invalidateRapidSite(value: string): void;
   releaseRapidRevisionFrame(): void;
+  cancelRapidRevisionHold(): void;
   enableRapidSibling(): void;
   misrouteNextRapidFrame(): void;
   enableRapidGroups(): void;
@@ -179,6 +184,12 @@ let rapidRejectedHandles = 0;
 let rapidInputPresent = true;
 let oldHostNoopAfterNextSubmit = false;
 let failAfterNextSubmit = false;
+let nextAsyncInputMode: 'early' | 'settled' | 'reject' | 'fault' | 'fault-render' | 'fault-load' | 'fault-outcome' | 'outcome' | 'outcome-no-fault' | 'outcome-other' | 'not-started' | null = null;
+let asyncInputRelease: (() => void) | null = null;
+let asyncFaultErrorRelease: (() => void) | null = null;
+let asyncInputReturned = false;
+let asyncInputCompleted = false;
+let asyncInputEffects = 0;
 let rapidRevision = 200;
 let holdRapidRevisionFrame = false;
 let rapidRevisionFrameRelease: (() => void) | null = null;
@@ -329,11 +340,12 @@ function emitSnapshotFrame(
   for (const listener of frameListeners) listener({ sessionId, runtimeId, frame: { ...frame, ...identity } });
 }
 
-function emitWorkerFaultFrame(sessionId: string, runtimeId: string, renderRevision: number, reason: string): void {
+function emitWorkerFaultFrame(sessionId: string, runtimeId: string, renderRevision: number, reason: string,
+  phase: 'load' | 'render' | 'run' = 'run'): void {
   for (const listener of frameListeners) listener({
     sessionId,
     runtimeId,
-    frame: { renderRevision, fault: { phase: 'run', reason, source: 'worker' } },
+    frame: { renderRevision, fault: { phase, reason, source: 'worker' } },
   });
 }
 
@@ -521,6 +533,64 @@ const host: ModUiClientHostApi = {
       if (kind === 'input') {
         const event = request.event as { kind?: string; value?: unknown } | undefined;
         const value = typeof event?.value === 'string' ? event.value : '';
+        if ((event?.kind === 'change' || event?.kind === 'submit') && nextAsyncInputMode) {
+          const mode = nextAsyncInputMode;
+          nextAsyncInputMode = null;
+          if (mode === 'not-started') {
+            // Host has already fenced the VM: no callback or side effect runs.
+            await new Promise<void>(resolve => { asyncInputRelease = resolve; });
+            asyncInputReturned = true;
+            return { handled:false, renderRevision:request.render_revision, runtimeId:request.runtimeId,
+              outcome:{status:'not_started',runtime:'unavailable'} } as UiClientOperationResponseFor<T>;
+          }
+          rapidInputCallbacks.push({ kind: event.kind, value });
+          if (event.kind === 'submit') {
+            rapidOnSubmitCallbacks.push(value);
+            rapidInputSubmitCount += 1;
+          } else {
+            rapidOnInputCallbacks.push(value);
+          }
+          // Reproduce the worker's observable contract: the callback reaches
+          // its first await before emitting a post. The real old worker returns
+          // accepted with no post IDs, allowing Host to render the old value.
+          const continuation = new Promise<void>(resolve => { asyncInputRelease = resolve; }).then(async () => {
+            rapidInputValue = value;
+            asyncInputEffects += 1;
+            if (mode === 'reject' || mode === 'fault' || mode === 'fault-render' || mode === 'fault-load' || mode === 'fault-outcome') {
+              asyncInputCompleted = true;
+              if (mode === 'fault' || mode === 'fault-render' || mode === 'fault-load' || mode === 'fault-outcome') {
+                const phase = mode === 'fault-render' ? 'render' : mode === 'fault-load' ? 'load' : 'run';
+                emitWorkerFaultFrame(session, request.runtimeId, request.render_revision, 'fixture async callback rejected after side effect', phase);
+                await new Promise<void>(resolve => { asyncFaultErrorRelease = resolve; });
+              }
+              if (mode === 'fault-outcome') return;
+              throw new Error('fixture async callback rejected after its side effect');
+            }
+            if (mode === 'outcome' || mode === 'outcome-no-fault' || mode === 'outcome-other') {
+              asyncInputCompleted = true;
+              return;
+            }
+            rapidPostOrdinal += 1;
+            emitRapidBackgroundFrame(value, request.render_revision);
+            asyncInputCompleted = true;
+          });
+          if (mode !== 'early') await continuation;
+          if (mode === 'outcome' || mode === 'outcome-no-fault' || mode === 'fault-outcome' || mode === 'outcome-other') {
+            asyncInputReturned = true;
+            return {
+              handled: false,
+              renderRevision: request.render_revision,
+              runtimeId: mode === 'outcome-other' ? 'different-runtime' : request.runtimeId,
+              outcome: { status: 'unknown', runtime: 'unavailable' },
+              ...(mode !== 'outcome-no-fault' ? { fault: { phase: 'run', reason: 'fixture async callback rejected after side effect', source: 'worker' } } : {}),
+            } as UiClientOperationResponseFor<T>;
+          }
+          const frame = makeRuntimeFrame(request.runtimeId, request.render_revision, rapidSurfaceTree());
+          call.returnedRevision = frame.renderRevision;
+          call.returnedFrameSequence = frame.frameSequence;
+          asyncInputReturned = true;
+          return frame as UiClientOperationResponseFor<T>;
+        }
         rapidInputCallbacks.push({ kind: typeof event?.kind === 'string' ? event.kind : 'unknown', value });
         if (event?.kind === 'submit') {
           rapidOnSubmitCallbacks.push(value);
@@ -703,6 +773,7 @@ window.__modUiClientFixture = {
     });
   },
   releaseRapidRevisionFrame() { rapidRevisionFrameRelease?.(); rapidRevisionFrameRelease = null; },
+  cancelRapidRevisionHold() { holdRapidRevisionFrame = false; rapidRevisionFrameRelease?.(); rapidRevisionFrameRelease = null; },
   enableRapidSibling() {
     rapidSiblingEnabled = true;
     rapidRevision += 1;
@@ -738,6 +809,15 @@ window.__modUiClientFixture = {
   restoreRapidInput(value) { rapidInputPresent = true; emitRapidBackgroundFrame(value); },
   oldHostNoopAfterNextSubmit() { oldHostNoopAfterNextSubmit = true; },
   failAfterNextSubmit() { failAfterNextSubmit = true; },
+  holdNextAsyncInput(mode) {
+    nextAsyncInputMode = mode;
+    rapidInputValue = rapidPropValue ?? '';
+    asyncInputReturned = false;
+    asyncInputCompleted = false;
+  },
+  releaseAsyncInput() { asyncInputRelease?.(); asyncInputRelease = null; },
+  releaseAsyncFaultError() { asyncFaultErrorRelease?.(); asyncFaultErrorRelease = null; },
+  emitRapidRunFault() { emitWorkerFaultFrame(rapidSessionId, 'runtime-rapid-input', rapidRevision, 'fixture async callback rejected after side effect'); },
   emitRapidExternalValue(value) {
     rapidPropValue = value;
     emitRapidBackgroundFrame(value);
@@ -760,6 +840,14 @@ window.__modUiClientFixture = {
       rapidRunRejectionHeld: rapidRunRejectionRelease !== null,
       rapidRunResponseHeld: rapidRunResponseRelease !== null,
       rapidResizeHeld: rapidResizeRelease !== null,
+      asyncInputHeld: asyncInputRelease !== null,
+      asyncFaultErrorHeld: asyncFaultErrorRelease !== null,
+      asyncInputReturned,
+      asyncInputCompleted,
+      asyncInputEffects,
+      retryDisabled: input?.closest('form')?.querySelector<HTMLButtonElement>('.mod-ui-client-input-retry')?.disabled ?? null,
+      inputDisabled: input?.disabled ?? null,
+      fallbackVisible: Boolean(document.querySelector('[data-client="rapid-input"] .mod-ui-client-fallback')),
       rapidRejectedHandles,
       rapidRunRejections,
       rapidSiteInstanceId,
@@ -783,6 +871,9 @@ window.__modUiClientFixture = {
       runHeld: calls.filter((call) => call.kind === 'operation' && call.sessionId === rapidSessionId
         && call.request.type === 'runHeld').map((call) => call.kind === 'operation' && call.request.type === 'runHeld'
           ? { handle: call.request.handle, event: call.request.event, revision: call.request.render_revision } : null),
+      frameOperations: calls.filter((call) => call.kind === 'operation' && call.sessionId === rapidSessionId
+        && 'runtimeId' in call.request && call.request.runtimeId === 'runtime-rapid-input'
+        && (call.request.type === 'render' || call.request.type === 'resize' || call.request.type === 'setProps')).length,
     };
   },
   contextMentionHref() { return fixtureContextMentionHref; },

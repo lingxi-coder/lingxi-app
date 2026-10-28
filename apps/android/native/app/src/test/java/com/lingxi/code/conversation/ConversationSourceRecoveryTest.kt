@@ -940,6 +940,22 @@ class ConversationSourceRecoveryTest {
     }
 
     @Test
+    fun uiFrameAdmissionIsFifoAndRejectsRetiredIngress() {
+        val source = DurableRecoveryIngress().newSource()
+        val effects = mutableListOf<String>()
+        val event = ClientEvent.UiClientFrame(runtimeId = "r", frameJson = "{}")
+        assertTrue(source.dispatch(event) {
+            effects += "outer"
+            assertTrue(source.dispatch(event) { effects += "frame" })
+            assertEquals(listOf("outer"), effects) // Reentrant receipt only proves queue admission.
+        })
+        assertEquals(listOf("outer", "frame"), effects)
+        source.retire()
+        assertFalse(source.dispatch(event) { effects += "late" })
+        assertEquals(listOf("outer", "frame"), effects)
+    }
+
+    @Test
     fun reentrantSourceRetirementStopsLaterCheckpointAndRelayEffects() {
         val source = DurableRecoveryIngress().newSource()
         source.acquireInterest("session-a", 88uL)

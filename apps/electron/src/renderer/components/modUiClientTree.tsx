@@ -168,6 +168,8 @@ export interface ModUiClientTreeProps {
   onRenderFault?(reason: string): void;
   /** Parent Client identities over Native ui_client_press's address bounds are rendered read-only. */
   interactionsEnabled?: boolean;
+  /** Preserve selectable Input drafts when a worker run fault fences this surface. */
+  preserveInputOnFault?: boolean;
 }
 
 const useClientLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
@@ -526,9 +528,9 @@ class ClientSurfaceErrorBoundary extends Component<{
 }
 
 /** React renderer for the bounded JSON tree returned by the Harness Node VM. It never imports or evaluates Mod source. */
-export const ModUiClientTree = memo(function ModUiClientTree({ tree, inputFrameVersion, frameCurrent = true, dispatchEpoch, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true }: ModUiClientTreeProps) {
+export const ModUiClientTree = memo(function ModUiClientTree({ tree, inputFrameVersion, frameCurrent = true, dispatchEpoch, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true, preserveInputOnFault = false }: ModUiClientTreeProps) {
   useI18n();
-  const body = React.createElement(ModUiClientTreeBody, { tree, inputFrameVersion, frameCurrent, dispatchEpoch, site, client, onPress, onRunFault, interactionsEnabled });
+  const body = React.createElement(ModUiClientTreeBody, { tree, inputFrameVersion, frameCurrent, dispatchEpoch, site, client, onPress, onRunFault, interactionsEnabled, preserveInputOnFault });
   return React.createElement(ClientSurfaceErrorBoundary, {
     key: modUiClientSurfaceIdentityKey(site, client),
     onFault: onRenderFault,
@@ -536,7 +538,7 @@ export const ModUiClientTree = memo(function ModUiClientTree({ tree, inputFrameV
   });
 });
 
-const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, inputFrameVersion, frameCurrent = true, dispatchEpoch, site, client, onPress, onRunFault, interactionsEnabled = true }: Omit<ModUiClientTreeProps, 'onRenderFault'>) {
+const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, inputFrameVersion, frameCurrent = true, dispatchEpoch, site, client, onPress, onRunFault, interactionsEnabled = true, preserveInputOnFault = false }: Omit<ModUiClientTreeProps, 'onRenderFault'>) {
   const parsed = parseModUiClientTree(tree, client.plugin);
   const lifecycle = useRef(0);
   const onPressRef = useRef(onPress);
@@ -575,23 +577,24 @@ const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, inputFrame
   }, [site.component, site.instanceId, client.plugin, client.key, client.module, interactionsEnabled, frameCurrent, dispatchEpoch]);
 
   return <div className="mod-ui-client-surface" data-mod-client={client.key} data-mod-plugin={client.plugin} data-mod-module={client.module}>
-    {typeof parsed === 'string' ? parsed : <SurfaceNode node={parsed} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />}
+    {typeof parsed === 'string' ? parsed : <SurfaceNode node={parsed} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} interactionsEnabled={interactionsEnabled} preserveInputOnFault={preserveInputOnFault} />}
   </div>;
 });
 
-const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, frameCurrent, dispatchEpoch, dispatch, interactionsEnabled }: {
+const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, frameCurrent, dispatchEpoch, dispatch, interactionsEnabled, preserveInputOnFault }: {
   node: ModUiSurfaceNode;
   inputFrameVersion?: string | number;
   frameCurrent: boolean;
   dispatchEpoch?: string | number;
   dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown>;
   interactionsEnabled: boolean;
+  preserveInputOnFault: boolean;
 }): ReactElement {
   const t = useT();
   useI18n();
   const children = node.children?.map((child, index) => typeof child === 'string'
     ? child
-    : <SurfaceNode key={childKey(child, index)} node={child} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />);
+    : <SurfaceNode key={childKey(child, index)} node={child} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} interactionsEnabled={interactionsEnabled} preserveInputOnFault={preserveInputOnFault} />);
   const style = node.type === 'Box' ? modUiBoxStyle(node.props)
     : node.type === 'Text' ? modUiTextStyle(node.props) : undefined;
 
@@ -615,7 +618,7 @@ const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, frameCu
       return <button type="button" className="mod-ui-client-button" style={buttonStyle} autoFocus={autoFocus} disabled={!interactionsEnabled || !frameCurrent} aria-keyshortcuts={hotkey} aria-label={label} data-action={action} data-role={role} onClick={() => dispatch(node.press, key, { type: 'press' })}>{children?.length ? children : label}</button>;
     }
     case 'Input':
-      return <SurfaceInput node={node} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} disabled={!interactionsEnabled} />;
+      return <SurfaceInput node={node} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} disabled={!interactionsEnabled} preserveInputOnFault={preserveInputOnFault} />;
     case 'Select':
       return <SurfaceSelect node={node} dispatch={dispatch} disabled={!interactionsEnabled || !frameCurrent} />;
     case 'Link': {
@@ -637,13 +640,14 @@ const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, frameCu
   }
 });
 
-const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, frameCurrent, dispatchEpoch, dispatch, disabled }: {
+const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, frameCurrent, dispatchEpoch, dispatch, disabled, preserveInputOnFault }: {
   node: Extract<ModUiSurfaceNode, { type: 'Input' }>;
   inputFrameVersion?: string | number;
   frameCurrent: boolean;
   dispatchEpoch?: string | number;
   dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown>;
   disabled: boolean;
+  preserveInputOnFault: boolean;
 }) {
   const t = useT();
   useI18n();
@@ -775,7 +779,7 @@ const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, frame
   return <form className="mod-ui-client-input-row" onSubmit={submit} style={{ display: 'flex', gap: 8, minWidth: 0 }}>
     <label className="mod-ui-client-input-label" style={{ display: 'grid', flex: 1, minWidth: 0, gap: 4, color: t.text2 }}>
       {label && <span>{label}</span>}
-      <input ref={inputElementRef} className="mod-ui-client-input" type="text" value={draft} placeholder={placeholder} autoFocus={autoFocus} disabled={disabled} readOnly={!frameCurrent || retryPending} maxLength={MAX_INPUT_VALUE} onChange={onChange} onKeyDown={submitOnEnter} style={{ minWidth: 0, border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 9px', background: t.windowBg, color: t.text, font: 'inherit' }} />
+      <input ref={inputElementRef} className="mod-ui-client-input" type="text" value={draft} placeholder={placeholder} autoFocus={autoFocus} disabled={disabled && !preserveInputOnFault} readOnly={preserveInputOnFault || !frameCurrent || retryPending} aria-describedby={unconfirmedDraft ? noticeId : undefined} maxLength={MAX_INPUT_VALUE} onChange={onChange} onKeyDown={submitOnEnter} style={{ minWidth: 0, border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 9px', background: t.windowBg, color: t.text, font: 'inherit' }} />
       {unconfirmedDraft && <span id={noticeId} role="status">
         {tr(unconfirmedDraft === 'change' ? 'desktop_ui_mod_input_unconfirmed_change' : 'desktop_ui_mod_input_unconfirmed_submit')}
         {unconfirmedDraft === 'submit' && unconfirmedSubmitValue !== null && <>

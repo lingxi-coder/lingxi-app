@@ -32,6 +32,9 @@ internal class SideChatSource(private val handle: MobileEngineHandle) : Conversa
             override suspend fun onEvent(event: ClientEvent) {
                 receiveEvent(event)
             }
+            override suspend fun onModUiClientFrame(event: ClientEvent): Boolean =
+                synchronized(this@SideChatSource) { !ended && relay.offer(event) }
+
             override suspend fun onWorkflowProgress(originSessionId: String, taskId: String, runId: String, progress: WorkflowProgressDto) = Unit
         }, object : AndroidPermissionSink {
             override suspend fun onRequest(request: PermissionRequest) {

@@ -1169,3 +1169,193 @@ async fn mod_ui_client_module_forwards_driver_success_and_missing_plugin_error_w
     drop(socket);
     endpoint.shutdown().await;
 }
+
+// Use the real Harness ModHost and Worker, but a narrow test driver to connect
+// them to the real BridgeConnection socket and local frame-admission sink.
+struct ModUiLiveSession {
+    root: std::path::PathBuf,
+    sink: Arc<dyn ClientEventSink>,
+    model_calls: std::sync::atomic::AtomicUsize,
+    model_gate: std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+}
+
+#[async_trait]
+impl hooks::mods::ModSessionContext for ModUiLiveSession {
+    fn cwd(&self) -> std::path::PathBuf { self.root.clone() }
+    fn root(&self) -> std::path::PathBuf { self.root.clone() }
+    async fn id(&self) -> String { "real-mod-bridge-session".into() }
+    async fn turns(&self) -> u64 { 0 }
+    async fn model(&self) -> String {
+        self.model_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let gate = self.model_gate.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
+        "observable model call".into()
+    }
+    async fn emit_mod_ui_client_frame(
+        &self, runtime_id: &str, frame: &Utf16JsonProjection,
+    ) -> Result<(), hooks::mods::ModError> {
+        let frame_json = frame.to_json_string()
+            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+        self.sink.admit_mod_ui_client_frame(ClientEvent::UiClientFrame {
+            runtime_id: runtime_id.into(), frame_json,
+        }).await.map_err(hooks::mods::ModError::Unavailable)
+    }
+}
+
+struct ModUiLiveDriver {
+    host: Arc<hooks::mods::ModHost>,
+    session: Arc<dyn hooks::mods::ModSessionContext>,
+}
+
+#[async_trait]
+impl TurnDriver for ModUiLiveDriver {
+    async fn run_turn(&self, _prompt: Utf16JsonProjection) {}
+    async fn mod_ui_control(&self, request: Utf16JsonProjection)
+        -> Result<lingxi_core::host::orchestrator::ModUiControlOutcome, lingxi_core::host::HandleError>
+    {
+        self.host.dispatch_client_ui_control(request, self.session.as_ref()).await
+            .map_err(|error| lingxi_core::host::HandleError::ActionFailed(error.to_string()))
+    }
+    async fn mod_ui_client_operation(&self, request: Utf16JsonProjection)
+        -> Result<Utf16JsonProjection, lingxi_core::host::HandleError>
+    {
+        self.host.dispatch_client_ui_operation(request, self.session.as_ref()).await
+            .map_err(|error| lingxi_core::host::HandleError::ActionFailed(error.to_string()))
+    }
+}
+
+#[tokio::test]
+async fn real_mod_worker_async_input_results_cross_bridge_socket_without_false_confirmation() {
+    let directory = tempfile::tempdir().unwrap();
+    let child = directory.path().join("card.tsx");
+    let entry = directory.path().join("register.tsx");
+    std::fs::write(&child, r#"
+      import { Input, h } from 'claude:surface-runtime';
+      let latest='';
+      export function Card(props, surface) {
+        latest=props.value;
+        return h(Input, {key:'query', value:latest, onSubmit(){}, onInput:async value=>{
+          await new Promise(resolve=>{const stop=surface.every(20,()=>{stop();resolve();});});
+          surface.post({value});
+          await new Promise(resolve=>{const stop=surface.every(2,()=>{if(latest===value){stop();resolve();}});});
+          if(value==='fail') throw new Error('rejected after the real post');
+        }});
+      }
+    "#).unwrap();
+    std::fs::write(&entry, r#"
+      export function register(on) {
+        on('ui.render',{surface:'desktop',component:'AbovePrompt'},($,event)=>{
+          const {Client,h}=$.ui.resolve(event);return h(Client,{key:'card',module:'./card.tsx',props:{value:''}});
+        });
+        on('ui.message',async ($,event)=>{
+          await $.session.model();return {handled:true,props:{value:event.data.value}};
+        });
+      }
+    "#).unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    let unbound = BridgeConnection::new();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let session_impl = Arc::new(ModUiLiveSession {
+        root:directory.path().to_path_buf(), sink:unbound.event_sink(),
+        model_calls:std::sync::atomic::AtomicUsize::new(0),
+        model_gate:std::sync::Mutex::new(Some((entered.clone(),release.clone()))),
+    });
+    let session: Arc<dyn hooks::mods::ModSessionContext> = session_impl.clone();
+    host.attach_background_context(Arc::downgrade(&session));
+    let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
+    host.load_with_tier_order_storage_prepared("review", "review@user", directory.path(), &entry,
+        Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared)).await.unwrap();
+    let gate = Arc::new(AdapterPermissionGate::new(unbound.permission_sink()));
+    let connection = Arc::new(unbound.bind(gate, Arc::new(ModUiLiveDriver {host, session})));
+    let endpoint = bridge::McpEndpoint::start_on_ephemeral_port_with_pump(connection.clone()).await.unwrap();
+    endpoint.set_auth_token("connection-regression-token".into());
+    let mut socket = connect_authenticated(&endpoint).await;
+    let hello_frame = Frame::Request(BridgeRequest {trace_context:None, id:3, method:"hello".into(),
+        params:serialize_source(&hello()).unwrap()});
+    socket.send(Message::Text(serde_json::to_string(&hello_frame).unwrap())).await.unwrap();
+    assert!(matches!(next_frame(&mut socket).await, Frame::Response(_)));
+    async fn send_live_command(socket: &mut Socket, id: u64, command: ClientCommand) {
+        let frame = Frame::Request(BridgeRequest {trace_context:None, id, method:"command".into(),
+            params:serialize_source(&command).unwrap()});
+        socket.send(Message::Text(serde_json::to_string(&frame).unwrap())).await.unwrap();
+    }
+    send_live_command(&mut socket, 4, ClientCommand::UiRender {
+        request_id:"render-live".into(), request_json:r#"{"subtype":"ui_render","surface":"desktop","component":"AbovePrompt","instance_id":"live","props":{},"viewport":{"columns":80,"rows":24}}"#.into(),
+    }).await;
+    let Frame::Event(ClientEvent::UiControlResult {request_id, metadata_json:Some(metadata), error:None, ..})
+        = next_frame(&mut socket).await else { panic!("missing real render response"); };
+    assert_eq!(request_id,"render-live");
+    let revision = serde_json::from_str::<serde_json::Value>(&metadata).unwrap()["renderRevision"].as_u64().unwrap();
+    send_live_command(&mut socket, 5, ClientCommand::UiClientOperation {request_id:"mount-live".into(),
+        operation_json:serde_json::json!({"type":"mount","surface":"desktop","component":"AbovePrompt",
+            "instance_id":"live","plugin":"review","client":"card","module":"card.tsx",
+            "render_revision":revision,"columns":80,"rows":24}).to_string(),
+    }).await;
+    let Frame::Event(ClientEvent::UiControlResult {request_id, response_json:Some(frame), error:None, ..})
+        = next_frame(&mut socket).await else { panic!("missing real mount response"); };
+    assert_eq!(request_id,"mount-live");
+    let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+    let runtime_id = frame["runtimeId"].as_str().unwrap().to_owned();
+    let handle = frame["tree"]["press"]["handle"].as_u64().unwrap();
+    send_live_command(&mut socket, 6, ClientCommand::UiClientOperation {request_id:"commit-live".into(),
+        operation_json:serde_json::json!({"type":"draw_commit","surface":"desktop","component":"AbovePrompt",
+            "instance_id":"live","render_revision":revision,
+            "clients":[{"plugin":"review","key":"card","module":"card.tsx"}]}).to_string(),
+    }).await;
+    assert!(matches!(next_frame(&mut socket).await,
+        Frame::Event(ClientEvent::UiControlResult {request_id, error:None, ..}) if request_id=="commit-live"));
+    let request = |id:&str, value:&str, handle:u64| ClientCommand::UiClientOperation {
+        request_id:id.into(), operation_json:serde_json::json!({"type":"runHeld","runtimeId":runtime_id,
+            "render_revision":revision,"handle":handle,"event":{"kind":"change","value":value}}).to_string(),
+    };
+    send_live_command(&mut socket, 7, request("input-live", "typed", handle)).await;
+    tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
+    assert_eq!(session_impl.model_calls.load(std::sync::atomic::Ordering::SeqCst),1);
+    assert!(tokio::time::timeout(Duration::from_millis(60), next_frame(&mut socket)).await.is_err(),
+        "the bridge must not deliver an old frame or operation confirmation while the real post is blocked");
+    release.notify_one();
+    let Frame::Event(ClientEvent::UiClientFrame {runtime_id:frame_runtime, frame_json}) = next_frame(&mut socket).await
+        else { panic!("the actual admitted frame must precede the callback result"); };
+    assert_eq!(frame_runtime,runtime_id);
+    let delivered:serde_json::Value=serde_json::from_str(&frame_json).unwrap();
+    assert_eq!(delivered["tree"]["props"]["value"],"typed");
+    let Frame::Event(ClientEvent::UiControlResult {request_id, response_json:Some(response), error:None, ..})
+        = next_frame(&mut socket).await else { panic!("missing settled input response"); };
+    assert_eq!(request_id,"input-live");
+    let response:serde_json::Value=serde_json::from_str(&response).unwrap();
+    assert_eq!(response["tree"]["props"]["value"],"typed");
+    let next_handle = response["tree"]["press"]["handle"].as_u64().unwrap();
+    send_live_command(&mut socket, 8, request("failed-live", "fail", next_handle)).await;
+    let failed_response = loop {
+        match next_frame(&mut socket).await {
+            Frame::Event(ClientEvent::UiClientFrame {..}) => {}
+            Frame::Event(ClientEvent::UiControlResult {request_id,response_json:Some(response),error:None,..})
+                if request_id=="failed-live" => break serde_json::from_str::<serde_json::Value>(&response).unwrap(),
+            other => panic!("unexpected real Worker bridge event: {other:?}"),
+        }
+    };
+    assert_eq!(session_impl.model_calls.load(std::sync::atomic::Ordering::SeqCst),2);
+    assert_eq!(failed_response["runtimeId"],runtime_id);
+    assert_eq!(failed_response["renderRevision"],revision);
+    assert_eq!(failed_response["outcome"],serde_json::json!({"status":"unknown","runtime":"unavailable"}));
+    send_live_command(&mut socket, 9, request("refused-live", "again", next_handle)).await;
+    let refused = loop {
+        match next_frame(&mut socket).await {
+            Frame::Event(ClientEvent::UiClientFrame {..}) => {}
+            Frame::Event(ClientEvent::UiControlResult {request_id,response_json:Some(response),error:None,..})
+                if request_id=="refused-live" => break serde_json::from_str::<serde_json::Value>(&response).unwrap(),
+            other => panic!("unexpected fenced Worker bridge event: {other:?}"),
+        }
+    };
+    assert_eq!(refused["runtimeId"],runtime_id);
+    assert_eq!(refused["outcome"],serde_json::json!({"status":"not_started","runtime":"unavailable"}));
+    assert_eq!(session_impl.model_calls.load(std::sync::atomic::Ordering::SeqCst),2,
+        "the fenced callback was not invoked");
+    connection.close_connection(None).await;
+    drop(socket);
+    endpoint.shutdown().await;
+}

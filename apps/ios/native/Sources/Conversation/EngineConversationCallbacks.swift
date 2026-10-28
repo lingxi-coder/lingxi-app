@@ -55,6 +55,12 @@ final class EnginePermissionSink: IosPermissionSink {
 /// Swift implementation of the `IosEventListener` UniFFI callback interface.
 /// Rust calls `onEvent(_:)` on the engine's runtime; we hop to the main actor
 /// and forward to the source so all state mutation is main-actor-confined.
+// Non-conversation listeners do not have a UI frame queue. Their fallback is
+// refusal, not a claim that the callback's no-op accepted a frame.
+extension IosEventListener {
+    func onModUiClientFrame(event _: ClientEvent) async -> Bool { false }
+}
+
 final class EngineListener: IosEventListener {
     private weak var source: EngineConversationSource?
     private static let drainBatchSize = 256
@@ -102,6 +108,10 @@ final class EngineListener: IosEventListener {
 
     func onEvent(event: ClientEvent) async {
         enqueue(.event(event))
+    }
+
+    func onModUiClientFrame(event: ClientEvent) async -> Bool {
+        enqueue(.event(event), requireSource: true)
     }
 
     func enqueuePermission(_ request: PermissionRequest) {
@@ -152,7 +162,12 @@ final class EngineListener: IosEventListener {
         enqueue(.event(event))
     }
 
-    private func enqueue(_ item: PendingItem) {
+    @discardableResult
+    private func enqueue(_ item: PendingItem, requireSource: Bool = false) -> Bool {
+        // Keep the weak owner alive through the append; subsequent projection
+        // may still be dropped if it is retired after this admission.
+        let liveSource = source
+        guard !requireSource || liveSource != nil else { return false }
         queueLock.lock()
         queue.append(item)
         let shouldSchedulePump = !pumpScheduled
@@ -161,10 +176,13 @@ final class EngineListener: IosEventListener {
         }
         queueLock.unlock()
 
-        guard shouldSchedulePump else { return }
-        Task { @MainActor [weak self] in
-            self?.drain()
+        if shouldSchedulePump {
+            Task { @MainActor [weak self] in
+                self?.drain()
+            }
         }
+        withExtendedLifetime(liveSource) {}
+        return true
     }
 
     @MainActor

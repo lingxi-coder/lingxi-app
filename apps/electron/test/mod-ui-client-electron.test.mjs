@@ -94,20 +94,60 @@ test('Electron renders Native Client input and Select held events while keeping 
           }
           if (!id.endsWith('/modUiAbovePrompt.tsx')) return null;
           let result = source;
+          if (process.env.LINGXI_TEST_DROP_FAULT_DRAFT === '1') {
+            const guard = `const preserveFailedInput = visibleFault?.source === 'worker'
+    && frame !== null && clientTreeHasInput(frame.tree, descriptor.plugin);`;
+            assert.ok(result.includes(guard), 'negative control must unmount the Input on a worker fault');
+            result = result.replace(guard, 'const preserveFailedInput = false;');
+          }
+          if (process.env.LINGXI_TEST_IGNORE_UNAVAILABLE_OUTCOME === '1') {
+            const guard = 'if (isUnavailableOutcome(result) && result.runtimeId === operation.runtimeId';
+            assert.ok(result.includes(guard), 'negative control must ignore the structured unavailable outcome');
+            result = result.replace(guard, 'if (false && isUnavailableOutcome(result) && result.runtimeId === operation.runtimeId');
+          }
+          if (process.env.LINGXI_TEST_FENCE_WRONG_RUNTIME === '1') {
+            const guard = 'isUnavailableOutcome(result) && result.runtimeId === operation.runtimeId';
+            assert.ok(result.includes(guard), 'negative control must remove the unavailable outcome runtime check');
+            result = result.replace(guard, 'isUnavailableOutcome(result)');
+          }
+          if (process.env.LINGXI_TEST_FENCE_AFTER_QUEUE === '1') {
+            const queuedGuard = 'if (isUnavailableOutcome(result) && result.runtimeId === operation.runtimeId';
+            assert.ok(result.includes(queuedGuard), 'negative control must defer the unavailable fence until after the queue');
+            result = result.replace(queuedGuard, 'if (false && isUnavailableOutcome(result) && result.runtimeId === operation.runtimeId');
+            const responseGuard = `    if (isUnavailableOutcome(frameResult)) return superseded;
+    if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
+      || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;`;
+            assert.ok(result.includes(responseGuard), 'negative control must discard an old-revision outcome');
+            result = result.replace(responseGuard, `    if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
+      || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;
+    if (isUnavailableOutcome(frameResult)) {
+      if (frameResult.runtimeId === runtimeAtStart && frameResult.renderRevision === revision) {
+        showWorkerFault('run', 'Client runtime outcome is unknown', revision, runtimeAtStart);
+      }
+      return superseded;
+    }`);
+          }
+          if (process.env.LINGXI_TEST_ALLOW_QUEUED_AFTER_FENCE === '1') {
+            const queuedGuard = `      if ('runtimeId' in operation && operation.type !== 'unmount'
+        && (failedRuntimeIdRef.current === operation.runtimeId
+          || (runtimeIdRef.current === operation.runtimeId && failedRuntimeEpochRef.current === runtimeEpochRef.current))) {
+        return { handled: false, renderRevision: operation.render_revision } as UiClientOperationResponseFor<T>;
+      }
+`;
+            assert.ok(result.includes(queuedGuard), 'negative control must allow a queued operation after the fence');
+            result = result.replace(queuedGuard, '');
+          }
           if (process.env.LINGXI_TEST_RESOLVE_HANDLE_EARLY === '1') {
-            const queuedHandle = `    const run = operationTail.current.catch(() => undefined).then(() => {
-      const operation = buildOperation();
-      return operation ? context.host.operation(context.site.sessionId, operation) : null;
-    });`;
+            const queuedHandle = `    const run = operationTail.current.catch(() => undefined).then(async () => {
+      const operation = buildOperation();`;
             assert.ok(result.includes(queuedHandle), 'negative control must resolve the held handle before the queue');
             result = result.replace(queuedHandle, `    const operation = buildOperation();
-    const run = operationTail.current.catch(() => undefined).then(() =>
-      operation ? context.host.operation(context.site.sessionId, operation) : null);`);
+    const run = operationTail.current.catch(() => undefined).then(async () => {`);
           }
           if (process.env.LINGXI_TEST_DROP_NOOP_WARNING === '1') {
-            const guard = 'if (frameResult === null || isStaleOperation(frameResult)) return superseded;';
+            const guard = 'if (isStaleOperation(frameResult)) return superseded;';
             assert.ok(result.includes(guard), 'negative control must discard an uncertain noop');
-            result = result.replace(guard, 'if (frameResult === null || isStaleOperation(frameResult)) return;');
+            result = result.replace(guard, 'if (isStaleOperation(frameResult)) return;');
           }
           if (process.env.LINGXI_TEST_THROW_UNKNOWN_INPUT === '1') {
             const guard = "if (request.event.type === 'input') return nativeInputSuperseded;";
@@ -222,8 +262,8 @@ test('Electron renders Native Client input and Select held events while keeping 
         // successful runHeld response is in transit. Do not roll that frame
         // back, but do acknowledge the completed callback. This relies on the
         // Host contract that rejected runHeld handles return handled:false,
-        // and that a frame is returned only after acceptance and settlement
-        // of the callback's synchronous posts.
+        // and that a frame is returned only after the accepted callback and
+        // all of its attributed posts have settled, including async handlers.
         if (!latest || latest.renderRevision !== revision || latest.frameSequence < frameResult.frameSequence
           || failedRuntimeEpochRef.current === runtimeEpochRef.current || failedRuntimeIdRef.current === runtimeAtStart) return;
       }`;
@@ -233,7 +273,8 @@ test('Electron renders Native Client input and Select held events while keeping 
           if (process.env.LINGXI_TEST_DISABLE_ACK_FRESHNESS !== '1') return result === source ? null : result;
           const current = `return createNativeInputAck(acknowledgedValue, () => {
         if (runtimeIdRef.current !== runtimeAtStart || operationGeneration.current !== generation
-          || currentRevisionRef.current !== revision || !context.isRevisionCurrent(revision)) return nativeInputSuperseded;
+          || currentRevisionRef.current !== revision || !context.isRevisionCurrent(revision)
+          || failedRuntimeEpochRef.current === runtimeEpochRef.current || failedRuntimeIdRef.current === runtimeAtStart) return nativeInputSuperseded;
         const latest = frameRef.current;
         if (latest?.renderRevision === revision && latest.frameSequence > frameResult.frameSequence) {
           return inputValueForElement(latest.tree, request.element, descriptor.plugin);

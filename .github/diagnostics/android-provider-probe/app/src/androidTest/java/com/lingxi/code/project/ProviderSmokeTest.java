@@ -68,7 +68,7 @@ public class ProviderSmokeTest {
         if (Build.VERSION.SDK_INT >= 33) target.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
         else target.registerReceiver(receiver, filter);
         String action = revoke ? "-a " + WorkspaceTestDocumentsActivity.ACTION_REVOKE + " " : "";
-        String command = "am start " + action + "--es " + WorkspaceTestDocumentsActivity.EXTRA_FIXTURE_ID + " " + fixture +
+        String command = "am start " + action + "-d lingxi-fixture://request/" + request + " --es " + WorkspaceTestDocumentsActivity.EXTRA_FIXTURE_ID + " " + fixture +
             " --es " + WorkspaceTestDocumentsActivity.EXTRA_REQUEST_ID + " " + request + " -n " +
             test.getPackageName() + "/com.lingxi.code.project.WorkspaceTestDocumentsActivity";
         Throwable primary = null;

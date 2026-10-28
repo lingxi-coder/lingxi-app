@@ -8,13 +8,23 @@ public class WorkspaceTestDocumentsActivity extends android.app.Activity {
     static final String EXTRA_REQUEST_ID = "request_id";
     static final String EXTRA_SUCCESS = "success";
     static final String EXTRA_ERROR = "error";
+    // Lifecycle callbacks run on the main thread; keep the Activity alive while
+    // any previously accepted fixture action is still producing its receipt.
+    private int pendingActions;
     @Override public void onCreate(android.os.Bundle state) {
         super.onCreate(state);
-        String request = getIntent().getStringExtra(EXTRA_REQUEST_ID);
-        String id = getIntent().getStringExtra(EXTRA_FIXTURE_ID);
-        boolean revoke = ACTION_REVOKE.equals(getIntent().getAction());
-        // A slow action on one fixture must not block the Activity main thread
-        // from accepting work for another fixture.
+        dispatchFixtureAction(getIntent());
+    }
+    @Override protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        dispatchFixtureAction(intent);
+    }
+    private void dispatchFixtureAction(android.content.Intent intent) {
+        String request = intent.getStringExtra(EXTRA_REQUEST_ID);
+        String id = intent.getStringExtra(EXTRA_FIXTURE_ID);
+        boolean revoke = ACTION_REVOKE.equals(intent.getAction());
+        android.util.Log.i("LingxiTest", "Fixture intent accepted: " + request);
+        pendingActions++;
         new Thread(() -> runFixtureAction(id, request, revoke), "test-document-fixture").start();
     }
     private void runFixtureAction(String id, String request, boolean revoke) {
@@ -45,7 +55,12 @@ public class WorkspaceTestDocumentsActivity extends android.app.Activity {
                     sendBroadcast(result);
                     android.util.Log.i("LingxiTest", "Fixture receipt sent: " + request);
                 }
-            } finally { runOnUiThread(this::finish); }
+            } finally {
+                runOnUiThread(() -> {
+                    pendingActions--;
+                    if (pendingActions == 0) finish();
+                });
+            }
         }
     }
 }

@@ -227,6 +227,7 @@ test('App page, settings, local app and picker navigation use the latest loading
     useCallback: (fn: unknown) => fn, localAppBridge: { current: { sessionLoading: false } },
     cancelLocalAppNavigation: () => calls.push('cancel-local'), setPage: (page: string) => calls.push(['page', page]),
     setSettingsRoute: (route: unknown) => calls.push(['settings', route]),
+    newExternalSession: () => calls.push('new'), openExternalSession: () => calls.push('open'),
   };
   evaluate('globalThis.sessionNavigationBlocked = ' + initializer(appSource, 'sessionNavigationBlocked'), context);
   for (const callback of ['openPage', 'openSettings', 'openLocalAppChat', 'openPicker']) {
@@ -247,6 +248,7 @@ test('sidebar capture and direct session or project callbacks cannot navigate du
   const calls: unknown[] = [];
   const context: any = { useCallback: (fn: unknown) => fn,
     bridge: { sessionLoading: true, openSession: () => calls.push('open'), newSession: () => calls.push('new') },
+    archiveTarget: null, closeArchiveForNavigation: () => calls.push('close-archive'),
     onOpenChat: () => calls.push('chat'), setOpeningSessionKey: () => calls.push('opening'),
     setExpandedProjects: () => calls.push('expand'), setEditingProject: () => calls.push('editing'),
   };
@@ -393,6 +395,7 @@ test('the ordinary sidebar opens the exact transcript from its displayed Current
   let openedChat = 0, openingKey: string | null = null;
   const context: any = {
     useCallback: (fn: unknown) => fn,
+    archiveTarget: null, closeArchiveForNavigation() {},
     onOpenChat: () => { openedChat++; },
     setOpeningSessionKey: (next: string | null | ((previous: string | null) => string | null)) => {
       openingKey = typeof next === 'function' ? next(openingKey) : next; opening.push(openingKey);
@@ -416,6 +419,7 @@ test('pinned or archived sidebar rows absent from the Current catalog retain the
     const calls: unknown[] = [];
     const context: any = {
       useCallback: (fn: unknown) => fn, onOpenChat: undefined, setOpeningSessionKey() {},
+      archiveTarget: null, closeArchiveForNavigation() {},
       bridge: { bootstrap, openSession: async (...args: unknown[]) => { calls.push(args); return true; } },
     };
     evaluate('globalThis.open = ' + initializer(composerSource, 'openSidebarSession'), context);
@@ -439,6 +443,7 @@ test('a refreshed Current catalog replaces the sidebar callback selection instea
   for (const path of ['/saved/old-A.jsonl', '/saved/fresh-B.jsonl']) {
     // Each render gets its own closure, while React's dependency cache persists.
     const context: any = { useCallback, onOpenChat, setOpeningSessionKey() {},
+      archiveTarget: null, closeArchiveForNavigation() {},
       bridge: { openSession, bootstrap: { projectCatalogs: { '/current': { sessions: [{ uuid: 'same-id', path }] } } } } };
     evaluate('globalThis.open = ' + initializer(composerSource, 'openSidebarSession'), context);
     context.open('/current', 'same-id');

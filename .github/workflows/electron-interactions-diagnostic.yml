@@ -1,7 +1,7 @@
 name: Electron interaction diagnostics
 on:
   push:
-    branches: [codex/media-electron-interactions-v4-9b8e]
+    branches: [codex/media-electron-interactions-v5-9b8e]
 jobs:
   interactions:
     strategy:
@@ -31,7 +31,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tests=(test/mod-ui-client-electron.test.mjs test/mod-ui-client-tree.test.ts test/archive-chat-interaction.test.mjs test/slash-argument-hint-interaction.test.mjs)
+          tests=(test/mod-ui-client-electron.test.mjs test/mod-ui-client-tree.test.ts test/archive-chat-interaction.test.mjs test/archive-chat-app-interaction.test.mjs test/session-workspace-bridge.test.ts test/slash-argument-hint-interaction.test.mjs)
           if [[ "$RUNNER_OS" == Linux ]]; then
             xvfb-run --auto-servernum node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 "${tests[@]}"
           else

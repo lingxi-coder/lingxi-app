@@ -23,6 +23,7 @@ import {
 } from 'react';
 
 import { useBridge } from './bridge/useBridge.js';
+import type { UseBridge } from './bridge/bridgeTypes.js';
 import {
   BetaComposer,
   BetaSidebar,
@@ -83,6 +84,25 @@ export function App() {
   const bridge = useBridge();
   const localAppBridge = useRef(bridge);
   localAppBridge.current = bridge;
+  const externalSessionNavigationRef = useRef<((projectPath?: string, sessionId?: string) => void) | null>(null);
+  const openExternalSession = useCallback<UseBridge['openSession']>((projectPath, sessionId, selection) => {
+    externalSessionNavigationRef.current?.(projectPath, sessionId);
+    return localAppBridge.current.openSession(projectPath, sessionId, selection);
+  }, []);
+  const newExternalSession = useCallback<UseBridge['newSession']>((projectPath) => {
+    externalSessionNavigationRef.current?.();
+    return localAppBridge.current.newSession(projectPath);
+  }, []);
+  const activateExternalProject = useCallback<UseBridge['activateProject']>((projectPath) => {
+    const current = localAppBridge.current;
+    if (projectPath !== (current.activeSession?.projectPath ?? current.bootstrap?.settings.activeProject)) {
+      externalSessionNavigationRef.current?.();
+    }
+    return current.activateProject(projectPath);
+  }, []);
+  const settingsBridge = useMemo(() => ({ ...bridge, openSession: openExternalSession,
+    newSession: newExternalSession, activateProject: activateExternalProject }),
+  [activateExternalProject, bridge, newExternalSession, openExternalSession]);
   const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading || localAppBridge.current.projectCreationOpen, []);
   const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
     if (sessionNavigationBlocked()) return;
@@ -94,9 +114,9 @@ export function App() {
       const target = await localAppChatTarget(app, {
         hasProject: path => Boolean(current.bootstrap?.settings.projects.includes(path)
           || current.bootstrap?.scheduledWorkspace === path),
-        openSession: current.openSession,
+        openSession: openExternalSession,
         addProject: current.addProject,
-        newSession: current.newSession,
+        newSession: newExternalSession,
         bindAuthoring: (appId, session) => {
           const api = window.lingxi?.localApps;
           if (!api) throw new Error('Desktop application host is unavailable');
@@ -116,7 +136,7 @@ export function App() {
     localAppNavigationQueue.current = localAppNavigationQueue.current.then(navigate, navigate).catch(error => {
       if (localAppNavigation.current === nonce) setLocalAppNavigationError(error instanceof Error ? error.message : String(error));
     });
-  }, [sessionNavigationBlocked]);
+  }, [newExternalSession, openExternalSession, sessionNavigationBlocked]);
   const consumeLocalAppDraft = useCallback((nonce: number) => {
     setLocalAppDraft(current => current?.nonce === nonce ? undefined : current);
   }, []);
@@ -284,7 +304,7 @@ export function App() {
           const catalog = await bridge.listProjectSessions(delivery.projectPath);
           const session = catalog?.sessions[0];
           if (!session) throw new Error(tr('desktop_link_open_project_config'));
-          if (!await bridge.openSession(delivery.projectPath, session.uuid)) throw new Error(tr('desktop_link_project_conversation_error'));
+          if (!await openExternalSession(delivery.projectPath, session.uuid)) throw new Error(tr('desktop_link_project_conversation_error'));
         }
         if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
         else if (kind === 'settings') {
@@ -295,8 +315,8 @@ export function App() {
         else if (kind === 'session' || kind === 'project') {
           setMessageTarget(null);
           if (!delivery.projectPath) throw new Error(tr('desktop_link_project_unregistered'));
-          if (kind === 'session' && !await bridge.openSession(delivery.projectPath, id!)) throw new Error(tr('desktop_link_conversation_error'));
-          if (kind === 'project') await bridge.activateProject(delivery.projectPath);
+          if (kind === 'session' && !await openExternalSession(delivery.projectPath, id!)) throw new Error(tr('desktop_link_conversation_error'));
+          if (kind === 'project') await activateExternalProject(delivery.projectPath);
           setPage('chat');
           setActivityView(false);
           if (params.message) {
@@ -308,14 +328,14 @@ export function App() {
         } else if (kind === 'new') {
           const project = delivery.projectPath ?? bridge.bootstrap?.settings.activeProject;
           if (!project) throw new Error(tr('desktop_link_select_project'));
-          const session = await bridge.newSession(project);
+          const session = await newExternalSession(project);
           if (!session) throw new Error(tr('desktop_link_create_error'));
           if (typeof delivery.target.payload?.prompt === 'string') bridge.offerLinkDraft({ sessionId: session.sessionId, text: delivery.target.payload.prompt, requestId: delivery.id });
           setPage('chat');
         } else if (kind === 'terminal') {
           const projectPath = delivery.projectPath ?? bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject;
           if (!projectPath) throw new Error(tr('desktop_link_terminal_project'));
-          if (projectPath !== bridge.activeSession?.projectPath) await bridge.activateProject(projectPath);
+          if (projectPath !== bridge.activeSession?.projectPath) await activateExternalProject(projectPath);
           setPage('chat');
           setActivityView(false);
           const scope = { projectPath, sessionId: params.scope ?? (bridge.activeSession?.projectPath === projectPath ? settledSession?.sessionId ?? '__draft__' : '__draft__') };
@@ -383,6 +403,7 @@ export function App() {
         <SettingsBackground active={bridge.projectCreationOpen || settingsRoute !== null || (sessionPicker !== null && !sessionPickerSuspended)}>
           <BetaSidebar
             bridge={bridge}
+            externalSessionNavigationRef={externalSessionNavigationRef}
             activityView={activityView}
             onToggleActivityView={toggleActivityView}
             apps={page === 'apps'}
@@ -536,7 +557,7 @@ export function App() {
         {settingsRoute && (
           <SettingsBackground active={bridge.projectCreationOpen}>
             <SettingsScreen
-              bridge={bridge}
+              bridge={settingsBridge}
               theme={theme}
               onTheme={changeTheme}
               linkRequest={settingsRoute.linkRequest}
@@ -556,7 +577,7 @@ export function App() {
           onCreate={bridge.confirmProjectCreation} onClose={bridge.cancelProjectCreation} />}
         {sessionPicker && <SessionPicker key={sessionPicker.id} projectPath={sessionPicker.projectPath} initialQuery={sessionPicker.query}
           suspended={sessionPickerSuspended}
-          activeSessionId={bridge.activeSession?.sessionId} listProjectSessions={bridge.listProjectSessions} openSession={bridge.openSession}
+          activeSessionId={bridge.activeSession?.sessionId} listProjectSessions={bridge.listProjectSessions} openSession={openExternalSession}
           onOpened={openedPickerSession} onClose={closeSessionPicker} />}
       </div>
       </GitWorkspaceProvider>

@@ -29,6 +29,7 @@ import {
   type CSSProperties,
   type ClipboardEvent,
   type KeyboardEvent,
+  type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react';
@@ -449,7 +450,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, onOpenChat, children, topbar }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, onOpenChat, externalSessionNavigationRef, children, topbar }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -459,6 +460,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   apps?: boolean;
   onOpenApps?(): void;
   onOpenChat?(): void;
+  externalSessionNavigationRef?: MutableRefObject<((projectPath?: string, sessionId?: string) => void) | null>;
   children?: ReactNode;
   topbar?: ReactNode;
 }) {
@@ -545,11 +547,39 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const [renamingSession, setRenamingSession] = useState(false);
   const [renameError, setRenameError] = useState('');
   const archiveRequest = useRef(0);
+  const archiveOwner = useRef<{ projectPath: string | null; sessionId: string | null } | null>(null);
+  const visibleSessionRef = useRef(visibleSession);
+  visibleSessionRef.current = visibleSession;
   const closeArchive = useCallback(() => {
     archiveRequest.current++;
+    archiveOwner.current = null;
     setArchiveTarget(null);
     setArchiving(false);
   }, []);
+  const closeArchiveForNavigation = useCallback((projectPath?: string, sessionId?: string) => {
+    const owner = archiveOwner.current;
+    if (!owner || (sessionId !== undefined && projectPath === owner.projectPath
+      && sessionId.toLowerCase() === owner.sessionId?.toLowerCase())) return;
+    // The incoming session owns focus. Also invalidate in-flight preflight and
+    // archive results before starting the navigation, not after it commits.
+    archiveFocus.current = null;
+    closeArchive();
+  }, [closeArchive]);
+  useLayoutEffect(() => {
+    if (!externalSessionNavigationRef) return;
+    externalSessionNavigationRef.current = closeArchiveForNavigation;
+    return () => {
+      if (externalSessionNavigationRef.current === closeArchiveForNavigation) externalSessionNavigationRef.current = null;
+    };
+  }, [closeArchiveForNavigation, externalSessionNavigationRef]);
+  useLayoutEffect(() => {
+    const owner = archiveOwner.current;
+    if (!owner || !archiveTarget || (archiving && !bridge.sessionLoading)) return;
+    if (owner.projectPath !== (visibleSession?.projectPath ?? null)
+      || (owner.sessionId?.toLowerCase() ?? null) !== (visibleSession?.sessionId?.toLowerCase() ?? null)) {
+      closeArchiveForNavigation(visibleSession?.projectPath, visibleSession?.sessionId);
+    }
+  }, [archiveTarget, archiving, bridge.sessionLoading, closeArchiveForNavigation, visibleSession?.projectPath, visibleSession?.sessionId]);
   const restoreArchiveFocus = (shouldRestore: boolean) => {
     const focus = archiveFocus.current;
     archiveFocus.current = null;
@@ -564,6 +594,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const prepareArchive = async (projectPath: string, sessionId: string, title: string, restoreTarget?: HTMLButtonElement | null) => {
     if (restoreTarget !== undefined) {
       setArchiving(false);
+      archiveOwner.current = {
+        projectPath: visibleSessionRef.current?.projectPath ?? null,
+        sessionId: visibleSessionRef.current?.sessionId ?? null,
+      };
       const list = restoreTarget?.closest<HTMLElement>('.desktop-sidebar-list') ?? asideRef.current?.querySelector<HTMLElement>('.desktop-sidebar-list') ?? null;
       const rows = list ? [...list.querySelectorAll<HTMLButtonElement>('.sidebar-session-row > button[data-session-id]')] : [];
       const index = restoreTarget ? rows.indexOf(restoreTarget) : -1;
@@ -705,8 +739,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     if (archiveTarget) {
       // A session change owns the new focus; closing the previous session's
       // archive dialog must not restore its old row.
-      archiveFocus.current = null;
-      closeArchive();
+      closeArchiveForNavigation(projectPath, sessionId);
     }
     onOpenChat?.();
     const key = `${projectPath}\0${sessionId}`;
@@ -718,16 +751,17 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     void opening
       .catch(() => undefined)
       .finally(() => setOpeningSessionKey((current) => current === key ? null : current));
-  }, [archiveTarget, bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.sessionLoading, closeArchive, onOpenChat]);
+  }, [archiveTarget, bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.sessionLoading, closeArchiveForNavigation, onOpenChat]);
   const editProject = useCallback((projectPath: string) => {
     if (bridge.sessionLoading) return;
+    closeArchiveForNavigation();
     onOpenChat?.();
     setExpandedProjects((current) => current.has(projectPath) ? current : new Set([...current, projectPath]));
     setEditingProject(projectPath);
     void bridge.newSession(projectPath)
       .catch(() => undefined)
       .finally(() => setEditingProject((current) => current === projectPath ? null : current));
-  }, [bridge.newSession, bridge.sessionLoading, onOpenChat]);
+  }, [bridge.newSession, bridge.sessionLoading, closeArchiveForNavigation, onOpenChat]);
   const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
   const manualSessionOrder = settings?.sidebar?.manualSessionOrder ?? {};
   const sortedSessions = useCallback((projectPath: string, sessions: readonly SessionRowDto[]) => {
@@ -1119,7 +1153,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                         else next.add(projectPath);
                         return next;
                       });
-                      if (!active) invoke(() => bridge.activateProject(projectPath));
+                      if (!active) {
+                        closeArchiveForNavigation();
+                        invoke(() => bridge.activateProject(projectPath));
+                      }
                     }}
                     style={{
                       width: '100%', minHeight: 37, display: 'flex', alignItems: 'center', gap: 9,

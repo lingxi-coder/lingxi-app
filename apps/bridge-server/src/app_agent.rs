@@ -514,6 +514,14 @@ fn validate_agent_input(input: &local_app::v2::agent::Input) -> Result<(), &'sta
 fn valid_id(id: &str) -> bool {
     !id.trim().is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
 }
+fn valid_app_id(id: &str) -> bool {
+    // Match the AppLibrary identifier contract before using it as a path segment.
+    !id.is_empty()
+        && id.len() <= 80
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
 fn validate_start(request: &StartRequest) -> Result<(), &'static str> {
     if request.protocol_version != PROTOCOL_VERSION {
         return Err("protocol_version");
@@ -526,6 +534,7 @@ fn validate_start(request: &StartRequest) -> Result<(), &'static str> {
     ]
     .into_iter()
     .all(|id| valid_id(id))
+        || !valid_app_id(&request.app_id)
     {
         return Err("invalid_identity");
     }
@@ -572,8 +581,11 @@ fn validate_start(request: &StartRequest) -> Result<(), &'static str> {
     {
         return Err("invalid_skills");
     }
-    let expected_source = request
-        .config_home
+    // AppLibrary resolves config-home aliases before returning release paths.
+    // Resolve only this trusted anchor: canonicalizing the expected release
+    // itself would also authorize a symlink into another app or outside home.
+    let expected_source = std::fs::canonicalize(&request.config_home)
+        .map_err(|_| "invalid_skills")?
         .join("local-apps/v2/apps")
         .join(&request.app_id)
         .join("releases")
@@ -593,7 +605,7 @@ fn validate_start(request: &StartRequest) -> Result<(), &'static str> {
     if source_metadata.file_type().is_symlink()
         || !source_metadata.is_dir()
         || std::fs::canonicalize(&request.skill_source_directory).map_err(|_| "invalid_skills")?
-            != std::fs::canonicalize(&expected_source).map_err(|_| "invalid_skills")?
+            != expected_source
     {
         return Err("invalid_skills");
     }
@@ -1460,6 +1472,187 @@ mod tests {
             timeout_ms: None,
         }
     }
+    fn start_request(config_home: &std::path::Path) -> StartRequest {
+        std::fs::create_dir_all(config_home).unwrap();
+        let app_id = format!("a{}", "1".repeat(32));
+        let library = local_app::v2::AppLibrary::open(config_home).unwrap();
+        let source = library.source_path(&app_id, 1).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        StartRequest {
+            kind: StartKind::Start,
+            protocol_version: PROTOCOL_VERSION,
+            run_id: "run-1".into(),
+            app_id,
+            version_id: "a".repeat(64),
+            invocation_id: "window-1".into(),
+            cwd: config_home.join("work"),
+            config_home: config_home.to_path_buf(),
+            global_config_path: None,
+            model: "test/model".into(),
+            provider_profiles: None,
+            routing: None,
+            credentials: Value::Null,
+            tool_policy: SessionToolPolicy::default(),
+            mcp_configs: Vec::new(),
+            input: input(),
+            app_chat: None,
+            skill_source_directory: source,
+            release_revision: 1,
+            skill_specs: Vec::new(),
+            granted_skills: Vec::new(),
+            release_files: Vec::new(),
+            model_capabilities: AgentModelCapabilities {
+                vision: true,
+                structured_output: true,
+            },
+            max_turns: DEFAULT_MAX_TURNS,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+        }
+    }
+
+    #[test]
+    fn start_source_keeps_exact_app_and_revision_ownership() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut request = start_request(temp.path());
+        assert_eq!(validate_start(&request), Ok(()));
+        let source = request.skill_source_directory.clone();
+        let app_id = request.app_id.clone();
+        let home = std::fs::canonicalize(temp.path()).unwrap();
+        let other_app = home.join("local-apps/v2/apps/other_App-2/releases/1/source");
+        let other_revision = source.parent().unwrap().parent().unwrap().join("2/source");
+        std::fs::create_dir_all(&other_app).unwrap();
+        std::fs::create_dir_all(&other_revision).unwrap();
+
+        request.app_id = "other_App-2".into();
+        assert_eq!(validate_start(&request), Err("invalid_skills"));
+        request.app_id = app_id;
+        request.release_revision = 2;
+        assert_eq!(validate_start(&request), Err("invalid_skills"));
+        request.release_revision = 1;
+        for foreign_source in [other_app, other_revision, source.join("../source")] {
+            request.skill_source_directory = foreign_source;
+            assert_eq!(validate_start(&request), Err("invalid_skills"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_source_accepts_a_config_home_parent_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let physical = root.join("physical");
+        std::fs::create_dir(&physical).unwrap();
+        std::os::unix::fs::symlink(&physical, root.join("alias")).unwrap();
+        let request = start_request(&root.join("alias/config"));
+        assert_ne!(
+            request.config_home,
+            std::fs::canonicalize(&request.config_home).unwrap()
+        );
+        assert_eq!(validate_start(&request), Ok(()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn start_source_accepts_the_macos_tmp_parent_alias() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let request = start_request(temp.path());
+        assert!(request.config_home.starts_with("/tmp"));
+        assert!(request.skill_source_directory.starts_with("/private/tmp"));
+        assert_eq!(validate_start(&request), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_source_rejects_a_final_source_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut request = start_request(&temp.path().join("config"));
+        let source = request.skill_source_directory.clone();
+        let redirected = temp.path().join("redirected");
+        std::fs::rename(&source, &redirected).unwrap();
+        std::os::unix::fs::symlink(&redirected, &source).unwrap();
+        assert_eq!(validate_start(&request), Err("invalid_skills"));
+        // A trailing current-directory component can make symlink_metadata
+        // follow the link; the unresolved expected path must still reject it.
+        request.skill_source_directory = source.join(".");
+        assert_eq!(validate_start(&request), Err("invalid_skills"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_source_rejects_symlink_escapes_below_config_home() {
+        let app_id = format!("a{}", "1".repeat(32));
+        for relative in [
+            "local-apps".to_owned(),
+            "local-apps/v2".into(),
+            "local-apps/v2/apps".into(),
+            format!("local-apps/v2/apps/{app_id}"),
+            format!("local-apps/v2/apps/{app_id}/releases"),
+            format!("local-apps/v2/apps/{app_id}/releases/1"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let request = start_request(&temp.path().join("config"));
+            let redirected = temp.path().join("redirected");
+            let ancestor = std::fs::canonicalize(&request.config_home)
+                .unwrap()
+                .join(&relative);
+            std::fs::rename(&ancestor, &redirected).unwrap();
+            std::os::unix::fs::symlink(&redirected, &ancestor).unwrap();
+            assert_eq!(
+                validate_start(&request),
+                Err("invalid_skills"),
+                "{relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn start_source_rejects_missing_paths_and_non_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut request = start_request(temp.path());
+        let home = request.config_home.clone();
+        request.config_home = home.join("missing");
+        assert_eq!(validate_start(&request), Err("invalid_skills"));
+        request.config_home = home;
+        std::fs::remove_dir(&request.skill_source_directory).unwrap();
+        assert_eq!(validate_start(&request), Err("invalid_skills"));
+        std::fs::write(&request.skill_source_directory, b"not a directory").unwrap();
+        assert_eq!(validate_start(&request), Err("invalid_skills"));
+    }
+
+    #[test]
+    fn start_source_requires_library_app_identifiers() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut request = start_request(temp.path());
+        for app_id in ["legacy_App-2".to_owned(), "X".repeat(80)] {
+            request.app_id = app_id;
+            request.skill_source_directory = std::fs::canonicalize(&request.config_home)
+                .unwrap()
+                .join("local-apps/v2/apps")
+                .join(&request.app_id)
+                .join("releases/1/source");
+            std::fs::create_dir_all(&request.skill_source_directory).unwrap();
+            assert_eq!(validate_start(&request), Ok(()));
+        }
+        for app_id in [
+            "../other".to_owned(),
+            "/absolute".into(),
+            "app/other".into(),
+            "app\\other".into(),
+            ".".into(),
+            "..".into(),
+            "app:name".into(),
+            "X".repeat(81),
+        ] {
+            request.app_id = app_id;
+            assert_eq!(validate_start(&request), Err("invalid_identity"));
+        }
+        request.app_id = "valid-app".into();
+        for version_id in [String::new(), "version\n".into(), "X".repeat(257)] {
+            request.version_id = version_id;
+            assert_eq!(validate_start(&request), Err("invalid_identity"));
+        }
+    }
+
     #[test]
     fn private_input_validation_rejects_paths_and_external_schema_references() {
         let mut value = input();
@@ -1556,6 +1749,7 @@ mod tests {
             .join(&app_id)
             .join("releases/1/source");
         std::fs::create_dir_all(&source).unwrap();
+        let source = std::fs::canonicalize(source).unwrap();
         let release_digest = "a".repeat(64);
         let official: Value = serde_json::from_str(include_str!(
             "../../electron/vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json"

@@ -164,6 +164,17 @@ jobs:
         run: |
           rust_flags="--remap-path-prefix=${GITHUB_WORKSPACE}=/workspace --remap-path-prefix=${CARGO_HOME}=/cargo"
           if [[ '${{ matrix.platform }}' == 'darwin' ]]; then
+            rustup_home="${RUSTUP_HOME:-${HOME}/.rustup}"
+            cargo_target="${CARGO_TARGET_DIR:-${GITHUB_WORKSPACE}/target}"
+            case "$cargo_target" in
+              /*) ;;
+              *) cargo_target="${GITHUB_WORKSPACE}/${cargo_target}" ;;
+            esac
+            rust_flags+=" --remap-path-prefix=${rustup_home}=/rustup --remap-path-prefix=${cargo_target}=/cargo-target"
+            # Native dependencies can embed __FILE__ independently of rustc.
+            # Reuse the same compiler mappings as the signed macOS build.
+            source apps/electron/scripts/native-path-remapping.sh
+            configure_native_path_remapping "$GITHUB_WORKSPACE" "$CARGO_HOME" "$rustup_home" "$cargo_target"
             sdk_lib="${LINGXI_GSTREAMER_SDK_MACOS:?macOS GStreamer SDK was not configured}/lib"
             case '${{ matrix.arch }}' in
               arm64) sdk_arch=arm64 ;;
@@ -178,6 +189,7 @@ jobs:
             # The unpackaged Rust executables need the SDK to resolve @rpath.
             # Packaging removes this absolute rpath and installs a bundle-relative one.
             rust_flags+=" -C link-arg=-Wl,-rpath,$sdk_lib"
+            printf 'CFLAGS=%s\nCXXFLAGS=%s\n' "$CFLAGS" "$CXXFLAGS" >> "$GITHUB_ENV"
           fi
           printf 'RUSTFLAGS=%s\n' "$rust_flags" >> "$GITHUB_ENV"
 
@@ -185,9 +197,21 @@ jobs:
         working-directory: packages/bridge-client
         run: npm ci
 
+      - name: Build fresh shared SDK before Desktop installation
+        shell: bash
+        working-directory: packages/bridge-client
+        run: |
+          rm -rf dist
+          npm run build
+
       - name: Install Desktop dependencies
         working-directory: apps/electron
-        run: npm ci
+        shell: bash
+        run: |
+          npm ci
+          # npm may link file: dependencies or copy them. Either form must
+          # contain exactly the SDK produced from this checkout above.
+          diff -r ../../packages/bridge-client/dist node_modules/@lingxi/bridge-client/dist
 
       - name: Check and test native Rust host
         shell: bash
@@ -330,17 +354,10 @@ jobs:
           sdk_root="$(python3 scripts/lib/mobile_linux_source.py --root)"
           cargo test --locked --manifest-path "${sdk_root}/Cargo.toml" -p platform-pty --test windows_file_exports
 
-      - name: Build and test shared SDK
+      - name: Test shared SDK
         if: matrix.platform != 'linux'
         working-directory: packages/bridge-client
-        run: |
-          npm run build
-          npm test
-
-      - name: Build shared SDK for Linux emulator tests
-        if: matrix.platform == 'linux'
-        working-directory: packages/bridge-client
-        run: npm run build
+        run: npm test
 
       - name: Install macOS test search tool
         if: matrix.platform == 'darwin'
@@ -409,7 +426,24 @@ jobs:
       - name: Package native Desktop target
         shell: bash
         working-directory: apps/electron
-        run: node scripts/package-desktop.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+        run: |
+          if node scripts/package-desktop.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'; then
+            exit 0
+          else
+            package_result=$?
+          fi
+          if [[ '${{ matrix.platform }}' == 'darwin' ]]; then
+            sidecar="${LINGXI_BRIDGE_SERVER_BIN:-${CARGO_TARGET_DIR:-$GITHUB_WORKSPACE/target}/release/bridge-server}"
+            if [[ -f "$sidecar" ]]; then
+              echo 'Release sidecar signature and build-source path diagnostics:'
+              /usr/bin/codesign --verify --strict "$sidecar" || true
+              /usr/bin/codesign -dv --verbose=2 "$sidecar" 2>&1 || true
+              # Bound diagnostics to source/object filenames under this CI
+              # user; do not print arbitrary neighboring binary strings.
+              /usr/bin/strings "$sidecar" | LC_ALL=C grep -oE '/Users/runner/[A-Za-z0-9_./-]*\.(cpp|hpp|cc|rs|mm|c|h|m|o|a)(:[0-9]+)?' | sort -u | head -30 || true
+            fi
+          fi
+          exit "$package_result"
         env:
           # Explicitly test package layout without pretending an ad-hoc build
           # can access Data Protection Keychain. Release packaging uses the

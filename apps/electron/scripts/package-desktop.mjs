@@ -51,6 +51,7 @@ import { writeProtocolRegistration } from './protocol-registration.mjs';
 import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
 import { prepareMacGStreamerRuntime, signMacGStreamerRuntime, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
 import { bundlePortableGStreamerRuntime, preflightPortableGStreamerRuntime } from './gstreamer-portable.mjs';
+import { buildFreshBridgeClient } from './bridge-client-dist.mjs';
 
 function log(message) {
   process.stdout.write(`[package:desktop] ${message}\n`);
@@ -248,7 +249,10 @@ async function main() {
   assertBinaryArchitecture(modCompiler.executable, target, 'Mod Bun compiler');
   scanTreeForForbiddenContent(sidecar);
 
-  run('npm', ['run', 'build'], join(repoRoot, 'packages', 'bridge-client'));
+  const sharedSdkRoot = join(repoRoot, 'packages', 'bridge-client');
+  const sharedSdkName = readJson(join(sharedSdkRoot, 'package.json')).name;
+  buildFreshBridgeClient(sharedSdkRoot, join(packageRoot, 'node_modules', ...sharedSdkName.split('/')),
+    () => run('npm', ['run', 'build'], sharedSdkRoot));
   run('npm', ['run', 'build'], packageRoot);
   resetDirectory(paths.stageRoot);
   unlinkIfPresent(paths.checksumPath);

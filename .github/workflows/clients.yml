@@ -131,6 +131,14 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Test Android CI build wiring
+        run: |
+          python3 apps/android/native/scripts/test-ci-build.py
+          python3 apps/android/native/scripts/test-ci-emulator.py
+
+      - name: Create temporary Android debug signing key
+        run: bash apps/android/native/scripts/prepare-ci-debug-keystore.sh
+
       # Installs the Android SDK + command-line tools and exports
       # ANDROID_HOME / ANDROID_SDK_ROOT for later steps.
       - uses: android-actions/setup-android@v3
@@ -178,13 +186,16 @@ jobs:
       - name: Gradle — Store/Full tests and APKs
         working-directory: apps/android/native
         run: |
-          ./gradlew "-PlingxiRootfsEvidenceDir=$RUNNER_TEMP/sdk-rootfs" \
+          # The generated UniFFI bindings are large. Avoid concurrent flavor
+          # compiles and give the separate Kotlin daemon a bounded 4 GiB heap.
+          ./gradlew --max-workers=1 -Pkotlin.daemon.jvmargs=-Xmx4g \
+            "-PlingxiRootfsEvidenceDir=$RUNNER_TEMP/sdk-rootfs" \
             :app:testPlayDebugUnitTest :app:testDirectDebugUnitTest \
             :app:assemblePlayDebug :app:assembleDirectDebug \
             :app:assemblePlayDebugAndroidTest :app:assembleDirectDebugAndroidTest
 
   # ---------------------------------------------------------------------------
-  # 3. android-emulator — the instrumented engine round-trip on an emulator.
+  # 3. android-emulator — Play/Direct connected suites and staged acceptance.
   #    Runs EngineRoundtripTest.kt on a booted AVD via the emulator-runner
   #    action. emulator-runner jobs are FRESH (no artifacts from job 2), so this
   #    job repeats the full rust + cargo-ndk + java + ndk setup AND re-runs
@@ -224,6 +235,9 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Create temporary Android debug signing key
+        run: bash apps/android/native/scripts/prepare-ci-debug-keystore.sh
+
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -238,30 +252,42 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # Rebuild jniLibs in THIS job — emulator-runner runs in the same job, but
-      # this job never ran job 2's build steps, so the artifacts must be made
-      # here too before the on-device test compiles the engine.
-      - name: Build Store native runtime from source
-        run: bash apps/android/native/scripts/build-mobile-linux-native.sh --variant play
+      # This fresh job needs both flavor-specific runtimes for the two suites.
+      - name: Build Store and Full native runtimes from source
+        run: |
+          bash apps/android/native/scripts/build-mobile-linux-native.sh --variant play
+          bash apps/android/native/scripts/build-mobile-linux-native.sh --variant direct
 
       - name: Fetch verified SDK release rootfs assets
         run: |
           python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
 
+      # Compile before launching the emulator so the large Kotlin compiler
+      # heap and emulator do not compete for the runner's memory.
+      - name: Assemble emulator APKs
+        working-directory: apps/android/native
+        run: |
+          ./gradlew --max-workers=1 -Pkotlin.daemon.jvmargs=-Xmx4g \
+            "-PlingxiRootfsEvidenceDir=$RUNNER_TEMP/sdk-rootfs" \
+            :app:assemblePlayDebug :app:assemblePlayDebugAndroidTest \
+            :app:assembleDirectDebug :app:assembleDirectDebugAndroidTest
+          ./gradlew --stop
+
       # api-level 30 (>= minSdk 26), x86_64 + google_apis for KVM-accelerated
       # boot. force-avd-creation + the headless/no-window emulator options are
       # the recommended CI flags for a deterministic cold boot.
-      - name: Instrumented round-trip on emulator
+      - name: Instrumented tests on emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 30
           target: google_apis
           arch: x86_64
           force-avd-creation: true
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          # Both installed flavors stage a real rootfs in the emulator's data partition.
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -partition-size 8192
           disable-animations: true
           working-directory: apps/android/native
-          script: ./gradlew "-PlingxiRootfsEvidenceDir=$RUNNER_TEMP/sdk-rootfs" :app:connectedPlayDebugAndroidTest
+          script: bash scripts/run-ci-emulator-tests.sh "$RUNNER_TEMP/sdk-rootfs"
 
   # ---------------------------------------------------------------------------
   # 4. ios — XCFramework build + Xcode simulator engine round-trip (macOS).

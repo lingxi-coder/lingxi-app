@@ -178,6 +178,7 @@ class EngineRoundtripTest {
         (terminalEvent as? ClientEvent.Error)?.let {
             assertFalse("the terminal error must carry a message", it.message.codeUnits.isEmpty())
         }
+        InstrumentationRegistry.getInstrumentation().addResults(android.os.Bundle().apply { putString("keylessTerminalResult", "PASS") })
     }
 
     // --- Test B (mirror iOS): ListModels → ModelList over the listener --------
@@ -237,5 +238,6 @@ class EngineRoundtripTest {
             "keyless ModelList via UniFFI listener: current=${modelList.current} " +
                 "models=${modelList.models}",
         )
+        InstrumentationRegistry.getInstrumentation().addResults(android.os.Bundle().apply { putString("keylessModelListResult", "PASS") })
     }
 }

@@ -3,7 +3,9 @@ package com.lingxi.code.apps
 import android.content.Intent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.lingxi.code.BuildConfig
 import com.lingxi.code.MainActivity
+import com.lingxi.code.acceptance.requireAcceptanceOptIn
 import kotlinx.coroutines.*
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -23,6 +25,11 @@ import java.util.UUID
 class UnifiedLocalAppProcessDeathTest {
     @Test
     fun hostSigkillRequiresFreshRunAndPreservesData() = runBlocking<Unit> {
+        requireAcceptanceOptIn(
+            "ownerDeathAcceptance", "Two-stage owner-death acceptance needs its external runner",
+            "com.lingxi.code.apps.UnifiedLocalAppProcessDeathTest#hostSigkillRequiresFreshRunAndPreservesData", "ownerDeathPhase",
+        )
+        check(BuildConfig.MOBILE_LINUX_FULL) { "Owner-death acceptance requires the Direct package" }
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val phase = InstrumentationRegistry.getArguments().getString("ownerDeathPhase")
@@ -155,6 +162,9 @@ class UnifiedLocalAppProcessDeathTest {
                     receipt.delete()
                 }
             }
+        }
+        if (phase == "recover") {
+            instrumentation.addResults(android.os.Bundle().apply { putString("ownerDeathResult", "RECOVERED") })
         }
     }
 

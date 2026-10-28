@@ -83,6 +83,12 @@ esac
                     expected_tasks = (":app:assemblePlayDebug", ":app:assembleDirectDebug")
                 else:
                     command = next(line.strip().removeprefix("script: ") for line in lines if line.strip().startswith("script: "))
+                    # The emulator action delegates to a checked-in runner;
+                    # exercise the workflow's shell expansion with a stub here.
+                    scripts = android / "scripts"
+                    scripts.mkdir()
+                    runner = scripts / "run-ci-emulator-tests.sh"
+                    runner.write_text("#!/bin/bash\nprintf '%s\\n' \"-P" + property_name + "=$1\" :app:connectedPlayDebugAndroidTest > \"$GRADLE_TRACE\"\n", encoding="utf-8")
                     expected_tasks = (":app:connectedPlayDebugAndroidTest",)
                 shell = "bash" if job == "android" else "sh"
                 subprocess.run([shell, "-e", "-c", command], cwd=android, env=env, check=True)

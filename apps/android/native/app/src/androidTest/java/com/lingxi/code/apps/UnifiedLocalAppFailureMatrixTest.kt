@@ -3,11 +3,13 @@ package com.lingxi.code.apps
 import android.content.Intent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.lingxi.code.BuildConfig
 import com.lingxi.code.MainActivity
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -20,6 +22,7 @@ import java.util.UUID
 @RunWith(AndroidJUnit4::class)
 class UnifiedLocalAppFailureMatrixTest {
     @Test fun preparationWriteAndDownloadFailuresKeepServingReleaseAndData() = runBlocking<Unit> {
+        assumeTrue("Python Local Apps require Direct", BuildConfig.MOBILE_LINUX_FULL)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val apps = UnifiedLocalApps.get(context)
         val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/failure-matrix-${UUID.randomUUID()}")

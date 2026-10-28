@@ -36,4 +36,4 @@ jobs:
       - uses: actions/checkout@v4
       - name: Observe Job debug chains
         shell: pwsh
-        run: ./\.github/diagnostics/windows-debug-tree/run.ps1
+        run: ./.github/diagnostics/windows-debug-tree/run.ps1

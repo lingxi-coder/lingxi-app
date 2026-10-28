@@ -306,8 +306,11 @@ struct LocalAppDetailPage: View {
                 client: library.client,
                 appID: appId,
                 release: release,
-                onConfigurationChanged: {
-                    await library.cancelBrowserAgentScope(appID: appId, revision: release.revision)
+                captureConfigurationScope: {
+                    library.configurationScopeSnapshot(appID: appId, revision: release.revision)
+                },
+                onConfigurationChanged: { snapshot in
+                    await library.cancelBrowserAgentScope(snapshot)
                 }
             )
         }

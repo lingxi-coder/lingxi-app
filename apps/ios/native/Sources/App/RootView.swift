@@ -2448,7 +2448,13 @@ struct RootView: View {
                       !hasUnsavedConversationMedia else {
                     throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
                 }
-                draft = "Use the local-app skill to develop \(request.name) in \(request.sourceDirectory). Use the schema 2 standalone LocalApp service. This ordinary authoring session is \(sessionID). Existing app ID: \(request.appId ?? "new app"). Publish locally only; publishing to the market is a separate user action.\n\n\(request.prompt)"
+                draft = """
+                Use the local-app skill to develop \(request.name) in \(request.sourceDirectory). Use the schema 2 standalone LocalApp service. This ordinary authoring session is \(sessionID). Existing app ID: \(request.appId ?? "new app"). Publish locally only; publishing to the market is a separate user action.
+
+                If the app uses an Agent, persist recoverable app state and the pending runId and threadId before submission. On reopen, read host task status and event or chat history, and reconnect to the same run and thread read-only. Do not automatically submit, resend or replay tools after an uncertain request or interruption. Show running only when the host confirms it, and show interrupted or unknown state and the action needed from the user; after the user reviews any side effects, a new attempt requires an explicit user action and a new runId. Only show completion when supported by the host's terminal result. iOS may suspend or terminate background work; do not promise indefinite execution.
+
+                \(request.prompt)
+                """
                 navigation.path.removeAll(); navigation.focusDetail()
                 #else
                 throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")

@@ -1,7 +1,7 @@
 import { reasoningSelectionLabel } from '../model/reasoningLabel';
 import { tr } from '../i18n/locale';
 import { AppsGlyph } from './LocalApps';
-import { localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
+import { localAppAuthoringPrompt, localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
 import { NeedsInputBadge, sessionNeedsInput } from './NeedsInputBadge';
 import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, audioSetupGuidance, type AudioSetupGuidance } from '../audio/audioFeatureGate';
 import { AudioSetupGuide } from './AudioSetupGuide';
@@ -3064,9 +3064,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     consumedLocalAppDraft.current = localAppDraft.nonce;
     onLocalAppDraftConsumed?.(localAppDraft.nonce);
     if (disposition === 'discard') return;
-    const prefix = localAppDraft.id
-      ? `修改本地应用「${localAppDraft.name}」（LocalApp id: ${localAppDraft.id}）。使用 local-app skill，先用 LocalApp read 查看应用及来源，在已绑定的源项目中修改后发布到同一个 id。\n`
-      : '创建一个本地应用，使用 local-app skill 并发布到应用库。需求：\n';
+    const prefix = localAppAuthoringPrompt(localAppDraft);
     const editor = input.current;
     editor.append(document.createTextNode(`${richPromptSnapshot(editor).text ? '\n' : ''}${prefix}`));
     syncPromptState();

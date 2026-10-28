@@ -1,6 +1,7 @@
 package com.lingxi.code
 
 import com.lingxi.code.conversation.blocksEngineReconnect
+import com.lingxi.code.apps.LocalAppAuthoringPrompt
 
 import android.content.pm.PackageManager
 import android.util.Base64
@@ -776,6 +777,7 @@ fun RootScreen(
     // Which scope's draft the composer is currently showing — guards the
     // restore effect below against unrelated recompositions.
     var draftScopeKey by remember { mutableStateOf<String?>(null) }
+    var draftRestoreGeneration by remember { mutableLongStateOf(0L) }
 
     // Swap the visible draft whenever workspace OR mode changes. Keyed on the
     // durable session-state key so Chat and Code can never overwrite each
@@ -785,12 +787,16 @@ fun RootScreen(
         if (key == draftScopeKey) return@LaunchedEffect
         val firstBind = draftScopeKey == null
         draftScopeKey = key
+        val generation = draftRestoreGeneration
         val restored = scopeStore.read(key)?.draft
             ?: if (firstBind && activeSessionMode == SessionMode.Code) {
                 chatViewModel.restoredDraft
             } else {
                 ""
             }
+        // An authoring navigation can install its own draft while the saved
+        // scope read is suspended. Do not overwrite that newer draft.
+        if (draftScopeKey != key || generation != draftRestoreGeneration) return@LaunchedEffect
         // The very first bind after process start must not wipe a draft the
         // user already restored (remember { } above) — only apply when the
         // stored value differs and this is a REAL scope change.
@@ -1999,12 +2005,26 @@ fun RootScreen(
                     canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) {
                     "开发目录已变化，没有插入草稿。"
                 }
-                if (appId == null) {
-                    val prompt = "请在这个源码项目中创建应用：$name。使用 local-app skill 和 LocalApp schema 2，完成后发布到本机应用库。"
-                    val key = ConversationScope.Project(project.record.id).sessionStateKey(mode)
-                    scopeStore.persistDraft(key, prompt)
-                    draft = prompt; draftScopeKey = key; chatViewModel.onDraftChanged(prompt)
+                val key = authoringScope.sessionStateKey(mode)
+                val storedDraft = scopeStore.read(key)?.draft.orEmpty()
+                check(chatViewModel.engineSource.value === authoringSource &&
+                    chatViewModel.sourceScope.value == authoringScope &&
+                    authoringSource.workspaceState.value == confirmed &&
+                    canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) {
+                    "开发目录已变化，没有插入草稿。"
                 }
+                // The Apps page owns the transition, so the destination's
+                // saved draft is authoritative (the source was saved above).
+                val prompt = LocalAppAuthoringPrompt.compose(name, appId, storedDraft)
+                scopeStore.persistDraft(key, prompt)
+                check(chatViewModel.engineSource.value === authoringSource &&
+                    chatViewModel.sourceScope.value == authoringScope &&
+                    authoringSource.workspaceState.value == confirmed &&
+                    canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) {
+                    "开发目录已变化，没有插入草稿。"
+                }
+                draftRestoreGeneration += 1
+                draft = prompt; draftScopeKey = key; chatViewModel.onDraftChanged(prompt)
                 appsPageOpen = false; marketAppId = null; runtimeAppId = null
                 closeDrawer(); closeProjectPages()
             } catch (error: Exception) { chatViewModel.reportHostError(error.message ?: "无法打开应用源码会话。") }

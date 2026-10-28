@@ -1,6 +1,15 @@
 import Foundation
 import CryptoKit
 
+enum LocalAppAgentModelHostConfiguration {
+    enum Decision: Equatable { case build, reuse, restartRequired }
+
+    static func decide(hasHost: Bool, currentDigest: String?, requestedDigest: String) -> Decision {
+        guard hasHost else { return .build }
+        return currentDigest == requestedDigest ? .reuse : .restartRequired
+    }
+}
+
 /// Owns model services independently of conversation navigation and history.
 /// The private handle never receives prompts or application approval commands.
 actor LocalAppAgentModelHost {
@@ -93,12 +102,29 @@ actor LocalAppAgentModelHost {
             return try await ensure()
         }
         let identity = [configuration.providerConfig?.providerProfilesJson ?? "", configuration.providerConfig?.routingJson ?? "",
-                        configuration.apiBase, configuration.apiKey, configuration.nativeConfigHome,
+                        configuration.model, configuration.apiBase, configuration.apiKey, configuration.nativeConfigHome,
                         configuration.appSandboxRoot, configuration.mobileLinux?.managedRoot ?? "",
                         configuration.mobileLinux?.brandId ?? "", configuration.mobileLinux?.linuxUser ?? "",
                         configuration.mobileLinux?.configDirName ?? ""].joined(separator: "\u{0}")
         let digest = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
-        if handle != nil && configurationDigest == digest { return }
+        switch LocalAppAgentModelHostConfiguration.decide(
+            hasHost: handle != nil,
+            currentDigest: configurationDigest,
+            requestedDigest: digest
+        ) {
+        case .reuse:
+            return
+        case .restartRequired:
+            // Replacing a model host revokes all of its tasks. A task or an
+            // approved browser handoff may still be using this host, and a
+            // native status snapshot cannot atomically prove otherwise.
+            throw LocalAppServiceFailure(
+                "AGENT_CONFIGURATION_RESTART_REQUIRED",
+                "Model settings changed. Wait for existing Local App Agent tasks to finish or cancel them, then quit and reopen LingXi to use the updated settings."
+            )
+        case .build:
+            break
+        }
         let task = Task.detached(priority: .userInitiated) { () throws -> MobileEngineHandle in
             return try await withCheckedThrowingContinuation { continuation in
                 let thread = Thread {

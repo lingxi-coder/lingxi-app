@@ -54,12 +54,25 @@ private struct AgentSettings: Codable, Sendable {
     }
 }
 
+struct LocalAppAgentConfigureResult: Decodable, Sendable {
+    let changed: Bool
+}
+
+@MainActor
+enum LocalAppAgentConfigurationCleanup {
+    static func perform(changed: Bool, cleanup: () async -> Void) async {
+        guard changed else { return }
+        await cleanup()
+    }
+}
+
 @MainActor
 struct LocalAppAgentSettingsView: View {
     let client: LocalAppServiceClient
     let appID: String
     let release: UnifiedAppRelease
-    let onConfigurationChanged: @MainActor () async -> Void
+    let captureConfigurationScope: @MainActor () -> LocalAppAgentConfigurationScopeSnapshot
+    let onConfigurationChanged: @MainActor (LocalAppAgentConfigurationScopeSnapshot) async -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var catalog: AgentCatalog?
     @State private var model = ""
@@ -160,8 +173,9 @@ struct LocalAppAgentSettingsView: View {
     }
     private func connect(_ serverID: String) {
         Task { busy = true; defer { busy = false }; do {
+            let snapshot = captureConfigurationScope()
             catalog = try await call(["op": .string("connectMcp"), "serverId": .string(serverID)], as: AgentCatalog.self)
-            await onConfigurationChanged()
+            await onConfigurationChanged(snapshot)
         } catch { self.error = error.localizedDescription } }
     }
     private func save() {
@@ -172,15 +186,21 @@ struct LocalAppAgentSettingsView: View {
             skills: skills.filter { allowedSkills.contains($0) }.sorted(), background: false,
             maxTurns: turns, timeoutMs: minutes * 60_000)
         Task { busy = true; defer { busy = false }; do {
-            let _: LocalAppJSON = try await call(["op": .string("configure"), "appId": .string(appID), "settings": try .encode(settings)], as: LocalAppJSON.self)
-            await onConfigurationChanged()
+            let snapshot = captureConfigurationScope()
+            let result = try await call(["op": .string("configure"), "appId": .string(appID), "settings": try .encode(settings)], as: LocalAppAgentConfigureResult.self)
+            await LocalAppAgentConfigurationCleanup.perform(changed: result.changed) {
+                await onConfigurationChanged(snapshot)
+            }
             dismiss()
         } catch { self.error = error.localizedDescription } }
     }
     private func revoke() {
         Task { busy = true; defer { busy = false }; do {
-            let _: LocalAppJSON = try await call(["op": .string("configure"), "appId": .string(appID), "settings": .null], as: LocalAppJSON.self)
-            await onConfigurationChanged()
+            let snapshot = captureConfigurationScope()
+            let result = try await call(["op": .string("configure"), "appId": .string(appID), "settings": .null], as: LocalAppAgentConfigureResult.self)
+            await LocalAppAgentConfigurationCleanup.perform(changed: result.changed) {
+                await onConfigurationChanged(snapshot)
+            }
             dismiss()
         } catch { self.error = error.localizedDescription } }
     }

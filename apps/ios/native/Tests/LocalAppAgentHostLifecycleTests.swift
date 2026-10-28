@@ -44,10 +44,6 @@ final class LocalAppAgentHostLifecycleTests: XCTestCase {
         ), .create)
         XCTAssertEqual(LocalAppAgentContextAdmission.decide(
             contextExists: false, finished: false, taskAttached: false, reservationExpiry: nil,
-            untrackedCleanupRunning: true, now: now
-        ), .wait, "An untracked reservation clear must finish before a retry can reserve.")
-        XCTAssertEqual(LocalAppAgentContextAdmission.decide(
-            contextExists: false, finished: false, taskAttached: false, reservationExpiry: nil,
             reservationRequestInFlight: true, now: now
         ), .wait, "A reserve response and its cleanup must finish before a retry can reserve.")
         XCTAssertEqual(LocalAppAgentContextAdmission.decide(
@@ -69,6 +65,55 @@ final class LocalAppAgentHostLifecycleTests: XCTestCase {
         XCTAssertEqual(LocalAppAgentContextAdmission.decide(
             contextExists: false, finished: false, taskAttached: false, reservationExpiry: nil, now: now
         ), .create, "A retry becomes available after cleanup removes the old context.")
+    }
+
+    @MainActor
+    func testCleanupRequiresTheExactNewReservationEvenAfterFailureOrExpiration() async throws {
+        let wake = LocalAppAgentWakeRequest(appID: "app-a", revision: 1, runID: "run-a")
+        let reservationID = UUID().uuidString
+        func receipt(created: Bool, appID: String = "app-a", identifier: String? = nil) -> LocalAppWakeReservation {
+            LocalAppWakeReservation(appId: appID, revision: 1, runId: "run-a", expiresAtMs: 100,
+                                    created: created, reservationId: identifier ?? reservationID)
+        }
+        let created = receipt(created: true)
+        XCTAssertEqual(LocalAppAgentWakeReservationDecision.decide(created, for: wake, nowMillis: 50, contextReady: true),
+                       .accept(reservationID))
+        XCTAssertEqual(LocalAppAgentWakeReservationDecision.decide(created, for: wake, nowMillis: 50, contextReady: false),
+                       .clear(reservationID), "A late response after iOS removed the context clears its own generation.")
+        XCTAssertEqual(LocalAppAgentWakeReservationDecision.decide(created, for: wake, nowMillis: 100, contextReady: true),
+                       .clear(reservationID), "An expired receipt still identifies its generation to clear.")
+        XCTAssertEqual(LocalAppAgentWakeReservationDecision.decide(receipt(created: false), for: wake, nowMillis: 50, contextReady: false),
+                       .existing, "A reused reservation never transfers cleanup ownership.")
+        XCTAssertEqual(LocalAppAgentWakeReservationDecision.decide(receipt(created: true, appID: "other"), for: wake, nowMillis: 50, contextReady: true), .invalid)
+        XCTAssertEqual(LocalAppAgentWakeReservationDecision.decide(receipt(created: true, identifier: "bad"), for: wake, nowMillis: 50, contextReady: true), .invalid)
+
+        var cleared: [String] = []
+        try await LocalAppAgentWakeCleanup.perform(ownedReservationID: nil) { cleared.append($0) }
+        XCTAssertTrue(cleared.isEmpty, "An unconfirmed or reused reservation must never cancel an existing run.")
+        // Both browser-open failure and system expiration use this owned cleanup.
+        try await LocalAppAgentWakeCleanup.perform(ownedReservationID: reservationID) { cleared.append($0) }
+        try await LocalAppAgentWakeCleanup.perform(ownedReservationID: reservationID) { cleared.append($0) }
+        XCTAssertEqual(cleared, [reservationID, reservationID])
+    }
+
+    @MainActor
+    func testConfigurationCleanupUsesTheHostResultAndCapturedGeneration() async {
+        let wake = LocalAppAgentWakeRequest(appID: "app-a", revision: 1, runID: "run-a")
+        let old = UUID(), newer = UUID()
+        let snapshot = LocalAppAgentConfigurationScopeSnapshot(wake: wake, token: old, contexts: [])
+        XCTAssertTrue(snapshot.matches(currentWake: wake, currentToken: old))
+        XCTAssertFalse(snapshot.matches(currentWake: wake, currentToken: newer),
+                       "A late settings response cannot detach a new same-run handoff.")
+        XCTAssertFalse(snapshot.matches(currentWake: nil, currentToken: nil))
+        XCTAssertFalse(LocalAppAgentContextAdmission.isCurrent(
+            expectedIdentifier: "old", actualIdentifier: "new", finished: false
+        ), "A captured old context cannot cancel its replacement.")
+
+        var cancellations = 0
+        await LocalAppAgentConfigurationCleanup.perform(changed: false) { cancellations += 1 }
+        XCTAssertEqual(cancellations, 0, "Saving unchanged settings must not cancel a running task.")
+        await LocalAppAgentConfigurationCleanup.perform(changed: true) { cancellations += 1 }
+        XCTAssertEqual(cancellations, 1, "A changed or revoked grant cleans the captured scope.")
     }
 
     @MainActor
@@ -211,6 +256,21 @@ final class LocalAppAgentHostLifecycleTests: XCTestCase {
         XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"configure","settings":null}"#), .available)
         XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: #"{"op":"registerAuthoring"}"#), .none)
         XCTAssertEqual(LocalAppAgentHostPolicy.requirement(for: "invalid JSON"), .currentConfiguration)
+    }
+
+    func testModelHostReusesOnlyTheCurrentConfiguration() {
+        XCTAssertEqual(LocalAppAgentModelHostConfiguration.decide(
+            hasHost: false, currentDigest: nil, requestedDigest: "new"
+        ), .build)
+        XCTAssertEqual(LocalAppAgentModelHostConfiguration.decide(
+            hasHost: true, currentDigest: "same", requestedDigest: "same"
+        ), .reuse)
+        XCTAssertEqual(LocalAppAgentModelHostConfiguration.decide(
+            hasHost: true, currentDigest: "old", requestedDigest: "new"
+        ), .restartRequired)
+        XCTAssertEqual(LocalAppAgentModelHostConfiguration.decide(
+            hasHost: true, currentDigest: nil, requestedDigest: "new"
+        ), .restartRequired)
     }
 
     func testKeychainReadFailureIsNotADeletedValue() throws {

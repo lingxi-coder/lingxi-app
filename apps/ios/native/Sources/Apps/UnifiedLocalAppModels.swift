@@ -136,6 +136,8 @@ struct LocalAppWakeReservation: Decodable, Sendable {
     let revision: UInt64
     let runId: String
     let expiresAtMs: UInt64
+    let created: Bool
+    let reservationId: String
 }
 struct LocalAppMarketOrigin: Codable, Equatable, Sendable {
     let appId: String

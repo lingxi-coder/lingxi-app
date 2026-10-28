@@ -18,6 +18,16 @@ export interface LocalAppChatNavigation {
   prepareAuthoring(session: SessionRef): Promise<DesktopAuthoringRef>;
 }
 
+const agentRecoveryGuidance = '如果应用使用 Agent，请在提交前持久保存可恢复的应用状态及待处理的 runId、threadId；重新打开时读取宿主任务状态和事件或聊天历史，以只读方式重连同一 run 和 thread。请求结果不确定或任务中断时，不要自动提交、重发或重放工具；仅在宿主确认时显示正在运行；明确显示中断或未知状态和用户需要采取的操作。用户检查可能已发生的副作用后，新的尝试必须由用户明确发起并使用新的 runId；只有宿主终止结果支持时才显示完成。iOS 可能暂停或终止后台工作，不要承诺无限期运行。';
+
+/** Draft for either authoring entry; it is presented for review and never sent automatically. */
+export function localAppAuthoringPrompt(draft: Pick<LocalAppDraft, 'id' | 'name'>): string {
+  const introduction = draft.id
+    ? `修改本地应用「${draft.name}」（LocalApp id: ${draft.id}）。使用 local-app skill，先用 LocalApp read 查看应用及来源，在已绑定的源项目中修改后发布到同一个 id。`
+    : '创建一个本地应用，使用 local-app skill 并发布到应用库。';
+  return `${introduction}\n${agentRecoveryGuidance}\n需求：\n`;
+}
+
 function assertAuthoringSession(binding: DesktopAuthoringRef, session: SessionRef): void {
   if (binding.sourceDirectory !== session.projectPath || binding.projectRef.kind !== 'desktopPath'
     || binding.projectRef.path !== session.projectPath || binding.authoringSessionId !== session.sessionId) {

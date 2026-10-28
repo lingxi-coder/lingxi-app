@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { localAppChatTarget, localAppDraftDisposition, type LocalAppChatNavigation, type LocalAppDraft } from '../src/renderer/bridge/localAppChat';
+import { localAppAuthoringPrompt, localAppChatTarget, localAppDraftDisposition, type LocalAppChatNavigation, type LocalAppDraft } from '../src/renderer/bridge/localAppChat';
 import type { DesktopAuthoringRef } from '../src/shared/localApps';
 
 const source = { projectPath: '/project/app', sessionId: 'session-app' };
@@ -131,4 +131,20 @@ test('drafts apply only to the exact settled Code session', () => {
   assert.equal(localAppDraftDisposition(draft, active, false), 'discard');
   assert.equal(localAppDraftDisposition(draft, { ...source, projectPath: '/other' }, false), 'discard');
   assert.equal(localAppDraftDisposition(draft, undefined, false), 'discard');
+});
+
+test('both authoring entries ask for read-only Agent recovery and an explicit new attempt', () => {
+  const create = localAppAuthoringPrompt({ id: '', name: '' });
+  const modify = localAppAuthoringPrompt({ id: app.id, name: app.name });
+  assert.match(create, /创建一个本地应用/);
+  assert.match(modify, new RegExp(`LocalApp id: ${app.id}`));
+  for (const prompt of [create, modify]) {
+    assert.match(prompt, /runId、threadId/);
+    assert.match(prompt, /只读方式重连同一 run 和 thread/);
+    assert.match(prompt, /不要自动提交、重发或重放工具/);
+    assert.match(prompt, /仅在宿主确认时显示正在运行/);
+    assert.match(prompt, /中断或未知状态/);
+    assert.match(prompt, /用户明确发起并使用新的 runId/);
+    assert.match(prompt, /不要承诺无限期运行/);
+  }
 });

@@ -71,6 +71,17 @@ actor LocalAppServiceClient {
     }
 }
 
+struct LocalAppAgentConfigurationScopeSnapshot: Sendable {
+    let wake: LocalAppAgentWakeRequest?
+    let token: UUID?
+    let contexts: [LocalAppAgentContextSnapshot]
+
+    func matches(currentWake: LocalAppAgentWakeRequest?, currentToken: UUID?) -> Bool {
+        guard let wake, let token else { return false }
+        return currentWake == wake && currentToken == token
+    }
+}
+
 enum LocalAppAgentHostPolicy {
     enum Requirement: Equatable {
         case none
@@ -247,18 +258,20 @@ final class UnifiedLocalApps {
     func endBrowserPageDelivery(_ scope: LocalAppBrowserDeliveryScope) {
         agentBackground.endBrowserDelivery(scope)
     }
-    func cancelBrowserAgentScope(appID: String, revision: UInt64) async {
-        let wake = browserAgentWake
-        let token = browserAgentWakeToken
-        if let wake = browserAgentWake,
-           wake.appID == appID, wake.revision == revision {
-            browserAgentWake = nil
-            browserAgentWakeToken = nil
-        }
-        await agentBackground.cancel(appID: appID, revision: revision, client: client)
-        if let wake, let token, wake.appID == appID, wake.revision == revision {
+    func configurationScopeSnapshot(appID: String, revision: UInt64) -> LocalAppAgentConfigurationScopeSnapshot {
+        let wake = browserAgentWake.flatMap { $0.appID == appID && $0.revision == revision ? $0 : nil }
+        return LocalAppAgentConfigurationScopeSnapshot(
+            wake: wake, token: wake == nil ? nil : browserAgentWakeToken,
+            contexts: agentBackground.configurationSnapshot(appID: appID, revision: revision)
+        )
+    }
+    func cancelBrowserAgentScope(_ snapshot: LocalAppAgentConfigurationScopeSnapshot) async {
+        if snapshot.matches(currentWake: browserAgentWake, currentToken: browserAgentWakeToken),
+           let wake = snapshot.wake, let token = snapshot.token,
+           detachBrowserAgentWake(wake, token: token) {
             handoffPreparations.finish(wake, token: token)
         }
+        await agentBackground.cancelConfigurationSnapshot(snapshot.contexts, client: client)
     }
     func prepareBrowserAgentHandoff(_ wake: LocalAppAgentWakeRequest, token: UUID) async throws -> (launch: LocalAppLaunch, readyURL: URL, token: UUID) {
         guard browserAgentWake == wake, browserAgentWakeToken == token else {
@@ -355,7 +368,11 @@ final class UnifiedLocalApps {
     func openExternalBrowser(_ id: String) async throws -> LocalAppLaunch {
         guard let app = record(id) else { throw LocalAppServiceFailure("APP_NOT_FOUND", "The local app was not found.") }
         let release = try await release(id, revision: app.currentRevision)
-        if (release.manifest.capabilities ?? []).contains("agent") { try await LocalAppAgentModelHost.shared.ensure() }
+        // Opening a page can be a read-only recovery of an existing Agent
+        // run. Refreshing the model configuration here replaces the executor
+        // and stops its tasks. New work still checks current configuration at
+        // the native admission boundary (for example, wake.reserve).
+        if (release.manifest.capabilities ?? []).contains("agent") { try await LocalAppAgentModelHost.shared.ensureAvailable() }
         let previousRun = runs[id]
         let currentRun = try await launch(id)
         if let previousRun, previousRun.phase == "running",

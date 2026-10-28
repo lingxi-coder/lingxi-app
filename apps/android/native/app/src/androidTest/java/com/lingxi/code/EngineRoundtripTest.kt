@@ -7,11 +7,14 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ClientTextDto
+import com.lingxi.code.bindings.client.decodeTurnEventEnvelope
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.voice.buildVoiceEngine
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -95,6 +98,23 @@ class EngineRoundtripTest {
         else -> false
     }
 
+    private fun correlatedTerminal(event: ClientEvent, sessionId: String, turnId: ULong): ClientEvent? {
+        return when (event) {
+            is ClientEvent.TurnEventReplay -> {
+                if (event.sessionId != sessionId || event.turnId != turnId) null
+                else decodeTurnEventEnvelope(event).event.takeIf { it.isTerminal() }
+            }
+            is ClientEvent.TurnEventLiveUnretained -> {
+                if (event.sessionId == sessionId && event.turnId == turnId) {
+                    error("The submitted turn emitted an unretained event; durable replay was not confirmed")
+                }
+                null
+            }
+            is ClientEvent.Error -> error("The engine emitted an uncorrelated error before terminal replay")
+            else -> null
+        }
+    }
+
     // --- Test A: keyless SendPrompt drives the listener to a terminal event ---
 
     /**
@@ -104,17 +124,35 @@ class EngineRoundtripTest {
      *
      * This single test exercises every hop of the Compose→UniFFI→engine→listener
      * path without network access or a secret. With no enabled provider, the turn
-     * is expected to surface a terminal `Error`; we also accept a clean
-     * `TurnEnded` and assert only that a terminal arrived.
+     * is expected to surface an error or a `TurnEnded` with `model_error`.
+     * The terminal must be retained for the submitted session and turn.
      */
     @Test
     fun keylessSendPromptDeliversTerminalEvent() {
-        // The terminal-event signal: a rendezvous channel the listener offers the
-        // first observed terminal event onto. Rust delivers `onEvent` from the
-        // engine runtime; the channel is the thread-safe handoff to the test
-        // coroutine. CONFLATED so a late second terminal never suspends.
-        val terminal = Channel<ClientEvent>(Channel.CONFLATED)
+        // Reject a different owner and malformed retained events, and decode a
+        // real terminal wire shape through the same FFI decoder used by the app.
+        val sample = """{"type":"turn_ended","outcome":{"type":"end_turn"},"stop_reason":"model_error","cost":{"total_usd":0.0,"input_tokens":0,"output_tokens":0,"api_calls":0,"session_duration_secs":0,"formatted":"zero"}}"""
+        val sampleEvent = ClientEvent.TurnEventReplay("test-session", 1uL, 1uL, sample)
+        assertTrue(correlatedTerminal(sampleEvent, "other-session", 1uL) == null)
+        assertTrue(correlatedTerminal(sampleEvent, "test-session", 2uL) == null)
+        val sampleTerminal = correlatedTerminal(sampleEvent, "test-session", 1uL)
+        assertTrue(sampleTerminal is ClientEvent.TurnEnded)
+        assertEquals("model_error", (sampleTerminal as ClientEvent.TurnEnded).stopReason)
+        assertTrue(runCatching {
+            correlatedTerminal(sampleEvent.copy(eventJson = "not-json"), "test-session", 1uL)
+        }.isFailure)
+        val unretained = ClientEvent.TurnEventLiveUnretained("test-session", 1uL, sample)
+        assertTrue(correlatedTerminal(unretained, "other-session", 1uL) == null)
+        val unretainedError = runCatching { correlatedTerminal(unretained, "test-session", 1uL) }.exceptionOrNull()
+        assertTrue(unretainedError?.message?.contains("unretained") == true)
+
+        // The native callback is on the engine runtime. A channel provides a
+        // thread-safe handoff and reports an invalid matching envelope promptly.
+        val terminal = Channel<Result<ClientEvent>>(Channel.UNLIMITED)
         val received = java.util.Collections.synchronizedList(mutableListOf<ClientEvent>())
+        val expectedSession = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val turnId = (java.util.UUID.randomUUID().mostSignificantBits and Long.MAX_VALUE)
+            .toULong().coerceAtLeast(1uL)
 
         // HANDSHAKE / engine-build: must succeed even with NO api key.
         val handle = buildEngineKeyless(
@@ -125,7 +163,11 @@ class EngineRoundtripTest {
             routingJson = """{"mobileEnabledProfiles":[]}""",
             onEvent = { event ->
                 received.add(event)
-                if (event.isTerminal()) terminal.trySend(event)
+                expectedSession.get()?.let { session ->
+                    val result = runCatching { correlatedTerminal(event, session, turnId) }
+                    result.exceptionOrNull()?.let { terminal.trySend(Result.failure(it)) }
+                    result.getOrNull()?.let { terminal.trySend(Result.success(it)) }
+                }
             },
         )
         assertNotNull(
@@ -135,24 +177,36 @@ class EngineRoundtripTest {
         )
         val engine = handle!!
 
-        val terminalEvent = runBlocking {
-            // SUBMIT: per the binding contract this returns once the turn is
-            // queued; a turn failure streams to the listener, it is NOT thrown.
-            engine.submit(
-                ClientCommand.SendPrompt(
-                    sessionId = engine.workspaceState().sessionId,
-                    text = ClientTextDto(
-                        codeUnits = "Reply with exactly: hello from lingxi".map { it.code.toUShort() },
+        val terminalEvent = try {
+            runBlocking {
+                // SUBMIT: per the binding contract this returns once the turn is
+                // queued; a turn failure streams to the listener, it is NOT thrown.
+                val sessionId = engine.workspaceState().sessionId
+                check(sessionId.isNotEmpty()) { "the engine must expose an active session" }
+                expectedSession.set(sessionId)
+                engine.submit(
+                    ClientCommand.SendPrompt(
+                        sessionId = sessionId,
+                        text = ClientTextDto(
+                            codeUnits = "Reply with exactly: hello from lingxi".map { it.code.toUShort() },
+                        ),
+                        visualizationContext = null,
+                        promptMode = null,
+                        images = emptyList(),
+                        turnId = turnId,
                     ),
-                    visualizationContext = null,
-                    promptMode = null,
-                    images = emptyList(),
-                    turnId = null,
-                ),
-            )
-            // Wait for the streamed terminal event to reach the listener over the
-            // UniFFI callback. The empty provider catalog must fail locally.
-            withTimeout(60_000) { terminal.receive() }
+                )
+                // Require the terminal to be retained and correlated to this turn.
+                val result = withTimeoutOrNull(60_000) { terminal.receive() }
+                checkNotNull(result) {
+                    "No correlated terminal replay; event kinds: " +
+                        synchronized(received) { received.joinToString(" | ") { it::class.simpleName ?: "?" } }
+                }.getOrThrow()
+            }
+        } finally {
+            expectedSession.set(null)
+            terminal.close()
+            engine.close()
         }
 
         // PROOF: at least one real engine-originated event arrived on the listener,
@@ -167,7 +221,7 @@ class EngineRoundtripTest {
             synchronized(received) { received.isEmpty() },
         )
         assertTrue(
-            "keyless turn must deliver a TERMINAL ClientEvent (Error or TurnEnded) to the " +
+            "keyless turn must deliver a correlated retained terminal event to the " +
                 "listener — proves Compose→UniFFI→engine→listener end to end. Got: " +
                 "${terminalEvent::class.simpleName}",
             terminalEvent.isTerminal(),
@@ -177,6 +231,9 @@ class EngineRoundtripTest {
         // the key value or print any secret.
         (terminalEvent as? ClientEvent.Error)?.let {
             assertFalse("the terminal error must carry a message", it.message.codeUnits.isEmpty())
+        }
+        (terminalEvent as? ClientEvent.TurnEnded)?.let {
+            assertEquals("the keyless turn must terminate at the model boundary", "model_error", it.stopReason)
         }
         InstrumentationRegistry.getInstrumentation().addResults(android.os.Bundle().apply { putString("keylessTerminalResult", "PASS") })
     }
@@ -210,10 +267,15 @@ class EngineRoundtripTest {
         )
         val engine = handle!!
 
-        val modelList = runBlocking {
-            // OUT-OF-BAND: ask for the catalog (not a text turn).
-            engine.submit(ClientCommand.ListModels)
-            withTimeout(30_000) { modelListCh.receive() }
+        val modelList = try {
+            runBlocking {
+                // OUT-OF-BAND: ask for the catalog (not a text turn).
+                engine.submit(ClientCommand.ListModels)
+                withTimeout(30_000) { modelListCh.receive() }
+            }
+        } finally {
+            modelListCh.close()
+            engine.close()
         }
 
         assertFalse(

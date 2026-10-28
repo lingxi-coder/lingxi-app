@@ -826,7 +826,8 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
   }, [context]);
 
   const reportCurrentFault = useCallback((phase: 'load' | 'render' | 'run', message: string, revision: number) => {
-    if (!context || currentRevisionRef.current !== revision || context.site.committedRevision !== revision) return;
+    if (!context || currentRevisionRef.current !== revision || context.site.committedRevision !== revision
+      || !context.isRevisionCurrent(revision)) return;
     showFault(phase, message, revision);
     context.reportFault(descriptor, phase, message);
   }, [context, descriptor, showFault]);
@@ -1060,7 +1061,14 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
       ...(event === undefined ? {} : { event }),
       handle: reachedHandle,
     } satisfies UiClientOperation;
-    const frameResult = await queueOperation(operation);
+    let frameResult;
+    try {
+      frameResult = await queueOperation(operation);
+    } catch (error) {
+      if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
+        || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;
+      throw error;
+    }
     if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
       || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;
     if (isStaleOperation(frameResult)) return;

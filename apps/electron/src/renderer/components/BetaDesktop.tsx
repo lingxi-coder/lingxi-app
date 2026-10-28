@@ -545,7 +545,11 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const [renamingSession, setRenamingSession] = useState(false);
   const [renameError, setRenameError] = useState('');
   const archiveRequest = useRef(0);
-  const closeArchive = () => { archiveRequest.current++; setArchiveTarget(null); };
+  const closeArchive = useCallback(() => {
+    archiveRequest.current++;
+    setArchiveTarget(null);
+    setArchiving(false);
+  }, []);
   const restoreArchiveFocus = (shouldRestore: boolean) => {
     const focus = archiveFocus.current;
     archiveFocus.current = null;
@@ -559,6 +563,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   };
   const prepareArchive = async (projectPath: string, sessionId: string, title: string, restoreTarget?: HTMLButtonElement | null) => {
     if (restoreTarget !== undefined) {
+      setArchiving(false);
       const list = restoreTarget?.closest<HTMLElement>('.desktop-sidebar-list') ?? asideRef.current?.querySelector<HTMLElement>('.desktop-sidebar-list') ?? null;
       const rows = list ? [...list.querySelectorAll<HTMLButtonElement>('.sidebar-session-row > button[data-session-id]')] : [];
       const index = restoreTarget ? rows.indexOf(restoreTarget) : -1;
@@ -575,14 +580,17 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   };
   const confirmArchive = async () => {
     if (!archiveTarget || archiving) return;
+    const version = archiveRequest.current;
+    const ownsArchive = () => archiveRequest.current === version;
     setArchiving(true); setArchiveError('');
     try {
       await bridge.archiveSession(archiveTarget.projectPath, archiveTarget.sessionId);
+      if (!ownsArchive()) return;
       if (archiveFocus.current) archiveFocus.current.archived = true;
       closeArchive();
     }
-    catch (cause) { setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
-    finally { setArchiving(false); }
+    catch (cause) { if (ownsArchive()) setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { if (ownsArchive()) setArchiving(false); }
   };
   const prepareRename = (projectPath: string, sessionId: string, title: string) => {
     setRenameTarget({ projectPath, sessionId, title });
@@ -698,8 +706,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       // A session change owns the new focus; closing the previous session's
       // archive dialog must not restore its old row.
       archiveFocus.current = null;
-      archiveRequest.current += 1;
-      setArchiveTarget(null);
+      closeArchive();
     }
     onOpenChat?.();
     const key = `${projectPath}\0${sessionId}`;
@@ -711,7 +718,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     void opening
       .catch(() => undefined)
       .finally(() => setOpeningSessionKey((current) => current === key ? null : current));
-  }, [archiveTarget, bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.sessionLoading, onOpenChat]);
+  }, [archiveTarget, bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.sessionLoading, closeArchive, onOpenChat]);
   const editProject = useCallback((projectPath: string) => {
     if (bridge.sessionLoading) return;
     onOpenChat?.();

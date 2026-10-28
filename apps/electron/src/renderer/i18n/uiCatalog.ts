@@ -1,5 +1,8 @@
 const rows: Record<string, readonly [string, string, string, string, string]> = {
-  mod_input_unconfirmed: ['更改尚未确认。请编辑或按 Enter 重新发送。', '變更尚未確認。請編輯或按 Enter 重新傳送。', 'Change not confirmed. Edit or press Enter to send again.', '変更は確認されていません。編集するか Enter キーでもう一度送信してください。', '변경이 확인되지 않았습니다. 수정하거나 Enter 키를 눌러 다시 보내세요.'],
+  mod_input_unconfirmed_change: ['更改尚未确认。请选择重试更改。', '變更尚未確認。請選擇重試變更。', 'Change not confirmed. Choose Retry change to send it again.', '変更は確認されていません。変更の再試行を選択してください。', '변경이 확인되지 않았습니다. 변경 재시도를 선택하세요.'],
+  mod_input_unconfirmed_submit: ['提交尚未确认，可能已经执行。请确认后重试提交。', '提交尚未確認，可能已經執行。請確認後重試提交。', 'Submit not confirmed and may already have run. Review before retrying.', '送信は確認されておらず、既に実行された可能性があります。確認してから再試行してください。', '제출이 확인되지 않았으며 이미 실행되었을 수 있습니다. 확인한 후 다시 시도하세요.'],
+  mod_input_retry_change: ['重试更改', '重試變更', 'Retry change', '変更を再試行', '변경 재시도'],
+  mod_input_retry_submit: ['重试提交', '重試提交', 'Retry submit', '送信を再試行', '제출 재시도'],
   output_truncated: ['… 输出已截断', '… 輸出已截斷', '… output truncated', '… 出力は省略されています', '… 출력이 일부 생략됨'],
   truncated_lines: ['… 已截断 — 显示 %1$d / %2$d 行', '… 已截斷 — 顯示 %1$d / %2$d 行', '… truncated — showing %1$d of %2$d lines', '… 省略あり — %2$d 行中 %1$d 行を表示', '… 일부 생략됨 — %2$d줄 중 %1$d줄 표시'],
   percent_elapsed: ["%1$d%% · %2$d秒", "%1$d%% · %2$d秒", "%1$d%% · %2$ds", "%1$d%% · %2$d秒", "%1$d%% · %2$d초"],

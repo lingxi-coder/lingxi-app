@@ -91,6 +91,8 @@ interface FixtureApi {
   enableRapidGroups(): void;
   swapRapidGroups(): void;
   holdNextRapidControl(): void;
+  holdNextRapidRunRejection(): void;
+  releaseRapidRunRejection(): void;
   replaceRapidSite(): void;
   releaseRapidControl(): void;
 }
@@ -153,6 +155,8 @@ const rapidHeldPostOrdinals = new Set<number>();
 const rapidHeldPostReleases = new Map<number, () => void>();
 const rapidHandleKinds = new Map<number, 'input' | 'button'>();
 const rapidInputCallbacks: Array<{ kind: string; value: string }> = [];
+const rapidOnInputCallbacks: string[] = [];
+const rapidOnSubmitCallbacks: string[] = [];
 const rapidButtonCallbacks: string[] = [];
 const rapidBackgroundPending: Array<{ ordinal: number; value: string | undefined }> = [];
 let rapidIgnoreNextRunAsStale = false;
@@ -170,6 +174,9 @@ let rapidGroupsReversed = false;
 let rapidSiteInstanceId = 'rapid-input-site';
 let holdNextRapidControl = false;
 let rapidControlRelease: (() => void) | null = null;
+let holdNextRapidRunRejection = false;
+let rapidRunRejectionRelease: (() => void) | null = null;
+let rapidRunRejections = 0;
 const statusMountCountsByEpoch = new Map<number, number>();
 let asyncFaultMountCount = 0;
 let nextLateRevision = 100;
@@ -474,6 +481,12 @@ const host: ModUiClientHostApi = {
       rejectRunAtAdapter = false;
       throw new Error('fixture callback failed');
     }
+    if (session === rapidSessionId && request.type === 'runHeld' && holdNextRapidRunRejection) {
+      holdNextRapidRunRejection = false;
+      await new Promise<void>((resolve) => { rapidRunRejectionRelease = resolve; });
+      rapidRunRejections += 1;
+      throw new Error('fixture delayed stale run failure');
+    }
     if (session === rapidSessionId && request.type === 'runHeld' && rapidIgnoreNextRunAsStale) {
       rapidIgnoreNextRunAsStale = false;
       call.handled = false;
@@ -485,12 +498,14 @@ const host: ModUiClientHostApi = {
         const event = request.event as { kind?: string; value?: unknown } | undefined;
         const value = typeof event?.value === 'string' ? event.value : '';
         rapidInputCallbacks.push({ kind: typeof event?.kind === 'string' ? event.kind : 'unknown', value });
-        rapidInputValue = rapidInputMode === 'uppercase'
-          ? value.toUpperCase()
-          : rapidInputMode === 'clear-on-submit' && event?.kind === 'submit'
-            ? ''
-            : value;
-        if (event?.kind === 'submit') rapidInputSubmitCount += 1;
+        if (event?.kind === 'submit') {
+          rapidOnSubmitCallbacks.push(value);
+          rapidInputSubmitCount += 1;
+          if (rapidInputMode === 'clear-on-submit') rapidInputValue = '';
+        } else {
+          rapidOnInputCallbacks.push(value);
+          rapidInputValue = rapidInputMode === 'uppercase' ? value.toUpperCase() : value;
+        }
         const post = {
           ordinal: ++rapidPostOrdinal,
           value: rapidInputMode === 'uncontrolled' ? undefined : rapidInputValue,
@@ -514,9 +529,11 @@ const host: ModUiClientHostApi = {
       let frame = makeRuntimeFrame(request.runtimeId, request.render_revision, rapidSurfaceTree());
       if (rapidMisrouteNextFrame) {
         rapidMisrouteNextFrame = false;
-        frame = makeRuntimeFrame('runtime-rapid-sibling', request.render_revision, { type: 'Text', children: ['Wrong runtime frame'] });
-        frame.frameSequence = (frameSequenceByRuntime.get(request.runtimeId) ?? 0) + 10;
-        frameSequenceByRuntime.set(frame.runtimeId, frame.frameSequence);
+        // Corrupt only this response. The live sibling's own frame must remain
+        // intact if it receives an independent resize while the test runs.
+        frame = { ...frame, runtimeId: 'runtime-rapid-sibling',
+          frameSequence: (frameSequenceByRuntime.get(request.runtimeId) ?? 0) + 10,
+          tree: { type: 'Text', children: ['Wrong runtime frame'] } };
       }
       if (kind === 'input' && rapidNextAckExternalValue !== undefined) {
         const nextValue = rapidNextAckExternalValue;
@@ -651,6 +668,8 @@ window.__modUiClientFixture = {
   enableRapidGroups() { rapidGroupsEnabled = true; rapidGroupsReversed = false; emitRapidBackgroundFrame(rapidPropValue); },
   swapRapidGroups() { rapidGroupsReversed = !rapidGroupsReversed; emitRapidBackgroundFrame(rapidPropValue); },
   holdNextRapidControl() { holdNextRapidControl = true; },
+  holdNextRapidRunRejection() { holdNextRapidRunRejection = true; },
+  releaseRapidRunRejection() { rapidRunRejectionRelease?.(); rapidRunRejectionRelease = null; },
   replaceRapidSite() {
     flushSync(() => setRapidInputEnabled(false));
     rapidSiteInstanceId = 'rapid-input-site-replacement';
@@ -675,9 +694,12 @@ window.__modUiClientFixture = {
       sameInputNode: input !== null && input === capturedRapidInput,
       inputReadOnly: input?.readOnly ?? null,
       unconfirmedNotice: input?.closest('label')?.querySelector('[role="status"]')?.textContent ?? null,
+      retryLabel: input?.closest('form')?.querySelector('.mod-ui-client-input-retry')?.textContent ?? null,
       rapidRevision,
       revisionFrameHeld: rapidRevisionFrameRelease !== null,
       rapidControlHeld: rapidControlRelease !== null,
+      rapidRunRejectionHeld: rapidRunRejectionRelease !== null,
+      rapidRunRejections,
       rapidSiteInstanceId,
       promptText: prompt?.textContent ?? null,
       mainPromptSubmitCount,
@@ -691,6 +713,8 @@ window.__modUiClientFixture = {
       rapidInputSubmitCount,
       rapidButtonSubmitCount,
       rapidInputCallbacks: [...rapidInputCallbacks],
+      rapidOnInputCallbacks: [...rapidOnInputCallbacks],
+      rapidOnSubmitCallbacks: [...rapidOnSubmitCallbacks],
       rapidButtonCallbacks: [...rapidButtonCallbacks],
       controlRequests: calls.filter((call) => call.kind === 'control' && call.sessionId === rapidSessionId
         && call.request.subtype === 'ui_client_press').map((call) => call.kind === 'control' ? call.request.event : null),

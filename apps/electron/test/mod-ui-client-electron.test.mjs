@@ -31,17 +31,52 @@ test('Electron renders Native Client input and Select held events while keeping 
         name: 'mod-ui-negative-controls',
         enforce: 'pre',
         transform(source, id) {
-          if (id.endsWith('/modUiClientTree.tsx') && process.env.LINGXI_TEST_DISABLE_ANCESTOR_KEYS === '1') {
+          if (id.endsWith('/modUiClientTree.tsx')) {
+            let result = source;
+            if (process.env.LINGXI_TEST_DISABLE_ANCESTOR_KEYS === '1') {
             const keyed = `function childKey(node: ModUiSurfaceNode, index: number): string {
   const key = explicitNodeKey(node);
   return key === null ? \`index:\${node.type}:\${index}\` : \`key:\${key}\`;
 }`;
-            assert.ok(source.includes(keyed), 'negative control must remove keyed ancestor reconciliation');
-            return source.replace(keyed, `function childKey(node: ModUiSurfaceNode, index: number): string {
+            assert.ok(result.includes(keyed), 'negative control must remove keyed ancestor reconciliation');
+            result = result.replace(keyed, `function childKey(node: ModUiSurfaceNode, index: number): string {
   if (node.type === 'Button' || node.type === 'Input' || node.type === 'Select') return \`\${node.type}:\${node.props.key}\`;
   if (node.type === 'Markdown' && node.props.key) return \`Markdown:\${node.props.key}\`;
   return \`\${node.type}:\${index}\`;
 }`);
+            }
+            if (process.env.LINGXI_TEST_DISABLE_STALE_RUN_REJECTION_FENCE === '1') {
+              const guarded = `    return queued.catch((error: unknown) => {
+      if (lifecycle.current !== activeGeneration || eventEpoch !== dispatchEpochRef.current || !dispatchReadyRef.current) return undefined;`;
+              assert.ok(result.includes(guarded), 'negative control must remove the stale dispatch fault fence');
+              result = result.replace(guarded, `    return queued.catch((error: unknown) => {
+      if (lifecycle.current !== activeGeneration) return undefined;`);
+            }
+            if (process.env.LINGXI_TEST_ALLOW_UNCONFIRMED_ENTER === '1') {
+              const guard = `    if (unconfirmedDraftRef.current) return;
+    void dispatchInput('submit', event.currentTarget.value);`;
+              assert.ok(result.includes(guard), 'negative control must allow Enter to submit an unconfirmed draft');
+              result = result.replace(guard, `    void dispatchInput('submit', event.currentTarget.value);`);
+            }
+            if (process.env.LINGXI_TEST_ALLOW_DUPLICATE_RETRY === '1') {
+              const guard = 'if (!kind || disabled || !frameCurrent || retryPendingRef.current) return;';
+              assert.ok(result.includes(guard), 'negative control must allow a duplicate retry');
+              result = result.replace(guard, 'if (!kind || disabled || !frameCurrent) return;');
+            }
+            if (process.env.LINGXI_TEST_DISABLE_RETRY_FOCUS === '1') {
+              const restore = `        if (unconfirmedDraftRef.current && document.activeElement === retryButtonRef.current) {
+          inputElementRef.current?.focus({ preventScroll: true });
+        }
+`;
+              assert.ok(result.includes(restore), 'negative control must remove retry focus restoration');
+              result = result.replace(restore, '');
+            }
+            if (process.env.LINGXI_TEST_RETRY_WRONG_KIND === 'change' || process.env.LINGXI_TEST_RETRY_WRONG_KIND === 'submit') {
+              const retry = 'void dispatchInput(kind, draft).finally(() => {';
+              assert.ok(result.includes(retry), 'negative control must change the retry event kind');
+              result = result.replace(retry, `void dispatchInput('${process.env.LINGXI_TEST_RETRY_WRONG_KIND}', draft).finally(() => {`);
+            }
+            return result === source ? null : result;
           }
           if (!id.endsWith('/modUiAbovePrompt.tsx')) return null;
           let result = source;
@@ -63,6 +98,22 @@ test('Electron renders Native Client input and Select held events while keeping 
       if ((window as any).__holdRapidParentCommit && sessionId === 'mod-ui-client-rapid-input-session') {
         (window as any).__heldRapidParentCommit = commitParentFrame;
       } else commitParentFrame();`);
+          if (process.env.LINGXI_TEST_DISABLE_STALE_RUN_REJECTION_FENCE === '1') {
+            const guardedFault = `    if (!context || currentRevisionRef.current !== revision || context.site.committedRevision !== revision
+      || !context.isRevisionCurrent(revision)) return;`;
+            assert.ok(result.includes(guardedFault), 'negative control must remove Host revision fault validation');
+            result = result.replace(guardedFault, `    if (!context || currentRevisionRef.current !== revision || context.site.committedRevision !== revision) return;`);
+            const guardedRun = `    let frameResult;
+    try {
+      frameResult = await queueOperation(operation);
+    } catch (error) {
+      if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
+        || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;
+      throw error;
+    }`;
+            assert.ok(result.includes(guardedRun), 'negative control must remove stale run rejection validation');
+            result = result.replace(guardedRun, '    const frameResult = await queueOperation(operation);');
+          }
           if (process.env.LINGXI_TEST_DISABLE_SUPERSEDED_MARKER === '1') {
             const marker = "const superseded = request.event.type === 'input' ? nativeInputSuperseded : undefined;";
             assert.ok(result.includes(marker), 'negative control must remove the superseded input marker');

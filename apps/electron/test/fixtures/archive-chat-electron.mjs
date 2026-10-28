@@ -130,6 +130,38 @@ async function main() {
     await wait(`!${dialog} && window.archiveChatFixture.state().openedSession === 'fixture-neighbor'`);
     result.switchDidNotRestoreOldRow = await run(`document.activeElement !== document.querySelector('button[data-session-id="fixture-session"]')`);
 
+    // A's delayed archive outcome must not close or display an error in B's
+    // replacement dialog after a session switch.
+    const raceOutcomes = process.env.LINGXI_TEST_ARCHIVE_RACE_OUTCOME
+      ? [process.env.LINGXI_TEST_ARCHIVE_RACE_OUTCOME] : ['success', 'failure'];
+    for (const outcome of raceOutcomes) {
+      const completed = (await state()).completedHeldArchives;
+      await run(`window.archiveChatFixture.holdNextSidebarArchive(${JSON.stringify(outcome)})`);
+      await openSidebarArchiveWithKeyboard('fixture-session');
+      await pressKey('TAB');
+      await pressKey('TAB');
+      await pressKey('ENTER');
+      await wait(`window.archiveChatFixture.state().sidebarArchiveHeld`);
+      await run(`document.querySelector('button[data-session-id="fixture-neighbor"]').focus()`);
+      await pressKey('ENTER');
+      await wait(`!${dialog} && window.archiveChatFixture.state().openedSession === 'fixture-neighbor'`);
+      await openSidebarArchiveWithKeyboard('fixture-neighbor');
+      await run(`window.__replacementArchiveDialog = ${dialog}`);
+      await run(`window.archiveChatFixture.releaseSidebarArchive()`);
+      await wait(`window.archiveChatFixture.state().completedHeldArchives === ${completed + 1}`);
+      await delay(50);
+      if (!await run(`${dialog} === window.__replacementArchiveDialog && ${dialog}?.textContent.includes('Neighbor chat')`)) {
+        throw new Error(`delayed archive A ${outcome} closed or replaced B's dialog`);
+      }
+      if (await run(`Boolean(${dialog}.querySelector('[role=alert]')) || ${confirm}.disabled`)) {
+        throw new Error(`delayed archive A ${outcome} changed B's error or busy state`);
+      }
+      await pressKey('ESCAPE');
+      await wait(`!${dialog}`);
+      await run(`window.archiveChatFixture.resetSidebar()`);
+      await wait(`Boolean(document.querySelector('button[data-session-id="fixture-session"]'))`);
+    }
+
     await openSidebarArchiveWithKeyboard('fixture-session');
     await delay(250);
     result.sidebarHitTarget = await run(`(() => { const rect = ${confirm}.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.closest('button') === ${confirm}; })()`);

@@ -29,6 +29,11 @@ test('archive chat dialog guards pending work, confirms once, and restores keybo
       name: 'defer-archive-passive-effects',
       enforce: 'pre',
       transform(source, id) {
+        if (id.endsWith('/BetaDesktop.tsx') && process.env.LINGXI_TEST_DISABLE_ARCHIVE_OWNER_FENCE === '1') {
+          const guard = 'const ownsArchive = () => archiveRequest.current === version;';
+          assert.ok(source.includes(guard), 'negative control must remove archive request ownership');
+          return source.replace(guard, 'const ownsArchive = () => true;');
+        }
         if (id.endsWith('/BetaDesktop.tsx') && process.env.LINGXI_TEST_DISABLE_ARCHIVE_ROW_RESTORE === '1') {
           const callback = ' onRestoreFocus={restoreArchiveFocus}';
           assert.ok(source.includes(callback), 'negative control must remove sidebar focus restoration');

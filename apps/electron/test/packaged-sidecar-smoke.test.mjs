@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 
-import { GSTREAMER_PLUGIN_ENV, runPackagedMacBridgeMediaSmoke, runPackagedMacMediaProbe, sanitizedEnvironment, verifyBundledLinuxDependencies } from '../scripts/packaged-sidecar-smoke.mjs';
+import { GSTREAMER_PLUGIN_ENV, runPackagedMacBridgeMediaSmoke, runPackagedMacMediaProbe, runPackagedMacMediaSmoke, sanitizedEnvironment, verifyBundledLinuxDependencies } from '../scripts/packaged-sidecar-smoke.mjs';
 
 test('Linux packaged smoke uses only its own loader and plugin paths', () => {
   const source = {
@@ -113,6 +113,36 @@ test('macOS bridge media smoke rejects failure before initialization or unexpect
     await assert.rejects(() => runPackagedMacBridgeMediaSmoke(client), /did not reach the test offer/);
     assert.equal(client.unregistered, true);
   }
+});
+
+test('macOS media smoke probes dynamic bundles and reaches an offer for both link modes', async () => {
+  for (const bundled of [true, false]) {
+    const client = new FakeMediaClient();
+    let probeCount = 0;
+    await runPackagedMacMediaSmoke('/App.app/Contents/Resources', '/isolated', 'x64', client, {
+      verifyRuntime: (frameworks, sidecar, options) => {
+        assert.equal(frameworks, '/App.app/Contents/Frameworks');
+        assert.equal(sidecar, '/App.app/Contents/Resources/bin/bridge-server');
+        assert.deepEqual(options, { expectedArch: 'x86_64', appRoot: '/App.app' });
+        return { bundled };
+      },
+      runProbe: () => { probeCount += 1; },
+    });
+    assert.equal(probeCount, bundled ? 1 : 0);
+    assert.equal(client.commands.length, 1);
+    assert.equal(client.unregistered, true);
+  }
+});
+
+test('macOS media smoke rejects a missing dynamic runtime before attempting an offer', async () => {
+  const client = new FakeMediaClient();
+  let probeCount = 0;
+  await assert.rejects(() => runPackagedMacMediaSmoke('/App.app/Contents/Resources', '/isolated', 'arm64', client, {
+    verifyRuntime: () => { throw new Error('packaged GStreamer plugin is missing'); },
+    runProbe: () => { probeCount += 1; },
+  }), /packaged GStreamer plugin is missing/);
+  assert.equal(probeCount, 0);
+  assert.equal(client.commands.length, 0);
 });
 
 function fixture(t) {

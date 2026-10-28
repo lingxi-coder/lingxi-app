@@ -28,21 +28,39 @@ static int verify_loaded_images(const char *executable, const char *libraries,
   return 1;
 }
 
-static int run_pipeline(const char *description) {
+typedef enum { PIPELINE_ERROR, PIPELINE_EMPTY, PIPELINE_RECEIVED } PipelineResult;
+
+static void count_buffer(GstElement *sink, GstBuffer *buffer, GstPad *pad, gpointer data) {
+  (void)sink;
+  (void)pad;
+  if (gst_buffer_get_size(buffer) > 0) g_atomic_int_inc((gint *)data);
+}
+
+static PipelineResult run_pipeline(const char *description) {
   GError *error = NULL;
   GstElement *pipeline = gst_parse_launch(description, &error);
   if (!pipeline || error) {
     fprintf(stderr, "pipeline creation failed: %s\n", error ? error->message : "unknown error");
     if (error) g_error_free(error);
     if (pipeline) gst_object_unref(pipeline);
-    return 0;
+    return PIPELINE_ERROR;
   }
+  GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "probe_sink");
+  if (!sink) {
+    fprintf(stderr, "pipeline has no probe sink: %s\n", description);
+    gst_object_unref(pipeline);
+    return PIPELINE_ERROR;
+  }
+  gint buffers = 0;
+  g_object_set(sink, "signal-handoffs", TRUE, NULL);
+  g_signal_connect(sink, "handoff", G_CALLBACK(count_buffer), &buffers);
   GstBus *bus = gst_element_get_bus(pipeline);
   if (!bus || gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
     fprintf(stderr, "pipeline failed to start\n");
     if (bus) gst_object_unref(bus);
+    gst_object_unref(sink);
     gst_object_unref(pipeline);
-    return 0;
+    return PIPELINE_ERROR;
   }
   GstMessage *message = gst_bus_timed_pop_filtered(
       bus, 15 * GST_SECOND, GST_MESSAGE_EOS | GST_MESSAGE_ERROR);
@@ -62,8 +80,10 @@ static int run_pipeline(const char *description) {
   if (message) gst_message_unref(message);
   gst_element_set_state(pipeline, GST_STATE_NULL);
   gst_object_unref(bus);
+  gst_object_unref(sink);
   gst_object_unref(pipeline);
-  return ok;
+  if (!ok) return PIPELINE_ERROR;
+  return g_atomic_int_get(&buffers) > 0 ? PIPELINE_RECEIVED : PIPELINE_EMPTY;
 }
 
 int main(int argc, char **argv) {
@@ -116,12 +136,25 @@ int main(int argc, char **argv) {
     gst_object_unref(factory);
   }
   if (!verify_loaded_images(executable, libraries, plugins)) return 6;
-  if (!run_pipeline("fakesrc num-buffers=2 sizetype=fixed sizemax=1920 do-timestamp=true format=time ! "
-                    "audio/x-raw,format=S16LE,rate=48000,channels=1,layout=interleaved ! "
-                    "audioconvert ! audioresample ! opusenc ! opusdec ! fakesink sync=false") ||
-      !run_pipeline("fakesrc num-buffers=2 sizetype=fixed sizemax=16384 filltype=zero format=time ! "
-                    "video/x-raw,format=RGBA,width=64,height=64,framerate=30/1 ! "
-                    "identity datarate=491520 ! videoconvert ! vp8enc deadline=1 ! vp8dec ! videoconvert ! fakesink sync=false")) return 7;
+  // EOS alone does not prove any media reached the sink. This control must
+  // complete normally while dropping every buffer, and must remain empty.
+  if (run_pipeline("fakesrc num-buffers=2 sizetype=fixed sizemax=1024 ! "
+                   "identity drop-probability=1 ! fakesink name=probe_sink sync=false") != PIPELINE_EMPTY) {
+    fprintf(stderr, "empty pipeline negative control failed\n");
+    return 7;
+  }
+  if (run_pipeline("fakesrc num-buffers=2 sizetype=fixed sizemax=1920 do-timestamp=true format=time ! "
+                   "audio/x-raw,format=S16LE,rate=48000,channels=1,layout=interleaved ! "
+                   "audioconvert ! audioresample ! opusenc ! opusdec ! fakesink name=probe_sink sync=false") != PIPELINE_RECEIVED) {
+    fprintf(stderr, "audio pipeline did not deliver a nonempty buffer\n");
+    return 7;
+  }
+  if (run_pipeline("fakesrc num-buffers=2 sizetype=fixed sizemax=16384 filltype=zero format=time ! "
+                   "video/x-raw,format=RGBA,width=64,height=64,framerate=30/1 ! "
+                   "identity datarate=491520 ! videoconvert ! vp8enc deadline=1 ! vp8dec ! videoconvert ! fakesink name=probe_sink sync=false") != PIPELINE_RECEIVED) {
+    fprintf(stderr, "video pipeline did not deliver a nonempty buffer\n");
+    return 7;
+  }
   if (!verify_loaded_images(executable, libraries, plugins)) return 6;
   puts("packaged media plugins and audio/video pipelines OK");
   return 0;

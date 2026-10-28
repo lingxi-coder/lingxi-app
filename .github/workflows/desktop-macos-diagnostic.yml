@@ -1,7 +1,7 @@
 name: Desktop macOS package diagnostic
 on:
   push:
-    branches: [codex/media-macos-package-v2-9b8e]
+    branches: [codex/media-macos-package-v3-9b8e]
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"

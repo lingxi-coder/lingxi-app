@@ -172,6 +172,11 @@ function machOArchitectures(path) {
   return run('/usr/bin/lipo', ['-archs', path]).split(/\s+/).filter(Boolean);
 }
 
+function cachedMachOArchitectures(path, cache) {
+  if (!cache.has(path)) cache.set(path, machOArchitectures(path));
+  return cache.get(path);
+}
+
 function isSystemDependency(path) {
   return posix.normalize(path) === path && SYSTEM_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
@@ -209,7 +214,7 @@ function expandRpath(value, binaryPath, executablePath) {
   return value;
 }
 
-function dependencySource(reference, binaryPath, executablePath, sdkRoot, runpathStack) {
+function dependencySource(reference, binaryPath, executablePath, sdkRoot, runpathStack, expectedArch, architectureCache) {
   if (isSystemDependency(reference)) return null;
   const candidates = [];
   if (reference.startsWith('@loader_path/') || reference === '@loader_path'
@@ -226,6 +231,9 @@ function dependencySource(reference, binaryPath, executablePath, sdkRoot, runpat
   for (const candidate of candidates) {
     if (existsSync(candidate)) {
       const source = realpathSync(candidate);
+      // dyld continues searching when an existing image has no compatible
+      // architecture; do not mistake that image for the loaded dependency.
+      if (!cachedMachOArchitectures(source, architectureCache).includes(expectedArch)) continue;
       if (!isWithin(sdkRoot, source)) {
         fail(`GStreamer dependency resolves outside LINGXI_GSTREAMER_SDK_MACOS: ${reference} -> ${source}`);
       }
@@ -271,8 +279,13 @@ function rebaseBinary(binary, pluginDirectory, replacements, arch, isExecutable 
   addRpath(binary, pluginDirectory ? '@loader_path/../GStreamerLibraries' : '@loader_path', arch);
 }
 
-function findGStreamerReferences(sidecar, arch) {
-  return dylibDependencies(sidecar, arch).filter((dependency) => /(?:gstreamer|gst[a-z]|gst-)/i.test(dependency));
+function findGStreamerReferences(dependencies) {
+  return dependencies.filter((dependency) => /(?:gstreamer|gst[a-z]|gst-)/i.test(dependency));
+}
+
+function assertSystemOnlySidecar(dependencies, sidecar) {
+  const external = dependencies.find((dependency) => !isSystemDependency(dependency));
+  if (external) fail(`sidecar without a bundled GStreamer runtime has an unbundled non-system dependency: ${sidecar} -> ${external}`);
 }
 
 // Package only the requested native slice. Apart from reducing the artifact,
@@ -318,8 +331,10 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
   // Inspect the copied bytes, while resolving executable/loader-relative
   // paths from the original location. The source may change after copying.
   const stagedSidecar = realpathSync(sidecar);
-  const references = findGStreamerReferences(stagedSidecar, expectedArch);
+  const sidecarDependencies = dylibDependencies(stagedSidecar, expectedArch);
+  const references = findGStreamerReferences(sidecarDependencies);
   if (references.length === 0) {
+    assertSystemOnlySidecar(sidecarDependencies, stagedSidecar);
     rmSync(join(frameworksDirectory, 'GStreamerLibraries'), { recursive: true, force: true });
     rmSync(join(frameworksDirectory, 'GStreamerPlugins'), { recursive: true, force: true });
     return { bundled: false, pluginDirectory: null, libraries: [] };
@@ -339,13 +354,14 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
 
   const sourceByDestination = new Map();
   const destinationNames = new Map();
+  const architectureCache = new Map();
   const plugins = [];
   for (const name of REQUIRED_PLUGINS) {
     const source = join(pluginSource, name);
     if (!existsSync(source)) fail(`configured GStreamer SDK is missing required plugin ${source}`);
     const resolvedSource = realpathSync(source);
     if (!isWithin(sdkRoot, resolvedSource)) fail(`GStreamer plugin resolves outside configured SDK root: ${source} -> ${resolvedSource}`);
-    const architectures = machOArchitectures(source);
+    const architectures = cachedMachOArchitectures(resolvedSource, architectureCache);
     if (!architectures.includes(expectedArch)) fail(`GStreamer plugin ${name} has architectures ${architectures.join(', ')}, expected ${expectedArch}`);
     plugins.push({ source: resolvedSource, destination: join(pluginDirectory, name), plugin: true });
   }
@@ -375,7 +391,7 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
     }
     let info = metadata.get(source);
     if (!info) {
-      const archs = machOArchitectures(source);
+      const archs = cachedMachOArchitectures(source, architectureCache);
       if (!archs.includes(expectedArch)) fail(`GStreamer binary ${source} lacks ${expectedArch}: ${archs.join(', ')}`);
       const loaderPath = item.sidecar ? originalSidecar : source;
       const ownRpaths = rpaths(source, expectedArch).map((path) => {
@@ -406,7 +422,7 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
       const edge = JSON.stringify([destination, dependency]);
       let dependencyBinary;
       try {
-        dependencyBinary = dependencySource(dependency, item.sidecar ? originalSidecar : source, originalSidecar, sdkRoot, stack);
+        dependencyBinary = dependencySource(dependency, item.sidecar ? originalSidecar : source, originalSidecar, sdkRoot, stack, expectedArch, architectureCache);
       } catch (error) {
         // Static Mach-O metadata does not prove which loaded image calls
         // dlopen(). A missing edge in any reachable plugin caller context
@@ -455,7 +471,7 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
     // never change it. Otherwise any already-loaded image may prepend its
     // own runpath before the executable's, so check every such directory.
     try {
-      dependencySource(edge.dependency, edge.source, originalSidecar, sdkRoot, edge.pluginPrefix);
+      dependencySource(edge.dependency, edge.source, originalSidecar, sdkRoot, edge.pluginPrefix, expectedArch, architectureCache);
       continue;
     } catch (error) {
       if (!(error instanceof UnresolvedDependency)) throw error;
@@ -463,7 +479,7 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
     for (const path of potentialCallerRpaths) {
       let candidate;
       try {
-        candidate = dependencySource(edge.dependency, edge.source, originalSidecar, sdkRoot, [path]);
+        candidate = dependencySource(edge.dependency, edge.source, originalSidecar, sdkRoot, [path], expectedArch, architectureCache);
       } catch (error) {
         if (error instanceof UnresolvedDependency) continue;
         throw error;
@@ -519,8 +535,10 @@ export function verifyMacGStreamerRuntime(frameworksDirectory, sidecar, { expect
   }
   const arch = sidecarArchs[0];
   if (expectedArch && expectedArch !== arch) fail(`packaged macOS sidecar has architecture ${arch}; expected ${expectedArch}`);
-  if (!existsSync(pluginDirectory) && findGStreamerReferences(sidecar, arch).length === 0) {
+  const sidecarDependencies = dylibDependencies(sidecar, arch);
+  if (!existsSync(pluginDirectory) && findGStreamerReferences(sidecarDependencies).length === 0) {
     if (existsSync(libraryDirectory)) fail('packaged GStreamer libraries exist without the plugin directory');
+    assertSystemOnlySidecar(sidecarDependencies, sidecar);
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', sidecar], { stdio: 'pipe' });
     return { bundled: false };
   }

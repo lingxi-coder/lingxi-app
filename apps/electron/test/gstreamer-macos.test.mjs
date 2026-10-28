@@ -420,6 +420,65 @@ test('dyld prefers the immediate loader rpath to the sidecar rpath', macOnly, ()
   }
 });
 
+test('dyld skips incompatible slices in ordered rpaths without accepting missing or escaped dependencies', macOnly, () => {
+  for (const arch of ['arm64', 'x86_64']) {
+    const root = mkdtempSync(join(tmpdir(), 'lingxi-dyld-arch-order-'));
+    try {
+      const fixture = sdkFixture(root);
+      const nativeArch = process.arch === 'x64' ? 'x86_64' : 'arm64';
+      const wrongArch = arch === 'arm64' ? 'x86_64' : 'arm64';
+      const wrong = join(fixture.sdk, 'wrong-arch');
+      const correct = join(fixture.sdk, 'correct-arch');
+      const escape = join(fixture.sdk, 'escape');
+      const outside = join(root, 'outside-sdk');
+      for (const directory of [wrong, correct, escape, outside]) mkdirSync(directory);
+      const librarySource = join(root, 'arch-choice.c');
+      const mainSource = join(root, 'arch-choice-main.c');
+      writeFileSync(librarySource, 'int gst_choice(void) { return 42; }\n');
+      writeFileSync(mainSource, '#include <stdio.h>\nint gst_choice(void); int main(void) { printf("%d\\n", gst_choice()); return 0; }\n');
+      for (const [directory, slice] of [[wrong, wrongArch], [correct, arch]]) {
+        run('clang', ['-arch', slice, '-dynamiclib', '-Wl,-headerpad_max_install_names',
+          '-Wl,-install_name,@rpath/libgstchoice.dylib', '-o', join(directory, 'libgstchoice.dylib'), librarySource]);
+      }
+      copyFileSync(join(correct, 'libgstchoice.dylib'), join(outside, 'libgstchoice.dylib'));
+      symlinkSync(join(outside, 'libgstchoice.dylib'), join(escape, 'libgstchoice.dylib'));
+
+      const variants = [
+        { name: 'wrong-first', paths: [wrong, correct] },
+        { name: 'correct-first', paths: [correct, wrong] },
+        { name: 'missing', paths: [wrong, join(fixture.sdk, 'missing')], error: /cannot resolve GStreamer dependency @rpath\/libgstchoice/ },
+        { name: 'escaped', paths: [wrong, escape], error: /resolves outside LINGXI_GSTREAMER_SDK_MACOS/ },
+      ];
+      for (const variant of variants) {
+        const source = join(root, `sidecar-${variant.name}`);
+        run('clang', ['-arch', arch, '-Wl,-headerpad_max_install_names',
+          ...variant.paths.map((path) => `-Wl,-rpath,${path}`), `-Wl,-rpath,${fixture.lib}`,
+          '-o', source, mainSource, join(correct, 'libgstchoice.dylib')]);
+        if (arch === nativeArch) {
+          if (variant.name === 'missing') assert.throws(() => runCleanSidecar(source), /Command failed/);
+          else assert.equal(runCleanSidecar(source), '42', `${variant.name}: actual dyld choice`);
+        }
+        const stageRoot = join(root, `stage-${variant.name}`);
+        const app = join(stageRoot, 'App.app');
+        const frameworks = join(app, 'Contents', 'Frameworks');
+        const sidecar = join(app, 'Contents', 'Resources', 'bin', 'bridge-server');
+        mkdirSync(frameworks, { recursive: true });
+        const stage = () => withSdk(fixture.sdk, () => stageDarwinSidecar(source, sidecar, frameworks, arch, stageRoot));
+        if (variant.error) {
+          assert.throws(stage, variant.error, `${variant.name}: ${arch}`);
+        } else {
+          const prepared = stage();
+          signFixture(sidecar, prepared);
+          assert.equal(verifyMacGStreamerRuntime(frameworks, sidecar, { expectedArch: arch, appRoot: app }).bundled, true);
+          if (arch === nativeArch) assert.equal(runCleanSidecar(sidecar), '42', `${variant.name}: rebased dyld choice`);
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test('an SDK directory is not guessed when dyld has no runpath to it', macOnly, () => {
   const root = mkdtempSync(join(tmpdir(), 'lingxi-dyld-no-runpath-'));
   try {
@@ -553,6 +612,57 @@ test('static macOS sidecars do not retain an orphan GStreamer bundle', macOnly, 
     assert.equal(verifyMacGStreamerRuntime(frameworks, sidecar).bundled, false);
     mkdirSync(libraryDirectory);
     assert.throws(() => verifyMacGStreamerRuntime(frameworks, sidecar), /libraries exist without the plugin directory/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a sidecar cannot hide indirect GStreamer dependencies behind the static link mode', macOnly, () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-gstreamer-indirect-'));
+  try {
+    const fixture = sdkFixture(root);
+    const arch = process.arch === 'x64' ? 'x86_64' : 'arm64';
+    const wrapperSource = join(root, 'wrapper.c');
+    const mainSource = join(root, 'indirect-main.c');
+    const wrapper = join(fixture.lib, 'libwrapper.dylib');
+    writeFileSync(wrapperSource, 'int gst_fixture(void); int wrapped(void) { return gst_fixture(); }\n');
+    writeFileSync(mainSource, 'int wrapped(void); int main(void) { return wrapped() - 1; }\n');
+    run('clang', ['-arch', arch, '-dynamiclib', '-Wl,-headerpad_max_install_names',
+      '-Wl,-install_name,@rpath/libwrapper.dylib', `-Wl,-rpath,${fixture.lib}`,
+      '-o', wrapper, wrapperSource, fixture.base]);
+    run('clang', ['-arch', arch, '-Wl,-headerpad_max_install_names', `-Wl,-rpath,${fixture.lib}`,
+      '-o', fixture.sidecar, mainSource, wrapper]);
+    runCleanSidecar(fixture.sidecar);
+    const frameworks = join(root, 'App.app', 'Contents', 'Frameworks');
+    mkdirSync(frameworks, { recursive: true });
+    assert.throws(
+      () => withSdk(fixture.sdk, () => prepareMacGStreamerRuntime(fixture.sidecar, frameworks, arch)),
+      /unbundled non-system dependency.*@rpath\/libwrapper/,
+    );
+    run('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', fixture.sidecar]);
+    assert.throws(
+      () => verifyMacGStreamerRuntime(frameworks, fixture.sidecar, { expectedArch: arch }),
+      /unbundled non-system dependency.*@rpath\/libwrapper/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a sidecar with direct dynamic GStreamer cannot pass without its plugin bundle', macOnly, () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-gstreamer-missing-bundle-'));
+  try {
+    const fixture = sdkFixture(root);
+    const arch = process.arch === 'x64' ? 'x86_64' : 'arm64';
+    const frameworks = join(root, 'App.app', 'Contents', 'Frameworks');
+    mkdirSync(frameworks, { recursive: true });
+    const prepared = withSdk(fixture.sdk, () => prepareMacGStreamerRuntime(fixture.sidecar, frameworks, arch));
+    signFixture(fixture.sidecar, prepared);
+    rmSync(prepared.pluginDirectory, { recursive: true });
+    assert.throws(
+      () => verifyMacGStreamerRuntime(frameworks, fixture.sidecar, { expectedArch: arch }),
+      /packaged GStreamer plugin is missing/,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

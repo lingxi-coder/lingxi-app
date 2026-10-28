@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BridgeClient } from '@lingxi/bridge-client';
+import { verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
 import { verifyPortableGStreamerRuntime } from './gstreamer-portable.mjs';
 
 import {
@@ -179,6 +180,21 @@ export async function runPackagedMacBridgeMediaSmoke(client) {
   }
 }
 
+/** Check the packaged link mode before exercising the native media offer. */
+export async function runPackagedMacMediaSmoke(resources, tempRoot, arch, client, {
+  verifyRuntime = verifyMacGStreamerRuntime,
+  runProbe = runPackagedMacMediaProbe,
+} = {}) {
+  const frameworks = resolve(resources, '..', 'Frameworks');
+  const sidecar = join(resources, 'bin', 'bridge-server');
+  const runtime = verifyRuntime(frameworks, sidecar, {
+    expectedArch: arch === 'x64' ? 'x86_64' : arch,
+    appRoot: resolve(resources, '..', '..'),
+  });
+  if (runtime.bundled) runProbe(resources, tempRoot, arch);
+  await runPackagedMacBridgeMediaSmoke(client);
+}
+
 /** Require every loaded manifest library to resolve to its exact packaged file. */
 export function verifyBundledLinuxDependencies(output, resources, manifest) {
   const runtimePath = join(resources, 'gstreamer');
@@ -295,11 +311,10 @@ export async function runPackagedSidecarSmoke(root, platform, arch) {
     assert.ok(lockfile, 'packaged sidecar must publish a discovery lockfile');
     assert.equal(child.exitCode, null, `packaged sidecar exited early: ${stderr}`);
     if (platform === 'darwin') {
-      runPackagedMacMediaProbe(resources, tempRoot, arch);
       const client = new BridgeClient({ lockfilePath: join(bridgeDir, lockfile) });
       try {
         await client.connect();
-        await runPackagedMacBridgeMediaSmoke(client);
+        await runPackagedMacMediaSmoke(resources, tempRoot, arch, client);
       } finally { client.close(); }
     }
     await terminate(child, join(bridgeDir, lockfile));

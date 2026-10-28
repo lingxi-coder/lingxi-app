@@ -16,7 +16,7 @@ test('Bridge keeps workspace GST settings for tools while selecting a host codec
     mkdirSync(join(resources, 'bin'), { recursive: true });
     writeFileSync(bin, `#!/usr/bin/env node
 const {spawnSync} = require('node:child_process');
-const keys = ['GST_PLUGIN_PATH', 'GST_REGISTRY_1_0', 'GST_TRACERS', 'LINGXI_GSTREAMER_PLUGIN_DIR', 'lingxi_gstreamer_plugin_dir'];
+const keys = ['GST_PLUGIN_PATH', 'GST_REGISTRY_1_0', 'GST_TRACERS', 'LINGXI_GSTREAMER_PLUGIN_DIR', 'lingxi_gstreamer_plugin_dir', 'HOME', 'USERPROFILE', 'TMPDIR', 'TMP', 'TEMP', 'SystemRoot', 'WINDIR'];
 const select = () => Object.fromEntries(keys.map(key => [key, process.env[key] ?? null]));
 const source = '(' + select.toString() + ')()';
 const child = spawnSync(process.execPath, ['-e', 'const keys=' + JSON.stringify(keys) + ';process.stdout.write(JSON.stringify(' + source + '))'], {encoding:'utf8'});
@@ -37,6 +37,8 @@ process.stdout.write(JSON.stringify({bridge:select(), tool:JSON.parse(child.stdo
       GST_PLUGIN_PATH: '/workspace/plugins', GST_REGISTRY_1_0: '/workspace/registry',
       GST_TRACERS: 'workspace-tracer', LINGXI_GSTREAMER_PLUGIN_DIR: '/workspace/override',
       lingxi_gstreamer_plugin_dir: '/workspace/alias',
+      HOME: '/workspace/home', USERPROFILE: '/workspace/profile', TMPDIR: '/workspace/tmpdir',
+      TMP: '/workspace/tmp', TEMP: '/workspace/temp', SystemRoot: '/workspace/system', WINDIR: '/workspace/windir',
     };
     for (const isPackaged of [false, true]) {
       const launch = { workspace: root, trusted: true, settingsEnvironment };
@@ -60,6 +62,8 @@ process.stdout.write(JSON.stringify({bridge:select(), tool:JSON.parse(child.stdo
         GST_PLUGIN_PATH: '/workspace/plugins', GST_REGISTRY_1_0: '/workspace/registry',
         GST_TRACERS: 'workspace-tracer', LINGXI_GSTREAMER_PLUGIN_DIR: selected,
         lingxi_gstreamer_plugin_dir: null,
+        HOME: '/workspace/home', USERPROFILE: '/workspace/profile', TMPDIR: '/workspace/tmpdir',
+        TMP: '/workspace/tmp', TEMP: '/workspace/temp', SystemRoot: '/workspace/system', WINDIR: '/workspace/windir',
       };
       assert.deepEqual(observed.bridge, expected);
       assert.deepEqual(observed.tool, expected);

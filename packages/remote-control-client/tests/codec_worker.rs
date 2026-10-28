@@ -11,6 +11,237 @@ fn codec_worker_entry() {
     remote_control_client::isolated_codec::run_worker().unwrap();
 }
 
+const ENV_KEYS: &[&str] = &[
+    "HOME",
+    "USERPROFILE",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "SystemRoot",
+    "WINDIR",
+    "PATH",
+    "GST_PLUGIN_PATH_1_0",
+    "GST_REGISTRY_1_0",
+    "GST_TRACERS",
+];
+
+fn observed_environment() -> serde_json::Value {
+    let mut values = serde_json::Map::new();
+    for key in ENV_KEYS {
+        values.insert(
+            (*key).to_owned(),
+            std::env::var_os(key)
+                .map(|value| serde_json::Value::String(value.to_string_lossy().into_owned()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    values.insert(
+        "cwd".into(),
+        serde_json::Value::String(
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    );
+    serde_json::Value::Object(values)
+}
+
+#[test]
+#[ignore = "private worker environment subprocess fixture"]
+fn codec_worker_environment_entry() {
+    let directory = std::env::current_dir().unwrap();
+    std::fs::write(
+        directory.parent().unwrap().join("worker-environment.json"),
+        serde_json::to_vec(&observed_environment()).unwrap(),
+    )
+    .unwrap();
+    remote_control_client::isolated_codec::run_worker().unwrap();
+}
+
+#[test]
+#[ignore = "private tool environment subprocess fixture"]
+fn codec_tool_environment_entry() {
+    let root = std::path::PathBuf::from(std::env::var_os("LINGXI_TEST_ENV_ROOT").unwrap());
+    std::fs::write(
+        root.join("tool-environment.json"),
+        serde_json::to_vec(&observed_environment()).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "private poisoned-parent subprocess fixture"]
+async fn codec_environment_driver() {
+    let root = std::path::PathBuf::from(std::env::var_os("LINGXI_TEST_ENV_ROOT").unwrap());
+    let canonical_root = root.canonicalize().unwrap();
+    let original = observed_environment();
+    let mut launch = launch(&root);
+    *launch.arguments.last_mut().unwrap() = OsString::from("codec_worker_environment_entry");
+    let worker = CodecClient::spawn(launch, true, true).await.unwrap();
+    let observed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("worker-environment.json")).unwrap())
+            .unwrap();
+    let cwd = std::path::PathBuf::from(observed["cwd"].as_str().unwrap());
+    assert_eq!(
+        cwd.canonicalize().unwrap().parent(),
+        Some(canonical_root.as_path())
+    );
+    let home = cwd.join("home");
+    let temp = cwd.join("tmp");
+    assert!(home.is_dir() && temp.is_dir());
+    for key in ["HOME", "USERPROFILE"] {
+        assert_eq!(
+            std::path::Path::new(observed[key].as_str().unwrap())
+                .canonicalize()
+                .unwrap(),
+            home.canonicalize().unwrap(),
+            "{key} is not the worker's private home"
+        );
+        assert_ne!(observed[key], original[key], "{key} leaked from parent");
+    }
+    for key in ["TMPDIR", "TMP", "TEMP"] {
+        assert_eq!(
+            std::path::Path::new(observed[key].as_str().unwrap())
+                .canonicalize()
+                .unwrap(),
+            temp.canonicalize().unwrap(),
+            "{key} is not the worker's private temp directory"
+        );
+        assert_ne!(observed[key], original[key], "{key} leaked from parent");
+    }
+    #[cfg(windows)]
+    {
+        let paths = platform_windows::system_paths::system_paths().unwrap();
+        assert_eq!(
+            observed["SystemRoot"].as_str().unwrap(),
+            paths.windows_dir.to_string_lossy(),
+            "SystemRoot is not the host system root"
+        );
+        assert_eq!(
+            observed["WINDIR"].as_str().unwrap(),
+            paths.windows_dir.to_string_lossy()
+        );
+        assert_ne!(observed["SystemRoot"], original["SystemRoot"]);
+        let host_root =
+            std::path::PathBuf::from(std::env::var_os("LINGXI_TEST_EXPECTED_SYSTEM_ROOT").unwrap())
+                .canonicalize()
+                .unwrap();
+        assert_eq!(paths.windows_dir.canonicalize().unwrap(), host_root);
+        assert_eq!(
+            paths.system_dir.canonicalize().unwrap(),
+            host_root.join("System32").canonicalize().unwrap()
+        );
+        let actual: Vec<_> = std::env::split_paths(observed["PATH"].as_str().unwrap()).collect();
+        assert_eq!(actual.last(), Some(&paths.system_dir));
+        let poison = root.join("hostile").join("path").canonicalize().unwrap();
+        assert!(!actual
+            .iter()
+            .any(|entry| entry.canonicalize().ok().as_ref() == Some(&poison)));
+    }
+    #[cfg(not(windows))]
+    {
+        assert!(observed["SystemRoot"].is_null());
+        assert!(observed["WINDIR"].is_null());
+        assert!(observed["PATH"].is_null());
+    }
+    assert_eq!(observed["GST_PLUGIN_PATH_1_0"], "");
+    assert_ne!(observed["GST_REGISTRY_1_0"], original["GST_REGISTRY_1_0"]);
+    assert!(observed["GST_TRACERS"].is_null());
+    let mut packets = 0;
+    for _ in 0..8 {
+        packets += worker
+            .encode_audio(48_000, &[0.1; 960])
+            .await
+            .unwrap()
+            .len();
+    }
+    assert!(packets > 0);
+    worker.shutdown().await.unwrap();
+    assert!(
+        !cwd.exists(),
+        "private directory must be removed only after worker exit"
+    );
+
+    // A user tool still inherits the coordinator's workspace variables. This
+    // is a separate child and cannot observe the codec's private env rewrite.
+    let tool = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "codec_tool_environment_entry"])
+        .output()
+        .unwrap();
+    assert!(
+        tool.status.success(),
+        "tool fixture failed: {}",
+        String::from_utf8_lossy(&tool.stderr)
+    );
+    let observed_tool: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("tool-environment.json")).unwrap())
+            .unwrap();
+    for key in ENV_KEYS {
+        assert_eq!(
+            observed_tool[key], original[key],
+            "tool lost workspace {key}"
+        );
+    }
+    std::fs::remove_file(root.join("worker-environment.json")).unwrap();
+    std::fs::remove_file(root.join("tool-environment.json")).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_parent_environment_is_not_inherited_by_the_codec_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let hostile = root.path().join("hostile");
+    std::fs::create_dir(&hostile).unwrap();
+    let poison_path = hostile.join("path");
+    std::fs::create_dir(&poison_path).unwrap();
+    let mut path_entries: Vec<_> =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    path_entries.insert(0, poison_path);
+    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--ignored",
+            "--exact",
+            "codec_environment_driver",
+            "--nocapture",
+        ])
+        .kill_on_drop(true)
+        .env("LINGXI_TEST_ENV_ROOT", root.path())
+        .env("PATH", std::env::join_paths(path_entries).unwrap());
+    #[cfg(windows)]
+    command.env(
+        "LINGXI_TEST_EXPECTED_SYSTEM_ROOT",
+        std::env::var_os("SystemRoot").expect("host Windows system root"),
+    );
+    for key in [
+        "HOME",
+        "USERPROFILE",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SystemRoot",
+        "WINDIR",
+    ] {
+        let value = hostile.join(key);
+        std::fs::create_dir(&value).unwrap();
+        command.env(key, value);
+    }
+    command
+        .env("GST_PLUGIN_PATH_1_0", hostile.join("plugins"))
+        .env("GST_REGISTRY_1_0", hostile.join("registry"))
+        .env("GST_TRACERS", "hostile-tracer");
+    let output = tokio::time::timeout(std::time::Duration::from_secs(45), command.output())
+        .await
+        .expect("environment driver timed out")
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "environment driver failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed;"));
+}
+
 fn launch(root: &std::path::Path) -> CodecLaunch {
     let (executable, arguments) = match std::env::var_os("LINGXI_TEST_CODEC_GIO_WRAPPER") {
         Some(wrapper) => {

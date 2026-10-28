@@ -729,23 +729,18 @@ fn add_system_environment(
     command: &mut Command,
     plugin_directory: Option<&std::path::Path>,
     loader_directory: Option<&std::path::Path>,
+    private_home: &std::path::Path,
+    private_temp: &std::path::Path,
 ) -> io::Result<()> {
-    // Only host-selected OS support variables; no inherited GST, loader, PATH,
-    // credentials, workspace settings or project-controlled cwd.
+    // Do not copy workspace-merged HOME, temp or Windows system variables.
+    // The child owns its home/temp, while Windows system paths come from the OS.
     #[cfg(not(any(target_os = "linux", windows)))]
     let _ = loader_directory;
-    for key in [
-        "HOME",
-        "USERPROFILE",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "SystemRoot",
-        "WINDIR",
-    ] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
+    for key in ["HOME", "USERPROFILE"] {
+        command.env(key, private_home);
+    }
+    for key in ["TMPDIR", "TMP", "TEMP"] {
+        command.env(key, private_temp);
     }
     if let Some(path) = plugin_directory {
         command.env("LINGXI_GSTREAMER_PLUGIN_DIR", path);
@@ -761,13 +756,14 @@ fn add_system_environment(
     }
     #[cfg(windows)]
     {
+        let system = platform_windows::system_paths::system_paths()?;
+        command.env("SystemRoot", &system.windows_dir);
+        command.env("WINDIR", &system.windows_dir);
         let mut paths = Vec::new();
         if let Some(path) = loader_directory {
             paths.push(path.to_path_buf());
         }
-        if let Some(system) = std::env::var_os("SystemRoot") {
-            paths.push(PathBuf::from(system).join("System32"));
-        }
+        paths.push(system.system_dir);
         command.env(
             "PATH",
             std::env::join_paths(paths).map_err(|_| failure("media loader path invalid"))?,
@@ -812,6 +808,10 @@ impl CodecClient {
             .prefix("lingxi-codec-")
             .tempdir_in(private_root)?;
         let registry = directory.path().join("registry.bin");
+        let private_home = directory.path().join("home");
+        let private_temp = directory.path().join("tmp");
+        std::fs::create_dir(&private_home)?;
+        std::fs::create_dir(&private_temp)?;
         // GIO can otherwise auto-relocate modules next to libgio or fall back
         // to a build-machine path. Keep both module loading and plugin
         // installation inside this private process-owned directory; packaged
@@ -841,6 +841,8 @@ impl CodecClient {
             &mut command,
             plugin_directory.as_deref(),
             loader_directory.as_deref(),
+            &private_home,
+            &private_temp,
         )?;
         command.env("GST_REGISTRY_1_0", &registry);
         command.env("GIO_MODULE_DIR", &gio_modules);

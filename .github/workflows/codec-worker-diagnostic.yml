@@ -55,7 +55,7 @@ jobs:
           python3 - "$RUNNER_TEMP/harness-source.json" <<'PY'
           import json, sys
           source = json.load(open(sys.argv[1], encoding='utf8'))
-          expected = '143e97e8fc6b59505a168f537a45446d758c29f2'
+          expected = '41ead2ca341e4ef259faf8b101da4e552f9cf40e'
           assert source['revision'] == expected, source
           assert source['development'] is False, source
           print('Verified canonical locked Harness revision', source['revision'])
@@ -105,6 +105,64 @@ jobs:
           grep -F 'assertion failed: executable.is_absolute() && executable.is_file()' "$test_log"
       - name: Verify timestamp and environment tests reject controlled regressions
         run: python3 scripts/ci/probe_codec_negative_controls.py "$GITHUB_WORKSPACE/target/debug/bridge-server"
+      - name: Verify HOME and temporary-directory isolation with a real subprocess
+        run: python3 scripts/ci/probe_codec_environment_negative.py
+      - name: Observe idle Bridge media loads and selected API calls
+        run: python3 scripts/ci/probe_bridge_media_environment.py --bridge "$GITHUB_WORKSPACE/target/debug/bridge-server"
+
+  windows-x64:
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - name: Enable Windows long paths and Git symlinks
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          git config --global core.symlinks true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Ensure Windows crypto assembler is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+      - name: Verify the pinned Rust compiler
+        shell: bash
+        run: |
+          grep -Fx 'channel = "1.94.0"' rust-toolchain.toml
+          rustc --version | grep -E '^rustc 1\.94\.0 '
+      - name: Install the pinned official GStreamer SDK
+        shell: bash
+        run: python3 scripts/ci/gstreamer_sdk.py windows --root "$RUNNER_TEMP/gstreamer-sdk/windows"
+      - name: Select the installed plugin directory
+        shell: bash
+        run: |
+          plugin_dir="$("$PKG_CONFIG" --variable=pluginsdir gstreamer-1.0)"
+          test -d "$plugin_dir"
+          printf 'LINGXI_GSTREAMER_PLUGIN_DIR=%s\n' "$plugin_dir" >> "$GITHUB_ENV"
+          "$PKG_CONFIG" --modversion gstreamer-1.0
+      - name: Verify the exact locked Harness source
+        shell: bash
+        run: |
+          python3 scripts/lib/runtime_source.py --json > "$RUNNER_TEMP/harness-source.json"
+          python3 - "$RUNNER_TEMP/harness-source.json" <<'PY'
+          import json, sys
+          source = json.load(open(sys.argv[1], encoding='utf8'))
+          expected = '41ead2ca341e4ef259faf8b101da4e552f9cf40e'
+          assert source['revision'] == expected, source
+          assert source['development'] is False, source
+          print('Verified canonical locked Harness revision', source['revision'])
+          PY
+      - name: Test real Windows worker and hostile parent environment
+        run: cargo test --locked -p remote-control-client --features native-media --test codec_worker -- --test-threads=1 --nocapture --color never
+      - name: Verify HOME, temporary-directory and Windows system-root negative controls
+        run: python scripts/ci/probe_codec_environment_negative.py
 
   linux-static:
     runs-on: ubuntu-22.04

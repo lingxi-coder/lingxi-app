@@ -14,11 +14,12 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch, Mutex},
 };
 
 const MAX_REQUEST: usize = 512 * 1024;
 const MAX_TERMINALS: usize = 32;
+const MAX_RESPONSE_BACKLOG: usize = 160;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -69,52 +70,154 @@ impl Utf8Stream {
     }
 }
 
-// A child exit and the PTY output stream have independent lifetimes. In
-// particular, the Windows pseudoconsole keeps its output pipe open while the
-// terminal handle exists. Report the actual child wait result without waiting
-// for pipe EOF, and keep forwarding any output that arrives afterward.
-async fn forward_terminal_events(
-    terminal_id: String,
-    mut output: mpsc::Receiver<Vec<u8>>,
-    mut exited: oneshot::Receiver<i32>,
-    events: mpsc::Sender<Value>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalPhase {
+    Running,
+    ExitObserved,
+    Exited,
+    Unknown,
+    Closed,
+}
+
+struct TerminalState {
+    // Input admission and lifecycle transitions share this lock. An input
+    // already admitted before a transition may complete; later ones cannot.
+    phase: Mutex<TerminalPhase>,
+    closed: watch::Sender<bool>,
+    output_drained: AtomicBool,
+}
+
+impl TerminalState {
+    fn new() -> Self {
+        let (closed, _) = watch::channel(false);
+        Self {
+            phase: Mutex::new(TerminalPhase::Running),
+            closed,
+            output_drained: AtomicBool::new(false),
+        }
+    }
+
+    async fn close(&self) {
+        let mut phase = self.phase.lock().await;
+        *phase = TerminalPhase::Closed;
+        self.closed.send_replace(true);
+    }
+}
+
+struct TerminalEntry {
+    handle: Arc<ProcessHandle>,
+    state: Arc<TerminalState>,
+}
+
+// Reserve capacity before taking the lifecycle lock. Once close changes the
+// state, no old instance can enqueue another event under a reused terminal ID.
+async fn send_terminal_event(
+    state: &TerminalState,
+    events: &mpsc::Sender<Value>,
+    closed: &mut watch::Receiver<bool>,
+    event: Value,
+    confirmed_exit: bool,
 ) -> bool {
-    let mut utf8 = Utf8Stream::default();
-    let mut output_open = true;
-    let mut exit_open = true;
-    while output_open || exit_open {
-        tokio::select! {
-            bytes = output.recv(), if output_open => {
-                let (data, ended) = match bytes {
-                    Some(bytes) => (utf8.push(&bytes, false), false),
-                    None => (utf8.push(&[], true), true),
-                };
-                output_open = !ended;
-                if !data.is_empty()
-                    && events.send(json!({"kind":"output","terminalId":terminal_id,"data":data})).await.is_err()
-                {
-                    return false;
-                }
-            }
-            result = &mut exited, if exit_open => {
-                exit_open = false;
-                let Ok(code) = result else {
-                    // A lost wait observation is not evidence that the child exited.
-                    return false;
-                };
-                // The PTY backend uses -1 for a failed wait or an exit code
-                // that cannot be represented as i32. Neither proves exit here.
-                if code == -1 {
-                    return false;
-                }
-                if events.send(json!({"kind":"exit","terminalId":terminal_id,"exitCode":code})).await.is_err() {
-                    return false;
-                }
-            }
-            () = events.closed() => return false,
+    if *closed.borrow() {
+        return true;
+    }
+    let permit = tokio::select! {
+        result = events.reserve() => match result { Ok(permit) => permit, Err(_) => return false },
+        _ = closed.changed() => return true,
+    };
+    let mut phase = state.phase.lock().await;
+    if *phase != TerminalPhase::Closed {
+        permit.send(event);
+        // Eviction must not cancel a confirmed exit before its frame has been
+        // queued. The frame precedes any later create response on this queue.
+        if confirmed_exit && *phase == TerminalPhase::ExitObserved {
+            *phase = TerminalPhase::Exited;
         }
     }
     true
+}
+
+// Output and wait observation are polled independently, so a full event queue
+// cannot prevent the broker from closing input admission when wait is unknown.
+async fn forward_terminal_events(
+    terminal_id: String,
+    mut output: mpsc::Receiver<Vec<u8>>,
+    exited: oneshot::Receiver<i32>,
+    events: mpsc::Sender<Value>,
+    state: Arc<TerminalState>,
+) -> bool {
+    let output_task = async {
+        let mut closed = state.closed.subscribe();
+        if *closed.borrow() {
+            return true;
+        }
+        let mut utf8 = Utf8Stream::default();
+        loop {
+            // send_terminal_event may have consumed the close watch change
+            // while waiting for capacity. Do not wait for a second change.
+            if *closed.borrow() {
+                return true;
+            }
+            tokio::select! {
+                bytes = output.recv() => {
+                    let (data, ended) = match bytes {
+                        Some(bytes) => (utf8.push(&bytes, false), false),
+                        None => (utf8.push(&[], true), true),
+                    };
+                    if !data.is_empty() && !send_terminal_event(&state, &events, &mut closed,
+                        json!({"kind":"output","terminalId":terminal_id,"data":data}), false).await {
+                        return false;
+                    }
+                    if ended {
+                        // EOF is observed only after the final UTF-8 chunk has
+                        // been queued; it is not evidence of process cleanup.
+                        state.output_drained.store(true, Ordering::Release);
+                        return true;
+                    }
+                }
+                _ = closed.changed() => return true,
+                () = events.closed() => return false,
+            }
+        }
+    };
+    let exit_task = async {
+        let mut closed = state.closed.subscribe();
+        if *closed.borrow() {
+            return true;
+        }
+        let result = tokio::select! {
+            result = exited => result,
+            _ = closed.changed() => return true,
+            () = events.closed() => return false,
+        };
+        let (event, confirmed_exit) = {
+            let mut phase = state.phase.lock().await;
+            if *phase == TerminalPhase::Closed {
+                return true;
+            }
+            match result {
+                Ok(code) if code != -1 => {
+                    *phase = TerminalPhase::ExitObserved;
+                    (
+                        json!({"kind":"exit","terminalId":terminal_id,"exitCode":code}),
+                        true,
+                    )
+                }
+                // -1 also represents a successful wait whose code overflows
+                // i32, so the SDK value cannot prove either exit or liveness.
+                _ => {
+                    *phase = TerminalPhase::Unknown;
+                    (
+                        json!({"kind":"unknown","terminalId":terminal_id,"reason":"exit-observation-unavailable"}),
+                        false,
+                    )
+                }
+            }
+        };
+        send_terminal_event(&state, &events, &mut closed, event, confirmed_exit).await
+    };
+    let (output_ok, exit_ok) = tokio::join!(output_task, exit_task);
+    output_ok && exit_ok
 }
 
 fn shell(request: &Request) -> Result<(String, Vec<String>)> {
@@ -403,7 +506,7 @@ async fn terminate_tree(handle: &ProcessHandle) {
 
 async fn dispatch(
     request: &Request,
-    terminals: &mut HashMap<String, Arc<ProcessHandle>>,
+    terminals: &mut HashMap<String, TerminalEntry>,
     events: &mpsc::Sender<Value>,
 ) -> Result<()> {
     if request.kind != "create"
@@ -422,25 +525,27 @@ async fn dispatch(
     }
     match request.kind.as_str() {
         "create" => {
-            // A shell the user exited is not a live terminal: without this the
-            // map fills with dead entries and `create` fails permanently. Reap
-            // each evicted handle the way `close` does — `ProcessHandle::drop`
-            // only kills the shell's own (already dead) process group, so a job
-            // the shell reparented (`nohup … &`) would otherwise survive both
-            // this eviction and the shutdown sweep, which iterates only the
-            // handles still in this map.
-            let exited: Vec<String> = terminals
-                .iter()
-                .filter(|(_, handle)| handle.has_exited())
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in exited {
-                if let Some(handle) = terminals.remove(&id) {
-                    terminate_tree(&handle).await;
-                }
-            }
             if terminals.contains_key(&request.terminal_id) {
                 bail!("terminal already exists");
+            }
+            // Keep exited output available while its tab remains open. At the
+            // limit, a confirmed exit AND drained output permit eviction. The
+            // SDK's has_exited flag is also set on failed/overflowed waits.
+            if terminals.len() >= MAX_TERMINALS {
+                let mut exited = Vec::new();
+                for (id, entry) in terminals.iter() {
+                    if *entry.state.phase.lock().await == TerminalPhase::Exited
+                        && entry.state.output_drained.load(Ordering::Acquire)
+                    {
+                        exited.push(id.clone());
+                    }
+                }
+                for id in exited {
+                    if let Some(entry) = terminals.remove(&id) {
+                        entry.state.close().await;
+                        terminate_tree(&entry.handle).await;
+                    }
+                }
             }
             if terminals.len() >= MAX_TERMINALS {
                 bail!("terminal limit reached");
@@ -461,15 +566,28 @@ async fn dispatch(
             )
             .await?;
             let handle = Arc::new(process.session);
-            terminals.insert(request.terminal_id.clone(), handle.clone());
+            let state = Arc::new(TerminalState::new());
+            terminals.insert(
+                request.terminal_id.clone(),
+                TerminalEntry {
+                    handle: handle.clone(),
+                    state: state.clone(),
+                },
+            );
             let terminal_id = request.terminal_id.clone();
             let events = events.clone();
             // The map owns the PTY. The forwarding task must not keep it alive:
             // closing the last handle is what lets ConPTY's output pipe reach EOF.
             let handle = Arc::downgrade(&handle);
             tokio::spawn(async move {
-                if !forward_terminal_events(terminal_id, process.stdout_rx, process.exit_rx, events)
-                    .await
+                if !forward_terminal_events(
+                    terminal_id,
+                    process.stdout_rx,
+                    process.exit_rx,
+                    events,
+                    state,
+                )
+                .await
                 {
                     if let Some(handle) = handle.upgrade() {
                         handle.terminate();
@@ -478,11 +596,19 @@ async fn dispatch(
             });
         }
         "input" => {
-            let handle = terminals
+            let entry = terminals
                 .get(&request.terminal_id)
                 .context("unknown terminal")?;
-            if handle.has_exited() {
-                bail!("terminal has exited");
+            let phase = entry.state.phase.lock().await;
+            match *phase {
+                TerminalPhase::ExitObserved | TerminalPhase::Exited => bail!("terminal has exited"),
+                TerminalPhase::Unknown | TerminalPhase::Closed => {
+                    bail!("terminal status is unknown")
+                }
+                TerminalPhase::Running if entry.handle.has_exited() => {
+                    bail!("terminal status is unavailable")
+                }
+                TerminalPhase::Running => {}
             }
             let data = request.data.as_deref().context("missing input")?;
             if data.len() > 64 * 1024 {
@@ -490,20 +616,34 @@ async fn dispatch(
             }
             tokio::time::timeout(
                 Duration::from_secs(5),
-                handle.write(data.as_bytes().to_vec()),
+                entry.handle.write(data.as_bytes().to_vec()),
             )
             .await
             .context("terminal input timed out")??;
         }
-        "resize" => terminals
-            .get(&request.terminal_id)
-            .context("unknown terminal")?
-            .resize(dimensions(request)?)?,
+        "resize" => {
+            let entry = terminals
+                .get(&request.terminal_id)
+                .context("unknown terminal")?;
+            let phase = entry.state.phase.lock().await;
+            match *phase {
+                TerminalPhase::ExitObserved | TerminalPhase::Exited => bail!("terminal has exited"),
+                TerminalPhase::Unknown | TerminalPhase::Closed => {
+                    bail!("terminal status is unknown")
+                }
+                TerminalPhase::Running if entry.handle.has_exited() => {
+                    bail!("terminal status is unavailable")
+                }
+                TerminalPhase::Running => {}
+            }
+            entry.handle.resize(dimensions(request)?)?;
+        }
         "close" => {
-            let handle = terminals
+            let entry = terminals
                 .remove(&request.terminal_id)
                 .context("unknown terminal")?;
-            terminate_tree(&handle).await;
+            entry.state.close().await;
+            terminate_tree(&entry.handle).await;
         }
         _ => bail!("unknown terminal request"),
     }
@@ -613,6 +753,17 @@ async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
     serve_until(input, output, stdin_eof, shutdown_signal()).await
 }
 
+async fn complete_terminal_cleanup(mut cleanup: tokio::task::JoinSet<()>) -> Result<()> {
+    let mut failed = false;
+    while let Some(result) = cleanup.join_next().await {
+        failed |= result.is_err();
+    }
+    if failed {
+        bail!("terminal cleanup action failed");
+    }
+    Ok(())
+}
+
 async fn serve_until<R, W, S>(
     input: R,
     mut output: W,
@@ -631,6 +782,20 @@ where
             line.push(b'\n');
             output.write_all(&line).await?;
             output.flush().await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    // Keep request processing independent of a blocked stdout writer. This
+    // bounded queue permits close/EOF to run even while output is stalled;
+    // exhausting it is an explicit transport failure, not cleanup proof.
+    let (responses, mut response_rx) = mpsc::channel::<Value>(MAX_RESPONSE_BACKLOG);
+    let response_events = events.clone();
+    let mut response_pump = tokio::spawn(async move {
+        while let Some(response) = response_rx.recv().await {
+            response_events
+                .send(response)
+                .await
+                .context("terminal output disconnected")?;
         }
         Ok::<_, anyhow::Error>(())
     });
@@ -657,23 +822,60 @@ where
                 .await
                 .err()
                 .map(|e| e.to_string());
-            events.send(json!({"kind":"response","requestId":request.request_id,"terminalId":request.terminal_id,"error":error})).await.context("terminal output disconnected")?;
+            let response = json!({"kind":"response","requestId":request.request_id,"terminalId":request.terminal_id,"error":error});
+            match responses.try_send(response) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    bail!("terminal response queue disconnected")
+                }
+                Err(mpsc::error::TrySendError::Full(response)) => {
+                    // Give a healthy writer a chance to drain a burst. A
+                    // persistently full queue is an explicit transport error,
+                    // not evidence that any process has been cleaned up.
+                    match tokio::time::timeout(Duration::from_millis(250), responses.send(response))
+                        .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => bail!("terminal response queue disconnected"),
+                        Err(_) => bail!("terminal response queue stalled"),
+                    }
+                }
+            }
         }
         Ok(())
     };
-    let (result, observed_eof): (Result<()>, bool) = tokio::select! {
+    let (mut result, observed_eof): (Result<()>, bool) = tokio::select! {
         result = operation => (result, true),
         () = shutdown => (Ok(()), false),
     };
+    drop(responses);
     let mut cleanup = tokio::task::JoinSet::new();
-    for (_, handle) in terminals {
-        cleanup.spawn(async move { terminate_tree(&handle).await });
+    for (_, entry) in terminals {
+        cleanup.spawn(async move {
+            entry.state.close().await;
+            terminate_tree(&entry.handle).await;
+        });
     }
-    let mut cleanup_completed = true;
-    while let Some(result) = cleanup.join_next().await {
-        if result.is_err() {
-            cleanup_completed = false;
+    let cleanup_result = complete_terminal_cleanup(cleanup).await;
+    let cleanup_completed = cleanup_result.is_ok();
+    if let Err(error) = cleanup_result {
+        if result.is_ok() {
+            result = Err(error);
         }
+    }
+    let responses_delivered =
+        match tokio::time::timeout(Duration::from_secs(1), &mut response_pump).await {
+            Ok(Ok(Ok(()))) => true,
+            Ok(_) => false,
+            Err(_) => {
+                response_pump.abort();
+                false
+            }
+        };
+    if !responses_delivered && result.is_ok() {
+        result = Err(anyhow::anyhow!(
+            "terminal response delivery could not be confirmed"
+        ));
     }
     if observed_eof
         && result.is_ok()
@@ -735,11 +937,13 @@ mod tests {
         let (output_tx, output_rx) = mpsc::channel(2);
         let (exit_tx, exit_rx) = oneshot::channel();
         let (events, mut receiver) = mpsc::channel(4);
+        let state = Arc::new(TerminalState::new());
         let task = tokio::spawn(forward_terminal_events(
             "test".into(),
             output_rx,
             exit_rx,
             events,
+            state.clone(),
         ));
 
         // The stream may remain open while a ConPTY handle is retained. A
@@ -754,6 +958,7 @@ mod tests {
             exit,
             json!({"kind":"exit","terminalId":"test","exitCode":7})
         );
+        assert!(!state.output_drained.load(Ordering::Acquire));
         assert!(!task.is_finished());
         output_tx.send(vec![0xad]).await.unwrap();
         let tail = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
@@ -766,6 +971,7 @@ mod tests {
         );
         drop(output_tx);
         assert!(task.await.unwrap());
+        assert!(state.output_drained.load(Ordering::Acquire));
         assert!(receiver.recv().await.is_none());
     }
 
@@ -779,6 +985,7 @@ mod tests {
             output_rx,
             exit_rx,
             events,
+            Arc::new(TerminalState::new()),
         ));
         output_tx.send(vec![0xe4]).await.unwrap();
         drop(output_tx);
@@ -797,31 +1004,131 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lost_exit_observation_and_disconnected_parent_do_not_fabricate_exit() {
-        let (_output_tx, output_rx) = mpsc::channel(1);
-        let (exit_tx, exit_rx) = oneshot::channel();
-        let (events, mut receiver) = mpsc::channel(2);
-        drop(exit_tx);
-        assert!(!forward_terminal_events("test".into(), output_rx, exit_rx, events).await);
-        assert!(receiver.recv().await.is_none());
+    async fn lost_or_ambiguous_exit_stays_unknown_and_keeps_output() {
+        for lost in [true, false] {
+            let (output_tx, output_rx) = mpsc::channel(2);
+            let (exit_tx, exit_rx) = oneshot::channel();
+            let (events, mut receiver) = mpsc::channel(4);
+            let state = Arc::new(TerminalState::new());
+            let task = tokio::spawn(forward_terminal_events(
+                "test".into(),
+                output_rx,
+                exit_rx,
+                events,
+                state.clone(),
+            ));
+            output_tx.send(b"before".to_vec()).await.unwrap();
+            assert_eq!(receiver.recv().await.unwrap()["data"], "before");
+            if lost {
+                drop(exit_tx);
+            } else {
+                exit_tx.send(-1).unwrap();
+            }
+            assert_eq!(
+                receiver.recv().await.unwrap(),
+                json!({"kind":"unknown","terminalId":"test","reason":"exit-observation-unavailable"})
+            );
+            assert_eq!(*state.phase.lock().await, TerminalPhase::Unknown);
+            output_tx.send(b"after".to_vec()).await.unwrap();
+            assert_eq!(receiver.recv().await.unwrap()["data"], "after");
+            drop(output_tx);
+            assert!(task.await.unwrap());
+            assert!(receiver.recv().await.is_none());
+        }
+    }
 
-        let (_output_tx, output_rx) = mpsc::channel(1);
-        let (exit_tx, exit_rx) = oneshot::channel();
-        let (events, mut receiver) = mpsc::channel(2);
-        exit_tx.send(-1).unwrap();
-        assert!(!forward_terminal_events("test".into(), output_rx, exit_rx, events).await);
-        assert!(receiver.recv().await.is_none());
-
+    #[tokio::test]
+    async fn disconnected_parent_does_not_fabricate_exit() {
         let (_output_tx, output_rx) = mpsc::channel(1);
         let (_exit_tx, exit_rx) = oneshot::channel();
         let (events, receiver) = mpsc::channel(2);
         drop(receiver);
         assert!(!tokio::time::timeout(
             Duration::from_secs(2),
-            forward_terminal_events("test".into(), output_rx, exit_rx, events)
+            forward_terminal_events(
+                "test".into(),
+                output_rx,
+                exit_rx,
+                events,
+                Arc::new(TerminalState::new())
+            )
         )
         .await
         .unwrap());
+    }
+
+    #[tokio::test]
+    async fn full_output_queue_does_not_block_unknown_admission_or_leak_after_close() {
+        let (output_tx, output_rx) = mpsc::channel(1);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let (events, mut receiver) = mpsc::channel(1);
+        events.send(json!({"kind":"occupied"})).await.unwrap();
+        let state = Arc::new(TerminalState::new());
+        let task = tokio::spawn(forward_terminal_events(
+            "reused".into(),
+            output_rx,
+            exit_rx,
+            events.clone(),
+            state.clone(),
+        ));
+        output_tx.send(b"old output".to_vec()).await.unwrap();
+        exit_tx.send(-1).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while *state.phase.lock().await != TerminalPhase::Unknown {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while output_tx.capacity() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        state.close().await;
+        assert!(tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap());
+        assert_eq!(receiver.recv().await.unwrap()["kind"], "occupied");
+        assert!(
+            receiver.try_recv().is_err(),
+            "old instance emitted after close"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_is_not_evictable_before_notification_is_queued() {
+        let (_output_tx, output_rx) = mpsc::channel(1);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let (events, mut receiver) = mpsc::channel(1);
+        events.send(json!({"kind":"occupied"})).await.unwrap();
+        let state = Arc::new(TerminalState::new());
+        let task = tokio::spawn(forward_terminal_events(
+            "test".into(),
+            output_rx,
+            exit_rx,
+            events,
+            state.clone(),
+        ));
+        exit_tx.send(7).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while *state.phase.lock().await != TerminalPhase::ExitObserved {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(receiver.recv().await.unwrap()["kind"], "occupied");
+        assert_eq!(
+            receiver.recv().await.unwrap(),
+            json!({"kind":"exit","terminalId":"test","exitCode":7})
+        );
+        assert_eq!(*state.phase.lock().await, TerminalPhase::Exited);
+        state.close().await;
+        assert!(task.await.unwrap());
     }
 
     #[test]
@@ -1152,6 +1459,179 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn unknown_blocks_broker_input_even_while_notification_is_backpressured() {
+        let directory = tempfile::tempdir().unwrap();
+        let (events, _output) = mpsc::channel(32);
+        let mut terminals = HashMap::new();
+        dispatch(
+            &request("create", "live", directory.path(), None),
+            &mut terminals,
+            &events,
+        )
+        .await
+        .unwrap();
+        let state = terminals["live"].state.clone();
+        let (_output_tx, output_rx) = mpsc::channel(1);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let (blocked_events, mut receiver) = mpsc::channel(1);
+        blocked_events
+            .send(json!({"kind":"occupied"}))
+            .await
+            .unwrap();
+        let task = tokio::spawn(forward_terminal_events(
+            "live".into(),
+            output_rx,
+            exit_rx,
+            blocked_events,
+            state.clone(),
+        ));
+        exit_tx.send(-1).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while *state.phase.lock().await != TerminalPhase::Unknown {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for kind in ["input", "resize"] {
+            let error = dispatch(
+                &request(kind, "live", directory.path(), Some("blocked")),
+                &mut terminals,
+                &events,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("status is unknown"));
+        }
+        assert_eq!(receiver.recv().await.unwrap()["kind"], "occupied");
+        assert_eq!(receiver.recv().await.unwrap()["kind"], "unknown");
+        dispatch(
+            &request("close", "live", directory.path(), None),
+            &mut terminals,
+            &events,
+        )
+        .await
+        .unwrap();
+        assert!(task.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn unknown_is_not_evicted_by_sdk_exit_flag_and_rejects_operations() {
+        let directory = tempfile::tempdir().unwrap();
+        let (events, _output) = mpsc::channel(128);
+        let mut terminals = HashMap::new();
+        dispatch(
+            &request("create", "old", directory.path(), None),
+            &mut terminals,
+            &events,
+        )
+        .await
+        .unwrap();
+        dispatch(
+            &request(
+                "input",
+                "old",
+                directory.path(),
+                Some(if cfg!(windows) {
+                    "exit 0\r"
+                } else {
+                    "exit 0\n"
+                }),
+            ),
+            &mut terminals,
+            &events,
+        )
+        .await
+        .unwrap();
+        let handle = terminals["old"].handle.clone();
+        let exit_code = tokio::time::timeout(Duration::from_secs(15), handle.wait())
+            .await
+            .unwrap();
+        assert_eq!(
+            exit_code, 0,
+            "the fixture shell must actually exit successfully"
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while *terminals["old"].state.phase.lock().await != TerminalPhase::Exited {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(handle.has_exited());
+        *terminals["old"].state.phase.lock().await = TerminalPhase::Unknown;
+        for index in 1..MAX_TERMINALS {
+            let state = Arc::new(TerminalState::new());
+            *state.phase.lock().await = TerminalPhase::Unknown;
+            terminals.insert(
+                format!("fake-{index}"),
+                TerminalEntry {
+                    handle: handle.clone(),
+                    state,
+                },
+            );
+        }
+        for kind in ["input", "resize"] {
+            let error = dispatch(
+                &request(kind, "old", directory.path(), Some("ignored")),
+                &mut terminals,
+                &events,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("status is unknown"));
+        }
+        let create = request("create", "new", directory.path(), None);
+        assert!(dispatch(&create, &mut terminals, &events)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("limit"));
+        assert!(terminals.contains_key("old"));
+        // Observing a genuine exit is insufficient until its frame is queued.
+        *terminals["fake-1"].state.phase.lock().await = TerminalPhase::ExitObserved;
+        assert!(dispatch(&create, &mut terminals, &events).await.is_err());
+        let retained = Arc::new(TerminalState::new());
+        terminals.get_mut("fake-1").unwrap().state = retained.clone();
+        let (tail_tx, tail_rx) = mpsc::channel(1);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let (tail_events, mut tail_frames) = mpsc::channel(2);
+        let tail_task = tokio::spawn(forward_terminal_events(
+            "fake-1".into(),
+            tail_rx,
+            exit_rx,
+            tail_events,
+            retained.clone(),
+        ));
+        exit_tx.send(7).unwrap();
+        assert_eq!(tail_frames.recv().await.unwrap()["kind"], "exit");
+        // A full-capacity create must not cancel the delayed tail.
+        assert!(dispatch(&create, &mut terminals, &events).await.is_err());
+        tail_tx.send(b"late tail".to_vec()).await.unwrap();
+        assert_eq!(tail_frames.recv().await.unwrap()["data"], "late tail");
+        drop(tail_tx);
+        assert!(tail_task.await.unwrap());
+        dispatch(&create, &mut terminals, &events).await.unwrap();
+        assert!(terminals.contains_key("old"));
+        assert!(!terminals.contains_key("fake-1"));
+        terminals.retain(|id, _| id == "old" || id == "new");
+        dispatch(
+            &request("close", "old", directory.path(), None),
+            &mut terminals,
+            &events,
+        )
+        .await
+        .unwrap();
+        dispatch(
+            &request("close", "new", directory.path(), None),
+            &mut terminals,
+            &events,
+        )
+        .await
+        .unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn real_shell_unicode_resize_interrupt_isolation_and_close() {
@@ -1251,7 +1731,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let first = terminals["one"].clone();
+        let first = terminals["one"].handle.clone();
         dispatch(
             &request("close", "one", directory.path(), None),
             &mut terminals,
@@ -1262,7 +1742,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(3), first.wait())
             .await
             .unwrap();
-        assert!(!terminals["two"].has_exited());
+        assert!(!terminals["two"].handle.has_exited());
         dispatch(
             &request("close", "two", directory.path(), None),
             &mut terminals,
@@ -1282,6 +1762,213 @@ mod tests {
             .unwrap();
         assert!(task.await.unwrap().is_err());
         assert!(serve(&b"{}\n"[..], tokio::io::sink(), None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cleanup_task_panic_is_reported_after_other_actions_finish() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let mut cleanup = tokio::task::JoinSet::new();
+        cleanup.spawn(async { panic!("fixture cleanup failure") });
+        let other = finished.clone();
+        cleanup.spawn(async move {
+            other.store(true, Ordering::Release);
+        });
+        let error = complete_terminal_cleanup(cleanup).await.unwrap_err();
+        assert!(error.to_string().contains("cleanup action failed"));
+        assert!(
+            finished.load(Ordering::Acquire),
+            "other cleanup actions must still run"
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_output_handles_a_large_response_burst() {
+        let (server_input, mut input) = tokio::io::duplex(128 * 1024);
+        let (server_output, mut output) = tokio::io::duplex(4096);
+        let task = tokio::spawn(serve_until(
+            server_input,
+            server_output,
+            None,
+            std::future::pending(),
+        ));
+        let reader = tokio::spawn(async move {
+            let mut frames = String::new();
+            output.read_to_string(&mut frames).await.unwrap();
+            frames
+        });
+        let mut requests = String::new();
+        for index in 0..500 {
+            requests.push_str(&format!("{}\n", json!({"kind":"resize","requestId":format!("burst-{index}"),"terminalId":"missing","cols":80,"rows":24})));
+        }
+        input.write_all(requests.as_bytes()).await.unwrap();
+        input.shutdown().await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok());
+        let output = reader.await.unwrap();
+        let frames: Vec<Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame["kind"] == "response")
+                .count(),
+            500
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame["kind"] == "shutdown")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn blocked_output_does_not_prevent_real_close_or_stdin_eof_cleanup() {
+        async fn alive(pid: u32) -> bool {
+            tokio::process::Command::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .await
+                .unwrap()
+                .status
+                .success()
+        }
+        async fn send(input: &mut tokio::io::DuplexStream, value: Value) {
+            input
+                .write_all(format!("{value}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        for mode in ["close", "eof", "overflow"] {
+            let directory = tempfile::tempdir().unwrap();
+            let (server_input, mut input) = tokio::io::duplex(128 * 1024);
+            let (server_output, output) = tokio::io::duplex(256);
+            let mut output = BufReader::new(output);
+            let mut task = tokio::spawn(serve_until(
+                server_input,
+                server_output,
+                None,
+                std::future::pending(),
+            ));
+            send(&mut input, json!({"kind":"create","requestId":"create","terminalId":"live","cwd":directory.path(),"cols":80,"rows":24})).await;
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    line.clear();
+                    output.read_line(&mut line).await.unwrap();
+                    let event: Value = serde_json::from_str(&line).unwrap();
+                    if event["requestId"] == "create" {
+                        assert!(event["error"].is_null());
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            send(&mut input, json!({"kind":"input","requestId":"start","terminalId":"live","data":"printf '__LX_%s__%s\\n' PID $$; exec sleep 30\n"})).await;
+            let mut text = String::new();
+            let pid = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    line.clear();
+                    output.read_line(&mut line).await.unwrap();
+                    let event: Value = serde_json::from_str(&line).unwrap();
+                    if let Some(data) = event["data"].as_str() {
+                        text.push_str(data);
+                    }
+                    if let Some((_, tail)) = text.split_once("__LX_PID__") {
+                        let digits: String =
+                            tail.chars().take_while(char::is_ascii_digit).collect();
+                        if !digits.is_empty() {
+                            break digits.parse::<u32>().unwrap();
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                alive(pid).await,
+                "the fixture process must actually be running"
+            );
+            // Stop reading stdout. Responses exceed the event queue and make
+            // its writer block on the tiny duplex stream. Overflow also fills
+            // the bounded response queue and must fail explicitly.
+            let count = if mode == "overflow" {
+                MAX_RESPONSE_BACKLOG + 64
+            } else {
+                40
+            };
+            let mut requests = String::new();
+            for index in 0..count {
+                requests.push_str(&format!("{}\n", json!({"kind":"resize","requestId":format!("blocked-{index}"),"terminalId":"missing","cols":80,"rows":24})));
+            }
+            input.write_all(requests.as_bytes()).await.unwrap();
+            if mode == "close" {
+                send(
+                    &mut input,
+                    json!({"kind":"close","requestId":"close","terminalId":"live"}),
+                )
+                .await;
+            } else if mode == "eof" {
+                input.shutdown().await.unwrap();
+            }
+            let stopped = tokio::time::timeout(Duration::from_secs(6), async {
+                while alive(pid).await {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await;
+            if stopped.is_err() {
+                task.abort();
+            }
+            stopped.expect("the owned shell process must actually stop despite blocked output");
+            if mode == "close" {
+                assert!(!task.is_finished(), "stdin is still open after close");
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        line.clear();
+                        output.read_line(&mut line).await.unwrap();
+                        let event: Value = serde_json::from_str(&line).unwrap();
+                        if event["requestId"] == "close" {
+                            assert!(event["error"].is_null());
+                            break;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                input.shutdown().await.unwrap();
+                // Keep consuming so the EOF acknowledgement can be delivered.
+                tokio::spawn(async move {
+                    let mut sink = Vec::new();
+                    let _ = output.read_to_end(&mut sink).await;
+                });
+                assert!(tokio::time::timeout(Duration::from_secs(5), &mut task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_ok());
+            } else {
+                let result = tokio::time::timeout(Duration::from_secs(5), &mut task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    result.is_err(),
+                    "stalled or overflowed responses must not be acknowledged as clean EOF"
+                );
+                if mode == "overflow" {
+                    assert!(result.unwrap_err().to_string().contains("response queue"));
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -1417,7 +2104,7 @@ mod tests {
         .await
         .unwrap();
         if shell_exits {
-            tokio::time::timeout(Duration::from_secs(5), terminals["jobs"].wait())
+            tokio::time::timeout(Duration::from_secs(5), terminals["jobs"].handle.wait())
                 .await
                 .unwrap();
             assert!(tokio::process::Command::new("/bin/kill")

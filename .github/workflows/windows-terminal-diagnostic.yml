@@ -1,7 +1,7 @@
 name: Windows terminal and process diagnostics
 on:
   push:
-    branches: [codex/media-windows-terminal-9b8e]
+    branches: [codex/media-windows-terminal-v2-9b8e]
 jobs:
   terminal:
     runs-on: windows-latest
@@ -24,16 +24,7 @@ jobs:
         working-directory: apps/electron
         run: npm ci
       - name: Exercise real broker and terminal EOF tests
-        run: python scripts/ci/probe_terminal_eof.py --with-node
-  debug-chain:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [windows-2022, windows-latest]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Observe Job debug chains
-        shell: pwsh
-        run: ./.github/diagnostics/windows-debug-tree/run.ps1
+        run: python scripts/ci/probe_terminal_eof.py --with-rust-tests --with-node --with-windows-backpressure
+      - name: Verify terminal delivery and host state
+        working-directory: apps/electron
+        run: node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 test/terminal-manager.test.ts test/terminal-delivery.test.ts test/terminal-host.test.ts

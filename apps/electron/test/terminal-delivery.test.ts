@@ -64,3 +64,19 @@ test('unsubscribed windows receive no terminal data and closing clears queued ti
   assert.equal(delivery.has('a'), false);
   delivery.dispose();
 });
+
+test('unknown state keeps buffered and subsequent output deliverable', async () => {
+  const events: TerminalEvent[] = [];
+  const delivery = new TerminalDelivery(event => events.push(event));
+  try {
+    delivery.watch(snapshot());
+    delivery.push({ kind: 'output', terminalId: 'a', sequence: 1, data: 'before' });
+    delivery.push({ kind: 'unknown', terminalId: 'a', reason: 'exit-observation-unavailable' });
+    await delay(30);
+    assert.deepEqual(events.map(event => event.kind), ['unknown', 'output']);
+    delivery.acknowledge('a', 1);
+    delivery.push({ kind: 'output', terminalId: 'a', sequence: 2, data: 'after' });
+    await delay(30);
+    assert.deepEqual(events[2], { kind: 'output', terminalId: 'a', sequence: 2, data: 'after' });
+  } finally { delivery.dispose(); }
+});

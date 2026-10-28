@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { PassThrough, Writable } from 'node:stream';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -317,6 +318,7 @@ test('failed creations with close in flight remain counted until broker cleanup 
 test('unknown terminal close is safe, but other close errors stop the broker before rejection', async () => {
   const f = fixture();
   const a = await f.manager.create(scope); const b = await f.manager.create({ ...scope, sessionId: 'other' });
+  f.send({ kind: 'exit', terminalId: a.id, exitCode: 0 }); await tick();
   f.stopReply();
   try {
     const unknown = f.manager.close(a.id);
@@ -332,7 +334,7 @@ test('unknown terminal close is safe, but other close errors stop the broker bef
     f.send({ kind: 'response', requestId: f.commands.at(-1).requestId, error: 'fixture close failure' });
     await rejected;
     assert.equal(f.child.stdin.writableEnded, true);
-    assert.equal(f.manager.get(b.id)?.status, 'exited');
+    assert.equal(f.manager.get(b.id)?.status, 'unknown');
   } finally { await f.manager.dispose(); }
 });
 test('scope isolation, migration and close preserve other sessions', async () => {
@@ -399,16 +401,126 @@ test('terminal output remains visible after the shell exit event', async () => {
   await assert.rejects(f.manager.input(terminal.id, 'x'), /not running/);
   await f.manager.dispose();
 });
+test('unknown terminal preserves output, rejects input and resize, and remains closeable', async () => {
+  const f = fixture(); const a = await f.manager.create(scope); const b = await f.manager.create({ ...scope, sessionId: 'other' });
+  const events: any[] = []; f.manager.onEvent(event => events.push(event));
+  f.send({ kind: 'output', terminalId: a.id, data: 'before ' });
+  f.send({ kind: 'unknown', terminalId: a.id, reason: 'exit-observation-unavailable' });
+  f.send({ kind: 'output', terminalId: a.id, data: 'after' });
+  // A later unexpected exit must not turn an uncertain result into certainty.
+  f.send({ kind: 'exit', terminalId: a.id, exitCode: 0 });
+  await tick();
+  assert.deepEqual(f.manager.get(a.id), { ...a, status: 'unknown', exitCode: null, unknownReason: 'exit-observation-unavailable', output: 'before after', sequence: 2 });
+  assert.deepEqual(events.map(event => event.kind), ['output', 'unknown', 'output']);
+  assert.equal(f.manager.get(b.id)?.status, 'running');
+  const count = f.commands.length;
+  await assert.rejects(f.manager.input(a.id, 'x'), /not running/);
+  await assert.rejects(f.manager.resize(a.id, 80, 24), /not running/);
+  assert.equal(f.commands.length, count);
+  await f.manager.close(a.id);
+  assert.equal(f.commands.at(-1).kind, 'close');
+  assert.equal(f.manager.get(a.id), undefined);
+  await f.manager.dispose();
+});
+test('broker loss reports unknown while preserving an observed exit', async () => {
+  const f = fixture(); const a = await f.manager.create(scope); const b = await f.manager.create({ ...scope, sessionId: 'other' });
+  const events: any[] = []; f.manager.onEvent(event => events.push(event));
+  f.send({ kind: 'exit', terminalId: a.id, exitCode: 7 }); await tick();
+  f.child.emit('error', new Error('crash')); await tick();
+  assert.equal(f.manager.get(a.id)?.status, 'exited');
+  assert.equal(f.manager.get(a.id)?.exitCode, 7);
+  assert.equal(f.manager.get(b.id)?.status, 'unknown');
+  assert.equal(f.manager.get(b.id)?.unknownReason, 'service-unavailable');
+  assert.deepEqual(events.map(event => event.kind), ['exit', 'unknown']);
+  await f.manager.dispose();
+});
+test('close after broker failure waits for that broker to stop and blocks a new generation', async () => {
+  const children: any[] = [];
+  const spawnChild = () => {
+    const child = new EventEmitter() as any;
+    child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.stdin = new Writable({ write(chunk, _encoding, callback) {
+      const request = JSON.parse(chunk.toString());
+      child.stdout.write(JSON.stringify({ kind: 'response', requestId: request.requestId }) + '\n');
+      callback();
+    } });
+    child.kill = () => true; // Sending a signal is not evidence of process exit.
+    children.push(child);
+    return child;
+  };
+  const manager = new TerminalManager({ serverBin: '/fake', spawnProcess: spawnChild as any });
+  try {
+    const old = await manager.create(scope);
+    children[0].emit('error', new Error('lost broker'));
+    assert.equal(manager.get(old.id)?.status, 'unknown');
+    let closed = false;
+    const closing = manager.close(old.id).then(() => { closed = true; });
+    await tick();
+    assert.equal(closed, false, 'a signal or stdin close cannot stand in for broker exit');
+    assert.equal(manager.get(old.id)?.status, 'unknown');
+    await assert.rejects(manager.create({ ...scope, sessionId: 'new' }), /stop.*confirm|stopping/i);
+    assert.equal(children.length, 1, 'no new broker while the previous generation is unconfirmed');
+    children[0].stdout.end(); children[0].emit('close', 0);
+    await closing;
+    assert.equal(manager.get(old.id), undefined);
+    const next = await manager.create({ ...scope, sessionId: 'new' });
+    assert.equal(children.length, 2);
+    assert.equal(next.status, 'running');
+  } finally {
+    for (const child of children) { child.stdout.end(); child.emit('close', 0); }
+    await manager.dispose();
+  }
+});
+test('broker failure does not close the terminal while the real broker process is still alive', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'terminal-delayed-broker-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const script = join(directory, 'broker.cjs');
+  writeFileSync(script, `
+    const readline = require('node:readline');
+    const input = readline.createInterface({ input: process.stdin });
+    input.on('line', line => {
+      const request = JSON.parse(line);
+      process.stdout.write(JSON.stringify({ kind: 'response', requestId: request.requestId }) + '\\n');
+      if (request.kind === 'create') setTimeout(() => process.stdout.write('invalid-json\\n'), 10);
+    });
+    input.on('close', () => setTimeout(() => process.exit(0), 300));
+  `);
+  let child: ChildProcessWithoutNullStreams | undefined;
+  const manager = new TerminalManager({ serverBin: '/fake', spawnProcess: (() => {
+    child = spawn(process.execPath, [script], { stdio: ['pipe', 'pipe', 'pipe'] });
+    return child;
+  }) as any });
+  try {
+    let observed!: () => void;
+    const unknown = new Promise<void>(resolve => { observed = resolve; });
+    manager.onEvent(event => { if (event.kind === 'unknown') observed(); });
+    const terminal = await manager.create(scope); await unknown;
+    assert.ok(child);
+    let closed = false;
+    const closing = manager.close(terminal.id).then(() => { closed = true; });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(child.exitCode, null, 'fixture broker is still alive');
+    assert.equal(closed, false);
+    assert.equal(manager.get(terminal.id)?.status, 'unknown');
+    await assert.rejects(manager.create({ ...scope, sessionId: 'new' }), /stop.*confirm/i);
+    await closing;
+    assert.equal(child.exitCode, 0, 'close settles only after the actual broker exits');
+    assert.equal(manager.get(terminal.id), undefined);
+  } finally {
+    if (child && child.exitCode === null) child.kill();
+    await manager.dispose();
+  }
+});
 test('input and dimensions bounded, control characters preserved', async () => {
   const f = fixture(); const a = await f.manager.create(scope); await f.manager.input(a.id, '\u0003中文\t'); await f.manager.resize(a.id, 120, 32);
   assert.equal(f.commands[1].data, '\u0003中文\t'); assert.equal(f.commands[2].cols, 120);
   await assert.rejects(f.manager.input(a.id, 'a'.repeat(65537)), /too large/); await assert.rejects(f.manager.resize(a.id, 0, 10), /dimensions/); await assert.rejects(f.manager.resize(a.id, 80, 2.5), /dimensions/); await f.manager.dispose();
 });
-test('malformed oversized output closes broker and marks sessions exited', async () => {
-  const f = fixture(); const a = await f.manager.create(scope); f.child.stdout.write('x'.repeat(256 * 1024 + 1)); await tick(); assert.equal(f.manager.get(a.id)!.status, 'exited'); await f.manager.dispose();
+test('malformed oversized output closes broker and marks sessions unknown', async () => {
+  const f = fixture(); const a = await f.manager.create(scope); f.child.stdout.write('x'.repeat(256 * 1024 + 1)); await tick(); assert.equal(f.manager.get(a.id)!.status, 'unknown'); await f.manager.dispose();
 });
-test('broker error stops sessions', async () => {
-  const f = fixture(); const a = await f.manager.create(scope); f.child.emit('error', new Error('crash')); await tick(); assert.equal(f.manager.get(a.id)!.status, 'exited'); await f.manager.dispose();
+test('broker error makes sessions unknown', async () => {
+  const f = fixture(); const a = await f.manager.create(scope); f.child.emit('error', new Error('crash')); await tick(); assert.equal(f.manager.get(a.id)!.status, 'unknown'); await f.manager.dispose();
 });
 test('broker EOF acknowledgement remains a host-only frame', async () => {
   const f = fixture(); const events: unknown[] = [];
@@ -442,7 +554,7 @@ test('request timeout closes stdin gracefully and rejects pending work', async (
   const keeper = setTimeout(() => {}, 100);
   await assert.rejects(f.manager.input(a.id, 'x'), /timed out/);
   assert.equal(f.child.stdin.writableEnded, true);
-  assert.equal(f.manager.get(a.id)!.status, 'exited');
+  assert.equal(f.manager.get(a.id)!.status, 'unknown');
   clearTimeout(keeper); await f.manager.dispose();
 });
 test('dispose rejects queued requests and prevents subsequent creation', async () => {
@@ -469,6 +581,17 @@ test('renderer backpressure pauses ordered reading and suspends request timeout 
   f.manager.setOutputPaused('window-b', false); await resize; await tick();
   assert.equal(f.manager.get(a.id)?.output, 'preserve \u001b[31mred\u001b[0m');
   await f.manager.dispose();
+});
+test('renderer backpressure does not make a close wait forever or report success', async () => {
+  const f = fixture(20); const terminal = await f.manager.create(scope); f.stopReply();
+  f.manager.setOutputPaused('stalled-window', true);
+  const keeper = setTimeout(() => {}, 500);
+  try {
+    const result = await f.manager.close(terminal.id).then(() => null, error => error);
+    assert.match(String(result), /timed out/);
+    assert.equal(f.manager.get(terminal.id)?.status, 'unknown');
+    assert.equal(f.child.stdin.writableEnded, true);
+  } finally { clearTimeout(keeper); await f.manager.dispose(); }
 });
 test('dispose releases paused output without waiting for renderer acknowledgement', async () => {
   const f = fixture(); const a = await f.manager.create(scope); f.manager.setOutputPaused('window-a', true);

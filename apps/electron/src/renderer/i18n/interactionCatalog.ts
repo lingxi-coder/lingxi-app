@@ -244,6 +244,20 @@ export const interactionCatalog: Record<string, Record<string, string>> = {
     "ja": "終了済み",
     "ko": "종료됨"
   },
+  "desktop_interaction_status_unknown": {
+    "zh-Hans": "状态未知",
+    "zh-Hant": "狀態未知",
+    "en": "Status unknown",
+    "ja": "状態不明",
+    "ko": "상태를 알 수 없음"
+  },
+  "desktop_interaction_shell_unknown": {
+    "zh-Hans": "无法确认终端状态，进程可能仍在运行。可以关闭此终端。",
+    "zh-Hant": "無法確認終端機狀態，程序可能仍在執行。可以關閉此終端機。",
+    "en": "Terminal status could not be confirmed; the process may still be running. You can close this terminal.",
+    "ja": "ターミナルの状態を確認できません。プロセスはまだ実行中の可能性があります。このターミナルを閉じることができます。",
+    "ko": "터미널 상태를 확인할 수 없습니다. 프로세스가 여전히 실행 중일 수 있습니다. 이 터미널을 닫을 수 있습니다."
+  },
   "desktop_interaction_close_terminal_named": {
     "zh-Hans": "关闭 %1$s 终端",
     "zh-Hant": "關閉 %1$s 終端機",

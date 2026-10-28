@@ -777,7 +777,12 @@ export class HostController {
             for (const snapshot of snapshots) delivery.watch(snapshot);
             return snapshots;
           }
-          const snapshot = await this.terminals!.create(scope);
+          const created = await this.terminals!.create(scope);
+          // Events can arrive after create clones its result but before this
+          // window is watching. Read the authoritative row and register the
+          // watch in the same turn, so its state and output are not lost.
+          const snapshot = this.terminals!.get(created.id);
+          if (!snapshot) throw new Error('terminal no longer exists');
           delivery.watch(snapshot);
           return snapshot;
         });

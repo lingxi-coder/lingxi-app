@@ -4,19 +4,22 @@ export const CH_TERMINAL_EVENT = 'lingxi:terminal:event';
 export const TERMINAL_DRAFT_SESSION = '__draft__';
 
 export interface TerminalScope { projectPath: string; sessionId: string }
+export type TerminalUnknownReason = 'exit-observation-unavailable' | 'service-unavailable';
 export interface TerminalSnapshot {
   id: string;
   scope: TerminalScope;
   title: string;
-  status: 'running' | 'exited';
+  status: 'running' | 'exited' | 'unknown';
   exitCode: number | null;
+  unknownReason?: TerminalUnknownReason;
   output: string;
   sequence: number;
 }
 export type TerminalEvent =
   | { kind: 'output'; terminalId: string; data: string; sequence: number }
   | { kind: 'reset'; terminalId: string; data: string; sequence: number }
-  | { kind: 'exit'; terminalId: string; exitCode: number | null }
+  | { kind: 'exit'; terminalId: string; exitCode: number }
+  | { kind: 'unknown'; terminalId: string; reason: TerminalUnknownReason }
   | { kind: 'closed'; terminalId: string }
   | { kind: 'scope'; terminalId: string; scope: TerminalScope };
 export interface TerminalApi {

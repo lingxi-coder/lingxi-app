@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EventEmitter } from 'node:events';
+import { PassThrough, Writable } from 'node:stream';
 import { HostController } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
-import { CH_TERMINAL_REQUEST, type TerminalScope, type TerminalSnapshot } from '../src/shared/terminal';
+import { TerminalManager } from '../src/main/terminal';
+import { CH_TERMINAL_EVENT, CH_TERMINAL_REQUEST, type TerminalScope, type TerminalSnapshot } from '../src/shared/terminal';
 
 test('terminal IPC validates sender, scope and window attachment without a connected model', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-terminal-host-'));
@@ -50,6 +53,57 @@ test('terminal IPC validates sender, scope and window attachment without a conne
     await invoke({ kind: 'input', terminalId: terminal.id, data: 'echo hello\r' }, second);
     settings.removeProject(project);
     await assert.rejects(invoke({ kind: 'input', terminalId: terminal.id, data: 'pwd\r' }), /unavailable/);
+  } finally { host.dispose(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('create watches a current snapshot when a broker lifecycle event follows the response', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lingxi-terminal-host-create-'));
+  const project = realpathSync(directory);
+  const settings = new SettingsStore(join(directory, 'settings')); settings.addProject(project);
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const scope = { projectPath: project, sessionId }; settings.setActiveSessionDraft(scope);
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const ipc = { handle: (name: string, fn: (...args: any[]) => any) => handlers.set(name, fn), removeHandler: (name: string) => handlers.delete(name) };
+  const bridge = { registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, get: () => ({ projectPath: project, connectionState: { status: 'idle' } }) };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
+  const frame = { url: 'http://127.0.0.1:4242' }; const delivered: any[] = [];
+  const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once() {}, send: (channel: string, event: unknown) => { if (channel === CH_TERMINAL_EVENT) delivered.push(event); } };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  try {
+    for (const scenario of ['unknown', 'exit', 'unknown+output', 'exit+output'] as const) {
+      const kind = scenario.startsWith('unknown') ? 'unknown' : 'exit';
+      const withOutput = scenario.endsWith('+output');
+      const child = new EventEmitter() as any;
+      child.stdout = new PassThrough(); child.stderr = new PassThrough();
+      child.stdin = new Writable({ write(chunk, _encoding, callback) {
+        const request = JSON.parse(chunk.toString());
+        const response = { kind: 'response', requestId: request.requestId };
+        if (request.kind === 'create') {
+          const lifecycle = kind === 'unknown'
+            ? { kind, terminalId: request.terminalId, reason: 'exit-observation-unavailable' }
+            : { kind, terminalId: request.terminalId, exitCode: 7 };
+          const output = { kind: 'output', terminalId: request.terminalId, data: 'creation tail' };
+          child.stdout.write(`${JSON.stringify(response)}\n${withOutput ? `${JSON.stringify(output)}\n` : ''}${JSON.stringify(lifecycle)}\n`);
+        } else child.stdout.write(`${JSON.stringify(response)}\n`);
+        callback();
+      } });
+      child.stdin.on('finish', () => { child.stdout.end(); child.emit('close', 0); });
+      child.kill = () => { child.stdout.end(); child.emit('close', 0); return true; };
+      const manager = new TerminalManager({ serverBin: '/fake', spawnProcess: (() => child) as any });
+      host.attachTerminals(manager); delivered.length = 0;
+      try {
+        const snapshot = await handlers.get(CH_TERMINAL_REQUEST)!({ sender, senderFrame: frame }, { kind: 'create', scope });
+        await new Promise(resolve => setTimeout(resolve, 30));
+        assert.equal(manager.get(snapshot.id)?.status, kind === 'exit' ? 'exited' : 'unknown');
+        assert.ok(snapshot.status === (kind === 'exit' ? 'exited' : 'unknown')
+          || delivered.some(event => event.terminalId === snapshot.id && event.kind === kind),
+        `${kind} must be in the returned snapshot or delivered after watch registration`);
+        if (withOutput) assert.ok(snapshot.output.includes('creation tail')
+          || delivered.some(event => event.terminalId === snapshot.id && event.kind === 'output' && event.data.includes('creation tail')),
+        'output must be in the returned snapshot or delivered after watch registration');
+        await assert.rejects(manager.input(snapshot.id, 'blocked'), /not running/);
+      } finally { await manager.dispose(); }
+    }
   } finally { host.dispose(); rmSync(directory, { recursive: true, force: true }); }
 });
 

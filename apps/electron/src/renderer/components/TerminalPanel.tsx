@@ -20,7 +20,7 @@ export function useTerminalPanel(scope: TerminalScope | null, enabled: boolean) 
   const [commandReview, setCommandReview] = useState<{ scope: TerminalScope; terminalId?: string; command: string } | null>(null);
   const creating = useRef(false);
   const closedIds = useRef(new Set<string>());
-  const exits = useRef(new Map<string, number | null>());
+  const lifecycle = useRef(new Map<string, Pick<TerminalSnapshot, 'status' | 'exitCode' | 'unknownReason'>>());
   const scopes = useRef(new Map<string, TerminalScope>());
   const current = useRef(scope); current.current = scope;
   const key = scope ? terminalScopeKey(scope) : '';
@@ -31,7 +31,12 @@ export function useTerminalPanel(scope: TerminalScope | null, enabled: boolean) 
     const next = new Map(previous.map(tab => [tab.id, tab]));
     for (const tab of records) {
       if (closedIds.current.has(tab.id)) continue;
-      next.set(tab.id, { ...tab, scope: scopes.current.get(tab.id) ?? tab.scope, ...(exits.current.has(tab.id) ? { status: 'exited' as const, exitCode: exits.current.get(tab.id)! } : {}) });
+      // An event can precede watch registration, leaving the snapshot as the
+      // only evidence of a terminal state change. Preserve it over older lists.
+      if (tab.status !== 'running' && !lifecycle.current.has(tab.id)) {
+        lifecycle.current.set(tab.id, { status: tab.status, exitCode: tab.exitCode, unknownReason: tab.unknownReason });
+      }
+      next.set(tab.id, { ...tab, scope: scopes.current.get(tab.id) ?? tab.scope, ...lifecycle.current.get(tab.id) });
     }
     return [...next.values()];
   }), []);
@@ -40,7 +45,16 @@ export function useTerminalPanel(scope: TerminalScope | null, enabled: boolean) 
     return window.lingxi!.terminal.onEvent(event => {
       if (event.kind === 'output' || event.kind === 'reset') return;
       if (event.kind === 'closed') { closedIds.current.add(event.terminalId); setTabs(previous => previous.filter(tab => tab.id !== event.terminalId)); }
-      if (event.kind === 'exit') { exits.current.set(event.terminalId, event.exitCode); setTabs(previous => previous.map(tab => tab.id === event.terminalId ? { ...tab, status: 'exited', exitCode: event.exitCode } : tab)); }
+      if (event.kind === 'exit' && !lifecycle.current.has(event.terminalId)) {
+        const state = { status: 'exited' as const, exitCode: event.exitCode };
+        lifecycle.current.set(event.terminalId, state);
+        setTabs(previous => previous.map(tab => tab.id === event.terminalId ? { ...tab, ...state } : tab));
+      }
+      if (event.kind === 'unknown' && !lifecycle.current.has(event.terminalId)) {
+        const state = { status: 'unknown' as const, exitCode: null, unknownReason: event.reason };
+        lifecycle.current.set(event.terminalId, state);
+        setTabs(previous => previous.map(tab => tab.id === event.terminalId ? { ...tab, ...state } : tab));
+      }
       if (event.kind === 'scope') {
         scopes.current.set(event.terminalId, event.scope);
         setTabs(previous => previous.map(tab => tab.id === event.terminalId ? { ...tab, scope: event.scope } : tab));
@@ -113,6 +127,7 @@ export function useTerminalPanel(scope: TerminalScope | null, enabled: boolean) 
       const tab = commandReview.terminalId
         ? (await window.lingxi!.terminal.list(commandReview.scope)).find(tab => tab.id === commandReview.terminalId)
         : await window.lingxi!.terminal.create(commandReview.scope);
+      if (tab?.status === 'unknown') throw new Error(tr('desktop_interaction_shell_unknown'));
       if (!tab || tab.status !== 'running') throw new Error(tr('desktop_interaction_shell_not_running'));
       merge([tab]);
       await window.lingxi!.terminal.input(tab.id, input);
@@ -167,7 +182,7 @@ export function TerminalPanel({ controller }: { controller: ReturnType<typeof us
     <div role="separator" aria-label={tr('desktop_interaction_terminal_height')} aria-orientation="horizontal" aria-valuemin={100} aria-valuemax={Math.max(100, available - 240)} aria-valuenow={clampTerminalHeight(height, available)} tabIndex={0} className="terminal-resizer" onPointerDown={resize} onKeyDown={event => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); saveHeight(clampTerminalHeight(height + (event.key === 'ArrowUp' ? 24 : -24), available)); } }} />
     <div className="terminal-toolbar">
       <div role="tablist" aria-label={tr('desktop_interaction_shell_terminals')} className="terminal-tabs">{controller.visibleTabs.map((tab, index) => <div className="terminal-tab" data-active={tab.id === controller.selected?.id} key={tab.id}>
-        <button type="button" role="tab" aria-selected={tab.id === controller.selected?.id} aria-controls={`terminal-${tab.id}`} onClick={() => controller.select(tab.id)}><ShellIcon /><span>{tab.title}{index ? ` ${index + 1}` : ''}</span>{tab.status === 'exited' && <span className="terminal-exited-dot" aria-label={tr('desktop_interaction_exited')}>·</span>}</button>
+        <button type="button" role="tab" aria-selected={tab.id === controller.selected?.id} aria-controls={`terminal-${tab.id}`} onClick={() => controller.select(tab.id)}><ShellIcon /><span>{tab.title}{index ? ` ${index + 1}` : ''}</span>{tab.status === 'exited' && <span className="terminal-exited-dot" aria-label={tr('desktop_interaction_exited')}>·</span>}{tab.status === 'unknown' && <span className="terminal-exited-dot" aria-label={tr('desktop_interaction_status_unknown')}>?</span>}</button>
         <button type="button" className="terminal-icon-button" aria-label={tr('desktop_interaction_close_terminal_named', tab.title)} title={tr('terminal_close')} onClick={() => void controller.close(tab.id)}><Icon name="x" size={18} /></button>
       </div>)}</div>
       <button type="button" className="terminal-icon-button" disabled={controller.busy} aria-label={tr('desktop_interaction_new_terminal')} title={tr('desktop_interaction_new_terminal')} onClick={() => void controller.create()}><Icon name="plus" size={18} /></button>
@@ -183,6 +198,7 @@ export function TerminalPanel({ controller }: { controller: ReturnType<typeof us
     {!controller.visibleTabs.length && !controller.commandReview && <div className="terminal-empty">{controller.busy ? tr('desktop_interaction_starting_shell') : <button type="button" onClick={() => void controller.create()}>{tr('desktop_interaction_open_terminal')}</button>}</div>}
     <div className="terminal-surfaces">{controller.tabs.map(tab => <TerminalSurface key={tab.id} tab={tab} active={controller.open && tab.id === controller.selected?.id} focusRequest={controller.focusRequest} dark={t.dark} background={t.windowBg} />)}</div>
     {controller.selected?.status === 'exited' && <div className="terminal-exit-status">{tr('desktop_interaction_shell_exited')}{controller.selected.exitCode !== null ? ` (${controller.selected.exitCode})` : ''}. <button type="button" onClick={() => { const id = controller.selected!.id; void controller.close(id).then(closed => { if (closed) return controller.create(); }); }}>{tr('desktop_interaction_restart_shell')}</button></div>}
+    {controller.selected?.status === 'unknown' && <div role="status" className="terminal-exit-status">{tr('desktop_interaction_shell_unknown')}</div>}
   </section>;
 }
 
@@ -195,6 +211,7 @@ function TerminalSurface({ tab, active, focusRequest, dark, background }: { tab:
   const scopeRef = useRef(tab.scope); scopeRef.current = tab.scope;
   const appearance = useRef({ dark, background }); appearance.current = { dark, background };
   const activeRef = useRef(active); activeRef.current = active;
+  const statusRef = useRef(tab.status); statusRef.current = tab.status;
   const [error, setError] = useState<string | null>(null);
   const focus = useRef(focusRequest); focus.current = focusRequest;
   useEffect(() => {
@@ -219,7 +236,7 @@ function TerminalSurface({ tab, active, focusRequest, dark, background }: { tab:
     let observer: ResizeObserver | undefined;
     void Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit'), import('@xterm/xterm/css/xterm.css')]).then(async ([{ Terminal }, { FitAddon }]) => {
       if (disposed || !element.current) return;
-      const instance = new Terminal({ cursorBlink: !window.matchMedia('(prefers-reduced-motion: reduce)').matches, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace', fontSize: 13, lineHeight: 1.3, scrollback: 5000, theme: terminalTheme(appearance.current.dark, appearance.current.background), screenReaderMode: true, allowProposedApi: false });
+      const instance = new Terminal({ cursorBlink: !window.matchMedia('(prefers-reduced-motion: reduce)').matches, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace', fontSize: 13, lineHeight: 1.3, scrollback: 5000, theme: terminalTheme(appearance.current.dark, appearance.current.background), screenReaderMode: true, allowProposedApi: false, disableStdin: statusRef.current !== 'running' });
       terminal.current = instance;
       const addon = new FitAddon(); instance.loadAddon(addon); instance.open(element.current);
       instance.attachCustomKeyEventHandler(event => {
@@ -227,8 +244,8 @@ function TerminalSurface({ tab, active, focusRequest, dark, background }: { tab:
         if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && event.code === 'KeyC' && instance.hasSelection()) { if (event.type === 'keydown') void navigator.clipboard.writeText(instance.getSelection()); return false; }
         return true;
       });
-      instance.onData(data => { void window.lingxi!.terminal.input(tab.id, data).catch(reason => setError(String(reason))); });
-      instance.onResize(({ cols, rows }) => { void window.lingxi!.terminal.resize(tab.id, cols, rows).catch(reason => setError(String(reason))); });
+      instance.onData(data => { if (statusRef.current === 'running') void window.lingxi!.terminal.input(tab.id, data).catch(reason => setError(String(reason))); });
+      instance.onResize(({ cols, rows }) => { if (statusRef.current === 'running') void window.lingxi!.terminal.resize(tab.id, cols, rows).catch(reason => setError(String(reason))); });
       fit.current = () => { if (activeRef.current && element.current?.clientWidth) addon.fit(); };
       observer = new ResizeObserver(() => fit.current?.()); observer.observe(element.current);
       // Subscribe before taking a fresh snapshot: discard queued chunks covered by its sequence.
@@ -242,6 +259,7 @@ function TerminalSurface({ tab, active, focusRequest, dark, background }: { tab:
     }).catch(reason => { if (!disposed) setError(String(reason)); });
     return () => { disposed = true; unsubscribe(); observer?.disconnect(); terminal.current?.dispose(); terminal.current = null; fit.current = null; };
   }, [tab.id]);
+  useEffect(() => { if (terminal.current) terminal.current.options.disableStdin = tab.status !== 'running'; }, [tab.status]);
   useEffect(() => { if (terminal.current) terminal.current.options.theme = terminalTheme(dark, background); }, [dark, background]);
   useEffect(() => { if (active) requestAnimationFrame(() => fit.current?.()); }, [active]);
   useEffect(() => { if (active && focusRequest?.id === tab.id) terminal.current?.focus(); }, [focusRequest]);

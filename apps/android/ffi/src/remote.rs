@@ -1373,6 +1373,28 @@ impl Active {
     }
 }
 
+/// A Local App shared by the connected computer.
+#[derive(Clone, uniffi::Record)]
+pub struct RemoteLocalAppFfi {
+    pub app_id: String,
+    pub name: String,
+    pub summary: String,
+    pub revision: u64,
+    pub phase: String,
+    pub background: bool,
+    pub execution_host: String,
+    pub remote_enabled: bool,
+}
+
+/// A short-lived browser bootstrap. Do not persist or log this value.
+#[derive(Clone, uniffi::Record)]
+pub struct RemoteLocalAppOpenFfi {
+    pub app_id: String,
+    pub revision: u64,
+    pub url: String,
+    pub expires_at: u64,
+}
+
 /// Metadata and receipt of an arbitrary original-file attachment.
 #[derive(Clone, uniffi::Record)]
 pub struct RemoteFileFfi {
@@ -1768,6 +1790,57 @@ impl AndroidRemoteControlClient {
             .expect("active")
             .as_ref()
             .map(|active| connection_state_to_ffi(&active.connection.state()))
+    }
+
+    /// List Local Apps shared by the currently connected computer.
+    pub async fn list_apps(&self) -> Result<Vec<RemoteLocalAppFfi>, RemoteFfiError> {
+        let (connection, generation) = {
+            let active = self.core.active.lock().expect("active");
+            let active = active.as_ref().ok_or(RemoteFfiError::NotConnected)?;
+            (
+                active.connection.clone(),
+                self.core.current.load(Ordering::SeqCst),
+            )
+        };
+        let apps = connection.list_apps().await.map_err(rpc_error)?;
+        if generation != self.core.current.load(Ordering::SeqCst) {
+            return Err(RemoteFfiError::NotConnected);
+        }
+        Ok(apps
+            .into_iter()
+            .map(|app| RemoteLocalAppFfi {
+                app_id: app.app_id,
+                name: app.name,
+                summary: app.summary,
+                revision: app.revision,
+                phase: app.phase,
+                background: app.background,
+                execution_host: app.execution_host,
+                remote_enabled: app.remote_enabled,
+            })
+            .collect())
+    }
+
+    /// Obtain a short-lived browser bootstrap from the connected computer.
+    pub async fn open_app(&self, app_id: String) -> Result<RemoteLocalAppOpenFfi, RemoteFfiError> {
+        let (connection, generation) = {
+            let active = self.core.active.lock().expect("active");
+            let active = active.as_ref().ok_or(RemoteFfiError::NotConnected)?;
+            (
+                active.connection.clone(),
+                self.core.current.load(Ordering::SeqCst),
+            )
+        };
+        let app = connection.open_app(&app_id).await.map_err(rpc_error)?;
+        if generation != self.core.current.load(Ordering::SeqCst) {
+            return Err(RemoteFfiError::NotConnected);
+        }
+        Ok(RemoteLocalAppOpenFfi {
+            app_id: app.app_id,
+            revision: app.revision,
+            url: app.url,
+            expires_at: app.expires_at,
+        })
     }
 
     /// The current computer's shared sessions; `None` until the first list arrives.

@@ -126,7 +126,7 @@ class NativeStyleUiTest {
         rule.setContent {
             LingXiTheme(darkTheme = dark.value) {
                 Surface(Modifier.fillMaxSize()) {
-                    if (apps.value) com.lingxi.code.apps.UnifiedAppsPage(localApps, {}, {}, {}, { _, _, _ -> })
+                    if (apps.value) com.lingxi.code.apps.UnifiedAppsPage(localApps, {}, {}, {}, { _, _, _ -> }, {})
                     else com.lingxi.code.project.ProjectsPage(emptyList(), emptyMap(), null, {}, {}, {}, {})
                 }
             }

@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -37,6 +38,8 @@ import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
 import com.lingxi.code.bindings.android.RemoteFailureKindFfi
 import com.lingxi.code.bindings.android.RemoteHostFfi
+import com.lingxi.code.bindings.android.RemoteLocalAppFfi
+import com.lingxi.code.apps.LocalAppBrowser
 import com.lingxi.code.bindings.android.RemotePendingActionFfi
 import com.lingxi.code.bindings.android.RemoteSessionStatusFfi
 import com.lingxi.code.bindings.android.RemoteSessionSummaryFfi
@@ -45,6 +48,7 @@ import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.theme.LingXiTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /** A page of the Remote Control screens: a back arrow and a title above [content]. */
@@ -169,6 +173,7 @@ internal fun RemoteHostScreen(
     val ui = remoteConnectionUi(connection?.takeIf { it.hostId == hostId })
     when (ui) {
         is RemoteConnectionUi.Ready -> RemoteSessionList(
+            manager = manager, hostId = hostId, attempt = connection?.attempt,
             transport = ui.transport,
             sessions = sessions.takeIf { it.hostId == hostId }?.sessions,
             onOpen = onOpenSession,
@@ -276,11 +281,36 @@ private fun RemoteFailed(
 /** The connected computer's shared sessions, with status and what each waits on. */
 @Composable
 private fun RemoteSessionList(
+    manager: RemoteControlManager,
+    hostId: String,
+    attempt: UInt?,
     transport: RemoteTransportFfi?,
     sessions: List<RemoteSessionSummaryFfi>?,
     onOpen: (RemoteSessionSummaryFfi) -> Unit,
 ) {
     val t = LingXiTheme.palette
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var apps by remember(hostId, attempt) { mutableStateOf<List<RemoteLocalAppFfi>?>(null) }
+    var appError by remember(hostId, attempt) { mutableStateOf(false) }
+    var busy by remember(hostId, attempt) { mutableStateOf(false) }
+    var refresh by remember(hostId, attempt) { mutableStateOf(0) }
+    LaunchedEffect(hostId, attempt, refresh) {
+        apps = null; appError = false
+        try { apps = manager.listApps(hostId) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { appError = true }
+    }
+    fun openApp(appId: String, choose: Boolean) {
+        if (busy) return
+        scope.launch {
+            busy = true; appError = false
+            try { LocalAppBrowser.open(context, manager.openApp(hostId, appId), choose) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { appError = true }
+            finally { busy = false }
+        }
+    }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         transport?.let {
             Text(
@@ -296,6 +326,30 @@ private fun RemoteSessionList(
             }
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(stringResource(R.string.remote_apps_title), color = t.text, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { refresh++ }, enabled = !busy) { Text(stringResource(R.string.local_app_v2_refresh)) }
+                    }
+                    Text(stringResource(R.string.remote_apps_help), color = t.text3, fontSize = 13.sp)
+                    if (appError) Text(stringResource(R.string.remote_apps_error), color = t.danger, fontSize = 13.sp)
+                    else if (apps == null) Text(stringResource(R.string.remote_loading), color = t.text3, fontSize = 13.sp)
+                    else if (apps!!.isEmpty()) Text(stringResource(R.string.remote_apps_empty), color = t.text3, fontSize = 13.sp)
+                }
+            }
+            items(apps.orEmpty(), key = { "app:" + it.appId }) { app ->
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(t.surface).padding(14.dp)) {
+                    Text(app.name, color = t.text, fontWeight = FontWeight.SemiBold)
+                    if (app.summary.isNotBlank()) Text(app.summary, color = t.text2, fontSize = 13.sp)
+                    Text(stringResource(R.string.remote_app_revision, app.revision.toString()), color = t.text3, fontSize = 12.sp)
+                    Row {
+                        TextButton(enabled = !busy, onClick = { openApp(app.appId, false) }) { Text(stringResource(R.string.local_app_v2_open)) }
+                        TextButton(enabled = !busy, onClick = { openApp(app.appId, true) }) { Text(stringResource(R.string.remote_apps_choose)) }
+                    }
+                }
+            }
+            item { Text(stringResource(R.string.remote_sessions_title), color = t.text, fontWeight = FontWeight.SemiBold) }
             items(sessions.orEmpty(), key = { it.sessionId }) { session ->
                 Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(t.surface)

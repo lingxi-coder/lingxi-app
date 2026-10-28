@@ -14,7 +14,7 @@ import { LocalAppChatAssetJournal } from './agentChatAssets.js';
 export { LocalAppAgentError } from './agentPolicy.js';
 
 /** Constructed by the trusted main-frame host; never accepted from the page. */
-export interface LocalAppAgentOwner { appId: string; releaseDigest: string; invocationId: string; webContentsId?: number }
+export interface LocalAppAgentOwner { appId: string; releaseDigest: string; invocationId: string; webContentsId?: number; remoteSessionId?: string }
 export interface LocalAppAgentAuthorization {
   settings: LocalAppAgentSettings;
   requestedTools: string[];
@@ -120,8 +120,9 @@ function validPublicId(value: unknown): value is string {
 
 function owner(value: LocalAppAgentOwner): LocalAppAgentOwner {
   if (!value || !/^a[a-f0-9]{32}$/.test(value.appId) || typeof value.releaseDigest !== 'string' || !/^[a-f0-9]{64}$/.test(value.releaseDigest)
-    || typeof value.invocationId !== 'string' || !value.invocationId || value.invocationId.length > 256) throw new LocalAppAgentError('invalid_owner', 'Invalid application execution identity.');
-  return { appId: value.appId, releaseDigest: value.releaseDigest, invocationId: value.invocationId };
+    || typeof value.invocationId !== 'string' || !value.invocationId || value.invocationId.length > 256
+    || (value.remoteSessionId !== undefined && (typeof value.remoteSessionId !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.remoteSessionId)))) throw new LocalAppAgentError('invalid_owner', 'Invalid application execution identity.');
+  return { appId: value.appId, releaseDigest: value.releaseDigest, invocationId: value.invocationId, ...(value.remoteSessionId ? { remoteSessionId: value.remoteSessionId } : {}) };
 }
 function safeUsage(value: LocalAppAgentUsage | undefined): LocalAppAgentUsage | undefined {
   if (value === undefined) return undefined;

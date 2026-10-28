@@ -17,12 +17,13 @@
 - Do not use `npm run dev` to test macOS credential persistence. The Credential Broker intentionally rejects unpackaged Electron processes.
 - The wrapper must retain the release Rust path remapping, inside-out signing performed by `package-mac.mjs`, and `verify:package` static/runtime verification. A successful compilation without those checks is not a completed macOS package.
 
-## Mobile Local App presentation (user decision, 2026-10-24)
+## Mobile Local App presentation and hosting (user decisions, updated 2026-10-28)
 
-- The first Android and iOS Local App release opens application pages in the operating system's resolved external browser handler: use the user's actual default browser or the system resolver, including OEM and third-party browsers. Never hard-code Chrome, Safari, a package name, or an application ID. Do not use an embedded Android WebView or iOS WKWebView as the Mobile product entry point. Desktop keeps its existing application windows. See [the Mobile Local App Agent and lifetime contract](docs/MOBILE_LOCAL_APP_AGENT.md).
+- Mobile opens application pages in the operating system's resolved default browser by default. Users may choose another supported opening method, including Android's browser chooser and iOS's optional system in-app browser; never hard-code an external browser brand, package, or application ID. Opening method is independent of execution host. Preserve the originating browser's Agent pending state during native handoff; disclose unsupported handoff modes instead of silently changing browsers. Desktop keeps its existing application windows. See [the Mobile Local App Agent and lifetime contract](docs/MOBILE_LOCAL_APP_AGENT.md).
+- Keep Mobile hosting available, including for long tasks. Recommend Desktop for sustained execution without forcing migration or creating a second data replica. Desktop-hosted apps run through the authenticated [remote access gateway](docs/LOCAL_APP_REMOTE_ACCESS.md); Mobile access does not install or execute their backend locally.
 - LingXi owns runtime services, independent Agent tasks, model credentials and trusted native permission/tool approval. Preserve Agent support using an authenticated browser-to-host interface scoped to the installed app and current run; never expose host-administration or approval APIs to app pages.
 - Use browser camera/file selection for the application UI. Verify external-browser navigation, photo return, host lifecycle, Agent requests, cancellation and recovery on physical Android and iOS. Historical WebView checks are not external-browser acceptance.
-- This is a product architecture requirement motivated by store distribution, not a guarantee of store approval. Do not switch back to WebView without an explicit user decision.
+- The default external-browser flow remains the release acceptance baseline. Optional system-browser modes need their own lifecycle, photo/file and Agent handoff acceptance; a default-browser pass does not establish those results.
 
 ## Local App Agent protocol standardization
 

@@ -9,6 +9,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import com.lingxi.code.R
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.components.UiTags
@@ -29,14 +31,15 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
     var busy by remember(appId) { mutableStateOf(false) }
     var needsConsent by remember(appId) { mutableStateOf(false) }
     var needsBrowserConsent by remember(appId) { mutableStateOf(false) }
+    var pendingChoose by remember(appId) { mutableStateOf(false) }
     var opened by rememberSaveable(appId) { mutableStateOf(appReview != null) }
-    fun display(value: AppLaunch) {
-        LocalAppBrowser.open(context, value.url)
+    fun display(value: AppLaunch, chooseHandler: Boolean = false) {
+        LocalAppBrowser.open(context, value.url, chooseHandler)
         opened = true
     }
-    suspend fun prepare(openBrowser: Boolean) {
+    suspend fun prepare(openBrowser: Boolean, chooseHandler: Boolean = false) {
         if (busy) return
-        busy = true; error = null
+        busy = true; error = null; pendingChoose = chooseHandler
         try {
             val app = apps.get(appId)
             val current = apps.release(appId, app.currentRevision); release = current
@@ -47,7 +50,7 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
             }
             val value = apps.openExternalBrowser(appId)
             launch = value; apps.markOpened(appId)
-            if (openBrowser) display(value)
+            if (openBrowser) display(value, chooseHandler)
         } catch (failure: Exception) { error = failure.message }
         finally { busy = false }
     }
@@ -73,6 +76,8 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
         if (busy) CircularProgressIndicator()
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Button(enabled = !busy, onClick = { scope.launch { prepare(true) } }) { Text(if (launch == null) "启动并在浏览器打开" else "返回浏览器") }
+        TextButton(enabled = !busy, onClick = { scope.launch { prepare(true, chooseHandler = true) } }) { Text(stringResource(R.string.remote_apps_choose)) }
+        Text(stringResource(R.string.local_app_host_recommendation), style = MaterialTheme.typography.bodySmall)
         TextButton(enabled = !busy, onClick = { onShowDetails(appId) }) { Text("应用设置与 Agent 授权") }
         TextButton(enabled = !busy, onClick = { scope.launch { try { apps.stop(appId); onClose() } catch (failure: Exception) { error = failure.message } } }) { Text("停止应用与 Agent 任务") }
         TextButton(onClick = onClose) { Text("关闭管理页面") }
@@ -85,12 +90,12 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
         title = { Text("允许浏览器使用期间运行") },
         text = { Text("灵犀需要在后台保留此应用的本地服务，并显示持续运行通知。可从通知或管理页面停止应用与 Agent 任务。授权仅适用于版本 ${selected.revision}（${selected.digest.take(16)}）；更新内容后需要重新允许。") },
         confirmButton = { TextButton(onClick = { scope.launch {
-            try { apps.setKeepRunning(appId, selected.digest, true); needsBrowserConsent = false; prepare(true) }
+            try { apps.setKeepRunning(appId, selected.digest, true); needsBrowserConsent = false; prepare(true, pendingChoose) }
             catch (failure: Exception) { error = failure.message }
         } }) { Text("允许并打开浏览器") } },
         dismissButton = { TextButton(onClick = { needsBrowserConsent = false; onClose() }) { Text("取消") } },
     )
     if (needsConsent && selected != null) AlertDialog(onDismissRequest = onClose, title = { Text("授权此版本运行") }, text = { Text("此版本将运行应用代码。版本 ${selected.revision}，内容 ${selected.digest.take(16)}。") }, confirmButton = {
-        TextButton(onClick = { scope.launch { try { apps.grant(appId, selected.digest); needsConsent = false; prepare(true) } catch (failure: Exception) { error = failure.message } } }) { Text("允许此版本") }
+        TextButton(onClick = { scope.launch { try { apps.grant(appId, selected.digest); needsConsent = false; prepare(true, pendingChoose) } catch (failure: Exception) { error = failure.message } } }) { Text("允许此版本") }
     }, dismissButton = { TextButton(onClick = onClose) { Text("取消") } })
 }

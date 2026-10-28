@@ -22,7 +22,10 @@ import { LOCAL_APP_CREDENTIALS_HEADER, serviceCookieHeader, storeServiceCookies 
 import { LocalAppRuntime, type RuntimeOptions } from './runtime.js';
 import { relativePath } from './manifest.js';
 import { isAppUrl, permissionCapabilities } from './permissions.js';
-import { LOCAL_APP_SDK } from '../../preload/localAppSdk.js';
+import { LOCAL_APP_SDK, REMOTE_LOCAL_APP_SDK } from '../../preload/localAppSdk.js';
+import { LocalAppRemoteGateway, type RemoteOwner, type RemoteRun } from './remoteGateway.js';
+import type { LocalAppRtc } from './remoteRtc.js';
+import { LOCAL_APP_RTC_BROWSER_SOURCE } from './remoteRtcBrowser.js';
 import { webmcpPolyfillSource } from '../../../vendor/local-app-webmcp/dist/webmcp-polyfill.source.js';
 
 function appEntryUrl(id: string, entry: DesktopAppManifest['entry']): string {
@@ -437,6 +440,15 @@ export class LocalAppHost {
   readonly market: LocalAppMarketClient;
   readonly runtime: LocalAppRuntime;
   private server?: Server;
+  private remoteGateway?: LocalAppRemoteGateway;
+  private remoteRtc?: LocalAppRtc;
+  private readonly remoteAgentTasks = new WeakMap<AbortSignal, { runId?: string; owner?: LocalAppAgentOwner }>();
+  private remoteSettingsTail: Promise<void> = Promise.resolve();
+  private readonly remoteDisabled = new Set<string>();
+  private remoteEpoch = 0;
+  private readonly remoteOpening = new Map<string, number>();
+  private readonly remoteManagedRuns = new Map<string, string>();
+  private readonly remoteCleaning = new Set<string>();
   private readonly token = randomBytes(32).toString('hex');
   private readonly windows = new Map<string, BrowserWindow>();
   private readonly windowRuns = new WeakMap<BrowserWindow, string>();
@@ -464,6 +476,7 @@ export class LocalAppHost {
     options.core.onDisconnected?.(error => {
       this.unavailable = error;
       void this.agentBroker?.dispose().catch(() => undefined);
+      this.remoteGateway?.revokeAll();
       this.launchGrants.clear();
       for (const opening of this.opening.values()) opening.controller.abort();
       for (const window of this.windows.values()) window.destroy();
@@ -620,6 +633,7 @@ export class LocalAppHost {
     return { authoring: structuredClone(app.authoring), sourceSession };
   }
   private async runEnded(appId: string, runId: string, reason: string): Promise<void> {
+    this.remoteGateway?.revokeApp(appId, runId);
     this.services.revoke(appId, runId);
     const retained = reason === 'stopped' && this.backgroundAgentOwners.get(appId)?.invocationId === runId && !this.blockedAgentApps.has(appId);
     if (this.runtime.invocationId(appId) === runId && !retained) await this.cancelAgentApp(appId, 'Application run ended');
@@ -637,8 +651,9 @@ export class LocalAppHost {
       || !this.launchGrants.get(owner.appId)?.includes('agent') || (this.runtime.phase(owner.appId) !== 'running' && !continuingBackground)
       || row.releaseDigest !== owner.releaseDigest || this.runtime.owner(owner.appId)?.releaseDigest !== owner.releaseDigest
       || this.runtime.invocationId(owner.appId) !== owner.invocationId) throw new Error('Application Agent access is no longer active');
+    if (owner.remoteSessionId && !this.remoteGateway?.hasSession(owner.appId, owner.invocationId, owner.remoteSessionId)) throw new Error('Application Agent remote session is no longer active');
     const window = this.windows.get(owner.appId);
-    if ((!window || window.isDestroyed()) && !settings.background) throw new Error('Application Agent background access is not granted');
+    if ((!window || window.isDestroyed()) && !settings.background && !this.remoteGateway?.hasRun(owner.appId, owner.invocationId)) throw new Error('Application Agent background access is not granted');
     if (window && owner.webContentsId !== undefined && window.webContents.id !== owner.webContentsId && !continuingBackground) throw new Error('Application Agent window changed');
     const requestedTools = this.runtime.manifest(owner.appId)?.agent?.tools ?? [];
     const manifestSkills = this.runtime.manifest(owner.appId)?.agent?.skills ?? [];
@@ -756,6 +771,202 @@ export class LocalAppHost {
     await atomicJson(join(this.options.configHome, 'desktop-local-app-host.json'), { port: address.port, token: this.token, pid: process.pid });
   }
   async list(): Promise<DesktopLocalApp[]> { return (await this.store.list()).map(row => this.runtime.status(row)); }
+  private get remoteSettingsPath(): string { return join(this.store.root, 'remote-access.v1.json'); }
+  async remoteSettings(): Promise<Record<string, boolean>> {
+    try {
+      const data = JSON.parse(await fs.readFile(this.remoteSettingsPath, 'utf8')) as { version?: number; enabled?: unknown };
+      if (data.version !== 1 || !Array.isArray(data.enabled) || data.enabled.some(id => typeof id !== 'string' || !/^a[a-f0-9]{32}$/.test(id))) throw new Error('Invalid remote access settings');
+      return Object.fromEntries(data.enabled.map(id => [id, true]));
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw error; }
+  }
+  async setRemoteAccess(id: string, enabled: boolean): Promise<void> {
+    appId(id); if (typeof enabled !== 'boolean') throw new Error('Invalid remote access setting');
+    const previous = this.remoteSettingsTail;
+    let release!: () => void; this.remoteSettingsTail = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      if (!enabled) { this.remoteEpoch++; this.remoteDisabled.add(id); this.remoteGateway?.revokeApp(id); }
+      await this.store.get(id);
+      const settings = await this.remoteSettings();
+      if (enabled) settings[id] = true; else delete settings[id];
+      await atomicJson(this.remoteSettingsPath, { version: 1, enabled: Object.keys(settings).sort() });
+      if (enabled) this.remoteDisabled.delete(id);
+      this.changed();
+    } finally { release(); }
+  }
+  async remoteList(): Promise<DesktopLocalApp[]> {
+    const enabled = await this.remoteSettings();
+    const rows = (await this.list()).filter(row => enabled[row.id]);
+    return Promise.all(rows.map(async row => this.runtime.status(await this.store.get(row.id))));
+  }
+  async remoteCurrent(run: RemoteRun): Promise<boolean> {
+    try {
+      if (this.shuttingDown || this.unavailable || this.remoteDisabled.has(run.appId) || !(await this.remoteSettings())[run.appId] || this.remoteDisabled.has(run.appId)) return false;
+      const row = await this.store.get(run.appId);
+      return row.revision === run.revision && this.runtime.revision(run.appId) === run.revision
+        && this.runtime.phase(run.appId) === 'running' && this.runtime.invocationId(run.appId) === run.runId;
+    } catch { return false; }
+  }
+  remoteConfiguration(): { configured: boolean; originTemplate?: string; port?: number; error?: string } {
+    const originTemplate = process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN, rawPort = process.env.LINGXI_LOCAL_APP_GATEWAY_PORT;
+    try {
+      if (!originTemplate || !rawPort || !/^\d+$/.test(rawPort)) throw new Error('Set LINGXI_LOCAL_APP_REMOTE_ORIGIN to an HTTPS origin using {appId}-{sessionId} as its first DNS label, and set LINGXI_LOCAL_APP_GATEWAY_PORT');
+      const port = Number(rawPort);
+      new LocalAppRemoteGateway(originTemplate, port, { current: async () => false, resource: async () => new Response(null), invoke: async () => undefined, socket: async () => undefined });
+      return { configured: true, originTemplate, port };
+    } catch (error) { return { configured: false, error: error instanceof Error ? error.message : 'Invalid gateway configuration' }; }
+  }
+  setRemoteRtc(rtc: LocalAppRtc): void { this.remoteRtc?.dispose(); this.remoteRtc = rtc; }
+  private gateway(): LocalAppRemoteGateway {
+    if (!this.remoteGateway) {
+      const origin = process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN, rawPort = process.env.LINGXI_LOCAL_APP_GATEWAY_PORT;
+      if (!origin || !rawPort || !/^\d+$/.test(rawPort)) throw new Error('Remote Local App gateway is not configured');
+      this.remoteGateway = new LocalAppRemoteGateway(origin, Number(rawPort), {
+        current: run => this.remoteCurrent(run), resource: (run, request) => this.remoteResource(run, request),
+        invoke: (run, method, args, signal, sessionId) => this.remoteInvoke(run, method, args, signal, sessionId),
+        socket: async (run, name) => {
+          if (!await this.remoteCurrent(run)) return;
+          const entry = this.runtime.manifest(run.appId)?.entry;
+          return this.runtime.service(run.appId, name || (entry?.type === 'server' ? entry.process : ''))?.port;
+        },
+        rtc: (run, request, sessionId, signal) => this.remoteRtc ? this.remoteRtc.rtc(run, request, sessionId, signal) : Promise.resolve(new Response('Not found', { status: 404 })),
+        onAccessEnded: (id, runId) => { void this.remoteAccessEnded(id, runId); },
+      });
+    }
+    return this.remoteGateway;
+  }
+  async remoteOpen(id: string, owner: RemoteOwner): Promise<{ app_id: string; revision: number; url: string; expires_at: number }> {
+    this.remoteOpening.set(id, (this.remoteOpening.get(id) ?? 0) + 1);
+    try { return await this.remoteOpenOnce(id, owner); }
+    finally {
+      const count = (this.remoteOpening.get(id) ?? 1) - 1;
+      if (count) this.remoteOpening.set(id, count); else { this.remoteOpening.delete(id); const run = this.runtime.invocationId(id); if (run) void this.remoteAccessEnded(id, run); }
+    }
+  }
+  private async remoteOpenOnce(id: string, owner: RemoteOwner): Promise<{ app_id: string; revision: number; url: string; expires_at: number }> {
+    const epoch = this.remoteEpoch;
+    appId(id); if (this.remoteDisabled.has(id) || !(await this.remoteSettings())[id] || this.remoteDisabled.has(id) || epoch !== this.remoteEpoch) throw new Error('Remote access is not enabled for this application');
+    const gateway = this.gateway();
+    const pending = this.opening.get(id);
+    if (pending) await pending.promise;
+    const controller = new AbortController();
+    const row = await this.store.get(id);
+    await this.store.assertTarget(row);
+    await this.authorize(id, controller.signal, row.revision);
+    const agentEpoch = this.agentEpochs.get(id);
+    if (epoch !== this.remoteEpoch) throw new Error('Remote access changed');
+    await this.runtime.start(id, false, controller.signal, this.runtime.revision(id) !== undefined && this.runtime.revision(id) !== row.revision, row.revision);
+    const startedRun = this.runtime.invocationId(id); if (startedRun) this.remoteManagedRuns.set(id, startedRun);
+    if (this.agentEpochs.get(id) === agentEpoch) this.blockedAgentApps.delete(id);
+    if (epoch !== this.remoteEpoch) throw new Error('Remote access changed');
+    this.launchGrants.set(id, (await this.store.getRevision(id, row.revision)).grants.filter(cap => this.runtime.manifest(id)?.capabilities?.includes(cap)));
+    const revision = this.runtime.revision(id), runId = this.runtime.invocationId(id);
+    if (!revision || !runId) throw new Error('Application run is unavailable');
+    if (epoch !== this.remoteEpoch) throw new Error('Remote access changed');
+    return gateway.open({ appId: id, revision, runId }, owner);
+  }
+  private async remoteAccessEnded(id: string, runId: string): Promise<void> {
+    if (this.remoteCleaning.has(id)) return;
+    this.remoteCleaning.add(id);
+    try {
+      const stillUnused = () => this.remoteManagedRuns.get(id) === runId && !this.shuttingDown && !this.remoteOpening.has(id) && !this.opening.has(id) && !this.windows.has(id)
+        && this.runtime.invocationId(id) === runId && !this.remoteGateway?.hasRun(id, runId);
+      if (!stillUnused()) return;
+      const row = await this.store.get(id);
+      if (!stillUnused() || row.background || (row.agent?.enabled && row.agent.background && this.agentBroker?.hasActiveApp(id))) return;
+      await this.cancelAgentApp(id, 'Remote application session ended');
+      if (stillUnused()) { await this.runtime.stop(id); if (this.remoteManagedRuns.get(id) === runId) this.remoteManagedRuns.delete(id); }
+    } catch { /* Run may already be stopping or removed. */ } finally { this.remoteCleaning.delete(id); }
+  }
+  remoteRevokeOwner(owner: RemoteOwner): void { this.remoteEpoch++; this.remoteGateway?.revokeOwner(owner); }
+  remoteRevokeAll(): void { this.remoteEpoch++; this.remoteGateway?.revokeAll(); }
+  async remoteResource(run: RemoteRun, request: Request): Promise<Response> {
+    if (!await this.remoteCurrent(run)) return new Response('Session expired', { status: 410 });
+    const { appId: id } = run, url = new URL(request.url), manifest = this.runtime.manifest(id), workspace = this.runtime.workspace(id);
+    if (!manifest || !workspace) return new Response('Application unavailable', { status: 410 });
+    if (url.pathname === '/__lingxi_webmcp.js') return new Response(webmcpPolyfillSource, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
+    if (url.pathname === '/__lingxi_local_app_sdk.js') return new Response(REMOTE_LOCAL_APP_SDK + (this.remoteRtc ? `\n${LOCAL_APP_RTC_BROWSER_SOURCE}` : ''), { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
+    if (url.pathname.startsWith('/__lingxi_remote_')) return new Response('Not found', { status: 404 });
+    if (manifest.entry.type === 'server' && url.pathname === '/' && manifest.entry.path && manifest.entry.path !== '/') {
+      return new Response(null, { status: 307, headers: { location: manifest.entry.path + url.search } });
+    }
+    const route = /^\/__services\/([\w-]+)(\/.*)?$/.exec(url.pathname);
+    let response: Response;
+    let remoteService: { port: number; prefix: string } | undefined;
+    if (manifest.entry.type === 'server' || route) {
+      const name = route?.[1] ?? (manifest.entry.type === 'server' ? manifest.entry.process : '');
+      const service = this.runtime.service(id, name);
+      if (!service) return new Response('Backend unavailable', { status: 503 });
+      const serviceHeaders = new Headers(request.headers);
+      for (const key of [...serviceHeaders.keys()]) if (key === 'forwarded' || key === 'x-real-ip' || key.startsWith('x-forwarded-')) serviceHeaders.delete(key);
+      serviceHeaders.set('x-forwarded-host', url.host);
+      serviceHeaders.set('x-forwarded-proto', url.protocol.slice(0, -1));
+      const serviceRequest = new Request(request, { headers: serviceHeaders });
+      remoteService = { port: service.port, prefix: route ? `/__services/${name}` : '' };
+      response = await this.services.fetch(id, run.runId, name, service.port, (route ? route[2] ?? '/' : url.pathname) + url.search, serviceRequest, request.headers.get(LOCAL_APP_CREDENTIALS_HEADER) === 'omit' ? '' : request.headers.get('cookie') ?? '', true);
+    } else {
+      const assetRoot = dirname(manifest.entry.path);
+      const path = url.pathname === '/' ? manifest.entry.path : join(assetRoot, decodeURIComponent(url.pathname).replace(/^\/+/, '')).split(sep).join('/');
+      let file: string;
+      try { file = await containedFile(workspace, path); }
+      catch { if (request.headers.get('accept')?.includes('text/html')) file = await containedFile(workspace, manifest.entry.path); else return new Response('Not found', { status: 404 }); }
+      response = await net.fetch(pathToFileURL(file).toString());
+    }
+    const headers = new Headers(response.headers);
+    const location = headers.get('location');
+    if (remoteService && location && /^http:\/\/(?:127\.0\.0\.1|localhost):[0-9]+(?=[/?#]|$)/i.test(location)) {
+      try {
+        const target = new URL(location);
+        if (target.protocol === 'http:' && !target.username && !target.password && ['127.0.0.1', 'localhost'].includes(target.hostname) && Number(target.port || 80) === remoteService.port) {
+          headers.set('location', `${url.origin}${remoteService.prefix}${target.pathname}${target.search}${target.hash}`);
+        }
+      } catch { /* Preserve malformed or external redirects unchanged. */ }
+    }
+    let body: BodyInit | null = response.body;
+    if (headers.get('content-type')?.toLowerCase().includes('text/html')) {
+      body = injectLocalAppScripts(await response.text(), id, url.pathname); headers.delete('content-length'); headers.delete('content-encoding');
+    }
+    headers.set('content-security-policy', "default-src 'self' data: blob: https: http: ws: wss:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https: http:; style-src 'self' 'unsafe-inline' https: http:; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'");
+    return new Response(body, { status: response.status, headers });
+  }
+  private async remoteInvoke(run: RemoteRun, method: string, args: Record<string, unknown>, signal: AbortSignal, sessionId: string): Promise<unknown> {
+    if (signal.aborted || !await this.remoteCurrent(run) || signal.aborted) throw new Error('Application operation is no longer active');
+    const row = await this.store.getRevision(run.appId, run.revision);
+    if (method === 'info') return { id: run.appId, name: row.name, runId: run.runId, revision: run.revision, platform: 'browser' };
+    if (method === 'capability.clipboard' && row.grants.includes('clipboard') && this.launchGrants.get(run.appId)?.includes('clipboard')) return;
+    if (!method.startsWith('agent.') || !row.grants.includes('agent') || !this.launchGrants.get(run.appId)?.includes('agent') || this.blockedAgentApps.has(run.appId)) throw new Error('Application capability is unavailable');
+    const active = this.runtime.owner(run.appId), broker = this.agentBroker;
+    if (!broker || !active || active.releaseDigest !== row.releaseDigest) throw new Error('Application Agent host is unavailable');
+    const owner: LocalAppAgentOwner = { appId: run.appId, releaseDigest: active.releaseDigest, invocationId: run.runId, remoteSessionId: sessionId };
+    await this.authorizeAgent(owner);
+    if (signal.aborted || !await this.remoteCurrent(run) || signal.aborted) throw new Error('Application operation is no longer active');
+    const start = async (operation: Promise<{runId: string}>) => {
+      const result = await operation;
+      let state = this.remoteAgentTasks.get(signal);
+      if (!state) {
+        state = {}; this.remoteAgentTasks.set(signal, state);
+        const tracked = state;
+        signal.addEventListener('abort', () => { if (tracked.owner && tracked.runId) void broker.cancel(tracked.owner, tracked.runId).catch(() => undefined); }, { once: true });
+      }
+      state.runId = result.runId; state.owner = owner;
+      if (signal.aborted) await broker.cancel(owner, result.runId).catch(() => undefined);
+      return result;
+    };
+    if (method === 'agent.tasks.start') return start(broker.run(owner, args.input));
+    if (method === 'agent.tasks.get') return broker.get(owner, String(args.runId));
+    if (method === 'agent.tasks.list') return broker.list(owner, args);
+    if (method === 'agent.tasks.events') return broker.events(owner, String(args.runId), args.afterSequence as number | undefined);
+    if (method === 'agent.tasks.cancel') return broker.cancel(owner, String(args.runId));
+    if (method === 'agent.chats.create') return broker.createChat(owner, args);
+    if (method === 'agent.chats.get') return broker.getChat(owner, String(args.chatId));
+    if (method === 'agent.chats.list') return broker.listChats(owner, args);
+    if (method === 'agent.chats.archive') return broker.archiveChat(owner, String(args.chatId));
+    if (method === 'agent.chats.delete') return broker.deleteChat(owner, String(args.chatId));
+    if (method === 'agent.chats.history') return broker.chatHistory(owner, String(args.chatId), args);
+    if (method === 'agent.chats.send') return start(broker.sendChat(owner, String(args.chatId), args.input));
+    if (method === 'agent.chats.cancel') return broker.cancelChat(owner, String(args.chatId));
+    throw new Error('Unknown application Agent API');
+  }
   private async editAuthoring(row: DesktopLocalApp): Promise<void> {
     const sourceDirectory = row.authoring?.sourceDirectory;
     let canonicalSource: string | undefined;
@@ -795,6 +1006,9 @@ export class LocalAppHost {
     if (this.unavailable) throw this.unavailable;
     if (!input || typeof input !== 'object') throw new Error('Invalid Local App request');
     const action = String(input.action);
+    if (action === 'remote-settings') return this.remoteSettings();
+    if (action === 'remote-configuration') return this.remoteConfiguration();
+    if (action === 'remote-access') { if (typeof input.enabled !== 'boolean') throw new Error('Invalid remote access setting'); await this.setRemoteAccess(appId(input.id), input.enabled); return; }
     if (action === 'marketList') return this.market.list(String(input.query ?? ''), input.owned === true);
     if (action === 'marketManage') { await shell.openExternal(new URL('/mine', this.market.base).href); return; }
     if (action === 'legacyEntries') return this.store.core.request({ op: 'legacyEntries' });
@@ -808,7 +1022,7 @@ export class LocalAppHost {
       if (typeof input.remoteId !== 'string') throw new Error('Choose a market application');
       const existing = input.id ? await this.store.get(appId(input.id)) : undefined;
       if (existing && existing.revision !== input.expectedRevision) throw new Error('Application changed; refresh before updating');
-      const row = await this.market.install(input.remoteId, existing); this.changed(); return row;
+      const row = await this.market.install(input.remoteId, existing); if (existing) { this.remoteEpoch++; this.remoteGateway?.revokeApp(existing.id); } this.changed(); return row;
     }
     if (action === 'list') return { action, apps: await this.list() };
     if (action === 'prepareAuthoring') {
@@ -878,6 +1092,7 @@ export class LocalAppHost {
         }
         return published;
       });
+      this.remoteEpoch++; this.remoteGateway?.revokeApp(row.id);
       this.changed();
       return { action, id: row.id, revision: row.revision, name: row.name, summary: row.summary, runtime: 'desktop', warnings: [], opensFrom: 'chat card or Apps library' };
     }
@@ -892,6 +1107,7 @@ export class LocalAppHost {
     if (action === 'versions') return this.store.core.request({ op: 'releases', appId: id });
     if (action === 'useVersion') {
       if (!Number.isSafeInteger(input.revision) || Number(input.revision) < 1 || !Number.isSafeInteger(input.expectedCurrentRevision) || Number(input.expectedCurrentRevision) < 1) throw new Error('Choose a version from the current release list');
+      this.remoteEpoch++; this.remoteGateway?.revokeApp(id);
       await this.cancelOpening(id);
       await this.open(id, false, true, signal, Number(input.revision), Number(input.expectedCurrentRevision));
       this.changed(); return;
@@ -984,6 +1200,7 @@ export class LocalAppHost {
     }
     if (action === 'open' || action === 'start') { await this.open(id, false, false, signal); return { action, id, phase: this.runtime.status(await this.store.get(id)).phase }; }
     if (action === 'stop') {
+      this.remoteEpoch++; this.remoteGateway?.revokeApp(id);
       const opening = this.cancelOpening(id);
       await this.cancelAgentApp(id, 'Application stopped');
       await this.runtime.stop(id);
@@ -998,6 +1215,7 @@ export class LocalAppHost {
       await this.runtime.exclusive(id, async () => { const row = await this.store.get(id); row.background = input.enabled as boolean; await this.store.save(row); });
       if (!input.enabled && !this.windows.has(id) && !this.opening.has(id)) await this.runtime.stop(id);
     } else if (action === 'revoke') {
+      this.remoteEpoch++; this.remoteGateway?.revokeApp(id);
       const opening = this.cancelOpening(id);
       this.launchGrants.delete(id);
       await this.cancelAgentApp(id, 'Application permissions revoked');
@@ -1140,6 +1358,7 @@ export class LocalAppHost {
       if (this.windows.get(id) === window) this.windows.delete(id);
       if (!this.shuttingDown) void this.store.get(id).then(async row => {
         if (this.windows.has(id) || this.opening.has(id)) return;
+        if (closingInvocation && this.remoteGateway?.hasRun(id, closingInvocation)) return;
         const agentBackground = row.agent?.enabled && row.agent.background;
         if (agentBackground && closingInvocation && closingRevision && this.runtime.invocationId(id) === closingInvocation) this.backgroundAgentOwners.set(id, { revision: closingRevision, invocationId: closingInvocation });
         else await this.cancelAgentApp(id, 'Application window closed');
@@ -1361,11 +1580,14 @@ export class LocalAppHost {
   }
   private async fileGrants(id: string): Promise<Record<string, string>> { try { return JSON.parse(await fs.readFile(join(this.store.directory(id), 'file-grants.json'), 'utf8')); } catch { return {}; } }
   async hasBackgroundApps(): Promise<boolean> {
+    if (this.remoteOpening.size || this.remoteGateway?.hasAccess()) return true;
     return (await this.list()).some(row => (row.background && ['running', 'installing', 'building', 'starting'].includes(row.phase))
       || (row.agent?.enabled && row.agent.background && this.agentBroker?.hasActiveApp(row.id)));
   }
   async dispose(): Promise<void> {
     this.shuttingDown = true;
+    await this.remoteGateway?.dispose();
+    this.remoteRtc?.dispose();
     for (const pending of this.agentQuestions.values()) pending.resolve(null);
     await this.agentBroker?.dispose();
     for (const operation of this.opening.values()) operation.controller.abort();

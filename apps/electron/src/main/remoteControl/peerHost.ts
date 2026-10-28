@@ -25,6 +25,7 @@ import {
   type PageToMain,
   type RtcCandidateType,
   type RtcPeerState,
+  type RtcIceServer,
 } from '../../shared/remoteRtc.js';
 import { describeError, noDiagnostics, type RemoteDiagnostics } from './diagnostics.js';
 
@@ -111,7 +112,7 @@ export class PeerHost {
    * the window cannot be created. The connection's link is available from
    * {@link link} as soon as this is called, and is released when it rejects.
    */
-  answer(connId: string, offerSdp: string, iceUrls: readonly string[]): Promise<string> {
+  answer(connId: string, offerSdp: string, iceUrls: readonly (string | RtcIceServer)[]): Promise<string> {
     const request = parseMainToPage({ t: 'answer', conn: connId, sdp: offerSdp, ice: [...iceUrls] });
     if (this.disposed) return Promise.reject(new Error('the peer host is shut down'));
     if (request?.t !== 'answer') return Promise.reject(new Error('invalid WebRTC answer request'));
@@ -162,6 +163,12 @@ export class PeerHost {
   /** @internal A link ended: forget it, tell the page, and start the idle clock when nothing is left. */
   release(connId: string, tellPage: boolean): void {
     if (!this.links.delete(connId)) return;
+    const pending = this.pending.get(connId);
+    if (pending) {
+      this.pending.delete(connId);
+      this.clock.clearTimeout(pending.timer);
+      pending.reject(new Error('the peer connection closed before its answer'));
+    }
     if (tellPage) this.post({ t: 'close', conn: connId });
     if (this.links.size === 0 && this.window !== undefined && this.idleTimer === undefined) {
       this.idleTimer = this.clock.setTimeout(() => {

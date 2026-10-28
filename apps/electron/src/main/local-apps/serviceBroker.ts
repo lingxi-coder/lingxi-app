@@ -31,7 +31,7 @@ export class LocalAppServiceBroker {
     if (origin) lease.origin = origin;
     return lease;
   }
-  async fetch(appId: string, runId: string, name: string, port: number, path: string, request: Request, cookieHeader = ''): Promise<Response> {
+  async fetch(appId: string, runId: string, name: string, port: number, path: string, request: Request, cookieHeader = '', streamUnknownLength = false): Promise<Response> {
     const lease = this.lease(appId, runId, name, port);
     const headers = new Headers(request.headers); for (const header of ['host', 'origin', 'connection', 'upgrade', LOCAL_APP_CREDENTIALS_HEADER]) headers.delete(header);
     headers.delete('cookie');
@@ -41,7 +41,7 @@ export class LocalAppServiceBroker {
     // Custom protocol requests do not always retain Content-Length. Materialize
     // only those request bodies, so simple HTTP backends do not receive chunked
     // framing they cannot decode. Responses (including SSE) remain streamed.
-    if (body && !headers.has('content-length')) {
+    if (body && !headers.has('content-length') && !streamUnknownLength) {
       const reader = request.body!.getReader(), chunks: Uint8Array[] = []; let size = 0;
       const cancel = () => { void reader.cancel(); }; signal.addEventListener('abort', cancel, { once: true });
       try {

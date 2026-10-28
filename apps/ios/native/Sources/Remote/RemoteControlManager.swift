@@ -19,6 +19,7 @@ final class RemoteControlManager {
     private(set) var error: String?
     @ObservationIgnored private var client: IosRemoteControlClient?
     @ObservationIgnored private var generation: UInt64 = 0
+    @ObservationIgnored private var connectionEpoch: UInt64 = 0
     private final class SourceReference {
         weak var value: RemoteConversationSource?
         init(_ value: RemoteConversationSource) { self.value = value }
@@ -86,11 +87,42 @@ final class RemoteControlManager {
     func connect(_ hostID: String) async throws {
         let client = try activeClient()
         if connection?.hostId != hostID {
+            connectionEpoch &+= 1
             sessions = []
             for source in sources.values { source.value?.invalidate() }
             sources.removeAll()
         }
         try await client.connect(hostId: hostID)
+    }
+
+    private func appRequestContext(hostID: String) throws -> (IosRemoteControlClient, UInt64, UInt64) {
+        let client = try activeClient()
+        guard connection?.hostId == hostID, connection?.phase == .ready else { throw RemoteFfiError.NotConnected }
+        return (client, generation, connectionEpoch)
+    }
+
+    private func checkAppRequest(hostID: String, generation: UInt64, epoch: UInt64) throws {
+        guard !Task.isCancelled, generation == self.generation, epoch == connectionEpoch,
+              uid == FirebaseAccount.shared.user?.uid,
+              connection?.hostId == hostID, connection?.phase == .ready else { throw CancellationError() }
+    }
+
+    func listApps(hostID: String) async throws -> [RemoteLocalAppFfi] {
+        let (client, generation, epoch) = try appRequestContext(hostID: hostID)
+        let apps = try await client.listApps()
+        try checkAppRequest(hostID: hostID, generation: generation, epoch: epoch)
+        return apps
+    }
+
+    func openApp(hostID: String, app: RemoteLocalAppFfi) async throws -> URL {
+        let (client, generation, epoch) = try appRequestContext(hostID: hostID)
+        let ticket = try await client.openApp(appId: app.appId)
+        try checkAppRequest(hostID: hostID, generation: generation, epoch: epoch)
+        guard ticket.appId == app.appId, ticket.revision == app.revision,
+              let url = RemoteAppLaunchURL.validate(ticket.url, expiresAt: ticket.expiresAt) else {
+            throw RemoteFfiError.InvalidArgument(message: "Invalid or expired app launch")
+        }
+        return url
     }
 
     func retryHosts() async {
@@ -142,6 +174,9 @@ final class RemoteControlManager {
 
     fileprivate func receive(_ state: RemoteConnectionStateFfi, generation: UInt64) {
         guard generation == self.generation else { return }
+        if state.hostId != connection?.hostId || state.phase != .ready || connection?.phase != .ready {
+            connectionEpoch &+= 1
+        }
         connection = state
     }
     fileprivate func receive(_ hosts: [RemoteHostFfi], generation: UInt64) {

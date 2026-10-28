@@ -93,6 +93,9 @@ export interface LocalAppAgentQuestion {
 }
 export interface LocalAppsApi {
   list(): Promise<DesktopLocalApp[]>;
+  remoteSettings(): Promise<Record<string, boolean>>;
+  remoteConfiguration(): Promise<{ configured: boolean; originTemplate?: string; port?: number; error?: string }>;
+  setRemoteAccess(id: string, enabled: boolean): Promise<void>;
   open(id: string): Promise<void>;
   stop(id: string): Promise<void>;
   restart(id: string): Promise<void>;

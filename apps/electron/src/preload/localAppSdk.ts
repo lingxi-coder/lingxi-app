@@ -1,5 +1,6 @@
 import { browserAgentSource } from '@lingxi/local-app-agui/browser/source';
 import { LOCAL_APP_CREDENTIALS_HEADER } from '../main/local-apps/serviceCookies.js';
+import { LOCAL_APP_AGENT_MAX_FILE_BYTES, LOCAL_APP_AGENT_MAX_FILES, LOCAL_APP_AGENT_MAX_TOTAL_FILE_BYTES } from '../shared/localAppAgent.js';
 
 /**
  * Injected into the app's page world. The public agent surface comes from the
@@ -242,3 +243,58 @@ const localAppBootstrap = String.raw`(() => {
 })();`;
 
 export const LOCAL_APP_SDK = `${credentialsBootstrap}\n${browserAgentSource}\n${localAppBootstrap}`;
+
+// Browser-only bridge: all privileged operations stay on the Desktop host. Native
+// UI and host filesystem APIs are deliberately unavailable in a remote page.
+const remoteBridge = String.raw`(() => {
+  if (window.top !== window) return;
+  // Keep the host session cookie while preserving the app's logical omit mode.
+  const hostFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    let request;
+    try { request = new Request(input, init); } catch { return hostFetch(input, init); }
+    const target = new URL(request.url);
+    if (target.origin !== location.origin || request.credentials !== 'omit') return hostFetch(request);
+    const headers = new Headers(request.headers); headers.set('${LOCAL_APP_CREDENTIALS_HEADER}', 'omit');
+    return hostFetch(new Request(request, {credentials:'same-origin', headers}));
+  };
+  const invoke = async (method, args = {}) => {
+    const response = await fetch('/__lingxi_remote_invoke', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({method,args})});
+    if (!response.ok) throw new Error('Application operation is unavailable');
+    return (await response.json()).result;
+  };
+  const unsupported = async () => { throw new Error('This native feature is unavailable in a remote browser'); };
+  const task = (method, args) => invoke('agent.tasks.' + method, args);
+  const chat = (method, args) => invoke('agent.chats.' + method, args);
+  window.__lingxiLocalAppBridge = Object.freeze({
+    info: () => invoke('info'),
+    clipboard: Object.freeze({read: async () => { await invoke('capability.clipboard'); return navigator.clipboard.readText(); }, write: async text => { await invoke('capability.clipboard'); return navigator.clipboard.writeText(text); }}),
+    notify: unsupported, process: Object.freeze({exec: unsupported}),
+    files: Object.freeze({
+      pick: options => new Promise((resolve, reject) => {
+        const input = document.createElement('input'); input.type='file'; input.multiple=!!options.multiple;
+        if (options.accept) input.accept=Array.isArray(options.accept) ? options.accept.join(',') : options.accept;
+        const cleanup = () => { input.onchange = null; input.oncancel = null; };
+        input.onchange = async () => {
+          try {
+            const selected = Array.from(input.files || []);
+            if (selected.length > ${LOCAL_APP_AGENT_MAX_FILES} || (!options.multiple && selected.length > 1)) throw new Error('Too many files selected');
+            if (selected.some(file => !Number.isSafeInteger(file.size) || file.size < 1 || file.size > ${LOCAL_APP_AGENT_MAX_FILE_BYTES})
+                || selected.reduce((total, file) => total + file.size, 0) > ${LOCAL_APP_AGENT_MAX_TOTAL_FILE_BYTES}) throw new Error('Selected files exceed the size limit');
+            const files = await Promise.all(selected.map(async file => ({name:file.name,mediaType:file.type,size:file.size,lastModified:file.lastModified,bytes:await file.arrayBuffer()})));
+            resolve({files});
+          } catch (error) { reject(error); } finally { cleanup(); }
+        };
+        input.oncancel = () => { cleanup(); resolve({files:[]}); };
+        try { input.click(); } catch (error) { cleanup(); reject(error); }
+      }), pickDirectory: unsupported, read: unsupported, write: unsupported, list: unsupported,
+    }),
+    serviceSocketUrl: async (name, path = '/') => {
+      if (!/^[\w-]+$/.test(name) || typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') || /[\\#]/.test(path)) throw new TypeError('Invalid service URL');
+      return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/__services/' + name + path;
+    },
+    agent: Object.freeze({tasks:Object.freeze({start:input=>task('start',{input}),get:runId=>task('get',{runId}),list:args=>task('list',args||{}),events:args=>task('events',args),cancel:runId=>task('cancel',{runId})}),
+      chats:Object.freeze({create:args=>chat('create',args||{}),open:chatId=>chat('get',{chatId}),get:chatId=>chat('get',{chatId}),list:args=>chat('list',args||{}),archive:chatId=>chat('archive',{chatId}),delete:chatId=>chat('delete',{chatId}),history:(chatId,args)=>chat('history',{chatId,...args}),send:(chatId,input)=>chat('send',{chatId,input}),cancel:chatId=>chat('cancel',{chatId})})}),
+  });
+})();`;
+export const REMOTE_LOCAL_APP_SDK = `${remoteBridge}\n${LOCAL_APP_SDK}`;

@@ -1368,6 +1368,28 @@ impl Active {
     }
 }
 
+/// Desktop-owned app shared with this paired device.
+#[derive(Clone, uniffi::Record)]
+pub struct RemoteLocalAppFfi {
+    pub app_id: String,
+    pub name: String,
+    pub summary: String,
+    pub revision: u64,
+    pub phase: String,
+    pub background: bool,
+    pub execution_host: String,
+    pub remote_enabled: bool,
+}
+
+/// Short-lived launch ticket. Do not log or persist the URL.
+#[derive(Clone, uniffi::Record)]
+pub struct RemoteLocalAppOpenFfi {
+    pub app_id: String,
+    pub revision: u64,
+    pub url: String,
+    pub expires_at: u64,
+}
+
 /// Metadata and receipt of an arbitrary original-file attachment.
 #[derive(Clone, uniffi::Record)]
 pub struct RemoteFileFfi {
@@ -1957,6 +1979,49 @@ impl IosRemoteControlClient {
         .map(Into::into)
         .map_err(file_error)
     }
+    /// Apps explicitly shared by the connected desktop.
+    pub async fn list_apps(&self) -> Result<Vec<RemoteLocalAppFfi>, RemoteFfiError> {
+        let generation = self.core.current.load(Ordering::SeqCst);
+        let connection = self.file_connection()?;
+        let apps = connection.list_apps().await.map_err(rpc_error)?;
+        if generation != self.core.current.load(Ordering::SeqCst)
+            || connection.state().phase != ConnectionPhase::Ready
+        {
+            return Err(RemoteFfiError::NotConnected);
+        }
+        Ok(apps
+            .into_iter()
+            .map(|app| RemoteLocalAppFfi {
+                app_id: app.app_id,
+                name: app.name,
+                summary: app.summary,
+                revision: app.revision,
+                phase: app.phase,
+                background: app.background,
+                execution_host: app.execution_host,
+                remote_enabled: app.remote_enabled,
+            })
+            .collect())
+    }
+
+    /// Obtain a short-lived desktop launch ticket; it is never retained here.
+    pub async fn open_app(&self, app_id: String) -> Result<RemoteLocalAppOpenFfi, RemoteFfiError> {
+        let generation = self.core.current.load(Ordering::SeqCst);
+        let connection = self.file_connection()?;
+        let app = connection.open_app(&app_id).await.map_err(rpc_error)?;
+        if generation != self.core.current.load(Ordering::SeqCst)
+            || connection.state().phase != ConnectionPhase::Ready
+        {
+            return Err(RemoteFfiError::NotConnected);
+        }
+        Ok(RemoteLocalAppOpenFfi {
+            app_id: app.app_id,
+            revision: app.revision,
+            url: app.url,
+            expires_at: app.expires_at,
+        })
+    }
+
     /// Published files this account/device may access in the attached session.
     pub async fn list_files(
         &self,

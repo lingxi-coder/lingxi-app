@@ -2454,6 +2454,7 @@ fun RootScreen(
             UnifiedAppsPage(
                 apps = localApps,
                 onBack = { appsPageOpen = false },
+                onRemoteApps = { appsPageOpen = false; onOpenRemoteControl() },
                 onOpen = { runtimeAppId = it },
                 onDetails = { marketAppId = it },
                 onAuthoring = ::openAppAuthoring,

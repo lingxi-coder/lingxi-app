@@ -16,6 +16,8 @@
 .rc-actions { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
 .rc-link { padding: 4px 2px; border: 0; background: none; color: var(--accent); font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; }
 .rc-crumb { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--ink-2); }
+.rc-view-switch { display: flex; gap: 8px; }
+.rc-view-switch [aria-current="page"] { border-color: var(--accent); color: var(--accent); }
 
 .rc-pairing-code { margin: 8px 0 12px; font: 600 36px/1.1 var(--mono); letter-spacing: .12em; color: var(--ink); }
 .rc-code-label { margin-bottom: 0 !important; font-size: 12px !important; color: var(--ink-3) !important; }

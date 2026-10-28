@@ -1,9 +1,9 @@
-name: macOS SDK path diagnostic
+name: macOS SDK embedded path classification
 on:
   push:
-    branches: [codex/media-macos-sdk-path-diagnostic-20261028]
+    branches: [codex/media-macos-sdk-path-classify-20261028]
 jobs:
-  sdk-paths:
+  classify:
     strategy:
       fail-fast: false
       matrix:
@@ -14,39 +14,30 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned official GStreamer SDK
         run: python3 scripts/ci/gstreamer_sdk.py macos --root "$RUNNER_TEMP/gstreamer-sdk/macos"
-      - name: Classify libffi paths and verify stripped runtime
+      - name: Classify paths in staged SDK image sections
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import collections, hashlib, os, pathlib, re, shutil, struct, subprocess
           sdk=pathlib.Path(os.environ['LINGXI_GSTREAMER_SDK_MACOS'])
-          source=(sdk/'lib/libffi.7.dylib').resolve(strict=True)
-          work=pathlib.Path(os.environ['RUNNER_TEMP'])/'libffi-path-probe'
+          work=pathlib.Path(os.environ['RUNNER_TEMP'])/'sdk-path-classify'
           work.mkdir()
-          library=work/'libffi.7.dylib'
-          architecture=subprocess.check_output(['/usr/bin/uname','-m'],text=True).strip()
-          architectures=subprocess.check_output(['/usr/bin/lipo','-archs',str(source)],text=True).split()
-          if architecture not in architectures: raise RuntimeError('required SDK slice missing')
-          if len(architectures)>1:
-              subprocess.run(['/usr/bin/lipo',str(source),'-thin',architecture,'-output',str(library)],check=True)
-          else:
-              shutil.copy2(source,library)
-          os.chmod(library,0o755)
-          def inspect(label):
-              data=library.read_bytes()
+          arch=subprocess.check_output(['/usr/bin/uname','-m'],text=True).strip()
+          libraries='libffi.7.dylib libgio-2.0.0.dylib libglib-2.0.0.dylib libgmodule-2.0.0.dylib libgobject-2.0.0.dylib libgstapp-1.0.0.dylib libgstaudio-1.0.0.dylib libgstbase-1.0.0.dylib libgstnet-1.0.0.dylib libgstpbutils-1.0.0.dylib libgstreamer-1.0.0.dylib libgstrtp-1.0.0.dylib libgsttag-1.0.0.dylib libgstvideo-1.0.0.dylib libintl.8.dylib libopus.0.dylib liborc-0.4.0.dylib libpcre2-8.0.dylib libvpx.9.dylib libz.1.dylib'.split()
+          plugins='libgstapp.dylib libgstaudioconvert.dylib libgstaudioresample.dylib libgstcoreelements.dylib libgstopus.dylib libgstrtp.dylib libgstrtpmanager.dylib libgstvideoconvertscale.dylib libgstvpx.dylib'.split()
+          def classify(path):
+              data=path.read_bytes()
               magic,_,_,_,count,_,_,_=struct.unpack_from('<IiiIIIII',data,0)
-              if magic != 0xfeedfacf: raise RuntimeError('expected little-endian 64-bit Mach-O')
-              regions=[]
-              pos=32
+              if magic!=0xfeedfacf: raise RuntimeError('expected 64-bit little-endian Mach-O')
+              regions=[];pos=32
               for _ in range(count):
                   command,size=struct.unpack_from('<II',data,pos)
-                  if size<8 or pos+size>len(data): raise RuntimeError('bad Mach-O command')
+                  if size<8 or pos+size>len(data):raise RuntimeError('invalid load command')
                   if command==0x19:
-                      nsects=struct.unpack_from('<I',data,pos+64)[0]
-                      for index in range(nsects):
-                          section=pos+72+index*80
-                          if section+80>pos+size: raise RuntimeError('bad Mach-O section')
+                      for i in range(struct.unpack_from('<I',data,pos+64)[0]):
+                          section=pos+72+i*80
+                          if section+80>pos+size:raise RuntimeError('invalid section')
                           sect,seg,_,length,offset=struct.unpack_from('<16s16sQQI',data,section)
                           name=(seg.split(b'\0')[0]+b','+sect.split(b'\0')[0]).decode(errors='replace')
                           regions.append((offset,offset+length,name))
@@ -54,21 +45,25 @@ jobs:
                       _,_,offset,length=struct.unpack_from('<IIII',data,pos+8)
                       regions.append((offset,offset+length,'symbol-string-table'))
                   pos+=size
-              paths=list(re.finditer(rb'/Users/[A-Za-z0-9._-]+/',data))
-              classes=collections.Counter(next((name for start,end,name in regions if start<=m.start()<end),'other') for m in paths)
-              print(label, 'bytes=',len(data), 'sha256=',hashlib.sha256(data).hexdigest(), 'path_count=',len(paths), 'regions=',dict(classes),flush=True)
-              return len(paths)
-          inspect('original-thin')
-          subprocess.run(['/usr/bin/strip','-S','-x',str(library)],check=True)
-          inspect('stripped')
-          subprocess.run(['/usr/bin/install_name_tool','-id','@rpath/libffi.7.dylib',str(library)],check=True)
-          subprocess.run(['/usr/bin/codesign','--force','--sign','-','--timestamp=none',str(library)],check=True)
-          subprocess.run(['/usr/bin/codesign','--verify','--strict',str(library)],check=True)
-          headers=list((sdk/'include').rglob('ffi.h'))
-          if not headers: raise RuntimeError('SDK ffi.h missing')
-          source_c=work/'probe.c'
-          source_c.write_text('''#include <ffi.h>\nstatic int add(int a, int b) { return a + b; }\nint main(void) { ffi_cif cif; ffi_type *types[] = { &ffi_type_sint32, &ffi_type_sint32 }; int a=19, b=23, result=0; void *args[] = { &a, &b }; if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, 2, &ffi_type_sint32, types) != FFI_OK) return 2; ffi_call(&cif, FFI_FN(add), &result, args); return result == 42 ? 0 : 3; }\n''')
-          subprocess.run(['/usr/bin/xcrun','clang','-I',str(headers[0].parent),str(source_c),str(library),'-Wl,-rpath,'+str(work),'-o',str(work/'probe')],check=True)
-          subprocess.run([str(work/'probe')],check=True)
-          print('signed stripped libffi ffi_call probe passed', flush=True)
+              pattern=rb'/Users/[A-Za-z0-9._-]+/[A-Za-z0-9_./+-]+'
+              matches=list(re.finditer(pattern,data))
+              counts=collections.Counter(next((n for start,end,n in regions if start<=m.start()<end),'other') for m in matches)
+              examples=[]
+              for m in matches[:8]:
+                  path=re.sub(rb'^/Users/[^/]+/',b'/Users/<redacted>/',m.group())
+                  examples.append(path[:240].decode(errors='replace'))
+              return len(matches),dict(counts),examples,hashlib.sha256(data).hexdigest()
+          for directory,names in [(sdk/'lib',libraries),(sdk/'lib/gstreamer-1.0',plugins)]:
+              for name in names:
+                  source=(directory/name).resolve(strict=True);target=work/name
+                  archs=subprocess.check_output(['/usr/bin/lipo','-archs',str(source)],text=True).split()
+                  if arch not in archs:raise RuntimeError(f'{name} missing {arch}')
+                  if len(archs)>1:subprocess.run(['/usr/bin/lipo',str(source),'-thin',arch,'-output',str(target)],check=True)
+                  else:shutil.copy2(source,target)
+                  os.chmod(target,0o755)
+                  before=classify(target)
+                  subprocess.run(['/usr/bin/strip','-S','-x',str(target)],check=True)
+                  after=classify(target)
+                  if before[0] or after[0]:print(name,'before',before[:2],'after',after[:2],'after_sha256',after[3],'examples',after[2],flush=True)
+                  target.unlink()
           PY

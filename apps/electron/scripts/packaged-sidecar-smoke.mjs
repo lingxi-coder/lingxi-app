@@ -125,7 +125,8 @@ export function runPackagedMacMediaProbe(resources, tempRoot, arch, source = pro
   execFileSync('/usr/bin/clang', [
     '-arch', arch === 'x64' ? 'x86_64' : 'arm64',
     `-I${gstInclude}`, `-I${glibInclude}`, `-I${glibConfig}`,
-    '-o', executable, probeSource, library('gstreamer-1\\.0'), library('glib-2\\.0'),
+    '-o', executable, probeSource, library('gstreamer-1\\.0'),
+    library('gobject-2\\.0'), library('glib-2\\.0'),
     '-Xlinker', '-rpath', '-Xlinker', libraries,
   ], { cwd: tempRoot, env, stdio: 'pipe', timeout: 60_000 });
   execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', executable], { stdio: 'pipe' });

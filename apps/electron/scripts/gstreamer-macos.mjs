@@ -1,5 +1,6 @@
 import {
   copyFileSync,
+  chmodSync,
   closeSync,
   constants,
   existsSync,
@@ -297,6 +298,10 @@ function copyMachOSlice(source, destination, expectedArch) {
   }
   if (architectures.length === 1) {
     if (source !== destination) copyFileSync(source, destination);
+    // SDKs can ship read-only binaries. Subsequent install_name_tool and
+    // strip operations modify only this staging copy, so make it writable
+    // without changing the source SDK's permissions.
+    chmodSync(destination, (statSync(destination).mode & 0o777) | 0o200);
     return;
   }
   const temporaryDirectory = mkdtempSync(join(dirname(destination), '.lingxi-macho-'));
@@ -304,6 +309,7 @@ function copyMachOSlice(source, destination, expectedArch) {
     const thin = join(temporaryDirectory, 'slice');
     execFileSync('/usr/bin/lipo', [source, '-thin', expectedArch, '-output', thin]);
     renameSync(thin, destination);
+    chmodSync(destination, (statSync(destination).mode & 0o777) | 0o200);
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }

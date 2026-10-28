@@ -1,7 +1,7 @@
 name: macOS staged media strip diagnostic
 on:
   push:
-    branches: [codex/media-macos-strip-diagnostic-v4-20261028]
+    branches: [codex/media-macos-strip-diagnostic-v5-20261028]
 jobs:
   staged-media:
     strategy:
@@ -44,6 +44,7 @@ jobs:
           import { join } from 'node:path';
           import { stageMacGStreamerRuntime, signMacGStreamerRuntime, verifyMacGStreamerRuntime } from './scripts/gstreamer-macos.mjs';
           import { scanTreeForForbiddenContent } from './scripts/package-support.mjs';
+          import { runPackagedMacMediaProbe } from './scripts/packaged-sidecar-smoke.mjs';
           const root = realpathSync(process.env.RUNNER_TEMP);
           const sdk = realpathSync(process.env.LINGXI_GSTREAMER_SDK_MACOS);
           const work = join(root, 'staged-media-diagnostic');
@@ -66,6 +67,9 @@ jobs:
           const result = execFileSync(staged, [prepared.pluginDirectory, join(frameworks, 'GStreamerLibraries')], { env, encoding: 'utf8', timeout: 60000 });
           if (result.trim() !== 'packaged media plugins and audio/video pipelines OK') throw new Error(`unexpected media probe: ${result}`);
           console.log('official SDK staged copy: signatures, nine plugins, and audio/video pipelines passed');
+          for (const name of ['home', 'tmp', 'appdata', 'localappdata']) mkdirSync(join(work, name), { recursive: true });
+          runPackagedMacMediaProbe(join(app, 'Contents', 'Resources'), work, process.arch);
+          console.log('production packaged-media probe passed');
           scanTreeForForbiddenContent(app);
           console.log('official SDK staged copy also passed the unchanged content scanner');
           JS

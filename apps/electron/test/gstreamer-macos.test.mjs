@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
+  chmodSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -11,6 +12,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir as systemTmpdir } from 'node:os';
@@ -178,6 +180,8 @@ test('packaging strips SDK debug paths while retaining runtime path checks', mac
       run('clang', ['-arch', arch, '-g', '-c', fixture.baseSource, '-o', object]);
       run('clang', ['-arch', arch, '-dynamiclib', '-Wl,-headerpad_max_install_names',
         '-Wl,-install_name,@rpath/libgstfixture.dylib', '-o', fixture.base, object]);
+      chmodSync(fixture.base, 0o444);
+      for (const name of pluginNames) chmodSync(join(fixture.plugins, name), 0o444);
       assert.ok(readFileSync(fixture.base).includes(Buffer.from(object)), 'fixture must contain an actual debug-object path');
       const sourceHash = hashFile(fixture.base);
       const frameworks = join(root, 'App.app', 'Contents', 'Frameworks');
@@ -187,6 +191,7 @@ test('packaging strips SDK debug paths while retaining runtime path checks', mac
       assert.ok(stagedLibrary);
       assert.equal(readFileSync(stagedLibrary).includes(Buffer.from(object)), false);
       assert.equal(hashFile(fixture.base), sourceHash, 'the SDK source must remain untouched');
+      assert.equal(statSync(fixture.base).mode & 0o777, 0o444, 'the SDK source permissions must remain unchanged');
       assert.match(run('/usr/bin/nm', ['-gU', stagedLibrary]), /_gst_fixture/);
       signFixture(fixture.sidecar, prepared);
       assert.equal(verifyMacGStreamerRuntime(frameworks, fixture.sidecar, { expectedArch: arch }).bundled, true);

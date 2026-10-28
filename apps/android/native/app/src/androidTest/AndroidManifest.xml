@@ -3,7 +3,7 @@
         <activity android:name="com.lingxi.code.project.WorkspaceTestDocumentsActivity" android:exported="true" />
         <!-- Test APK only: exercises SAF transfers without touching user documents. -->
         <provider android:name="com.lingxi.code.project.WorkspaceTestDocumentsProvider"
-            android:authorities="com.lingxi.code.debug.test.filesfixtures"
+            android:authorities="${applicationId}.filesfixtures"
             android:exported="true" android:grantUriPermissions="true" android:permission="android.permission.MANAGE_DOCUMENTS">
             <intent-filter><action android:name="android.content.action.DOCUMENTS_PROVIDER" /></intent-filter>
         </provider>

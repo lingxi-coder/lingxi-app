@@ -1,6 +1,10 @@
 package com.lingxi.code.project;
 
 import android.content.Intent;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.pm.InstrumentationInfo;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.os.CancellationSignal;
@@ -13,9 +17,29 @@ import java.io.IOException;
 
 /** Isolated SAF provider installed exclusively in the test APK. */
 public class WorkspaceTestDocumentsProvider extends DocumentsProvider {
+    static String authority(Context context) {
+        try {
+            return context.getPackageManager().getProviderInfo(
+                new ComponentName(context, WorkspaceTestDocumentsProvider.class), 0).authority;
+        } catch (PackageManager.NameNotFoundException error) {
+            throw new IllegalStateException("Test documents provider is not installed", error);
+        }
+    }
+    static String targetPackage(Context context) {
+        try {
+            InstrumentationInfo[] runners = context.getPackageManager().getPackageInfo(
+                context.getPackageName(), PackageManager.GET_INSTRUMENTATION).instrumentation;
+            if (runners != null) for (InstrumentationInfo runner : runners) {
+                if ("androidx.test.runner.AndroidJUnitRunner".equals(runner.name)) return runner.targetPackage;
+            }
+        } catch (PackageManager.NameNotFoundException error) {
+            throw new IllegalStateException("Test package is not installed", error);
+        }
+        throw new IllegalStateException("Test instrumentation target is missing");
+    }
     private File root() { File root = new File(getContext().getFilesDir(), "workspace-fixtures"); root.mkdirs(); return root; }
     @Override public boolean onCreate() {
-        getContext().grantUriPermission("com.lingxi.code.debug", DocumentsContract.buildTreeDocumentUri("com.lingxi.code.debug.test.filesfixtures", "root"),
+        getContext().grantUriPermission(targetPackage(getContext()), DocumentsContract.buildTreeDocumentUri(authority(getContext()), "root"),
             Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
         return true;
     }
@@ -49,8 +73,8 @@ public class WorkspaceTestDocumentsProvider extends DocumentsProvider {
         validName(name); File target = new File(file(parent), name);
         try { if (target.exists() || !(mime.equals(DocumentsContract.Document.MIME_TYPE_DIR) ? target.mkdir() : target.createNewFile())) throw new FileNotFoundException(name); }
         catch (IOException error) { throw new FileNotFoundException(error.toString()); }
-        if (target.isDirectory()) getContext().grantUriPermission("com.lingxi.code.debug",
-            DocumentsContract.buildTreeDocumentUri("com.lingxi.code.debug.test.filesfixtures", id(target)),
+        if (target.isDirectory()) getContext().grantUriPermission(targetPackage(getContext()),
+            DocumentsContract.buildTreeDocumentUri(authority(getContext()), id(target)),
             Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
         return id(target);
     }

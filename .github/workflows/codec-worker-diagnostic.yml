@@ -55,6 +55,12 @@ jobs:
           PY
       - name: Test worker audio, crash and startup cancellation
         run: cargo test --locked -p remote-control-client --features native-media --test codec_worker -- --test-threads=1 --color never
+      - name: Test codec clock origin when startup precedes the requested margin
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p remote-control-client --features native-media --lib isolated_codec::clock_origin::tests:: -- --test-threads=1 --color never 2>&1 | tee "$RUNNER_TEMP/clock-origin-test.log"
+          grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/clock-origin-test.log"
       - name: Test real local and isolated RemoteMediaConnector loopbacks
         run: cargo test --locked -p remote-control-client --features native-media --test remote_media_loopback production_ -- --test-threads=1 --color never
       - name: Test the actual Bridge binary codec entry

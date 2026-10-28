@@ -1,5 +1,7 @@
 //! Desktop codec subprocess candidate. RTC, route authorization, signaling and
 //! remote Close remain in the host. This module is still under validation.
+#[path = "clock_origin.rs"]
+mod clock_origin;
 use lingxi_webrtc_core::ReceivedRtp;
 use lingxi_webrtc_media::{
     ports::DecodedAudioPlayout,
@@ -71,12 +73,14 @@ struct Clock {
     origin: Instant,
 }
 impl Clock {
-    fn parent() -> io::Result<Self> {
-        Ok(Self {
-            origin: Instant::now()
-                .checked_sub(CLOCK_MARGIN)
-                .ok_or_else(|| failure("clock origin unavailable"))?,
-        })
+    fn parent() -> Self {
+        let now = Instant::now();
+        Self {
+            // A machine may start this process before its monotonic clock has
+            // accumulated the usual margin. It can still use times captured
+            // after worker startup, so do not fail solely on that margin.
+            origin: clock_origin::with_margin(now, CLOCK_MARGIN),
+        }
     }
     fn child_at(received_at: Instant, parent_midpoint_elapsed: u64) -> io::Result<Self> {
         Ok(Self {
@@ -771,9 +775,9 @@ impl CodecClient {
             .tempdir_in(private_root)?;
         let registry = directory.path().join("registry.bin");
         // GIO can otherwise auto-relocate modules next to libgio or fall back
-        // to a build-machine path. The codec does not need external GIO
-        // modules or plugin installation; keep both searches inside this
-        // private process-owned directory, not the user's environment.
+        // to a build-machine path. Keep both module loading and plugin
+        // installation inside this private process-owned directory; packaged
+        // codec functionality with this configuration must also be verified.
         let gio_modules = directory.path().join("gio-modules");
         let disabled_installer = directory.path().join("disabled-installer");
         std::fs::create_dir(&gio_modules)?;
@@ -785,7 +789,7 @@ impl CodecClient {
         SystemRandom::new()
             .fill(&mut token)
             .map_err(|_| failure("codec authentication unavailable"))?;
-        let clock = Clock::parent()?;
+        let clock = Clock::parent();
         let mut command = Command::new(executable);
         command
             .args(&launch.arguments)

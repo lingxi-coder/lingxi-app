@@ -32,6 +32,11 @@ jobs:
           plugin_dir="$("$PKG_CONFIG" --variable=pluginsdir gstreamer-1.0)"
           test -d "$plugin_dir"
           printf 'LINGXI_GSTREAMER_PLUGIN_DIR=%s\n' "$plugin_dir" >> "$GITHUB_ENV"
+          # Match the existing desktop workflow for unpackaged Rust binaries.
+          # The child clears loader variables, so the SDK rpath must be linked in.
+          sdk_lib="${LINGXI_GSTREAMER_SDK_MACOS:?SDK was not configured}/lib"
+          test -f "$sdk_lib/libgstvideo-1.0.0.dylib"
+          printf 'RUSTFLAGS=-C link-arg=-Wl,-rpath,%s\n' "$sdk_lib" >> "$GITHUB_ENV"
           "$PKG_CONFIG" --modversion gstreamer-1.0
       - name: Verify the exact locked Harness source
         shell: bash

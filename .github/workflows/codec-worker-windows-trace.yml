@@ -1,0 +1,147 @@
+name: codec-worker-windows-stop-trace
+
+on:
+  push:
+    branches: [codex/codec-worker-windows-rust-only-20261028]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '4'
+  RUST_MIN_STACK: '16777216'
+  # Use the same pinned compiler as rust-toolchain.toml without asking rustup
+  # to mutate preinstalled rustfmt/clippy components during these test jobs.
+  RUSTUP_TOOLCHAIN: '1.94.0'
+
+jobs:
+  windows-x64:
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - name: Enable Windows long paths and Git symlinks
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          git config --global core.symlinks true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Ensure Windows crypto assembler is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+      - name: Verify the pinned Rust compiler
+        shell: bash
+        run: |
+          grep -Fx 'channel = "1.94.0"' rust-toolchain.toml
+          rustc --version | grep -E '^rustc 1\.94\.0 '
+      - name: Install the pinned official GStreamer SDK
+        shell: bash
+        run: python3 scripts/ci/gstreamer_sdk.py windows --root "$RUNNER_TEMP/gstreamer-sdk/windows"
+      - name: Select the installed plugin directory
+        shell: bash
+        run: |
+          plugin_dir="$("$PKG_CONFIG" --variable=pluginsdir gstreamer-1.0)"
+          test -d "$plugin_dir"
+          printf 'LINGXI_GSTREAMER_PLUGIN_DIR=%s\n' "$plugin_dir" >> "$GITHUB_ENV"
+          "$PKG_CONFIG" --modversion gstreamer-1.0
+      - name: Verify the exact locked Harness source
+        shell: bash
+        run: |
+          python3 scripts/lib/runtime_source.py --json > "$RUNNER_TEMP/harness-source.json"
+          python3 - "$RUNNER_TEMP/harness-source.json" <<'PY'
+          import json, sys
+          source = json.load(open(sys.argv[1], encoding='utf8'))
+          expected = '41ead2ca341e4ef259faf8b101da4e552f9cf40e'
+          assert source['revision'] == expected, source
+          assert source['development'] is False, source
+          print('Verified canonical locked Harness revision', source['revision'])
+          PY
+      - name: Verify each Windows shutdown case ran exactly one test
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset LINGXI_TEST_CODEC_GIO_WRAPPER LINGXI_TEST_CODEC_BRIDGE_BINARY LINGXI_TEST_CODEC_WORKER_BINARY
+          run_case() {
+            local label="$1"
+            shift
+            local test_log="$RUNNER_TEMP/codec-shutdown-${label}.log"
+            cargo test --locked -p remote-control-client --features native-media,codec-trace "$@" -- --exact --test-threads=1 --nocapture --color never 2>&1 | tee "$test_log"
+            local count
+            count="$(grep -Ec '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$test_log" || true)"
+            if [[ "$count" != 1 ]]; then
+              echo "Expected exactly one passed test for $label, found $count summaries" >&2
+              exit 1
+            fi
+          }
+          run_case frame --lib isolated_codec::tests::codec_frame_eof_is_clean_only_between_complete_frames
+          run_case real-worker --test codec_worker real_rust_codec_worker_encodes_audio_and_confirms_exit
+          run_case ordered --test codec_worker shutdown_drains_admitted_request_before_data_fin_and_control_q
+          run_case blocked --test codec_worker stuck_admitted_request_makes_bounded_shutdown_unverified
+          run_case partial --test codec_worker real_worker_partial_frame_never_sends_clean_receipt
+          run_case no-d --test codec_worker data_fin_without_worker_receipt_is_unverified
+          run_case no-exit --test codec_worker worker_receipt_without_actual_exit_is_unverified
+          run_case delayed --test codec_worker delayed_audio_request_retains_first_sample_timestamps
+          run_case stale --test codec_worker slow_boot_cannot_hide_a_stale_audio_request
+          run_case crash --test codec_worker admitted_operation_crash_is_unknown_and_exact_child_is_reaped
+          run_case cancelled --test codec_worker cancelling_started_child_retains_owner_until_wait_finishes
+      - name: Verify bounded negative controls and source restoration
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset LINGXI_TEST_CODEC_GIO_WRAPPER LINGXI_TEST_CODEC_BRIDGE_BINARY LINGXI_TEST_CODEC_WORKER_BINARY
+          unset CODEC_SHUTDOWN_NEGATIVE_ONLY CODEC_SHUTDOWN_NEGATIVE_SELFTEST
+          source=packages/remote-control-client/src/isolated_codec.rs
+          before="$(sha256sum "$source" | cut -d' ' -f1)"
+          for mode in exception timeout unconfirmed; do
+            test_log="$RUNNER_TEMP/codec-shutdown-selftest-${mode}.log"
+            if CODEC_SHUTDOWN_NEGATIVE_SELFTEST="$mode" python3 scripts/ci/probe_codec_shutdown_negative.py > "$test_log" 2>&1; then
+              cat "$test_log"
+              echo "Self-test $mode incorrectly succeeded" >&2
+              exit 1
+            fi
+            cat "$test_log"
+            grep -Fq 'Restored codec source SHA-256:' "$test_log"
+            if [[ "$mode" == exception ]]; then
+              grep -Fq 'synthetic failure after mutation' "$test_log"
+            elif [[ "$mode" == timeout ]]; then
+              grep -Fq 'subprocess exceeded deadline; exact child reaped' "$test_log"
+            else
+              grep -Fq 'exact child termination unconfirmed' "$test_log"
+            fi
+            [[ "$(sha256sum "$source" | cut -d' ' -f1)" == "$before" ]]
+          done
+          test_log="$RUNNER_TEMP/codec-shutdown-negatives.log"
+          python3 scripts/ci/probe_codec_shutdown_negative.py 2>&1 | tee "$test_log"
+          [[ "$(grep -Fc 'Negative control detected:' "$test_log")" == 5 ]]
+          grep -Fq 'Restored codec source SHA-256:' "$test_log"
+          [[ "$(sha256sum "$source" | cut -d' ' -f1)" == "$before" ]]
+      - name: Exercise the actual Bridge binary codec entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_log="$RUNNER_TEMP/codec-shutdown-bridge.log"
+          cargo test --locked -p bridge-server --test desktop_codec_worker -- --test-threads=1 --nocapture --color never 2>&1 | tee "$test_log"
+          [[ "$(grep -Ec '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$test_log" || true)" == 1 ]]
+      - name: Exercise isolated media loopbacks using the real Bridge worker
+        shell: pwsh
+        run: |
+          $env:LINGXI_TEST_CODEC_WORKER_BINARY = Join-Path $env:GITHUB_WORKSPACE 'target/debug/bridge-server.exe'
+          if (-not (Test-Path -LiteralPath $env:LINGXI_TEST_CODEC_WORKER_BINARY -PathType Leaf)) { throw 'Bridge worker binary is missing' }
+          $testLog = Join-Path $env:RUNNER_TEMP 'codec-shutdown-bridge-loopback.log'
+          cargo test --locked -p remote-control-client --features native-media --test remote_media_loopback _isolated -- --test-threads=1 --nocapture --color never 2>&1 | Tee-Object -FilePath $testLog
+          $cargoExit = $LASTEXITCODE
+          if ($cargoExit -ne 0) { exit $cargoExit }
+          $summaries = @(Select-String -Path $testLog -Pattern '^test result: ok[.] 3 passed; 0 failed; 0 ignored;')
+          $realWorkers = @(Select-String -Path $testLog -SimpleMatch 'Using actual Bridge codec worker:')
+          if ($summaries.Count -ne 1 -or $realWorkers.Count -ne 3) { throw 'Expected three passing loopbacks using the actual Bridge worker' }

@@ -35,6 +35,13 @@ mod local_app_process;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if std::env::args().nth(1).as_deref() == Some("--desktop-codec-worker") {
+        return tokio::task::spawn_blocking(remote_control_client::isolated_codec::run_worker)
+            .await
+            .map_err(|_| anyhow::anyhow!("codec worker task failed"))?
+            .map_err(Into::into);
+    }
     #[cfg(windows)]
     if std::env::args().nth(1).as_deref() == Some("--local-app-process") {
         return local_app_process::run().await;
@@ -190,6 +197,25 @@ async fn main() -> anyhow::Result<()> {
         "bridge-server: resolved desktop config"
     );
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let codec_root = args
+        .bridge_dir
+        .clone()
+        .unwrap_or_else(|| cfg.lingxi_home.clone());
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let codec_launch = remote_control_client::isolated_codec::CodecLaunch {
+        executable: std::env::current_exe()?,
+        arguments: vec![std::ffi::OsString::from("--desktop-codec-worker")],
+        plugin_directory: remote_control_client::isolated_codec::configured_plugin_directory()
+            .unwrap_or_default(),
+        loader_directory: remote_control_client::isolated_codec::configured_loader_directory(),
+        private_root: codec_root,
+    };
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let bound = boot::assemble_with_codec(cfg, provider_keys, openai_oauth, Some(codec_launch))
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to assemble bridge runtime: {e}"))?;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     let bound = boot::assemble_with_credentials(cfg, provider_keys, openai_oauth)
         .await
         .map_err(|e| anyhow::anyhow!("failed to assemble bridge runtime: {e}"))?;

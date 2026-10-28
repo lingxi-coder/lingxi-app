@@ -8,13 +8,16 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   APP_NAME,
@@ -49,7 +52,8 @@ import {
 } from './credential-broker.mjs';
 import { writeProtocolRegistration } from './protocol-registration.mjs';
 import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
-import { prepareMacGStreamerRuntime, signMacGStreamerRuntime, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { assertSafeStageRoot, assertSidecarOutsideOutputs, stageMacGStreamerRuntime, verifyMacAppSignature, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { signNestedFrameworks, writeHelperEntitlements } from './package-mac.mjs';
 import { bundlePortableGStreamerRuntime, preflightPortableGStreamerRuntime } from './gstreamer-portable.mjs';
 import { buildFreshBridgeClient } from './bridge-client-dist.mjs';
 
@@ -71,14 +75,16 @@ function assertNativeHost(target) {
   }
 }
 
-function assertBinaryArchitecture(path, target, label) {
+export function assertBinaryArchitecture(path, target, label) {
   if (!existsSync(path)) throw new Error(`${label} is missing: ${path}`);
   if (target.platform !== 'win32' && (statSync(path).mode & 0o111) === 0) {
     throw new Error(`${label} is not executable: ${path}`);
   }
   if (target.platform === 'darwin') {
     const architectures = binaryArchitectures(path);
-    if (!architectures.includes(target.arch)) {
+    // Node/Electron calls Intel "x64"; lipo reports the Mach-O name.
+    const expectedArchitecture = target.arch === 'x64' ? 'x86_64' : target.arch;
+    if (!architectures.includes(expectedArchitecture)) {
       throw new Error(`${label} has ${architectures.join(', ') || 'unknown'}; ${target.arch} is required`);
     }
     return;
@@ -101,6 +107,40 @@ function assertBinaryArchitecture(path, target, label) {
   }
   const expectedMachine = target.arch === 'arm64' ? 0xaa64 : 0x8664;
   if (bytes.readUInt16LE(peOffset + 4) !== expectedMachine) throw new Error(`${label} is not win32-${target.arch}`);
+}
+
+export function preflightDesktopSidecar(paths, source) {
+  assertSafeStageRoot(paths.stageRoot, { allowMissing: true });
+  assertSidecarOutsideOutputs(source, [paths.stageRoot, paths.artifactPath, paths.checksumPath, paths.metadataPath]);
+}
+
+export function resetDesktopOutputs(paths, source) {
+  preflightDesktopSidecar(paths, source);
+  resetDirectory(paths.stageRoot);
+  unlinkIfPresent(paths.checksumPath);
+  unlinkIfPresent(paths.metadataPath);
+}
+
+export function stageDarwinSidecar(source, destination, frameworks, arch, stageRoot) {
+  return stageMacGStreamerRuntime(source, destination, frameworks, arch, stageRoot);
+}
+
+export function signGenericDesktopFrameworks(frameworks, temporaryDirectory) {
+  const helperEntitlements = join(temporaryDirectory, 'helper.entitlements.plist');
+  const pluginEntitlements = join(temporaryDirectory, 'plugin.entitlements.plist');
+  const appEntitlements = join(temporaryDirectory, 'test-app.entitlements.plist');
+  writeHelperEntitlements(helperEntitlements);
+  writeHelperEntitlements(pluginEntitlements, true);
+  // The generic package uses ad-hoc signatures and therefore has no Team ID
+  // with which hardened runtime can match its own nested libraries.
+  writeFileSync(appEntitlements, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict></plist>\n`, 'utf8');
+  signNestedFrameworks(frameworks, '-', helperEntitlements, pluginEntitlements);
+  return appEntitlements;
 }
 
 async function createRuntimeAsar(resources, metadata) {
@@ -159,12 +199,9 @@ async function assembleDarwin(paths, metadata, electronDist, sidecar, modCompile
   rmSync(join(resources, 'default_app.asar'), { force: true });
   await createRuntimeAsar(resources, metadata);
   const binDir = join(resources, 'bin');
-  mkdirSync(binDir, { recursive: true });
   const packagedSidecar = join(binDir, 'bridge-server');
   cpSync(join(packageRoot, 'browser-extension'), join(resources, 'browser-extension'), { recursive: true });
-  copyFileSync(sidecar, packagedSidecar);
-  chmodSync(packagedSidecar, 0o755);
-  prepareMacGStreamerRuntime(packagedSidecar, join(contents, 'Frameworks'), paths.arch === 'arm64' ? 'arm64' : 'x86_64');
+  stageDarwinSidecar(sidecar, packagedSidecar, join(contents, 'Frameworks'), paths.arch === 'arm64' ? 'arm64' : 'x86_64', paths.stageRoot);
   const packagedModCompiler = stageModBun(resources, modCompiler);
   const brokerResourceRoot = join(resources, BROKER_RESOURCE_DIRNAME);
   buildCredentialBrokerResources(brokerResourceRoot, {
@@ -180,23 +217,33 @@ async function assembleDarwin(paths, metadata, electronDist, sidecar, modCompile
   assertBinaryArchitecture(executable, paths, `${APP_NAME} executable`);
   assertBinaryArchitecture(packagedSidecar, paths, 'packaged bridge-server sidecar');
   if (!commandAvailable('/usr/bin/codesign')) throw new Error('codesign is required for macOS package tests');
-  signBinary(packagedSidecar, '-', BRIDGE_SERVER_IDENTIFIER);
-  signMacGStreamerRuntime(join(contents, 'Frameworks'), '-');
-  signBinary(packagedModCompiler, '-', `${BUNDLE_ID}.mod-compiler`);
-  sealModBun(resources);
-  signBinary(
-    join(brokerResourceRoot, 'bin', 'lingxi-credential-client'),
-    '-',
-    BROKER_CLIENT_IDENTIFIER,
-  );
-  execFileSync('/usr/bin/codesign', [
-    '--force', '--sign', '-', '--timestamp=none',
-    join(brokerResourceRoot, 'LingXiCredentialBroker.app'),
-  ], { stdio: 'inherit' });
-  execFileSync('/usr/bin/codesign', [
-    '--force', '--sign', '-', '--timestamp=none', paths.payloadRoot,
-  ], { stdio: 'inherit' });
-  verifyMacGStreamerRuntime(join(contents, 'Frameworks'), packagedSidecar);
+  const signingDirectory = mkdtempSync(join(paths.stageRoot, '.lingxi-signing-'));
+  try {
+    const helperEntitlements = signGenericDesktopFrameworks(join(contents, 'Frameworks'), signingDirectory);
+    signBinary(packagedSidecar, '-', BRIDGE_SERVER_IDENTIFIER);
+    signBinary(packagedModCompiler, '-', `${BUNDLE_ID}.mod-compiler`);
+    sealModBun(resources);
+    signBinary(
+      join(brokerResourceRoot, 'bin', 'lingxi-credential-client'),
+      '-',
+      BROKER_CLIENT_IDENTIFIER,
+    );
+    execFileSync('/usr/bin/codesign', [
+      '--force', '--sign', '-', '--timestamp=none',
+      join(brokerResourceRoot, 'LingXiCredentialBroker.app'),
+    ], { stdio: 'inherit' });
+    execFileSync('/usr/bin/codesign', [
+      '--force', '--sign', '-', '--timestamp=none', '--options', 'runtime',
+      '--entitlements', helperEntitlements, paths.payloadRoot,
+    ], { stdio: 'inherit' });
+  } finally {
+    rmSync(signingDirectory, { recursive: true, force: true });
+  }
+  verifyMacGStreamerRuntime(join(contents, 'Frameworks'), packagedSidecar, {
+    expectedArch: paths.arch === 'arm64' ? 'arm64' : 'x86_64',
+    appRoot: paths.payloadRoot,
+  });
+  verifyMacAppSignature(paths.payloadRoot);
 }
 
 async function assemblePortable(paths, metadata, electronDist, sidecar, modCompiler, gstreamerPlan) {
@@ -240,6 +287,7 @@ async function main() {
       ?? join(cargoTargetDir, 'release', target.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server'),
   );
   assertBinaryArchitecture(sidecar, target, 'release bridge-server sidecar');
+  preflightDesktopSidecar(paths, sidecar);
   // Validate the explicit portable SDK before downloads, artifact resets, or
   // staging. macOS uses its separately signed runtime bundle below.
   const portableGStreamerPlan = target.platform === 'darwin'
@@ -254,9 +302,7 @@ async function main() {
   buildFreshBridgeClient(sharedSdkRoot, join(packageRoot, 'node_modules', ...sharedSdkName.split('/')),
     () => run('npm', ['run', 'build'], sharedSdkRoot));
   run('npm', ['run', 'build'], packageRoot);
-  resetDirectory(paths.stageRoot);
-  unlinkIfPresent(paths.checksumPath);
-  unlinkIfPresent(paths.metadataPath);
+  resetDesktopOutputs(paths, sidecar);
 
   if (target.platform === 'darwin') await assembleDarwin(paths, metadata, electronDist, sidecar, modCompiler);
   else await assemblePortable(paths, metadata, electronDist, sidecar, modCompiler, portableGStreamerPlan);
@@ -280,7 +326,18 @@ async function main() {
   log(`sha256: ${checksum}`);
 }
 
-main().catch((error) => {
-  process.stderr.write(`[package:desktop] ERROR: ${formatError(error)}\n`);
-  process.exitCode = 1;
-});
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
+  main().catch((error) => {
+    process.stderr.write(`[package:desktop] ERROR: ${formatError(error)}\n`);
+    process.exitCode = 1;
+  });
+}

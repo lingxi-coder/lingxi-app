@@ -22,7 +22,7 @@ import {
 import { BROKER_RESOURCE_DIRNAME } from './credential-broker.mjs';
 import { verifyProtocolRegistration } from './protocol-registration.mjs';
 import { modBunFilename, verifyModBun } from './mod-bun.mjs';
-import { verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { verifyMacAppSignature, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
 import { verifyPortableGStreamerRuntime } from './gstreamer-portable.mjs';
 
 function requirePath(path, label) {
@@ -56,10 +56,18 @@ export function verifyDesktopPackage(root, platform, arch) {
   requirePath(executable, 'Electron executable');
   requirePath(join(resources, 'icon.png'), 'LingXi application icon');
   if (sha256File(join(resources, 'icon.png')) !== sha256File(join(packageRoot, 'assets', 'icons', 'icon.png'))) throw new Error('Packaged brand icon is stale');
-  verifyModBun(resources, platform, arch);
   if (platform === 'darwin') {
-    verifyMacGStreamerRuntime(join(paths.payloadRoot, 'Contents', 'Frameworks'), sidecar);
+    const expectedArchitecture = arch === 'x64' ? 'x86_64' : 'arm64';
+    if (!binaryArchitectures(executable).includes(expectedArchitecture)) {
+      throw new Error(`packaged Desktop executable has the wrong architecture: ${executable}`);
+    }
+    verifyMacGStreamerRuntime(join(paths.payloadRoot, 'Contents', 'Frameworks'), sidecar, {
+      expectedArch: expectedArchitecture,
+      appRoot: paths.payloadRoot,
+    });
+    verifyMacAppSignature(paths.payloadRoot);
   }
+  verifyModBun(resources, platform, arch);
   if (platform !== 'darwin') verifyPortableGStreamerRuntime(resources, platform, arch);
   if (platform !== 'darwin') verifyProtocolRegistration(paths.payloadRoot, platform);
   if (platform === 'darwin') {

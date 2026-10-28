@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-import { chmodSync, copyFileSync, cpSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 
 import {
@@ -52,7 +53,7 @@ import {
 } from './audio-helper.mjs';
 import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
 import { stageCrashlytics, signCrashlytics } from './desktop-crashlytics.mjs';
-import { prepareMacGStreamerRuntime, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { assertSafeStageRoot, assertSidecarOutsideOutputs, stageMacGStreamerRuntime, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
 import { buildFreshBridgeClient } from './bridge-client-dist.mjs';
 
 function log(message) {
@@ -64,7 +65,21 @@ function run(command, args, cwd = packageRoot) {
   execFileSync(command, args, { cwd, stdio: 'inherit' });
 }
 
-function writeHelperEntitlements(path, plugin = false) {
+export function preflightSignedSidecar(paths, source) {
+  assertSafeStageRoot(paths.appContainer, { allowMissing: true });
+  assertSidecarOutsideOutputs(source, [paths.appContainer, paths.zipPath, paths.checksumPath]);
+}
+
+export function resetSignedOutputs(paths, source) {
+  preflightSignedSidecar(paths, source);
+  resetMacPackageArtifacts(paths);
+}
+
+export function stageSignedSidecar(source, destination, frameworks, arch, stageRoot) {
+  return stageMacGStreamerRuntime(source, destination, frameworks, arch, stageRoot);
+}
+
+export function writeHelperEntitlements(path, plugin = false) {
   const pluginRows = plugin ? `
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
   <key>com.apple.security.cs.disable-library-validation</key><true/>` : '';
@@ -76,7 +91,7 @@ function writeHelperEntitlements(path, plugin = false) {
 `, 'utf8');
 }
 
-function signNestedFrameworks(frameworksDir, identity, helperEntitlementsPath, pluginEntitlementsPath) {
+export function signNestedFrameworks(frameworksDir, identity, helperEntitlementsPath, pluginEntitlementsPath) {
   const timestamp = identity === '-' ? '--timestamp=none' : '--timestamp';
   const nestedBinaries = findMachOFiles(frameworksDir);
   for (const path of nestedBinaries) {
@@ -213,6 +228,7 @@ async function main() {
   // Reject the most expensive and most common packaging mistakes before building.
   assertArm64Executable(electronExecutable, 'Electron runtime');
   assertArm64Executable(sidecar, 'release bridge-server sidecar');
+  preflightSignedSidecar(paths, sidecar);
   const modCompiler = await prepareModBun({ platform: 'darwin', arch: TARGET_ARCH });
   assertArm64Executable(modCompiler.executable, 'Mod Bun compiler');
   try {
@@ -231,7 +247,7 @@ async function main() {
     () => run('npm', ['run', 'build'], sharedSdkRoot));
   run('npm', ['run', 'build'], packageRoot);
 
-  resetMacPackageArtifacts(paths);
+  resetSignedOutputs(paths, sidecar);
   copyElectronApp(electronApp, paths.appPath);
 
   const contents = join(paths.appPath, 'Contents');
@@ -263,12 +279,9 @@ async function main() {
   await createAsarArchive(packagedApp, asarPath);
   rmSync(packagedApp, { recursive: true, force: true });
   const binDir = join(resources, 'bin');
-  mkdirSync(binDir, { recursive: true });
   const packagedSidecar = join(binDir, 'bridge-server');
   cpSync(join(packageRoot, 'browser-extension'), join(resources, 'browser-extension'), { recursive: true });
-  copyFileSync(sidecar, packagedSidecar);
-  chmodSync(packagedSidecar, 0o755);
-  prepareMacGStreamerRuntime(packagedSidecar, join(contents, 'Frameworks'), 'arm64');
+  stageSignedSidecar(sidecar, packagedSidecar, join(contents, 'Frameworks'), 'arm64', paths.appContainer);
   stageModBun(resources, modCompiler);
   const brokerResourceRoot = join(resources, BROKER_RESOURCE_DIRNAME);
   buildCredentialBrokerResources(brokerResourceRoot, {
@@ -340,7 +353,18 @@ async function main() {
   log(`sha256: ${checksum}`);
 }
 
-main().catch((error) => {
-  process.stderr.write(`[package:mac] ERROR: ${formatError(error)}\n`);
-  process.exitCode = 1;
-});
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
+  main().catch((error) => {
+    process.stderr.write(`[package:mac] ERROR: ${formatError(error)}\n`);
+    process.exitCode = 1;
+  });
+}

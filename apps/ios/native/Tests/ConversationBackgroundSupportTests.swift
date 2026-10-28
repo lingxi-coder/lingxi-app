@@ -109,6 +109,228 @@ final class ConversationBackgroundSupportTests: XCTestCase {
         XCTAssertEqual(payloads.first?.identifier, "conversation:session-a:none:completed:task-1")
     }
 
+    func testUnknownBackgroundTaskExitDoesNotReportSuccessOrFailure() {
+        let scheduler = RecordingConversationScheduler()
+        var payloads: [ConversationNotificationPayload] = []
+        var preferences = NotifConfig()
+        preferences.enabled = true
+        preferences.taskCompleteNotifEnabled = true
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            preferences: preferences,
+            notificationDispatcher: { payloads.append($0) }
+        )
+        controller.setScenePhase(.background)
+
+        func task(_ id: String, _ status: BackgroundTaskSnapshot.Status) -> BackgroundTaskSnapshot {
+            BackgroundTaskSnapshot(id: id, descriptionText: "sensitive command for \(id)", status: status)
+        }
+        func snapshot(
+            _ tasks: [BackgroundTaskSnapshot],
+            requiresExecutionLease: Bool
+        ) -> ConversationBackgroundSnapshot {
+            ConversationBackgroundSnapshot(
+                sessionID: "session-a",
+                turnToken: nil,
+                turnCompletion: nil,
+                pendingQuestions: [],
+                backgroundTasks: tasks,
+                requiresExecutionLease: requiresExecutionLease
+            )
+        }
+
+        controller.sync(snapshot([
+            task("unknown-transition", .running),
+            task("success", .running),
+            task("failure", .running),
+        ], requiresExecutionLease: true))
+        let unknown = task("unknown-transition", .exitedUnknown)
+        let finished = snapshot([
+            unknown,
+            task("unknown-first-seen", .exitedUnknown),
+            task("success", .completed),
+            task("success", .completed),
+            task("failure", .failed),
+        ], requiresExecutionLease: false)
+        controller.sync(finished)
+        controller.sync(finished)
+        let identifiers = payloads.map(\.identifier)
+        XCTAssertEqual(identifiers.count, 2)
+        XCTAssertEqual(identifiers.sorted(), [
+            "conversation:session-a:none:completed:success",
+            "conversation:session-a:none:failed:failure",
+        ].sorted())
+        XCTAssertEqual(
+            payloads.first { $0.identifier.hasSuffix(":completed:success") }?.body,
+            String(localized: "chat_status_completed")
+        )
+        XCTAssertEqual(
+            payloads.first { $0.identifier.hasSuffix(":failed:failure") }?.body,
+            String(localized: "chat_status_failed")
+        )
+        XCTAssertTrue(payloads.allSatisfy { $0.title == String(localized: "chat_execution_tasks") })
+        XCTAssertFalse(payloads.contains { ($0.title + $0.body).contains("sensitive command") })
+        XCTAssertTrue(unknown.status.isTerminal)
+        XCTAssertFalse(unknown.status.requiresExecutionLease)
+        XCTAssertNil(snapshot([unknown], requiresExecutionLease: false).preferredLiveActivitySnapshot)
+    }
+
+    func testUnknownTaskExitClearsMixedLiveActivityWithoutClaimingCompletion() {
+        let scheduler = RecordingConversationScheduler()
+        let reporter = RecordingConversationActivityReporter()
+        var preferences = NotifConfig()
+        preferences.enabled = false
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            activityReporter: reporter,
+            preferences: preferences
+        )
+        controller.setScenePhase(.background)
+
+        func task(_ id: String, _ status: BackgroundTaskSnapshot.Status) -> BackgroundTaskSnapshot {
+            BackgroundTaskSnapshot(id: id, descriptionText: id, status: status)
+        }
+        func snapshot(
+            _ tasks: [BackgroundTaskSnapshot],
+            requiresExecutionLease: Bool,
+            turnCompletion: ConversationTurnCompletion? = nil,
+            pendingQuestions: [ConversationPendingQuestion] = []
+        ) -> ConversationBackgroundSnapshot {
+            ConversationBackgroundSnapshot(
+                sessionID: "session-a",
+                turnToken: nil,
+                turnCompletion: turnCompletion,
+                pendingQuestions: pendingQuestions,
+                backgroundTasks: tasks,
+                requiresExecutionLease: requiresExecutionLease
+            )
+        }
+
+        let completed = task("completed", .completed)
+        let running = task("unknown", .running)
+        let unknown = task("unknown", .exitedUnknown)
+        let active = snapshot([completed, running], requiresExecutionLease: true)
+        let settled = snapshot([completed, unknown], requiresExecutionLease: false)
+
+        controller.sync(active)
+        controller.sync(settled)
+        XCTAssertEqual(reporter.snapshots.count, 2)
+        XCTAssertEqual(reporter.snapshots[0]?.status, .running)
+        XCTAssertNil(reporter.snapshots[1])
+        XCTAssertNil(snapshot([unknown, completed], requiresExecutionLease: false).preferredLiveActivitySnapshot)
+        XCTAssertEqual(snapshot([unknown, task("failed", .failed)], requiresExecutionLease: false).preferredLiveActivitySnapshot?.status, .failed)
+        XCTAssertEqual(snapshot([unknown, task("paused", .paused)], requiresExecutionLease: false).preferredLiveActivitySnapshot?.status, .paused)
+        XCTAssertEqual(snapshot([completed], requiresExecutionLease: false).preferredLiveActivitySnapshot?.status, .completed)
+        XCTAssertEqual(snapshot([unknown, running], requiresExecutionLease: true).preferredLiveActivitySnapshot?.status, .running)
+        let question = ConversationPendingQuestion(requestId: 9, questions: [], timeoutSecs: nil)
+        XCTAssertEqual(
+            snapshot([unknown], requiresExecutionLease: false, pendingQuestions: [question]).preferredLiveActivitySnapshot?.status,
+            .waiting
+        )
+
+        let completion = ConversationTurnCompletion(
+            token: ConversationTurnToken(clientTurnId: 42, sessionEpoch: 1),
+            outcome: .completed,
+            finalAssistantText: "done"
+        )
+        let turnActivity = snapshot([unknown], requiresExecutionLease: false, turnCompletion: completion).preferredLiveActivitySnapshot
+        XCTAssertEqual(turnActivity?.status, .completed)
+        XCTAssertEqual(turnActivity?.turnID, 42)
+        XCTAssertEqual(turnActivity?.title, String(localized: "chat_agent_main"))
+        XCTAssertEqual(turnActivity?.subtitle, String(localized: "chat_run_status_completed"))
+        XCTAssertEqual(
+            snapshot([unknown, task("failed", .failed)], requiresExecutionLease: false, turnCompletion: completion).preferredLiveActivitySnapshot?.status,
+            .completed
+        )
+        XCTAssertEqual(
+            snapshot([unknown, task("paused", .paused)], requiresExecutionLease: false, turnCompletion: completion).preferredLiveActivitySnapshot?.status,
+            .completed
+        )
+        let failedCompletion = ConversationTurnCompletion(
+            token: ConversationTurnToken(clientTurnId: 43, sessionEpoch: 1),
+            outcome: .failed,
+            finalAssistantText: ""
+        )
+        XCTAssertEqual(
+            snapshot([unknown], requiresExecutionLease: false, turnCompletion: failedCompletion).preferredLiveActivitySnapshot?.status,
+            .failed
+        )
+        let laterCompletion = ConversationTurnCompletion(
+            token: ConversationTurnToken(clientTurnId: 44, sessionEpoch: 1),
+            outcome: .completed,
+            finalAssistantText: "done"
+        )
+        XCTAssertEqual(
+            snapshot([unknown], requiresExecutionLease: false, turnCompletion: laterCompletion).preferredLiveActivitySnapshot?.turnID,
+            44
+        )
+        XCTAssertEqual(
+            snapshot([unknown, task("failed", .failed)], requiresExecutionLease: false, turnCompletion: laterCompletion).preferredLiveActivitySnapshot?.turnID,
+            44
+        )
+        XCTAssertEqual(
+            snapshot([unknown, task("paused", .paused)], requiresExecutionLease: false, turnCompletion: laterCompletion).preferredLiveActivitySnapshot?.turnID,
+            44
+        )
+    }
+
+    func testUnknownTaskDoesNotSuppressIndependentTurnIdleAlerts() async throws {
+        let scheduler = RecordingConversationScheduler()
+        let gate = AsyncGate()
+        var payloads: [ConversationNotificationPayload] = []
+        let controller = ConversationBackgroundAlertController(
+            scheduler: scheduler,
+            sleeper: { _ in await gate.wait() },
+            preferences: NotifConfig(),
+            notificationDispatcher: { payloads.append($0) }
+        )
+        controller.setScenePhase(.background)
+
+        func snapshot(
+            _ outcome: ConversationTurnCompletion.Outcome,
+            taskStatus: BackgroundTaskSnapshot.Status,
+            turnID: UInt64
+        ) -> ConversationBackgroundSnapshot {
+            let token = ConversationTurnToken(clientTurnId: turnID, sessionEpoch: 1)
+            return ConversationBackgroundSnapshot(
+                sessionID: "session-a",
+                turnToken: token,
+                turnCompletion: ConversationTurnCompletion(token: token, outcome: outcome, finalAssistantText: "done"),
+                pendingQuestions: [],
+                backgroundTasks: [BackgroundTaskSnapshot(id: "shell", descriptionText: "sensitive command", status: taskStatus)],
+                requiresExecutionLease: taskStatus.requiresExecutionLease
+            )
+        }
+
+        // An unknown task must not cancel a separately confirmed turn result.
+        controller.sync(snapshot(.completed, taskStatus: .running, turnID: 7))
+        let armed = try XCTUnwrap(controller.idleAlertTaskForTesting)
+        controller.sync(snapshot(.completed, taskStatus: .exitedUnknown, turnID: 7))
+        await gate.open()
+        await armed.value
+        XCTAssertEqual(payloads.map(\.identifier), ["conversation:session-a:7:completed:-"])
+
+        // Historical unknown results must not suppress later completed or
+        // failed turns, and each notification must describe the main run.
+        controller.sync(snapshot(.completed, taskStatus: .exitedUnknown, turnID: 8))
+        let completedAlert = try XCTUnwrap(controller.idleAlertTaskForTesting)
+        await completedAlert.value
+        controller.sync(snapshot(.failed, taskStatus: .exitedUnknown, turnID: 9))
+        let failedAlert = try XCTUnwrap(controller.idleAlertTaskForTesting)
+        await failedAlert.value
+        XCTAssertEqual(payloads.map(\.identifier), [
+            "conversation:session-a:7:completed:-",
+            "conversation:session-a:8:completed:-",
+            "conversation:session-a:9:failed:-",
+        ])
+        XCTAssertTrue(payloads.allSatisfy { $0.title == String(localized: "chat_agent_main") })
+        XCTAssertEqual(payloads.map(\.body), [
+            String(localized: "chat_run_status_completed"),
+            String(localized: "chat_run_status_completed"),
+            String(localized: "chat_run_status_failed"),
+        ])
+    }
+
     /// Every background task posted with `turnID: nil` and no discriminator, so
     /// all of them collapsed onto ONE identifier and `post`'s delivered-set
     /// guard swallowed every task after the first — permanently, since the set
@@ -583,4 +805,15 @@ private actor RecordingConversationScheduler: ConversationNotificationScheduling
     func snapshot() -> [ConversationNotificationPayload] {
         payloads
     }
+}
+
+@MainActor
+private final class RecordingConversationActivityReporter: ConversationActivityReporting {
+    private(set) var snapshots: [ConversationLiveActivitySnapshot?] = []
+
+    func sync(snapshot: ConversationBackgroundSnapshot, scenePhase _: ScenePhase) {
+        snapshots.append(snapshot.preferredLiveActivitySnapshot)
+    }
+
+    func clear() {}
 }

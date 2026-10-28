@@ -66,10 +66,9 @@ msgqueue = { workspace = true }
 tool-cron = { workspace = true }
 cron = { workspace = true }
 # S2: the real binary resolves a DesktopConfig from env/argv and assembles the
-# production runtime through the desktop composition root. app→app is permitted
-# by the dependency gate (apps are leaves; the rule only forbids non-leaf→leaf).
+# production runtime through the desktop composition root.
 harness-runtime = { workspace = true, default-features = true, features = ["desktop"] }
-cli = { path = "../cli/host" }
+host-identity = { path = "../../packages/host-identity" }
 plugin = { workspace = true }
 skill = { workspace = true }
 hooks = { workspace = true }

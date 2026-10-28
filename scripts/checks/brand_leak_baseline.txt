@@ -218,9 +218,9 @@ G1	scripts/tests/parity_behaviour.py	\.lingxi
 G1	scripts/tests/teammate_worker_smoke.py	LINGXI
 G1	apps/android/native/app/src/androidTest/java/com/lingxi/code/conversation/VisualizationCardUiTest.kt	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/android/native/app/src/main/java/com/lingxi/code/settings/GeneralSettingsPage.kt	\.lingxi(?![A-Za-z0-9_.\-])
-G1	apps/android/native/app/src/main/java/com/lingxi/code/voice/EngineEnvironmentOverrides.kt	LINGXI_
+G1	apps/android/native/app/src/main/java/com/lingxi/code/runtimeintegration/EngineEnvironmentOverrides.kt	LINGXI_
 G1	apps/android/native/app/src/test/java/com/lingxi/code/plugins/PluginCatalogTest.kt	\.lingxi(?![A-Za-z0-9_.\-])
-G1	apps/android/native/app/src/test/java/com/lingxi/code/voice/EngineEnvironmentOverridesTest.kt	LINGXI_
+G1	apps/android/native/app/src/test/java/com/lingxi/code/runtimeintegration/EngineEnvironmentOverridesTest.kt	LINGXI_
 G1	apps/bridge-server/src/router/configuration.rs	\.lingxi
 G1	apps/cli/host/tests/common/native_fallback.rs	LINGXI
 G1	apps/ios/native/Sources/Settings/SimplePages.swift	\.lingxi(?![A-Za-z0-9_.\-])
@@ -398,3 +398,5 @@ G7	apps/cli/host/src/commands/plugin_eval.rs	CLAUDE_PLUGIN_
 G7	apps/cli/host/src/commands/plugin_eval.rs	\.claude-plugin
 G7	apps/cli/host/src/commands/plugin_init.rs	CLAUDE_PLUGIN_
 G1	scripts/tests/test_android_jni_promotion.py	LINGXI
+# Existing LINGXI_NATIVE_ANTHROPIC_ENDPOINT policy moved from cli/host/src/init.rs.
+G1	packages/host-identity/src/lib.rs	LINGXI

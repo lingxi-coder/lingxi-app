@@ -15,7 +15,7 @@ import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.MCPServer
 import com.lingxi.code.model.Message
-import com.lingxi.code.voice.buildVoiceEngine
+import com.lingxi.code.runtimeintegration.NativeEngineFactory
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,7 +32,7 @@ import kotlinx.coroutines.flow.flow
  *  - [UnavailableConversationSource] — explicit empty/error state when the
  *    engine cannot be built.
  *  - [EngineConversationSource] — the real in-process engine over UniFFI: owns
- *    a [MobileEngineHandle] built via [buildVoiceEngine], registers an
+ *    a [MobileEngineHandle] built via [NativeEngineFactory], registers an
  *    `AndroidEventListener` whose `onEvent` pushes each inbound [ClientEvent]
  *    into an internal flow, and drives ordinary turns via
  *    `ClientCommand.SendPrompt` plus main slash commands via

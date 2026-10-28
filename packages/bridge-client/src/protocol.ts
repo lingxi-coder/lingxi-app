@@ -1,15 +1,15 @@
 /**
- * LingXi bridge wire-protocol types — a 1:1 TypeScript mirror of the Rust
- * serde contract (the SOURCE OF TRUTH).
+ * LingXi bridge wire-protocol types. The command/event envelopes and selected
+ * DTOs are generated from Rust; nested DTOs below are hand-maintained mirrors.
  *
  * Mirrored from:
- *  - `client-protocol/src/commands.rs`   → {@link ClientCommand} + payload DTOs
- *  - `client-protocol/src/events.rs`     → {@link ClientEvent} + cost/outcome DTOs
- *  - `client-protocol/src/message.rs`    → {@link MessageDto} / {@link MessageBlockDto}
- *  - `client-protocol/src/permission.rs` → {@link PermissionRequest} + response DTOs
- *  - `client-protocol/src/listings.rs`   → the screen-listing row/payload DTOs
- *  - `client-protocol/src/error.rs`      → {@link ClientError}
- *  - `client-protocol/src/version.rs`    → {@link CLIENT_PROTOCOL_VERSION}
+ *  - `crates/client/src/protocol/commands.rs`   → {@link ClientCommand} + payload DTOs
+ *  - `crates/client/src/protocol/events.rs`     → {@link ClientEvent} + cost/outcome DTOs
+ *  - `crates/client/src/protocol/message.rs`    → {@link MessageDto} / {@link MessageBlockDto}
+ *  - `crates/client/src/protocol/permission.rs` → {@link PermissionRequest} + response DTOs
+ *  - `crates/client/src/protocol/listings.rs`   → the screen-listing row/payload DTOs
+ *  - `crates/client/src/protocol/error.rs`      → {@link ClientError}
+ *  - `crates/client/src/protocol/version.rs`    → {@link CLIENT_PROTOCOL_VERSION}
  *  - `bridge/src/wire.rs`                → {@link Frame}, {@link ClientHello},
  *                                          {@link ServerHello}, {@link Capabilities},
  *                                          {@link BRIDGE_PROTOCOL_VERSION}
@@ -26,20 +26,13 @@
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Version constants (bridge/src/wire.rs, client-protocol/src/version.rs)
+// Version constants (bridge/src/wire.rs, crates/client/src/protocol/version.rs)
 // ─────────────────────────────────────────────────────────────────────────────
 
-import type {
-  MediaConnectionRequestDto,
-  MediaConnectionResponseDto,
-  MediaControlRequestDto,
-  MediaControlResponseDto,
-  MediaDeviceRequestEnvelopeDto,
-  MediaDeviceResponseDto,
-  MediaServiceRequestDto,
-  MediaServiceResponseDto,
-  MediaSessionModeDto,
-} from './mediaProtocol.js';
+import type { MediaSessionModeDto } from './mediaProtocol.js';
+import type { ClientEvent } from './protocol.generated.js';
+
+export type { ClientCommand, ClientEvent, TaskRowDto } from './protocol.generated.js';
 
 export {
   MAX_MEDIA_AUDIO_SETTINGS_JSON_BYTES,
@@ -275,11 +268,7 @@ export interface AudioCapabilitySnapshotDto {
 }
 
 /**
- * The inbound command envelope a client sends to the engine
- * (commands.rs `ClientCommand`). Internally tagged on `type`, `snake_case`.
- *
- * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive; consumers
- * should treat the union as open-ended.
+ * Scheduled run DTOs carried by the generated command and event envelopes.
  */
 export interface CronRunDto {
   ownerPid?: number;
@@ -658,155 +647,6 @@ export interface UiInvalidateEventDto {
   instances?: Array<{ surface: 'desktop' | 'mobile' | 'vscode'; component: NativeUiComponent; instance_id: string }>;
   uuid: string;
 }
-
-export type ClientCommand =
-  | { type: 'cron_run_started'; run_id: string; session_id: string }
-  | { type: 'scheduled_run_turn'; run_id: string; prompt: string; model: string; reasoning: ReasoningSelectionDto }
-  | { type: 'cron_run_completed'; run_id: string; session_id?: string | null; summary?: string | null; error?: string | null }
-  | { type: 'cron_manage'; request_id: string; request: CronRequestDto }
-  // ── Turn driving ──────────────────────────────────────────────────────────
-  | {
-      type: 'send_prompt';
-      text: string;
-      prompt_mode?: PromptModeDto;
-      images: ImageRefDto[];
-      turn_id?: number;
-      /** Widget the user follows up on; the engine attaches its saved model state. */
-      visualization_context?: VisualizationRefDto;
-    }
-  | { type: 'cancel'; turn_id?: number }
-  /**
-   * Reattach a mobile client to a durable turn on the connection's active
-   * session; the engine emits the current recovery snapshot and replays
-   * events whose sequence is greater than `after_sequence`
-   * (commands.rs `ClientCommand::AttachTurn`).
-   */
-  | { type: 'attach_turn'; turn_id: number; after_sequence?: number }
-  /** Resume a checkpointed durable turn when its recovery policy allows it (commands.rs `ClientCommand::ResumeTurn`). */
-  | { type: 'resume_turn'; turn_id: number }
-  /**
-   * Persist a platform-lease expiration without converting it to cancel.
-   * `reason` is a machine-readable platform reason such as
-   * `background_time_expired` (commands.rs `ClientCommand::PauseTurn`).
-   */
-  | { type: 'pause_turn'; turn_id: number; reason: string }
-  // ── Permission resolution ───────────────────────────────────────────────────
-  | { type: 'approve_permission'; request_id: number; response: PermissionResponseDto }
-  | { type: 'deny_permission'; request_id: number }
-  | { type: 'set_permission_mode'; mode: PermissionModeId }
-  | { type: 'initialize_proactivity'; proactivity?: boolean; reinitialize?: boolean }
-  | { type: 'set_proactivity_level'; level: NativeProactivityLevelDto; offer_bypass?: boolean }
-  | { type: 'set_typescript_lsp_mode'; mode: TypescriptLspModeId }
-  // ── `computer` tool request_access resolution ───────────────────────────────
-  | { type: 'approve_computer_access'; request_id: number; response: ComputerAccessResponseDto }
-  | { type: 'deny_computer_access'; request_id: number }
-  // ── `AskUserQuestion` resolution ───────────────────────────────────────────
-  | { type: 'answer_ask_user_question'; request_id: number; answers: Record<string, string> }
-  | { type: 'cancel_ask_user_question'; request_id: number }
-  // ── Provider credentials (authenticated local bridge only) ──────────────────
-  | { type: 'list_provider_credentials'; operation_id: number; provider_ids: string[]; preview_provider_ids?: string[] }
-  | { type: 'set_provider_credential'; operation_id: number; provider_id: string; credential: string }
-  | { type: 'delete_provider_credential'; operation_id: number; provider_id: string }
-  | {
-      type: 'test_provider_connection';
-      operation_id: number;
-      provider_id: string;
-      api_base: string;
-      model: string;
-      credential_override?: string;
-    }
-  // ── Model ─────────────────────────────────────────────────────────────────
-  | { type: 'set_model'; model: string }
-  | { type: 'list_models' }
-  | { type: 'get_conversation_controls' }
-  | { type: 'set_reasoning_selection'; selection: ReasoningSelectionDto }
-  | { type: 'set_fast_mode'; enabled: boolean }
-  // ── Slash commands ──────────────────────────────────────────────────────────
-  | { type: 'run_slash_command'; raw: string; images: ImageRefDto[]; turn_id?: number }
-  // ── Listings ────────────────────────────────────────────────────────────────
-  | { type: 'refresh_listings'; which: ListingKindDto[] }
-  | { type: 'list_session_agents' }
-  | { type: 'load_session_agent_transcript'; agent_id: string }
-  // ── Session lifecycle (decision §0.5) ───────────────────────────────────────
-  | { type: 'new_session'; cwd?: string; model?: string }
-  | { type: 'resume_session'; session_id: string; cwd?: string }
-  | { type: 'list_sessions'; limit?: number }
-  | { type: 'fork_session'; session_id: string; target_mode: SessionModeDto }
-  // Explicit UI mount lifecycle; transport hello/close does not imply an attach.
-  | { type: 'ui_attach'; surface: 'desktop' | 'mobile' | 'vscode'; client_id: string }
-  | { type: 'ui_detach'; client_id: string }
-  // Mod UI request channels are part of the canonical wire protocol. Electron
-  // keeps them off its generic desktop command allowlist.
-  | { type: 'ui_render'; request_id: string; request_json: string }
-  | { type: 'ui_client_module'; request_id: string; plugin: string }
-  | { type: 'ui_message'; request_id: string; request_json: string }
-  | { type: 'ui_client_fault'; request_id: string; request_json: string }
-  | { type: 'ui_client_press'; request_id: string; request_json: string }
-  | { type: 'ui_press'; request_id: string; request_json: string }
-  | { type: 'ui_input'; request_id: string; request_json: string }
-  | { type: 'ui_select'; request_id: string; request_json: string }
-  | { type: 'ui_client_operation'; request_id: string; operation_json: string }
-  // ── Auth + session control ────────────────────────────────────────────────
-  | { type: 'login' }
-  | { type: 'logout' }
-  | { type: 'force_compact' }
-  | { type: 'clear_session' }
-  // ── Tasks ───────────────────────────────────────────────────────────────────
-  | { type: 'task_list'; status_filter?: TaskStatusDto; request_id?: string }
-  | { type: 'task_output'; task_id: string; offset: number }
-  | { type: 'task_stop'; task_id: string }
-  | { type: 'task_message'; task_id: string; message: string }
-  | { type: 'resume_workflow'; task_id: string }
-  // ── Lifecycle ───────────────────────────────────────────────────────────────
-  | { type: 'request_exit' }
-  // ── Settings (persisted) ─────────────────────────────────────────────────────
-  | { type: 'update_settings'; destination: WritableScopeDto; patch_json: string }
-  | { type: 'update_prompt_suggestion_context'; session_id: string; focus: string; input_empty: boolean; pending_permission: boolean; elicitation_active: boolean }
-  | { type: 'prompt_suggestion_feedback'; session_id: string; uuid: string; action: string }
-  | { type: 'record_prompt_suggestion_submission'; text: string }
-  // ── Permissions (persisted) ──────────────────────────────────────────────────
-  | {
-      type: 'update_permission_rules';
-      destination: WritableScopeDto;
-      behavior: PermissionBehaviorDto;
-      add: string[];
-      remove: string[];
-    }
-  | { type: 'set_default_permission_mode'; destination: WritableScopeDto; mode: string }
-  | {
-      type: 'update_workspace_directories';
-      destination: WritableScopeDto;
-      add: string[];
-      remove: string[];
-    }
-  // ── MCP servers (persisted) ──────────────────────────────────────────────────
-  | { type: 'upsert_mcp_server'; scope: WritableScopeDto; name: string; config_json: string }
-  | { type: 'remove_mcp_server'; scope: WritableScopeDto; name: string }
-  | { type: 'skill_admin'; command: SkillAdminCommandDto }
-  | { type: 'mcp_admin'; command: McpAdminCommandDto }
-  | { type: 'plugin_admin'; command: PluginAdminCommandDto }
-  | { type: 'hook_admin'; command: HookAdminCommandDto }
-  | { type: 'fusion_admin'; command: FusionAdminCommandDto }
-  // ── AudioService (engine -> device operations and capability publication) ──
-  | { type: 'audio_response'; identity: AudioOperationIdDto; result: AudioOperationResultDto }
-  | { type: 'start_realtime_audio'; request_json: string }
-  | { type: 'realtime_audio_input'; input_json: string }
-  | { type: 'stop_realtime_audio' }
-  | { type: 'get_audio_session_context' }
-  | { type: 'update_audio_capabilities'; capabilities: AudioCapabilitySnapshotDto }
-  | { type: 'update_media_session_modes'; modes: MediaSessionModeDto[] }
-  // Lightweight in-memory child conversations (client-protocol protocol 25).
-  // ClientTextDto remains an ordinary JSON string on the wire; command_json is
-  // a JSON-encoded ClientCommand carried as a string, not a nested object.
-  | { type: 'side_chat_create'; request_id: string; initial_input?: string }
-  | { type: 'side_chat_list' }
-  | { type: 'side_chat_get'; side_id: string }
-  | { type: 'side_chat_end'; side_id: string }
-  | { type: 'side_chat_submit'; side_id: string; request_id: string; command_json: string }
-  | { type: 'media_service_request'; request: MediaServiceRequestDto }
-  | { type: 'media_connection_response'; response: MediaConnectionResponseDto }
-  | { type: 'media_device_response'; response: MediaDeviceResponseDto }
-  | { type: 'media_control_response'; response: MediaControlResponseDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // tool_display.rs — the pre-derived render model for one tool call
@@ -1565,32 +1405,6 @@ export type TaskStatusDto =
   | { type: 'failed' }
   | { type: 'cancelled' };
 
-/** One task row (listings.rs `TaskRowDto`). */
-export interface TaskRowDto {
-  /** The teammate is waiting for its leader's plan decision. */
-  awaiting_plan_approval?: boolean;
-  task_id: string;
-  /** Persistent runner identity for local_agent tasks; never the task creator. */
-  agent_id?: string;
-  task_type: string;
-  status: TaskStatusDto;
-  description: string;
-  can_resume?: boolean;
-  started_at_ms?: number;
-  /** Terminal failure reason for a `failed` row, when the handler reported one. */
-  error?: string;
-  /** `local_fusion` only (F005): the run's current progress-stage label. */
-  stage?: string;
-  /** Additive shell specialization, e.g. a command event monitor. */
-  kind?: string;
-  /** Agent completion has not yet been delivered or consumed. */
-  unread?: boolean;
-  /** Concrete model used by an agent task. */
-  model?: string;
-  /** String effort label; numeric budgets are omitted. */
-  effort?: string;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // events.rs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1658,10 +1472,7 @@ export interface CostDto {
 }
 
 /**
- * Outbound events the engine streams to a client (events.rs `ClientEvent`).
- * Internally tagged on `type`, `snake_case`.
- *
- * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive.
+ * Provider fallback message retained for native transcript parity.
  */
 export interface ServerFallbackProviderMessageDto {
   id?: string;
@@ -1688,328 +1499,6 @@ export interface ServerFallbackTombstoneMessageDto {
 
 export type RefusalContinuationPhaseDto = 'begin';
 export type RefusalContinuationJoinDto = 'exact';
-
-export type ClientEvent =
-  | { type: 'scheduled_run_finished'; run_id: string; summary?: string | null; error?: string | null }
-  | { type: 'cron_run_bound'; run_id: string; error?: string | null }
-  | { type: 'cron_run_requested'; run_id: string; task: CronJobDto }
-  | { type: 'cron_result'; request_id: string; jobs: CronJobDto[]; error?: string }
-  /** A visualization slot in the live assistant text (events.rs `VisualizationBlock`). */
-  | { type: 'visualization_block'; status: VisualizationBlockStatusDto; reference?: VisualizationRefDto }
-  // ── Error ─────────────────────────────────────────────────────────────────
-  | { type: 'error'; kind: ErrorKindDto; message: string }
-  | { type: 'terminal_api_error'; api_error_status?: number; terminal_reason: string; stop_reason: string }
-  | { type: 'message_identity'; message_id: string }
-  | { type: 'message_retracted'; message_id: string }
-  | { type: 'assistant_block_start'; block_key: number }
-  | { type: 'assistant_block_identity'; block_key: number; message_uuid: string }
-  | { type: 'assistant_transcript_row_uuids'; message_id: string; uuids: (string | null)[] }
-  | { type: 'system_notice'; message: string; is_error: boolean }
-  | { type: 'session_storage_state'; disk_full: boolean }
-  | { type: 'workspace_changed'; state: WorkspaceStateDto }
-  | { type: 'ui_log'; plugin: string; text: string }
-  | { type: 'ui_toast'; plugin: string; text: string; timeout_ms: number }
-  | { type: 'ui_status'; plugin: string; text: string | null }
-  | { type: 'ui_notify'; plugin: string; text: string }
-  | { type: 'ui_client_frame'; runtime_id: string; frame_json: string }
-  | { type: 'ui_control_result'; request_id: string; response_json?: string; metadata_json?: string; error?: string }
-  | { type: 'ui_invalidate'; instances_json?: string; uuid: string; session_id: string }
-  | { type: 'scheduled_task_fire'; message: string }
-  | {
-      type: 'loop_wakeup';
-      /** The resume line, already rendered host-side. */
-      message: string;
-      /** The companion meta line, present only when `streak > 0`. */
-      companion?: string;
-      /** Consecutive quiet ticks before this wakeup; 0 for an ordinary one. */
-      streak: number;
-      /** When the streak began, epoch ms; 0 when there is none. */
-      since_ms: number;
-    }
-  | { type: 'ask_user_question'; request: AskUserQuestionRequestDto }
-  | { type: 'ask_user_question_resolved'; request_id: number }
-  | {
-      type: 'permission_request_resolved';
-      request_id: number;
-      resolution: PermissionResolutionDto;
-    }
-  // ── Live-turn streaming events ──────────────────────────────────────────────
-  | { type: 'text_delta'; text: string }
-  | {
-      type: 'tool_use_started';
-      id: string;
-      tool: string;
-      input_json: string;
-      header: ToolHeaderDto;
-    }
-  | { type: 'tool_heartbeat'; id: string; tool: string; elapsed_ms: number }
-  | {
-      type: 'tool_use_result';
-      id: string;
-      tool: string;
-      result_json: string;
-      is_error: boolean;
-      display: ToolResultDisplayDto;
-    }
-  | { type: 'plan_updated'; tasks: PlanTaskDto[] }
-  | { type: 'message_complete'; stop_reason?: string; message?: MessageDto }
-  | { type: 'turn_started'; turn_id?: number }
-  | { type: 'turn_ended'; outcome: TurnOutcomeDto; stop_reason?: string; cost: CostDto }
-  | { type: 'prompt_suggestion'; suggestion: string; uuid: string; session_id: string }
-  | { type: 'prompt_suggestion_state'; enabled: boolean; notice: string | null }
-  /**
-   * Authoritative durable state for one mobile turn. Emitted on attach,
-   * resume, recovery gating, and every terminal transition
-   * (events.rs `ClientEvent::TurnRecoveryState`).
-   */
-  | { type: 'turn_recovery_state'; snapshot: TurnRecoverySnapshotDto }
-  /**
-   * Sequenced retained copy of a turn event, emitted beside live delivery and
-   * replayed after `attach_turn`. `event_json` is the original serialized
-   * {@link ClientEvent}, kept as a string to avoid a recursive shape
-   * (events.rs `ClientEvent::TurnEventReplay`).
-   */
-  | { type: 'turn_event_replay'; session_id: string; turn_id: number; sequence: number; event_json: string }
-  | {
-      type: 'cost_update';
-      total_usd: number;
-      input_tokens: number;
-      output_tokens: number;
-      api_calls: number;
-      session_duration_secs: number;
-      formatted: string;
-    }
-  | {
-      type: 'compaction_completed';
-      messages_before: number;
-      messages_after: number;
-      bytes_saved: number;
-      /** Empty or absent when connected to an older engine. */
-      summary?: string;
-    }
-  // ── Session lifecycle ───────────────────────────────────────────────────────
-  | { type: 'session_started'; session_id: string; mode: SessionModeDto }
-  | { type: 'session_ended' }
-  | { type: 'session_resumed'; session_id: string; mode: SessionModeDto; messages: MessageDto[] }
-  | { type: 'session_forked'; source_session_id: string; session_id: string; mode: SessionModeDto }
-  | { type: 'session_list'; sessions: SessionRowDto[] }
-  | { type: 'session_agent_list'; session_id: string; agents: SessionAgentSummaryDto[] }
-  | {
-      type: 'session_agent_transcript';
-      session_id: string;
-      agent_id: string;
-      messages: SessionAgentMessageRowDto[];
-      next_message_index: number;
-      revision: number;
-    }
-  | { type: 'session_agent_updated'; session_id: string; agent: SessionAgentSummaryDto }
-  | {
-      type: 'session_agent_message';
-      session_id: string;
-      agent_id: string;
-      message_index: number;
-      message_uuid: string;
-      message: MessageDto;
-      api_error_json?: string;
-    }
-  | { type: 'session_agent_tombstone'; session_id: string; agent_id: string; message_uuid: string; display_only: boolean }
-  // ── Listing / screen events ─────────────────────────────────────────────────
-  | { type: 'model_list'; models: string[]; current: string; current_model_source?: string; details?: ModelDetailsDto[] }
-  | { type: 'provider_model_catalog'; providers: ProviderModelCatalogEntryDto[] }
-  | { type: 'query_model_change'; to_model: string }
-  | {
-      type: 'refusal_continuation';
-      phase: RefusalContinuationPhaseDto;
-      salvage_text: string;
-      join: RefusalContinuationJoinDto;
-      replaces_uuids: string[];
-      display_salvage_text: boolean;
-    }
-  | { type: 'tombstone'; message: ServerFallbackTombstoneMessageDto; display_only: boolean }
-  | { type: 'user_transcript_row_identity'; row_token: string; uuid: string }
-  | { type: 'compaction_status'; phase: string; error?: string }
-  | { type: 'model_changed'; model: string; model_source?: string }
-  | { type: 'permission_mode_changed'; mode: PermissionModeId }
-  | {
-      type: 'typescript_lsp_mode_changed';
-      requested: TypescriptLspModeId;
-      effective: TypescriptLspModeId;
-      available: boolean;
-    }
-  | { type: 'conversation_controls_changed'; controls: ConversationControlsDto }
-  | { type: 'fast_mode_changed'; enabled: boolean }
-  | {
-      type: 'openai_oauth_updated';
-      session: { access_token: string; refresh_token?: string; expires_at: number; account_id?: string; fedramp: boolean };
-    }
-  | {
-      type: 'provider_credential_status';
-      operation_id: number;
-      configured_provider_ids: string[];
-      unavailable_provider_ids?: string[];
-      storage_encrypted: boolean;
-      credential_previews?: Record<string, string>;
-      error?: string;
-    }
-  | {
-      type: 'provider_connection_tested';
-      operation_id: number;
-      provider_id: string;
-      connected: boolean;
-      reachable: boolean;
-      authenticated: boolean;
-      model_available: boolean;
-      http_status?: number;
-      latency_ms: number;
-      message: string;
-      used_stored_credential: boolean;
-    }
-  | {
-      type: 'configuration_operation';
-      domain: ConfigurationDomainDto;
-      operation_id: number;
-      status: ConfigurationOperationStatusDto;
-      effect: ConfigurationEffectDto;
-      message?: string;
-      details_json?: string;
-    }
-  | { type: 'fusion_catalog'; catalog_json: string }
-  | { type: 'fusion_strategy_resolved'; operation_id: number; selection_json?: string; error?: string }
-  | { type: 'skill_catalog'; catalog_json: string }
-  | { type: 'skill_document'; document_json: string }
-  | { type: 'mcp_configuration_snapshot'; snapshot_json: string }
-  | { type: 'plugin_catalog'; catalog_json: string }
-  | { type: 'mcp_servers'; servers: McpServerDto[] }
-  | { type: 'skills'; skills: SkillDto[] }
-  | { type: 'hooks'; hooks: HookDto[] }
-  | { type: 'agents'; agents: AgentDto[] }
-  | { type: 'slash_command_catalog'; commands: SlashCommandDto[] }
-  | { type: 'slash_command_result'; turn_id?: number; display: string; is_error?: boolean }
-  | { type: 'memory_entries'; entries: MemoryEntryDto[] }
-  | { type: 'status_snapshot'; snapshot: StatusSnapshotDto }
-  | {
-      type: 'settings_snapshot';
-      effective_json: string;
-      provenance_json: string;
-      /**
-       * `[{layer, path, exists, parsed, parse_error?}]` — the on-disk state
-       * of every settings file layer, so the UI can show which file backs a
-       * layer and whether it parsed. `parsed` reports JSON validity only; it
-       * says nothing about OS write permission.
-       */
-      files_json?: string;
-      /**
-       * `{key: value}` — the FILE-LAYER values as read at session start. NOT
-       * the session's live configuration: no `cli`/`managed`/`env` overlay is
-       * applied, so this can differ from `effective_json` both because of an
-       * on-disk edit not yet picked up and because `effective_json` carries
-       * the managed overlay that this field does not.
-       */
-      active_json?: string;
-      /** Top-level keys the managed layer locks; editable elsewhere is refused. */
-      locked?: string[];
-      /**
-       * `{layer: {key: value}}` — each FILE layer's OWN raw settings map,
-       * unmerged. `effective_json` is a cross-layer merge and `active_json`
-       * is the file-layer merge without the managed overlay; neither can
-       * stand in for "what does layer L's file itself say", which a layered
-       * editor needs before writing back to one layer: `update_settings`
-       * replaces a key WHOLESALE in one layer's file, so pre-merging a write
-       * against `effective_json` (which can carry another layer's entries
-       * for an object-valued key like `providers`) would silently fork that
-       * other layer's data into whichever layer gets saved.
-       */
-      layers_json?: string;
-      /**
-       * The keys in `effective_json` whose value is a CROSS-LAYER union
-       * rather than any one layer's value. The engine deep-merges or
-       * concat-dedups a specific set of keys (`hooks`, `permissions`,
-       * `providers`, `enabledPlugins`, `trustedDirectories`, … — its
-       * `settings::schema::MERGE_STRATEGIES` table), so once more than one
-       * layer contributes, the effective value belongs to no single layer and
-       * `provenance_json` names only the highest-priority CONTRIBUTOR. The UI
-       * must therefore not draw a single-layer provenance badge for a key
-       * listed here — it says the value is merged across layers instead.
-       *
-       * Only keys the merge actually unioned appear: a deep-merge key whose
-       * entries the winning layer entirely redefines is absent, because there
-       * the winning layer's badge is honest.
-       */
-      merged_keys?: string[];
-    }
-  | { type: 'auth_state'; state: AuthStateDto }
-  | { type: 'doctor_report'; report: DoctorReportDto }
-  | { type: 'task_row'; task: TaskRowDto }
-  | { type: 'task_list_complete'; request_id: string; active_count: number; error?: string }
-  /** SDK task lifecycle receipt (`ClientEvent::TaskLifecycle`). The payload is the
-   *  already-serialized `system` / `task_*` SDK record, forwarded verbatim. */
-  | { type: 'task_lifecycle'; event_json: string }
-  | {
-      type: 'task_output_chunk';
-      task_id: string;
-      content: string;
-      total_lines: number;
-      truncated: boolean;
-    }
-  | {
-      type: 'task_status_changed';
-      task_id: string;
-      status: TaskStatusDto;
-      origin_session_id?: string;
-      /** Failure reason accompanying a `failed` transition, when reported. */
-      error?: string;
-    }
-  | {
-      type: 'workflow_resumed';
-      previous_task_id: string;
-      task: TaskRowDto;
-      run_id: string;
-      origin_session_id?: string;
-    }
-  | { type: 'commands_changed'; commands: SlashCommandDto[] }
-  // ── Reserved / feed-deferred (round-trip only) ──────────────────────────────
-  | { type: 'coordinator_status'; active_workers: number; team?: string }
-  | {
-      type: 'coordinator_worker';
-      worker: { agent_id: string; name: string; agent_type: string; status: string };
-    }
-  | { type: 'attachment'; attachment: AttachmentDto }
-  | { type: 'thinking_delta'; thinking: string; signature?: string }
-  | {
-      type: 'usage_update';
-      /** Complete restored counters, including zeros; absent for live deltas. */
-      is_snapshot?: boolean;
-      input_tokens: number;
-      output_tokens: number;
-      cache_read_tokens: number;
-      cache_creation_tokens: number;
-    }
-  | {
-      type: 'api_retry';
-      message: string;
-      attempt: number;
-      max_retries: number;
-      delay_ms: number;
-    }
-  // ── AudioService (engine -> device operations/cancellation/capabilities) ──
-  | { type: 'audio_request'; request: AudioOperationRequestDto }
-  | { type: 'audio_cancel'; identity: AudioOperationIdDto }
-  | { type: 'realtime_audio_event'; session_id: string; event_json: string }
-  | { type: 'audio_session_context'; session_id: string; profile_id: string; account_scope: string }
-  | { type: 'audio_capabilities_changed'; capabilities: AudioCapabilitySnapshotDto }
-  // Lightweight in-memory child-conversation lifecycle and replay events.
-  | { type: 'side_chat_created'; request_id: string; side_id: string }
-  | { type: 'side_chat_list'; side_ids: string[] }
-  | { type: 'side_chat_snapshot'; side_id: string; events_json: string[] }
-  | { type: 'side_chat_event'; side_id: string; event_json: string }
-  | { type: 'side_chat_permission'; side_id: string; request: PermissionRequest }
-  | { type: 'side_chat_submitted'; side_id: string; request_id: string }
-  | { type: 'side_chat_ended'; side_id: string }
-  | { type: 'side_chat_error'; request_id?: string; side_id?: string; message: string }
-  | { type: 'media_connection_request'; request: MediaConnectionRequestDto }
-  | { type: 'media_device_request'; request: MediaDeviceRequestEnvelopeDto }
-  | { type: 'media_service_response'; response: MediaServiceResponseDto }
-  | { type: 'media_control_request'; request: MediaControlRequestDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // error.rs

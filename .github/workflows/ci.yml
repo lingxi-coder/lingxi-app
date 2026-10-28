@@ -10,6 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install source policy scan dependencies
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Test pinned-source rejection cases
         run: |
           python3 scripts/tests/test_runtime_source.py
@@ -18,6 +20,7 @@ jobs:
           python3 scripts/tests/test_workspace_layout.py
           python3 scripts/tests/test_gstreamer_sdk.py
           python3 scripts/tests/test_mobile_gstreamer_cargo.py
+          python3 scripts/tests/test_store_compliance.py
       - name: Validate both pinned runtime sources
         run: python3 scripts/checks/check-runtime-dependency.py
       - name: Run every checked-in product gate

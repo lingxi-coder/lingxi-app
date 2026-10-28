@@ -162,9 +162,16 @@ test('task refresh replaces stale rows and outputs instead of merging forever', 
 test('new desktop sessions start in Auto and honor authoritative permission changes', () => {
   const initial = emptyDesktopState();
   assert.equal(initial.permissionMode, 'auto');
-  for (const mode of ['default', 'plan', 'auto'] as const) {
+  for (const mode of ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'] as const) {
     const state = reduceDesktopEvent(initial, { type: 'permission_mode_changed', mode });
     assert.equal(state.permissionMode, mode);
+  }
+});
+
+test('unknown permission mode events preserve the last confirmed desktop state', () => {
+  const current = reduceDesktopEvent(emptyDesktopState(), { type: 'permission_mode_changed', mode: 'plan' });
+  for (const mode of ['', 'PLAN', 'accept_edits', 'futureMode']) {
+    assert.equal(reduceDesktopEvent(current, { type: 'permission_mode_changed', mode }), current);
   }
 });
 
@@ -222,4 +229,22 @@ test('authoritative controls restore the displayed permission after runtime stat
     assert.equal(restored.permissionMode, effective);
     assert.equal(restored.conversationControls, controls);
   }
+});
+
+test('an unknown effective mode in a controls snapshot does not replace the displayed mode', () => {
+  const current = reduceDesktopEvent(emptyDesktopState(), { type: 'permission_mode_changed', mode: 'plan' });
+  // Decode an actual wire-shaped payload because the nested handwritten DTO is
+  // narrower than the engine's string field.
+  const event: ClientEvent = JSON.parse(JSON.stringify({
+    type: 'conversation_controls_changed',
+    controls: {
+      qualified_model: 'test/model',
+      permission: { requested: 'auto', effective: 'futureMode', options: [] },
+      reasoning: { requested: { type: 'automatic' }, effective: { type: 'automatic' },
+        spec: { options: [], provider_default: { type: 'automatic' }, forced_reasoning: false, editable: false } },
+    },
+  }));
+  const next = reduceDesktopEvent(current, event);
+  assert.equal(next.permissionMode, 'plan');
+  assert.equal(next.conversationControls?.qualified_model, 'test/model');
 });

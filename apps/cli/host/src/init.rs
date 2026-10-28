@@ -25,10 +25,8 @@
 use crate::argv::Argv;
 use async_trait::async_trait;
 use client::protocol::permission::PermissionRequest as PermissionRequestDto;
-use command_api::RegistrySlashDispatcher;
-use harness_runtime::desktop::{build, DesktopConfig};
-use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream};
-use orchestrator::ConversationOrchestrator;
+use harness_runtime::desktop::{build, DesktopConfig, DesktopRuntime};
+use lingxi_core::host::{OrchestratorHandle, OutputStream};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -41,184 +39,32 @@ impl harness_runtime::desktop::DesktopDiagnosticSink for CliDesktopDiagnostics {
     }
 }
 
-/// Bundle of everything `run_cli` needs to drive a conversation.
+/// The desktop runtime and the CLI-specific background-session owner.
+///
+/// The same assembled runtime lives until the CLI session ends, including its
+/// watcher guards and other internal session resources. Field access delegates
+/// to it so host callers use the original handles instead of a projection.
 pub struct Runtime {
-    pub catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
+    desktop: Box<DesktopRuntime>,
     /// Unit-test credential fixture lifetime; never compiled into a host build.
     #[cfg(test)]
     test_home: Option<tempfile::TempDir>,
-    /// Session team registry and leader inbox shared with Agent/SendMessage.
-    pub coordinator: Arc<harness_runtime::desktop::TeamRegistry>,
-    /// The fully-constructed orchestrator.
-    pub orchestrator: Arc<ConversationOrchestrator>,
-    /// Dynamic loop timer seam retained for the mounted terminal host.
-    pub wakeup_scheduler_cell: harness_runtime::desktop::loop_tools::WakeupSchedulerCell,
-    /// Host runtime used to arm cancellable loop timers.
-    pub runtime_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
-    /// Durable session coordinator retained across CLI runtime projection and
-    /// remounts. Every host has one; the no-transcript mode gets a disposable
-    /// ledger under a temporary home rather than no ledger.
-    pub session_state: Arc<harness_runtime::desktop::session_state::SessionStateCoordinator>,
-    /// Common Fusion terminal recorder retained by the projected runtime.
-    pub fusion_recorder: Arc<dyn lingxi_core::host::FusionRunRecorder>,
-    /// Per-session recorder factory used to drain mounted outboxes during CLI
-    /// shutdown or an in-process session remount.
-    pub fusion_recorder_factory:
-        Arc<harness_runtime::desktop::fusion_recorder::DesktopFusionRecorderFactory>,
-    /// Ordered producer/cost/session/outbox drain retained across the desktop
-    /// runtime projection.
-    pub session_lifecycle: Arc<harness_runtime::desktop::DesktopSessionLifecycle>,
-    /// Latched managed-policy refusal observed by the host's exit path.
-    pub policy_helper_refusal: harness_runtime::desktop::PolicyHelperRefusalProbe,
-    /// Current source-scoped failure to validate a required Native policy JS semantic.
-    pub policy_helper_semantic_worker_failure: harness_runtime::desktop::PolicySemanticWorkerProbe,
-    /// Slash-command dispatcher seeded with the 94 builtins + 18 wired core
-    /// handlers (M5-09/M5-10/M5-11).
-    pub dispatcher: RegistrySlashDispatcher,
-    /// Live command catalog whose Mod queue is bound by the mounted TUI host.
-    pub mod_command_catalog: Arc<command_api::RegistryModCommandCatalog>,
-    /// Auth handle for `/login` and `/logout`.
-    pub auth: Arc<dyn AuthHandle>,
-    /// (M9-05) The desktop task registry shared with the tool context. The TUI
-    /// mount wraps it in a `PollerFeed` so the background-task footer + dialog
-    /// read live state.
-    pub task_registry: Arc<tasks::registry::TaskRegistry>,
-    /// Event-driven workflow lifecycle/progress feed from the desktop
-    /// composition root. Non-interactive hosts may drop it.
-    pub workflow_events: Option<
-        tokio::sync::mpsc::UnboundedReceiver<harness_runtime::desktop::DesktopWorkflowEvent>,
-    >,
-    /// Live settings watcher firing `ConfigChange` hooks when settings files
-    /// mutate on disk. Held here purely to keep the watcher alive for the
-    /// session: dropping the `Runtime` (process teardown) aborts the watch
-    /// tasks (RAII). If this field were dropped at `build_runtime` exit, the
-    /// watcher would stop immediately after boot — so it must live on `Runtime`.
-    pub settings_watcher: harness_runtime::desktop::settings_watch::SettingsWatcherHandle,
-    /// Live file-changed watcher firing `FileChanged` hooks when a path resolved
-    /// from a `FileChanged` hook's `matcher` mutates on disk. Held here purely to
-    /// keep the watcher alive for the session: dropping the `Runtime` (process
-    /// teardown) aborts the watch tasks (RAII). If dropped at `build_runtime`
-    /// exit, the watcher would stop immediately after boot — so it lives on
-    /// `Runtime`, exactly like `settings_watcher`.
-    pub file_changed_watcher:
-        harness_runtime::desktop::file_changed_watch::FileChangedWatcherHandle,
-    /// (B4 Task 5) Shared subscription slot, projected straight from
-    /// [`harness_runtime::desktop::DesktopRuntime::subscription`] (seeded at build,
-    /// refined by the background profile+roles fetch). The TUI mount threads a
-    /// clone into `tui::session::Runtime::with_subscription` so the rate-limit
-    /// composer reads the live snapshot.
-    pub subscription: lingxi_core::host::subscription::SharedSubscription,
-    /// (`/sandbox`) Shared bash-sandbox toggle cell, projected straight from
-    /// [`harness_runtime::desktop::DesktopRuntime::sandbox_toggle`] (the SAME
-    /// `Arc<AtomicBool>` the bash tool reads). The TUI mount threads a clone
-    /// into the widget so `/sandbox` flips sandboxing for the live session.
-    pub sandbox_toggle: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// (`/sandbox` description) auto-allow / fallback flags projected from
-    /// [`harness_runtime::desktop::DesktopRuntime`], rendered in the dynamic `/sandbox`
-    /// popup description.
-    pub sandbox_desc_auto_allow: bool,
-    /// See [`Self::sandbox_desc_auto_allow`].
-    pub sandbox_desc_fallback: bool,
-    /// (`/sandbox` description) dependency-check status projected from
-    /// [`harness_runtime::desktop::DesktopRuntime`]; `false` → the warning glyph.
-    pub sandbox_desc_deps_ok: bool,
-    /// (`/rewind`) Shared file-history checkpoint store, projected from
-    /// [`harness_runtime::desktop::DesktopRuntime::file_history`]. The TUI mount builds the
-    /// `/rewind` picker rows from it, and the restore path calls its
-    /// `rewind_files` on a code rewind.
-    pub file_history: std::sync::Arc<session::FileHistory>,
-    /// Per-host owner for V2 installed-plugin archive materializations. Keep
-    /// the exact session returned by DesktopRuntime so discovery, PluginManager,
-    /// and settings inventory share the same cache lifetime.
-    pub plugin_archive_session: std::sync::Arc<plugin::PluginArchiveSession>,
-    /// (`/reload-plugins`) Retained plugin subsystem, projected from
-    /// [`harness_runtime::desktop::DesktopRuntime::plugin_runtime`]. The TUI mount threads
-    /// it into the `on_reload_plugins` effect so the interactive command applies
-    /// pending enable/disable changes to the live session. `None` when plugins
-    /// are disabled.
-    pub plugin_runtime: Option<std::sync::Arc<harness_runtime::desktop::PluginRuntime>>,
-    /// (Plan 3c §8) Per-provider availability map, projected straight from
-    /// [`harness_runtime::desktop::DesktopRuntime::provider_availability`] (computed at
-    /// `build()` from the LIVE multi-provider config). The TUI mount threads it
-    /// into `tui::session::Runtime::with_provider_availability` so the `/model`
-    /// picker can badge unconfigured providers. Empty keeps every row available.
-    pub provider_availability: std::collections::BTreeMap<String, bool>,
-    /// (T2a) Per-provider login-method tag map, projected straight from
-    /// [`harness_runtime::desktop::DesktopRuntime::provider_auth_methods`] (derived at
-    /// `build()` from the real catalog auth strategy: `"api_key"` /
-    /// `"copilot_device"` / `"oauth"`). The TUI mount threads it into
-    /// `tui::session::Runtime::with_provider_auth_methods` — it IS the data-driven
-    /// `/connect` picker's provider SET, so an empty map yields an empty picker.
-    pub provider_auth_methods: std::collections::BTreeMap<String, String>,
-    /// (Plan 3c I1/I2) Authoritative `request_model -> (profile_name,
-    /// provider_label)` map, projected from
-    /// [`harness_runtime::desktop::DesktopRuntime::model_providers`]. The TUI mount threads
-    /// it into `tui::session::Runtime::with_model_providers` so the `/model`
-    /// picker can resolve a bare USER-provider model id to its own group +
-    /// availability gate. Empty keeps the historical Built-in fallback.
-    pub model_providers: std::collections::BTreeMap<String, (String, String)>,
-    /// Provenance of the model selected by the desktop composition root for
-    /// the initial/default `/model` row.
-    pub model_provenance: lingxi_core::host::ModelProvenance,
-    /// (Plan 3c C1) Shared engine credential store, projected straight from
-    /// [`harness_runtime::desktop::DesktopRuntime::credentials`]. The TUI mount threads a
-    /// clone into `tui::session::Runtime::with_provider_key_store` so the
-    /// `/connect` screen's `pump_store_provider_key` persists a collected
-    /// provider key via `CredentialManager::set_provider_key`.
-    pub provider_key_store: std::sync::Arc<secret::CredentialManager>,
-    /// Shared analytics bus projected from the desktop runtime.
-    pub analytics_bus: std::sync::Arc<telemetry::AnalyticsBus>,
-    /// Structured-output capture slot, projected from
-    /// [`harness_runtime::desktop::DesktopRuntime::structured_output_slot`]. `Some` only
-    /// under `--json-schema`; the print path reads it after each turn to validate
-    /// the model's `StructuredOutput` result against the schema and retry.
-    pub structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot>,
-    /// (`!` bash mode) The sandboxed Bash runner, projected straight from
-    /// [`harness_runtime::desktop::DesktopRuntime::bash_runner`]. Built over the SAME
-    /// `BuiltinToolContext`/`BashTool` the model uses. The TUI mount threads a
-    /// clone into `tui::session::Runtime::with_bash_runner` so a typed `!command`
-    /// runs sandboxed and renders inline with no LLM turn.
-    pub bash_runner: std::sync::Arc<dyn tool_api::bash_runner::BashRunner>,
-    /// (#3 shell-expansion) The shared prompt shell-expansion provider, projected
-    /// straight from [`harness_runtime::desktop::DesktopRuntime::shell_expansion`]. The TUI
-    /// mount (`run_ratatui` → `run_app`) threads a clone into the `ChatWidget` so
-    /// a typed `/commit` / `/commit-push-pr` / `/security-review` expands its
-    /// embedded `!`git …`` bodies through the real host runner + policy-backed
-    /// gate before submit — mirroring the dispatcher's expansion for non-TUI
-    /// hosts. Built over the SAME `BuiltinToolContext` the model's Bash tool uses.
-    pub shell_expansion: std::sync::Arc<dyn command_api::ShellExpansionProvider>,
-    /// (`/connect` Copilot device-flow) GitHub-Copilot OAuth device-flow driver,
-    /// projected straight from [`harness_runtime::desktop::DesktopRuntime::connect_copilot`].
-    /// The TUI mount threads a clone into
-    /// `tui::session::Runtime::with_copilot_connect_driver` so picking GitHub
-    /// Copilot in `/connect` runs the real web sign-in (browser open + device
-    /// poll + token store) instead of an inert key field.
-    pub connect_copilot: std::sync::Arc<dyn command_api::builtins::CopilotConnectDriver>,
-    /// (T2b) Unified OAuth sign-in driver, projected from
-    /// [`harness_runtime::desktop::DesktopRuntime::oauth_connect_driver`]. The TUI mount
-    /// threads a clone into `tui::session::Runtime::with_oauth_connect_driver` so
-    /// picking an OAuth provider (Anthropic Pro/Max, OpenAI ChatGPT) in `/connect`
-    /// runs the real browser sign-in instead of the inert `Unavailable` screen.
-    pub oauth_connect_driver: std::sync::Arc<dyn command_api::builtins::OAuthConnectDriver>,
-    /// (P1-08 runtime `/add-dir`) The SAME live `Arc<SessionCwd>` the file tools
-    /// gate on, projected from [`harness_runtime::desktop::DesktopRuntime::session_cwd`].
-    /// The `/add-dir` off-loop effect calls `add_trusted_dir(...)` on it so a
-    /// directory added mid-session is immediately accessible to the file tools.
-    pub session_cwd: std::sync::Arc<tool_api::SessionCwd>,
     /// CLI-owned forker retained for live authority binding and regression checks.
     pub(crate) background_forker: Option<Arc<crate::bg_session_forker::CliBgSessionForker>>,
-    /// (P1-08 runtime `/add-dir`) The live MCP registry, projected from
-    /// [`harness_runtime::desktop::DesktopRuntime::mcp_registry`]. The `/add-dir` effect
-    /// calls `add_root(...)` + `notify_roots_list_changed_all()` on it so every
-    /// connected server's `roots/list` reflects the new working directory.
-    pub mcp_registry: std::sync::Arc<mcp::McpRegistry>,
-    /// Provider-neutral local IDE lifecycle handle projected from the desktop
-    /// composition root. It owns lockfile discovery and local auth state.
-    pub ide_handle: std::sync::Arc<dyn lingxi_core::host::IdeHandle>,
-    /// The ENFORCING permission gate (`harness_runtime::desktop::DesktopRuntime::
-    /// enforcing_permission_gate`), threaded to the TUI so Shift+Tab drives live
-    /// permission-mode cycling via `set_permission_mode`.
-    pub enforcing_permission_gate: Option<std::sync::Arc<dyn permission::gate::PermissionGate>>,
+}
+
+impl std::ops::Deref for Runtime {
+    type Target = DesktopRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.desktop
+    }
+}
+
+impl std::ops::DerefMut for Runtime {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.desktop
+    }
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -399,7 +245,9 @@ pub enum InitError {
 impl From<harness_runtime::desktop::BuildError> for InitError {
     fn from(e: harness_runtime::desktop::BuildError) -> Self {
         match e {
-            harness_runtime::desktop::BuildError::AppInvocation(error) => Self::AppInvocation(error),
+            harness_runtime::desktop::BuildError::AppInvocation(error) => {
+                Self::AppInvocation(error)
+            }
             harness_runtime::desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
             harness_runtime::desktop::BuildError::InvalidAgents(m) => Self::InvalidAgents(m),
             harness_runtime::desktop::BuildError::InvalidToolAliases(m) => {
@@ -459,98 +307,6 @@ impl client::adapter::PermissionRequestSink for NoopPermissionRequestSink {
 #[must_use]
 pub fn resolve_api_base() -> String {
     std::env::var("LINGXI_API_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
-}
-
-/// Explicit custom-endpoint opt-in for Native-compatible Anthropic request
-/// metadata. The value must match the configured API base; ordinary custom
-/// gateways keep LingXi's normal transport policy.
-pub const NATIVE_ANTHROPIC_ENDPOINT_ENV: &str = "LINGXI_NATIVE_ANTHROPIC_ENDPOINT";
-
-/// Build the host identity supplied to the Anthropic Native request policy.
-///
-/// The canonical Anthropic API is enabled by default for first-party provider
-/// selection. A custom API base requires an exact endpoint opt-in through
-/// [`NATIVE_ANTHROPIC_ENDPOINT_ENV`]. The runtime still checks the resolved
-/// provider, protocol, profile base, and request URL on every call, so a
-/// different configured provider never receives this policy.
-#[must_use]
-pub fn native_anthropic_client_metadata_for_host(
-    api_base: &str,
-    app_id: &str,
-    host_version: &str,
-) -> Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata> {
-    let first_party_environment = ![
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-        "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
-        "CLAUDE_CODE_USE_MANTLE",
-    ]
-    .iter()
-    .any(|name| lingxi_core::host::env::is_env_truthy(std::env::var(name).ok().as_deref()));
-    let explicit_endpoint = std::env::var(NATIVE_ANTHROPIC_ENDPOINT_ENV).ok();
-    native_anthropic_client_metadata_for_host_with_policy(
-        api_base,
-        app_id,
-        host_version,
-        first_party_environment,
-        explicit_endpoint.as_deref(),
-    )
-}
-
-fn native_anthropic_client_metadata_for_host_with_policy(
-    api_base: &str,
-    app_id: &str,
-    host_version: &str,
-    first_party_environment: bool,
-    explicit_endpoint: Option<&str>,
-) -> Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata> {
-    const CANONICAL_ENDPOINT: &str = "https://api.anthropic.com";
-    let configured_base = api_base.trim_end_matches('/');
-    let canonical_endpoint = configured_base == CANONICAL_ENDPOINT;
-    let explicitly_enabled = explicit_endpoint
-        .map(str::trim)
-        .filter(|endpoint| !endpoint.is_empty())
-        .is_some_and(|endpoint| endpoint.trim_end_matches('/') == configured_base);
-    if !first_party_environment || (!canonical_endpoint && !explicitly_enabled) {
-        return None;
-    }
-
-    let (os, arch) = native_client_platform();
-    Some(
-        lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata {
-            language: "rust".into(),
-            runtime: "lingxi".into(),
-            package_version: lingxi_llm_client::PACKAGE_VERSION.into(),
-            runtime_version: host_version.into(),
-            os,
-            arch,
-            timeout_seconds: 600,
-            session_id: None,
-            app_id: app_id.into(),
-        },
-    )
-}
-
-fn native_client_platform() -> (String, String) {
-    let os = match std::env::consts::OS {
-        "macos" => "MacOS".to_owned(),
-        "windows" => "Windows".to_owned(),
-        "linux" => "Linux".to_owned(),
-        "freebsd" => "FreeBSD".to_owned(),
-        "openbsd" => "OpenBSD".to_owned(),
-        "android" => "Android".to_owned(),
-        "ios" => "iOS".to_owned(),
-        other => format!("Other:{other}"),
-    };
-    let arch = match std::env::consts::ARCH {
-        "aarch64" | "arm64" => "arm64".to_owned(),
-        "x86_64" | "x64" => "x64".to_owned(),
-        "x32" | "arm" => std::env::consts::ARCH.to_owned(),
-        other => format!("other:{other}"),
-    };
-    (os, arch)
 }
 
 /// Which file setting-sources to load, from claude-code `--setting-sources
@@ -1058,8 +814,11 @@ pub(crate) fn resolve_desktop_config_at(
         option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
     );
     let api_base = resolve_api_base();
-    let anthropic_client_metadata =
-        native_anthropic_client_metadata_for_host(&api_base, "lingxi-cli", build_info.version);
+    let anthropic_client_metadata = host_identity::native_anthropic_client_metadata_for_host(
+        &api_base,
+        "lingxi-cli",
+        build_info.version,
+    );
 
     {
         let mut __desktop_config = DesktopConfig::default();
@@ -1515,8 +1274,8 @@ fn read_flag_settings_source_checked(
 ///
 /// **F2-01**: the actual assembly is delegated to [`harness_runtime::desktop::build`].
 /// This function only resolves a [`DesktopConfig`] from `Argv`/env
-/// ([`resolve_desktop_config`]) and projects the returned
-/// [`harness_runtime::desktop::DesktopRuntime`] into the CLI's [`Runtime`]. The CLI sets
+/// ([`resolve_desktop_config`]) and retains the returned
+/// [`DesktopRuntime`] in the CLI's [`Runtime`]. The CLI sets
 /// `use_noop_permission_gate: true`, so the supplied [`NoopPermissionRequestSink`]
 /// is never invoked (the no-op gate never emits a request) and the returned
 /// `permission_gate` handle is always `None`.
@@ -1666,51 +1425,10 @@ pub async fn build_runtime_from_config(
         );
     }
     Ok(Runtime {
+        desktop: Box::new(rt),
         #[cfg(test)]
         test_home,
-        wakeup_scheduler_cell: rt.wakeup_scheduler_cell,
-        runtime_spawner: rt.runtime_spawner,
-        coordinator: rt.coordinator,
-        orchestrator: rt.orchestrator,
-        session_state: rt.session_state,
-        fusion_recorder: rt.fusion_recorder,
-        fusion_recorder_factory: rt.fusion_recorder_factory,
-        session_lifecycle: rt.session_lifecycle,
-        policy_helper_refusal: rt.policy_helper_refusal,
-        policy_helper_semantic_worker_failure: rt.policy_helper_semantic_worker_failure,
-        dispatcher: rt.dispatcher,
-        mod_command_catalog: rt.mod_command_catalog,
-        auth: rt.auth,
-        enforcing_permission_gate: rt.enforcing_permission_gate,
-        task_registry: rt.task_registry,
-        workflow_events: rt.workflow_events,
-        settings_watcher: rt.settings_watcher,
-        file_changed_watcher: rt.file_changed_watcher,
-        subscription: rt.subscription,
-        sandbox_toggle: rt.sandbox_toggle,
-        sandbox_desc_auto_allow: rt.sandbox_desc_auto_allow,
-        sandbox_desc_fallback: rt.sandbox_desc_fallback,
-        sandbox_desc_deps_ok: rt.sandbox_desc_deps_ok,
-        file_history: rt.file_history,
-        plugin_archive_session: rt.plugin_archive_session,
-        plugin_runtime: rt.plugin_runtime,
-        provider_availability: rt.provider_availability,
-        provider_auth_methods: rt.provider_auth_methods,
-        model_providers: rt.model_providers,
-        model_provenance: rt.model_provenance,
-        catalog_registry: rt.catalog_registry,
-        provider_key_store: rt.credentials,
-        analytics_bus: rt.analytics_bus,
-        structured_output_slot: rt.structured_output_slot,
-        bash_runner: rt.bash_runner,
-        shell_expansion: rt.shell_expansion,
-        connect_copilot: rt.connect_copilot,
-        oauth_connect_driver: rt.oauth_connect_driver,
-        // P1-08 runtime `/add-dir` live-effect handles.
-        session_cwd: rt.session_cwd,
         background_forker: None,
-        mcp_registry: rt.mcp_registry,
-        ide_handle: rt.ide_handle,
     })
 }
 
@@ -2132,6 +1850,30 @@ mod tests {
             .unwrap());
     }
 
+    // `block_on` polls the root future on its calling thread; size both that
+    // thread and Tokio's workers to the supported desktop runtime budget.
+    fn run_on_supported_runtime_stack<F, Fut>(test: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let worker = std::thread::Builder::new()
+            .name("desktop-runtime-test".into())
+            .stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+                    .build()
+                    .expect("build supported-stack Tokio runtime");
+                runtime.block_on(test());
+            })
+            .expect("spawn supported-stack test thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     async fn fixture_cli_runtime(home: &std::path::Path, cwd: &std::path::Path) -> Runtime {
         fixture_cli_runtime_with_balance(home, cwd, None).await
     }
@@ -2194,6 +1936,30 @@ mod tests {
         )
         .await
         .expect("isolated CLI runtime")
+    }
+
+    #[test]
+    fn cli_runtime_keeps_workflow_feed_and_watcher_until_shutdown() {
+        run_on_supported_runtime_stack(|| async {
+            let home = tempfile::tempdir().unwrap();
+            let cwd = tempfile::tempdir().unwrap();
+            let mut runtime = fixture_cli_runtime(home.path(), cwd.path()).await;
+
+            // The TUI takes the sole receiver; the engine must retain its sender and
+            // the settings watcher while the session is mounted.
+            let mut workflow = runtime.workflow_events.take().expect("workflow feed");
+            assert!(runtime.workflow_events.take().is_none());
+            assert!(matches!(
+                workflow.try_recv(),
+                Ok(_) | Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            let watcher = runtime.settings_watcher.clone();
+            assert!(watcher.task_count() > 0, "fixture home should be watched");
+
+            let report = runtime.session_lifecycle.shutdown_and_drain().await;
+            assert!(report.complete, "shutdown errors: {:?}", report.errors);
+            assert_eq!(watcher.task_count(), 0, "shutdown must join the watcher");
+        });
     }
 
     async fn fixture_permission_action(
@@ -2566,61 +2332,63 @@ mod tests {
         runtime.session_lifecycle.shutdown_and_drain().await;
     }
 
-    #[tokio::test]
-    async fn cli_background_fork_uses_live_permission_and_cd_authority() {
-        let home = tempfile::tempdir().unwrap();
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let runtime = fixture_cli_runtime(home.path(), first.path()).await;
-        let forker = runtime.background_forker.as_ref().unwrap().clone();
-        let paths = permission::PermissionPaths {
-            lingxi_home: home.path().to_owned(),
-            cwd: first.path().to_owned(),
-        };
-        fixture_permission_action(
-            &runtime,
-            paths,
-            tui::bottom_pane::PermissionAction::ChangeDirectory {
-                path: second.path().display().to_string(),
-            },
-        )
-        .await;
-        assert_eq!(runtime.session_cwd.cwd(), second.path());
-        runtime
-            .orchestrator
-            .set_permission_mode("plan")
-            .await
-            .unwrap();
-        let (cwd, context) = forker.launch_identity().unwrap();
-        assert_eq!(cwd, second.path());
-        assert_eq!(
-            context.resolved_permission_mode,
-            Some(permission::PermissionMode::Plan)
-        );
-        let mut argv = Argv::default();
-        let mut options = context.options.unwrap();
-        options.freeze_permission_mode(context.resolved_permission_mode.unwrap());
-        options.apply(&mut argv);
-        assert_eq!(argv.permission_mode.as_deref(), Some("plan"));
-        assert!(!argv.dangerously_skip_permissions);
-        // The same forker sees subsequent changes, rather than freezing the first read.
-        runtime
-            .orchestrator
-            .set_permission_mode("default")
-            .await
-            .unwrap();
-        assert_eq!(
-            forker.launch_identity().unwrap().1.resolved_permission_mode,
-            Some(permission::PermissionMode::Default)
-        );
-        let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
-        assert!(shutdown.complete, "{:?}", shutdown.errors);
-        drop(runtime);
-        tokio::task::yield_now().await;
-        assert!(
-            forker.launch_identity().is_err(),
-            "expired runtime must not restore boot privileges"
-        );
+    #[test]
+    fn cli_background_fork_uses_live_permission_and_cd_authority() {
+        run_on_supported_runtime_stack(|| async {
+            let home = tempfile::tempdir().unwrap();
+            let first = tempfile::tempdir().unwrap();
+            let second = tempfile::tempdir().unwrap();
+            let runtime = fixture_cli_runtime(home.path(), first.path()).await;
+            let forker = runtime.background_forker.as_ref().unwrap().clone();
+            let paths = permission::PermissionPaths {
+                lingxi_home: home.path().to_owned(),
+                cwd: first.path().to_owned(),
+            };
+            fixture_permission_action(
+                &runtime,
+                paths,
+                tui::bottom_pane::PermissionAction::ChangeDirectory {
+                    path: second.path().display().to_string(),
+                },
+            )
+            .await;
+            assert_eq!(runtime.session_cwd.cwd(), second.path());
+            runtime
+                .orchestrator
+                .set_permission_mode("plan")
+                .await
+                .unwrap();
+            let (cwd, context) = forker.launch_identity().unwrap();
+            assert_eq!(cwd, second.path());
+            assert_eq!(
+                context.resolved_permission_mode,
+                Some(permission::PermissionMode::Plan)
+            );
+            let mut argv = Argv::default();
+            let mut options = context.options.unwrap();
+            options.freeze_permission_mode(context.resolved_permission_mode.unwrap());
+            options.apply(&mut argv);
+            assert_eq!(argv.permission_mode.as_deref(), Some("plan"));
+            assert!(!argv.dangerously_skip_permissions);
+            // The same forker sees subsequent changes, rather than freezing the first read.
+            runtime
+                .orchestrator
+                .set_permission_mode("default")
+                .await
+                .unwrap();
+            assert_eq!(
+                forker.launch_identity().unwrap().1.resolved_permission_mode,
+                Some(permission::PermissionMode::Default)
+            );
+            let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
+            assert!(shutdown.complete, "{:?}", shutdown.errors);
+            drop(runtime);
+            tokio::task::yield_now().await;
+            assert!(
+                forker.launch_identity().is_err(),
+                "expired runtime must not restore boot privileges"
+            );
+        });
     }
 
     #[tokio::test]
@@ -3003,61 +2771,6 @@ mod tests {
         if let Some(v) = prior {
             std::env::set_var("LINGXI_API_BASE_URL", v);
         }
-    }
-
-    #[test]
-    fn native_anthropic_metadata_is_canonical_or_explicit_custom_endpoint_only() {
-        let canonical = native_anthropic_client_metadata_for_host_with_policy(
-            "https://api.anthropic.com",
-            "lingxi-cli",
-            "0.12.0",
-            true,
-            None,
-        )
-        .expect("the canonical first-party API is enabled");
-        assert_eq!(canonical.language, "rust");
-        assert_eq!(canonical.runtime, "lingxi");
-        assert_eq!(canonical.app_id, "lingxi-cli");
-        assert_eq!(
-            canonical.package_version,
-            lingxi_llm_client::PACKAGE_VERSION
-        );
-        assert_eq!(canonical.runtime_version, "0.12.0");
-        assert_eq!(canonical.session_id, None);
-
-        assert!(native_anthropic_client_metadata_for_host_with_policy(
-            "http://127.0.0.1:3000",
-            "lingxi-cli",
-            "0.12.0",
-            true,
-            None,
-        )
-        .is_none());
-        assert!(native_anthropic_client_metadata_for_host_with_policy(
-            "http://127.0.0.1:3000",
-            "lingxi-cli",
-            "0.12.0",
-            true,
-            Some("http://127.0.0.1:4000"),
-        )
-        .is_none());
-        let custom = native_anthropic_client_metadata_for_host_with_policy(
-            "http://127.0.0.1:3000/",
-            "lingxi-cli",
-            "0.12.0",
-            true,
-            Some("http://127.0.0.1:3000"),
-        )
-        .expect("an exact custom-endpoint opt-in is accepted");
-        assert_eq!(custom.app_id, "lingxi-cli");
-        assert!(native_anthropic_client_metadata_for_host_with_policy(
-            "https://api.anthropic.com",
-            "lingxi-cli",
-            "0.12.0",
-            false,
-            None,
-        )
-        .is_none());
     }
 
     // ---- ANTHROPIC_MODEL env-pin resolution (claude-code D4) ----------------

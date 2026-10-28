@@ -14,6 +14,7 @@ import type {
   StatusSnapshotDto,
   TaskRowDto,
 } from '@lingxi/bridge-client';
+import { isPermissionModeId } from '../../shared/permission';
 
 export interface TaskOutputState {
   readonly content: string;
@@ -140,13 +141,18 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'model_changed':
       return { ...state, currentModel: event.model, currentModelSource: event.model_source ?? null };
     case 'conversation_controls_changed':
-      return { ...state, conversationControls: event.controls, permissionMode: event.controls.permission.effective };
+      return {
+        ...state,
+        conversationControls: event.controls,
+        permissionMode: isPermissionModeId(event.controls.permission.effective)
+          ? event.controls.permission.effective : state.permissionMode,
+      };
     case 'permission_request_resolved':
       return { ...state, lastPermissionResolution: event };
     case 'fast_mode_changed':
       return { ...state, fastMode: event.enabled };
     case 'permission_mode_changed':
-      return { ...state, permissionMode: event.mode };
+      return isPermissionModeId(event.mode) ? { ...state, permissionMode: event.mode } : state;
     case 'turn_ended':
       // Both events carry authoritative session totals, never per-turn deltas.
       return { ...state, lastCost: event.cost, apiRetry: null };

@@ -95,7 +95,7 @@ private struct LiveTerminalRuntimeFFIBridge: TerminalRuntimeFFIBridge {
             archiveSha256: config.archiveSha256,
             authorizationFile: config.authorizationFile,
             // Same authority as the engine launch config; see
-            // `makeIosMobileLinuxConfig`. `TerminalRuntimeConfig` deliberately
+            // `NativeEngineFactory.mobileLinuxConfiguration`. `TerminalRuntimeConfig` deliberately
             // does not carry it — it is an `Equatable` handle-cache key, and
             // the root is a process constant, not part of a runtime's identity.
             appSandboxRoot: ConversationSourceFactory.appSandboxRoot()

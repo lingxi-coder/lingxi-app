@@ -11,7 +11,7 @@ use std::time::Duration;
 
 // The fake desktop of the viewer crate's own integration tests (it only uses that
 // crate's public API), so the flow below talks to a real tunnel and handshake.
-#[path = "../../../../../packages/remote-control-client/tests/support/host.rs"]
+#[path = "../../../remote-control-client/tests/support/host.rs"]
 mod fake_host;
 use fake_host::FakeHost;
 
@@ -36,7 +36,7 @@ struct FakeKeyStore {
 }
 
 impl FakeKeyStore {
-    fn boxed(&self) -> Box<dyn IosRemoteKeyStore> {
+    fn boxed(&self) -> Box<dyn PlatformRemoteKeyStore> {
         Box::new(Self {
             state: Arc::clone(&self.state),
             fail_pin_writes: Arc::clone(&self.fail_pin_writes),
@@ -45,7 +45,7 @@ impl FakeKeyStore {
 }
 
 #[async_trait]
-impl IosRemoteKeyStore for FakeKeyStore {
+impl PlatformRemoteKeyStore for FakeKeyStore {
     async fn load_identity(&self) -> Result<Option<Vec<u8>>, RemoteFfiError> {
         Ok(self.state.lock().unwrap().identity.clone())
     }
@@ -131,7 +131,7 @@ impl Recorder {
 }
 
 #[async_trait]
-impl IosRemoteListener for Recorder {
+impl PlatformRemoteListener for Recorder {
     async fn on_connection_state(&self, state: RemoteConnectionStateFfi) {
         self.seen.lock().unwrap().push(Seen::State(state));
     }
@@ -620,7 +620,7 @@ struct Tokens {
 }
 
 #[async_trait]
-impl IosRemoteTokenProvider for Tokens {
+impl PlatformRemoteTokenProvider for Tokens {
     async fn id_token(&self, force_refresh: bool) -> Result<String, RemoteFfiError> {
         self.calls.lock().unwrap().push(force_refresh);
         if self.fail {
@@ -658,7 +658,7 @@ async fn the_token_provider_is_asked_with_the_refresh_flag() {
 // ---------------------------------------------------------------------------
 
 struct Rig {
-    client: IosRemoteControlClient,
+    client: RemoteControlCore,
     recorder: Arc<Recorder>,
     store: FakeKeyStore,
     host: Arc<FakeHost>,
@@ -700,7 +700,7 @@ fn rig() -> Rig {
         device_name: "Pixel".into(),
         app_version: "1.0".into(),
     };
-    let client = IosRemoteControlClient::from_parts(parts, Arc::clone(&recorder) as _);
+    let client = RemoteControlCore::from_parts(parts, Arc::clone(&recorder) as _);
     Rig {
         client,
         recorder,
@@ -1363,7 +1363,7 @@ async fn disconnect_during_repair_without_an_active_host_prevents_a_late_connect
         entered: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
     });
-    let client = Arc::new(IosRemoteControlClient::from_parts(
+    let client = Arc::new(RemoteControlCore::from_parts(
         Parts {
             uid: parts.uid.clone(),
             rtdb: parts.rtdb.clone(),

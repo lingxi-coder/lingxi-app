@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { AllowedClientCommand } from '../src/shared/clientCommands';
 
 import {
   assertCommandAllowedDuringTurn,
@@ -95,6 +96,55 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
     }),
     /invalid listing selection/,
   );
+});
+
+test('permission commands accept only supported string modes at the host boundary', () => {
+  for (const mode of ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']) {
+    assert.deepEqual(validateClientCommand({ type: 'set_permission_mode', mode }), { type: 'set_permission_mode', mode });
+  }
+  for (const mode of ['', 'futureMode', ['default'], null, { toString: () => 'default' }]) {
+    assert.throws(() => validateClientCommand({ type: 'set_permission_mode', mode }), /invalid permission mode/);
+  }
+});
+
+test('nullable renderer command options have the same meaning as omitted options', () => {
+  const cases: Array<{ input: AllowedClientCommand; expected: AllowedClientCommand }> = [
+    { input: { type: 'run_slash_command', raw: '/help', images: [], turn_id: null },
+      expected: { type: 'run_slash_command', raw: '/help', images: [] } },
+    { input: { type: 'initialize_proactivity', proactivity: null, reinitialize: false },
+      expected: { type: 'initialize_proactivity', reinitialize: false } },
+    { input: { type: 'initialize_proactivity', proactivity: false, reinitialize: null },
+      expected: { type: 'initialize_proactivity', proactivity: false } },
+    { input: { type: 'set_proactivity_level', level: 'ask', offer_bypass: null },
+      expected: { type: 'set_proactivity_level', level: 'ask' } },
+    { input: { type: 'set_proactivity_level', level: 'ask', offer_bypass: false },
+      expected: { type: 'set_proactivity_level', level: 'ask', offer_bypass: false } },
+    { input: { type: 'side_chat_create', request_id: 'request-1', initial_input: null },
+      expected: { type: 'side_chat_create', request_id: 'request-1' } },
+    { input: { type: 'side_chat_create', request_id: 'request-1', initial_input: 'What next?' },
+      expected: { type: 'side_chat_create', request_id: 'request-1', initial_input: 'What next?' } },
+    { input: { type: 'list_sessions', limit: null }, expected: { type: 'list_sessions' } },
+    { input: { type: 'task_list', status_filter: null, request_id: 'request-1' },
+      expected: { type: 'task_list', request_id: 'request-1' } },
+    { input: { type: 'task_list', status_filter: { type: 'paused' }, request_id: null },
+      expected: { type: 'task_list', status_filter: { type: 'paused' } } },
+  ];
+  for (const { input, expected } of cases) {
+    assert.deepEqual(validateClientCommand(input), expected);
+  }
+});
+
+test('nullable options do not weaken command type, range, or permission checks', () => {
+  assert.throws(() => validateClientCommand({ type: 'initialize_proactivity', proactivity: 0 }), /invalid proactivity initialize flag/);
+  assert.throws(() => validateClientCommand({ type: 'initialize_proactivity', reinitialize: 'false' }), /invalid proactivity reinitialize flag/);
+  assert.throws(() => validateClientCommand({ type: 'set_proactivity_level', level: 'ask', offer_bypass: 0 }), /invalid proactivity bypass flag/);
+  assert.throws(() => validateClientCommand({ type: 'set_permission_mode', mode: null }), /invalid permission mode/);
+  assert.throws(() => validateClientCommand({ type: 'side_chat_create', request_id: 'request-1', initial_input: 0 }), /invalid side input/);
+  for (const limit of [0, 201, 1.5, '1']) {
+    assert.throws(() => validateClientCommand({ type: 'list_sessions', limit }), /invalid limit/);
+  }
+  assert.throws(() => validateClientCommand({ type: 'task_list', request_id: '' }), /invalid request id/);
+  assert.throws(() => validateClientCommand({ type: 'task_list', status_filter: { type: 'unknown' } }), /invalid task status/);
 });
 
 test('the settings, permission, workspace, and MCP commands pass the runtime allowlist', () => {
@@ -344,7 +394,7 @@ test('slash commands preserve optional correlation ids and reject invalid ids', 
     const command = { type: 'run_slash_command', raw: '/btw progress?', images: [], turn_id };
     assert.deepEqual(validateClientCommand(command), command);
   }
-  for (const turn_id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '42', null, Infinity, NaN]) {
+  for (const turn_id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '42', Infinity, NaN]) {
     assert.throws(() => validateClientCommand({
       type: 'run_slash_command', raw: '/btw progress?', images: [], turn_id,
     }), /invalid slash command turn id/);

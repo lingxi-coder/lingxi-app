@@ -1,16 +1,9 @@
 /**
  * Wire-compatibility test: load the F1-08 golden snapshots (the canonical JSON
  * the Rust serde produces) and prove every one parses into the TypeScript wire
- * types in `../src/protocol.ts`.
- *
- * The snapshots ARE the contract: if a tag or field name drifts in the TS
- * mirror, the corresponding structural assertion here fails. Each snapshot is
- * validated by a hand-written runtime guard that mirrors the exact TS type, so
- * the test fails loudly on any divergence rather than silently `as`-casting.
- *
- * Coverage is enforced: the test asserts EVERY snapshot file under each category
- * directory is checked, so a newly-added Rust variant whose snapshot lands here
- * forces a TS-type + guard update.
+ * types. Rust declarations generate the envelopes; these golden examples and
+ * the handwritten guards provide independent behavior and coverage evidence.
+ * Every snapshot under each category is checked.
  */
 
 import assert from 'node:assert/strict';
@@ -30,7 +23,6 @@ import type {
 import {
   ALL_CLIENT_COMMAND_TYPES,
   ALL_CLIENT_EVENT_TYPES,
-  ALL_TASK_ROW_DTO_KEYS,
 } from '../src/protocolCoverage.js';
 import { validateClientEvent, validateServerHello } from '../src/validation.js';
 import {
@@ -195,44 +187,8 @@ function validateTaskRow(v: unknown): void {
   if ('awaiting_plan_approval' in task) assert.equal(typeof task['awaiting_plan_approval'], 'boolean');
 }
 
-// Compile-time contract check for finding B7#11: `TaskRowDto` (listings.rs)
-// gained a `stage` field for F005 (`/fusion` progress). This TS mirror is
-// hand-maintained and `packages/bridge-client/tsconfig.json` excludes `test/` from
-// `npm run typecheck`, so nothing in THIS file can be the type-level gate —
-// `tsx` (which `npm test` runs through) transpiles without type-checking, so
-// a dropped field here would be a silent pass. The actual enforcing gate is
-// `ALL_TASK_ROW_DTO_KEYS` in `src/protocolCoverage.ts`, which lives under
-// `src/` specifically so it IS covered by `npm run typecheck`: dropping
-// `stage` from `TaskRowDto` there fails with "Property 'stage' does not
-// exist on type 'Record<keyof TaskRowDto, true>'". The assertion below is a
-// runtime cross-check on that same table (imported, not restated), so a key
-// added to one but not the other — including a future 8th field — goes red
-// here too.
-test('ALL_TASK_ROW_DTO_KEYS (src/protocolCoverage.ts) matches TaskRowDto exactly', () => {
-  assert.deepEqual(Object.keys(ALL_TASK_ROW_DTO_KEYS).sort(), [
-    'agent_id',
-    'awaiting_plan_approval',
-    'can_resume',
-    'description',
-    'effort',
-    'error',
-    'kind',
-    'model',
-    'stage',
-    'started_at_ms',
-    'status',
-    'task_id',
-    'task_type',
-    'unread',
-  ].sort());
-});
-
-// This test does NOT go red if `stage` is removed from the `TaskRowDto`
-// interface — `tsx` transpiles without type-checking, so a missing property
-// on an object literal is silently dropped, not rejected. It exists only to
-// prove `validateTaskRow` accepts and correctly type-checks a string `stage`
-// value at runtime; the type-level guarantee is the `ALL_TASK_ROW_DTO_KEYS`
-// test above.
+// Exercise an optional field omitted by some golden rows. The DTO itself is
+// generated from the Rust struct.
 test('validateTaskRow accepts a string stage value', () => {
   const withStage: TaskRowDto = {
     task_id: 'f00000001',
@@ -1956,19 +1912,8 @@ test('every event snapshot parses as ClientEvent', () => {
   }
 });
 
-// The two tests above only prove every golden's `type` tag is HANDLED by the
-// hand-written `switch` in validateCommand/validateEvent — they cast the
-// loaded JSON `as ClientCommand`/`as ClientEvent` and never check that tag
-// against the actual TS union. That is exactly how `attach_turn`/
-// `resume_turn`/`pause_turn` and `turn_recovery_state`/`turn_event_replay`
-// went missing from the unions while staying fully validated and
-// snapshotted: nothing tied the switch to the union. `ALL_CLIENT_COMMAND_TYPES`
-// / `ALL_CLIENT_EVENT_TYPES` (src/protocolCoverage.ts) close that at COMPILE
-// time — a `Record<Union['type'], true>` can only type-check when its key set
-// is exactly the union's `type` values. These two tests close the remaining
-// runtime direction: the record's keys must also match what the goldens
-// actually carry, so a golden with no union member (or a union member with no
-// golden) fails HERE, by name, instead of staying silent.
+// Compare the generated variant inventories with the independent Rust golden
+// snapshots, including their on-wire tag values rather than filenames.
 test('ALL_CLIENT_COMMAND_TYPES matches the locked runtime exactly', () => {
   assert.deepEqual(Object.keys(ALL_CLIENT_COMMAND_TYPES).sort(), [...typeTagsOnDisk('command')].sort());
 });

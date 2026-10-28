@@ -7,6 +7,8 @@ import com.lingxi.code.bindings.android.buildAndroidLocalAppService
 import com.lingxi.code.bindings.android.buildAndroidMobileLinuxRuntimeHandle
 import com.lingxi.code.bindings.runtime.MobileLocalAppServiceHandle
 import com.lingxi.code.project.MobileUserStorage
+import com.lingxi.code.runtimeintegration.NativeEngineFactory
+import com.lingxi.code.runtimeintegration.NativeEngineScenario
 import com.lingxi.code.settings.LinuxRuntimeBridge
 import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
@@ -49,10 +51,10 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             if (agentModelHost != null && agentConfiguration == identity) return@withLock
             withContext(Dispatchers.IO) {
                 val mediaHost = AndroidNativeMediaHostProvider.get(context)
-                agentModelHost = com.lingxi.code.voice.buildVoiceEngine(
+                agentModelHost = NativeEngineFactory.build(
                     context = context, model = configured.defaultModel,
                     providerProfilesJson = configured.providerProfilesJson, routingJson = configured.routingJson,
-                    appAgentHost = true, mediaHost = mediaHost, onEvent = {}, onPermission = {},
+                    scenario = NativeEngineScenario.LocalAppAgent, mediaHost = mediaHost,
                 ) ?: error("无法初始化应用的模型服务，请检查模型配置。")
                 agentConfiguration = identity
             }

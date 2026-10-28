@@ -1,7 +1,6 @@
 import { tr } from '../../../i18n/locale';
 import { useEffect, useRef, useState } from 'react';
 import type { AccountCommand, AccountState } from '../../../../shared/account';
-import { Card } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import { ghostButtonStyle } from './ghostButton';
 
@@ -62,12 +61,12 @@ export function LingxiAccount() {
           <button type="button" disabled={busy} style={button} onClick={() => void run({ type: 'signOut' })}>{tr('settings_logout')}</button>
         </div>
       </> : <>
-        <button type="button" disabled={busy} style={{ ...primaryButton, width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 10, background: t.surface2, color: t.text }} onClick={() => void run({ type: 'oauth', provider: 'google.com' })}><img src={googleIcon} alt="" width={20} height={20} />{tr('account_google')}</button>
+        <button type="button" disabled={busy} style={{ ...primaryButton, width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 10, background: t.surfaceHover, color: t.text }} onClick={() => void run({ type: 'oauth', provider: 'google.com' })}><img src={googleIcon} alt="" width={20} height={20} />{tr('account_google')}</button>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, color: t.text3, fontSize: 13 }}><span style={{ height: 1, background: t.border, flex: 1 }} />OR<span style={{ height: 1, background: t.border, flex: 1 }} /></div>
         <form onSubmit={event => { event.preventDefault(); void run({ type: register ? 'register' : 'signIn', email, password }); }} style={{ display: 'grid', gap: 12 }}>
           <input aria-label={tr('account_email')} placeholder={tr('account_email')} type="email" autoComplete="username" required value={email} onChange={e => setEmail(e.target.value)} disabled={busy} style={inputStyle} />
           <input aria-label={tr('account_password')} placeholder={tr('account_password')} type="password" autoComplete={register ? 'new-password' : 'current-password'} minLength={register ? 6 : undefined} required value={password} onChange={e => setPassword(e.target.value)} disabled={busy} style={inputStyle} />
-          <button type="submit" disabled={busy} style={{ ...primaryButton, width: '100%', background: t.text, color: t.bg }}>{register ? tr('account_create') : tr('settings_provider_login')}</button>
+          <button type="submit" disabled={busy} style={{ ...primaryButton, width: '100%', background: t.text, color: t.surface }}>{register ? tr('account_create') : tr('settings_provider_login')}</button>
         </form>
         <div style={{ textAlign: 'center', color: t.text3, fontSize: 12.5, lineHeight: 1.6 }}>{tr('desktop_shell_browser_login_desc')}</div>
       </>}

@@ -426,7 +426,7 @@ export class SessionRuntime {
       this.notifyActivityChanged();
     };
     const pending = {
-      model, sent: false, slash: !!slashCommand, turnId: slashCommand?.turn_id, promise,
+      model, sent: false, slash: !!slashCommand, turnId: slashCommand?.turn_id ?? undefined, promise,
       complete: (selected = model) => {
         try {
           if (persist) this.opts.onModelSelected?.(selected);

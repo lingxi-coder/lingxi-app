@@ -1,0 +1,118 @@
+name: MCP exit diagnostic
+
+on:
+  push:
+    branches:
+      - 'codex/diagnose-mcp-exit-d67-*'
+  workflow_dispatch:
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Select the isolated build directory
+        run: printf 'CARGO_TARGET_DIR=%s/mcp-exit-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Verify diagnostic scope and pinned sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=d67f2e6fcfce44bc21ea1f912ce446926ba4db8f
+          git merge-base --is-ancestor "$base" HEAD
+          actual=$(git diff --name-only "$base" HEAD | LC_ALL=C sort)
+          expected=$(printf '%s\n' .github/workflows/mcp-exit-diagnostic.yml scripts/ci/probe_mcp_exit.py | LC_ALL=C sort)
+          test "$actual" = "$expected"
+          git diff --quiet "$base" HEAD -- Cargo.toml Cargo.lock
+          grep -Fq 'rev=ff076c70babd85c1dd5f9cb04034b472d68e1797#ff076c70babd85c1dd5f9cb04034b472d68e1797' Cargo.lock
+          git rev-parse HEAD
+          sha256sum Cargo.toml Cargo.lock scripts/ci/probe_mcp_exit.py
+          rustc --version
+          cargo --version
+      - name: Restore pinned Linux GStreamer static SDK cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gstreamer-sdk/linux-static
+          key: gstreamer-linux-static-jammy-${{ hashFiles('scripts/ci/gstreamer-sdk-lock.json', 'scripts/ci/build_gstreamer_linux.py', 'scripts/ci/gstreamer_sdk.py', 'scripts/ci/gstreamer-linux-meson-requirements.txt') }}
+      - name: Install pinned SDK build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bison flex libglib2.0-dev libopus-dev libvpx-dev ninja-build pkg-config
+          python3 -m pip install --no-deps --require-hashes -r scripts/ci/gstreamer-linux-meson-requirements.txt
+      - name: Build and validate the pinned GStreamer static SDK
+        run: python3 scripts/ci/build_gstreamer_linux.py --root "$RUNNER_TEMP/gstreamer-sdk/linux-static" --static-plugins
+      - name: Record and compile the scoped feature graph
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mcp-exit-report"
+          cargo tree --locked -p cli --all-features -e features > "$RUNNER_TEMP/mcp-exit-report/cli-features.txt"
+          sha256sum "$RUNNER_TEMP/mcp-exit-report/cli-features.txt"
+          cargo test --locked -p cli --all-features --test mcp_serve --no-run
+          sha256sum "$CARGO_TARGET_DIR/debug/lingxi-cli"
+      - name: Original single process test
+        id: original_single
+        timeout-minutes: 4
+        continue-on-error: true
+        run: cargo test --locked -p cli --all-features --test mcp_serve -- serve_processes_initialize_ping_and_tools_list_before_eof --exact --nocapture
+      - name: Original exact-ID process test
+        id: original_ids
+        timeout-minutes: 4
+        continue-on-error: true
+        run: cargo test --locked -p cli --all-features --test mcp_serve -- serve_echoes_large_negative_and_escaped_ids_exactly --exact --nocapture
+      - name: Original EOF tool-error process test
+        id: original_error
+        timeout-minutes: 4
+        continue-on-error: true
+        run: cargo test --locked -p cli --all-features --test mcp_serve -- eof_keeps_an_accepted_ordinary_tool_error_response --exact --nocapture
+      - name: Owned direct process, one worker
+        id: owned_single
+        timeout-minutes: 3
+        continue-on-error: true
+        run: |
+          python3 scripts/ci/probe_mcp_exit.py \
+            --cli "$CARGO_TARGET_DIR/debug/lingxi-cli" --workers 1 --timeout 45 \
+            --loader-dir "$LINGXI_GSTREAMER_SDK_LINUX_SOURCE/lib/x86_64-linux-gnu" \
+            --report "$RUNNER_TEMP/mcp-exit-report/owned-single.json"
+      - name: Owned direct processes, four workers
+        id: owned_parallel
+        timeout-minutes: 3
+        continue-on-error: true
+        run: |
+          python3 scripts/ci/probe_mcp_exit.py \
+            --cli "$CARGO_TARGET_DIR/debug/lingxi-cli" --workers 4 --timeout 45 \
+            --loader-dir "$LINGXI_GSTREAMER_SDK_LINUX_SOURCE/lib/x86_64-linux-gnu" \
+            --report "$RUNNER_TEMP/mcp-exit-report/owned-parallel.json"
+      - name: Upload sanitized diagnostic receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-exit-diagnostic
+          path: ${{ runner.temp }}/mcp-exit-report
+          if-no-files-found: ignore
+      - name: Preserve every diagnostic result
+        if: always()
+        env:
+          SINGLE: ${{ steps.original_single.outcome }}
+          IDS: ${{ steps.original_ids.outcome }}
+          ERROR: ${{ steps.original_error.outcome }}
+          OWNED_SINGLE: ${{ steps.owned_single.outcome }}
+          OWNED_PARALLEL: ${{ steps.owned_parallel.outcome }}
+        run: |
+          printf 'original_single=%s original_ids=%s original_error=%s owned_single=%s owned_parallel=%s\n' "$SINGLE" "$IDS" "$ERROR" "$OWNED_SINGLE" "$OWNED_PARALLEL"
+          test "$SINGLE" = success && test "$IDS" = success && test "$ERROR" = success && test "$OWNED_SINGLE" = success && test "$OWNED_PARALLEL" = success

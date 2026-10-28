@@ -1933,3 +1933,312 @@ fn windows_broken_stdout_cancels_open_stdin_and_reaps_the_running_shell() {
     // Retain the parent's stdin handle until after the server has exited.
     drop(stdin);
 }
+
+mod bounded_server_tests {
+    use serde_json::Value;
+    use std::io;
+    use std::process::Stdio;
+    use std::time::Duration;
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+    use tokio::process::{Child, Command};
+    use tokio::task::JoinHandle;
+    use tokio::time::{timeout, timeout_at, Instant};
+
+    const MAX_CAPTURE: usize = 1024 * 1024;
+    const INPUT: &[u8] = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{}}\n",
+    ).as_bytes();
+
+    async fn read_limited(mut reader: impl AsyncRead + Unpin) -> Result<Vec<u8>, String> {
+        let mut result = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let count = reader
+                .read(&mut chunk)
+                .await
+                .map_err(|error| error.to_string())?;
+            if count == 0 {
+                return Ok(result);
+            }
+            if count > MAX_CAPTURE.saturating_sub(result.len()) {
+                return Err(format!("output exceeded {MAX_CAPTURE} bytes"));
+            }
+            result.extend_from_slice(&chunk[..count]);
+        }
+    }
+
+    async fn finish_task<T>(
+        task: &mut JoinHandle<Result<T, String>>,
+        deadline: Instant,
+        name: &str,
+    ) -> Result<T, String> {
+        match timeout_at(deadline, &mut *task).await {
+            Ok(Ok(result)) => result.map_err(|error| format!("{name}: {error}")),
+            Ok(Err(error)) => Err(format!("{name} task failed: {error}")),
+            Err(_) => {
+                task.abort();
+                // Aborting closes the async pipe. Even the cancellation receipt
+                // has its own bound; a stuck task is reported, not awaited forever.
+                if timeout(Duration::from_secs(1), &mut *task).await.is_err() {
+                    return Err(format!(
+                        "{name} exceeded its deadline and cancellation was unverified"
+                    ));
+                }
+                Err(format!("{name} exceeded its deadline"))
+            }
+        }
+    }
+
+    async fn stop_and_reap(child: &mut Child) -> Result<(), String> {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(error) => return Err(format!("child status is unverified: {error}")),
+        }
+        if let Err(error) = child.start_kill() {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                _ => return Err(format!("could not kill owned child: {error}")),
+            }
+        }
+        match timeout(Duration::from_secs(2), child.wait()).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(format!("could not reap owned child: {error}")),
+            Err(_) => Err("owned child did not reap before the deadline".into()),
+        }
+    }
+
+    struct Server {
+        _home: tempfile::TempDir,
+        child: Child,
+        stdin: JoinHandle<Result<(), String>>,
+        stdout: JoinHandle<Result<Vec<u8>, String>>,
+        stderr: JoinHandle<Result<Vec<u8>, String>>,
+        status: Option<std::process::ExitStatus>,
+    }
+
+    /// Four real servers share a deadline. Outputs and input are drained by
+    /// cancellable tasks with caps; child timeout and incomplete reaping fail.
+    #[tokio::test]
+    async fn concurrent_servers_complete_protocol_and_shutdown() {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut servers = Vec::new();
+        let mut errors = Vec::new();
+        for _ in 0..4 {
+            let setup = || -> io::Result<_> {
+                let home = tempfile::tempdir()?;
+                let project = home.path().join("project");
+                let config = home.path().join("config");
+                std::fs::create_dir_all(&project)?;
+                std::fs::create_dir_all(&config)?;
+                let child = Command::new(env!("CARGO_BIN_EXE_lingxi-cli"))
+                    .current_dir(project)
+                    .env("HOME", home.path())
+                    .env("LINGXI_CONFIG_DIR", config)
+                    .env("ANTHROPIC_API_KEY", "sk-ant-test-mcp-serve")
+                    .env("DISABLE_AUTOUPDATER", "1")
+                    .args(["mcp", "serve"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()?;
+                Ok((home, child))
+            };
+            let (home, mut child) = match setup() {
+                Ok(value) => value,
+                Err(error) => {
+                    errors.push(format!("could not start server: {error}"));
+                    break;
+                }
+            };
+            let (Some(mut stdin), Some(stdout), Some(stderr)) =
+                (child.stdin.take(), child.stdout.take(), child.stderr.take())
+            else {
+                errors.push("a piped server stream was unavailable".into());
+                if let Err(error) = stop_and_reap(&mut child).await {
+                    errors.push(error);
+                }
+                break;
+            };
+            servers.push(Server {
+                _home: home,
+                child,
+                stdin: tokio::spawn(async move {
+                    stdin
+                        .write_all(INPUT)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    stdin.shutdown().await.map_err(|error| error.to_string())
+                }),
+                stdout: tokio::spawn(read_limited(stdout)),
+                stderr: tokio::spawn(read_limited(stderr)),
+                status: None,
+            });
+        }
+        if servers.len() != 4 {
+            for server in &mut servers {
+                if let Err(error) = stop_and_reap(&mut server.child).await {
+                    errors.push(error);
+                }
+            }
+        }
+        for server in &mut servers {
+            match timeout_at(deadline, server.child.wait()).await {
+                Ok(Ok(status)) => server.status = Some(status),
+                Ok(Err(error)) => {
+                    errors.push(format!("server exit status is unverified: {error}"));
+                    if let Err(error) = stop_and_reap(&mut server.child).await {
+                        errors.push(error);
+                    }
+                }
+                Err(_) => {
+                    errors.push("server did not exit before the deadline".into());
+                    if let Err(error) = stop_and_reap(&mut server.child).await {
+                        errors.push(error);
+                    }
+                }
+            }
+        }
+        for server in &mut servers {
+            if let Err(error) = finish_task(&mut server.stdin, deadline, "stdin").await {
+                errors.push(error);
+            }
+            let stdout = finish_task(&mut server.stdout, deadline, "stdout").await;
+            let stderr = finish_task(&mut server.stderr, deadline, "stderr").await;
+            if let Err(error) = &stdout {
+                errors.push(error.clone());
+            }
+            if let Err(error) = &stderr {
+                errors.push(error.clone());
+            }
+            if let (Some(status), Ok(stdout), Ok(stderr)) = (server.status, stdout, stderr) {
+                if !status.success() {
+                    errors.push(format!(
+                        "server failed: {status}; stderr: {}",
+                        String::from_utf8_lossy(&stderr)
+                    ));
+                    continue;
+                }
+                let frames = std::str::from_utf8(&stdout)
+                    .map_err(|error| error.to_string())
+                    .and_then(|text| {
+                        text.lines()
+                            .map(serde_json::from_str::<Value>)
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|error| error.to_string())
+                    });
+                match frames {
+                    Ok(frames)
+                        if frames.len() == 3
+                            && frames[0]["id"] == 1
+                            && frames[1]
+                                == serde_json::json!({ "jsonrpc": "2.0", "id": 2, "result": {} })
+                            && frames[2]["id"] == 3
+                            && frames[2]["result"]["tools"]
+                                .as_array()
+                                .is_some_and(|tools| !tools.is_empty()) => {}
+                    Ok(frames) => errors.push(format!("unexpected protocol frames: {frames:?}")),
+                    Err(error) => errors.push(format!("invalid protocol output: {error}")),
+                }
+            }
+        }
+        assert!(errors.is_empty(), "{}", errors.join("; "));
+    }
+
+    /// A second owned process retains the same output writer after the first
+    /// child exits, reproducing the inherited-pipe lifetime that must fail.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inherited_output_handle_is_bounded_and_reported() {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        let (reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let holder_stdout: OwnedFd = writer.try_clone().unwrap().into();
+        let first_stdout: OwnedFd = writer.try_clone().unwrap().into();
+        let mut holder = Command::new("/bin/sleep")
+            .arg("5")
+            .stdout(Stdio::from(holder_stdout))
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let first = Command::new("/usr/bin/true")
+            .stdout(Stdio::from(first_stdout))
+            .kill_on_drop(true)
+            .spawn();
+        let mut first = match first {
+            Ok(first) => first,
+            Err(error) => {
+                let cleanup = stop_and_reap(&mut holder).await;
+                panic!("first child did not start: {error}; holder cleanup: {cleanup:?}");
+            }
+        };
+        drop(writer);
+        let status = timeout(Duration::from_secs(2), first.wait()).await;
+        let first_cleanup = stop_and_reap(&mut first).await;
+        let mut capture = tokio::spawn(read_limited(
+            tokio::net::UnixStream::from_std(reader).unwrap(),
+        ));
+        let result = finish_task(
+            &mut capture,
+            Instant::now() + Duration::from_millis(150),
+            "stdout",
+        )
+        .await;
+        let cleanup = stop_and_reap(&mut holder).await;
+        assert!(
+            matches!(status, Ok(Ok(status)) if status.success()),
+            "first child did not exit cleanly"
+        );
+        assert!(
+            first_cleanup.is_ok(),
+            "first child cleanup: {first_cleanup:?}"
+        );
+        assert!(
+            matches!(result, Err(ref error) if error.contains("exceeded its deadline")),
+            "{result:?}"
+        );
+        assert!(cleanup.is_ok(), "holder cleanup: {cleanup:?}");
+        assert!(
+            holder.try_wait().unwrap().is_some(),
+            "holder was not reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_output_above_the_limit() {
+        let (mut writer, reader) = tokio::io::duplex(8192);
+        let mut writer_task = tokio::spawn(async move {
+            writer
+                .write_all(&vec![b'x'; MAX_CAPTURE + 1])
+                .await
+                .map_err(|error| error.to_string())
+        });
+        let mut capture = tokio::spawn(read_limited(reader));
+        let result = finish_task(
+            &mut capture,
+            Instant::now() + Duration::from_secs(3),
+            "stdout",
+        )
+        .await;
+        let writer_result = finish_task(
+            &mut writer_task,
+            Instant::now() + Duration::from_secs(2),
+            "writer",
+        )
+        .await;
+        assert!(
+            !matches!(writer_result, Err(ref error) if error.contains("deadline")),
+            "{writer_result:?}"
+        );
+        assert!(
+            matches!(result, Err(ref error) if error.contains("output exceeded")),
+            "{result:?}"
+        );
+    }
+}

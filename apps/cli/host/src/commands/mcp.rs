@@ -1526,6 +1526,10 @@ async fn run_serve(a: &ServeArgs) -> i32 {
     cfg.use_noop_permission_gate = true;
     cfg.deny_unresolved_ask = true;
     cfg.session_persistence = false;
+    // MCP exposes tools rather than starting a main conversation. Tools keep
+    // the model client for their own requests, but main-session prewarm is
+    // unnecessary and can outlive a short stdio session.
+    cfg.startup_responses_websocket_prewarm = false;
 
     let permission_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(McpServePermissionSink);

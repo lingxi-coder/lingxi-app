@@ -29,6 +29,19 @@ function countMatches(value: string, pattern: string): number {
   return (value.match(new RegExp(pattern, 'g')) ?? []).length;
 }
 
+test('completed Mermaid fences render in an isolated local frame while streaming remains code', () => {
+  const source = 'flowchart TB\nA["中文<br/>第二行"] <--> B';
+  for (const fence of ['```mermaid', '```MERMAID', '~~~mermaid']) {
+    const marker = fence.startsWith('~') ? '~~~' : '```';
+    const complete = renderMarkdownContent(`${fence}\n${source}\n${marker}`);
+    assert.match(complete, /<iframe[^>]+title="Mermaid"[^>]+sandbox="allow-scripts"/);
+    assert.match(complete, /mermaid\.html/);
+    assert.doesNotMatch(complete, /allow-same-origin/);
+    assert.doesNotMatch(renderMarkdownContent(`${fence}\n${source}`), /<iframe/);
+  }
+  assert.doesNotMatch(renderMarkdownContent(`\`\`\`text\n${source}\n\`\`\``), /<iframe/);
+});
+
 test('markdown parser normalizes loose bullet output for list-like model text', () => {
   const source = '天气如下： - **当前气温**：27°C - **天气状况**：多云\n\n```ts\nconst answer = true;\n```';
   const parsed = parseMarkdown(source);
@@ -344,6 +357,7 @@ test('replacement renderers preserve sanitized anchor IDs on their actual DOM no
     '<pre id="sample"><code>text</code></pre>',
     '<pre><code id="sample" class="language-js">const x = 1;</code></pre>',
     '<pre><code id="sample" class="language-unknown">text</code></pre>',
+    '<pre><code id="sample" class="language-mermaid">flowchart LR\nA --&gt; B</code></pre>',
     '<a id="sample"></a>',
     '<hr id="sample">',
     '<img id="sample" src="https://example.com/image.png" alt="Image">',

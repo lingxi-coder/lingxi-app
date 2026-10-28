@@ -438,7 +438,9 @@ private fun CodeBlockView(block: MdBlock.CodeBlock) {
                 LXIcon(LXIconName.Copy, size = 16.dp, color = t.text3, contentDescription = stringResource(R.string.terminal_copy_button))
             }
         }
-        Text(
+        if (block.closed && block.language.equals("mermaid", ignoreCase = true)) {
+            MermaidDiagram(block.code)
+        } else Text(
             text = block.code,
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             color = t.text2,

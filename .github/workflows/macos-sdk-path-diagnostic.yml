@@ -1,0 +1,74 @@
+name: macOS SDK path diagnostic
+on:
+  push:
+    branches: [codex/media-macos-sdk-path-diagnostic-20261028]
+jobs:
+  sdk-paths:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned official GStreamer SDK
+        run: python3 scripts/ci/gstreamer_sdk.py macos --root "$RUNNER_TEMP/gstreamer-sdk/macos"
+      - name: Classify libffi paths and verify stripped runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections, hashlib, os, pathlib, re, shutil, struct, subprocess
+          sdk=pathlib.Path(os.environ['LINGXI_GSTREAMER_SDK_MACOS'])
+          source=(sdk/'lib/libffi.7.dylib').resolve(strict=True)
+          work=pathlib.Path(os.environ['RUNNER_TEMP'])/'libffi-path-probe'
+          work.mkdir()
+          library=work/'libffi.7.dylib'
+          architecture=subprocess.check_output(['/usr/bin/uname','-m'],text=True).strip()
+          architectures=subprocess.check_output(['/usr/bin/lipo','-archs',str(source)],text=True).split()
+          if architecture not in architectures: raise RuntimeError('required SDK slice missing')
+          if len(architectures)>1:
+              subprocess.run(['/usr/bin/lipo',str(source),'-thin',architecture,'-output',str(library)],check=True)
+          else:
+              shutil.copy2(source,library)
+          os.chmod(library,0o755)
+          def inspect(label):
+              data=library.read_bytes()
+              magic,_,_,_,count,_,_,_=struct.unpack_from('<IiiIIIII',data,0)
+              if magic != 0xfeedfacf: raise RuntimeError('expected little-endian 64-bit Mach-O')
+              regions=[]
+              pos=32
+              for _ in range(count):
+                  command,size=struct.unpack_from('<II',data,pos)
+                  if size<8 or pos+size>len(data): raise RuntimeError('bad Mach-O command')
+                  if command==0x19:
+                      nsects=struct.unpack_from('<I',data,pos+64)[0]
+                      for index in range(nsects):
+                          section=pos+72+index*80
+                          if section+80>pos+size: raise RuntimeError('bad Mach-O section')
+                          sect,seg,_,length,offset=struct.unpack_from('<16s16sQQI',data,section)
+                          name=(seg.split(b'\0')[0]+b','+sect.split(b'\0')[0]).decode(errors='replace')
+                          regions.append((offset,offset+length,name))
+                  elif command==2:
+                      _,_,offset,length=struct.unpack_from('<IIII',data,pos+8)
+                      regions.append((offset,offset+length,'symbol-string-table'))
+                  pos+=size
+              paths=list(re.finditer(rb'/Users/[A-Za-z0-9._-]+/',data))
+              classes=collections.Counter(next((name for start,end,name in regions if start<=m.start()<end),'other') for m in paths)
+              print(label, 'bytes=',len(data), 'sha256=',hashlib.sha256(data).hexdigest(), 'path_count=',len(paths), 'regions=',dict(classes),flush=True)
+              return len(paths)
+          inspect('original-thin')
+          subprocess.run(['/usr/bin/strip','-S','-x',str(library)],check=True)
+          inspect('stripped')
+          subprocess.run(['/usr/bin/install_name_tool','-id','@rpath/libffi.7.dylib',str(library)],check=True)
+          subprocess.run(['/usr/bin/codesign','--force','--sign','-','--timestamp=none',str(library)],check=True)
+          subprocess.run(['/usr/bin/codesign','--verify','--strict',str(library)],check=True)
+          headers=list((sdk/'include').rglob('ffi.h'))
+          if not headers: raise RuntimeError('SDK ffi.h missing')
+          source_c=work/'probe.c'
+          source_c.write_text('''#include <ffi.h>\nstatic int add(int a, int b) { return a + b; }\nint main(void) { ffi_cif cif; ffi_type *types[] = { &ffi_type_sint32, &ffi_type_sint32 }; int a=19, b=23, result=0; void *args[] = { &a, &b }; if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, 2, &ffi_type_sint32, types) != FFI_OK) return 2; ffi_call(&cif, FFI_FN(add), &result, args); return result == 42 ? 0 : 3; }\n''')
+          subprocess.run(['/usr/bin/xcrun','clang','-I',str(headers[0].parent),str(source_c),str(library),'-Wl,-rpath,'+str(work),'-o',str(work/'probe')],check=True)
+          subprocess.run([str(work/'probe')],check=True)
+          print('signed stripped libffi ffi_call probe passed', flush=True)
+          PY

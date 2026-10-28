@@ -1,7 +1,7 @@
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import * as React from 'react';
-import { Component, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
+import { Component, memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
 import type { CSSProperties, FormEvent, KeyboardEvent, ReactElement, ChangeEvent } from 'react';
 import type { NativeUiComponent, NativeUiControlRequest, NativeUiClientPressEventDto, UiJsonValue } from '@lingxi/bridge-client';
 import { useT } from '../theme/ThemeContext';
@@ -649,69 +649,106 @@ const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, frame
   useI18n();
   const { key, label, placeholder, value, submitLabel, autoFocus } = node.props;
   const [draft, setDraft] = useState(value ?? '');
+  const noticeId = useId();
   const inputElementRef = useRef<HTMLInputElement>(null);
   const retryButtonRef = useRef<HTMLButtonElement>(null);
   const valueRef = useRef(value);
   const editSequence = useRef(0);
-  const localEditRef = useRef<{ sequence: number; epoch: string | number | undefined; kind: 'change' | 'submit' } | null>(null);
+  const localEditRef = useRef<{ sequence: number; epoch: string | number | undefined; kind: 'change' | 'submit'; value: string; retry: boolean } | null>(null);
+  const pendingEditsRef = useRef(new Map<number, { epoch: string | number | undefined; kind: 'change' | 'submit'; value: string }>());
   const frameCurrentRef = useRef(frameCurrent);
   const dispatchEpochRef = useRef(dispatchEpoch);
   const unconfirmedDraftRef = useRef<'change' | 'submit' | null>(null);
   const [unconfirmedDraft, setUnconfirmedDraft] = useState<'change' | 'submit' | null>(null);
+  const unconfirmedSubmitValueRef = useRef<string | null>(null);
+  const [unconfirmedSubmitValue, setUnconfirmedSubmitValue] = useState<string | null>(null);
+  const preserveNewDraftRef = useRef(false);
+  const submitPendingRef = useRef(false);
+  const [submitPending, setSubmitPending] = useState(false);
   const retryPendingRef = useRef(false);
   const [retryPending, setRetryPending] = useState(false);
   valueRef.current = value;
   frameCurrentRef.current = frameCurrent;
   dispatchEpochRef.current = dispatchEpoch;
-  useEffect(() => {
-    if (localEditRef.current && (localEditRef.current.epoch !== dispatchEpoch || !frameCurrent)) {
-      unconfirmedDraftRef.current = localEditRef.current.kind;
-      setUnconfirmedDraft(localEditRef.current.kind);
+  const markUnconfirmed = useCallback((edit: { kind: 'change' | 'submit'; value: string }) => {
+    // A later change cannot prove that an earlier submit did not run.
+    if (unconfirmedDraftRef.current === 'submit') return;
+    const unconfirmed = edit.kind;
+    if (unconfirmed === 'submit') {
+      unconfirmedSubmitValueRef.current = edit.value;
+      setUnconfirmedSubmitValue(edit.value);
     }
-  }, [dispatchEpoch, frameCurrent]);
+    unconfirmedDraftRef.current = unconfirmed;
+    setUnconfirmedDraft(unconfirmed);
+  }, []);
+  useEffect(() => {
+    for (const edit of pendingEditsRef.current.values()) {
+      if (edit.epoch !== dispatchEpoch || !frameCurrent) markUnconfirmed(edit);
+    }
+  }, [dispatchEpoch, frameCurrent, markUnconfirmed]);
   // A newer frame can return to the same value before React commits the
   // intermediate frames. Its version still makes that value authoritative.
   useEffect(() => {
-    if (!frameCurrent || localEditRef.current || unconfirmedDraftRef.current || value === undefined) return;
+    if (!frameCurrent || localEditRef.current || unconfirmedDraftRef.current || preserveNewDraftRef.current || value === undefined) return;
     setDraft(value);
   }, [key, value, inputFrameVersion, frameCurrent]);
-  const dispatchInput = useCallback((kind: 'change' | 'submit', nextValue: string): Promise<void> => {
+  const dispatchInput = useCallback((kind: 'change' | 'submit', nextValue: string, retry = false): Promise<void> => {
     if (!frameCurrent) return Promise.resolve();
-    const edit = { sequence: ++editSequence.current, epoch: dispatchEpoch, kind };
+    if (kind === 'submit') {
+      if (submitPendingRef.current) return Promise.resolve();
+      submitPendingRef.current = true;
+      setSubmitPending(true);
+    }
+    const edit = { sequence: ++editSequence.current, epoch: dispatchEpoch, kind, value: nextValue, retry };
     localEditRef.current = edit;
+    pendingEditsRef.current.set(edit.sequence, edit);
     return dispatch(node.press, key, { type: 'input', kind, value: nextValue }).then((result) => {
       const currentEdit = localEditRef.current;
-      if (!currentEdit || currentEdit.sequence !== edit.sequence) return;
-      localEditRef.current = null;
+      pendingEditsRef.current.delete(edit.sequence);
       const authoritativeValue = readNativeInputAck(result);
       if (authoritativeValue === nativeInputSuperseded || edit.epoch !== dispatchEpochRef.current || !frameCurrentRef.current) {
         // A superseded request cannot acknowledge or overwrite the draft.
         // Its callback may already have run, so retry requires user action.
-        unconfirmedDraftRef.current = edit.kind;
-        setUnconfirmedDraft(edit.kind);
+        markUnconfirmed(edit);
+        if (currentEdit?.sequence === edit.sequence) localEditRef.current = null;
         return;
       }
+      if (!currentEdit || currentEdit.sequence !== edit.sequence) return;
+      localEditRef.current = null;
       if (authoritativeValue !== null) {
-        if (unconfirmedDraftRef.current && document.activeElement === retryButtonRef.current) {
-          inputElementRef.current?.focus({ preventScroll: true });
+        if (unconfirmedDraftRef.current !== 'submit' || edit.kind === 'submit') {
+          if (unconfirmedDraftRef.current && document.activeElement === retryButtonRef.current) {
+            inputElementRef.current?.focus({ preventScroll: true });
+          }
+          unconfirmedDraftRef.current = null;
+          setUnconfirmedDraft(null);
+          unconfirmedSubmitValueRef.current = null;
+          setUnconfirmedSubmitValue(null);
         }
-        unconfirmedDraftRef.current = null;
-        setUnconfirmedDraft(null);
-        if (authoritativeValue !== undefined) setDraft(authoritativeValue);
+        if (!(edit.retry && edit.kind === 'submit' && preserveNewDraftRef.current)) {
+          if (!unconfirmedDraftRef.current) preserveNewDraftRef.current = false;
+          if (authoritativeValue !== undefined) setDraft(authoritativeValue);
+        }
         return;
       }
       // Failed, stale, or cancelled dispatches release the draft lock. A newer
       // controlled value that arrived while pending is then authoritative.
-      if (!unconfirmedDraftRef.current && valueRef.current !== undefined) setDraft(valueRef.current);
+      if (!unconfirmedDraftRef.current && !preserveNewDraftRef.current && valueRef.current !== undefined) setDraft(valueRef.current);
+    }).finally(() => {
+      if (edit.kind === 'submit') {
+        submitPendingRef.current = false;
+        setSubmitPending(false);
+      }
     });
-  }, [dispatch, key, node.press, frameCurrent, dispatchEpoch]);
+  }, [dispatch, key, markUnconfirmed, node.press, frameCurrent, dispatchEpoch]);
   const submit = useCallback((event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (unconfirmedDraftRef.current) return;
+    if (unconfirmedDraftRef.current || submitPendingRef.current) return;
     const input = event.currentTarget.querySelector('input');
     void dispatchInput('submit', input?.value ?? draft);
   }, [dispatchInput, draft]);
   const onChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    if (retryPendingRef.current) return;
     const nextValue = event.currentTarget.value;
     setDraft(nextValue);
     void dispatchInput('change', nextValue);
@@ -719,15 +756,18 @@ const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, frame
   const submitOnEnter = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    if (unconfirmedDraftRef.current) return;
+    if (unconfirmedDraftRef.current || submitPendingRef.current) return;
     void dispatchInput('submit', event.currentTarget.value);
   }, [dispatchInput]);
   const retryUnconfirmed = useCallback(() => {
     const kind = unconfirmedDraftRef.current;
-    if (!kind || disabled || !frameCurrent || retryPendingRef.current) return;
+    if (!kind || disabled || !frameCurrent || retryPendingRef.current || submitPendingRef.current) return;
+    const retryValue = kind === 'submit' ? unconfirmedSubmitValueRef.current : draft;
+    if (retryValue === null) return;
+    if (kind === 'submit') preserveNewDraftRef.current = retryValue !== draft;
     retryPendingRef.current = true;
     setRetryPending(true);
-    void dispatchInput(kind, draft).finally(() => {
+    void dispatchInput(kind, retryValue, true).finally(() => {
       retryPendingRef.current = false;
       setRetryPending(false);
     });
@@ -735,11 +775,17 @@ const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, frame
   return <form className="mod-ui-client-input-row" onSubmit={submit} style={{ display: 'flex', gap: 8, minWidth: 0 }}>
     <label className="mod-ui-client-input-label" style={{ display: 'grid', flex: 1, minWidth: 0, gap: 4, color: t.text2 }}>
       {label && <span>{label}</span>}
-      <input ref={inputElementRef} className="mod-ui-client-input" type="text" value={draft} placeholder={placeholder} autoFocus={autoFocus} disabled={disabled} readOnly={!frameCurrent} maxLength={MAX_INPUT_VALUE} onChange={onChange} onKeyDown={submitOnEnter} style={{ minWidth: 0, border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 9px', background: t.windowBg, color: t.text, font: 'inherit' }} />
-      {unconfirmedDraft && <span role="status">{tr(unconfirmedDraft === 'change' ? 'desktop_ui_mod_input_unconfirmed_change' : 'desktop_ui_mod_input_unconfirmed_submit')}</span>}
+      <input ref={inputElementRef} className="mod-ui-client-input" type="text" value={draft} placeholder={placeholder} autoFocus={autoFocus} disabled={disabled} readOnly={!frameCurrent || retryPending} maxLength={MAX_INPUT_VALUE} onChange={onChange} onKeyDown={submitOnEnter} style={{ minWidth: 0, border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 9px', background: t.windowBg, color: t.text, font: 'inherit' }} />
+      {unconfirmedDraft && <span id={noticeId} role="status">
+        {tr(unconfirmedDraft === 'change' ? 'desktop_ui_mod_input_unconfirmed_change' : 'desktop_ui_mod_input_unconfirmed_submit')}
+        {unconfirmedDraft === 'submit' && unconfirmedSubmitValue !== null && <>
+          {' '}{tr('desktop_ui_mod_input_original_submit_value')}
+          <code data-submitted-value tabIndex={0} style={{ display: 'block', maxHeight: '4.5em', overflow: 'auto', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{JSON.stringify(unconfirmedSubmitValue)}</code>
+        </>}
+      </span>}
     </label>
-    {unconfirmedDraft && <button ref={retryButtonRef} type="button" className="mod-ui-client-input-retry" disabled={disabled || !frameCurrent} aria-disabled={retryPending || undefined} aria-busy={retryPending || undefined} onClick={retryUnconfirmed} style={{ alignSelf: 'end', border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 10px', background: t.surface, color: t.text, font: 'inherit' }}>{tr(unconfirmedDraft === 'change' ? 'desktop_ui_mod_input_retry_change' : 'desktop_ui_mod_input_retry_submit')}</button>}
-    {submitLabel && <button type="submit" className="mod-ui-client-input-submit" disabled={disabled || !frameCurrent || !!unconfirmedDraft} style={{ alignSelf: 'end', border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 10px', background: t.surface, color: t.text, font: 'inherit', cursor: disabled || !frameCurrent || unconfirmedDraft ? 'not-allowed' : 'pointer' }}>{submitLabel}</button>}
+    {unconfirmedDraft && <button ref={retryButtonRef} type="button" className="mod-ui-client-input-retry" disabled={disabled || !frameCurrent} aria-describedby={noticeId} aria-disabled={retryPending || submitPending || undefined} aria-busy={retryPending || submitPending || undefined} onClick={retryUnconfirmed} style={{ alignSelf: 'end', border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 10px', background: t.surface, color: t.text, font: 'inherit' }}>{tr(unconfirmedDraft === 'change' ? 'desktop_ui_mod_input_retry_change' : 'desktop_ui_mod_input_retry_submit')}</button>}
+    {submitLabel && <button type="submit" className="mod-ui-client-input-submit" disabled={disabled || !frameCurrent || !!unconfirmedDraft || submitPending} style={{ alignSelf: 'end', border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 10px', background: t.surface, color: t.text, font: 'inherit', cursor: disabled || !frameCurrent || unconfirmedDraft || submitPending ? 'not-allowed' : 'pointer' }}>{submitLabel}</button>}
   </form>;
 });
 

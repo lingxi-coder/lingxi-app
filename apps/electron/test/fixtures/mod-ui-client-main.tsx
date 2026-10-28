@@ -80,6 +80,8 @@ interface FixtureApi {
   holdRapidPostAt(ordinal: number): void;
   releaseRapidPostAt(ordinal: number): void;
   ignoreNextRapidRunAsStale(): void;
+  holdNextRapidRunResponse(): void;
+  releaseRapidRunResponse(): void;
   emitRapidExternalValue(value: string | undefined): void;
   rapidInputSnapshot(): unknown;
   raceNextRapidAck(value: string): void;
@@ -91,6 +93,7 @@ interface FixtureApi {
   enableRapidGroups(): void;
   swapRapidGroups(): void;
   holdNextRapidControl(): void;
+  timeoutNextRapidControl(): void;
   holdNextRapidRunRejection(): void;
   releaseRapidRunRejection(): void;
   replaceRapidSite(): void;
@@ -162,6 +165,8 @@ const rapidBackgroundPending: Array<{ ordinal: number; value: string | undefined
 let rapidIgnoreNextRunAsStale = false;
 let rapidNextAckExternalValue: string | undefined;
 let rapidAckRaceFired = false;
+let holdNextRapidRunResponse = false;
+let rapidRunResponseRelease: (() => void) | null = null;
 let rapidRevision = 200;
 let holdRapidRevisionFrame = false;
 let rapidRevisionFrameRelease: (() => void) | null = null;
@@ -173,6 +178,8 @@ let rapidGroupsEnabled = false;
 let rapidGroupsReversed = false;
 let rapidSiteInstanceId = 'rapid-input-site';
 let holdNextRapidControl = false;
+let timeoutNextRapidControl = false;
+let rapidControlTimeouts = 0;
 let rapidControlRelease: (() => void) | null = null;
 let holdNextRapidRunRejection = false;
 let rapidRunRejectionRelease: (() => void) | null = null;
@@ -349,6 +356,11 @@ const host: ModUiClientHostApi = {
       call.returnedRevision = metadata.renderRevision;
     } else if (session === rapidSessionId && request.subtype === 'ui_client_press') {
       rapidControlOrdinal += 1;
+      if (timeoutNextRapidControl) {
+        timeoutNextRapidControl = false;
+        rapidControlTimeouts += 1;
+        throw new Error('fixture control timeout');
+      }
       if (holdNextRapidControl) {
         holdNextRapidControl = false;
         await new Promise<void>((resolve) => { rapidControlRelease = resolve; });
@@ -557,6 +569,12 @@ const host: ModUiClientHostApi = {
       call.returnedRevision = frame.renderRevision;
       call.returnedFrameSequence = frame.frameSequence;
       call.returnedRuntimeId = frame.runtimeId;
+      if (holdNextRapidRunResponse) {
+        holdNextRapidRunResponse = false;
+        // The callback and its posts have settled, but a newer independent
+        // frame can arrive before the older successful RPC is delivered.
+        await new Promise<void>((resolve) => { rapidRunResponseRelease = resolve; });
+      }
       return frame as UiClientOperationResponseFor<T>;
     }
     if (session === rapidSessionId && request.runtimeId === 'runtime-rapid-input'
@@ -668,6 +686,7 @@ window.__modUiClientFixture = {
   enableRapidGroups() { rapidGroupsEnabled = true; rapidGroupsReversed = false; emitRapidBackgroundFrame(rapidPropValue); },
   swapRapidGroups() { rapidGroupsReversed = !rapidGroupsReversed; emitRapidBackgroundFrame(rapidPropValue); },
   holdNextRapidControl() { holdNextRapidControl = true; },
+  timeoutNextRapidControl() { timeoutNextRapidControl = true; },
   holdNextRapidRunRejection() { holdNextRapidRunRejection = true; },
   releaseRapidRunRejection() { rapidRunRejectionRelease?.(); rapidRunRejectionRelease = null; },
   replaceRapidSite() {
@@ -681,6 +700,8 @@ window.__modUiClientFixture = {
   holdRapidPostAt(ordinal) { rapidHeldPostOrdinals.add(ordinal); },
   releaseRapidPostAt(ordinal) { rapidHeldPostReleases.get(ordinal)?.(); rapidHeldPostReleases.delete(ordinal); },
   ignoreNextRapidRunAsStale() { rapidIgnoreNextRunAsStale = true; },
+  holdNextRapidRunResponse() { holdNextRapidRunResponse = true; },
+  releaseRapidRunResponse() { rapidRunResponseRelease?.(); rapidRunResponseRelease = null; },
   emitRapidExternalValue(value) {
     rapidPropValue = value;
     emitRapidBackgroundFrame(value);
@@ -694,11 +715,14 @@ window.__modUiClientFixture = {
       sameInputNode: input !== null && input === capturedRapidInput,
       inputReadOnly: input?.readOnly ?? null,
       unconfirmedNotice: input?.closest('label')?.querySelector('[role="status"]')?.textContent ?? null,
+      originalSubmitValue: input?.closest('label')?.querySelector('[data-submitted-value]')?.textContent ?? null,
       retryLabel: input?.closest('form')?.querySelector('.mod-ui-client-input-retry')?.textContent ?? null,
       rapidRevision,
       revisionFrameHeld: rapidRevisionFrameRelease !== null,
       rapidControlHeld: rapidControlRelease !== null,
+      rapidControlTimeouts,
       rapidRunRejectionHeld: rapidRunRejectionRelease !== null,
+      rapidRunResponseHeld: rapidRunResponseRelease !== null,
       rapidRunRejections,
       rapidSiteInstanceId,
       promptText: prompt?.textContent ?? null,

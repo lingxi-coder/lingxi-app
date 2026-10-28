@@ -26,12 +26,26 @@ import {
 } from '../src/renderer/components/modUiAbovePrompt';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
+import { translate, type DesktopLocale } from '../src/renderer/i18n/locale';
 
 (globalThis as { React?: typeof React }).React = React;
 
 const site = { component: 'AbovePrompt', instanceId: 'parent-render-1' };
 const client = { plugin: 'status-plugin', key: 'status', module: 'surface/status.tsx' };
 const noOp = () => undefined;
+
+test('original submit value is identified in all desktop locales', () => {
+  const expected: Record<DesktopLocale, string> = {
+    'zh-Hans': '重试将发送以下原始提交内容：',
+    'zh-Hant': '重試將傳送以下原始提交內容：',
+    en: 'Retry will send the original submitted value:',
+    ja: '再試行では元の送信内容を送ります：',
+    ko: '다시 시도하면 원래 제출한 내용을 보냅니다:',
+  };
+  for (const [locale, text] of Object.entries(expected)) {
+    assert.equal(translate('desktop_ui_mod_input_original_submit_value', locale as DesktopLocale), text);
+  }
+});
 
 function render(tree: unknown, interactionsEnabled = true): string {
   return withDesktopLocale('en', () => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, React.createElement(ModUiClientTree, {

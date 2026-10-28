@@ -1083,7 +1083,17 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
       throw new Error('Client module host returned a frame for a different runtime');
     }
     if (isFrame(frameResult) && frameResult.renderRevision === revision) {
-      if (!acceptFrame(frameResult, revision, runtimeAtStart)) return;
+      if (!acceptFrame(frameResult, revision, runtimeAtStart)) {
+        const latest = frameRef.current;
+        // A later frame may arrive on the independent event channel while the
+        // successful runHeld response is in transit. Do not roll that frame
+        // back, but do acknowledge the completed callback. This relies on the
+        // Host contract that rejected runHeld handles return handled:false,
+        // and that a frame is returned only after acceptance and settlement
+        // of the callback's synchronous posts.
+        if (!latest || latest.renderRevision !== revision || latest.frameSequence < frameResult.frameSequence
+          || failedRuntimeEpochRef.current === runtimeEpochRef.current || failedRuntimeIdRef.current === runtimeAtStart) return;
+      }
       if (request.event.type !== 'input') return undefined;
       // The Host returns this frame only after the callback's UI posts have
       // settled. Its Input value is authoritative even when it transforms or

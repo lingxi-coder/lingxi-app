@@ -50,7 +50,7 @@ export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, 
     {error && <p role="alert" style={{ color: 'var(--dialog-danger)', lineHeight: 1.6 }}>{error}</p>}
     <DesktopDialogActions>
       <DesktopDialogButton variant="cancel" disabled={busy} onClick={onClose}>{tr('common_cancel')}</DesktopDialogButton>
-      <DesktopDialogButton variant="primary" disabled={busy || loading || (!!error && !onRetry)} onClick={error ? onRetry : onConfirm}>{error && !busy ? tr('retry') : busy ? tr('desktop_archive_busy') : jobs.length ? tr('desktop_archive_pause') : tr('desktop_archive_chat')}</DesktopDialogButton>
+      <DesktopDialogButton variant="primary" disabled={busy || loading || (!!error && !onRetry)} onClick={error ? onRetry : onConfirm}>{error && !busy ? tr('desktop_ui_retry') : busy ? tr('desktop_archive_busy') : jobs.length ? tr('desktop_archive_pause') : tr('desktop_archive_chat')}</DesktopDialogButton>
     </DesktopDialogActions>
   </DesktopDialog>;
 }

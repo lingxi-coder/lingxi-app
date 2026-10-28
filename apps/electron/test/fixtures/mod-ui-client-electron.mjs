@@ -538,6 +538,19 @@ async function main() {
       window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ENTER' });
       window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'ENTER' });
     };
+    const clearRapidDraft = async () => {
+      const initial = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+      if (initial.value === '') return;
+      const before = initial.rapidOnInputCallbacks.length;
+      await run(`(() => { const input = document.querySelector('[data-client="rapid-input"] .mod-ui-client-input');
+        input.focus(); input.select(); window.__clearRapidTrusted = false;
+        input.addEventListener('input', event => { window.__clearRapidTrusted = event.isTrusted; }, { once: true }); })()`);
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'BACKSPACE' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'BACKSPACE' });
+      await wait(`window.__clearRapidTrusted`);
+      await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+        return s.value === '' && s.rapidPropValue === '' && s.rapidOnInputCallbacks.length === ${before + 1}; })()`);
+    };
     const assertUnconfirmedEnterBlocked = async () => {
       const before = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
       await run(`(() => {
@@ -855,16 +868,63 @@ async function main() {
     assert.equal(unconfirmedSubmit.value, 'v');
     assert.equal(unconfirmedSubmit.retryLabel, 'Retry submit');
     assert.match(unconfirmedSubmit.unconfirmedNotice, /may already have run/i);
+    assert.equal(unconfirmedSubmit.originalSubmitValue, '"v"');
     assert.deepEqual(unconfirmedSubmit.rapidOnSubmitCallbacks, beforeSubmit.rapidOnSubmitCallbacks);
     await assertUnconfirmedEnterBlocked();
-    const heldRetrySubmit = unconfirmedSubmit.rapidPostOrdinal + 1;
+    // Editing after an uncertain submit is a separate change, not confirmation
+    // of that submit. In particular its ACK must not enable a fresh Enter.
+    const testUnconfirmedEdit = process.env.LINGXI_TEST_SKIP_UNCONFIRMED_EDIT !== '1';
+    const newerDraft = testUnconfirmedEdit ? 'vx' : 'v';
+    const retryValue = 'v';
+    if (testUnconfirmedEdit) {
+      await sendText('x');
+      await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+        return s.rapidOnInputCallbacks.length === ${beforeSubmit.rapidOnInputCallbacks.length + 2}
+          && s.rapidPropValue === 'vx'; })()`);
+      await delay(80);
+      const afterEdit = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+      assert.equal(afterEdit.value, 'vx');
+      assert.equal(afterEdit.retryLabel, 'Retry submit', 'a successful change must not confirm an earlier submit');
+      assert.match(afterEdit.unconfirmedNotice, /may already have run/i);
+      assert.match(afterEdit.unconfirmedNotice, /original submitted value/i);
+      assert.equal(afterEdit.originalSubmitValue, '"v"', 'the retry notice must identify the original submitted value');
+      await assertUnconfirmedEnterBlocked();
+    }
+    const beforeRetrySubmit = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    // A timed-out control response is not proof that the submit executed.
+    await run(`window.__modUiClientFixture.timeoutNextRapidControl()`);
+    await retryUnconfirmed('Retry submit');
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+      const button = document.querySelector('[data-client="rapid-input"] .mod-ui-client-input-retry');
+      return s.rapidControlTimeouts === ${beforeRetrySubmit.rapidControlTimeouts + 1}
+        && button?.getAttribute('aria-busy') !== 'true'; })()`);
+    const timedOutRetry = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(timedOutRetry.retryLabel, 'Retry submit', 'a timeout must not confirm a submit');
+    assert.equal(timedOutRetry.value, newerDraft);
+    assert.deepEqual(timedOutRetry.rapidOnSubmitCallbacks, beforeRetrySubmit.rapidOnSubmitCallbacks);
+    // A Host noop is not a successful callback. The warning must survive and
+    // the user must be able to retry after the rejected attempt settles.
+    await run(`window.__modUiClientFixture.ignoreNextRapidRunAsStale()`);
+    await retryUnconfirmed('Retry submit');
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+      const button = document.querySelector('[data-client="rapid-input"] .mod-ui-client-input-retry');
+      return s.runHeld.length === ${beforeRetrySubmit.runHeld.length + 1}
+        && button?.getAttribute('aria-busy') !== 'true'; })()`);
+    const rejectedRetry = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(rejectedRetry.retryLabel, 'Retry submit', 'a noop must not confirm a submit');
+    assert.equal(rejectedRetry.value, newerDraft);
+    assert.deepEqual(rejectedRetry.rapidOnSubmitCallbacks, beforeRetrySubmit.rapidOnSubmitCallbacks);
+    const heldRetrySubmit = beforeRetrySubmit.rapidPostOrdinal + 1;
     await run(`window.__modUiClientFixture.holdRapidPostAt(${heldRetrySubmit})`);
+    if (process.env.LINGXI_TEST_SKIP_OLD_ACK_RACE !== '1') {
+      await run(`window.__modUiClientFixture.holdNextRapidRunResponse()`);
+    }
     await retryUnconfirmed('Retry submit');
     await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidBackgroundPending.some(p => p.ordinal === ${heldRetrySubmit})`);
     const retrySubmitPending = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
-    assert.deepEqual(retrySubmitPending.rapidInputCallbacks.at(-1), { kind: 'submit', value: 'v' },
+    assert.deepEqual(retrySubmitPending.rapidInputCallbacks.at(-1), { kind: 'submit', value: retryValue },
       'retrying an unconfirmed submit must call onSubmit');
-    assert.equal(retrySubmitPending.rapidOnInputCallbacks.length, beforeSubmit.rapidOnInputCallbacks.length + 1);
+    assert.equal(retrySubmitPending.rapidOnInputCallbacks.length, beforeSubmit.rapidOnInputCallbacks.length + (testUnconfirmedEdit ? 2 : 1));
     assert.equal(retrySubmitPending.rapidOnSubmitCallbacks.length, beforeSubmit.rapidOnSubmitCallbacks.length + 1);
     assert.equal(await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input-retry').getAttribute('aria-disabled')`), 'true');
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ENTER' });
@@ -873,18 +933,99 @@ async function main() {
     await delay(50);
     assert.equal((await run(`window.__modUiClientFixture.rapidInputSnapshot()`)).rapidOnSubmitCallbacks.length,
       beforeSubmit.rapidOnSubmitCallbacks.length + 1, 'pending retry must not submit twice');
+    await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').focus()`);
+    assert.equal((await run(`window.__modUiClientFixture.rapidInputSnapshot()`)).inputReadOnly, true);
+    await sendText('z', false);
+    const whileRetryPending = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(whileRetryPending.value, newerDraft, 'an in-flight retry must not lose a newer edit');
+    assert.equal(whileRetryPending.controlRequests.length, retrySubmitPending.controlRequests.length);
+    await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input-retry').focus()`);
     await run(`window.__modUiClientFixture.releaseRapidPostAt(${heldRetrySubmit})`);
+    if (process.env.LINGXI_TEST_SKIP_OLD_ACK_RACE !== '1') {
+      await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidRunResponseHeld`);
+      // This independent frame has a higher sequence than the already-created
+      // successful response, which remains in transport until released.
+      await run(`window.__modUiClientFixture.emitRapidExternalValue('newer-before-submit-ack')`);
+      await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidPropValue === 'newer-before-submit-ack'`);
+      await run(`window.__modUiClientFixture.releaseRapidRunResponse()`);
+    }
     await wait(`window.__modUiClientFixture.rapidInputSnapshot().unconfirmedNotice === null`);
     const completedRetrySubmit = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
     assert.equal(completedRetrySubmit.rapidOnSubmitCallbacks.length, beforeSubmit.rapidOnSubmitCallbacks.length + 1,
       'a second activation while retrying must not submit later');
     assert.equal(completedRetrySubmit.clientFocused, true,
       'a completed submit retry must return focus to the input');
+    assert.equal(completedRetrySubmit.value,
+      testUnconfirmedEdit ? newerDraft : process.env.LINGXI_TEST_SKIP_OLD_ACK_RACE === '1' ? retryValue : 'newer-before-submit-ack',
+      'the latest frame must not erase a separate newer draft');
+
+    // A submit can be older than a change already queued behind it. Losing
+    // the older pending event at a revision boundary would offer Retry change
+    // even though the submit may have run.
+    await clearRapidDraft();
+    const beforeQueuedChange = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    await sendText('n');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidOnInputCallbacks.length === ${beforeQueuedChange.rapidOnInputCallbacks.length + 1}`);
+    await run(`window.__modUiClientFixture.holdNextRapidControl()`);
+    sendEnter();
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidControlHeld`);
+    await sendText('m');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().value === 'nm'`);
+    await run(`window.__modUiClientFixture.invalidateRapidSite('after-queued-change')`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().retryLabel === 'Retry submit'`);
+    await run(`window.__modUiClientFixture.releaseRapidControl()`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().revisionFrameHeld`);
+    await run(`window.__modUiClientFixture.releaseRapidRevisionFrame()`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().inputReadOnly === false`);
+    const afterQueuedChange = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(afterQueuedChange.value, 'nm');
+    assert.equal(afterQueuedChange.retryLabel, 'Retry submit', 'a newer queued change must not hide an older uncertain submit');
+    assert.equal(afterQueuedChange.originalSubmitValue, '"n"');
+    assert.deepEqual(afterQueuedChange.rapidOnSubmitCallbacks, beforeQueuedChange.rapidOnSubmitCallbacks);
+    await assertUnconfirmedEnterBlocked();
+    await retryUnconfirmed('Retry submit');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().unconfirmedNotice === null`);
+    const queuedChangeRetry = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.deepEqual(queuedChangeRetry.rapidInputCallbacks.at(-1), { kind: 'submit', value: 'n' });
+    assert.equal(queuedChangeRetry.value, 'nm', 'retrying the original submission must preserve the newer draft');
+    assert.equal(queuedChangeRetry.rapidOnSubmitCallbacks.length, beforeQueuedChange.rapidOnSubmitCallbacks.length + 1);
+
+    // The original value is text, never HTML. A long value remains completely
+    // available in a bounded scroll area associated with the retry button.
+    await clearRapidDraft();
+    const longOriginal = `<img src=x onerror=1>${'x'.repeat(4096)}`;
+    await run(`window.__modUiClientFixture.emitRapidExternalValue(${JSON.stringify(longOriginal)})`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().value === ${JSON.stringify(longOriginal)}`);
+    await run(`window.__modUiClientFixture.holdNextRapidControl()`);
+    sendEnter();
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidControlHeld`);
+    await run(`window.__modUiClientFixture.invalidateRapidSite('long-original')`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().retryLabel === 'Retry submit'`);
+    await run(`window.__modUiClientFixture.releaseRapidControl()`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().revisionFrameHeld`);
+    await run(`window.__modUiClientFixture.releaseRapidRevisionFrame()`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().inputReadOnly === false`);
+    const originalPresentation = await run(`(() => {
+      const code = document.querySelector('[data-client="rapid-input"] [data-submitted-value]');
+      const button = document.querySelector('[data-client="rapid-input"] .mod-ui-client-input-retry');
+      const status = document.getElementById(button?.getAttribute('aria-describedby'));
+      return { text: code?.textContent, hasImage: Boolean(code?.querySelector('img')),
+        scrollable: code?.scrollHeight > code?.clientHeight, keyboardFocusable: code?.tabIndex === 0,
+        described: status?.contains(code) };
+    })()`);
+    assert.equal(originalPresentation.text, JSON.stringify(longOriginal));
+    assert.equal(originalPresentation.hasImage, false, 'the submitted value must remain escaped text');
+    assert.equal(originalPresentation.scrollable, true, 'long submitted values must not expand the dialog without bound');
+    assert.equal(originalPresentation.keyboardFocusable, true, 'the original value must be scrollable with a keyboard');
+    assert.equal(originalPresentation.described, true, 'the retry must describe the original submitted value');
+    await retryUnconfirmed('Retry submit');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().unconfirmedNotice === null`);
+    assert.deepEqual((await run(`window.__modUiClientFixture.rapidInputSnapshot()`)).rapidInputCallbacks.at(-1),
+      { kind: 'submit', value: longOriginal });
 
     // Reorder two keyed ancestor Boxes while an Input callback is held.
     // The key, draft, focus and pending callback must stay with the Input.
-    await run(`window.__modUiClientFixture.emitRapidExternalValue('')`);
-    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`);
+    await clearRapidDraft();
     await run(`window.__modUiClientFixture.enableRapidGroups()`);
     await wait(`Boolean(document.querySelector('[data-client="rapid-input"] .mod-ui-client-surface > .mod-ui-client-box > .mod-ui-client-box .mod-ui-client-input'))`);
     await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').focus(); window.__modUiClientFixture.captureRapidInput()`);

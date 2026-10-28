@@ -53,28 +53,42 @@ test('Electron renders Native Client input and Select held events while keeping 
       if (lifecycle.current !== activeGeneration) return undefined;`);
             }
             if (process.env.LINGXI_TEST_ALLOW_UNCONFIRMED_ENTER === '1') {
-              const guard = `    if (unconfirmedDraftRef.current) return;
+              const guard = `    if (unconfirmedDraftRef.current || submitPendingRef.current) return;
     void dispatchInput('submit', event.currentTarget.value);`;
               assert.ok(result.includes(guard), 'negative control must allow Enter to submit an unconfirmed draft');
-              result = result.replace(guard, `    void dispatchInput('submit', event.currentTarget.value);`);
+              result = result.replace(guard, `    if (submitPendingRef.current) return;
+    void dispatchInput('submit', event.currentTarget.value);`);
             }
             if (process.env.LINGXI_TEST_ALLOW_DUPLICATE_RETRY === '1') {
-              const guard = 'if (!kind || disabled || !frameCurrent || retryPendingRef.current) return;';
+              const guard = 'if (!kind || disabled || !frameCurrent || retryPendingRef.current || submitPendingRef.current) return;';
               assert.ok(result.includes(guard), 'negative control must allow a duplicate retry');
               result = result.replace(guard, 'if (!kind || disabled || !frameCurrent) return;');
+              const submitGuard = '      if (submitPendingRef.current) return Promise.resolve();';
+              assert.ok(result.includes(submitGuard), 'negative control must allow a duplicate submit');
+              result = result.replace(submitGuard, '');
             }
             if (process.env.LINGXI_TEST_DISABLE_RETRY_FOCUS === '1') {
-              const restore = `        if (unconfirmedDraftRef.current && document.activeElement === retryButtonRef.current) {
-          inputElementRef.current?.focus({ preventScroll: true });
-        }
+              const restore = `          if (unconfirmedDraftRef.current && document.activeElement === retryButtonRef.current) {
+            inputElementRef.current?.focus({ preventScroll: true });
+          }
 `;
               assert.ok(result.includes(restore), 'negative control must remove retry focus restoration');
               result = result.replace(restore, '');
             }
+            if (process.env.LINGXI_TEST_CLEAR_UNCONFIRMED_SUBMIT_ON_CHANGE === '1') {
+              const guard = "if (unconfirmedDraftRef.current !== 'submit' || edit.kind === 'submit') {";
+              assert.ok(result.includes(guard), 'negative control must let a change confirm an uncertain submit');
+              result = result.replace(guard, 'if (true) {');
+            }
+            if (process.env.LINGXI_TEST_RETRY_CURRENT_DRAFT === '1') {
+              const value = "const retryValue = kind === 'submit' ? unconfirmedSubmitValueRef.current : draft;";
+              assert.ok(result.includes(value), 'negative control must retry the new draft instead of the original submit');
+              result = result.replace(value, 'const retryValue = draft;');
+            }
             if (process.env.LINGXI_TEST_RETRY_WRONG_KIND === 'change' || process.env.LINGXI_TEST_RETRY_WRONG_KIND === 'submit') {
-              const retry = 'void dispatchInput(kind, draft).finally(() => {';
+              const retry = 'void dispatchInput(kind, retryValue, true).finally(() => {';
               assert.ok(result.includes(retry), 'negative control must change the retry event kind');
-              result = result.replace(retry, `void dispatchInput('${process.env.LINGXI_TEST_RETRY_WRONG_KIND}', draft).finally(() => {`);
+              result = result.replace(retry, `void dispatchInput('${process.env.LINGXI_TEST_RETRY_WRONG_KIND}', retryValue, true).finally(() => {`);
             }
             return result === source ? null : result;
           }
@@ -170,6 +184,21 @@ test('Electron renders Native Client input and Select held events while keeping 
 `;
             assert.ok(result.includes(runtimeCheck), 'negative control must remove the runtime identity check');
             result = result.replace(runtimeCheck, '');
+          }
+          if (process.env.LINGXI_TEST_REJECT_OLD_SUCCESS_ACK === '1') {
+            const oldFrame = `      if (!acceptFrame(frameResult, revision, runtimeAtStart)) {
+        const latest = frameRef.current;
+        // A later frame may arrive on the independent event channel while the
+        // successful runHeld response is in transit. Do not roll that frame
+        // back, but do acknowledge the completed callback. This relies on the
+        // Host contract that rejected runHeld handles return handled:false,
+        // and that a frame is returned only after acceptance and settlement
+        // of the callback's synchronous posts.
+        if (!latest || latest.renderRevision !== revision || latest.frameSequence < frameResult.frameSequence
+          || failedRuntimeEpochRef.current === runtimeEpochRef.current || failedRuntimeIdRef.current === runtimeAtStart) return;
+      }`;
+            assert.ok(result.includes(oldFrame), 'negative control must discard the older successful acknowledgement');
+            result = result.replace(oldFrame, '      if (!acceptFrame(frameResult, revision, runtimeAtStart)) return;');
           }
           if (process.env.LINGXI_TEST_DISABLE_ACK_FRESHNESS !== '1') return result === source ? null : result;
           const current = `return createNativeInputAck(acknowledgedValue, () => {

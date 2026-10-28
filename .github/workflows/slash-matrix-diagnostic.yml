@@ -1,0 +1,32 @@
+name: Linux slash hint matrix diagnostic
+on:
+  push:
+    branches: [codex/media-slash-matrix-9b8e]
+jobs:
+  slash-hint:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [theme-only, resize-only, no-action]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Install and build shared SDK
+        working-directory: packages/bridge-client
+        run: |
+          npm ci
+          npm run build
+      - name: Install Desktop dependencies
+        working-directory: apps/electron
+        run: npm ci
+      - name: Collect diagnostic trace (intentionally fails)
+        working-directory: apps/electron
+        env:
+          LINGXI_SLASH_HINT_DIAGNOSTIC: ${{ matrix.mode }}
+        run: xvfb-run --auto-servernum node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 test/slash-argument-hint-interaction.test.mjs

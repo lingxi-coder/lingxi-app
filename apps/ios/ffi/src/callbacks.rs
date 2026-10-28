@@ -1,4 +1,21 @@
 #[cfg(feature = "uniffi")]
+use IosSecureStorage as PlatformSecureStorage;
+#[cfg(feature = "uniffi")]
+use IosShare as PlatformShare;
+#[cfg(feature = "uniffi")]
+const PLATFORM_SECURE_STORAGE_BACKEND: lingxi_core::host::SecureStorageBackend =
+    lingxi_core::host::SecureStorageBackend::IosKeychain;
+#[cfg(feature = "uniffi")]
+#[path = "../../../../packages/mobile-ffi/src/callbacks.rs"]
+mod common;
+#[cfg(feature = "uniffi")]
+pub(super) use common::SecureStorageBridge as IosSecureStorageBridge;
+#[cfg(all(feature = "uniffi", target_os = "ios"))]
+pub(super) use common::ShareBridge as IosShareBridge;
+#[cfg(feature = "uniffi")]
+pub use common::{SecureStorageFfiError, ShareFfiError, ShareResultFfi};
+
+#[cfg(feature = "uniffi")]
 use harness_runtime::mobile::ClientEventListener;
 
 /// A [`harness_runtime::mobile::PermissionRequestSink`] that drops outbound permission requests. Mobile
@@ -205,36 +222,6 @@ impl ClientEventListener for IosListenerBridge {
     }
 }
 
-/// FFI error surface for the iOS share callback interface. A flat enum so `UniFFI`
-/// can render it for an async `callback_interface` method; the bridge fans it
-/// back out onto the richer [`lingxi_core::host::ShareError`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
-#[derive(Debug, thiserror::Error)]
-pub enum ShareFfiError {
-    /// Sharing is unsupported on this device / for this payload.
-    #[error("sharing unsupported")]
-    Unsupported,
-    /// Any other native failure.
-    #[error("share error: {message}")]
-    Other {
-        /// Human-readable detail from the native side.
-        message: String,
-    },
-}
-
-/// FFI carrier for the outcome of a native share — whether the user completed
-/// or dismissed the system share sheet. Mapped to [`lingxi_core::host::ShareResult`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[derive(Debug, Clone)]
-pub enum ShareResultFfi {
-    /// The user completed the share (chose a target app).
-    Success,
-    /// The user dismissed the share sheet without sharing.
-    Cancelled,
-}
-
 /// Crate-local foreign callback interface for native sharing — the Swift app
 /// implements it over `UIActivityViewController`. Bridged to
 /// [`lingxi_core::host::SharingService`] by [`IosShareBridge`]. The payload crosses the
@@ -251,40 +238,6 @@ pub trait IosShare: Send + Sync {
         url: Option<String>,
         image_bytes: Option<Vec<u8>>,
     ) -> Result<ShareResultFfi, ShareFfiError>;
-}
-
-/// Adapts the crate-local [`IosShare`] callback interface to the shared
-/// [`lingxi_core::host::SharingService`] seam the engine consumes. Destructures
-/// [`lingxi_core::host::SharePayload`] into the flat `text` / `url` / `image_bytes` args
-/// and fans [`ShareResultFfi`] / [`ShareFfiError`] back out onto
-/// [`lingxi_core::host::ShareResult`] / [`lingxi_core::host::ShareError`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-pub(super) struct IosShareBridge {
-    pub(super) inner: Box<dyn IosShare>,
-}
-
-#[cfg(feature = "uniffi")]
-#[async_trait::async_trait]
-impl lingxi_core::host::SharingService for IosShareBridge {
-    async fn share(
-        &self,
-        payload: lingxi_core::host::SharePayload,
-    ) -> Result<lingxi_core::host::ShareResult, lingxi_core::host::ShareError> {
-        let lingxi_core::host::SharePayload {
-            text,
-            url,
-            image_bytes,
-        } = payload;
-        match self.inner.share(text, url, image_bytes).await {
-            Ok(ShareResultFfi::Success) => Ok(lingxi_core::host::ShareResult::Success),
-            Ok(ShareResultFfi::Cancelled) => Ok(lingxi_core::host::ShareResult::Cancelled),
-            Err(ShareFfiError::Unsupported) => Err(lingxi_core::host::ShareError::Unsupported),
-            Err(ShareFfiError::Other { message }) => {
-                Err(lingxi_core::host::ShareError::Other(message))
-            }
-        }
-    }
 }
 
 /// FFI error surface for the iOS location callback interface. Flat, like its
@@ -868,33 +821,6 @@ pub(super) fn camera_error_from_ffi(e: CameraFfiError) -> lingxi_core::host::Cam
     }
 }
 
-/// FFI error surface for the iOS secure-storage callback interface. A flat enum
-/// so `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`lingxi_core::host::SecureStorageError`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
-#[derive(Debug, thiserror::Error)]
-pub enum SecureStorageFfiError {
-    /// The OS denied access (e.g. Keychain item requires user auth / device unlock).
-    #[error("secure storage permission denied: {message}")]
-    PermissionDenied {
-        /// Human-readable detail from the native side.
-        message: String,
-    },
-    /// The Keychain is currently unusable.
-    #[error("secure storage backend unavailable: {message}")]
-    BackendUnavailable {
-        /// Human-readable detail from the native side.
-        message: String,
-    },
-    /// Any other native failure (non-zero OSStatus, etc.).
-    #[error("secure storage io error: {message}")]
-    Io {
-        /// Human-readable detail from the native side.
-        message: String,
-    },
-}
-
 /// Crate-local foreign callback interface for the native iOS Keychain-backed
 /// secure store — the Swift app implements it over `SecItemAdd`/`SecItemCopyMatching`
 /// (kSecClass GenericPassword, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
@@ -923,94 +849,4 @@ pub trait IosSecureStorage: Send + Sync {
     async fn delete(&self, service: String, account: String) -> Result<(), SecureStorageFfiError>;
     /// List every `account` stored under `service`.
     async fn list(&self, service: String) -> Result<Vec<String>, SecureStorageFfiError>;
-}
-
-/// Adapts the crate-local [`IosSecureStorage`] (opaque-blob FFI) to the shared
-/// [`lingxi_core::host::SecureStorage`] seam: serde-encodes `SecureStorageData` to a blob on
-/// store, decodes on retrieve, and reports the Keychain as an encrypted backend.
-#[cfg(feature = "uniffi")]
-#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-pub(super) struct IosSecureStorageBridge {
-    pub(super) inner: Box<dyn IosSecureStorage>,
-}
-
-#[cfg(feature = "uniffi")]
-#[async_trait::async_trait]
-impl lingxi_core::host::SecureStorage for IosSecureStorageBridge {
-    async fn store(
-        &self,
-        service: &str,
-        account: &str,
-        data: lingxi_core::types::SecureStorageData,
-    ) -> Result<(), lingxi_core::host::SecureStorageError> {
-        let blob = serde_json::to_vec(&data)
-            .map_err(|e| lingxi_core::host::SecureStorageError::Io(format!("serialize: {e}")))?;
-        self.inner
-            .store(service.to_string(), account.to_string(), blob)
-            .await
-            .map_err(securestorage_error_from_ffi)
-    }
-    async fn retrieve(
-        &self,
-        service: &str,
-        account: &str,
-    ) -> Result<Option<lingxi_core::types::SecureStorageData>, lingxi_core::host::SecureStorageError>
-    {
-        match self
-            .inner
-            .retrieve(service.to_string(), account.to_string())
-            .await
-            .map_err(securestorage_error_from_ffi)?
-        {
-            Some(blob) => {
-                let data = serde_json::from_slice(&blob).map_err(|e| {
-                    lingxi_core::host::SecureStorageError::Io(format!("deserialize: {e}"))
-                })?;
-                Ok(Some(data))
-            }
-            None => Ok(None),
-        }
-    }
-    async fn delete(
-        &self,
-        service: &str,
-        account: &str,
-    ) -> Result<(), lingxi_core::host::SecureStorageError> {
-        self.inner
-            .delete(service.to_string(), account.to_string())
-            .await
-            .map_err(securestorage_error_from_ffi)
-    }
-    async fn list(
-        &self,
-        service: &str,
-    ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
-        self.inner
-            .list(service.to_string())
-            .await
-            .map_err(securestorage_error_from_ffi)
-    }
-    fn is_encrypted(&self) -> bool {
-        true
-    }
-    fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
-        lingxi_core::host::SecureStorageBackend::IosKeychain
-    }
-}
-
-/// Fan a flat [`SecureStorageFfiError`] back out onto [`lingxi_core::host::SecureStorageError`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-pub(super) fn securestorage_error_from_ffi(
-    e: SecureStorageFfiError,
-) -> lingxi_core::host::SecureStorageError {
-    match e {
-        SecureStorageFfiError::PermissionDenied { message } => {
-            lingxi_core::host::SecureStorageError::PermissionDenied(message)
-        }
-        SecureStorageFfiError::BackendUnavailable { message } => {
-            lingxi_core::host::SecureStorageError::BackendUnavailable(message)
-        }
-        SecureStorageFfiError::Io { message } => lingxi_core::host::SecureStorageError::Io(message),
-    }
 }

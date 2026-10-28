@@ -12,6 +12,7 @@ import type { PluggableList } from 'unified';
 
 import { useT } from '../theme/ThemeContext';
 import { CodeBlock } from './CodeBlock';
+import { MermaidDiagram } from './MermaidDiagram';
 import {
   parseMarkdown,
   remarkDesktopMarkdown,
@@ -81,6 +82,8 @@ const components = {
           language={rawLanguage}
           closed={!unclosed}
           copyText={source}
+          preview={rawLanguage?.toLowerCase() === 'mermaid' && !unclosed
+            ? <MermaidDiagram code={source.replace(/\n$/, '')} /> : undefined}
         />
       );
     },

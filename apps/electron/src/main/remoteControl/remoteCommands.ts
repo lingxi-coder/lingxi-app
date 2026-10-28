@@ -16,7 +16,7 @@
 
 import { randomBytes } from 'node:crypto';
 
-import type { ImageRefDto, PermissionModeId, PermissionResponseDto, ReasoningSelectionDto } from '@lingxi/bridge-client';
+import type { ImageRefDto, PermissionResponseDto, ReasoningSelectionDto } from '@lingxi/bridge-client';
 import {
   RemoteRpcError,
   type Clock,
@@ -359,7 +359,7 @@ export class RemoteCommands {
     const mode = input['mode'];
     if (!isPermissionModeId(mode)) throw invalid('invalid mode');
     if (mode === 'bypassPermissions') throw new RemoteRpcError('forbidden', 'bypass permissions can only be turned on at the computer');
-    await this.dispatch(runtime, viewer, { type: 'set_permission_mode', mode: mode as PermissionModeId });
+    await this.dispatch(runtime, viewer, { type: 'set_permission_mode', mode });
     return {};
   }
 

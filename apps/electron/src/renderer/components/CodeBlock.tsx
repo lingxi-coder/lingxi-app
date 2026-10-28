@@ -1,6 +1,6 @@
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
-import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import hljs from 'highlight.js/lib/common';
 
 import { useT } from '../theme/ThemeContext';
@@ -99,6 +99,7 @@ export interface CodeBlockProps {
   closed?: boolean;
   copyText?: string;
   variant?: 'message' | 'tool';
+  preview?: ReactNode;
 }
 
 type CopyState = 'idle' | 'copied' | 'error';
@@ -111,6 +112,7 @@ export const CodeBlock = memo(function CodeBlock({
   closed = true,
   copyText = code,
   variant = 'message',
+  preview,
 }: CodeBlockProps) {
   const t = useT();
   useI18n();
@@ -188,8 +190,8 @@ export const CodeBlock = memo(function CodeBlock({
           <span aria-live="polite">{copyLabel}</span>
         </button>
       </div>
-      <div className="code-card-scroll">
-        <pre className="mono-code">
+      <div className="code-card-scroll" id={preview ? codeId : undefined}>
+        {preview ?? <pre className="mono-code">
           {highlighted.html !== undefined ? (
             <code
               className="hljs"
@@ -200,7 +202,7 @@ export const CodeBlock = memo(function CodeBlock({
           ) : (
             <code id={codeId} data-language={highlighted.language}>{code}</code>
           )}
-        </pre>
+        </pre>}
       </div>
     </div>
   );

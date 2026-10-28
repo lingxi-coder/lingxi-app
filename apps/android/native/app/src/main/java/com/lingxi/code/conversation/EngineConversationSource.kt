@@ -26,11 +26,13 @@ import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.project.ProjectWorkspace
+import com.lingxi.code.runtimeintegration.NativeEngineCallbacks
+import com.lingxi.code.runtimeintegration.NativeEngineFactory
+import com.lingxi.code.runtimeintegration.NativeEngineScenario
+import com.lingxi.code.runtimeintegration.resolveEngineEnvironmentOverrides
 import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.settings.ProviderSettingsRepository
-import com.lingxi.code.voice.buildVoiceEngine
 import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
-import com.lingxi.code.voice.resolveEngineEnvironmentOverrides
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -52,17 +54,17 @@ import kotlinx.coroutines.sync.withLock
 /**
  * The real conversation source: an in-process engine reached over UniFFI.
  *
- * Owns the single [MobileEngineHandle] (built once via [buildVoiceEngine], which
+ * Owns the single [MobileEngineHandle] (built once via [NativeEngineFactory], which
  * wires every device-capability adapter through the FFI seam) and the single
  * registered `AndroidEventListener`. The listener pushes every inbound
  * [ClientEvent] into [events]; [submit] fires the `SendPrompt` command and
  * returns a [Flow] that maps the shared stream through [clientEventToReply],
  * completing on [ReplyEvent.End] / [ReplyEvent.Error].
  *
- * The handle is built eagerly in the constructor (the factory below catches a
- * build failure and falls back to the mock, mirroring iOS) so this type is only
+ * The handle is built eagerly by the factory below, which returns an unavailable
+ * source if construction fails, so this type is only
  * ever instantiated when the engine is actually available. The listener is
- * passed INTO [buildVoiceEngine] so the source is the sole owner of the
+ * passed INTO [NativeEngineFactory] so the source is the sole owner of the
  * handle+listener — no second build, no dropped events. Ordinary prompts use
  * `SendPrompt`; main slash commands use `RunSlashCommand` so display results
  * and prompt-expanding commands retain the host's command lifecycle.
@@ -694,7 +696,7 @@ class EngineConversationSource private constructor(
             val mediaHost = AndroidNativeMediaHostProvider.get(context.applicationContext)
             val mediaContextBindings = MediaAudioSessionContextBindings(mediaHost)
             var mediaContextEngine: MobileEngineHandle? = null
-            val handle = buildVoiceEngine(
+            val handle = NativeEngineFactory.build(
                 context = context,
                 apiBase = environment.apiBase,
                 apiKey = environment.apiKey,
@@ -710,89 +712,93 @@ class EngineConversationSource private constructor(
                 sessionMode = sessionMode,
                 linuxRuntimeMode = linuxRuntimeMode,
                 mediaHost = mediaHost,
-                onEvent = { event ->
-                    // The OUT-OF-BAND state paths: fold model catalog + session
-                    // catalog + live-resume events into the StateFlows the picker /
-                    // drawer / conversation observe, BEFORE forwarding to the
-                    // per-turn stream. Every reducer is a no-op for unrelated
-                    // events, so every event still reaches `events` unchanged
-                    // (lifecycle events like SessionStarted ride the per-turn
-                    // stream; the ViewModel acts on them there).
-                    models.value = reduceModelEvent(models.value, event)
-                    sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
-                    val previousActiveSessionId = activeSession.value?.sessionId
-                    activeSession.update { current ->
-                        reduceActivatedSession(current, event, sessionMode, strings)
-                    }
-                    when (event) {
-                        is ClientEvent.SessionStarted,
-                        is ClientEvent.SessionResumed,
-                        is ClientEvent.ModelChanged -> runCatching {
-                            mediaContextEngine?.let { engine ->
-                                val binding = mediaHost.updateAudioSessionContext(engine)
-                                mediaContextBindings.register(binding.sessionId, binding.generation)
+                scenario = NativeEngineScenario.Interactive(
+                    NativeEngineCallbacks(
+                        onEvent = { event ->
+                            // The OUT-OF-BAND state paths: fold model catalog + session
+                            // catalog + live-resume events into the StateFlows the picker /
+                            // drawer / conversation observe, BEFORE forwarding to the
+                            // per-turn stream. Every reducer is a no-op for unrelated
+                            // events, so every event still reaches `events` unchanged
+                            // (lifecycle events like SessionStarted ride the per-turn
+                            // stream; the ViewModel acts on them there).
+                            models.value = reduceModelEvent(models.value, event)
+                            sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
+                            val previousActiveSessionId = activeSession.value?.sessionId
+                            activeSession.update { current ->
+                                reduceActivatedSession(current, event, sessionMode, strings)
                             }
-                        }
-                        ClientEvent.SessionEnded -> previousActiveSessionId?.let(mediaContextBindings::remove)
-                        else -> Unit
-                    }
-                    if (event is ClientEvent.WorkspaceChanged) {
-                        val value = event.state
-                        workspace.value = com.lingxi.code.project.SessionWorkspaceState(
-                            value.sessionId, value.cwd, value.projectRoot,
-                            value.additionalDirectories, value.transcriptPath,
-                        )
-                    }
-                    // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
-                    if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
-                    if (event is ClientEvent.SettingsSnapshot) {
-                        runCatching {
-                            val repository = ProviderSettingsRepository(context)
-                            try { repository.recordAudioProviderRegion(event.effectiveJson) } finally { repository.close() }
-                        }
-                    }
-                    if (event is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
-                    if (event is ClientEvent.PermissionRequestResolved) {
-                        permissionIngress.resolve(event.requestId)
-                    }
-                    if (
-                        event is ClientEvent.TurnRecoveryState &&
-                            event.snapshot.state in setOf(
-                                TurnRecoveryStateDto.COMPLETED,
-                                TurnRecoveryStateDto.FAILED,
-                                TurnRecoveryStateDto.CANCELLED,
+                            when (event) {
+                                is ClientEvent.SessionStarted,
+                                is ClientEvent.SessionResumed,
+                                is ClientEvent.ModelChanged -> runCatching {
+                                    mediaContextEngine?.let { engine ->
+                                        val binding = mediaHost.updateAudioSessionContext(engine)
+                                        mediaContextBindings.register(binding.sessionId, binding.generation)
+                                    }
+                                }
+                                ClientEvent.SessionEnded -> previousActiveSessionId?.let(mediaContextBindings::remove)
+                                else -> Unit
+                            }
+                            if (event is ClientEvent.WorkspaceChanged) {
+                                val value = event.state
+                                workspace.value = com.lingxi.code.project.SessionWorkspaceState(
+                                    value.sessionId, value.cwd, value.projectRoot,
+                                    value.additionalDirectories, value.transcriptPath,
+                                )
+                            }
+                            // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
+                            if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
+                            if (event is ClientEvent.SettingsSnapshot) {
+                                runCatching {
+                                    val repository = ProviderSettingsRepository(context)
+                                    try { repository.recordAudioProviderRegion(event.effectiveJson) } finally { repository.close() }
+                                }
+                            }
+                            if (event is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
+                            if (event is ClientEvent.PermissionRequestResolved) {
+                                permissionIngress.resolve(event.requestId)
+                            }
+                            if (
+                                event is ClientEvent.TurnRecoveryState &&
+                                    event.snapshot.state in setOf(
+                                        TurnRecoveryStateDto.COMPLETED,
+                                        TurnRecoveryStateDto.FAILED,
+                                        TurnRecoveryStateDto.CANCELLED,
+                                    )
+                            ) {
+                                durableTurns.clear(
+                                    sessionId = event.snapshot.sessionId,
+                                    turnId = event.snapshot.turnId.toLong(),
+                                )
+                            }
+                            if (event is ClientEvent.SlashCommandResult) {
+                                clearDurableSlashCommandCheckpoint(durableTurns, event)
+                                permissionIngress.endTurn()
+                            }
+                            if (event is ClientEvent.TurnEnded ||
+                                (event is ClientEvent.Error && !isCompactTurnRejection(event.message.displayText()))) {
+                                permissionIngress.endTurn()
+                            }
+                            if (durableReplayGate.shouldForward(event)) {
+                                eventRelay.offer(event)
+                            }
+                        },
+                        onWorkflowProgress = { originSessionId, taskId, runId, progress ->
+                            workflowRelay.offer(
+                                WorkflowProgressUpdate(
+                                    originSessionId = originSessionId,
+                                    taskId = taskId,
+                                    runId = runId,
+                                    progress = progress,
+                                ),
                             )
-                    ) {
-                        durableTurns.clear(
-                            sessionId = event.snapshot.sessionId,
-                            turnId = event.snapshot.turnId.toLong(),
-                        )
-                    }
-                    if (event is ClientEvent.SlashCommandResult) {
-                        clearDurableSlashCommandCheckpoint(durableTurns, event)
-                        permissionIngress.endTurn()
-                    }
-                    if (event is ClientEvent.TurnEnded ||
-                        (event is ClientEvent.Error && !isCompactTurnRejection(event.message.displayText()))) {
-                        permissionIngress.endTurn()
-                    }
-                    if (durableReplayGate.shouldForward(event)) {
-                        eventRelay.offer(event)
-                    }
-                },
-                onWorkflowProgress = { originSessionId, taskId, runId, progress ->
-                    workflowRelay.offer(
-                        WorkflowProgressUpdate(
-                            originSessionId = originSessionId,
-                            taskId = taskId,
-                            runId = runId,
-                            progress = progress,
-                        ),
-                    )
-                },
-                onPermission = { request ->
-                    permissionIngress.publish(request)
-                },
+                        },
+                        onPermission = { request ->
+                            permissionIngress.publish(request)
+                        },
+                    ),
+                ),
             ) ?: run {
                 if (reuseProcessSource) {
                     ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.scopeKey)

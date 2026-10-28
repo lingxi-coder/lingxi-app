@@ -5,6 +5,7 @@ import type {
   HookAdminCommandDto,
   ImageRefDto,
   McpAdminCommandDto,
+  PermissionModeId,
   PermissionResponseDto,
   PluginAdminCommandDto,
   ReasoningSelectionDto,
@@ -16,6 +17,7 @@ import { validateNativeUiControlRequest, validateUiClientOperation } from '@ling
 import { detectImageMediaType, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES } from '../shared/imageInput.js';
 import { ALLOWED_CLIENT_COMMAND_TYPES, ALLOWED_REFRESH_LISTING_KINDS } from '../shared/clientCommands.js';
 import { isBase64 } from '../shared/base64.js';
+import { isPermissionModeId } from '../shared/permission.js';
 
 const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
@@ -266,8 +268,12 @@ export function validateBridgeLockfile(
   }
 }
 
+/** The validated permission command has a narrower domain than its wire string. */
+type ValidatedClientCommand = Exclude<ClientCommand, { type: 'set_permission_mode' }>
+  | { type: 'set_permission_mode'; mode: PermissionModeId };
+
 /** Runtime validator for the deliberately small desktop command surface. */
-export function validateClientCommand(value: unknown, workspace?: string): ClientCommand {
+export function validateClientCommand(value: unknown, workspace?: string): ValidatedClientCommand {
   const input = object(value);
   const type = input['type'];
   if (typeof type !== 'string' || !ALLOWED_COMMANDS.has(type)) throw new Error('command is not allowed');
@@ -276,7 +282,7 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     case 'side_chat_create': {
       exactKeys(input, ['type', 'request_id', 'initial_input']);
       const request_id = string(input['request_id'], 'side create request id', 128);
-      const initial_input = input['initial_input'] === undefined ? undefined : string(input['initial_input'], 'side input', 100_000);
+      const initial_input = input['initial_input'] == null ? undefined : string(input['initial_input'], 'side input', 100_000);
       return { type, request_id, ...(initial_input === undefined ? {} : { initial_input }) };
     }
     case 'side_chat_list':
@@ -369,15 +375,17 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       // === 'default') and forward the ARRAY over the bridge, where Rust serde
       // rejects the frame. Every other validator here type-checks first.
       const mode = string(input['mode'], 'permission mode', 64);
-      if (!['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'].includes(mode)) {
+      if (!isPermissionModeId(mode)) {
         throw new Error('invalid permission mode');
       }
-      return { type, mode } as Extract<ClientCommand, { type: 'set_permission_mode' }>;
+      return { type, mode };
     }
     case 'initialize_proactivity': {
       exactKeys(input, ['type', 'proactivity', 'reinitialize']);
-      const proactivity = input['proactivity'];
-      const reinitialize = input['reinitialize'];
+      // Rust Option fields accept null and missing values equivalently. Omit
+      // both while retaining false and validating every other present value.
+      const proactivity = input['proactivity'] ?? undefined;
+      const reinitialize = input['reinitialize'] ?? undefined;
       if (proactivity !== undefined && typeof proactivity !== 'boolean') {
         throw new Error('invalid proactivity initialize flag');
       }
@@ -393,7 +401,7 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     case 'set_proactivity_level': {
       exactKeys(input, ['type', 'level', 'offer_bypass']);
       const level = enumValue(input['level'], 'proactivity level', ['ask', 'default', 'proactive']);
-      const offer_bypass = input['offer_bypass'];
+      const offer_bypass = input['offer_bypass'] ?? undefined;
       if (offer_bypass !== undefined && typeof offer_bypass !== 'boolean') {
         throw new Error('invalid proactivity bypass flag');
       }
@@ -422,13 +430,13 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       if (!/^\/[^\s/]+(?:\s|$)/.test(raw)) throw new Error('invalid slash command raw');
       if (!Array.isArray(input['images'])) throw new Error('invalid slash command image attachments');
       const images = validateImageRefs(input['images']);
-      return input['turn_id'] === undefined
+      return input['turn_id'] == null
         ? { type, raw, images }
         : { type, raw, images, turn_id: integer(input['turn_id'], 'slash command turn id', 1) };
     }
     case 'list_sessions':
       exactKeys(input, ['type', 'limit']);
-      return input['limit'] === undefined ? { type } : { type, limit: integer(input['limit'], 'limit', 1, 200) };
+      return input['limit'] == null ? { type } : { type, limit: integer(input['limit'], 'limit', 1, 200) };
     case 'ui_attach': {
       exactKeys(input, ['type', 'surface', 'client_id']);
       const surface = enumValue(input['surface'], 'UI surface', ['desktop', 'mobile', 'vscode']);
@@ -449,9 +457,9 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       return { type };
     case 'task_list': {
       exactKeys(input, ['type', 'status_filter', 'request_id']);
-      const request = input['request_id'] === undefined ? {} : { request_id: string(input['request_id'], 'request id') };
+      const request = input['request_id'] == null ? {} : { request_id: string(input['request_id'], 'request id') };
       const status = input['status_filter'];
-      if (status === undefined) return { type, ...request };
+      if (status == null) return { type, ...request };
       const filter = object(status);
       exactKeys(filter, ['type']);
       const filterType = string(filter['type'], 'task status', 32);

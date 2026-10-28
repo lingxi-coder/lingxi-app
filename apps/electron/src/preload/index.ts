@@ -1,5 +1,6 @@
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { CH_APPLICATION_ICON, type ApplicationIconApi } from '../shared/applicationIcon.js';
+import { CH_DESKTOP_UPDATES, CH_DESKTOP_UPDATES_CHANGED, type DesktopUpdatesApi } from '../shared/desktopUpdates.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
 import { CH_COMPUTER_SETTINGS, CH_COMPUTER_SETTINGS_CHANGED, type ComputerSettingsApi } from '../shared/computerSettings.js';
 import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
@@ -228,6 +229,7 @@ export interface VisualizationApi {
 export interface LingxiApi {
   computerSettings: ComputerSettingsApi;
   applicationIcon: ApplicationIconApi;
+  desktopUpdates: DesktopUpdatesApi;
   localApps: LocalAppsApi;
   onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled: ScheduledApi;
@@ -354,6 +356,12 @@ const api: LingxiApi = {
     },
   },
   applicationIcon: { get: bundleId => ipcRenderer.invoke(CH_APPLICATION_ICON, bundleId) },
+  desktopUpdates: {
+    getState: () => ipcRenderer.invoke(CH_DESKTOP_UPDATES, 'get'),
+    download: () => ipcRenderer.invoke(CH_DESKTOP_UPDATES, 'download'),
+    remindLater: () => ipcRenderer.invoke(CH_DESKTOP_UPDATES, 'later'),
+    onChanged: listener => subscribe(CH_DESKTOP_UPDATES_CHANGED, listener),
+  },
   localApps: {
     list: async () => (await ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'list' })).apps,
     open: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'open', id }),

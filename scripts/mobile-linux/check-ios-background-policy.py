@@ -84,12 +84,15 @@ def code_without_comments(text):
     return "".join(result)
 
 
-def function_body(source, name):
-    match = re.search(r"func\s+" + re.escape(name) + r"\(\)\s*\{", source)
+def function_body(source, name, parameters=""):
+    match = re.search(r"func\s+" + re.escape(name) + r"\(" + parameters, source)
     if not match:
         return ""
+    opening = source.find("{", match.end())
+    if opening == -1:
+        return ""
     depth = 1
-    start = index = match.end()
+    start = index = opening + 1
     while index < len(source):
         if source[index] == '"':
             index += 1
@@ -110,6 +113,66 @@ def function_body(source, name):
                 return source[start:index]
         index += 1
     return ""
+
+
+def validate_local_agent_lifecycle(path, source):
+    # Scope each ownership and cleanup anchor to its actual function so another
+    # callback cannot accidentally satisfy a removed expiration/cancel guard.
+    contracts = (
+        ("isCurrent", "", [r'actualIdentifier\s*==\s*expectedIdentifier\s*&&\s*!finished']),
+        ("isCurrentContext", "", [
+            r'let\s+context\s*=\s*contexts\[contextKey\]',
+            r'LocalAppAgentContextAdmission\.isCurrent\(\s*expectedIdentifier:\s*identifier,\s*actualIdentifier:\s*context\?\.identifier,\s*finished:\s*context\?\.finished\s*\?\?\s*true',
+        ]),
+        ("receive", "", [
+            r'guard\s+let\s+contextKey\s*=\s*requestIDsByIdentifier\[task\.identifier\],\s*isCurrentContext\(contextKey,\s*identifier:\s*task\.identifier\)',
+            r'let\s+identifier\s*=\s*task\.identifier',
+            r'continued\.expirationHandler\s*=\s*\{[\s\S]*?await\s+self\?\.expire\(contextKey,\s*identifier:\s*identifier\)',
+        ]),
+        ("expire", "", [
+            r'guard\s+isCurrentContext\(contextKey,\s*identifier:\s*identifier\),\s*let\s+context\s*=\s*contexts\[contextKey\]\s*else\s*\{\s*return\s*\}',
+            r'await\s+cancel\(context\.wake,\s*client:\s*context\.client,\s*reason:\s*\.systemExpiration,\s*expectedIdentifier:\s*identifier\)',
+        ]),
+        ("cancel", r'\s*_\s+wake:\s*LocalAppAgentWakeRequest', [
+            r'let\s+contextKey\s*=\s*wake\.contextKey',
+            r'if\s+let\s+expectedIdentifier,\s*contexts\[contextKey\]\?\.identifier\s*!=\s*expectedIdentifier\s*\{\s*return\s*\}',
+            r'guard\s+var\s+context\s*=\s*contexts\[contextKey\],\s*context\.wake\s*==\s*wake,\s*!context\.finished\s*else',
+            r'LocalAppAgentWakeCleanup\.perform\(\s*ownedReservationID:\s*context\.reservationID\s*\)\s*\{\s*reservationID\s+in\s*try\s+await\s+clearReservation\(wake,\s*reservationID:\s*reservationID,\s*reason:\s*reason,\s*client:\s*client\)',
+            r'finishTask\(contextKey:\s*contextKey,\s*success:\s*false\)',
+        ]),
+        ("request", "", [
+            r'"op":\s*\.string\("wake\.clear"\)',
+            r'"appId":\s*\.string\(wake\.appID\)',
+            r'"revision":\s*\.number\(Double\(wake\.revision\)\)',
+            r'"runId":\s*\.string\(wake\.runID\)',
+            r'"reservationId":\s*\.string\(reservationID\)',
+            r'if\s+reason\s*==\s*\.systemExpiration\s*\{\s*fields\["reason"\]\s*=\s*\.string\("system_expiration"\)',
+        ]),
+        ("perform", "", [
+            r'guard\s+let\s+ownedReservationID\s+else\s*\{\s*return\s*\}',
+            r'try\s+await\s+clear\(ownedReservationID\)',
+        ]),
+        ("clearReservation", "", [
+            r'let\s+fields\s*=\s*LocalAppAgentWakeCleanup\.request\(wake:\s*wake,\s*reservationID:\s*reservationID,\s*reason:\s*reason\)',
+            r'client\.agentHost\(fields,\s*as:\s*LocalAppJSON\.self\)',
+        ]),
+        ("complete", "", [
+            r'let\s+contextKey\s*=\s*wake\.contextKey',
+            r'guard\s+var\s+context\s*=\s*contexts\[contextKey\],\s*context\.wake\s*==\s*wake,\s*context\.identifier\s*==\s*identifier,\s*!context\.finished\s*else',
+            r'browserDelivery\.finishBackgroundTaskAfterStartingResultDelivery\(\s*scope:\s*wake\.deliveryScope\s*\)\s*\{\s*self\.finishTask\(contextKey:\s*contextKey,\s*success:\s*success\)',
+            r'"BROWSER_DELIVERY_UNAVAILABLE"',
+        ]),
+        ("waitForAttachment", "", [
+            r'guard\s+isCurrentContext\(contextKey,\s*identifier:\s*identifier\)\s*else',
+            r'"BACKGROUND_LEASE_UNAVAILABLE"',
+            r'"iOS could not start this Agent task immediately\. Return to the app and try again\."',
+        ]),
+    )
+    for name, parameters, patterns in contracts:
+        body = function_body(source, name, parameters)
+        for pattern in patterns:
+            if not re.search(pattern, body):
+                raise ValueError(f"{path}: missing reviewed Local App Agent {name} lifecycle source contract: {pattern}")
 
 
 def validate_processing_sources(repo_root):
@@ -134,11 +197,8 @@ def validate_processing_sources(repo_root):
             r'BGTaskScheduler\.shared\.register\(forTaskWithIdentifier:\s*identifier',
             r'BGContinuedProcessingTaskRequest\(\s*identifier:\s*identifier',
             r'request\.strategy\s*=\s*\.fail',
-            r'continued\.expirationHandler\s*=\s*\{[\s\S]*?await\s+self\?\.expire\(contextKey\)',
             r'BGTaskScheduler\.shared\.cancel\(taskRequestWithIdentifier:\s*context\.identifier\)',
             r'BGTaskScheduler\.shared\.cancel\(taskRequestWithIdentifier:\s*identifier\)',
-            r'private\s+func\s+expire\(_\s+contextKey:\s*String\)\s+async\s*\{[\s\S]*?await\s+cancel\(context\.wake,\s*client:\s*context\.client\)',
-            r'private\s+func\s+clearReservation\(_\s+wake:\s*LocalAppAgentWakeRequest,\s*client:\s*LocalAppServiceClient\)\s+async\s+throws\s*\{[\s\S]*?"op":\s*\.string\("wake\.clear"\),[\s\S]*?"appId":\s*\.string\(wake\.appID\),[\s\S]*?"revision":\s*\.number\(Double\(wake\.revision\)\),[\s\S]*?"runId":\s*\.string\(wake\.runID\)',
             r'task\.setTaskCompleted\(success:\s*false\)',
             r'task\.setTaskCompleted\(success:\s*success\)',
             r'return\s+"\\\(bundleID\)\.local-app\.\\\(digest\)"'],
@@ -148,6 +208,8 @@ def validate_processing_sources(repo_root):
     for relative, patterns in contracts.items():
         path = repo_root / SOURCES / relative
         source = code_without_comments(path.read_text())
+        if relative == "Apps/LocalAppAgentBackground.swift":
+            validate_local_agent_lifecycle(path, source)
         if relative == "Voice/VoiceAudioSessionCoordinator.swift":
             if "sessionDriver.deactivate()" not in function_body(source, "suspendForBackground"):
                 raise ValueError(f"{path}: missing foreground audio deactivation on background entry")

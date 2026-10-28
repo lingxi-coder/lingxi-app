@@ -1,0 +1,21 @@
+flowchart TB
+    C["Mobile 客户端<br/>默认浏览器 / 用户选择的打开方式"]
+    A["LingXi 控制服务<br/>登录、设备发现、授权、连接信令"]
+    R["反向隧道中继<br/>HTTPS 加密流量转发"]
+    T["TURN 中继<br/>WebRTC 无法直连时使用"]
+
+    subgraph Desktop["Desktop：应用运行宿主"]
+        G["Local App Gateway<br/>应用路由、鉴权、能力限制"]
+        B["应用后端 / Agent / 后台任务"]
+        D["业务数据库与文件"]
+        G --> B
+        B --> D
+    end
+
+    C -.-> A
+    G -.-> A
+    C <-->|"页面、资源、HTTP / WS / SSE"| R
+    G <-->|"Desktop 主动建立出站隧道"| R
+    C <-->|"WebRTC 直连：适配后的 API、事件、文件"| G
+    C <--> T
+    T <--> G

@@ -534,6 +534,8 @@ struct BubbleShape: Shape {
 enum MDBlock: Equatable {
     /// A fenced code block (``` … ```), `lang` is the optional info string.
     case code(String, lang: String?)
+    /// A complete Mermaid fence. Incomplete streaming fences remain code.
+    case mermaid(String)
     /// A run of ordinary text lines (paragraphs + list items).
     case text([MDLine])
     /// A GitHub-Flavored Markdown pipe table.
@@ -580,6 +582,8 @@ private struct MDBlockView: View, Equatable {
         switch block {
         case let .code(code, language):
             codeBlock(code, language: language)
+        case let .mermaid(code):
+            codeBlock(code, language: "mermaid", diagram: true)
         case let .text(lines):
             textBlock(lines)
         case let .table(table):
@@ -589,7 +593,7 @@ private struct MDBlockView: View, Equatable {
     }
 
     // A fenced code block: monospaced, in a tinted rounded panel.
-    private func codeBlock(_ code: String, language: String?) -> some View {
+    private func codeBlock(_ code: String, language: String?, diagram: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(language.flatMap { $0.isEmpty ? nil : $0 } ?? String(localized: "drawer_tab_code"))
@@ -609,14 +613,18 @@ private struct MDBlockView: View, Equatable {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             Divider().overlay(t.border)
-            ScrollView(.horizontal) {
-                Text(code)
-                    .font(.system(size: 13.5, design: .monospaced))
-                    .foregroundStyle(t.text)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
+            if diagram {
+                MermaidDiagram(source: code)
+            } else {
+                ScrollView(.horizontal) {
+                    Text(code)
+                        .font(.system(size: 13.5, design: .monospaced))
+                        .foregroundStyle(t.text)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                }
             }
         }
         .background(t.surface)
@@ -893,7 +901,7 @@ struct AIText: View, Equatable {
     /// Split the source into fenced-code, GFM table, and text blocks.
     static func parseBlocks(_ md: String) -> [MDBlock] {
         var blocks: [MDBlock] = []
-        let lines = md.components(separatedBy: "\n")
+        let lines = md.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
         var i = 0
         var pendingText: [String] = []
 
@@ -908,18 +916,23 @@ struct AIText: View, Equatable {
 
         while i < lines.count {
             let line = lines[i]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
+            if let fence = codeFenceStart(line) {
                 flushText()
-                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                let lang = fence.language
                 var code: [String] = []
                 i += 1
-                while i < lines.count, !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                while i < lines.count, !isClosingFence(lines[i], marker: fence.marker, length: fence.length) {
                     code.append(lines[i]); i += 1
                 }
                 // Skip the closing fence (if present).
-                if i < lines.count { i += 1 }
-                blocks.append(.code(code.joined(separator: "\n"), lang: lang.isEmpty ? nil : lang))
+                let closed = i < lines.count
+                if closed { i += 1 }
+                let source = code.joined(separator: "\n")
+                if closed && lang.lowercased() == "mermaid" {
+                    blocks.append(.mermaid(source))
+                } else {
+                    blocks.append(.code(source, lang: lang.isEmpty ? nil : lang))
+                }
             } else if i + 1 < lines.count,
                       let tableHeader = parseTableHeader(line, delimiter: lines[i + 1]) {
                 flushText()
@@ -943,6 +956,25 @@ struct AIText: View, Equatable {
         }
         flushText()
         return blocks
+    }
+
+    private static func codeFenceStart(_ line: String) -> (marker: Character, length: Int, language: String)? {
+        let indent = line.prefix(while: { $0 == " " }).count
+        guard indent <= 3 else { return nil }
+        let text = line.dropFirst(indent)
+        guard let marker = text.first, marker == "`" || marker == "~" else { return nil }
+        let length = text.prefix(while: { $0 == marker }).count
+        guard length >= 3 else { return nil }
+        let info = text.dropFirst(length).trimmingCharacters(in: .whitespaces)
+        guard marker != "`" || !info.contains("`") else { return nil }
+        return (marker, length, info.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? "")
+    }
+
+    private static func isClosingFence(_ line: String, marker: Character, length: Int) -> Bool {
+        let indent = line.prefix(while: { $0 == " " }).count
+        guard indent <= 3 else { return false }
+        let text = line.dropFirst(indent).trimmingCharacters(in: .whitespaces)
+        return text.count >= length && text.allSatisfy { $0 == marker }
     }
 
     private static func parseTableHeader(

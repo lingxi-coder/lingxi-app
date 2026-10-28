@@ -17,6 +17,7 @@ import { parseVoicePreferences } from '../shared/voicePreferences.js';
 import type { VoicePreferences } from '../shared/voicePreferences.js';
 import { parseNotificationPreferences } from '../shared/notificationPreferences.js';
 import type { NotificationPreferences } from '../shared/notificationPreferences.js';
+import { isPermissionModeId } from '../shared/permission.js';
 import type { SessionCatalogScope } from '../shared/sessionWorkspace.js';
 
 export { SETTINGS_VERSION } from '../shared/settings.js';
@@ -30,6 +31,7 @@ export type { VoicePreferences } from '../shared/voicePreferences.js';
 export { parseVoicePreferences } from '../shared/voicePreferences.js';
 export type { NotificationPreferences } from '../shared/notificationPreferences.js';
 export { parseNotificationPreferences } from '../shared/notificationPreferences.js';
+export { isPermissionModeId } from '../shared/permission.js';
 
 export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
@@ -183,11 +185,6 @@ function boundedStringArray(value: unknown, maxItems: number): string[] {
 }
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-export function isPermissionModeId(value: unknown): value is PermissionModeId {
-  return value === 'default' || value === 'acceptEdits' || value === 'plan'
-    || value === 'auto' || value === 'dontAsk' || value === 'bypassPermissions';
-}
 
 export function parseSettings(value: unknown): PersistedSettings {
   if (!isPlainObject(value) || value['version'] !== SETTINGS_VERSION) {

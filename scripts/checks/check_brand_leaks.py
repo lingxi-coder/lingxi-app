@@ -308,6 +308,8 @@ AREAS = [
     ("apps/bridge-server/", FULL_NEEDLES),
     ("apps/ios/ffi/", FULL_NEEDLES),
     ("apps/android/ffi/", FULL_NEEDLES),
+    ("packages/mobile-ffi/", FULL_NEEDLES),
+    ("packages/host-identity/", FULL_NEEDLES),
     ("apps/", CLIENT_NEEDLES),
     ("packages/bridge-client/", CLIENT_NEEDLES),
     ("resources/", CLIENT_NEEDLES),
@@ -807,6 +809,7 @@ SELFTEST_FILES = {
 _LAYOUT_FULL_PATHS = (
     "apps/cli/host/st.rs", "apps/cli/tui/st.rs", "apps/cli/tui-core/st.rs",
     "apps/bridge-server/st.rs", "apps/ios/ffi/st.rs", "apps/android/ffi/st.rs",
+    "packages/mobile-ffi/st.rs", "packages/host-identity/st.rs",
     "packages/config-requirements/st.rs", "tools/ios-use/st.rs", "build-support/st.sh",
 )
 _LAYOUT_CLIENT_PATHS = (

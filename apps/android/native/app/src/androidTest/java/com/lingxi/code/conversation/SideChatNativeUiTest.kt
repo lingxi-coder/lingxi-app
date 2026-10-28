@@ -15,7 +15,9 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.theme.LingXiTheme
-import com.lingxi.code.voice.buildVoiceEngine
+import com.lingxi.code.runtimeintegration.NativeEngineCallbacks
+import com.lingxi.code.runtimeintegration.NativeEngineFactory
+import com.lingxi.code.runtimeintegration.NativeEngineScenario
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
@@ -39,11 +41,14 @@ class SideChatNativeUiTest {
             override fun getFilesDir(): File = root
         }
         val parentEvents = CopyOnWriteArrayList<ClientEvent>()
-        val engine = requireNotNull(buildVoiceEngine(
+        val engine = requireNotNull(NativeEngineFactory.build(
             context = context, apiBase = "https://invalid.example", apiKey = "", model = "",
             providerProfilesJson = "{}", routingJson = """{"mobileEnabledProfiles":[]}""",
-            visionDelegationEnabled = false, onEvent = { parentEvents.add(it) },
-            onPermission = { error("No permission expected") },
+            visionDelegationEnabled = false,
+            scenario = NativeEngineScenario.Interactive(NativeEngineCallbacks(
+                onEvent = { parentEvents.add(it) },
+                onPermission = { error("No permission expected") },
+            )),
         ))
         val source = SideChatSource(engine)
         val store = ViewModelStore()

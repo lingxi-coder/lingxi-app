@@ -181,64 +181,24 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
     }
 
     private func makeHandle(scope: CronScope, task: CronTaskRecord? = nil) async throws -> MobileEngineHandle {
-        let (snapshot, runtime) = await MainActor.run {
-            (launchSnapshot(), terminalConfig(scope))
-        }
-        let cronRuntime = runtime
-        let listener = CronEngineListener()
-        let permissionSink = CronPermissionSink()
-        let provider = IosProviderConfigFfi(
-            providerProfilesJson: snapshot.providerProfilesJSON,
-            routingJson: snapshot.routingJSON
-        )
-        let directories = MobileUserStorage.directories()
-        let config = IosEngineLaunchConfigFfi(
-            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-            appAgentHost: false,
-            brandId: directories.brandId,
-            linuxUser: directories.linuxUser,
-            configDirName: directories.configDirName,
-            nativeConfigHome: directories.configHome,
-            apiBase: Keychain.get(.apiBase) ?? "https://api.anthropic.com",
-            apiKey: "",
-            model: task?.configuration.model ?? snapshot.defaultModelID ?? Keychain.get(.model) ?? "",
-            sessionMode: .code,
-            visionDelegationEnabled: snapshot.visionDelegationEnabled,
-            appSandboxRoot: appSandboxRoot,
-            projectCwd: scope.projectCwd ?? (task == nil ? nil : directories.scheduledCwd),
-            projectAdditionalDirectories: [],
-            projectMountGrants: [],
-            providerConfig: provider,
-            mobileLinux: cronRuntime.map {
-                makeIosMobileLinuxConfig($0, appSandboxRoot: appSandboxRoot)
-            },
-            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
-            hostEnvironment: await MainActor.run {
-                makeIosHostEnvironment(launchMode: .scheduledHeadless)
+        let (prepared, mediaHost) = try await MainActor.run {
+            guard let mediaHostComposition else {
+                throw NSError(
+                    domain: "IOSNativeMediaHost",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "The app media host was not composed before cron engine creation."]
+                )
             }
-        )
-        guard let mediaHostComposition else {
-            throw NSError(
-                domain: "IOSNativeMediaHost",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "The app media host was not composed before cron engine creation."]
-            )
+            let prepared = try NativeEngineFactory.prepare(.scheduled(
+                appSandboxRoot: appSandboxRoot,
+                scope: scope,
+                task: task,
+                snapshot: launchSnapshot(),
+                runtime: terminalConfig(scope)
+            ))
+            return (prepared, mediaHostComposition.nativeHost)
         }
-        let mediaHost = await MainActor.run { mediaHostComposition.nativeHost }
-        let handle = try buildIosEngineWithConfig(
-            config: config,
-            listener: listener,
-            mediaHost: mediaHost,
-            share: ShareImpl(),
-            notifications: NotificationImpl(),
-            clipboard: ClipboardImpl(),
-            permissions: permissionSink,
-            secureStorage: SecureStorageImpl(),
-            deviceControl: DeviceControlImpl()
-        )
-        try await migrateLegacyAnthropicCredential(on: handle)
-        permissionSink.attach(handle)
-        return handle
+        return try await NativeEngineFactory.build(prepared, mediaHost: mediaHost)
     }
 
     private static func map(_ fired: FiredCronJobDto) -> CronExecutionOutcome {
@@ -284,63 +244,6 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         }
         return (.failed, .system)
     }
-}
-
-private final class CronEngineListener: IosEventListener, @unchecked Sendable {
-    func onEvent(event: ClientEvent) async {}
-    func onWorkflowProgress(
-        originSessionId _: String,
-        taskId _: String,
-        runId _: String,
-        progress _: WorkflowProgressDto
-    ) async {}
-
-    /// Compatibility with pre-session-scoping generated bindings.
-    func onWorkflowProgress(
-        taskId _: String,
-        runId _: String,
-        progress _: WorkflowProgressDto
-    ) async {}
-}
-
-private final class CronPermissionSink: IosPermissionSink, @unchecked Sendable {
-    private var handle: MobileEngineHandle?
-
-    func attach(_ handle: MobileEngineHandle) {
-        self.handle = handle
-    }
-
-    func onRequest(request: PermissionRequest) async {
-        try? await handle?.submit(command: .denyPermission(requestId: request.requestId))
-    }
-}
-
-/// `appSandboxRoot` is a parameter rather than something this function looks
-/// up, so that both callers pass the SAME value they hand the engine in the
-/// launch config beside it. The runtime validates mounts against this root;
-/// when it disagreed with the engine's by even one component, the mount check
-/// guarded the wrong directory. Passing one expression to both fields makes
-/// them agree by construction instead of by two lookups that happen to match.
-func makeIosMobileLinuxConfig(
-    _ config: TerminalRuntimeConfig,
-    appSandboxRoot: String
-) -> IosMobileLinuxConfigFfi {
-    LXISHRuntimeResourceBootstrap.prepare()
-    let directories = MobileUserStorage.directories()
-    return IosMobileLinuxConfigFfi(
-        mode: config.mode == .legacy ? .legacy : .mobileLinux,
-        brandId: directories.brandId,
-        linuxUser: directories.linuxUser,
-        configDirName: directories.configDirName,
-        managedRoot: config.managedRoot,
-        workspaceHostPath: config.workspaceHostPath,
-        stableWorkspaceId: config.stableWorkspaceId,
-        abi: config.abi,
-        rootfsVersion: config.rootfsVersion,
-        archiveSha256: config.archiveSha256,
-        authorizationFile: config.authorizationFile,
-        appSandboxRoot: appSandboxRoot
-    )
 }
 
 #endif

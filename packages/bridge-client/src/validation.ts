@@ -1,3 +1,4 @@
+import { validateBasicClientEventFields } from './protocol.generated.js';
 import type {
   VisualizationBlockStatusDto,
   VisualizationMountDto,
@@ -1425,12 +1426,13 @@ export function validateClientEvent(value: unknown): ClientEvent {
     case 'openai_oauth_updated': {
       exactKeys(input, ['type', 'session'], 'client event');
       const session = object(input['session'], 'OAuth session');
-      exactKeys(session, ['access_token', 'refresh_token', 'expires_at', 'account_id', 'fedramp'], 'OAuth session');
+      exactKeys(session, ['access_token', 'refresh_token', 'expires_at', 'account_id', 'fedramp', 'email'], 'OAuth session');
       if (typeof session['expires_at'] !== 'number' || !Number.isFinite(session['expires_at']) || typeof session['fedramp'] !== 'boolean') throw new Error('invalid OAuth session');
       return { type, session: {
         access_token: string(session['access_token'], 'access_token'),
         ...(session['refresh_token'] == null ? {} : { refresh_token: string(session['refresh_token'], 'refresh_token') }),
         ...(session['account_id'] == null ? {} : { account_id: string(session['account_id'], 'account_id') }),
+        ...(session['email'] == null ? {} : { email: string(session['email'], 'email') }),
         expires_at: session['expires_at'], fedramp: session['fedramp'],
       } };
     }
@@ -1552,7 +1554,7 @@ export function validateClientEvent(value: unknown): ClientEvent {
         message: string(input['message'], 'side chat error'),
       };
   }
-  return input as ClientEvent;
+  return validateBasicClientEventFields(input, type) as ClientEvent;
 }
 
 function sideChatPermissionRequest(value: unknown): PermissionRequest {

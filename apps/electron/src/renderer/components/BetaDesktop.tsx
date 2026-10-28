@@ -104,6 +104,8 @@ import { ArchiveChatDialog } from './ArchiveChatDialog';
 import { RenameSessionDialog } from './RenameSessionDialog';
 import type { ScheduledCronJob } from '../bridge/scheduledTaskDraft';
 import { Icon } from './Icon';
+import { GitChangesButton } from './GitReview';
+import { DesktopUpdateReminder } from './DesktopUpdateReminder';
 import { commandPaletteColor } from './commandPaletteIcons';
 import { CommandIcon } from './CommandIdentity';
 import { parseSlashCommandPrefix } from './slashCommandMessage';
@@ -432,7 +434,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, onOpenChat, children, topbar }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, onOpenChat, children, topbar }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -441,6 +443,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   onOpenScheduled?(): void;
   apps?: boolean;
   onOpenApps?(): void;
+  changes?: boolean;
   onOpenChat?(): void;
   children?: ReactNode;
   topbar?: ReactNode;
@@ -469,7 +472,6 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const projectsHeadingRef = useRef<HTMLElement>(null);
   const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
   const matchesSearch = (value: string) => !normalizedSearch || value.toLocaleLowerCase().includes(normalizedSearch);
   useLayoutEffect(() => {
@@ -808,14 +810,13 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       </div>
       <div className="desktop-body">
       <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
-        <button type="button" className="desktop-rail-button" data-active={!scheduled && !apps || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
-        <button type="button" className="desktop-rail-button" aria-label={tr('drawer_entry_projects')} title={tr('drawer_entry_projects')} onClick={() => { setSidebarCollapsed(false); window.requestAnimationFrame(() => projectsHeadingRef.current?.scrollIntoView({ block: 'start' })); }}><Icon name="copy" size={20} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button" data-active={!scheduled && !apps && !changes || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
         <button type="button" className="desktop-rail-button" data-active={apps || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={onOpenApps}><AppsGlyph size={21}/></button>
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><Icon name="clock" size={21} stroke={1.7} /></button>
-        <button type="button" className="desktop-rail-button" aria-label={tr('desktop_activity')} title={tr('desktop_activity')} onClick={() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); }}><Icon name="goal" size={21} stroke={1.7} /></button>
         <span className="desktop-rail-divider" aria-hidden="true" />
-        <button type="button" className="desktop-rail-button" aria-label={tr('desktop_review_changes')} title={tr('desktop_review_changes')} onClick={() => { onOpenChat?.(); bridge.openRuntimeItem({ kind: 'section', id: 'review' }); }}><Icon name="branch" size={21} stroke={1.7} /></button>
+        <GitChangesButton active={changes} />
         <button type="button" className="desktop-rail-button desktop-rail-settings" aria-label={tr('settings_title_main')} title={tr('settings_title_main')} onClick={onOpenSettings}><Icon name="cog" size={20} stroke={1.7} /></button>
+        <DesktopUpdateReminder />
       </nav>
     <div className="desktop-surface">
     <aside
@@ -923,7 +924,6 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         </section>}
 
         <section
-          ref={projectsHeadingRef}
           className="projects-sidebar-section"
           aria-labelledby="projects-heading"
           tabIndex={0}

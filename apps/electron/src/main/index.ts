@@ -20,6 +20,8 @@ import { GitService } from './git.js';
 import { app, BrowserWindow, dialog, Menu, net, powerMonitor, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
 import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
+import { installDesktopUpdates } from './desktopUpdates.js';
+import { desktopUpdateManifestUrl } from '../shared/productConfig.js';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -110,6 +112,7 @@ let remotePolicyTimer: NodeJS.Timeout | undefined;
 /** How often the administrator's `managed-settings.json` is read again. */
 const REMOTE_POLICY_RECHECK_MS = 30_000;
 const mainWindows = new Set<BrowserWindow>();
+let desktopUpdates: ReturnType<typeof installDesktopUpdates> | null = null;
 // On macOS the app remains alive and the bridge stays available for reopen.
 // Elsewhere it quits with its last window, unless a background app or a
 // connected phone or browser still needs it.
@@ -240,6 +243,7 @@ function createWindow(): BrowserWindow {
   localApps?.registerMainWindow(mainWindow, target.url);
   secureSession(mainWindow.webContents.session);
   host?.registerWindow(mainWindow.webContents, target.url);
+  desktopUpdates?.registerWindow(mainWindow.webContents, target.url);
   mainWindow.webContents.on('did-finish-load', () => {
     // Permission requests travel on their own IPC channel and are not part of
     // the sequenced event replay. Re-deliver any still-pending request after a
@@ -768,7 +772,17 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   }
   deepLinkProjects = () => settings.getPublic().projects;
   deepLinks.register();
+  desktopUpdates = installDesktopUpdates({
+    currentVersion: app.getVersion(),
+    manifestUrl: desktopUpdateManifestUrl,
+    preferencePath: join(userData, 'desktop-update-reminder.json'),
+    onError: error => diagnostics.add('warn', 'host', `Desktop update check failed: ${sanitizeDiagnostic(error)}`),
+  });
   createWindow();
+  if (app.isPackaged) {
+    desktopUpdates.start();
+    powerMonitor.on('resume', () => { void desktopUpdates?.check(); });
+  }
 
   const publicSettings = settings.getPublic();
   const activeProject = publicSettings.activeProject;
@@ -814,6 +828,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
+  desktopUpdates?.dispose();
+  desktopUpdates = null;
   host?.dispose();
   host = null;
   notifier?.dispose();

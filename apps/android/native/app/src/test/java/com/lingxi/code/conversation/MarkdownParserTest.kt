@@ -1,6 +1,7 @@
 package com.lingxi.code.conversation
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -135,6 +136,32 @@ class MarkdownParserTest {
         val blocks = parseMarkdownBlocks("```\nno close")
         val cb = blocks[0] as MdBlock.CodeBlock
         assertEquals("no close", cb.code)
+        assertFalse(cb.closed)
+    }
+
+    @Test
+    fun mermaidFencePreservesDiagramAndWaitsForClosingFence() {
+        val source = "flowchart TB\n    A[\"中文<br/>第二行\"] <--> B"
+        val completed = parseMarkdownBlocks("```mermaid\n$source\n```").single() as MdBlock.CodeBlock
+        assertEquals("mermaid", completed.language)
+        assertEquals(source, completed.code)
+        assertTrue(completed.closed)
+        val streaming = parseMarkdownBlocks("```mermaid\n$source").single() as MdBlock.CodeBlock
+        assertEquals(source, streaming.code)
+        assertFalse(streaming.closed)
+    }
+
+    @Test
+    fun mermaidFencesSupportTildesAndRequireMatchingClosers() {
+        val tilde = parseMarkdownBlocks("~~~mermaid\r\nflowchart TB\r\nA --> B\r\n~~~").single() as MdBlock.CodeBlock
+        assertEquals("mermaid", tilde.language)
+        assertEquals("flowchart TB\nA --> B", tilde.code)
+        assertTrue(tilde.closed)
+        val longer = parseMarkdownBlocks("````mermaid\nflowchart TB\n```\n").single() as MdBlock.CodeBlock
+        assertFalse(longer.closed)
+        val suffix = parseMarkdownBlocks("```mermaid\nflowchart TB\n```suffix").single() as MdBlock.CodeBlock
+        assertFalse(suffix.closed)
+        assertEquals("\nA --> B", (parseMarkdownBlocks("```mermaid\n\nA --> B\n```").single() as MdBlock.CodeBlock).code)
     }
 
     @Test

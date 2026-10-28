@@ -336,6 +336,13 @@ export const gitCatalog: Record<string, Record<string, string>> = {
     "ja": "リポジトリを読み取り中…",
     "ko": "저장소 읽는 중…"
   },
+  "desktop_git_select_project": {
+    "zh-Hans": "请先在侧边栏选择项目，以查看文件变更。",
+    "zh-Hant": "請先在側邊欄選擇專案，以檢視檔案變更。",
+    "en": "Select a project in the sidebar to review file changes.",
+    "ja": "ファイルの変更を確認するには、サイドバーでプロジェクトを選択してください。",
+    "ko": "파일 변경 사항을 검토하려면 사이드바에서 프로젝트를 선택하세요."
+  },
   "desktop_git_e312efef68": {
     "zh-Hans": "仓库不可用。",
     "zh-Hant": "儲存庫無法使用。",

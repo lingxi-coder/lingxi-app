@@ -2013,7 +2013,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // (/connect async effects) Shared credential store + OAuth/Copilot
     // drivers for the real store-key / device-flow / browser sign-in
     // effects, wired below.
-    let connect_key_store = tui_build.runtime.provider_key_store.clone();
+    let connect_key_store = tui_build.runtime.credentials.clone();
     let connect_oauth = tui_build.runtime.oauth_connect_driver.clone();
     let connect_copilot = tui_build.runtime.connect_copilot.clone();
     // (`!` bash mode) Sandboxed bash runner for `!`-prefixed commands, cloned
@@ -4777,8 +4777,12 @@ pub(crate) async fn run_permission_action(
                             let transcript = writer.active_path();
                             if let Some(source) = transcript.parent() {
                                 if let Err(error) = session::jsonl::record_session_alias(
-                                    &paths.lingxi_home, source, std::path::Path::new(&path),
-                                ).await {
+                                    &paths.lingxi_home,
+                                    source,
+                                    std::path::Path::new(&path),
+                                )
+                                .await
+                                {
                                     tracing::warn!(%error, "session alias could not be recorded after /add-dir");
                                 }
                             }

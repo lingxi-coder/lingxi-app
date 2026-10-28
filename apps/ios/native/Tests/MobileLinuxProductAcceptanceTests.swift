@@ -18,7 +18,7 @@ final class MobileLinuxProductAcceptanceTests: XCTestCase {
         state.selectedMode = .mobileLinux
         let descriptor = TerminalRuntimeDescriptor.make(appSandboxRoot: appRoot, project: project, linuxRuntime: state)
         let config = try XCTUnwrap(descriptor.config)
-        let runtime = try createIosMobileLinuxRuntime(config: makeIosMobileLinuxConfig(config, appSandboxRoot: appRoot))
+        let runtime = try createIosMobileLinuxRuntime(config: NativeEngineFactory.mobileLinuxConfiguration(config, appSandboxRoot: appRoot))
         let status = try await runtime.boot()
         XCTAssertEqual(status.state, .ready, status.lastError ?? "runtime not ready")
         let marker = "product-acceptance-\(UUID().uuidString)"

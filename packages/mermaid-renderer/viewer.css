@@ -1,0 +1,14 @@
+:root { color-scheme: light; font: 13px system-ui, sans-serif; color: #333; background: #fff; }
+:root.dark { color-scheme: dark; color: #ddd; background: #202124; }
+* { box-sizing: border-box; }
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; }
+nav { display: flex; justify-content: flex-end; gap: 4px; padding: 4px; flex-shrink: 0; border-bottom: 1px solid #8883; }
+button { font: inherit; font-size: 16px; color: inherit; background: transparent; border: 0; border-radius: 4px; min-width: 38px; min-height: 36px; cursor: pointer; }
+button:hover, button[aria-pressed=true] { background: #8882; }
+button:focus-visible { outline: 2px solid #559bde; outline-offset: -2px; }
+main { flex: 1; min-height: 0; overflow: auto; padding: 12px; overscroll-behavior: contain; }
+#diagram { width: max-content; min-width: 100%; }
+svg { display: block; margin: auto; max-width: none !important; }
+pre { font: 12px/1.6 ui-monospace, monospace; margin: 0; width: max-content; min-width: 100%; white-space: pre; }
+#error { padding: 8px 12px; margin: 0; }
+[hidden] { display: none !important; }

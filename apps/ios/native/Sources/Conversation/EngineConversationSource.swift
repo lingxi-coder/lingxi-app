@@ -28,19 +28,14 @@ final class EngineConversationSource: ConversationSource {
     /// iOS must override the host's five-row default with the full u32 range.
     private static let completeSessionListLimit = UInt32.max
 
-    typealias HandleBuilder = (
-        _ config: IosEngineLaunchConfigFfi,
-        _ listener: IosEventListener,
-        _ mediaHost: IosNativeMediaHost?,
-        _ permissions: IosPermissionSink
-    ) throws -> MobileEngineHandle
+    typealias HandleBuilder = NativeEngineFactory.HandleBuilder
 
     let model: ConversationModel
     let sessionMode: SessionMode
 
     private let isRemoteProjection: Bool
     private let config: EngineConfig
-    private let handleBuilder: HandleBuilder
+    private let handleBuilder: HandleBuilder?
     private let mediaHostComposition: IOSNativeMediaHostComposition?
     private let permissionModeRepository: PermissionModeConfigurationRepository
     private var handle: MobileEngineHandle?
@@ -200,7 +195,7 @@ final class EngineConversationSource: ConversationSource {
 
     init(
         config: EngineConfig,
-        handleBuilder: @escaping HandleBuilder = EngineConversationSource.buildDefaultHandle,
+        handleBuilder: HandleBuilder? = nil,
         mediaHostComposition: IOSNativeMediaHostComposition? = nil,
         permissionModeRepository: PermissionModeConfigurationRepository? = nil,
         memoryOnly: Bool = false,
@@ -2023,67 +2018,23 @@ final class EngineConversationSource: ConversationSource {
         // SHIP-BLOCKER #3: register a real permission sink so a tool that needs
         // approval surfaces a prompt instead of hanging the turn forever.
         let permissionSink = EnginePermissionSink(listener: listener)
-        let providerConfig = config.providerProfilesJson.map {
-            IosProviderConfigFfi(
-                providerProfilesJson: $0,
-                routingJson: config.providerRoutingJson
-            )
-        }
         let userDirectories = MobileUserStorage.directories()
-        let launchConfig = IosEngineLaunchConfigFfi(
-            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-            appAgentHost: false,
-            brandId: userDirectories.brandId,
-            linuxUser: userDirectories.linuxUser,
-            configDirName: userDirectories.configDirName,
-            nativeConfigHome: userDirectories.configHome,
-            apiBase: config.apiBase,
-            apiKey: config.apiKey,
-            model: config.model,
-            sessionMode: config.sessionMode.dto,
-            visionDelegationEnabled: config.visionDelegationEnabled,
-            appSandboxRoot: config.appSandboxRoot,
-            projectCwd: config.projectCwd,
-            projectAdditionalDirectories: config.additionalWorkspaceDirectories,
-            projectMountGrants: config.projectMountGrants,
-            providerConfig: providerConfig,
-            mobileLinux: config.mobileLinux.map {
-                makeIosMobileLinuxConfig($0, appSandboxRoot: config.appSandboxRoot)
-            },
-            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
-            hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
-        )
+        let prepared = try NativeEngineFactory.prepare(.interactive(
+            config: config, listener: listener, permissions: permissionSink
+        ))
         let additionalDirectories = config.additionalWorkspaceDirectories
         let userHome = userDirectories.home
         let handleBuilder = self.handleBuilder
         handleBuildAttemptID &+= 1
         let attemptID = handleBuildAttemptID
-        // `buildIosEngineWithConfig` is synchronous and can enter the iSH
-        // bridge, verify the bundled archive, and extract the rootfs on a
-        // first launch. A child `Task` would inherit MainActor here and make
-        // the entire setup UI unresponsive until that work completed.
+        // The task owns the entire session bootstrap and is shared by all
+        // callers; the factory runs the blocking constructor on its own thread.
         let mediaHost = mediaHostComposition?.nativeHost
         let buildTask = Task.detached(priority: .userInitiated) {
-            [handleBuilder, launchConfig, listener, mediaHost, permissionSink] in
-            // The synchronous FFI constructor block_on's MCP initialization.
-            // Its native frames can exhaust a cooperative worker's small stack,
-            // and blocking that worker also prevents unrelated tasks progressing.
-            // Keep the shared build task, but suspend it while a short-lived
-            // native thread performs just the blocking constructor.
-            let handle: MobileEngineHandle = try await withCheckedThrowingContinuation { continuation in
-                let thread = Thread {
-                    autoreleasepool {
-                        continuation.resume(with: Result {
-                            return try handleBuilder(launchConfig, listener, mediaHost, permissionSink)
-                        })
-                    }
-                }
-                thread.name = "LingXi engine bootstrap"
-                thread.qualityOfService = .userInitiated
-                thread.stackSize = 8 * 1024 * 1024
-                thread.start()
-            }
-            try await migrateLegacyAnthropicCredential(on: handle)
+            [handleBuilder, prepared, mediaHost] in
+            let handle = try await NativeEngineFactory.build(
+                prepared, mediaHost: mediaHost, interactiveBuilder: handleBuilder
+            )
             let owner = await handle.workspaceState().sessionId
             for directory in additionalDirectories where directory == LXISHGuestPaths.home || directory.hasPrefix(LXISHGuestPaths.home + "/") {
                 let native = URL(fileURLWithPath: userHome).appendingPathComponent(String(directory.dropFirst(LXISHGuestPaths.home.count + 1)))
@@ -2136,38 +2087,6 @@ final class EngineConversationSource: ConversationSource {
             }
             throw error
         }
-    }
-
-    private nonisolated static func buildDefaultHandle(
-        config: IosEngineLaunchConfigFfi,
-        listener: IosEventListener,
-        mediaHost: IosNativeMediaHost?,
-        permissions: IosPermissionSink
-    ) throws -> MobileEngineHandle {
-        guard let mediaHost else {
-            throw NSError(
-                domain: "IOSNativeMediaHost",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "The app media host was not composed before engine creation."]
-            )
-        }
-        return try buildIosEngineWithConfig(
-            config: config,
-            listener: listener,
-            mediaHost: mediaHost,
-            share: ShareImpl(),
-            notifications: NotificationImpl(),
-            clipboard: ClipboardImpl(),
-            permissions: permissions,
-            // Native Keychain secure store enables OAuth token persistence.
-            secureStorage: SecureStorageImpl(),
-            // One-shot device location. The cron
-            // bridge passes nothing here (the FFI defaults it to nil):
-            // a background wake has no user present to answer an
-            // authorization sheet.
-            deviceControl: DeviceControlImpl(),
-            location: LocationImpl()
-        )
     }
 
     /// Build the handle eagerly (independent of the first turn) so the model

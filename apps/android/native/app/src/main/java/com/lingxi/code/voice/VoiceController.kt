@@ -1,12 +1,8 @@
 package com.lingxi.code.voice
 
 import android.Manifest
-import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
-import android.content.res.Configuration
-import android.os.Build
-import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
@@ -15,30 +11,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.core.content.ContextCompat
-import com.lingxi.code.BuildConfig
 import com.lingxi.code.R
-import com.lingxi.code.bindings.android.AndroidEventListener
-import com.lingxi.code.bindings.android.AndroidEngineLaunchConfigFfi
-import com.lingxi.code.bindings.android.AndroidDeviceClassFfi
-import com.lingxi.code.bindings.android.AndroidExecutionTargetFfi
-import com.lingxi.code.bindings.android.AndroidHostEnvironmentFfi
-import com.lingxi.code.bindings.android.AndroidLaunchModeFfi
-import com.lingxi.code.bindings.android.AndroidPermissionSink
-import com.lingxi.code.bindings.android.AndroidProviderConfigFfi
-import com.lingxi.code.bindings.android.AndroidShellConfigFfi
-import com.lingxi.code.bindings.android.AndroidNativeMediaHost
-import com.lingxi.code.bindings.client.ClientEvent
-import com.lingxi.code.bindings.runtime.MobileEngineHandle
-import com.lingxi.code.bindings.client.PermissionRequest
-import com.lingxi.code.bindings.client.SessionModeDto
-import com.lingxi.code.bindings.client.WorkflowProgressDto
-import com.lingxi.code.bindings.android.buildAndroidEngine
-import com.lingxi.code.location.AndroidLocationAdapter
-import com.lingxi.code.computeruse.ComputerUseFeatureProvider
-import com.lingxi.code.model.SessionMode
-import com.lingxi.code.model.toDto
 import com.lingxi.code.voice.audio.AndroidAudioServiceProvider
-import com.lingxi.code.voice.audio.AndroidNativeMediaHostProvider
 import com.lingxi.code.voice.audio.AudioOwnerKey
 import com.lingxi.code.voice.audio.DeviceAudioErrorKind
 import com.lingxi.code.voice.audio.DeviceAudioOperation
@@ -46,14 +20,6 @@ import com.lingxi.code.voice.audio.DeviceAudioResult
 import com.lingxi.code.voice.audio.AudioOperationException
 import com.lingxi.code.voice.audio.AudioDriverException
 import com.lingxi.code.voice.audio.DeviceAudioError
-import com.lingxi.code.share.AndroidShareAdapter
-import com.lingxi.code.notify.AndroidNotificationAdapter
-import com.lingxi.code.project.ProjectWorkspace
-import com.lingxi.code.clipboard.AndroidClipboardAdapter
-import com.lingxi.code.device.AndroidDeviceControlAdapter
-import com.lingxi.code.secure.AndroidSecureStorageAdapter
-import com.lingxi.code.settings.LinuxRuntimeBridge
-import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,75 +30,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
-
-private const val TAG = "VoiceController"
-
-internal fun androidDeviceClass(smallestScreenWidthDp: Int): AndroidDeviceClassFfi = when {
-    smallestScreenWidthDp <= Configuration.SMALLEST_SCREEN_WIDTH_DP_UNDEFINED ->
-        AndroidDeviceClassFfi.UNKNOWN
-    smallestScreenWidthDp >= 600 -> AndroidDeviceClassFfi.TABLET
-    else -> AndroidDeviceClassFfi.PHONE
-}
-
-internal fun androidExecutionTarget(
-    fingerprint: String,
-    model: String,
-    manufacturer: String,
-    brand: String,
-    device: String,
-    product: String,
-    hardware: String,
-): AndroidExecutionTargetFfi {
-    val values = listOf(fingerprint, model, manufacturer, brand, device, product, hardware)
-    if (values.all { it.isBlank() || it.equals("unknown", ignoreCase = true) }) {
-        return AndroidExecutionTargetFfi.UNKNOWN
-    }
-
-    val emulator = fingerprint.startsWith("generic", ignoreCase = true) ||
-        model.contains("google_sdk", ignoreCase = true) ||
-        model.contains("emulator", ignoreCase = true) ||
-        model.contains("android sdk built for", ignoreCase = true) ||
-        manufacturer.contains("genymotion", ignoreCase = true) ||
-        hardware.equals("goldfish", ignoreCase = true) ||
-        hardware.equals("ranchu", ignoreCase = true) ||
-        product.contains("sdk_gphone", ignoreCase = true) ||
-        product.contains("google_sdk", ignoreCase = true) ||
-        product.contains("emulator", ignoreCase = true) ||
-        product.contains("simulator", ignoreCase = true) ||
-        (brand.startsWith("generic", ignoreCase = true) &&
-            device.startsWith("generic", ignoreCase = true))
-
-    return if (emulator) AndroidExecutionTargetFfi.EMULATOR
-    else AndroidExecutionTargetFfi.PHYSICAL_DEVICE
-}
-
-internal fun androidHostOsVersion(release: String, apiLevel: Int): String? {
-    val normalizedRelease = release.trim()
-    return when {
-        normalizedRelease.isNotEmpty() && apiLevel > 0 -> "$normalizedRelease (API $apiLevel)"
-        normalizedRelease.isNotEmpty() -> normalizedRelease
-        apiLevel > 0 -> "API $apiLevel"
-        else -> null
-    }
-}
-
-private fun androidHostEnvironment(
-    context: Context,
-    launchMode: AndroidLaunchModeFfi,
-): AndroidHostEnvironmentFfi = AndroidHostEnvironmentFfi(
-    hostOsVersion = androidHostOsVersion(Build.VERSION.RELEASE, Build.VERSION.SDK_INT),
-    deviceClass = androidDeviceClass(context.resources.configuration.smallestScreenWidthDp),
-    executionTarget = androidExecutionTarget(
-        fingerprint = Build.FINGERPRINT,
-        model = Build.MODEL,
-        manufacturer = Build.MANUFACTURER,
-        brand = Build.BRAND,
-        device = Build.DEVICE,
-        product = Build.PRODUCT,
-        hardware = Build.HARDWARE,
-    ),
-    launchMode = launchMode,
-)
 
 /**
  * Resolves a localized string for voice-package code that runs OUTSIDE a
@@ -158,183 +55,6 @@ val DefaultVoiceStrings = VoiceStrings { _, fallback, args ->
 fun voiceStrings(context: Context): VoiceStrings {
     val appContext = context.applicationContext
     return VoiceStrings { id, _, args -> com.lingxi.code.theme.LocaleWrapper.getString(appContext, id, *args) }
-}
-
-/**
- * T3.3 — wire the device-audio path into the engine + the Compose hold-to-talk
- * surface.
- *
- * Two concerns live here:
- *  1. [buildVoiceEngine] constructs the real [MobileEngineHandle] through the
- *     generated UniFFI `buildAndroidEngine(...)` with one app-scoped audio
- *     callback. UI, Flow, tool, and Computer Use requests all share
- *     the same service and resource arbitration. On a non-Android host (and if
- *     the cdylib fails to load) it returns `null` rather than crashing the shell.
- *  2. [rememberVoiceCapture] routes hold-to-talk through the app-scoped audio
- *     service. It gates on `RECORD_AUDIO`, starts one owner-bound live Listen
- *     session, and sends the final transcript back to the composer draft.
- */
-
-/**
- * Build the engine over the device's app-scoped audio service.
- *
- * [onEvent] is the single sink for every inbound engine [ClientEvent]: the
- * caller (the conversation source) owns the registered listener so the chat
- * surface streams the REAL turn loop. It defaults to a `Log.d` trace so callers
- * that only need the device-capability wiring (e.g. the voice path) still build
- * a working handle without re-implementing a listener.
- *
- * [onPermission] is the single sink for every OUTBOUND [PermissionRequest]: when
- * a tool needs approval the engine parks the turn and emits the request through
- * the `AndroidPermissionSink` registered here. The caller (the conversation
- * source) enqueues a prompt and resolves it via
- * `handle.submit(ClientCommand.Approve/DenyPermission)`. SHIP-BLOCKER #3: without
- * this sink the prior `NoopPermissionSink` DROPPED the request and the turn hung
- * forever. It defaults to a `Log.w` trace so the voice-only path still builds.
- *
- * Returns `null` when the engine cannot be built — on a JVM/unit host the
- * `buildAndroidEngine` export returns `PlatformUnavailable`, and a missing
- * cdylib throws on class init; either way the chat shell stays usable.
- */
-fun buildVoiceEngine(
-    context: Context,
-    apiBase: String = "",
-    apiKey: String = "",
-    model: String = "",
-    providerProfilesJson: String = "{}",
-    routingJson: String? = null,
-    visionDelegationEnabled: Boolean = true,
-    appAgentHost: Boolean = false,
-    mediaHost: AndroidNativeMediaHost? = null,
-    projectWorkspace: ProjectWorkspace? = null,
-    sessionMode: SessionMode = SessionMode.Code,
-    linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
-    launchMode: AndroidLaunchModeFfi = AndroidLaunchModeFfi.INTERACTIVE,
-    onEvent: suspend (ClientEvent) -> Unit = { event ->
-        Log.d(TAG, "engine event: ${event::class.simpleName}")
-    },
-    onWorkflowProgress: suspend (String, String, String, WorkflowProgressDto) -> Unit =
-        { originSessionId, taskId, runId, _ ->
-            Log.d(TAG, "workflow progress: $originSessionId/$taskId/$runId")
-        },
-    onPermission: suspend (PermissionRequest) -> Unit = { request ->
-        Log.w(TAG, "permission request dropped (no prompt UI wired): ${request.requestId}")
-    },
-): MobileEngineHandle? {
-    val appContext = context.applicationContext
-    // The same app-scoped object backs the engine, local Agent hosts, cron and
-    // Remote Control; it also owns the native camera/audio lease callbacks.
-    val appMediaHost = mediaHost ?: AndroidNativeMediaHostProvider.get(appContext)
-    // Device-share: the share adapter drives the process-global ShareController,
-    // whose Context is attached by MainActivity. The engine bridges this onto
-    // `traits::SharingService`, lighting up `tool-share` on-device.
-    val share = AndroidShareAdapter()
-    // Device-notifications: the notification adapter drives the process-global
-    // NotificationController, whose Context is attached by MainActivity. The
-    // engine bridges this onto `traits::NotificationService`, lighting up
-    // `tool-notification` on-device (engine-driven; no UI affordance).
-    val notifications = AndroidNotificationAdapter()
-    // Device-clipboard: the clipboard adapter drives the process-global
-    // ClipboardController, whose Context is attached by MainActivity. The engine
-    // bridges this onto `traits::Clipboard`, lighting up `tool-clipboard`
-    // on-device (engine-driven; no UI affordance).
-    val clipboard = AndroidClipboardAdapter()
-    // Device-location: the engine authorizes the operation before this adapter
-    // requests Android's fine/coarse runtime permission.
-    val location = AndroidLocationAdapter()
-    val listener = object : AndroidEventListener {
-        override suspend fun onEvent(event: ClientEvent) {
-            // Single sink: forward every inbound engine event to the caller's
-            // [onEvent]. EngineConversationSource passes a sink that pushes into
-            // its SharedFlow, so the chat surface streams the REAL turn loop.
-            onEvent(event)
-        }
-
-        override suspend fun onWorkflowProgress(
-            originSessionId: String,
-            taskId: String,
-            runId: String,
-            progress: WorkflowProgressDto,
-        ) {
-            onWorkflowProgress(originSessionId, taskId, runId, progress)
-        }
-    }
-    // Device-permissions: the engine's adapter gate emits an OUTBOUND
-    // PermissionRequest through this sink whenever a tool needs approval. The
-    // adapter forwards it to the caller's [onPermission] (EngineConversationSource
-    // pushes it into its pending-permission StateFlow, which the Compose prompt
-    // renders). This MUST return promptly — the user's answer comes back
-    // asynchronously via `handle.submit(Approve/DenyPermission)`.
-    val permissions = object : AndroidPermissionSink {
-        override suspend fun onRequest(request: PermissionRequest) {
-            onPermission(request)
-        }
-    }
-    return try {
-        buildAndroidEngine(
-            config = AndroidEngineLaunchConfigFfi(
-                appVersion = com.lingxi.code.BuildConfig.VERSION_NAME,
-                appAgentHost = appAgentHost,
-                apiBase = apiBase,
-                apiKey = apiKey,
-                model = model,
-                sessionMode = sessionMode.toDto(),
-                visionDelegationEnabled = visionDelegationEnabled,
-                appFilesRoot = appContext.filesDir.canonicalPath,
-                projectCwd = projectWorkspace?.hostPath,
-                providerConfig = AndroidProviderConfigFfi(
-                    providerProfilesJson = providerProfilesJson,
-                    routingJson = routingJson,
-                ),
-                mobileLinux = LinuxRuntimeBridge.configForWorkspace(
-                    context = appContext,
-                    mode = linuxRuntimeMode,
-                    workspace = projectWorkspace,
-                ),
-                physicalMemoryBytes = runCatching {
-                    val memoryInfo = ActivityManager.MemoryInfo()
-                    val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-                    activityManager.getMemoryInfo(memoryInfo)
-                    memoryInfo.totalMem.takeIf { it > 0L }?.toULong() ?: 0uL
-                }.getOrDefault(0uL),
-                hostEnvironment = androidHostEnvironment(appContext, launchMode),
-            ),
-            listener = listener,
-            mediaHost = appMediaHost,
-            share = share,
-            location = location,
-            notifications = notifications,
-            clipboard = clipboard,
-            permissions = permissions,
-            // Direct builds inject the user-started Accessibility/MediaProjection
-            // controller. Play builds return null, so `android_use` is absent.
-            computerUse = ComputerUseFeatureProvider.engineHost(),
-            // The Agent Shell uses the same verified PRoot runtime as the terminal.
-            shell = AndroidShellConfigFfi(
-                enableShell = true,
-                secretsInKeystore = true,
-                shellDataExposureAccepted = true,
-            ),
-            // P4: Git-tool config not surfaced in the app UI yet — null keeps
-            // Git support fully absent (spec P4 §G5 registration gate).
-            git = null,
-            // Provider profiles contain only non-secret endpoint/model metadata.
-            // API keys travel through SetProviderCredential into Keystore.
-            // Per-op credential provider not surfaced in the app UI yet — null
-            // means no Git secrets are available (anonymous/public remotes only).
-            gitCredentialProvider = null,
-            // Native Android Keystore secure store — enables OAuth /login token
-            // persist (flips the engine's oauth_supported true). Rooted under the
-            // app-private filesDir.
-            secureStorage = AndroidSecureStorageAdapter(appContext),
-            deviceControl = AndroidDeviceControlAdapter(),
-        )
-    } catch (t: Throwable) {
-        // PlatformUnavailable on a host build, or UnsatisfiedLinkError when the
-        // native lib for this ABI is absent — degrade to the UI shell.
-        Log.w(TAG, "buildAndroidEngine unavailable: ${t.message}", t)
-        null
-    }
 }
 
 /** Result of one hold-to-talk capture. */

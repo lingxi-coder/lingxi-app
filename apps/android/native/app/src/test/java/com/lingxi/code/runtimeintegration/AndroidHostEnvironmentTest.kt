@@ -1,4 +1,4 @@
-package com.lingxi.code.voice
+package com.lingxi.code.runtimeintegration
 
 import com.lingxi.code.bindings.android.AndroidDeviceClassFfi
 import com.lingxi.code.bindings.android.AndroidExecutionTargetFfi

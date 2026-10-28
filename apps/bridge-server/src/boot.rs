@@ -846,7 +846,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
     );
     let api_base = resolve_api_base();
-    let anthropic_client_metadata = cli::init::native_anthropic_client_metadata_for_host(
+    let anthropic_client_metadata = host_identity::native_anthropic_client_metadata_for_host(
         &api_base,
         "lingxi-desktop",
         build_info.version,
@@ -2473,8 +2473,12 @@ pub async fn assemble_with_credentials(
 
     // The full command-routing seam over the real engine handles.
     let handle: Arc<dyn OrchestratorHandle> = runtime.orchestrator.clone();
-    let dispatcher: Arc<dyn SlashCommandDispatcher> =
-        Arc::new(RegistrySlashDispatcherClone::wrap(&runtime));
+    let dispatcher: Arc<dyn SlashCommandDispatcher> = Arc::new(
+        runtime
+            .dispatcher
+            .clone_shared()
+            .with_injected_messages_as_turns(),
+    );
     let mut router = EngineCommandRouter::new(
         handle,
         runtime.auth.clone(),
@@ -2583,38 +2587,6 @@ fn spawn_mcp_startup_publisher(
             }
         }
     });
-}
-
-/// The `RegistrySlashDispatcher` returned by `harness_runtime::desktop::build` is owned by
-/// value on the runtime, but the router needs an `Arc<dyn SlashCommandDispatcher>`
-/// it can hold for the connection's lifetime. We cannot move the dispatcher out
-/// of the runtime (we keep the runtime alive), so this thin newtype clones the
-/// dispatcher's shared registry handle into a fresh dispatcher pointing at the
-/// SAME registry — dispatching is identical.
-struct RegistrySlashDispatcherClone {
-    inner: command_api::RegistrySlashDispatcher,
-}
-
-impl RegistrySlashDispatcherClone {
-    fn wrap(runtime: &DesktopRuntime) -> Self {
-        Self {
-            inner: runtime
-                .dispatcher
-                .clone_shared()
-                .with_injected_messages_as_turns(),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl SlashCommandDispatcher for RegistrySlashDispatcherClone {
-    async fn dispatch(
-        &self,
-        raw: lingxi_core::types::utf16_json::Utf16JsonProjection,
-        cancellation: tokio_util::sync::CancellationToken,
-    ) -> lingxi_core::host::SlashDispatchResult {
-        self.inner.dispatch(raw, cancellation).await
-    }
 }
 
 /// A running endpoint paired with the Drop-guard that reaps its discovery
@@ -3933,6 +3905,201 @@ mod tests {
         profiles.insert("p".to_string(), serde_json::json!({}));
         cfg.provider_profiles = Some(profiles);
         assert!(!has_no_credential_source(&cfg));
+    }
+
+    // `block_on` polls the root future on its calling thread; size both that
+    // thread and Tokio's workers to the supported desktop runtime budget.
+    fn run_on_supported_runtime_stack<F, Fut>(test: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let worker = std::thread::Builder::new()
+            .name("desktop-runtime-test".into())
+            .stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+                    .build()
+                    .expect("build supported-stack Tokio runtime");
+                runtime.block_on(test());
+            })
+            .expect("spawn supported-stack test thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// Drive a local injector through the production-assembled router and an
+    /// authenticated Bridge connection. It must become an owned turn rather
+    /// than display-only output, regardless of the user's `/goal` policy.
+    #[test]
+    fn assembled_bridge_runs_injected_local_command_as_owned_turn() {
+        run_on_supported_runtime_stack(|| async {
+            use bridge::wire::Frame;
+            use bridge::{BridgeRequest, Capabilities, ClientHello, BRIDGE_PROTOCOL_VERSION};
+            use client::protocol::{commands::ClientCommand, events::ClientEvent};
+            use command_api::model::{BuiltinCommandHandler, CommandResult};
+            use futures_util::{SinkExt, StreamExt};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::time::Duration;
+            use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+            use tokio_tungstenite::tungstenite::Message;
+
+            struct InjectFixture(Arc<AtomicBool>);
+            #[async_trait::async_trait]
+            impl BuiltinCommandHandler for InjectFixture {
+                async fn handle(
+                    &self,
+                    _: &command_api::parser::ParsedSlashCommand,
+                ) -> CommandResult {
+                    self.0.store(true, Ordering::SeqCst);
+                    CommandResult::InjectMessage {
+                        content: "test-only injected prompt".into(),
+                    }
+                }
+
+                fn name(&self) -> &str {
+                    "fixture-inject"
+                }
+
+                fn description(&self) -> &str {
+                    "Deterministic local injector"
+                }
+            }
+
+            let _loop_state = crate::driver::LOOP_KA_TEST_SERIAL
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let mut cfg = DesktopConfig::default();
+            cfg.cwd = tmp.path().to_path_buf();
+            cfg.lingxi_home = tmp.path().join(".lingxi");
+            cfg.host_workspace_trusted = Some(true);
+            cfg.restricted = true;
+            cfg.isolated_credential_storage = true;
+            cfg.api_key = String::new();
+            cfg.default_model_explicit = true;
+            cfg.use_noop_permission_gate = false;
+            cfg.permission_mode = permission::PermissionMode::Default;
+            cfg.enable_automation_scheduler = false;
+            cfg.mod_render_surface = Some(harness_runtime::desktop::ModRenderSurface::Desktop);
+            let bound = assemble(cfg).await.expect("assemble must succeed");
+            let called = Arc::new(AtomicBool::new(false));
+            bound
+                .runtime
+                .shared_command_registry
+                .write()
+                .await
+                .register_builtin_handler(Arc::new(InjectFixture(called.clone())));
+            let lifecycle = bound.session_lifecycle();
+            let endpoint =
+                McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection))
+                    .await
+                    .expect("endpoint must start");
+            const TOKEN: &str = "inject-test-token-32chars00000000";
+            endpoint.set_auth_token(TOKEN.to_string());
+            let port = endpoint.port();
+            let request = http::Request::builder()
+                .method("GET")
+                .uri(format!("ws://127.0.0.1:{port}/mcp"))
+                .header("host", format!("127.0.0.1:{port}"))
+                .header("connection", "upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", generate_key())
+                .header("sec-websocket-protocol", "mcp")
+                .header("x-lingxi-ide-authorization", TOKEN)
+                .body(())
+                .unwrap();
+            let (mut ws, response) = tokio_tungstenite::connect_async(request)
+                .await
+                .expect("WebSocket upgrade");
+            assert_eq!(response.status(), 101);
+            let frame = |id, method: &str, value: serde_json::Value| {
+                Frame::Request(BridgeRequest {
+                    trace_context: None,
+                    id,
+                    method: method.into(),
+                    params: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                        &value.to_string(),
+                    )
+                    .unwrap(),
+                })
+            };
+            let hello = frame(
+                1,
+                "hello",
+                serde_json::to_value(ClientHello {
+                    protocol_version: BRIDGE_PROTOCOL_VERSION.to_string(),
+                    client_name: "inject-test".into(),
+                    capabilities: Capabilities::default(),
+                })
+                .unwrap(),
+            );
+            ws.send(Message::Text(serde_json::to_string(&hello).unwrap()))
+                .await
+                .unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(10), ws.next())
+                .await
+                .expect("hello deadline")
+                .expect("hello response")
+                .expect("hello WebSocket message");
+            let Message::Text(response) = response else {
+                panic!("hello must return a text response");
+            };
+            assert!(matches!(
+                serde_json::from_str::<Frame>(&response).unwrap(),
+                Frame::Response(response) if response.id == 1 && response.error.is_none()
+            ));
+
+            let submit = frame(
+                2,
+                "submit",
+                serde_json::to_value(ClientCommand::RunSlashCommand {
+                    raw: "/fixture-inject".into(),
+                    images: Vec::new(),
+                    turn_id: Some(47),
+                })
+                .unwrap(),
+            );
+            ws.send(Message::Text(serde_json::to_string(&submit).unwrap()))
+                .await
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let mut started = false;
+            loop {
+                let message = tokio::time::timeout_at(deadline, ws.next())
+                    .await
+                    .expect("injected command must reach a terminal turn")
+                    .expect("WebSocket remains open")
+                    .expect("WebSocket message");
+                let Message::Text(message) = message else {
+                    continue;
+                };
+                match serde_json::from_str::<Frame>(&message).unwrap() {
+                    Frame::Event(ClientEvent::TurnStarted { turn_id }) => {
+                        assert_eq!(turn_id, Some(47));
+                        assert!(!started, "command started more than one turn");
+                        assert!(called.load(Ordering::SeqCst), "fixture handler must run");
+                        started = true;
+                    }
+                    Frame::Event(ClientEvent::TurnEnded { .. }) => {
+                        assert!(started, "injected prompt must start a turn before ending");
+                        break;
+                    }
+                    Frame::Event(ClientEvent::SlashCommandResult { display, .. }) => {
+                        panic!("injected prompt must not be display-only: {display:?}");
+                    }
+                    _ => {}
+                }
+            }
+            ws.close(None).await.unwrap();
+            endpoint.shutdown().await;
+            let report = lifecycle.shutdown_and_drain().await;
+            assert!(report.complete, "shutdown errors: {:?}", report.errors);
+        });
     }
 
     /// Assembly produces a fully-bound connection (gate + driver attached) from a

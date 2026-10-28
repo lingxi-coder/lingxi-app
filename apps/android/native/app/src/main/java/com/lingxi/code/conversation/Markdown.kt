@@ -25,8 +25,8 @@ sealed interface MdBlock {
     /** A run of inline content (one logical paragraph; may span source lines). */
     data class Paragraph(val spans: List<MdInline>) : MdBlock
 
-    /** A fenced code block (``` … ```). [language] is the info string (may be empty). */
-    data class CodeBlock(val language: String, val code: String) : MdBlock
+    /** A fenced code block. [language] is the first info token (may be empty). */
+    data class CodeBlock(val language: String, val code: String, val closed: Boolean = true) : MdBlock
 
     /** A bullet list (`-` / `*` / `+`). Each item is its own inline run. */
     data class BulletList(val items: List<List<MdInline>>) : MdBlock
@@ -62,7 +62,7 @@ private val HEADING_RE = Regex("""^ {0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$""")
 private val QUOTE_RE = Regex("""^ {0,3}> ?(.*)$""")
 private val BULLET_RE = Regex("""^\s*[-*+]\s+(.*)$""")
 private val NUMBERED_RE = Regex("""^\s*(\d+)[.)]\s+(.*)$""")
-private val FENCE_RE = Regex("""^\s*```(.*)$""")
+private val FENCE_RE = Regex("""^ {0,3}(`{3,}|~{3,})(.*)$""")
 
 /**
  * Parse [src] into a flat list of [MdBlock]s. Total over any input: unrecognized
@@ -72,7 +72,7 @@ private val FENCE_RE = Regex("""^\s*```(.*)$""")
  * into a single list block.
  */
 fun parseMarkdownBlocks(src: String): List<MdBlock> {
-    val lines = src.split("\n")
+    val lines = src.replace("\r\n", "\n").split("\n")
     val blocks = mutableListOf<MdBlock>()
 
     val paragraph = StringBuilder()
@@ -86,23 +86,27 @@ fun parseMarkdownBlocks(src: String): List<MdBlock> {
     var i = 0
     while (i < lines.size) {
         val line = lines[i]
-        val fence = FENCE_RE.matchEntire(line)
+        val fence = FENCE_RE.matchEntire(line)?.takeUnless {
+            it.groupValues[1].startsWith('`') && it.groupValues[2].contains('`')
+        }
 
         when {
             // --- fenced code block --------------------------------------
             fence != null -> {
                 flushParagraph()
-                val language = fence.groupValues[1].trim()
-                val code = StringBuilder()
+                val marker = fence.groupValues[1]
+                val language = fence.groupValues[2].trim().split(Regex("\\s+"), limit = 2).first()
+                val closingFence = Regex("^ {0,3}${Regex.escape(marker.first().toString())}{${marker.length},}[ \\t]*$")
+                val code = mutableListOf<String>()
                 i++
                 // Consume until the closing fence (or EOF — unterminated is fine).
-                while (i < lines.size && FENCE_RE.matchEntire(lines[i]) == null) {
-                    if (code.isNotEmpty()) code.append("\n")
-                    code.append(lines[i])
+                while (i < lines.size && !closingFence.matches(lines[i])) {
+                    code += lines[i]
                     i++
                 }
-                if (i < lines.size) i++ // skip the closing ```
-                blocks += MdBlock.CodeBlock(language = language, code = code.toString())
+                val closed = i < lines.size
+                if (closed) i++ // skip the closing ```
+                blocks += MdBlock.CodeBlock(language = language, code = code.joinToString("\n"), closed = closed)
             }
 
             i + 1 < lines.size && tableAlignment(lines[i + 1]) != null &&

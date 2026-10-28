@@ -1,3 +1,4 @@
 {
-  "localAppMarketApiRoot": "https://lingxi-5e4b2-market.web.app/api/v2"
+  "localAppMarketApiRoot": "https://lingxi-5e4b2-market.web.app/api/v2",
+  "desktopUpdateManifestUrl": "https://lingxios.net/desktop-updates.json"
 }

@@ -1,0 +1,164 @@
+name: iOS settings accessibility diagnostic
+
+on:
+  push:
+    branches: ['codex/ios-settings-ax-diagnostic-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: xcode-27
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify diagnostic-only scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=f54d168a685f2b149312967b1406dcdff4aa4604
+          git merge-base --is-ancestor "$base" HEAD
+          actual=$(git diff --name-only "$base" HEAD | LC_ALL=C sort)
+          expected=$(printf '%s\n' \
+            .github/workflows/ios-settings-ax-diagnostic.yml \
+            scripts/ci/ios-settings-ax-probe/project.yml \
+            scripts/ci/ios-settings-ax-probe/Sources/SettingsAXProbeApp.swift \
+            scripts/ci/ios-settings-ax-probe/UITests/SettingsAXProbeUITests.swift | LC_ALL=C sort)
+          test "$actual" = "$expected"
+          git rev-parse HEAD
+          xcodebuild -version
+      - name: Generate probe project
+        working-directory: scripts/ci/ios-settings-ax-probe
+        run: |
+          set -euo pipefail
+          command -v xcodegen >/dev/null || brew install xcodegen
+          xcodegen generate
+      - name: Select the f54 simulator class and runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          id=$(xcrun simctl list devices available --json | jq -er '
+            [.devices["com.apple.CoreSimulator.SimRuntime.iOS-27-1"][]?
+             | select(.isAvailable and .name == "iPhone Duo") | .udid] | first // error("iPhone Duo iOS 27.1 unavailable")')
+          printf 'SIMULATOR_UDID=%s\n' "$id" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/settings-ax-report"
+      - name: Build the isolated fixture
+        working-directory: scripts/ci/ios-settings-ax-probe
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing -scheme SettingsAXProbe \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/settings-ax-derived" CODE_SIGNING_ALLOWED=NO
+      - name: Original account toolbar with keyboard and large type
+        id: account_original
+        continue-on-error: true
+        timeout-minutes: 5
+        working-directory: scripts/ci/ios-settings-ax-probe
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building -scheme SettingsAXProbe \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/settings-ax-derived" \
+            -resultBundlePath "$RUNNER_TEMP/settings-ax-report/account-original.xcresult" \
+            -only-testing:SettingsAXProbeUITests/SettingsAXProbeUITests/testAccountOriginalToolbar \
+            2>&1 | tee "$RUNNER_TEMP/settings-ax-report/account-original.log"
+      - name: Compact account toolbar candidate
+        id: account_compact
+        continue-on-error: true
+        timeout-minutes: 5
+        working-directory: scripts/ci/ios-settings-ax-probe
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building -scheme SettingsAXProbe \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/settings-ax-derived" \
+            -resultBundlePath "$RUNNER_TEMP/settings-ax-report/account-compact.xcresult" \
+            -only-testing:SettingsAXProbeUITests/SettingsAXProbeUITests/testAccountCompactToolbar \
+            2>&1 | tee "$RUNNER_TEMP/settings-ax-report/account-compact.log"
+      - name: Standard type account toolbar control
+        id: account_standard
+        continue-on-error: true
+        timeout-minutes: 5
+        working-directory: scripts/ci/ios-settings-ax-probe
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building -scheme SettingsAXProbe \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/settings-ax-derived" \
+            -resultBundlePath "$RUNNER_TEMP/settings-ax-report/account-standard.xcresult" \
+            -only-testing:SettingsAXProbeUITests/SettingsAXProbeUITests/testAccountStandardToolbar \
+            2>&1 | tee "$RUNNER_TEMP/settings-ax-report/account-standard.log"
+      - name: Original title-scoped model back lookup
+        id: model_title
+        continue-on-error: true
+        timeout-minutes: 5
+        working-directory: scripts/ci/ios-settings-ax-probe
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building -scheme SettingsAXProbe \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/settings-ax-derived" \
+            -resultBundlePath "$RUNNER_TEMP/settings-ax-report/model-title.xcresult" \
+            -only-testing:SettingsAXProbeUITests/SettingsAXProbeUITests/testModelTitleScopedBack \
+            2>&1 | tee "$RUNNER_TEMP/settings-ax-report/model-title.log"
+      - name: Native back identifier candidate
+        id: model_back
+        continue-on-error: true
+        timeout-minutes: 5
+        working-directory: scripts/ci/ios-settings-ax-probe
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building -scheme SettingsAXProbe \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/settings-ax-derived" \
+            -resultBundlePath "$RUNNER_TEMP/settings-ax-report/model-back.xcresult" \
+            -only-testing:SettingsAXProbeUITests/SettingsAXProbeUITests/testModelNativeBackIdentifier \
+            2>&1 | tee "$RUNNER_TEMP/settings-ax-report/model-back.log"
+      - name: Preserve fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-settings-ax-diagnostic
+          path: ${{ runner.temp }}/settings-ax-report
+          if-no-files-found: warn
+      - name: Require repro and candidate observations
+        if: always()
+        env:
+          ACCOUNT_ORIGINAL: ${{ steps.account_original.outcome }}
+          ACCOUNT_COMPACT: ${{ steps.account_compact.outcome }}
+          ACCOUNT_STANDARD: ${{ steps.account_standard.outcome }}
+          MODEL_TITLE: ${{ steps.model_title.outcome }}
+          MODEL_BACK: ${{ steps.model_back.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/settings-ax-report"
+          printf 'account_original=%s account_compact=%s account_standard=%s model_title=%s model_back=%s\n' \
+            "$ACCOUNT_ORIGINAL" "$ACCOUNT_COMPACT" "$ACCOUNT_STANDARD" "$MODEL_TITLE" "$MODEL_BACK"
+          failures=0
+          # A failure before the marked assertion is not a reproduced bug.
+          if [[ "$ACCOUNT_ORIGINAL" != failure ]] || ! grep -Fq 'AX_ACCOUNT_ORIGINAL_UNREACHABLE' "$report/account-original.log"; then
+            echo 'Account fixture did not reproduce the marked original failure.' >&2
+            failures=1
+          fi
+          if [[ "$ACCOUNT_COMPACT" != success ]] || ! grep -Fq 'AX_ACCOUNT_COMPACT exists=true hittable=true' "$report/account-compact.log" || ! grep -Eq "Test Case '-\[.* testAccountCompactToolbar\]' passed" "$report/account-compact.log"; then
+            echo 'Compact account candidate was not verified.' >&2
+            failures=1
+          fi
+          if [[ "$ACCOUNT_STANDARD" != success ]] || ! grep -Fq 'AX_ACCOUNT_STANDARD exists=true hittable=true' "$report/account-standard.log" || ! grep -Eq "Test Case '-\[.* testAccountStandardToolbar\]' passed" "$report/account-standard.log"; then
+            echo 'Standard type account control was not verified.' >&2
+            failures=1
+          fi
+          if [[ "$MODEL_TITLE" != failure ]] || ! grep -Fq 'AX_MODEL_TITLE_BACK_UNREACHABLE' "$report/model-title.log"; then
+            echo 'Model fixture did not reproduce the marked title lookup failure.' >&2
+            failures=1
+          fi
+          if [[ "$MODEL_BACK" != success ]] || ! grep -Fq 'AX_MODEL_NATIVE_BACK hittableCount=1' "$report/model-back.log" || ! grep -Eq "Test Case '-\[.* testModelNativeBackIdentifier\]' passed" "$report/model-back.log"; then
+            echo 'Native back candidate was not verified.' >&2
+            failures=1
+          fi
+          exit "$failures"

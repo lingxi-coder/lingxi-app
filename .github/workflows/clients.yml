@@ -14,7 +14,7 @@ name: clients
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/media-ios-ci-369d3df5]
 
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"

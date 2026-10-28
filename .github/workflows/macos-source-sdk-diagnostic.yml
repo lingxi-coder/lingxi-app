@@ -160,7 +160,8 @@ jobs:
             for (const record of records) counts[record.section] = (counts[record.section] ?? 0) + 1;
             console.log('embedded-prefix', name, JSON.stringify({ counts, examples: records.slice(0, 8) }));
           }
-          const buildRoot = process.env.CERBERO_BUILD_ROOT;
+          // Move the SDK inside the owned Cerbero tree; its parent /opt is root-owned.
+          const buildRoot = sdk;
           const parked = buildRoot + '-parked';
           renameSync(buildRoot, parked);
           try {

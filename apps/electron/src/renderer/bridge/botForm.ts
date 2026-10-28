@@ -34,6 +34,8 @@ export interface BotDraft {
   workspaces: BotWorkspaceUi[];
   /** The ids of the Bots that may hand this one tasks, as saved; a Bot that was deleted since may still be among them. */
   acceptFrom: string[];
+  /** Whether the owner's approved phones and browsers can reach this Bot. A new Bot is made with this off. */
+  remote: boolean;
 }
 
 export type BotDraftProblem =
@@ -74,7 +76,7 @@ export function permissionModeNeedsConfirmation(mode: PermissionModeId | ''): bo
 }
 
 export function emptyBotDraft(): BotDraft {
-  return { name: '', description: '', persona: '', model: '', permissionMode: '', workspaces: [], acceptFrom: [] };
+  return { name: '', description: '', persona: '', model: '', permissionMode: '', workspaces: [], acceptFrom: [], remote: false };
 }
 
 export function draftFromBot(bot: BotUi, persona: string): BotDraft {
@@ -87,6 +89,7 @@ export function draftFromBot(bot: BotUi, persona: string): BotDraft {
     permissionMode: bot.permissionMode === undefined || bot.permissionMode === 'default' ? '' : bot.permissionMode,
     workspaces: bot.workspaces.map((workspace) => ({ ...workspace })),
     acceptFrom: [...(bot.acceptFrom ?? [])],
+    remote: bot.remote === true,
   };
 }
 
@@ -109,7 +112,7 @@ export function hasBotDraftProblems(problems: BotDraftProblems): boolean {
   return Object.keys(problems).length > 0;
 }
 
-/** What a new Bot is made from. Blank optional parts are left out, so that the Bot gets the defaults; a new Bot accepts tasks from no one. */
+/** What a new Bot is made from. Blank optional parts are left out, so that the Bot gets the defaults; a new Bot accepts tasks from no one and is out of reach of remote devices. */
 export function botCreateRequest(draft: BotDraft): BotCreateRequest {
   return {
     name: draft.name.trim(),
@@ -137,6 +140,7 @@ export function botChanges(bot: BotUi, persona: string, draft: BotDraft, peers?:
   if (draft.model !== (bot.model ?? '')) patch.model = draft.model || null;
   if ((draft.permissionMode || 'default') !== (bot.permissionMode ?? 'default')) patch.permissionMode = draft.permissionMode || null;
   if (!sameFolders(draft.workspaces, bot.workspaces)) patch.workspaces = draft.workspaces.map((workspace) => ({ ...workspace }));
+  if (draft.remote !== (bot.remote === true)) patch.remote = draft.remote;
   if (peers !== undefined) {
     const accepted = present(draft.acceptFrom, peers);
     if (!sameIds(accepted, present(bot.acceptFrom ?? [], peers))) patch.acceptFrom = accepted;

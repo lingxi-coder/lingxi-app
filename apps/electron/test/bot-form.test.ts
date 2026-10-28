@@ -81,6 +81,13 @@ test('a new Bot is made from the trimmed name and only the parts the owner fille
   }), { name: 'Scribe', description: 'notes', persona: '# Scribe\n', model: 'builtin/small', permissionMode: 'plan', workspaces: [{ path: '/work/a', mode: 'write' }] });
 });
 
+test('a new Bot is made out of reach of remote devices: its draft has the switch off and the request never carries it', () => {
+  assert.equal(emptyBotDraft().remote, false);
+  const request = botCreateRequest({ ...emptyBotDraft(), name: 'Scribe', remote: true });
+  assert.deepEqual(request, { name: 'Scribe' });
+  assert.ok(!('remote' in request));
+});
+
 test('creating a Bot sends nothing while the form has problems, and says why a refusal happened otherwise', async () => {
   const refused = fakeApi();
   assert.deepEqual(await createBot(refused.api, emptyBotDraft()), { ok: false, conflict: false, message: '' });
@@ -124,6 +131,22 @@ test('only what the owner changed is sent, and clearing a choice sends null', ()
   assert.deepEqual(botChanges(current, 'old', { ...draft, permissionMode: 'acceptEdits' }).patch, { permissionMode: 'acceptEdits' });
   assert.deepEqual(botChanges(current, 'old', { ...draft, workspaces: [{ path: '/work/a', mode: 'write' }] }).patch, { workspaces: [{ path: '/work/a', mode: 'write' }] });
   assert.deepEqual(botChanges(current, 'old', { ...draft, persona: 'new' }), { patch: {}, personaChanged: true });
+});
+
+test('the Remote Control switch is shown as the Bot has it, and only a change of it is sent', async () => {
+  const off = bot();
+  const on = bot({ remote: true });
+  assert.equal(draftFromBot(off, '').remote, false);
+  assert.equal(draftFromBot(on, '').remote, true);
+  assert.deepEqual(botChanges(off, '', draftFromBot(off, '')), { patch: {}, personaChanged: false });
+  assert.deepEqual(botChanges(on, '', draftFromBot(on, '')), { patch: {}, personaChanged: false });
+  assert.deepEqual(botChanges(off, '', { ...draftFromBot(off, ''), remote: true }).patch, { remote: true });
+  assert.deepEqual(botChanges(on, '', { ...draftFromBot(on, ''), remote: false }).patch, { remote: false }, 'off is sent as false, not left out');
+  assert.deepEqual(botChanges(on, '', { ...draftFromBot(on, ''), name: 'Renamed' }).patch, { name: 'Renamed' }, 'a switch that stays on is not sent again');
+  const { api, calls } = fakeApi();
+  const saved = await saveBot(api, off, '', { ...draftFromBot(off, ''), remote: true });
+  assert.equal(saved.ok, true);
+  assert.deepEqual(calls.update, [['b1', 3, { remote: true }]], 'with the revision it was read at, like every change');
 });
 
 test('saving writes the record, then the persona, and does nothing when nothing changed', async () => {

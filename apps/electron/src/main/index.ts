@@ -70,7 +70,7 @@ import { TerminalManager } from './terminal.js';
 import { HostController } from './host.js';
 import { HostNotifier } from './notifications.js';
 import { notificationPresentation } from './notificationPresentation.js';
-import { DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
+import { BOT_PERMISSION_TIMEOUT_SECS, DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
 import { SettingsStore } from './settings.js';
 import { ComputerSettingsStore } from './computerSettings.js';
 import { BrowserIntegration } from './browserIntegration.js';
@@ -434,6 +434,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
   };
   const sessionCatalog = new ProjectSessionCatalog(catalogOptions);
+  // Off unless the owner (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns Remote Control on for this computer.
+  const remoteControlOn = (): boolean => settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1');
   const launchCache = new SessionLaunchCache();
   // The one refresher of the Codex session. Engines get only access tokens.
   // The wall clock is checked every minute and on wake: a timer alone would
@@ -615,8 +617,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         telemetry: settings.getTelemetryConfig(),
         allowInsights: settings.getInsightsAllowed(),
         allowTeamOnboarding: settings.getTeamOnboardingAllowed(),
-        remoteControlEnabled: !botWorkspace && (settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1'))
-          && (remotePolicy?.allows() ?? true),
+        // A Bot's sessions are launched for remote devices when the Bot's own switch is on as well; its owner may be away for a day.
+        remoteControlEnabled: botWorkspace
+          ? remotePolicy?.botReachable(workspace) === true
+          : remoteControlOn() && (remotePolicy?.allows() ?? true),
+        ...(botWorkspace ? { permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS } : {}),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
         ...(openaiOAuth ? { openaiOAuth } : {}),
@@ -662,6 +667,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const policy = new RemotePolicy({
     settings,
     managedDirectory: managedSettingsDirectory(process.env, process.platform),
+    computerEnabled: remoteControlOn,
+    bots: () => bots,
   });
   remotePolicy = policy;
   const runtimes = bridge;
@@ -669,6 +676,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     files: new RemoteFileStore(join(userData, 'remote-files')),
     runtimes,
     policy,
+    bots: () => bots,
     commands: new RemoteCommands({
       allowAlwaysAllow: () => policy.allowAlwaysAllow(),
       echo: (echo) => remoteUi?.echo(echo),
@@ -809,6 +817,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         runtimes: bridge,
         router,
         delegation: tasks,
+        // Remote devices reach a Bot's chats by session id, and its switch decides whether they may.
+        openProject: (sessionId) => manager.get(sessionId)?.projectPath,
+        changed: () => remotePolicy?.notifySessionsChanged(),
         catalogFor: (configHome) => new ProjectSessionCatalog({ ...catalogOptions, configHome }),
         // The scheduler was made first; it learns of the Bots below, and is asked for these only when used.
         routines: {

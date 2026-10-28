@@ -73,6 +73,8 @@ export interface BridgeLaunchConfig {
   allowTeamOnboarding?: boolean;
   scheduledController?: boolean;
   remoteControlEnabled?: boolean;
+  /** How long the engine waits for a permission answer from a remote device; its remote default (30 minutes) when absent. */
+  permissionTimeoutSecs?: number;
   model?: string;
   apiBaseUrl?: string;
 }
@@ -216,6 +218,8 @@ export interface PromptSource {
   origin: RemotePromptOrigin;
   /** The sending device when `origin` is `device`. */
   deviceName?: string;
+  /** The sending Bot when `origin` is `bot`. */
+  fromBotName?: string;
 }
 
 /** How {@link SessionRuntime.runHostTurn} is asked to run a turn. */
@@ -253,6 +257,7 @@ export interface PromptJournalEntry {
   text: string;
   origin: RemotePromptOrigin;
   deviceName?: string;
+  fromBotName?: string;
   /** The bytes are kept for the latest entries that have images; an older entry keeps only the media type. */
   images: ReadonlyArray<{ media_type: string; base64?: string }>;
 }

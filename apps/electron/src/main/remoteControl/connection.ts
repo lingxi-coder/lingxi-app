@@ -18,6 +18,7 @@ import {
   MAX_HOST_CONNECTIONS,
   MessageTransport,
   FileChannel,
+  REMOTE_FEATURE_BOTS,
   REMOTE_PROTOCOL_MAJOR,
   RemoteProtocolError,
   RemoteRpcError,
@@ -129,6 +130,20 @@ function newerOfferNonce(record: unknown): string | undefined {
 interface InitializeRequest {
   pushInstallationId?: string;
   mediaCapabilities?: RemoteMediaCapabilities;
+  botAware?: true;
+}
+
+const MAX_FEATURES = 32;
+const MAX_FEATURE_CHARS = 64;
+
+/** Whether the viewer declared `REMOTE_FEATURE_BOTS`; the other strings it lists are none of the host's business. */
+function parseBotAware(value: unknown, invalid: (what: string) => RemoteRpcError): boolean {
+  if (value === undefined) return false;
+  if (!Array.isArray(value) || value.length > MAX_FEATURES
+    || !value.every(feature => typeof feature === 'string' && feature.length <= MAX_FEATURE_CHARS)) {
+    throw invalid('bad app.features');
+  }
+  return value.includes(REMOTE_FEATURE_BOTS);
 }
 
 function parseMediaCapabilities(value: unknown, invalid: (what: string) => RemoteRpcError): RemoteMediaCapabilities | undefined {
@@ -173,6 +188,7 @@ function parseInitialize(params: unknown): InitializeRequest {
   if (typeof app['platform'] !== 'string' || !PLATFORMS.includes(app['platform'])) throw invalid('bad app.platform');
   const mediaCapabilities = parseMediaCapabilities(app['media_capabilities'], invalid);
   const request: InitializeRequest = mediaCapabilities === undefined ? {} : { mediaCapabilities };
+  if (parseBotAware(app['features'], invalid)) request.botAware = true;
   if (push !== undefined) {
     if (typeof push !== 'string' || push.length < 1 || push.length > MAX_PUSH_ID_CHARS || CONTROL.test(push)) throw invalid('bad push_installation_id');
     request.pushInstallationId = push;
@@ -559,6 +575,7 @@ export class HostConnection {
       device_name: offer.device.name,
       platform: offer.device.platform,
       ...(request.mediaCapabilities === undefined ? {} : { media_capabilities: request.mediaCapabilities }),
+      ...(request.botAware === undefined ? {} : { bot_aware: true as const }),
       conn_id: this.connId,
       ...(request.pushInstallationId === undefined ? {} : { push_installation_id: request.pushInstallationId }),
     };

@@ -19,6 +19,7 @@ import type { PermissionModeId } from '@lingxi/bridge-client';
 
 import { BOT_CONFLICT_MESSAGE } from '../../shared/bots.js';
 import { isPermissionModeId } from '../host-utils.js';
+import { isSessionId } from '../sessionIdentity.js';
 import { isInside, writeFileAtomic } from './files.js';
 import { projectDirName } from './projectDirName.js';
 
@@ -58,6 +59,8 @@ export interface BotRecord {
   permission_mode?: PermissionModeId;
   /** The Bots that may delegate tasks to this one, by id. Absent: none may. */
   accept_from?: string[];
+  /** Whether the owner's approved devices may reach this Bot's chats through Remote Control. Absent: they may not. */
+  remote?: boolean;
   workspaces: BotWorkspace[];
   /** Only the owner exists in this version. */
   audiences: Array<{ id: 'owner'; kind: 'owner' }>;
@@ -82,6 +85,8 @@ export interface BotPatch {
   permissionMode?: PermissionModeId | null;
   /** The Bots that may delegate tasks to this one; an empty list removes them all. */
   acceptFrom?: ReadonlyArray<string>;
+  /** Whether Remote Control reaches this Bot. */
+  remote?: boolean;
   workspaces?: ReadonlyArray<{ path: string; mode: BotWorkspaceMode }>;
 }
 
@@ -159,6 +164,11 @@ function botPermissionMode(value: unknown): PermissionModeId {
   return value;
 }
 
+function botRemote(value: unknown): boolean {
+  if (typeof value !== 'boolean') throw new Error('invalid remote');
+  return value;
+}
+
 /** The text of a Bot's `LINGXI.md`. */
 export function personaText(value: unknown): string {
   if (typeof value !== 'string' || value.includes('\0') || Buffer.byteLength(value, 'utf8') > MAX_PERSONA_BYTES) throw new Error('invalid persona');
@@ -200,7 +210,7 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
   try { parsed = JSON.parse(text); } catch { throw new Error('bot.json is not valid JSON'); }
   const input = plainObject(parsed, 'bot.json');
   if (input['v'] !== BOT_RECORD_VERSION) throw new Error('bot.json has an unsupported version');
-  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model', 'permission_mode', 'accept_from'], 'bot.json');
+  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model', 'permission_mode', 'accept_from', 'remote'], 'bot.json');
   if (input['bot_id'] !== expectedId || !isBotId(input['bot_id'])) throw new Error('bot.json belongs to a different Bot');
   const name = botName(input['name']);
   if (name !== input['name']) throw new Error('invalid name');
@@ -217,6 +227,7 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
   const description = botDescription(input['description']);
   if (description !== input['description']) throw new Error('invalid description');
   const acceptFrom = input['accept_from'] === undefined ? [] : acceptFromList(input['accept_from'], expectedId);
+  const remote = input['remote'] === undefined ? false : botRemote(input['remote']);
   return {
     v: BOT_RECORD_VERSION,
     bot_id: expectedId,
@@ -228,6 +239,7 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
     ...(input['model'] !== undefined ? { model: botModel(input['model']) } : {}),
     ...(input['permission_mode'] !== undefined ? { permission_mode: botPermissionMode(input['permission_mode']) } : {}),
     ...(acceptFrom.length > 0 ? { accept_from: acceptFrom } : {}),
+    ...(remote ? { remote } : {}),
     workspaces,
     audiences: [{ id: 'owner', kind: 'owner' }],
   };
@@ -311,6 +323,18 @@ export class BotStore {
   botIdForWorkspace(path: string): string | undefined {
     const botId = this.workspaceBotId(path);
     return botId !== undefined && existsSync(join(this.botDir(botId), 'bot.json')) ? botId : undefined;
+  }
+
+  /**
+   * The Bot whose home holds the transcript of a session, if any. The id must
+   * be a session's: it becomes part of a file name.
+   */
+  botIdOfTranscript(sessionId: string): string | undefined {
+    if (!isSessionId(sessionId)) return undefined;
+    for (const botId of readdirSync(this.root)) {
+      if (isBotId(botId) && existsSync(join(this.transcriptsDir(botId), `${sessionId}.jsonl`))) return botId;
+    }
+    return undefined;
   }
 
   /** Every other entry of the Bots folder, whatever it is: they are all out of bounds for a Bot. */
@@ -428,7 +452,11 @@ export class BotStore {
       if (acceptFrom.length > 0) next.accept_from = acceptFrom;
       else delete next.accept_from;
     }
-    const unchanged = (['name', 'description', 'model', 'permission_mode'] as const).every((key) => next[key] === current[key])
+    if (patch.remote !== undefined) {
+      if (botRemote(patch.remote)) next.remote = true;
+      else delete next.remote;
+    }
+    const unchanged = (['name', 'description', 'model', 'permission_mode', 'remote'] as const).every((key) => next[key] === current[key])
       && sameBotIds(next.accept_from, current.accept_from)
       && JSON.stringify(next.workspaces) === JSON.stringify(current.workspaces);
     if (unchanged) return current;

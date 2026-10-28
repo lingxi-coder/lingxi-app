@@ -10,6 +10,8 @@ import type { ObservableState } from '../bridge/observableState';
 import { permissionModeOptions } from '../model/permissionModes';
 import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
 import { Icon } from './Icon';
+import { Toggle } from './settings/primitives';
+import type { RemoteAvailability } from '../bridge/remoteControl';
 
 /** Read a controller's state; the component renders again whenever it changes. */
 export function useObservable<S>(source: ObservableState<S>): S {
@@ -175,6 +177,27 @@ export function BotPermissionField({ draft, disabled = false, onChange }: Pick<F
       <p>{tr('bots_permission_full_body')}</p>
     </BotConfirm> : null}
   </div>;
+}
+
+/**
+ * The switch that lets the owner's approved phones and browsers reach a Bot.
+ * It cannot be turned on while Remote Control is unavailable, and says why;
+ * turning it off is always allowed.
+ */
+export function BotRemoteField({ draft, availability, disabled = false, onChange }: Pick<FieldsProps, 'draft' | 'disabled' | 'onChange'> & {
+  availability: RemoteAvailability;
+}) {
+  return <ul className="bots-rows bots-remote">
+    <li className="bots-row">
+      <div className="bots-row-main">
+        <span className="bots-row-title">{tr('bots_remote_title')}</span>
+        <span className="bots-row-text">{tr('bots_remote_hint')}</span>
+        {!availability.available ? <span role="status" className="bots-row-text bots-remote-why">{availability.reason}</span> : null}
+      </div>
+      <Toggle value={draft.remote} disabled={disabled || (!availability.available && !draft.remote)} label={tr('bots_remote_title')}
+        onChange={(remote) => onChange({ remote })} />
+    </li>
+  </ul>;
 }
 
 export function BotFoldersField({ draft, problems, disabled = false, pickFolder, onChange }: FieldsProps & {

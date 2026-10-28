@@ -900,6 +900,7 @@ fn record_to_ffi(record: &RemoteRecord) -> RemoteRecordFfi {
             images,
             origin,
             device_name,
+            ..
         } => RemoteRecordFfi::Prompt {
             turn_id: *turn_id,
             text: text.clone(),
@@ -907,7 +908,7 @@ fn record_to_ffi(record: &RemoteRecord) -> RemoteRecordFfi {
             origin: match origin {
                 RemotePromptOrigin::Desktop => RemotePromptOriginFfi::Desktop,
                 RemotePromptOrigin::Device => RemotePromptOriginFfi::Device,
-                RemotePromptOrigin::Scheduled => RemotePromptOriginFfi::Scheduled,
+                RemotePromptOrigin::Scheduled | RemotePromptOrigin::Bot => RemotePromptOriginFfi::Scheduled,
             },
             device_name: device_name.clone(),
         },

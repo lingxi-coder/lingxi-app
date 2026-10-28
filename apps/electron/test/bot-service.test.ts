@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, w
 import { join } from 'node:path';
 
 import { pathRule } from '../src/main/bots/botSettings.js';
-import { BotService, botsAvailability, type BotCatalog, type BotRuntimes } from '../src/main/bots/service.js';
-import { BotConflictError, BotNotFoundError } from '../src/main/bots/store.js';
+import { BotService, botsAvailability, type BotCatalog, type BotRuntimes, type BotServiceOptions } from '../src/main/bots/service.js';
+import { BotConflictError, BotNotFoundError, BotStore } from '../src/main/bots/store.js';
 import type { ProjectSessionCatalogRow } from '../src/main/session-catalog.js';
 import { botFixture, SESSION } from './bot-helpers.js';
 
@@ -20,7 +20,7 @@ function row(uuid: string, extra: Partial<ProjectSessionCatalogRow> = {}): Proje
   };
 }
 
-function setup(t: { after(fn: () => void): void }) {
+function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptions, 'openProject' | 'changed'> = {}) {
   const f = botFixture(t);
   const calls: unknown[][] = [];
   const warnings: string[] = [];
@@ -59,6 +59,7 @@ function setup(t: { after(fn: () => void): void }) {
       releaseScope: (workspace) => { calls.push(['releaseScope', workspace]); },
     },
     warn: (message) => warnings.push(message),
+    ...options,
   });
   return {
     ...f, service, calls, warnings, catalogs,
@@ -452,4 +453,177 @@ test('a Bot is named by its folder wherever the app has only the folder', (t) =>
   assert.equal(s.service.nameFor(s.folder('project')), undefined);
   s.service.update(bot.bot_id, 1, { name: 'Renamed' });
   assert.equal(s.service.nameFor(s.store.workspaceDir(bot.bot_id)), 'Renamed');
+});
+
+// What Remote Control asks
+
+const NO_RUNTIMES: BotRuntimes = { newSession: async () => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => undefined };
+const NO_CATALOGS = (): BotCatalog => { throw new Error('unused'); };
+
+test('a Bot stands for remote devices as off until the owner switches it on, and is gone when it cannot be read or is being deleted', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Reachable', description: 'Helps' });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  assert.deepEqual(s.service.remoteBot(bot.bot_id), { state: 'off' }, 'a new Bot is off');
+  s.service.update(bot.bot_id, 1, { remote: true });
+  assert.deepEqual(s.service.remoteBot(bot.bot_id), { state: 'on', bot: { botId: bot.bot_id, name: 'Reachable', description: 'Helps', workspace } });
+  assert.deepEqual(s.service.remoteBot('Bot0000000000000000999'), { state: 'unknown' });
+  assert.deepEqual(s.service.remoteBot('../../etc'), { state: 'unknown' }, 'an id that is none never reaches the disk');
+  let release!: () => void;
+  s.holdClose(new Promise<void>((resolve) => { release = resolve; }));
+  const deleting = s.service.delete(bot.bot_id);
+  assert.deepEqual(s.service.remoteBot(bot.bot_id), { state: 'deleting' });
+  release();
+  await deleting;
+  assert.deepEqual(s.service.remoteBot(bot.bot_id), { state: 'unknown' });
+  const damaged = s.service.create({ name: 'Damaged' });
+  writeFileSync(s.store.recordPath(damaged.bot_id), '{ not json');
+  assert.deepEqual(s.service.remoteBot(damaged.bot_id), { state: 'unknown' }, 'it never throws');
+});
+
+test('the Bots offered to remote devices are those whose switch is on, oldest first, none being deleted or unreadable', async (t) => {
+  const s = setup(t);
+  const first = s.service.create({ name: 'First' });
+  const second = s.service.create({ name: 'Second' });
+  const third = s.service.create({ name: 'Third' });
+  const fourth = s.service.create({ name: 'Fourth' });
+  assert.deepEqual(s.service.remoteBots(), []);
+  for (const bot of [first, second, third, fourth]) s.service.update(bot.bot_id, 1, { remote: true });
+  assert.deepEqual(s.service.remoteBots().map((bot) => bot.name), ['First', 'Second', 'Third', 'Fourth']);
+  assert.deepEqual(s.service.remoteBots()[0], { botId: first.bot_id, name: 'First', description: '', workspace: s.store.workspaceDir(first.bot_id) });
+  s.service.update(second.bot_id, 2, { remote: false });
+  writeFileSync(s.store.recordPath(third.bot_id), '{ not json');
+  let release!: () => void;
+  s.holdClose(new Promise<void>((resolve) => { release = resolve; }));
+  const deleting = s.service.delete(fourth.bot_id);
+  assert.deepEqual(s.service.remoteBots().map((bot) => bot.name), ['First'], 'switched off, unreadable and being deleted are all left out');
+  release();
+  await deleting;
+});
+
+test('the Bots offered to remote devices are ordered by when they were made, not by their ids', (t) => {
+  const f = botFixture(t);
+  const ids = ['Bot0000000000000000003', 'Bot0000000000000000002', 'Bot0000000000000000001'];
+  let now = 1000;
+  const store = new BotStore({ userData: f.userData, home: f.home, defaultConfigHome: f.defaultConfigHome, now: () => now, newId: () => ids.shift()! });
+  const service = new BotService({ store, platform: 'darwin', runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS });
+  for (const name of ['Oldest', 'Middle', 'Newest']) {
+    const bot = service.create({ name });
+    service.update(bot.bot_id, 1, { remote: true });
+    now += 1000;
+  }
+  assert.deepEqual(service.remoteBots().map((bot) => bot.name), ['Oldest', 'Middle', 'Newest']);
+});
+
+test('where Bots cannot run, none is offered to remote devices and none is a chat\'s Bot', (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Mac Bot' });
+  s.service.update(bot.bot_id, 1, { remote: true });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  const elsewhere = new BotService({ store: s.store, platform: 'linux', runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS, openProject: () => workspace });
+  assert.deepEqual(elsewhere.remoteBots(), []);
+  assert.deepEqual(elsewhere.remoteBot(bot.bot_id), { state: 'unknown' });
+  assert.equal(elsewhere.chat(SESSION), undefined);
+  assert.equal(elsewhere.remoteEnabled(workspace), false);
+});
+
+test('a chat is a Bot\'s when it is open in the Bot\'s workspace or its transcript is in the Bot\'s home', (t) => {
+  const open = new Map<string, string>();
+  const s = setup(t, { openProject: (sessionId) => open.get(sessionId) });
+  const bot = s.service.create({ name: 'Chatty' });
+  const other = s.service.create({ name: 'Other' });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  const transcript = (botId: string, sessionId: string) => {
+    mkdirSync(s.store.transcriptsDir(botId), { recursive: true });
+    writeFileSync(join(s.store.transcriptsDir(botId), `${sessionId}.jsonl`), '');
+  };
+  assert.equal(s.service.chat(SESSION), undefined, 'a session nobody knows');
+
+  transcript(bot.bot_id, SESSION);
+  assert.deepEqual(s.service.chat(SESSION), { botId: bot.bot_id, ref: { projectPath: workspace, sessionId: SESSION }, remote: false }, 'found by its transcript');
+  s.service.update(bot.bot_id, 1, { remote: true });
+  assert.equal(s.service.chat(SESSION)?.remote, true, 'and follows the switch');
+
+  open.set(OTHER_SESSION, s.store.workspaceDir(other.bot_id));
+  assert.deepEqual(s.service.chat(OTHER_SESSION), { botId: other.bot_id, ref: { projectPath: s.store.workspaceDir(other.bot_id), sessionId: OTHER_SESSION }, remote: false }, 'found by where it is open, before any transcript');
+
+  open.set(SESSION, s.folder('repo'));
+  assert.equal(s.service.chat(SESSION), undefined, 'open in a project of the owner\'s, it is no Bot\'s, whatever is in a Bot\'s home');
+  open.delete(SESSION);
+
+  s.controllerOf(workspace, CONTROLLER);
+  transcript(bot.bot_id, CONTROLLER);
+  assert.equal(s.service.chat(CONTROLLER), undefined, 'the scheduler\'s hidden session is no chat');
+
+  const lettered = 'abcdefab-2222-4333-8444-abcdefabcdef';
+  transcript(bot.bot_id, lettered);
+  assert.equal(s.service.chat(lettered)?.botId, bot.bot_id);
+  assert.equal(s.service.chat(lettered.toUpperCase()), undefined, 'only the spelling the engine writes: a file system that ignores case would find the transcript');
+  for (const bad of ['', 'not-a-session', '../x', `${SESSION}.jsonl`, 5 as any]) assert.equal(s.service.chat(bad), undefined, JSON.stringify(bad));
+});
+
+test('a chat of a Bot that is being deleted is not reachable, and one of a Bot that is gone is nobody\'s', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Leaving' });
+  s.service.update(bot.bot_id, 1, { remote: true });
+  mkdirSync(s.store.transcriptsDir(bot.bot_id), { recursive: true });
+  writeFileSync(join(s.store.transcriptsDir(bot.bot_id), `${SESSION}.jsonl`), '');
+  assert.equal(s.service.chat(SESSION)?.remote, true);
+  let release!: () => void;
+  s.holdClose(new Promise<void>((resolve) => { release = resolve; }));
+  const deleting = s.service.delete(bot.bot_id);
+  assert.equal(s.service.chat(SESSION)?.remote, false, 'still its chat, but not reachable');
+  release();
+  await deleting;
+  assert.equal(s.service.chat(SESSION), undefined);
+});
+
+test('Remote Control is on for a folder when the Bot that works in it has its switch on', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Folder' });
+  const workspace = s.store.workspaceDir(bot.bot_id);
+  assert.equal(s.service.remoteEnabled(workspace), false);
+  s.service.update(bot.bot_id, 1, { remote: true });
+  assert.equal(s.service.remoteEnabled(workspace), true);
+  assert.equal(s.service.remoteEnabled(s.folder('repo')), false, 'a folder of the owner\'s');
+  assert.equal(s.service.remoteEnabled(s.store.homeDir(bot.bot_id)), false, 'the home is no workspace');
+  let release!: () => void;
+  s.holdClose(new Promise<void>((resolve) => { release = resolve; }));
+  const deleting = s.service.delete(bot.bot_id);
+  assert.equal(s.service.remoteEnabled(workspace), false, 'not while it is being deleted');
+  release();
+  await deleting;
+  assert.equal(s.service.remoteEnabled(workspace), false);
+});
+
+test('Remote Control hears of a Bot made, changed or deleted, and of nothing that changed nothing or failed', async (t) => {
+  let heard = 0;
+  const s = setup(t, { changed: () => { heard += 1; } });
+  const bot = s.service.create({ name: 'Heard' });
+  assert.equal(heard, 1, 'made');
+  s.service.update(bot.bot_id, 1, { remote: true });
+  assert.equal(heard, 2, 'switched on');
+  s.service.update(bot.bot_id, 2, { remote: true });
+  s.service.update(bot.bot_id, 2, { name: 'Heard' });
+  assert.equal(heard, 2, 'nothing changed');
+  assert.throws(() => s.service.update(bot.bot_id, 1, { name: 'Stale' }), BotConflictError);
+  assert.throws(() => s.service.update(bot.bot_id, 2, { remote: 'yes' as any }), /invalid remote/);
+  assert.throws(() => s.service.create({ name: '' }), /invalid name/);
+  assert.equal(heard, 2, 'a refused change is not news');
+  s.service.update(bot.bot_id, 2, { name: 'Renamed' });
+  assert.equal(heard, 3, 'renamed');
+  s.setActiveWork(true);
+  await assert.rejects(s.service.delete(bot.bot_id), /cancel active turns/);
+  assert.equal(heard, 3, 'a deletion that failed is not news');
+  s.setActiveWork(false);
+  await s.service.delete(bot.bot_id);
+  assert.equal(heard, 4, 'deleted');
+});
+
+test('a listener that fails does not fail the change, and is reported', async (t) => {
+  const s = setup(t, { changed: () => { throw new Error('listener broke'); } });
+  const bot = s.service.create({ name: 'Unbothered' });
+  assert.equal(s.service.update(bot.bot_id, 1, { remote: true }).remote, true);
+  await s.service.delete(bot.bot_id);
+  assert.equal(s.warnings.filter((message) => message.includes('could not be passed on: listener broke')).length, 3);
 });

@@ -1267,6 +1267,7 @@ export class SessionRuntime {
       text,
       origin: source?.origin ?? 'desktop',
       ...(source?.deviceName !== undefined ? { deviceName: source.deviceName } : {}),
+      ...(source?.fromBotName !== undefined ? { fromBotName: source.fromBotName } : {}),
       images: images.map((image) => ({ media_type: image.media_type, base64: image.base64 })),
     };
     const journal = [...this.promptJournal, entry];
@@ -1948,6 +1949,7 @@ export class SessionRuntime {
       allowTeamOnboarding: launch.allowTeamOnboarding,
       scheduledController: launch.scheduledController,
       remoteControlEnabled: launch.remoteControlEnabled,
+      permissionTimeoutSecs: launch.permissionTimeoutSecs,
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
 

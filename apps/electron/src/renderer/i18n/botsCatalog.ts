@@ -1160,5 +1160,26 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "en": "The system did not accept the change. Check System Settings → General → Login Items.",
     "ja": "システムが変更を受け付けませんでした。「システム設定 → 一般 → ログイン項目」を確認してください。",
     "ko": "시스템에서 변경을 받아들이지 않았습니다. '시스템 설정 → 일반 → 로그인 항목'을 확인하세요."
+  },
+  "bots_remote_title": {
+    "zh-Hans": "在手机和浏览器上使用这个 Bot",
+    "zh-Hant": "在手機和瀏覽器上使用這個 Bot",
+    "en": "Reach this Bot from your phone and browser",
+    "ja": "スマートフォンやブラウザからこの Bot を使う",
+    "ko": "휴대폰과 브라우저에서 이 Bot 사용"
+  },
+  "bots_remote_hint": {
+    "zh-Hans": "已获你批准的设备可以查看这个 Bot 的对话、开启新的对话、回答它的提问，并停止它正在进行的回复。",
+    "zh-Hant": "已獲你批准的裝置可以查看這個 Bot 的對話、開啟新的對話、回答它的提問，並停止它正在進行的回覆。",
+    "en": "Your approved devices can see this Bot's chats, start new ones, answer its questions and stop its turns.",
+    "ja": "承認済みのデバイスから、この Bot のチャットの表示、新しいチャットの開始、質問への回答、実行中の応答の停止ができます。",
+    "ko": "승인된 기기에서 이 Bot의 채팅을 보고, 새 채팅을 시작하고, 질문에 답하고, 진행 중인 응답을 중지할 수 있습니다."
+  },
+  "bots_remote_computer_off": {
+    "zh-Hans": "这台电脑上的远程控制已关闭。请先在“设置”中开启。",
+    "zh-Hant": "這台電腦上的遠端控制已關閉。請先在「設定」中開啟。",
+    "en": "Remote control is off on this computer. Turn it on in Settings first.",
+    "ja": "このコンピュータではリモート操作がオフです。先に「設定」でオンにしてください。",
+    "ko": "이 컴퓨터에서는 원격 제어가 꺼져 있습니다. 먼저 설정에서 켜세요."
   }
 };

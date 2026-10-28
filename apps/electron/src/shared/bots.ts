@@ -116,6 +116,8 @@ export interface BotUi {
   permissionMode?: PermissionModeId;
   /** The ids of the Bots that may delegate tasks to this one. Absent: none may. */
   acceptFrom?: string[];
+  /** Whether the owner's approved devices can reach this Bot through Remote Control. Absent: they cannot. */
+  remote?: boolean;
   workspaces: BotWorkspaceUi[];
   /** Epoch milliseconds; absent while the Bot has had no session. */
   lastActivityAt?: number;
@@ -141,6 +143,8 @@ export interface BotUpdateRequest {
   permissionMode?: PermissionModeId | null;
   /** Replaces the whole list; an empty list lets no Bot delegate to this one. */
   acceptFrom?: string[];
+  /** Whether the owner's approved devices can reach this Bot through Remote Control. */
+  remote?: boolean;
   /** Replaces the whole list. */
   workspaces?: BotWorkspaceUi[];
 }

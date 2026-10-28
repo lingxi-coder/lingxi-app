@@ -704,6 +704,11 @@ export function resolveModBunExecutable(options: {
   return configured && configured.length > 0 && !configured.includes('\0') ? configured : undefined;
 }
 
+/** How long the engine waits for a remote device to answer a permission prompt, in seconds. */
+export const REMOTE_PERMISSION_TIMEOUT_SECS = 1800;
+/** The same for a Bot, whose owner may be away for a day; the most bridge-server accepts. */
+export const BOT_PERMISSION_TIMEOUT_SECS = 86_400;
+
 export function buildBridgeArguments(config: {
   appVersion?: string;
   workspace: string;
@@ -728,6 +733,8 @@ export function buildBridgeArguments(config: {
   packagedCredentialBoundary?: boolean;
   scheduledController?: boolean;
   remoteControlEnabled?: boolean;
+  /** How long a remote device has to answer a permission prompt; {@link REMOTE_PERMISSION_TIMEOUT_SECS} when absent. */
+  permissionTimeoutSecs?: number;
 }): string[] {
   if (config.listSessionsJson) {
     return ['--cwd', config.workspace, '--list-sessions-json',
@@ -753,7 +760,9 @@ export function buildBridgeArguments(config: {
   if (typeof config.allowTeamOnboarding === 'boolean') {
     args.push('--host-team-onboarding-policy-gate', String(config.allowTeamOnboarding));
   }
-  if (config.remoteControlEnabled) args.push('--permission-timeout-secs', '1800', '--ask-user-question-timeout', 'never');
+  if (config.remoteControlEnabled) {
+    args.push('--permission-timeout-secs', String(config.permissionTimeoutSecs ?? REMOTE_PERMISSION_TIMEOUT_SECS), '--ask-user-question-timeout', 'never');
+  }
   if (config.scheduledController) args.push('--scheduled-controller');
   if (config.packagedCredentialBoundary) args.push('--packaged-credential-stdin-only');
   return args;

@@ -1587,6 +1587,8 @@ impl Inner {
                     .as_ref()
                     .and_then(|handler| handler.capabilities())
                     .filter(|capabilities| capabilities.validate().is_ok()),
+                // P2c declares `REMOTE_FEATURE_BOTS` once the viewer handles Bots.
+                features: None,
             },
             push_installation_id: deps.push_installation_id.clone(),
         })

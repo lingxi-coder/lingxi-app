@@ -8,6 +8,7 @@ import { BotRoutinesController, routineScopeOf } from '../bridge/botRoutines';
 import { BotSkillsController } from '../bridge/botSkills';
 import { BotTasksController, type BotTasksState } from '../bridge/botTasks';
 import { relativeActivity, removeBot, startBotChat, type BotActivity } from '../bridge/botSession';
+import { botRemoteAvailability, useRemoteControl } from '../bridge/remoteControl';
 import type { BotsController } from '../bridge/botsStore';
 import type { UseBridge } from '../bridge/bridgeTypes';
 import { BotChatsPanel, BotMemoryPanel, BotRoutinesPanel, BotSkillsPanel, BotTasksPanel, type BotChats } from './BotPanels';
@@ -18,6 +19,7 @@ import {
   BotGeneralFields,
   BotPermissionField,
   BotPersonaField,
+  BotRemoteField,
   useObservable,
   type ModelChoices,
 } from './BotFields';
@@ -118,6 +120,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
   const state = useObservable(editor);
   const taskState = useObservable(tasks);
   const known = useObservable(bots);
+  const remoteAvailability = botRemoteAvailability(useRemoteControl().status);
   const [tab, setTab] = useState<BotTab>('chats');
   const [chats, setChats] = useState<BotChats>({ status: 'loading' });
   const [opening, setOpening] = useState<string | undefined>();
@@ -207,6 +210,7 @@ export function BotDetail({ botId, listed, api, bots, activity, models, pickFold
       {tab === 'folders' ? <BotFoldersField draft={state.draft} problems={problems} disabled={state.save.kind === 'saving'} pickFolder={pickFolder} onChange={(change) => editor.setDraft(change)} /> : null}
       {tab === 'permissions' ? <>
         <BotPermissionField draft={state.draft} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} />
+        <BotRemoteField draft={state.draft} availability={remoteAvailability} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} />
         <BotAcceptField draft={state.draft} problems={problems} peers={peers === undefined ? undefined : known.bots.filter((bot) => bot.botId !== botId)} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} />
       </> : null}
       <BotSaveBar state={state} dirty={dirty} problems={hasBotDraftProblems(problems)} onSave={() => void editor.save()} onReload={() => void editor.load()} />

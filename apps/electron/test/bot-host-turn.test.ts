@@ -150,6 +150,19 @@ test('a host turn sends the prompt as the host and returns what the assistant en
   assert.notEqual(h.prompts[1]!.turnId, h.prompts[0]!.turnId);
 });
 
+test('a prompt another Bot sent is journaled with that Bot\'s name, and one that nobody sent carries none', async (t) => {
+  const h = await fixture(t);
+  h.onPrompt(goodTurn('Done.', 0.1));
+  await h.runtime.runHostTurn('A task from Alice.', { source: { origin: 'bot', fromBotName: 'Alice' } });
+  h.onPrompt(goodTurn('Done again.', 0.2, true));
+  await h.runtime.runHostTurn('A routine.');
+  await h.runtime.runHostTurn('A phone.', { source: { origin: 'device', deviceName: 'Phone' } });
+  const [task, routine, phone] = h.runtime.remoteView().prompts;
+  assert.deepEqual([task!.origin, task!.fromBotName], ['bot', 'Alice']);
+  assert.deepEqual([routine!.origin, 'fromBotName' in routine!], ['scheduled', false]);
+  assert.deepEqual([phone!.origin, phone!.deviceName, 'fromBotName' in phone!], ['device', 'Phone', false]);
+});
+
 test('the answer is the last message of the turn, whatever was said before a tool was used', async (t) => {
   const h = await fixture(t);
   h.onPrompt(({ turnId }, emit) => {

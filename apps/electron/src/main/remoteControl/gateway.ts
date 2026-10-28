@@ -16,6 +16,8 @@ export interface RemoteViewer {
   platform: DevicePlatform;
   /** Present only when the authenticated viewer declared a concrete handler. */
   media_capabilities?: RemoteMediaCapabilities;
+  /** True only when the viewer declared the `bots` feature; only then does it see Bots and their chats. */
+  bot_aware?: true;
   conn_id: string;
   push_installation_id?: string;
 }

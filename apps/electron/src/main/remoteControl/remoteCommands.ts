@@ -71,7 +71,7 @@ export const IMAGE_GET_MAX_SIDE = 1568;
 export const IMAGE_GET_MAX_BYTES = 2 * 1024 * 1024;
 /** A retry of a prompt with the same `client_request_id` within this long gets the first answer. */
 export const IDEMPOTENCY_WINDOW_MS = 5 * 60_000;
-const IDEMPOTENCY_MAX_ENTRIES = 512;
+export const IDEMPOTENCY_MAX_ENTRIES = 512;
 const MAX_HISTORY_LIMIT = 200;
 const MAX_ID_CHARS = 128;
 const SLASH_COMMAND = /^\/[^\s/]+(?:\s|$)/;

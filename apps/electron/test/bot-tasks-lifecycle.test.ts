@@ -194,6 +194,16 @@ test('a follow-up goes to the same session after the task is over, and the task 
   assert.deepEqual(s.record(s.task.task_id).messages.map((message) => message.text), ['Also include the totals.']);
 });
 
+test('a task, and a follow-up to it, are put to the session as the sending Bot\'s, so that a phone can tell them from a routine\'s', async (t) => {
+  const s = await started(t);
+  assert.deepEqual(s.session().last.options!.source, { origin: 'bot', fromBotName: 'Alice' });
+  s.session().last.finish({ status: 'completed', text: 'First answer' });
+  await s.reached('completed');
+  await s.tasks.messageBot(s.chat(s.Alice), s.task.task_id, 'Also include the totals.');
+  assert.equal(s.session().turns.length, 2);
+  assert.deepEqual(s.session().last.options!.source, { origin: 'bot', fromBotName: 'Alice' });
+});
+
 test('a follow-up needs a Bot that has stopped: not one that is working, waiting, or was canceled; and a failed task may be followed up', async (t) => {
   const s = await started(t);
   await refused(s.tasks.messageBot(s.caller, s.task.task_id, 'Hurry'), 'state', /still working on this task/);

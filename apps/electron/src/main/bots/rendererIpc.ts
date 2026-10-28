@@ -136,12 +136,13 @@ function createRequest(value: unknown): BotCreateRequest {
 }
 
 function updateRequest(value: unknown): BotUpdateRequest {
-  const request = plainObject(value, ['name', 'description', 'model', 'permissionMode', 'acceptFrom', 'workspaces']);
+  const request = plainObject(value, ['name', 'description', 'model', 'permissionMode', 'acceptFrom', 'remote', 'workspaces']);
   const name = optionalText(request['name'], 'name');
   const description = optionalText(request['description'], 'description');
   const model = request['model'] === null ? null : optionalText(request['model'], 'model');
   const mode = request['permissionMode'] === null ? null : permissionMode(request['permissionMode']);
   const accepted = acceptFrom(request['acceptFrom']);
+  const remote = request['remote'] === undefined ? undefined : flag(request['remote'], 'Remote Control setting');
   const bound = workspaces(request['workspaces']);
   return {
     ...(name !== undefined ? { name } : {}),
@@ -149,6 +150,7 @@ function updateRequest(value: unknown): BotUpdateRequest {
     ...(model !== undefined ? { model } : {}),
     ...(mode !== undefined ? { permissionMode: mode } : {}),
     ...(accepted !== undefined ? { acceptFrom: accepted } : {}),
+    ...(remote !== undefined ? { remote } : {}),
     ...(bound !== undefined ? { workspaces: bound } : {}),
   };
 }
@@ -174,6 +176,7 @@ export function botUi(record: BotRecord, lastActivityAt?: number): BotUi {
     ...(record.model !== undefined ? { model: record.model } : {}),
     ...(record.permission_mode !== undefined ? { permissionMode: record.permission_mode } : {}),
     ...(record.accept_from !== undefined ? { acceptFrom: [...record.accept_from] } : {}),
+    ...(record.remote === true ? { remote: true } : {}),
     workspaces: record.workspaces.map((workspace) => ({ path: workspace.path, mode: workspace.mode })),
     ...(lastActivityAt !== undefined ? { lastActivityAt } : {}),
   };

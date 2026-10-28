@@ -404,6 +404,7 @@ fn session_summaries_map_status_and_pending_action() {
         pending_action: Some(RemotePendingAction::ComputerAccess),
         model: Some("m".into()),
         viewers: 2,
+        bot_id: None,
     };
     let ffi = session_summary_to_ffi(&summary);
     assert_eq!(ffi.status, RemoteSessionStatusFfi::RequiresAction);

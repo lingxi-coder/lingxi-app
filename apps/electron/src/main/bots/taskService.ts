@@ -517,6 +517,8 @@ export class BotTasks implements DelegationBackend {
           }
           return await runtime.runHostTurn(prompt, {
             signal: controller.signal,
+            // The prompt shows as the sending Bot's, not as a scheduled run's.
+            source: { origin: 'bot', fromBotName: this.nameOf(task.sender.bot_id) },
             onSent: () => this.options.promptSent?.(task.receiver.session_id, prompt),
           });
         } finally {

@@ -368,6 +368,57 @@ test('the record is read strictly where the mode is concerned', (t) => {
   }
 });
 
+test('a Bot is made with Remote Control off, and the switch is turned on and off by an update, which is checked first', (t) => {
+  const f = botFixture(t);
+  const bot = f.store.create({ name: 'Reachable' });
+  assert.ok(!('remote' in bot) && !('remote' in JSON.parse(recordText(f.store, bot.bot_id))), 'a new Bot is off, and off is an absent key');
+  const on = f.store.update(bot.bot_id, 1, { remote: true });
+  assert.equal(on.remote, true);
+  assert.equal(on.revision, 2);
+  assert.equal(JSON.parse(recordText(f.store, bot.bot_id)).remote, true);
+  assert.equal(f.store.get(bot.bot_id).remote, true);
+  assert.equal(f.store.update(bot.bot_id, 2, { remote: true }).revision, 2, 'the same again changes nothing');
+  assert.equal(f.store.update(bot.bot_id, 2, { name: 'Reachable too' }).remote, true, 'what the patch does not mention stays');
+  const before = recordText(f.store, bot.bot_id);
+  for (const bad of ['true', 'yes', 1, 0, null, {}, []]) {
+    assert.throws(() => f.store.update(bot.bot_id, 3, { remote: bad as any }), /invalid remote/, JSON.stringify(bad));
+  }
+  assert.equal(recordText(f.store, bot.bot_id), before, 'a refused switch changes nothing');
+  const off = f.store.update(bot.bot_id, 3, { remote: false });
+  assert.equal(off.remote, undefined);
+  assert.equal(off.revision, 4);
+  assert.ok(!('remote' in JSON.parse(recordText(f.store, bot.bot_id))), 'switching off removes the key');
+  assert.equal(f.store.update(bot.bot_id, 4, { remote: false }).revision, 4, 'off when it is off changes nothing');
+});
+
+test('the record is read strictly where the switch is concerned', (t) => {
+  const f = botFixture(t);
+  const bot = f.store.create({ name: 'Strict switch' });
+  const good = JSON.parse(recordText(f.store, bot.bot_id));
+  assert.equal(parseRecord(JSON.stringify({ ...good, remote: true }), bot.bot_id).remote, true);
+  assert.deepEqual(parseRecord(JSON.stringify({ ...good, remote: false }), bot.bot_id), bot, 'false reads as an absent key');
+  for (const bad of ['true', 'yes', 1, 0, null, {}, []]) {
+    assert.throws(() => parseRecord(JSON.stringify({ ...good, remote: bad }), bot.bot_id), /invalid remote/, JSON.stringify(bad));
+  }
+  assert.throws(() => parseRecord(JSON.stringify({ ...good, remote: true, shared: true }), bot.bot_id), /unsupported fields/, 'an unknown key is still refused');
+});
+
+test('the Bot a transcript belongs to is found by the session id alone, and only a session id is looked for', (t) => {
+  const f = botFixture(t);
+  const first = f.store.create({ name: 'First' });
+  const second = f.store.create({ name: 'Second' });
+  const id = '12121212-3434-4567-8899-aaaaaaaaaaaa';
+  assert.equal(f.store.botIdOfTranscript(id), undefined, 'no transcript, no Bot');
+  mkdirSync(f.store.transcriptsDir(second.bot_id), { recursive: true });
+  writeFileSync(join(f.store.transcriptsDir(second.bot_id), `${id}.jsonl`), '');
+  assert.equal(f.store.botIdOfTranscript(id), second.bot_id);
+  assert.equal(f.store.botIdOfTranscript('12121212-3434-4567-8899-bbbbbbbbbbbb'), undefined, 'another session');
+  mkdirSync(join(f.store.root, 'not-a-bot', 'home'), { recursive: true });
+  for (const bad of ['', '../x', `../${first.bot_id}/bot`, id.slice(1), `${id}.jsonl`, 'x'.repeat(2000)]) {
+    assert.equal(f.store.botIdOfTranscript(bad), undefined, JSON.stringify(bad));
+  }
+});
+
 test('a conflict says what the window knows it by', (t) => {
   const f = botFixture(t);
   const bot = f.store.create({ name: 'Raced' });

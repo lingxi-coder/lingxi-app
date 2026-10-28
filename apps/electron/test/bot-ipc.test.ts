@@ -328,6 +328,27 @@ test('a Bot has a permission mode of its own, checked on the way in', async (t) 
   assert.equal((await s.call(CH_BOTS_GET, bot.botId)).revision, 3);
 });
 
+test('a Bot is reachable from the owner\'s devices only when its switch is on, which the window sets by an update and reads back', async (t) => {
+  const s = setup(t);
+  const bot = await s.call(CH_BOTS_CREATE, { name: 'Reachable' });
+  assert.ok(!('remote' in bot), 'a new Bot is off, and the window is told nothing of it');
+  const on = await s.call(CH_BOTS_UPDATE, bot.botId, 1, { remote: true });
+  assert.deepEqual([on.remote, on.revision], [true, 2]);
+  assert.equal((await s.call(CH_BOTS_GET, bot.botId)).remote, true);
+  assert.equal((await s.call(CH_BOTS_LIST))[0].remote, true);
+  assert.deepEqual(botUi(s.store.get(bot.botId)), on);
+  assert.equal((await s.call(CH_BOTS_UPDATE, bot.botId, 2, { name: 'Reachable too' })).remote, true, 'a patch that does not mention it keeps it');
+  const off = await s.call(CH_BOTS_UPDATE, bot.botId, 3, { remote: false });
+  assert.ok(!('remote' in off), 'off is an absent key, as for the record');
+  assert.equal(off.revision, 4);
+  for (const bad of ['true', 'on', 1, 0, null, {}, []]) {
+    await assert.rejects(s.call(CH_BOTS_UPDATE, bot.botId, 4, { remote: bad }), /invalid Remote Control setting/, JSON.stringify(bad));
+  }
+  assert.equal((await s.call(CH_BOTS_GET, bot.botId)).revision, 4, 'a refused value changes nothing');
+  await assert.rejects(s.call(CH_BOTS_CREATE, { name: 'Eager', remote: true }), /unsupported fields/, 'a Bot is made off, and switched on afterwards');
+  assert.deepEqual((await s.call(CH_BOTS_LIST)).map((entry: any) => entry.name), ['Reachable too'], 'and the refused one was not made');
+});
+
 test('the conflict a stale update causes is the one the window recognises by its text', async (t) => {
   const s = setup(t);
   const bot = await s.call(CH_BOTS_CREATE, { name: 'Raced' });

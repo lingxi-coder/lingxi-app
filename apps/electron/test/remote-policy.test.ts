@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { MAX_REMOTE_SESSIONS, parseSettings } from '../src/main/host-utils.js';
 import { RemotePolicy, managedSettingsDirectory } from '../src/main/remoteControl/policy.js';
 import { SettingsStore } from '../src/main/settings.js';
-import { FakeSettings, PROJECT, SESSION_A, SESSION_B } from './remote-session-helpers.js';
+import { FakeSettings, PROJECT, SESSION_A, SESSION_B, SESSION_C } from './remote-session-helpers.js';
 
 /** A settings store that knows the projects the tests use. */
 function storeIn(directory: string): SettingsStore {
@@ -248,4 +248,96 @@ test('the policy against a real settings file, across a restart', () => {
     const managed = new RemotePolicy({ settings: storeIn(directory), managedDirectory: join(directory, 'managed') });
     assert.equal(managed.allows(), false);
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A Bot's chats
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BOT_WORKSPACE = '/bots/Bot0000000000000000001/workspace';
+
+/** A policy over Bots that are told apart by a flag each: which chats there are, and whose switch is on. */
+function botPolicy(options: { veto?: boolean; computer?: boolean } = {}) {
+  const state = { veto: options.veto ?? false, computer: options.computer ?? true, switchOn: true, bots: true };
+  const settings = new FakeSettings();
+  const policy = new RemotePolicy({
+    settings,
+    managedDirectory: '/managed',
+    readFile: () => (state.veto ? '{"disableRemoteControl":true}' : '{}'),
+    computerEnabled: () => state.computer,
+    bots: () => (state.bots
+      ? {
+        chat: (sessionId) => (sessionId === SESSION_C
+          ? { botId: 'Bot0000000000000000001', ref: { projectPath: BOT_WORKSPACE, sessionId }, remote: state.switchOn }
+          : undefined),
+        remoteEnabled: (workspace) => workspace === BOT_WORKSPACE && state.switchOn,
+      }
+      : undefined),
+  });
+  return { policy, settings, state };
+}
+
+test('a Bot\'s chat is reachable exactly when the administrator allows Remote Control, it is on for this computer, and the Bot\'s switch is on', () => {
+  for (const veto of [false, true]) {
+    for (const computer of [false, true]) {
+      for (const switchOn of [false, true]) {
+        const { policy, state } = botPolicy({ veto, computer });
+        state.switchOn = switchOn;
+        const reachable = !veto && computer && switchOn;
+        const label = JSON.stringify({ veto, computer, switchOn });
+        assert.deepEqual(policy.botChat(SESSION_C), { ref: { projectPath: BOT_WORKSPACE, sessionId: SESSION_C }, reachable }, label);
+        assert.equal(policy.botReachable(BOT_WORKSPACE), reachable, label);
+      }
+    }
+  }
+});
+
+test('a session that is no Bot\'s chat, a workspace that is no Bot\'s, and a computer without Bots are not reachable as a Bot', () => {
+  const { policy, state } = botPolicy();
+  assert.equal(policy.botChat(SESSION_A), undefined);
+  assert.equal(policy.botReachable('/work/project-one'), false);
+  state.bots = false;
+  assert.equal(policy.botChat(SESSION_C), undefined);
+  assert.equal(policy.botReachable(BOT_WORKSPACE), false);
+  const plain = new RemotePolicy({ settings: new FakeSettings() });
+  assert.equal(plain.botChat(SESSION_C), undefined, 'without a Bot source there are no Bot chats');
+  assert.equal(plain.botReachable(BOT_WORKSPACE), false);
+});
+
+test('Remote Control is taken as on for the computer when the policy is not told otherwise', () => {
+  const policy = new RemotePolicy({
+    settings: new FakeSettings(),
+    bots: () => ({ chat: (sessionId) => ({ botId: 'Bot0000000000000000001', ref: { projectPath: BOT_WORKSPACE, sessionId }, remote: true }), remoteEnabled: () => true }),
+  });
+  assert.equal(policy.botChat(SESSION_C)?.reachable, true);
+  assert.equal(policy.botReachable(BOT_WORKSPACE), true);
+});
+
+test('a Bot\'s chat is nobody\'s session: find, isEnabled and enabledSessions neither list it nor change for it', () => {
+  const { policy, settings, state } = botPolicy();
+  settings.sessions = [ref(SESSION_A)];
+  const before = JSON.stringify([policy.enabledSessions(), policy.find(SESSION_A), policy.find(SESSION_C), policy.isEnabled(SESSION_C), policy.wasEnabled(SESSION_C)]);
+  assert.equal(policy.botChat(SESSION_C)?.reachable, true);
+  assert.equal(policy.find(SESSION_C), undefined);
+  assert.equal(policy.isEnabled(SESSION_C), false);
+  assert.equal(policy.wasEnabled(SESSION_C), false);
+  assert.deepEqual(policy.enabledSessions(), [ref(SESSION_A)]);
+  for (const veto of [false, true]) {
+    for (const computer of [false, true]) {
+      state.veto = veto;
+      state.computer = computer;
+      policy.recheck();
+      assert.equal(JSON.stringify([policy.enabledSessions(), policy.find(SESSION_A), policy.find(SESSION_C), policy.isEnabled(SESSION_C), policy.wasEnabled(SESSION_C)]), before, JSON.stringify({ veto, computer }));
+    }
+  }
+});
+
+test('the Bot source is asked each time, so that Bots made after the policy, or gone, are seen', () => {
+  const { policy, state } = botPolicy();
+  assert.equal(policy.botChat(SESSION_C)?.reachable, true);
+  state.bots = false;
+  assert.equal(policy.botChat(SESSION_C), undefined);
+  state.bots = true;
+  state.switchOn = false;
+  assert.equal(policy.botChat(SESSION_C)?.reachable, false);
 });

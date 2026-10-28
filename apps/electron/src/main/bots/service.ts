@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 import type { BotsAvailability } from '../../shared/bots.js';
 import type { SessionRef, WorkspaceLaunchSettings } from '../bridgeTypes.js';
+import type { RemoteBot, RemoteBotLookup, BotChat } from '../remoteControl/remoteBots.js';
 import type { RoutineBot } from '../scheduled.js';
 import type { ProjectSessionCatalogRow } from '../session-catalog.js';
 import { isSessionId } from '../sessionIdentity.js';
@@ -82,6 +83,10 @@ export interface BotServiceOptions {
   router?: BotRouterAccess;
   /** Tasks between Bots; absent where there are none. */
   delegation?: BotDelegation;
+  /** The working directory a session is open in, if it is open; without it only a chat's transcript tells whose it is. */
+  openProject?: (sessionId: string) => string | undefined;
+  /** A Bot was made, changed or deleted, which Remote Control must hear of: its switch, name and chats are what viewers see. */
+  changed?: () => void;
   /** The platform the app runs on; this process's by default. */
   platform?: NodeJS.Platform;
   /** Something went wrong that does not stop the operation. */
@@ -124,6 +129,10 @@ export class BotService {
     this.options.warn?.(message);
   }
 
+  private changed(): void {
+    try { this.options.changed?.(); } catch (error) { this.warn(`a change to the Bots could not be passed on: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+
   /**
    * Make the Bot's `settings.json` current; a Bot cannot be made or changed if
    * that fails. Returns the folders that are granted.
@@ -151,13 +160,16 @@ export class BotService {
     const record = this.store.create(input, (draft) => { this.writeSettings(draft); });
     // Every other Bot must now keep out of this one.
     writeAllBotSettings(this.store, (message) => this.warn(message), record.bot_id);
+    this.changed();
     return record;
   }
 
   update(botId: string, expectedRevision: number, patch: BotPatch): BotRecord {
     this.assertAvailable();
     this.assertNotDeleting(botId);
-    return this.store.update(botId, expectedRevision, patch, (draft) => { this.writeSettings(draft); });
+    const record = this.store.update(botId, expectedRevision, patch, (draft) => { this.writeSettings(draft); });
+    if (record.revision !== expectedRevision) this.changed();
+    return record;
   }
 
   /** Stop the Bot's sessions, then move its folder to the trash folder. Rejects while a session is working. */
@@ -183,6 +195,7 @@ export class BotService {
     }
     // The others no longer need to keep out of it.
     writeAllBotSettings(this.store, (message) => this.warn(message));
+    this.changed();
   }
 
   /** A new session of the Bot, or an existing one of its own. */
@@ -292,6 +305,55 @@ export class BotService {
   /** Whether the Bot is being deleted right now. */
   isDeleting(botId: string): boolean {
     return this.deleting.has(botId);
+  }
+
+  // What Remote Control asks
+
+  /** Where a Bot stands for remote devices. Never throws: a Bot that cannot be read is not there. */
+  remoteBot(botId: string): RemoteBotLookup {
+    if (!this.availability().available) return { state: 'unknown' };
+    if (this.deleting.has(botId)) return { state: 'deleting' };
+    let record: BotRecord;
+    try { record = this.store.get(botId); } catch { return { state: 'unknown' }; }
+    return record.remote === true ? { state: 'on', bot: this.remoteBotOf(record) } : { state: 'off' };
+  }
+
+  /** The Bots whose Remote Control switch is on, oldest first: none where Bots cannot run, and not one being deleted or that cannot be read. */
+  remoteBots(): RemoteBot[] {
+    if (!this.availability().available) return [];
+    let entries: ReturnType<BotStore['entries']>;
+    try { entries = this.store.entries(); } catch { return []; }
+    return entries
+      .flatMap(({ botId, record }) => record?.remote === true && !this.deleting.has(botId) ? [record] : [])
+      .sort((left, right) => left.created_at - right.created_at || left.bot_id.localeCompare(right.bot_id))
+      .map((record) => this.remoteBotOf(record));
+  }
+
+  /**
+   * The Bot a chat belongs to, if it belongs to one, without waiting for the
+   * disk: a chat open in a Bot's workspace, else a transcript in a Bot's home.
+   * (A chat started from a phone has no transcript until its first prompt.)
+   * The hidden session that watches the clock is no chat.
+   */
+  chat(sessionId: string): BotChat | undefined {
+    // Only the spelling the engine writes: the id reaches a file name below.
+    if (!this.availability().available || !isSessionId(sessionId) || sessionId !== sessionId.toLowerCase()) return undefined;
+    const project = this.options.openProject?.(sessionId);
+    const botId = project !== undefined ? this.store.botIdForWorkspace(project) : this.store.botIdOfTranscript(sessionId);
+    if (botId === undefined) return undefined;
+    const workspace = this.store.workspaceDir(botId);
+    if (this.options.routines?.isControllerSession(workspace, sessionId)) return undefined;
+    return { botId, ref: { projectPath: workspace, sessionId }, remote: this.remoteBot(botId).state === 'on' };
+  }
+
+  /** Whether the Bot that works in this folder has its Remote Control switch on. */
+  remoteEnabled(workspace: string): boolean {
+    const botId = this.botIdFor(workspace);
+    return botId !== undefined && this.remoteBot(botId).state === 'on';
+  }
+
+  private remoteBotOf(record: BotRecord): RemoteBot {
+    return { botId: record.bot_id, name: record.name, description: record.description, workspace: this.store.workspaceDir(record.bot_id) };
   }
 
   /** Whether a working directory is shaped like a Bot's workspace, whether or not the Bot still exists. */

@@ -199,6 +199,7 @@ export class FakeRuntime implements RemoteRuntime {
       text,
       origin: source.origin,
       ...(source.deviceName !== undefined ? { deviceName: source.deviceName } : {}),
+      ...(source.fromBotName !== undefined ? { fromBotName: source.fromBotName } : {}),
       images: images.map((image) => ({ media_type: image.media_type, base64: image.base64 })),
     };
     this.prompts.push(entry);
@@ -395,7 +396,8 @@ export function newClock(): ManualClock { return new ManualClock(START); }
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { RemoteCommands, type ImageCodec, type RemotePromptEcho } from '../src/main/remoteControl/remoteCommands.js';
-import { RemotePolicy, type RemotePolicySettings } from '../src/main/remoteControl/policy.js';
+import { RemotePolicy, type RemotePolicyOptions, type RemotePolicySettings } from '../src/main/remoteControl/policy.js';
+import type { RemoteBotDirectory } from '../src/main/remoteControl/remoteBots.js';
 import { SessionGateway, LEASE_GRACE_MS } from '../src/main/remoteControl/sessionGateway.js';
 
 export class FakeSettings implements RemotePolicySettings {
@@ -432,10 +434,18 @@ export interface GatewayFixture {
   call(method: string, params?: unknown, who?: { viewer: RemoteViewer; channel: RecordingChannel }): Promise<any>;
 }
 
-export function gatewayFixture(options: { codec?: ImageCodec; turnIds?: number[]; files?: RemoteFileStore } = {}): GatewayFixture {
+export function gatewayFixture(options: {
+  codec?: ImageCodec;
+  turnIds?: number[];
+  files?: RemoteFileStore;
+  /** The Bots, as the policy and the gateway ask for them. */
+  bots?: () => RemoteBotDirectory | null | undefined;
+  /** More of what the policy is made from: whether Remote Control is on for the computer, the managed directory. */
+  policy?: Partial<RemotePolicyOptions>;
+} = {}): GatewayFixture {
   const clock = newClock();
   const settings = new FakeSettings();
-  const policy = new RemotePolicy({ settings });
+  const policy = new RemotePolicy({ settings, ...(options.bots ? { bots: options.bots } : {}), ...options.policy });
   const runtimes = new FakeRuntimes();
   const echoes: RemotePromptEcho[] = [];
   const titles = new Map<string, string>();
@@ -452,6 +462,7 @@ export function gatewayFixture(options: { codec?: ImageCodec; turnIds?: number[]
   const gateway = new SessionGateway({
     runtimes,
     policy,
+    ...(options.bots ? { bots: options.bots } : {}),
     files: options.files,
     commands,
     titleOf: async (ref) => titles.get(ref.sessionId),

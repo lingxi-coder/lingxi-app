@@ -119,6 +119,7 @@ test('protocol constants carry the plan\'s values', () => {
   assert.equal(version.REMOTE_PROTOCOL, 'lingxi-rc/1');
   assert.equal(version.REMOTE_PROTOCOL_MAJOR, 1);
   assert.equal(version.DATA_CHANNEL_LABEL, 'lingxi-agent');
+  assert.equal(version.REMOTE_FEATURE_BOTS, 'bots');
   assert.equal(version.FRAGMENT_MAX_BYTES, 16384);
   assert.equal(version.MESSAGE_MAX_BYTES, 16 * 1024 * 1024);
   assert.equal(version.TUNNEL_FRAME_PLAINTEXT_MAX, 49136);

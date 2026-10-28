@@ -20,8 +20,12 @@ selected = {name: spec for name, spec in manifest_data['workspace']['dependencie
             if isinstance(spec, dict) and spec.get('git') == repo}
 if len(selected) != 45 or any(spec.get('rev') != old for spec in selected.values()):
     raise SystemExit('unexpected Harness dependency inventory or base pin')
+patched = {name: spec for name, spec in manifest_data.get('patch', {}).get('crates-io', {}).items()
+           if isinstance(spec, dict) and spec.get('git') == repo}
+if set(patched) != {'nix'} or any(spec.get('rev') != old for spec in patched.values()):
+    raise SystemExit('unexpected Harness crates-io patch inventory or base pin')
 original_lock = lockfile.read_bytes()
-print(f'Original App git pin: {old}; direct dependencies: {len(selected)}', flush=True)
+print(f'Original App git pin: {old}; direct dependencies: {len(selected)}; patched packages: {len(patched)}', flush=True)
 print(f'Original Cargo.lock SHA256: {hashlib.sha256(original_lock).hexdigest()}', flush=True)
 lines = original_text.splitlines(keepends=True)
 changed = 0
@@ -32,8 +36,8 @@ for index, line in enumerate(lines):
             raise SystemExit(f'unexpected source line: {line}')
         lines[index] = line.replace(old_marker, f'rev = "{new}"')
         changed += 1
-if changed != len(selected):
-    raise SystemExit(f'changed {changed} entries but expected {len(selected)}')
+if changed != len(selected) + len(patched):
+    raise SystemExit(f'changed {changed} entries but expected {len(selected) + len(patched)}')
 manifest.write_text(''.join(lines))
 subprocess.run(['cargo', 'update', '--package', 'harness-runtime'], cwd=root, check=True)
 with (temp / 'pin-lock-metadata.json').open('w') as stream:

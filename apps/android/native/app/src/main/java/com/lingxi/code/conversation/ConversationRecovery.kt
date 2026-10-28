@@ -162,6 +162,48 @@ internal fun ownerModeForSavedRecord(workspaceKey: String, sessionId: String, sa
     return SessionMode.entries.firstOrNull { scope == "$workspaceKey#${it.wireValue}" }
 }
 
+/** UI-owned history kept only in the live source while its current turn runs. */
+data class RetainedConversationTranscript(
+    val sessionId: String,
+    val turnId: Long?,
+    val state: ChatState,
+    val afterSequence: Long,
+    val turnToken: Long,
+    val turnOrigin: ConversationTurnOrigin,
+    val pendingAssistantIdentity: String?,
+    val optimisticRowsByToken: Map<String, String>,
+    val assistantTranscriptUuidsByIdentity: Map<String, List<String>>,
+    val pendingAssistantTranscriptUuids: Set<String>,
+    val assistantRowsByIdentity: Map<String, String>,
+    val reasoningBeforeResponse: String?,
+    val assistantReasoningByIdentity: Map<String, Pair<String, String>>,
+    val assistantIdentityTurnToken: Long,
+)
+
+internal class RetainedConversationTranscriptStore {
+    @Volatile private var snapshot: RetainedConversationTranscript? = null
+
+    fun save(value: RetainedConversationTranscript) {
+        snapshot = value
+    }
+
+    fun clear() { snapshot = null }
+
+    fun turnRecord(scope: String, sessionId: String?): DurableConversationTurnRecord? {
+        val retained = snapshot ?: return null
+        val turnId = retained.turnId ?: return null
+        if (sessionId == null || canonicalSessionId(retained.sessionId) != canonicalSessionId(sessionId)) return null
+        return DurableConversationTurnRecord(scope, retained.sessionId, turnId)
+    }
+
+    fun activation(current: ActivatedSession): ActivatedSession {
+        val retained = snapshot?.takeIf { canonicalSessionId(it.sessionId) == canonicalSessionId(current.sessionId) }
+            ?: return current
+        return current.copy(transcript = retained.state.messages, transcriptComplete = retained.turnId == null,
+            retainedProjection = retained)
+    }
+}
+
 internal class DurableTurnReplayGate {
     private var pendingColdResumeAttachTurnId: Long? = null
     private var suppressingRetainedReplayTurnId: Long? = null
@@ -176,7 +218,7 @@ internal class DurableTurnReplayGate {
         pendingColdResumeAttachTurnId =
             turnId.takeIf {
                 afterSequence <= 0L &&
-                    activation?.kind == SessionActivationKind.Resumed
+                    activation?.kind == SessionActivationKind.Resumed && activation.transcriptComplete
             }
         if (pendingColdResumeAttachTurnId != turnId) {
             clearTurn(turnId)
@@ -288,6 +330,11 @@ internal class DurableAttachCoordinator {
     @Synchronized
     fun releaseToHeadless() {
         claimedByUi = false
+        // A later Activity has a new collector, even at the same cursor. It
+        // must receive its own recovery snapshot and replay rather than being
+        // coalesced with the Activity that just released the source.
+        lastOwner = null
+        lastRequest = null
     }
 
     /**
@@ -344,7 +391,13 @@ internal class RecoveringConversationSource(
             retainedSource = delegate
             launch { delegate.modelState.collect { models.value = it } }
             launch { delegate.sessionState.collect { sessions.value = it } }
-            launch { delegate.activeSessionState.collect { activeSession.value = it } }
+            launch {
+                var first = true
+                delegate.activeSessionState.collect {
+                    activeSession.value = if (first) it?.withLatestMode(delegate.sessionModeState.value) else it
+                    if (it != null) first = false
+                }
+            }
             launch { delegate.sessionModeState.collect { modeState.value = it } }
             launch { delegate.pendingPermission.collect { permissions.value = it } }
             launch { delegate.mcpServers.collect { mcp.value = it } }
@@ -391,6 +444,15 @@ internal class RecoveringConversationSource(
 
     override suspend fun resumeEmptySession(uuid: String, title: String) {
         pendingSource.await()?.resumeEmptySession(uuid, title)
+    }
+
+    override suspend fun restoreInitialSession(uuid: String, title: String, empty: Boolean): ActivatedSession? {
+        val delegate = pendingSource.await() ?: error("engine is not connected")
+        return delegate.restoreInitialSession(uuid, title, empty)
+    }
+
+    override fun retainUiTranscript(snapshot: RetainedConversationTranscript) {
+        retainedSource?.retainUiTranscript(snapshot)
     }
 
     override suspend fun refreshMcpServers() {

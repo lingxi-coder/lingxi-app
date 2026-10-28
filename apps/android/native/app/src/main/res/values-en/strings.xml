@@ -3,6 +3,7 @@
     <string name="chat_compact_during_turn">Compact is disabled while a chat is in progress</string>
     <string name="chat_message_copy">Copy</string>
     <string name="chat_message_copied">Copied</string>
+    <string name="chat_recovery_replay_truncated">Some responses are temporarily missing. Reopen the conversation after the task finishes to view the full history.</string>
     <string name="app_intent_ask_description">Bring text from Siri, Shortcuts, or another app into a new conversation.</string>
     <string name="app_intent_ask_title">Ask LingXi</string>
     <string name="app_intent_initial_command_param_title">Pre-filled Command</string>

@@ -8,6 +8,9 @@ import com.lingxi.code.bindings.client.DiffLineKindDto
 import com.lingxi.code.bindings.client.DiffRowDto
 import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.bindings.client.HeadlineKindDto
+import com.lingxi.code.bindings.client.MessageBlockDto
+import com.lingxi.code.bindings.client.MessageDto
+import com.lingxi.code.bindings.client.MessageImageDto
 import com.lingxi.code.bindings.client.StructuredDiffDto
 import com.lingxi.code.bindings.client.SyntaxClassDto
 import com.lingxi.code.bindings.client.ToolHeaderDto
@@ -15,7 +18,9 @@ import com.lingxi.code.bindings.client.ToolIconDto
 import com.lingxi.code.bindings.client.ToolResultDisplayDto
 import com.lingxi.code.bindings.client.ToolSubLineDto
 import com.lingxi.code.bindings.client.ToolVerbDto
+import com.lingxi.code.bindings.client.VisualizationRefDto
 import com.lingxi.code.model.Message
+import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.toUi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
@@ -127,10 +132,13 @@ sealed interface ReplyEvent {
     data object End : ReplyEvent
 }
 
-private fun shouldAwaitDurableTurnReplayAck(event: ClientEvent, reply: ReplyEvent): Boolean =
+internal fun shouldAwaitDurableTurnReplayAck(event: ClientEvent, reply: ReplyEvent): Boolean =
     when (event) {
         is ClientEvent.TurnStarted,
         is ClientEvent.TextDelta,
+        is ClientEvent.MessageIdentity,
+        is ClientEvent.MessageComplete,
+        is ClientEvent.MessageRetracted,
         is ClientEvent.VisualizationBlock,
         is ClientEvent.ThinkingDelta,
         is ClientEvent.SystemNotice,
@@ -147,6 +155,118 @@ private fun shouldAwaitDurableTurnReplayAck(event: ClientEvent, reply: ReplyEven
             reply !is ReplyEvent.Completed
         else -> false
     }
+
+/**
+ * A live projection may include several raw callbacks before any of their
+ * journal envelopes arrive. Export it only after every rendered callback has
+ * an envelope and all sequence numbers since the previous checkpoint arrived.
+ * A missing or unpaired envelope freezes the checkpoint rather than pairing a
+ * newer projection with an older cursor.
+ */
+internal class DurableTurnProjectionFrontier(
+    start: Long = 0L,
+    private val strings: ConversationStrings = DefaultConversationStrings,
+) {
+    private var through = start
+    private val pending = mutableMapOf<Pair<String, ReplyEvent>, Int>()
+    private val seen = java.util.TreeSet<Long>()
+    private var ambiguous = false
+    private var trackedSinceExport = false
+
+    fun reset(start: Long) {
+        through = start
+        pending.clear()
+        seen.clear()
+        ambiguous = false
+        trackedSinceExport = false
+    }
+
+    fun rendered(event: ClientEvent, reply: ReplyEvent) {
+        if (!shouldAwaitDurableTurnReplayAck(event, reply)) return
+        val type = durableRenderedEventType(event) ?: run { ambiguous = true; return }
+        track(type, reply)
+    }
+
+    fun hasMatchingRendered(event: ClientEvent.TurnEventReplay): Boolean =
+        envelopeKey(event)?.let { (pending[it] ?: 0) > 0 } == true
+
+    fun renderedEnvelope(event: ClientEvent.TurnEventReplay, reply: ReplyEvent) {
+        val type = runCatching { JSONObject(event.eventJson).optString("type") }.getOrNull() ?: return
+        if (type in DURABLE_RENDERED_EVENT_TYPES) track(type, reply)
+    }
+
+    private fun track(type: String, reply: ReplyEvent) {
+        val key = type to stableReplayReply(reply)
+        pending[key] = (pending[key] ?: 0) + 1
+    }
+
+    private fun envelopeKey(event: ClientEvent.TurnEventReplay): Pair<String, ReplyEvent>? {
+        val type = runCatching { JSONObject(event.eventJson).optString("type") }.getOrNull() ?: return null
+        val reply = retainedTurnEventToReply(event.eventJson, strings) ?: return null
+        return type to stableReplayReply(reply)
+    }
+
+    fun acknowledge(event: ClientEvent.TurnEventReplay): Long? {
+        val sequence = event.sequence.toLong()
+        if (sequence <= through || !seen.add(sequence)) return null
+        val type = runCatching { JSONObject(event.eventJson).optString("type") }.getOrNull()
+        if (type == null) {
+            ambiguous = true
+            return null
+        }
+        val tracked = type in DURABLE_RENDERED_EVENT_TYPES
+        if (tracked) {
+            val key = envelopeKey(event)
+            val count = key?.let { pending[it] } ?: 0
+            if (count == 0) {
+                ambiguous = true
+            } else if (count == 1) {
+                pending.remove(key!!)
+            } else {
+                pending[key!!] = count - 1
+            }
+            trackedSinceExport = true
+        }
+        if (ambiguous || pending.isNotEmpty()) return null
+        val previous = through
+        while (seen.remove(through + 1)) through++
+        return through.takeIf { trackedSinceExport && it > previous }?.also {
+            trackedSinceExport = false
+        }
+    }
+}
+
+/** Message row IDs are local UUIDs; the durable payload does not carry them. */
+internal fun stableReplayReply(reply: ReplyEvent): ReplyEvent = when (reply) {
+    is ReplyEvent.MessageComplete -> reply.copy(message = reply.message?.copy(id = ""))
+    else -> reply
+}
+
+private val DURABLE_RENDERED_EVENT_TYPES = setOf(
+    "turn_started", "text_delta", "message_identity", "message_complete", "message_retracted",
+    "visualization_block", "thinking_delta", "system_notice", "tool_use_started", "tool_heartbeat",
+    "tool_use_result", "usage_update", "api_retry", "cost_update", "compaction_completed", "coordinator_status",
+)
+
+private fun durableRenderedEventType(event: ClientEvent): String? = when (event) {
+    is ClientEvent.TurnStarted -> "turn_started"
+    is ClientEvent.TextDelta -> "text_delta"
+    is ClientEvent.MessageIdentity -> "message_identity"
+    is ClientEvent.MessageComplete -> "message_complete"
+    is ClientEvent.MessageRetracted -> "message_retracted"
+    is ClientEvent.VisualizationBlock -> "visualization_block"
+    is ClientEvent.ThinkingDelta -> "thinking_delta"
+    is ClientEvent.SystemNotice -> "system_notice"
+    is ClientEvent.ToolUseStarted -> "tool_use_started"
+    is ClientEvent.ToolHeartbeat -> "tool_heartbeat"
+    is ClientEvent.ToolUseResult -> "tool_use_result"
+    is ClientEvent.UsageUpdate -> "usage_update"
+    is ClientEvent.ApiRetry -> "api_retry"
+    is ClientEvent.CostUpdate -> "cost_update"
+    is ClientEvent.CompactionCompleted -> "compaction_completed"
+    is ClientEvent.CoordinatorStatus -> "coordinator_status"
+    else -> null
+}
 
 /**
  * PURE mapping from one inbound engine [ClientEvent] to a [ReplyEvent], or
@@ -285,6 +405,21 @@ internal fun retainedTurnEventToReply(
             ReplyEvent.Visualization(status, reference)
         }
         "thinking_delta" -> ReplyEvent.ReasoningDelta(event.optString("thinking"))
+        "usage_update" -> ReplyEvent.Usage(AgentRunUsage(
+            inputTokens = event.optLong("input_tokens"), outputTokens = event.optLong("output_tokens"),
+            cacheReadTokens = event.optLong("cache_read_tokens"), cacheCreationTokens = event.optLong("cache_creation_tokens"),
+        ))
+        "api_retry" -> ReplyEvent.Retry(event.optString("message"), event.optInt("attempt"),
+            event.optInt("max_retries"), event.optLong("delay_ms"))
+        "cost_update" -> ReplyEvent.Cost(event.optString("formatted"))
+        "compaction_completed" -> ReplyEvent.Compaction(event.optInt("messages_before"),
+            event.optInt("messages_after"), event.optLong("bytes_saved"))
+        "coordinator_status" -> ReplyEvent.Coordinator(event.optInt("active_workers"), event.optionalString("team"))
+        "message_identity" -> event.optionalString("message_id")?.let(ReplyEvent::MessageIdentity)
+        "message_retracted" -> event.optionalString("message_id")?.let(ReplyEvent::MessageRetracted)
+        "message_complete" -> ReplyEvent.MessageComplete(event.optJSONObject("message")?.let {
+            retainedMessageDto(it)?.let { dto -> messageDtoToMessage(dto, strings) }
+        })
         "system_notice" -> ReplyEvent.Notice(
             message = event.optString("message"),
             isError = event.optBoolean("is_error"),
@@ -335,6 +470,53 @@ internal fun retainedTurnEventToReply(
         else -> null
     }
 }.getOrNull()
+
+private fun retainedMessageDto(value: JSONObject): MessageDto? {
+    val role = value.requiredString("role") ?: return null
+    val blocks = value.optJSONArray("blocks") ?: return null
+    val parsedBlocks = buildList {
+        for (index in 0 until blocks.length()) {
+            val block = blocks.optJSONObject(index) ?: return null
+            val parsed = when (block.optString("type")) {
+                "text" -> MessageBlockDto.Text((block.requiredString("text") ?: return null).toClientTextDto())
+                "thinking" -> MessageBlockDto.Thinking(block.requiredString("thinking") ?: return null, block.optionalString("signature"))
+                "redacted_thinking" -> MessageBlockDto.RedactedThinking(block.requiredString("data") ?: return null)
+                "compact_boundary" -> MessageBlockDto.CompactBoundary(
+                    block.requiredUInt("messages_before") ?: return null,
+                    block.requiredUInt("messages_after") ?: return null,
+                    block.requiredString("summary") ?: return null,
+                )
+                "tool_use" -> MessageBlockDto.ToolUse(
+                    block.requiredString("id") ?: return null, block.requiredString("tool") ?: return null,
+                    block.requiredString("input_json") ?: return null,
+                    block.optJSONObject("header")?.let(::retainedToolHeader) ?: return null,
+                )
+                "tool_result" -> MessageBlockDto.ToolResult(
+                    block.requiredString("id") ?: return null, block.requiredString("tool") ?: return null,
+                    block.requiredString("result_json") ?: return null, block.optBoolean("is_error"),
+                    block.optJSONObject("display")?.let(::retainedToolResultDisplay) ?: return null,
+                )
+                "visualization" -> MessageBlockDto.Visualization(block.optJSONObject("reference")?.let { ref ->
+                    VisualizationRefDto(ref.requiredString("id") ?: return null, ref.requiredUInt("revision") ?: return null)
+                })
+                else -> return null
+            }
+            add(parsed)
+        }
+    }
+    val images = value.optJSONArray("images")?.let { array ->
+        buildList {
+            for (index in 0 until array.length()) {
+                val image = array.optJSONObject(index) ?: return null
+                add(MessageImageDto(image.requiredString("media_type") ?: return null, image.requiredString("url") ?: return null))
+            }
+        }
+    }.orEmpty()
+    return MessageDto(
+        transcriptUuid = value.optionalString("transcript_uuid"), role = role, blocks = parsedBlocks, images = images,
+        sentAtMs = if (value.has("sent_at_ms") && !value.isNull("sent_at_ms")) value.optLong("sent_at_ms") else null,
+    )
+}
 
 private fun retainedToolHeader(value: JSONObject): ToolHeaderDto? {
     val verb = value.enumValue<ToolVerbDto>("verb") ?: return null
@@ -559,20 +741,23 @@ fun mapReplyStream(
     events: Flow<ClientEvent>,
     strings: ConversationStrings = DefaultConversationStrings,
     acceptSlashCommandResults: Boolean = false,
+    expectedTurnId: Long? = null,
+    expectedSessionId: String? = null,
 ): Flow<ReplyEvent> = flow {
     emit(ReplyEvent.Thinking)
-    var awaitingDurableReplayAck = false
+    val frontier = DurableTurnProjectionFrontier(strings = strings)
     emitAll(
         events.transformWhile { event ->
             if (event is ClientEvent.TurnEventReplay) {
-                if (awaitingDurableReplayAck) {
+                if (expectedTurnId != null && event.turnId != expectedTurnId.toULong()) return@transformWhile true
+                if (expectedSessionId != null && canonicalSessionId(event.sessionId) != canonicalSessionId(expectedSessionId)) return@transformWhile true
+                frontier.acknowledge(event)?.let { sequence ->
                     emit(
                         ReplyEvent.DurableTurnReplayAcknowledged(
                             turnId = event.turnId.toLong(),
-                            sequence = event.sequence.toLong(),
+                            sequence = sequence,
                         ),
                     )
-                    awaitingDurableReplayAck = false
                 }
                 return@transformWhile true
             }
@@ -580,8 +765,8 @@ fun mapReplyStream(
                 return@transformWhile true
             }
             val reply = clientEventToReply(event, strings) ?: return@transformWhile true
+            frontier.rendered(event, reply)
             emit(reply)
-            awaitingDurableReplayAck = shouldAwaitDurableTurnReplayAck(event, reply)
             val terminal = reply is ReplyEvent.End ||
                 reply is ReplyEvent.Error ||
                 reply is ReplyEvent.Completed ||

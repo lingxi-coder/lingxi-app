@@ -72,7 +72,7 @@ import kotlinx.coroutines.sync.withLock
  * exercised by JVM unit tests. The pure [clientEventToReply] mapper carries the
  * mapping coverage; this wiring is covered by the on-device integration build.
  */
-private class MediaAudioSessionContextBindings(
+internal class MediaAudioSessionContextBindings(
     private val mediaHost: AndroidNativeMediaHost,
 ) {
     private val lock = Any()
@@ -107,7 +107,7 @@ private class MediaAudioSessionContextBindings(
     }
 }
 
-class EngineConversationSource private constructor(
+class EngineConversationSource internal constructor(
     private val handle: MobileEngineHandle,
     private val mediaHost: AndroidNativeMediaHost,
     private val mediaContextBindings: MediaAudioSessionContextBindings,
@@ -151,6 +151,22 @@ class EngineConversationSource private constructor(
 
     private val durableAttachMutex = Mutex()
     private val durableAttachCoordinator = DurableAttachCoordinator()
+    private val retainedUiTranscript = RetainedConversationTranscriptStore()
+
+    override fun retainUiTranscript(snapshot: RetainedConversationTranscript) {
+        retainedUiTranscript.save(snapshot)
+    }
+
+    override suspend fun restoreInitialSession(uuid: String, title: String, empty: Boolean): ActivatedSession? {
+        val existing = activeSession.value
+        if (existing != null && existing.kind != SessionActivationKind.Bootstrap &&
+            canonicalSessionId(existing.sessionId) == canonicalSessionId(uuid)
+        ) {
+            return retainedUiTranscript.activation(existing.withLatestMode(modeState.value))
+                .copy(kind = SessionActivationKind.Resumed)
+        }
+        return super<ConversationSource>.restoreInitialSession(uuid, title, empty)
+    }
 
     init {
         if (autoAttachDurableTurns) {
@@ -211,7 +227,10 @@ class EngineConversationSource private constructor(
     }
 
     override suspend fun attachDurableTurnForUi(afterSequence: Long) {
-        val record = durableTurns.load() ?: return
+        val activeId = activeSession.value?.sessionId ?: return
+        val record = durableTurns.load()?.takeIf { canonicalSessionId(it.sessionId) == canonicalSessionId(activeId) }
+            ?: retainedUiTranscript.turnRecord(recoverySpec.scopeKey, activeId)
+            ?: return
         if (
             activeSession.value?.let { canonicalSessionId(it.sessionId) } ==
                 canonicalSessionId(record.sessionId)
@@ -225,7 +244,9 @@ class EngineConversationSource private constructor(
         forceAttach: Boolean,
         afterSequence: Long = 0L,
     ) = durableAttachMutex.withLock {
-        val latest = durableTurns.load()?.takeIf { it.turnId == record.turnId } ?: record
+        val latest = durableTurns.load()?.takeIf {
+            it.turnId == record.turnId && canonicalSessionId(it.sessionId) == canonicalSessionId(record.sessionId)
+        } ?: record
         // A second Activity can claim the shared source while AttachTurn is
         // suspended. Snapshot the first claim's disposition before yielding;
         // that claim must still consume its required Resume exactly once.
@@ -239,7 +260,8 @@ class EngineConversationSource private constructor(
         if (!durableAttachCoordinator.reserve(request, owner)) return@withLock
         durableReplayGate.noteAttachRequested(
             turnId = latest.turnId,
-            activation = activeSession.value?.takeIf { canonicalSessionId(it.sessionId) == canonicalSessionId(latest.sessionId) },
+            activation = activeSession.value?.takeIf { canonicalSessionId(it.sessionId) == canonicalSessionId(latest.sessionId) }
+                ?.let(retainedUiTranscript::activation),
             afterSequence = request.afterSequence,
         )
         try {
@@ -346,6 +368,9 @@ class EngineConversationSource private constructor(
 
     override suspend fun resumeSession(uuid: String) {
         if (uuid.isBlank()) return
+        if (activeSession.value?.sessionId?.let(::canonicalSessionId) != canonicalSessionId(uuid)) {
+            retainedUiTranscript.clear()
+        }
         val record = durableTurns.load()
         if (record != null && canonicalSessionId(uuid) != canonicalSessionId(record.sessionId)) {
             durableTurns.clear()
@@ -368,6 +393,9 @@ class EngineConversationSource private constructor(
 
     override suspend fun resumeEmptySession(uuid: String, title: String) {
         if (uuid.isBlank()) return
+        if (activeSession.value?.sessionId?.let(::canonicalSessionId) != canonicalSessionId(uuid)) {
+            retainedUiTranscript.clear()
+        }
         handle.resumeEmptySession(
             sessionId = canonicalSessionId(uuid),
             title = title.ifBlank { strings.resolve(R.string.chat_new_conversation, "新对话") },
@@ -375,11 +403,13 @@ class EngineConversationSource private constructor(
     }
 
     override suspend fun newSession() {
+        retainedUiTranscript.clear()
         durableTurns.clear()
         handle.submit(ClientCommand.NewSession(cwd = null, model = null))
     }
 
     override suspend fun newSession(cwd: String) {
+        retainedUiTranscript.clear()
         durableTurns.clear()
         handle.submit(ClientCommand.NewSession(cwd = cwd, model = null))
     }
@@ -495,6 +525,8 @@ class EngineConversationSource private constructor(
                 }
             },
             strings,
+            expectedTurnId = turnId,
+            expectedSessionId = activeSession.value?.sessionId,
         )
 
     override fun submitSlashCommand(
@@ -527,6 +559,7 @@ class EngineConversationSource private constructor(
             }.filter { event -> slashCommandEventBelongsToTurn(event, turnId) },
             strings,
             acceptSlashCommandResults = true,
+            expectedTurnId = turnId,
         )
 
     override suspend fun cancel() {

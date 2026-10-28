@@ -55,6 +55,15 @@ final class AppIntegrationTests: XCTestCase {
         XCTAssertNil(LingxiDeepLink.action(from: URL(string: "https://lingxios.net.evil/open/new")!))
     }
 
+    func testNewLinkUsesExplicitModeEvenWhenItMatchesCurrentMode() throws {
+        let link = try XCTUnwrap(CanonicalDeepLink.parse("lingxi://new?mode=code"))
+        let currentMode = SessionMode.code
+        let savedDefault = SessionMode.chat
+        XCTAssertEqual(link.newConversationMode(defaultMode: savedDefault), currentMode)
+        let defaulted = try XCTUnwrap(CanonicalDeepLink.parse("lingxi://new"))
+        XCTAssertEqual(defaulted.newConversationMode(defaultMode: savedDefault), .chat)
+    }
+
     func testCanonicalRoutesAndPersistedMessageIdentity() {
         let uuid = "4A16A316-E6FE-4D5A-9A5D-A42E390990DA"
         for route in ["provider/custom", "extensions/mcp/server", "extensions/skill/skill", "extensions/plugin/plugin", "cron/job/job", "cron/run/run", "apps/app", "runtime/agent/a", "runtime/task/t", "runtime/plan/p", "runtime/review/r", "runtime/activity/a"] {

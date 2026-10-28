@@ -127,7 +127,16 @@ data class ActivatedSession(
     val transcript: List<Message>,
     val kind: SessionActivationKind,
     val mode: SessionMode = SessionMode.Code,
+    /** False when the active turn must still be rebuilt from its replay. */
+    val transcriptComplete: Boolean = true,
+    val retainedProjection: RetainedConversationTranscript? = null,
 )
+
+/** A retained activation can predate a later mode snapshot for the same session. */
+internal fun ActivatedSession.withLatestMode(snapshot: SessionModeSnapshot?): ActivatedSession =
+    if (snapshot != null && canonicalSessionId(sessionId) == canonicalSessionId(snapshot.sessionId)) {
+        copy(mode = snapshot.mode)
+    } else this
 
 /**
  * Lower one [McpServerDto] to the UI [MCPServer] model. The DTO is thinner than

@@ -392,6 +392,7 @@ pub(super) async fn mount_resumed_tui(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -418,6 +419,7 @@ pub(crate) async fn mount_background_resumed_tui(
         initial_prompt,
         handoff,
         Some(shell_launch),
+        Some(PathBuf::from(&shell_launch.transcript_path)),
     )
     .await
 }
@@ -431,6 +433,7 @@ pub(super) async fn mount_resumed_tui_inner(
     initial_prompt: Option<Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     shell_launch: Option<&crate::background_launch::BackgroundLaunchSpec>,
+    transcript_path: Option<PathBuf>,
 ) -> crate::mode::RunOutcome {
     // A cold resume inherits the last persisted assistant effort unless the
     // caller explicitly supplied a new `--effort`. Resolve this before build:
@@ -454,6 +457,7 @@ pub(super) async fn mount_resumed_tui_inner(
             Some(session_id),
             parent_session_id,
             native_settings_agent_context,
+            transcript_path,
         )
         .await
         {
@@ -658,6 +662,7 @@ pub(super) async fn remount_tui(
     argv: &Argv,
     session_id: uuid::Uuid,
     messages: Vec<JsonlMessage>,
+    transcript_path: PathBuf,
     state: Option<crate::mode::RemountState>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
 ) -> crate::mode::RunOutcome {
@@ -670,8 +675,101 @@ pub(super) async fn remount_tui(
         None,
         None,
         None,
+        Some(transcript_path),
     )
     .await
+}
+
+struct RemountSource {
+    path: PathBuf,
+    messages: Vec<JsonlMessage>,
+}
+
+/// Retain the mounted source for the same UUID; only a different session may
+/// be resolved from the worktree catalog. Both paths receive the same exact
+/// source validation as the actual runtime capture.
+async fn remount_source_from(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    current: Option<uuid::Uuid>,
+    state: Option<&crate::mode::RemountState>,
+    target: uuid::Uuid,
+) -> Result<RemountSource, LoaderError> {
+    let path = if current == Some(target) {
+        state.and_then(|state| state.transcript_path.clone()).ok_or_else(|| {
+            LoaderError::Io {
+                arg: target.to_string(),
+                source: std::io::Error::other("mounted transcript path is unavailable"),
+            }
+        })?
+    } else {
+        let path = session::jsonl::resolve_session_path_across_worktrees(
+            home,
+            &cwd.to_string_lossy(),
+            target,
+        )
+        .await?;
+        crate::init::absolute_resolved_tui_resume_path(path).map_err(|error| LoaderError::Io {
+            arg: target.to_string(),
+            source: std::io::Error::other(error.to_string()),
+        })?
+    };
+    remount_source_at(home, cwd, target, &path).await
+}
+
+async fn remount_source_at(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    target: uuid::Uuid,
+    path: &std::path::Path,
+) -> Result<RemountSource, LoaderError> {
+    let path = crate::init::validate_exact_tui_resume_path(home, target, path).map_err(|error| {
+        LoaderError::Io {
+            arg: path.display().to_string(),
+            source: std::io::Error::other(error.to_string()),
+        }
+    })?;
+    let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.to_path_buf()));
+    let (_, _, loaded) =
+        session::jsonl::load_routed_session_from_path_with_source(&path, target, fs).await?;
+    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &target.to_string());
+    if messages.is_empty() {
+        return Err(LoaderError::EmptyDirectory);
+    }
+    Ok(RemountSource { path, messages })
+}
+
+async fn remount_source(
+    current: Option<uuid::Uuid>,
+    state: Option<&crate::mode::RemountState>,
+    target: uuid::Uuid,
+) -> Result<RemountSource, LoaderError> {
+    let home = lingxi_home_dir();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    remount_source_from(&home, &cwd, current, state, target).await
+}
+
+/// Source mutations run under the same UUID writer claim as a mounted
+/// persistent session, and revalidate the path after acquiring it.
+fn claim_mounted_transcript(
+    home: &std::path::Path,
+    session_id: uuid::Uuid,
+    state: Option<&crate::mode::RemountState>,
+) -> Result<(PathBuf, lingxi_core::host::live_sessions::SessionIdClaim), String> {
+    let state = state.ok_or_else(|| "mounted session state is unavailable".to_string())?;
+    if !state.transcript_persistent {
+        return Err("mounted session is read-only".into());
+    }
+    let path = state
+        .transcript_path
+        .as_ref()
+        .ok_or_else(|| "mounted transcript path is unavailable".to_string())?;
+    let claim = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
+        .claim_session_id(&session_id.to_string(), std::process::id())
+        .map_err(|error| format!("session writer claim failed: {error}"))?;
+    let path = crate::init::validate_exact_tui_resume_path(home, session_id, path)
+        .map_err(|error| error.to_string())?;
+    Ok((path, claim))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -872,11 +970,18 @@ pub(super) async fn drive_tui_switch_loop_inner(
                 };
             }
             crate::mode::RunOutcome::SwitchTo { target, state } => {
-                match load_resume_session(target).await {
-                    Ok(messages) => {
+                match remount_source(current, state.as_ref(), target).await {
+                    Ok(source) => {
                         current = Some(target);
-                        outcome =
-                            remount_tui(argv, target, messages, state, registration.clone()).await;
+                        outcome = remount_tui(
+                            argv,
+                            target,
+                            source.messages,
+                            source.path,
+                            state,
+                            registration.clone(),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         // The outgoing runtime is already unwound, so we cannot just
@@ -887,12 +992,13 @@ pub(super) async fn drive_tui_switch_loop_inner(
                         match recover_from_failed_switch(current) {
                             SwitchRecovery::Remount(fallback) => {
                                 eprintln!("lingxi-cli: staying in current session {fallback}");
-                                match load_resume_session(fallback).await {
-                                    Ok(messages) => {
+                                match remount_source(current, state.as_ref(), fallback).await {
+                                    Ok(source) => {
                                         outcome = remount_tui(
                                             argv,
                                             fallback,
-                                            messages,
+                                            source.messages,
+                                            source.path,
                                             state,
                                             registration.clone(),
                                         )
@@ -924,15 +1030,21 @@ pub(super) async fn drive_tui_switch_loop_inner(
                 let cwd_str = cwd.to_string_lossy().into_owned();
                 let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.clone()));
                 let mut state = state;
-                let mount_target = match session::create_branch(
-                    &lingxi_home,
-                    &cwd_str,
-                    source,
-                    title.as_deref(),
-                    fs,
-                )
-                .await
-                {
+                let branch = match claim_mounted_transcript(&lingxi_home, source, state.as_ref()) {
+                    Ok((path, _claim)) => {
+                        session::branch::create_branch_from_path(
+                            &lingxi_home,
+                            &cwd_str,
+                            source,
+                            &path,
+                            title.as_deref(),
+                            fs,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(session::BranchError::Io(std::io::Error::other(error))),
+                };
+                let mount_target = match branch {
                     Ok(result) => {
                         // claude-code 2.1.205 success confirmation, rendered in
                         // the NEW branch's transcript: `Branched
@@ -974,12 +1086,34 @@ pub(super) async fn drive_tui_switch_loop_inner(
                         source
                     }
                 };
-                match load_resume_session(mount_target).await {
-                    Ok(messages) => {
+                let selected = if mount_target == source {
+                    remount_source_from(&lingxi_home, &cwd, current, state.as_ref(), source).await
+                } else {
+                    let path = session::jsonl::session_path(
+                        &lingxi_home,
+                        &cwd_str,
+                        &mount_target.to_string(),
+                    );
+                    match crate::init::absolute_resolved_tui_resume_path(path) {
+                        Ok(path) => remount_source_at(&lingxi_home, &cwd, mount_target, &path).await,
+                        Err(error) => Err(LoaderError::Io {
+                            arg: mount_target.to_string(),
+                            source: std::io::Error::other(error.to_string()),
+                        }),
+                    }
+                };
+                match selected {
+                    Ok(selected) => {
                         current = Some(mount_target);
-                        outcome =
-                            remount_tui(argv, mount_target, messages, state, registration.clone())
-                                .await;
+                        outcome = remount_tui(
+                            argv,
+                            mount_target,
+                            selected.messages,
+                            selected.path,
+                            state,
+                            registration.clone(),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         // The branch (or fallback) target won't load. Fall back to
@@ -987,12 +1121,13 @@ pub(super) async fn drive_tui_switch_loop_inner(
                         eprintln!("lingxi-cli: couldn't open {mount_target}: {e}");
                         match recover_from_failed_switch(current) {
                             SwitchRecovery::Remount(fallback) => {
-                                match load_resume_session(fallback).await {
-                                    Ok(messages) => {
+                                match remount_source(current, state.as_ref(), fallback).await {
+                                    Ok(selected) => {
                                         outcome = remount_tui(
                                             argv,
                                             fallback,
-                                            messages,
+                                            selected.messages,
+                                            selected.path,
                                             state,
                                             registration.clone(),
                                         )
@@ -1025,59 +1160,63 @@ pub(super) async fn drive_tui_switch_loop_inner(
                 let lingxi_home = lingxi_home_dir();
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let cwd_str = cwd.to_string_lossy().into_owned();
-                // 1. Code restore (unless conversation-only): rebuild the
-                //    file-history index from the persisted transcript + rewind
-                //    the working tree to the checkpoint.
-                if scope != RewindScope::ConversationOnly {
-                    match session::file_history::rewind_from_disk(
-                        &lingxi_home,
-                        &cwd_str,
-                        source,
-                        message,
-                    )
-                    .await
-                    {
-                        Ok(outcome) => {
-                            eprintln!("lingxi-cli: rewound {} file(s)", outcome.changed.len());
-                            if outcome.skipped_links > 0 {
-                                let noun = if outcome.skipped_links == 1 {
-                                    "path was"
-                                } else {
-                                    "paths were"
-                                };
-                                eprintln!(
-                                    "lingxi-cli: {} tracked {noun} skipped: the tracked path is \
-                                     (or became) a link or other non-regular file, its directory \
-                                     changed since the checkpoint, or its backup could not be \
-                                     safely read.",
-                                    outcome.skipped_links
-                                );
+                match claim_mounted_transcript(&lingxi_home, source, state.as_ref()) {
+                    Ok((path, _claim)) => {
+                        // Restore the working tree using checkpoints from the
+                        // exact mounted transcript, then truncate that same file.
+                        if scope != RewindScope::ConversationOnly {
+                            match session::file_history::rewind_from_transcript(
+                                &lingxi_home,
+                                &cwd_str,
+                                source,
+                                &path,
+                                message,
+                            )
+                            .await
+                            {
+                                Ok(outcome) => {
+                                    eprintln!("lingxi-cli: rewound {} file(s)", outcome.changed.len());
+                                    if outcome.skipped_links > 0 {
+                                        let noun = if outcome.skipped_links == 1 {
+                                            "path was"
+                                        } else {
+                                            "paths were"
+                                        };
+                                        eprintln!(
+                                            "lingxi-cli: {} tracked {noun} skipped: the tracked path is \
+                                             (or became) a link or other non-regular file, its directory \
+                                             changed since the checkpoint, or its backup could not be \
+                                             safely read.",
+                                            outcome.skipped_links
+                                        );
+                                    }
+                                }
+                                Err(e) => eprintln!("lingxi-cli: file rewind failed: {e}"),
                             }
                         }
-                        Err(e) => eprintln!("lingxi-cli: file rewind failed: {e}"),
-                    }
-                }
-                // 2. Conversation truncation (unless code-only): truncate the
-                //    live transcript in place up to `message`, re-mount same id.
-                let mount_target = if scope != RewindScope::CodeOnly {
-                    match session::rewind_conversation(&lingxi_home, &cwd_str, source, message)
-                        .await
-                    {
-                        Ok(()) => source,
-                        Err(e) => {
-                            eprintln!("lingxi-cli: conversation rewind failed: {e}");
-                            source
+                        if scope != RewindScope::CodeOnly {
+                            if let Err(error) =
+                                session::rewind::rewind_conversation_from_path(&path, message).await
+                            {
+                                eprintln!("lingxi-cli: conversation rewind failed: {error}");
+                            }
                         }
                     }
-                } else {
-                    source
-                };
-                match load_resume_session(mount_target).await {
-                    Ok(messages) => {
+                    Err(error) => eprintln!("lingxi-cli: cannot rewind: {error}"),
+                }
+                let mount_target = source;
+                match remount_source(current, state.as_ref(), mount_target).await {
+                    Ok(selected) => {
                         current = Some(mount_target);
-                        outcome =
-                            remount_tui(argv, mount_target, messages, state, registration.clone())
-                                .await;
+                        outcome = remount_tui(
+                            argv,
+                            mount_target,
+                            selected.messages,
+                            selected.path,
+                            state,
+                            registration.clone(),
+                        )
+                        .await;
                     }
                     // A conversation-scope rewind can legitimately truncate the
                     // transcript to EMPTY (rewinding to before the FIRST turn).
@@ -1091,10 +1230,26 @@ pub(super) async fn drive_tui_switch_loop_inner(
                     Err(LoaderError::EmptyDirectory) if scope != RewindScope::CodeOnly => {
                         eprintln!("lingxi-cli: rewound to the start — empty conversation");
                         current = Some(mount_target);
+                        let path = match state.as_ref().and_then(|s| s.transcript_path.as_ref()) {
+                            Some(path) => match crate::init::validate_exact_tui_resume_path(
+                                &lingxi_home, mount_target, path,
+                            ) {
+                                Ok(path) => path,
+                                Err(error) => {
+                                    eprintln!("lingxi-cli: cannot reopen rewind source: {error}");
+                                    return exit_codes::RUNTIME_ERROR;
+                                }
+                            },
+                            None => {
+                                eprintln!("lingxi-cli: mounted transcript path is unavailable");
+                                return exit_codes::RUNTIME_ERROR;
+                            }
+                        };
                         outcome = remount_tui(
                             argv,
                             mount_target,
                             Vec::new(),
+                            path,
                             state,
                             registration.clone(),
                         )
@@ -1104,12 +1259,13 @@ pub(super) async fn drive_tui_switch_loop_inner(
                         eprintln!("lingxi-cli: couldn't open {mount_target} after rewind: {e}");
                         match recover_from_failed_switch(current) {
                             SwitchRecovery::Remount(fallback) => {
-                                match load_resume_session(fallback).await {
-                                    Ok(messages) => {
+                                match remount_source(current, state.as_ref(), fallback).await {
+                                    Ok(selected) => {
                                         outcome = remount_tui(
                                             argv,
                                             fallback,
-                                            messages,
+                                            selected.messages,
+                                            selected.path,
                                             state,
                                             registration.clone(),
                                         )
@@ -1575,3 +1731,7 @@ mod native_settings_agent_context_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "exact_remount_path_tests.rs"]
+mod exact_remount_path_tests;

@@ -236,6 +236,8 @@ pub(crate) struct CapturedTuiResume {
 pub struct TuiBuild {
     /// Exact transcript used to hydrate a resumed runtime before startup hooks.
     pub(crate) captured_resume: Option<CapturedTuiResume>,
+    /// Source identity for a read-only resume without a transcript writer.
+    pub(crate) resume_transcript_path: Option<std::path::PathBuf>,
     pub initial_draft: Option<String>,
     pub message_anchor: Option<String>,
     /// Reload the exact Fusion sources admitted by this CLI session.
@@ -406,7 +408,9 @@ pub enum InitError {
 impl From<harness_runtime::desktop::BuildError> for InitError {
     fn from(e: harness_runtime::desktop::BuildError) -> Self {
         match e {
-            harness_runtime::desktop::BuildError::AppInvocation(error) => Self::AppInvocation(error),
+            harness_runtime::desktop::BuildError::AppInvocation(error) => {
+                Self::AppInvocation(error)
+            }
             harness_runtime::desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
             harness_runtime::desktop::BuildError::InvalidAgents(m) => Self::InvalidAgents(m),
             harness_runtime::desktop::BuildError::InvalidToolAliases(m) => {
@@ -1787,6 +1791,7 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         parent_session_id,
         None,
         false,
+        None,
     ))
     .await
 }
@@ -1798,6 +1803,7 @@ pub(crate) async fn build_runtime_for_tui_inner_with_parent_and_native_settings_
     resume_session_id: Option<uuid::Uuid>,
     parent_session_id: Option<String>,
     native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext,
+    resume_transcript_path: Option<std::path::PathBuf>,
 ) -> Result<TuiBuild, InitError> {
     Box::pin(build_runtime_for_tui_inner_with_parent_impl(
         argv,
@@ -1805,6 +1811,7 @@ pub(crate) async fn build_runtime_for_tui_inner_with_parent_and_native_settings_
         parent_session_id,
         Some(native_settings_agent_context),
         true,
+        resume_transcript_path,
     ))
     .await
 }
@@ -1833,13 +1840,20 @@ pub(crate) async fn capture_tui_resume(
     #[cfg(windows)]
     let fs = Arc::new(platform_windows::WindowsFileSystem::new(cfg.cwd.clone()));
     let fs: Arc<dyn lingxi_core::host::FileSystem> = fs;
-    let path = session::jsonl::resolve_session_path_across_worktrees(
-        &cfg.lingxi_home,
-        &cfg.cwd.to_string_lossy(),
-        session_id,
-    )
-    .await
-    .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+    let path = match cfg.session_transcript_path.as_ref() {
+        Some(path) => path.clone(),
+        None => {
+            let path = session::jsonl::resolve_session_path_across_worktrees(
+                &cfg.lingxi_home,
+                &cfg.cwd.to_string_lossy(),
+                session_id,
+            )
+            .await
+            .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))?;
+            absolute_resolved_tui_resume_path(path)?
+        }
+    };
+    let path = validate_exact_tui_resume_path(&cfg.lingxi_home, session_id, &path)?;
     let (_, content, loaded) =
         session::jsonl::load_routed_session_from_path_with_source(&path, session_id, fs)
             .await
@@ -1874,12 +1888,59 @@ pub(crate) async fn capture_tui_resume(
     })
 }
 
+#[cfg(test)]
+#[path = "init/captured_resume_path_tests.rs"]
+pub(crate) mod captured_resume_path_tests;
+
+/// Resolve a catalog-produced relative path against the process cwd. Explicit
+/// source identities are never passed through this conversion.
+pub(crate) fn absolute_resolved_tui_resume_path(
+    path: std::path::PathBuf,
+) -> Result<std::path::PathBuf, InitError> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .map_err(|error| InitError::Orchestrator(format!("resume transcript: {error}")))
+}
+
+pub(crate) fn validate_exact_tui_resume_path(
+    config_home: &std::path::Path,
+    session_id: uuid::Uuid,
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, InitError> {
+    let rejected = |message: &str| InitError::Orchestrator(format!("resume transcript: {message}"));
+    let expected_name = format!("{session_id}.jsonl");
+    if !path.is_absolute()
+        || path.file_name().and_then(|name| name.to_str()) != Some(&expected_name)
+    {
+        return Err(rejected("selected path does not match the session UUID"));
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| rejected(&format!("cannot inspect selected path: {error}")))?;
+    if !metadata.file_type().is_file() {
+        return Err(rejected("selected transcript is not a regular file"));
+    }
+    let root = std::fs::canonicalize(config_home.join("projects"))
+        .map_err(|error| rejected(&format!("cannot resolve transcript root: {error}")))?;
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| rejected(&format!("cannot resolve selected path: {error}")))?;
+    if !canonical.starts_with(root)
+        || canonical.file_name().and_then(|name| name.to_str()) != Some(&expected_name)
+    {
+        return Err(rejected("selected path is outside the transcript root"));
+    }
+    Ok(canonical)
+}
+
 async fn build_runtime_for_tui_inner_with_parent_impl(
     argv: &Argv,
     resume_session_id: Option<uuid::Uuid>,
     parent_session_id: Option<String>,
     native_settings_agent_context: Option<lingxi_core::host::NativeSettingsAgentContext>,
     capture_resume: bool,
+    resume_transcript_path: Option<std::path::PathBuf>,
 ) -> Result<TuiBuild, InitError> {
     crate::startup_trace::mark("tui_runtime_build_start");
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1921,6 +1982,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
         cfg.permission_mode_cli_explicit = argv.permission_mode.is_some()
             || argv.dangerously_skip_permissions
             || crate::permission_mode_preference::load(argv).is_some();
+        cfg.session_transcript_path = resume_transcript_path;
         Some(capture_tui_resume(&mut cfg, id).await?)
     } else {
         None
@@ -1989,6 +2051,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
         harness_runtime::desktop::fusion_settings_layers_for_config(&fusion_cfg)
             .map_err(|error| error.to_string())
     });
+    let resume_transcript_path = cfg.session_transcript_path.clone();
     let mut runtime = build_cli_runtime_from_config(cfg, bridge, argv).await?;
     bind_tui_permission_gate(&gate, &runtime);
     #[cfg(test)]
@@ -2017,6 +2080,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
         .unwrap_or(permission_mode);
     Ok(TuiBuild {
         captured_resume,
+        resume_transcript_path,
         initial_draft: argv.resolve_prefill(),
         message_anchor: argv.deep_link_message.clone(),
         fusion_layers,

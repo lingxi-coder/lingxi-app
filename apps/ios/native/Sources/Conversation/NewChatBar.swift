@@ -8,6 +8,7 @@ struct NewChatBar: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let mode: SessionMode
     let workspaceName: String
+    let modeSelectionDisabled: Bool
     let onSelectMode: (SessionMode) -> Void
     let onPickWorkspace: () -> Void
 
@@ -50,6 +51,7 @@ struct NewChatBar: View {
         } label: {
             Text(mode.title)
         }
+        .disabled(modeSelectionDisabled)
     }
 
     private var workspaceButton: some View {

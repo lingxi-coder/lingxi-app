@@ -1,5 +1,8 @@
 package com.lingxi.code.project
 
+import com.lingxi.code.draftForModeChange
+import com.lingxi.code.sameDraftOwner
+import com.lingxi.code.shouldPersistActiveSession
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.conversationScopeFromKey
@@ -67,6 +70,42 @@ class ScopeStateStoreTest {
         assertEquals(42L, second.readWorkspacePresentation()["app.tracker"]?.pinnedAtEpochMillis)
         assertEquals(true, second.readWorkspacePresentation()["chat:app.tracker"]?.collapsed)
         assertNull(second.read("global"))
+    }
+
+    @Test
+    fun `resuming another session loads its mode draft while switching the same owner carries it`() = runTest {
+        val store = store()
+        val scope = ConversationScope.Project("notes")
+        val code = scope.sessionStateKey(SessionMode.Code)
+        val chat = scope.sessionStateKey(SessionMode.Chat)
+        store.persistDraft(code, "Code draft")
+        store.persistDraft(chat, "Chat draft")
+
+        val otherSession = sameDraftOwner(scope, "session-code", scope, "session-chat")
+        assertEquals("Chat draft", draftForModeChange(store, chat, "Code draft", otherSession))
+        assertEquals("Code draft", store.read(code)?.draft)
+        assertEquals("Chat draft", store.read(chat)?.draft)
+
+        val sameSession = sameDraftOwner(scope, "sess:19587a33-0725-48db-abca-8a2aed345f6b", scope,
+            "19587a33-0725-48db-abca-8a2aed345f6b")
+        assertEquals("Code draft", draftForModeChange(store, chat, "Code draft", sameSession))
+        assertEquals("Code draft", store.read(chat)?.draft)
+        assertEquals(false, sameDraftOwner(scope, "session-code", ConversationScope.Global, "session-code"))
+    }
+
+    @Test
+    fun `provisional session cannot replace saved owner while catalog restore is unresolved`() = runTest {
+        val store = store()
+        val key = ConversationScope.Global.sessionStateKey(SessionMode.Chat)
+        store.persistLastActiveSession(key, "saved-owner")
+        if (shouldPersistActiveSession(true, "provisional", SessionMode.Chat, SessionMode.Chat, key, null)) {
+            store.persistLastActiveSession(key, "provisional")
+        }
+        assertEquals("saved-owner", store.read(key)?.lastActiveSessionId)
+        if (shouldPersistActiveSession(true, "saved-owner", SessionMode.Chat, SessionMode.Chat, key, key)) {
+            store.persistLastActiveSession(key, "saved-owner")
+        }
+        assertEquals("saved-owner", store.read(key)?.lastActiveSessionId)
     }
 
     @Test

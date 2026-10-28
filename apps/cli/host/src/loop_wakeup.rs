@@ -132,6 +132,7 @@ impl CliLoopHost {
                 text: prompt.clone(),
                 is_meta: true,
                 turn_companion: false,
+                skill_identity: None,
                 message_origin: None,
                 prompt_source: None,
                 sdk_content_is_json_string: None,

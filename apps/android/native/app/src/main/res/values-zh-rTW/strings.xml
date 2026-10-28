@@ -3,6 +3,7 @@
     <string name="chat_compact_during_turn">對話進行中，暫時無法壓縮上下文</string>
     <string name="chat_message_copy">複製</string>
     <string name="chat_message_copied">已複製</string>
+    <string name="chat_recovery_replay_truncated">部分回覆暫未顯示。任務結束後，重新開啟對話可查看完整記錄。</string>
     <string name="app_intent_ask_description">把來自 Siri、快捷指令或其他 App 的文字帶入新對話。</string>
     <string name="app_intent_ask_title">向靈犀提問</string>
     <string name="app_intent_initial_command_param_title">預填命令</string>

@@ -200,8 +200,9 @@ struct ChatView: View {
                 }
                 if showsNewChatBar {
                     NewChatBar(
-                        mode: displayedSessionMode,
+                        mode: convo.requestedNewSessionMode ?? displayedSessionMode,
                         workspaceName: workspaceName,
+                        modeSelectionDisabled: convo.sessionTransitionPending,
                         onSelectMode: onSelectNewChatMode,
                         onPickWorkspace: onPickWorkspace
                     )
@@ -215,7 +216,16 @@ struct ChatView: View {
                         .padding(.vertical, 4)
                 }
                 if convo.awaitingNewSessionMode {
-                    Text(String(localized: convo.newSessionModeFailed ? "session_mode_retry" : "session_mode_setting"))
+                    Group {
+                        if convo.newSessionModeFailed, let mode = convo.requestedNewSessionMode {
+                            Button(String(localized: "session_mode_retry")) {
+                                onSelectNewChatMode(mode)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Text(String(localized: "session_mode_setting"))
+                        }
+                    }
                         .font(.caption)
                         .foregroundStyle(t.text3)
                         .frame(maxWidth: .infinity, alignment: .leading)

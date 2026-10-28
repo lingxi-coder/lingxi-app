@@ -372,6 +372,13 @@ test('bridge arguments carry the actual desktop version for catalog filtering', 
   assert.equal(args.includes('--api-key-stdin'), false);
 });
 
+test('only an owned draft launch requests draft metadata restoration', () => {
+  const base = { workspace: '/w', bridgeDir: '/b', sessionId: '11111111-2222-4333-8444-555555555555', hasApiKey: false, trusted: true };
+  assert.ok(!buildBridgeArguments(base).includes('--restore-draft'));
+  assert.ok(buildBridgeArguments({ ...base, restoreDraft: true }).includes('--restore-draft'));
+  assert.ok(!buildBridgeArguments({ ...base, restoreDraft: true, listSessionsJson: true }).includes('--restore-draft'));
+});
+
 test('private bridge arguments carry explicit local Insights policy without a user CLI switch', () => {
   const allowed = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowInsights: true });
   const denied = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowInsights: false });

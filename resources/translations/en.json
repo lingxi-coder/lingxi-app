@@ -2,6 +2,7 @@
   "chat_compact_during_turn": "Compact is disabled while a chat is in progress",
   "chat_message_copy": "Copy",
   "chat_message_copied": "Copied",
+  "chat_recovery_replay_truncated": "Some responses are temporarily missing. Reopen the conversation after the task finishes to view the full history.",
   "__info_plist__": {
     "CFBundleDisplayName": "LingXi",
     "NSCameraUsageDescription": "LingXi uses the camera to take photos for model analysis.",

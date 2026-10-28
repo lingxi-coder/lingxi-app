@@ -2135,9 +2135,11 @@ export class HostController {
         const after = await runtime.getWorkspaceState();
         const target = canonicalWorkspace(result.cwd);
         if (this.isProjectClosing(target)) throw new Error('project is closing');
+        const relocateDraft = this.bridge.prepareDraftRelocation(ref, target);
         this.settings.relocateSession(ref, target, after.has_conversation === false || !after.transcript_path ? null : {
           catalogProjectPath: target, scope: 'current', transcriptPath: after.transcript_path,
         });
+        relocateDraft();
         committed = true;
         if (after.initial_project_root) this.bridge.setSessionProjectRoot(sessionId, after.initial_project_root);
         if (after.prompt_directories) this.bridge.setSessionPromptDirectories(sessionId, after.prompt_directories);

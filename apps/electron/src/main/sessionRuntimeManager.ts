@@ -40,7 +40,7 @@ import {
   parseVisualizationReference,
   parseVisualizationTheme,
 } from '../shared/visualization.js';
-import { validateRequestId } from './validation.js';
+import { validateClientCommand, validateRequestId } from './validation.js';
 
 
 const DEFAULT_MAX_CACHED_RUNTIMES = 6;
@@ -52,6 +52,12 @@ export interface LiveDraftSession {
   projectPath: string;
   mode: RuntimeSessionMode;
   engineCwd: string;
+}
+
+interface DraftSession extends SessionRef {
+  mode: RuntimeSessionMode;
+  initialized: boolean;
+  revision?: number;
 }
 
 /** Accept only a live, active, host-created draft with explicit runtime mode and cwd. */
@@ -104,7 +110,7 @@ export class SessionRuntimeManager {
   private readonly openingSessions = new Map<string, { projectPath: string; transcriptPath?: string; promise: Promise<SessionRuntime>; activate: boolean }>();
   private readonly restartingSessions = new Map<string, Set<Promise<void>>>();
   private readonly backgroundSessionLeases = new Map<string, number>();
-  private readonly draftSessions = new Map<string, SessionRef>();
+  private readonly draftSessions = new Map<string, DraftSession>();
   private readonly openingDraftSessions = new Map<string, Promise<SessionRef>>();
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
@@ -118,12 +124,15 @@ export class SessionRuntimeManager {
   private readonly sessionTranscriptPaths = new Map<string, string>();
   private readonly sessionConfigOwners = new Map<string, { configHome: string; globalConfigPath?: string }>();
   private readonly pendingEvictions = new Set<Promise<void>>();
+  private readonly evictingSessions = new Map<string, Promise<void>>();
   private readonly maxCachedRuntimes: number;
   private readonly runtimeCreatedListeners = new Set<(runtime: SessionRuntime) => void>();
   /** Sessions whose runtime was opened for a remote viewer and is still leased by one. */
   private readonly remoteOpened = new Set<string>();
   private activeSessionId: string | null = null;
   private accessSequence = 0;
+  private modeSelectionSequence = 0;
+  private lastSavedModeSelectionSequence = 0;
   private cacheTrimScheduled = false;
   private registered = false;
 
@@ -199,6 +208,23 @@ export class SessionRuntimeManager {
     this.sessionPromptDirectories.set(sessionId, [...directories]);
   }
 
+  /** Preserve the unsent draft across a same-UUID directory remount. */
+  prepareDraftRelocation(ref: SessionRef, projectPath: string): () => void {
+    assertSessionRef(ref);
+    const draft = this.draftSessions.get(ref.projectPath);
+    if (!draft || draft.sessionId !== ref.sessionId || projectPath === ref.projectPath) return () => {};
+    const targetDraft = this.draftSessions.get(projectPath);
+    if (targetDraft && targetDraft.sessionId !== ref.sessionId) {
+      throw new Error('The destination project already has an unsent draft.');
+    }
+    // The host invokes this immediately after its settings transaction, with
+    // no asynchronous boundary, before releasing the old workspace lease.
+    return () => {
+      this.draftSessions.delete(ref.projectPath);
+      this.draftSessions.set(projectPath, { ...draft, projectPath });
+    };
+  }
+
   private touch(sessionId: string): void {
     if (this.runtimes.has(sessionId)) this.lastUsed.set(sessionId, ++this.accessSequence);
   }
@@ -218,6 +244,8 @@ export class SessionRuntimeManager {
       || status === 'restarting'
       || status === 'connecting'
       || this.openingSessions.has(runtime.sessionId)
+      || (this.draftSessions.get(runtime.projectPath)?.sessionId === runtime.sessionId
+        && this.openingDraftSessions.has(runtime.projectPath))
       || this.restartingSessions.has(runtime.sessionId)
       || this.backgroundSessionLeases.has(runtime.sessionId);
   }
@@ -234,8 +262,12 @@ export class SessionRuntimeManager {
       this.sessionModelHints.delete(victim.sessionId);
       const eviction = victim.dispose()
         .catch((error) => this.opts.diagnostics?.add('warn', 'host', `session cache eviction failed: ${sanitizeDiagnostic(error)}`))
-        .finally(() => this.pendingEvictions.delete(eviction));
+        .finally(() => {
+          this.pendingEvictions.delete(eviction);
+          if (this.evictingSessions.get(victim.sessionId) === eviction) this.evictingSessions.delete(victim.sessionId);
+        });
       this.pendingEvictions.add(eviction);
+      this.evictingSessions.set(victim.sessionId, eviction);
     }
   }
 
@@ -284,6 +316,11 @@ export class SessionRuntimeManager {
   async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string, sessionMode?: RuntimeSessionMode): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
+    const eviction = this.evictingSessions.get(ref.sessionId);
+    if (eviction) {
+      await eviction;
+      return this.ensure(ref, start, resumeModel, remountControls, sessionMode);
+    }
     const existing = this.runtimes.get(ref.sessionId);
     if (existing) {
       if (existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
@@ -294,7 +331,10 @@ export class SessionRuntimeManager {
 
     if (resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     const runtimeOptions = this.runtimeOptions(ref);
-    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, sessionMode);
+    const draft = this.draftSessions.get(ref.projectPath);
+    const draftMode = draft?.sessionId === ref.sessionId ? draft.mode : sessionMode;
+    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, draftMode, draft?.sessionId === ref.sessionId && draft.initialized,
+      draft?.sessionId === ref.sessionId ? draft.revision : undefined);
     // A newly opened session can adopt an engine that was absent from the
     // credential-write fanout. Mark only keys changed during this host's
     // lifetime; the idle runtime resolves their latest values before readiness.
@@ -481,17 +521,19 @@ export class SessionRuntimeManager {
     const pendingDraft = this.openingDraftSessions.get(projectPath);
     if (pendingDraft) return pendingDraft;
     const draft = this.draftSessions.get(projectPath);
-    if (draft) {
-      const runtime = await this.ensure(draft, true, model);
-      this.activate(runtime);
-      return { ...draft };
-    }
-    const promise = this.allocateDraftSession(projectPath, model);
+    const promise = draft ? this.reopenDraftSession(draft, model) : this.allocateDraftSession(projectPath, model);
     const trackedPromise = promise.finally(() => {
       if (this.openingDraftSessions.get(projectPath) === trackedPromise) this.openingDraftSessions.delete(projectPath);
+      this.scheduleCacheTrim();
     });
     this.openingDraftSessions.set(projectPath, trackedPromise);
     return trackedPromise;
+  }
+
+  private async reopenDraftSession(draft: DraftSession, model?: string): Promise<SessionRef> {
+    const runtime = await this.ensure(draft, true, model);
+    this.activate(runtime);
+    return { projectPath: draft.projectPath, sessionId: draft.sessionId };
   }
 
   private async allocateDraftSession(projectPath: string, model?: string): Promise<SessionRef> {
@@ -510,11 +552,12 @@ export class SessionRuntimeManager {
       }
     }
     if (!ref) throw new Error('could not allocate a new session id');
-    this.draftSessions.set(projectPath, ref);
+    const mode = this.opts.getSavedSessionMode?.() ?? 'code';
+    this.draftSessions.set(projectPath, { ...ref, mode, initialized: false });
     try {
-      const mode = this.opts.getSavedSessionMode?.() ?? 'code';
       const runtime = await this.ensure(ref, true, model, undefined, mode);
-      if (mode !== 'code') await runtime.initializeSessionMode(mode);
+      const draft = this.draftSessions.get(projectPath);
+      if (draft?.sessionId === ref.sessionId) draft.initialized = true;
       this.activate(runtime);
     } catch (error) {
       this.clearDraftSession(ref);
@@ -676,6 +719,7 @@ export class SessionRuntimeManager {
     this.openingDraftSessions.clear();
     await Promise.all(runtimes.map((runtime) => runtime.dispose().catch(() => undefined)));
     await Promise.all([...this.pendingEvictions]);
+    this.evictingSessions.clear();
     this.unregisterIpc();
     for (const webContents of [...this.targets.keys()]) this.detachWindow(webContents);
   }
@@ -687,9 +731,11 @@ export class SessionRuntimeManager {
       this.assertSender(event);
       return this.replaySnapshots;
     });
-    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown, turnId?: unknown, visualizationContext?: unknown) => {
+    ipcMain.handle(CH_SEND_PROMPT, async (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown, turnId?: unknown, visualizationContext?: unknown) => {
       this.assertSender(event);
-      return this.requireById(sessionId).sendPrompt(text, images, turnId, visualizationContext);
+      const runtime = this.requireById(sessionId);
+      await this.waitForRuntimeReadiness(runtime, event, sessionId);
+      return runtime.sendPrompt(text, images, turnId, visualizationContext);
     });
     ipcMain.handle(CH_VISUALIZATION_MOUNT, (event: IpcMainInvokeEvent, sessionId: unknown, reference: unknown, theme: unknown, locale: unknown, expanded: unknown) => {
       this.assertSender(event);
@@ -747,18 +793,20 @@ export class SessionRuntimeManager {
     ipcMain.handle(CH_COMMAND, async (event: IpcMainInvokeEvent, sessionId: unknown, command: unknown) => {
       this.assertSender(event);
       const runtime = this.requireById(sessionId);
+      // Reserve the order at IPC admission, before an opening/restart can
+      // delay one session while another session confirms a later selection.
+      let reservedModeSelection: (() => void) | undefined;
+      if (command && typeof command === 'object' && 'type' in command && command.type === 'set_session_mode') {
+        const validated = validateClientCommand(command, runtime.engineWorkspacePath);
+        if (validated.type === 'set_session_mode') {
+          reservedModeSelection = this.beginSessionModeSelection({ projectPath: runtime.projectPath, sessionId: runtime.sessionId }, validated.mode);
+        }
+      }
       // Connectivity precedes owned transcript/control recovery. Only ordinary
       // commands wait here; approvals, questions and cancellation must remain
       // available while the recovery transaction waits for those interactions.
-      do {
-        const opening = this.openingSessions.get(runtime.sessionId)?.promise;
-        const restarting = this.restartingSessions.get(runtime.sessionId) ?? [];
-        await Promise.all([opening, ...restarting, runtime.waitForLifecycle()]);
-        this.assertSender(event);
-        if (this.requireById(sessionId) !== runtime) throw new Error('session runtime was replaced');
-      } while (this.openingSessions.get(runtime.sessionId)?.promise !== undefined
-        || this.restartingSessions.has(runtime.sessionId));
-      await runtime.dispatchCommand(command);
+      await this.waitForRuntimeReadiness(runtime, event, sessionId);
+      await runtime.dispatchCommand(command, undefined, reservedModeSelection);
     });
     ipcMain.handle(CH_MOD_UI_CONTROL, (event: IpcMainInvokeEvent, sessionId: unknown, request: unknown) => {
       this.assertSender(event);
@@ -781,6 +829,7 @@ export class SessionRuntimeManager {
       onModelChanged,
       onModelSelected,
       getSavedModel,
+      onSessionModeSelected: _onSessionModeSelected,
       onFirstPromptSent,
       maxCachedRuntimes: _maxCachedRuntimes,
       workspaceSettings,
@@ -824,6 +873,14 @@ export class SessionRuntimeManager {
         onModelChanged?.(ref, model);
       },
       onActivityChanged: () => this.scheduleCacheTrim(ref.sessionId),
+      onSessionModeSelectionStarted: (mode) => this.beginSessionModeSelection(ref, mode),
+      onDraftModeSnapshot: (mode, revision) => {
+        const draft = this.draftSessions.get(ref.projectPath);
+        if (draft?.sessionId === ref.sessionId) {
+          draft.revision = revision;
+          if (draft.initialized) draft.mode = mode;
+        }
+      },
       onFirstPromptSent: () => {
         if (!onFirstPromptSent) {
           this.clearDraftSession(ref);
@@ -844,6 +901,31 @@ export class SessionRuntimeManager {
   private clearDraftSession(ref: SessionRef): void {
     const current = this.draftSessions.get(ref.projectPath);
     if (current?.sessionId === ref.sessionId) this.draftSessions.delete(ref.projectPath);
+  }
+
+  private beginSessionModeSelection(ref: SessionRef, mode: RuntimeSessionMode): () => void {
+    const sequence = ++this.modeSelectionSequence;
+    return () => {
+      const draft = this.draftSessions.get(ref.projectPath);
+      if (draft?.sessionId === ref.sessionId) draft.mode = mode;
+      if (sequence > this.lastSavedModeSelectionSequence) {
+        this.opts.onSessionModeSelected?.(mode);
+        this.lastSavedModeSelectionSequence = sequence;
+      }
+    };
+  }
+
+  private async waitForRuntimeReadiness(runtime: SessionRuntime, event: IpcMainInvokeEvent, sessionId: unknown): Promise<void> {
+    const openingDraft = () => this.draftSessions.get(runtime.projectPath)?.sessionId === runtime.sessionId
+      ? this.openingDraftSessions.get(runtime.projectPath) : undefined;
+    do {
+      const opening = this.openingSessions.get(runtime.sessionId)?.promise;
+      const restarting = this.restartingSessions.get(runtime.sessionId) ?? [];
+      await Promise.all([openingDraft(), opening, ...restarting, runtime.waitForLifecycle()]);
+      this.assertSender(event);
+      if (this.requireById(sessionId) !== runtime) throw new Error('session runtime was replaced');
+    } while (openingDraft() !== undefined || this.openingSessions.get(runtime.sessionId)?.promise !== undefined
+      || this.restartingSessions.has(runtime.sessionId));
   }
 
   private requireById(value: unknown): SessionRuntime {

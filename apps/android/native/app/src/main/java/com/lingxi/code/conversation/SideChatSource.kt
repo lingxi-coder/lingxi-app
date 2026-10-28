@@ -122,6 +122,7 @@ internal class SideChatSource(private val handle: MobileEngineHandle) : Conversa
             },
             DefaultConversationStrings,
             acceptSlashCommandResults = true,
+            expectedTurnId = turnId,
         )
     override suspend fun cancel() = cancel(null)
 

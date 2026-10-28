@@ -1618,8 +1618,9 @@ fn skill_prompt_inputs(
     command: Utf16JsonProjection,
     body: Utf16JsonProjection,
     hook_messages: Vec<Utf16JsonProjection>,
+    skill: Option<lingxi_core::host::SlashSkillIdentity>,
 ) -> Vec<orchestrator::QueuedPromptInput> {
-    orchestrator::skill_prompt_inputs(command, body, hook_messages)
+    orchestrator::skill_prompt_inputs(command, body, hook_messages, skill)
 }
 
 fn slash_image_sources(images: Vec<ImageRefDto>) -> Vec<lingxi_core::types::ImageSource> {
@@ -1831,8 +1832,9 @@ async fn dispatch_queued_bridge_slash(
             command,
             body,
             hook_messages,
+            skill,
         }) => {
-            let mut prompt_inputs = skill_prompt_inputs(command, body, hook_messages);
+            let mut prompt_inputs = skill_prompt_inputs(command, body, hook_messages, skill);
             if let Some(first) = prompt_inputs.first_mut() {
                 first.images.extend(slash_image_sources(images));
             }
@@ -2250,10 +2252,11 @@ async fn run_queued_mod_command(
             command,
             body,
             hook_messages,
+            skill,
         } => {
             queued_turn = Some(QueuedModTurn {
                 prompt: Utf16JsonProjection::from(""),
-                prompt_inputs: Some(skill_prompt_inputs(command, body, hook_messages)),
+                prompt_inputs: Some(skill_prompt_inputs(command, body, hook_messages, skill)),
                 as_user: false,
                 origin: serde_json::json!({"kind":"plugin","name":plugin}),
                 generation,
@@ -2612,6 +2615,7 @@ async fn drain_main_thread(
                 skip_model_query: false,
                 is_meta: command.is_meta || command.source != QueueSource::PromptInput,
                 turn_companion: false,
+                skill_identity: None,
                 mod_origin: Some(match command.source {
                     QueueSource::PromptInput => serde_json::json!({"kind":"bridge"}),
                     QueueSource::Cron => serde_json::json!({"kind":"scheduled-trigger"}),

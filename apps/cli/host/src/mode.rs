@@ -343,10 +343,12 @@ fn slash_model_prompt(
             command,
             body,
             hook_messages,
+            skill,
         } => Some(SlashModelTurn::Batch(skill_prompt_inputs(
             command,
             body,
             hook_messages,
+            skill,
         ))),
         SlashDispatchResult::Handled { display } => {
             let _ = tx.send(tui::TurnEvent::SystemNotice {
@@ -427,8 +429,9 @@ fn skill_prompt_inputs(
     command: lingxi_core::types::utf16_json::Utf16JsonProjection,
     body: lingxi_core::types::utf16_json::Utf16JsonProjection,
     hook_messages: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    skill: Option<lingxi_core::host::SlashSkillIdentity>,
 ) -> Vec<orchestrator::QueuedPromptInput> {
-    orchestrator::skill_prompt_inputs(command, body, hook_messages)
+    orchestrator::skill_prompt_inputs(command, body, hook_messages, skill)
 }
 
 #[async_trait::async_trait]
@@ -1081,8 +1084,9 @@ async fn drain_teammate_prompts(
                     command,
                     body,
                     hook_messages,
+                    skill,
                 } => {
-                    queued_inputs = Some(skill_prompt_inputs(command, body, hook_messages));
+                    queued_inputs = Some(skill_prompt_inputs(command, body, hook_messages, skill));
                     mod_settle = Some(settle);
                 }
                 lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
@@ -1768,6 +1772,11 @@ pub(crate) fn ensure_live_messaging(
 /// carry this state IN MEMORY to reproduce the same observable behavior WITHOUT
 /// writing config keys the upstream never had.
 pub(crate) struct RemountState {
+    /// The source selected for the outgoing mount, or its current writer path
+    /// after a workspace retarget. Never re-resolve this session by UUID.
+    pub transcript_path: Option<std::path::PathBuf>,
+    /// Only a mounted persistent writer may mutate its source on rewind.
+    pub transcript_persistent: bool,
     /// Active `(request_model, provider_profile)` — `None` resolves the model
     /// by-id (no profile). Applied via `switch_model`.
     pub model: Option<(String, Option<String>)>,
@@ -1862,6 +1871,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     initial_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
 ) -> RunOutcome {
+    let resume_transcript_path = tui_build.resume_transcript_path.clone();
     let initial_draft = tui_build.initial_draft.clone();
     let message_anchor = tui_build.message_anchor.clone();
     let session_lifecycle = tui_build.runtime.session_lifecycle.clone();
@@ -3807,6 +3817,11 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // drops it.
     let carried_state = {
         let status = summary_orch.get_status_snapshot().await;
+        let transcript_writer = concrete_orchestrator.session_transcript_writer();
+        let transcript_path = match transcript_writer.as_ref() {
+            Some(writer) => crate::init::absolute_resolved_tui_resume_path(writer.active_path()).ok(),
+            None => resume_transcript_path,
+        };
         let user_model_setting = {
             let session = concrete_orchestrator.session();
             let session = session.lock().await;
@@ -3816,6 +3831,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 .flatten()
         };
         Some(RemountState {
+            transcript_path,
+            transcript_persistent: transcript_writer.is_some(),
             model: Some((status.model, status.model_profile)),
             user_model_setting,
             fast_mode: summary_orch.fast_mode().await,
@@ -7354,6 +7371,7 @@ mod tests {
                 command: "<command-name>/demo</command-name>".into(),
                 body: "Expanded Skill body".into(),
                 hook_messages: Vec::new(),
+                skill: Some(lingxi_core::host::SlashSkillIdentity { name: "demo".into(), path: "/skills/demo".into() }),
             },
             "/demo".into(),
             &tx,
@@ -7397,6 +7415,7 @@ mod tests {
             "<command-name>/demo</command-name>".into(),
             "Expanded Skill body".into(),
             Vec::new(),
+            Some(lingxi_core::host::SlashSkillIdentity { name: "demo".into(), path: "/skills/demo".into() }),
         );
         let error = run_slash_prompt_batch_with_images(
             orch.as_ref(),
@@ -7593,6 +7612,7 @@ mod tests {
             "<command-name>/demo</command-name>".into(),
             "Expanded Skill body".into(),
             Vec::new(),
+            Some(lingxi_core::host::SlashSkillIdentity { name: "demo".into(), path: "/skills/demo".into() }),
         );
         let observed_images = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -7750,6 +7770,7 @@ mod tests {
                 command: "<command-name>/demo</command-name>".into(),
                 body: "Base directory: /skills/demo\n\nExpanded".into(),
                 hook_messages: vec![hook_row.clone()],
+                skill: Some(lingxi_core::host::SlashSkillIdentity { name: "demo".into(), path: "/skills/demo".into() }),
             },
             "/demo".into(),
             &tx,

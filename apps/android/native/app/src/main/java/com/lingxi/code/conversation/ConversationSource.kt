@@ -83,6 +83,9 @@ interface ConversationSource {
     /** Attach the durable active turn when a new UI owner binds this source. */
     suspend fun attachDurableTurnForUi(afterSequence: Long = 0L) {}
 
+    /** Preserve the current UI's history when the process source outlives it. */
+    fun retainUiTranscript(snapshot: RetainedConversationTranscript) {}
+
     /** Apply the persisted permission-mode preference to the live engine. */
     suspend fun setPermissionMode(mode: String) {
         submitClientCommand(ClientCommand.SetPermissionMode(mode))
@@ -241,6 +244,18 @@ interface ConversationSource {
      */
     suspend fun resumeEmptySession(uuid: String, title: String) {
         resumeSession(uuid)
+    }
+
+    /** Restore a startup owner, adopting an already live matching session. */
+    suspend fun restoreInitialSession(uuid: String, title: String, empty: Boolean): ActivatedSession? {
+        val existing = activeSessionState.value
+        if (existing != null && existing.kind != SessionActivationKind.Bootstrap &&
+            com.lingxi.code.model.canonicalSessionId(existing.sessionId) == com.lingxi.code.model.canonicalSessionId(uuid)
+        ) {
+            return existing.withLatestMode(sessionModeState.value).copy(kind = SessionActivationKind.Resumed)
+        }
+        if (empty) resumeEmptySession(uuid, title) else resumeSession(uuid)
+        return null
     }
 
     /**

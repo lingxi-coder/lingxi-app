@@ -330,6 +330,18 @@ class ConversationSourceRecoveryTest {
     }
 
     @Test
+    fun newUiOwnerReattachesEvenWhenItsCursorHasNotChanged() {
+        val coordinator = DurableAttachCoordinator()
+        val request = DurableAttachRequest("session-a", 42L, 7L)
+        coordinator.claimForUi()
+        assertTrue(coordinator.reserve(request, DurableAttachOwner.Ui))
+        coordinator.releaseToHeadless()
+        coordinator.claimForUi()
+        assertTrue(coordinator.reserve(request, DurableAttachOwner.Ui))
+        assertFalse(coordinator.reserve(request, DurableAttachOwner.Ui))
+    }
+
+    @Test
     fun coldResumedTerminalAttachSuppressesDuplicateAssistantAndToolReplay() {
         val gate = DurableTurnReplayGate()
         gate.noteAttachRequested(
@@ -392,6 +404,20 @@ class ConversationSourceRecoveryTest {
                 ),
             ),
         )
+    }
+
+    @Test
+    fun terminalReplayIsNotSuppressedForAPartialRetainedTranscript() {
+        val gate = DurableTurnReplayGate()
+        gate.noteAttachRequested(
+            turnId = 88L,
+            activation = ActivatedSession("session-a", emptyList(), SessionActivationKind.Resumed,
+                transcriptComplete = false),
+            afterSequence = 0L,
+        )
+        assertTrue(gate.shouldForward(ClientEvent.TurnRecoveryState(snapshot(TurnRecoveryStateDto.COMPLETED, 88u, 2u))))
+        assertTrue(gate.shouldForward(ClientEvent.TurnEventReplay("session-a", 88u, 1u,
+            """{"type":"text_delta","text":"terminal output"}""")))
     }
 
     @Test
@@ -460,7 +486,7 @@ private class RecordingRecoveredSource : ConversationSource, SlashCommandConvers
     }
 }
 
-private class FakeSharedPreferences : SharedPreferences {
+internal class FakeSharedPreferences : SharedPreferences {
     private val values = linkedMapOf<String, Any?>()
 
     override fun getAll(): MutableMap<String, *> = values.toMutableMap()

@@ -110,6 +110,7 @@ impl TaskNotificationWake for ReplTaskWake {
                                 text: prompt.unwrap_or_else(|| raw.clone()),
                                 is_meta: true,
                                 turn_companion: false,
+                skill_identity: None,
                                 prompt_ingress_kind: Some(orchestrator::PromptIngressKind::Other),
                                 skip_model_query: false,
                                 message_origin: None,

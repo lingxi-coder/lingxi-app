@@ -306,15 +306,25 @@ export class SessionRuntime {
     complete(): void;
     fail(error: Error): void;
   } | undefined;
+  private pendingDraftModeSnapshot: {
+    generation: number;
+    complete(event: Extract<ClientEvent, { type: 'session_mode_changed' }>): void;
+    fail(error: Error): void;
+  } | undefined;
 
   /** Initialize a fresh draft only; existing conversations restore their own metadata. */
   initializeSessionMode(mode: RuntimeSessionMode): Promise<void> {
-    return this.applySessionMode(mode, false);
+    this.draftModeRestorationRequired = true;
+    return this.applySessionMode(mode, false).then(() => {
+      this.draftWasInitialized = true;
+      this.draftModeRestorationRequired = false;
+    });
   }
 
-  private applySessionMode(mode: RuntimeSessionMode, persist: boolean): Promise<void> {
+  private applySessionMode(mode: RuntimeSessionMode, persist: boolean, reservedSelection?: () => void): Promise<void> {
     if (this.pendingSessionModeSwitch) return Promise.reject(new Error('A conversation mode change is already in progress.'));
     const client = this.requireClient();
+    const saveSelection = persist ? reservedSelection ?? this.opts.onSessionModeSelectionStarted?.(mode) : undefined;
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => pending.fail(new Error('Conversation mode change timed out.')), 10_000);
       timer.unref();
@@ -322,13 +332,18 @@ export class SessionRuntime {
         if (this.pendingSessionModeSwitch !== pending) return;
         this.pendingSessionModeSwitch = undefined;
         clearTimeout(timer);
+        this.notifyActivityChanged();
         if (error) reject(error); else resolve();
       };
       const pending = {
         mode,
         complete: () => {
           try {
-            if (persist) this.opts.onSessionModeSelected?.(mode);
+            if (persist) {
+              if (this.draftSessionMode !== undefined) this.draftSessionMode = mode;
+              if (saveSelection) saveSelection();
+              else this.opts.onSessionModeSelected?.(mode);
+            }
             finish();
           } catch (error) {
             finish(new Error(`Could not save conversation mode: ${sanitizeDiagnostic(error)}`));
@@ -337,6 +352,7 @@ export class SessionRuntime {
         fail: (error: Error) => finish(error),
       };
       this.pendingSessionModeSwitch = pending;
+      this.notifyActivityChanged();
       try { client.sendCommand({ type: 'set_session_mode', mode }); }
       catch (error) { pending.fail(error instanceof Error ? error : new Error(String(error))); }
     });
@@ -707,9 +723,19 @@ export class SessionRuntime {
 
   sessionMode?: RuntimeSessionMode;
   private sessionModeSnapshot?: Extract<ClientEvent, { type: 'session_mode_changed' }>;
+  private sessionModeSnapshotGeneration?: number;
+  /** Drafts have no transcript to resume, so retain their confirmed profile across process starts. */
+  private draftSessionMode?: RuntimeSessionMode;
+  private draftModeRestorationRequired: boolean;
+  private draftWasInitialized: boolean;
+  private draftConfirmedRevision?: number;
 
-  constructor(private readonly opts: BridgeManagerOptions, sessionMode?: RuntimeSessionMode) {
+  constructor(private readonly opts: BridgeManagerOptions, sessionMode?: RuntimeSessionMode, draftWasInitialized = false, draftConfirmedRevision?: number) {
     this.sessionMode = sessionMode;
+    this.draftSessionMode = sessionMode;
+    this.draftModeRestorationRequired = sessionMode !== undefined;
+    this.draftWasInitialized = draftWasInitialized;
+    this.draftConfirmedRevision = draftConfirmedRevision;
     this.sessionId = opts.sessionId ?? randomUUID();
     this.ownedTranscriptPath = opts.resumeTranscriptPath;
     this.remountControls = opts.remountControls;
@@ -935,7 +961,7 @@ export class SessionRuntime {
   }
 
   get hasActiveWork(): boolean {
-    return this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
+    return this.resumeOperationInProgress || this.changingWorkspace || this.pendingSessionModeSwitch !== undefined || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
   }
 
   private currentResumeOwner(): PendingSessionResume | null {
@@ -1403,6 +1429,7 @@ export class SessionRuntime {
         if (this.state.status === 'connected') return;
         if (this.child || this.client || this.adoptedPid) await this.recoverConnection();
         else await this.startInternal();
+        await this.restoreDraftSessionModeIfNeeded();
       } catch (error) {
         this.startupDiagnostic('bridge_start_failed', {
           durationMs: Date.now() - startedAt,
@@ -1522,10 +1549,12 @@ export class SessionRuntime {
       this.assertNoLiveSideChats();
       await beforeRestart?.();
       this.assertNoLiveSideChats();
+      if (this.draftSessionMode !== undefined) this.draftModeRestorationRequired = true;
       this.setState({ status: 'restarting' });
       try {
         await this.stopBridge();
         await this.startInternal();
+        await this.restoreDraftSessionModeIfNeeded();
       } catch (error) {
         if (this.state.status !== 'error') this.fail(error);
         throw error;
@@ -1569,6 +1598,7 @@ export class SessionRuntime {
   }
 
   private async startInternal(): Promise<void> {
+    if (this.draftSessionMode !== undefined) this.draftModeRestorationRequired = true;
     this.telemetryRevoked = false;
     this.liveConnectionRecovered = false;
     this.configuredCustomProviderIds = [];
@@ -1878,6 +1908,7 @@ export class SessionRuntime {
       sessionId: this.sessionId,
       bridgeDir,
       sessionTranscriptPath: this.ownedTranscriptPath,
+      restoreDraft: this.draftSessionMode !== undefined,
       additionalDirectories: launch.additionalDirectories,
       promptDirectories: launch.promptDirectories,
       initialProjectRoot: launch.initialProjectRoot,
@@ -2327,6 +2358,7 @@ export class SessionRuntime {
             // The owning chat must no longer be reused as an unsent draft.
             if (pending.creating && !this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) {
               this.sessionIdentityCommitted = true;
+              this.draftSessionMode = undefined;
             }
             pending.resolve(event.jobs);
           }
@@ -2365,12 +2397,34 @@ export class SessionRuntime {
       if (event.type === 'context_manifest') return;
       if (event.type === 'session_mode_changed') {
         if (event.session_id !== this.sessionId) return;
+        const selectedMode = event.pending_mode ?? event.mode;
+        if (this.draftModeRestorationRequired && this.draftWasInitialized) {
+          const previousRevision = this.draftConfirmedRevision;
+          if ((previousRevision !== undefined && event.revision < previousRevision)
+            || (selectedMode !== this.draftSessionMode && (previousRevision === undefined || event.revision <= previousRevision))) {
+            this.pendingDraftModeSnapshot?.fail(new Error('The restored draft conversation mode does not match its confirmed profile.'));
+            return;
+          }
+          // A newer durable selection may have committed even if its response
+          // was lost. It is authoritative, but does not change device defaults.
+          if (previousRevision !== undefined && event.revision > previousRevision) this.draftSessionMode = selectedMode;
+        }
+        if (this.sessionModeSnapshotGeneration !== generation) {
+          this.sessionModeSnapshot = undefined;
+          this.sessionModeSnapshotGeneration = generation;
+        }
         const previous = this.sessionModeSnapshot;
         if (previous && (event.revision < previous.revision
           || (event.revision === previous.revision && previous.pending_mode === undefined
             && event.pending_mode !== undefined && previous.mode === event.pending_mode))) return;
         this.sessionModeSnapshot = event;
         this.sessionMode = event.mode;
+        if (this.draftSessionMode !== undefined) {
+          if (this.draftWasInitialized && !this.pendingSessionModeSwitch) this.draftSessionMode = selectedMode;
+          this.draftConfirmedRevision = event.revision;
+          this.opts.onDraftModeSnapshot?.(selectedMode, event.revision);
+        }
+        if (this.pendingDraftModeSnapshot?.generation === generation) this.pendingDraftModeSnapshot.complete(event);
         if ((event.pending_mode ?? event.mode) === this.pendingSessionModeSwitch?.mode) this.pendingSessionModeSwitch.complete();
       }
       if (event.type === 'session_resumed') {
@@ -2380,6 +2434,7 @@ export class SessionRuntime {
           return;
         }
         this.sessionModeSnapshot = undefined;
+        this.sessionModeSnapshotGeneration = undefined;
         this.latestState.delete('session_mode_changed');
         this.sessionMode = event.mode;
         void this.updateNativeMediaOwner(event.session_id);
@@ -2392,6 +2447,7 @@ export class SessionRuntime {
       }
       if (event.type === 'session_started') {
         this.sessionModeSnapshot = undefined;
+        this.sessionModeSnapshotGeneration = undefined;
         this.latestState.delete('session_mode_changed');
         this.sessionMode = event.mode;
         void this.updateNativeMediaOwner(event.session_id);
@@ -2752,6 +2808,7 @@ export class SessionRuntime {
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another prompt.');
+    if (this.draftModeRestorationRequired || this.pendingSessionModeSwitch) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
     if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
@@ -2795,6 +2852,7 @@ export class SessionRuntime {
     visualizationContext?: VisualizationReference,
     source?: PromptSource,
   ): void {
+    if (this.draftModeRestorationRequired || this.pendingSessionModeSwitch) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
     const needsIdentityCommit = !this.sessionIdentityCommitted;
     const traceContext = this.telemetryRevoked ? undefined : this.telemetry?.beginTurn(turnId);
     try {
@@ -2809,6 +2867,7 @@ export class SessionRuntime {
     this.sessionHasHistory = true;
     if (needsIdentityCommit && this.opts.onFirstPromptSent?.() !== false) {
       this.sessionIdentityCommitted = true;
+      this.draftSessionMode = undefined;
     }
     // Claim the local slot as soon as the command crossed the authenticated
     // bridge boundary. `turn_started` may arrive on a later event-loop tick;
@@ -2990,12 +3049,14 @@ export class SessionRuntime {
    * never reaches the engine; the renderer's mode display reads the engine's
    * actual (unchanged) mode, so nothing to revert.
    */
-  async dispatchCommand(command: unknown, source?: PromptSource): Promise<void> {
+  async dispatchCommand(command: unknown, source?: PromptSource, reservedModeSelection?: () => void): Promise<void> {
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another command.');
     if (this.archiving) throw new Error('This chat is being archived.');
     const validated = validateClientCommand(command, this.activeWorkspace);
+    if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a command.');
+    if (validated.type === 'run_slash_command' && this.pendingSessionModeSwitch) throw new Error('Wait for the conversation mode to be ready before sending a command.');
     if (validated.type.startsWith('side_chat_')) {
       const client = this.requireClient();
       if (validated.type === 'side_chat_create') this.pendingSideCreates.add(validated.request_id);
@@ -3102,7 +3163,7 @@ export class SessionRuntime {
     if (validated.type === 'set_permission_mode' && (this.opts.getSavedPermissionMode || this.opts.onPermissionModeSelected)) {
       return this.applyPermissionMode(validated.mode, true);
     }
-    if (validated.type === 'set_session_mode') return this.applySessionMode(validated.mode, true);
+    if (validated.type === 'set_session_mode') return this.applySessionMode(validated.mode, true, reservedModeSelection);
     if (validated.type === 'set_fast_mode' && (this.opts.getSavedFastMode || this.opts.onFastModeSelected)) {
       return this.applyFastMode(validated.enabled, true);
     }
@@ -3114,7 +3175,10 @@ export class SessionRuntime {
   private commitFusionHistory(command: ClientCommand): void {
     if (command.type !== 'run_slash_command' || !/^\/fusion(?:\s|$)/i.test(command.raw.trim())) return;
     this.sessionHasHistory = true;
-    if (!this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) this.sessionIdentityCommitted = true;
+    if (!this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) {
+      this.sessionIdentityCommitted = true;
+      this.draftSessionMode = undefined;
+    }
   }
 
   private recordFusionPreparationFailure(command: Extract<ClientCommand, { type: 'run_slash_command' }>, cause: unknown, source?: PromptSource): void {
@@ -3457,6 +3521,38 @@ export class SessionRuntime {
     if (this.sessionHasHistory || this.ownedSessionResumeRequired) await this.resumeOwnedSession();
   }
 
+  private async restoreDraftSessionModeIfNeeded(): Promise<void> {
+    if (!this.draftModeRestorationRequired || this.draftSessionMode === undefined) return;
+    if (!this.draftWasInitialized) {
+      await this.initializeSessionMode(this.draftSessionMode);
+      return;
+    }
+    // A retained draft is hydrated by bridge boot under the transcript writer
+    // lease. Verify that exact profile instead of writing a new transition.
+    await this.requestDraftModeSnapshot();
+    this.draftModeRestorationRequired = false;
+  }
+
+  private requestDraftModeSnapshot(): Promise<void> {
+    if (this.pendingDraftModeSnapshot) return Promise.reject(new Error('A draft mode check is already in progress.'));
+    const client = this.requireClient();
+    const generation = this.generation;
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => pending.fail(new Error('Timed out restoring the draft conversation mode.')), 10_000);
+      timer.unref();
+      const finish = (error?: Error): void => {
+        if (this.pendingDraftModeSnapshot !== pending) return;
+        this.pendingDraftModeSnapshot = undefined;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve();
+      };
+      const pending = { generation, complete: () => finish(), fail: (error: Error) => finish(error) };
+      this.pendingDraftModeSnapshot = pending;
+      try { client.sendCommand({ type: 'get_context_manifest' }); }
+      catch (error) { pending.fail(error instanceof Error ? error : new Error(String(error))); }
+    });
+  }
+
   private resolvePendingSessionResume(pending: PendingSessionResume): void {
     if (this.pendingSessionResume !== pending || pending.sessionId !== this.sessionId
       || pending.generation !== this.generation || pending.client !== this.client || this.disposed) return;
@@ -3567,6 +3663,7 @@ export class SessionRuntime {
       this.telemetry?.interrupt(next.status === 'error' ? 'error' : 'interrupted');
       this.disconnectedForegroundPending ||= this.activeTurn || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
       this.pendingSessionModeSwitch?.fail(new Error('Conversation mode change was interrupted.'));
+      this.pendingDraftModeSnapshot?.fail(new Error('Draft mode restoration was interrupted.'));
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
       this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
       this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
@@ -3616,6 +3713,7 @@ export class SessionRuntime {
     this.pendingRunBindings.clear();
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
     this.pendingSessionModeSwitch?.fail(new Error('Conversation mode change was interrupted.'));
+    this.pendingDraftModeSnapshot?.fail(new Error('Draft mode restoration was interrupted.'));
     this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
     this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
     this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));

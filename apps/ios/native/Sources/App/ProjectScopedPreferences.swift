@@ -68,6 +68,26 @@ struct ProjectScopedPreferences {
         defaults.set(value, forKey: key("draft", scope: scope, mode: mode))
     }
 
+    /// A mode change within one conversation carries its composer contents.
+    /// Resuming another conversation instead restores the destination slot.
+    func draftForModeChange(
+        _ value: String,
+        scope: ConversationScope,
+        from oldMode: SessionMode,
+        to newMode: SessionMode,
+        ownerSessionID: String,
+        restoringSessionID: String?
+    ) -> (draft: String, didRestoreOwner: Bool) {
+        let restoresAnotherOwner = !ownerSessionID.isEmpty && restoringSessionID == ownerSessionID
+        guard oldMode != newMode else { return (value, restoresAnotherOwner) }
+        setDraft(value, scope: scope, mode: oldMode)
+        if !restoresAnotherOwner {
+            setDraft(value, scope: scope, mode: newMode)
+            return (value, false)
+        }
+        return (draft(scope: scope, mode: newMode), true)
+    }
+
     func activeSessionID(scope: ConversationScope) -> String {
         storedActiveSessionID(scope: scope) ?? ""
     }

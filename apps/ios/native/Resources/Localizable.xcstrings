@@ -88913,6 +88913,40 @@
           }
         }
       }
+    },
+    "chat_recovery_replay_truncated": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "部分回复暂未显示。任务结束后，重新打开对话可查看完整记录。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "部分回覆暫未顯示。任務結束後，重新開啟對話可查看完整記錄。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some responses are temporarily missing. Reopen the conversation after the task finishes to view the full history."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一部の応答が一時的に表示されていません。タスク終了後に会話を開き直すと、履歴全体を確認できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일부 응답이 일시적으로 표시되지 않습니다. 작업이 끝난 후 대화를 다시 열면 전체 기록을 볼 수 있습니다."
+          }
+        }
+      }
     }
   }
 }

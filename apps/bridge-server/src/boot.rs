@@ -91,6 +91,8 @@ pub struct BridgeArgs {
     pub catalog_session_id: Option<String>,
     /// Exact persisted source selected by the host before lifecycle hooks run.
     pub session_transcript_path: Option<PathBuf>,
+    /// Restore an owned, unsent desktop draft from its canonical metadata source.
+    pub restore_draft: bool,
     /// `--list-sessions-json`: read the session catalog and exit without building an engine.
     pub list_sessions_json: bool,
     /// Read the merged workspace environment without building an engine.
@@ -254,6 +256,7 @@ impl BridgeArgs {
                     }
                     out.session_transcript_path = Some(path);
                 }
+                "--restore-draft" => out.restore_draft = true,
                 "--model" => {
                     let v = it
                         .next()
@@ -332,6 +335,17 @@ impl BridgeArgs {
         }
         if out.session_scope.is_some() && !out.list_sessions_json {
             return Err("--session-scope requires --list-sessions-json".into());
+        }
+        if out.restore_draft
+            && (out.session_id.is_none()
+                || out.session_transcript_path.is_some()
+                || out.list_sessions_json
+                || out.workspace_environment_json
+                || out.product_paths_json)
+        {
+            return Err(
+                "--restore-draft requires a runtime session UUID and no selected transcript".into(),
+            );
         }
         if let Some(path) = &out.session_transcript_path {
             let id = out
@@ -867,6 +881,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // settles.
         __desktop_config.connect_mcp_in_background = true;
         __desktop_config.session_transcript_path = args.session_transcript_path.clone();
+        __desktop_config.restore_draft = args.restore_draft;
         __desktop_config.session_resume_snapshot = None;
         __desktop_config.session_resume_cost = None;
         __desktop_config.max_structured_output_retries = 5;
@@ -1382,12 +1397,42 @@ async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), St
             .into_shared()
     };
     let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(HostFileSystem::new(cfg.cwd.clone()));
-    let (_, content, loaded) =
-        session::jsonl::load_routed_session_from_path_with_source(&path, uuid, fs)
+    let (content, loaded) = if cfg.restore_draft {
+        // The ordinary transcript loader deliberately excludes zero-message
+        // files. Drafts use the same captured source and strict validation,
+        // without broadening historical-session discovery or resume.
+        let content = fs
+            .read_file(
+                path.to_str().expect("validated UTF-8 transcript path"),
+                None,
+                None,
+            )
             .await
-            .map_err(|error| format!("selected transcript is not resumable: {error}"))?;
+            .map_err(|error| format!("draft transcript is unavailable: {error}"))?
+            .content;
+        let loaded = session::jsonl::route_lines(&content);
+        (content, loaded)
+    } else {
+        let (_, content, loaded) =
+            session::jsonl::load_routed_session_from_path_with_source(&path, uuid, fs)
+                .await
+                .map_err(|error| format!("selected transcript is not resumable: {error}"))?;
+        (content, loaded)
+    };
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &uuid.to_string());
-    if messages.is_empty() && !loaded.mobile_empty_sessions.contains(&uuid.to_string()) {
+    if cfg.restore_draft
+        && !harness_runtime::desktop::session_state::is_mode_only_draft(&content, &uuid.to_string())
+    {
+        return Err("draft transcript is not valid mode-only metadata".into());
+    }
+    if messages.is_empty()
+        && !loaded.mobile_empty_sessions.contains(&uuid.to_string())
+        && !(cfg.restore_draft
+            && harness_runtime::desktop::session_state::is_mode_only_draft(
+                &content,
+                &uuid.to_string(),
+            ))
+    {
         return Err("selected transcript has no resumable conversation".into());
     }
     if let Some(workspace) = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
@@ -1416,6 +1461,54 @@ async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), St
     });
     cfg.session_writer_lease = Some(lease);
     Ok(())
+}
+
+/// Claim the draft UUID before checking for its canonical transcript. A missing
+/// file means the draft has never selected a mode; any existing file must be
+/// validated and captured under that same writer authority before build hooks.
+async fn prepare_draft_boot_session(cfg: &mut DesktopConfig) -> Result<(), String> {
+    if !cfg.restore_draft {
+        return Ok(());
+    }
+    if cfg.session_transcript_path.is_some() || cfg.session_resume_snapshot.is_some() {
+        return Err("draft restore cannot override a selected transcript".into());
+    }
+    let uuid = uuid::Uuid::parse_str(
+        cfg.session_id_override
+            .as_deref()
+            .ok_or("draft restore requires a session UUID")?,
+    )
+    .map_err(|_| "draft restore requires a valid session UUID")?;
+    let lease = if let Some(lease) = cfg.session_writer_lease.as_ref() {
+        if lease.canonical_session_id().map(|id| id.as_uuid()) != Some(uuid) {
+            return Err("draft writer authority does not match the session UUID".into());
+        }
+        lease.clone()
+    } else {
+        lingxi_core::host::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"))
+            .claim_session_id(&uuid.to_string(), std::process::id())
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    "bridge session id is already active".to_string()
+                }
+                _ => "bridge session writer authority is unavailable".to_string(),
+            })?
+            .into_shared()
+    };
+    cfg.session_writer_lease = Some(lease);
+    let path = session::jsonl::session_path(
+        &cfg.lingxi_home,
+        &cfg.cwd.to_string_lossy(),
+        &uuid.to_string(),
+    );
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => {
+            cfg.session_transcript_path = Some(path);
+            prepare_selected_boot_session(cfg).await
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("draft transcript is unavailable".into()),
+    }
 }
 
 fn initialize_live_session(
@@ -1968,15 +2061,20 @@ pub async fn assemble_with_credentials(
     let media_handoffs =
         Arc::new(harness_runtime::desktop::DesktopMediaAgentHandoffQueue::default());
     cfg.media_agent_handoffs = Some(media_handoffs.clone());
+    prepare_draft_boot_session(&mut cfg).await?;
     prepare_selected_boot_session(&mut cfg).await?;
-    let cold_resume = crate::workspace_commands::ColdBootResume::capture(&cfg)?;
+    let cold_resume = if cfg.restore_draft {
+        None
+    } else {
+        crate::workspace_commands::ColdBootResume::capture(&cfg)?
+    };
     let provider_credentials_ephemeral = matches!(
         cfg.credential_storage_policy,
         lingxi_core::host::CredentialStoragePolicy::NativeOrMemory
     );
     let enable_automation_scheduler = cfg.enable_automation_scheduler;
     let initial_workspace_trusted = cfg.host_workspace_trusted == Some(true);
-    let initial_session_resumed = cfg.session_resume_snapshot.is_some();
+    let initial_session_resumed = !cfg.restore_draft && cfg.session_resume_snapshot.is_some();
     let initial_add_dirs = cfg
         .add_dir
         .iter()
@@ -2058,7 +2156,11 @@ pub async fn assemble_with_credentials(
         SettingsContext {
             plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
             fusion_layers: Some(Arc::new({
-                let config = cfg.clone();
+                let mut config = cfg.clone();
+                // Settings reloads outlive individual session mounts. The
+                // bootstrap lease belongs to the hydrated session, not this
+                // configuration snapshot.
+                config.session_writer_lease = None;
                 move || harness_runtime::desktop::fusion_settings_layers_for_config(&config)
             })),
             paths,
@@ -2574,9 +2676,15 @@ fn spawn_mcp_startup_publisher(
     router: Arc<EngineCommandRouter>,
     sink: Arc<dyn client::adapter::ClientEventSink>,
 ) {
+    // Waiting for startup progress must not keep a closed session (and its
+    // writer authority) alive. Hold the router only while publishing an update.
+    let router = Arc::downgrade(&router);
     tokio::spawn(async move {
         while progress.changed().await.is_ok() {
             let settled = progress.borrow_and_update().pending == 0;
+            let Some(router) = router.upgrade() else {
+                break;
+            };
             router.publish_mcp_startup_progress(sink.as_ref()).await;
             if settled {
                 break;
@@ -2870,6 +2978,113 @@ mod tests {
         ] {
             assert!(BridgeArgs::parse(flags).is_err());
         }
+    }
+
+    #[test]
+    fn draft_restore_flag_requires_an_owned_runtime_session() {
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let parsed = BridgeArgs::parse(["--session-id", id, "--restore-draft"]).unwrap();
+        assert!(parsed.restore_draft);
+        assert!(resolve_desktop_config(&parsed).restore_draft);
+        assert!(BridgeArgs::parse(["--restore-draft"]).is_err());
+        assert!(BridgeArgs::parse([
+            "--session-id",
+            id,
+            "--restore-draft",
+            "--list-sessions-json"
+        ])
+        .is_err());
+        assert!(BridgeArgs::parse([
+            "--session-id",
+            id,
+            "--restore-draft",
+            "--session-transcript-path",
+            &format!("/tmp/{id}.jsonl")
+        ])
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn draft_boot_captures_valid_metadata_under_the_session_writer_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let home = root.path().join("home");
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let content = format!(
+            "{}\n",
+            serde_json::json!({"type":"session-mode", "sessionId":id,
+            "sessionMode":"chat", "contextRevision":3, "profileEpoch":3,
+            "admittedMode":"chat", "admittedEpoch":3, "pending":false})
+        );
+        std::fs::write(&path, &content).unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd;
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.restore_draft = true;
+        prepare_draft_boot_session(&mut cfg).await.unwrap();
+        assert_eq!(cfg.session_transcript_path.as_ref(), Some(&path));
+        assert_eq!(
+            cfg.session_resume_snapshot
+                .as_ref()
+                .unwrap()
+                .content
+                .as_ref(),
+            content
+        );
+        assert_eq!(cfg.session_writer_lease.as_ref().unwrap().session_id(), id);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        drop(cfg);
+        assert!(LiveSessionDir::at_live(home.join("sessions"))
+            .claim_session_id(id, std::process::id())
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn draft_boot_rejects_corrupt_or_message_bearing_files_without_changing_them() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let home = root.path().join("home");
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mode = serde_json::json!({"type":"session-mode", "sessionId":id,
+            "sessionMode":"chat", "contextRevision":3, "profileEpoch":3,
+            "admittedMode":"chat", "admittedEpoch":3, "pending":false});
+        for content in [
+            format!("{mode}\n{{broken\n"),
+            format!(
+                "{mode}\n{}\n",
+                serde_json::json!({"type":"user","sessionId":id,"message":{}})
+            ),
+        ] {
+            std::fs::write(&path, &content).unwrap();
+            let mut cfg = DesktopConfig::default();
+            cfg.cwd = cwd.clone();
+            cfg.lingxi_home = home.clone();
+            cfg.session_id_override = Some(id.into());
+            cfg.restore_draft = true;
+            assert!(prepare_draft_boot_session(&mut cfg).await.is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+    }
+
+    #[tokio::test]
+    async fn new_draft_without_a_transcript_remains_new_with_a_writer_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = root.path().into();
+        cfg.lingxi_home = root.path().join("home");
+        cfg.session_id_override = Some("11111111-2222-4333-8444-555555abcdef".into());
+        cfg.restore_draft = true;
+        prepare_draft_boot_session(&mut cfg).await.unwrap();
+        assert!(cfg.session_transcript_path.is_none());
+        assert!(cfg.session_resume_snapshot.is_none());
+        assert!(cfg.session_writer_lease.is_some());
     }
 
     #[test]

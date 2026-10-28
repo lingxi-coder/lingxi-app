@@ -12,6 +12,10 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
     }
 
+    func newConversationMode(defaultMode: SessionMode) -> SessionMode {
+        params["mode"].flatMap(SessionMode.init(rawValue:)) ?? defaultMode
+    }
+
     func needsContextRebind(workspace: String, mode: String) -> Bool {
         guard !["session", "new", "project", "market", "apps", "remote"].contains(parts[0]) else { return false }
         return params["workspace"].map { $0 != workspace } == true

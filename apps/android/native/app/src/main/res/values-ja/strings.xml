@@ -3,6 +3,7 @@
     <string name="chat_compact_during_turn">チャットの実行中はコンパクトできません</string>
     <string name="chat_message_copy">コピー</string>
     <string name="chat_message_copied">コピーしました</string>
+    <string name="chat_recovery_replay_truncated">一部の応答が一時的に表示されていません。タスク終了後に会話を開き直すと、履歴全体を確認できます。</string>
     <string name="app_intent_ask_description">Siri、ショートカット、または他のアプリからのテキストを新しい会話に渡します。</string>
     <string name="app_intent_ask_title">灵犀に質問する</string>
     <string name="app_intent_initial_command_param_title">事前入力するコマンド</string>

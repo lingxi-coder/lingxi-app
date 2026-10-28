@@ -2,6 +2,7 @@
   "chat_compact_during_turn": "채팅 진행 중에는 압축할 수 없습니다",
   "chat_message_copy": "복사",
   "chat_message_copied": "복사됨",
+  "chat_recovery_replay_truncated": "일부 응답이 일시적으로 표시되지 않습니다. 작업이 끝난 후 대화를 다시 열면 전체 기록을 볼 수 있습니다.",
   "__info_plist__": {
     "CFBundleDisplayName": "LingXi",
     "NSCameraUsageDescription": "灵犀가 모델 분석을 위해 카메라로 사진을 촬영합니다.",

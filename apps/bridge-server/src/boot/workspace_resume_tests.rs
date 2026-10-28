@@ -978,3 +978,225 @@ async fn cold_resume_reports_admitted_mode_and_preserves_pending_selection() {
     let report = lifecycle.shutdown_and_drain().await;
     assert!(report.complete, "{:?}", report.errors);
 }
+
+#[tokio::test]
+async fn cold_draft_boot_restores_profile_revision_before_new_selections() {
+    use client::protocol::commands::ClientCommand;
+    use client::protocol::listings::SessionModeDto;
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("config");
+    let id = uuid::Uuid::new_v4();
+    let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type":"session-mode", "sessionId":id, "sessionMode":"chat", "contextRevision":3,
+                "profileEpoch":3, "admittedMode":"code", "admittedEpoch":0, "pending":true
+            })
+        ),
+    )
+    .unwrap();
+    let mut cfg = isolated_config(&cwd, &home);
+    cfg.session_id_override = Some(id.to_string());
+    cfg.restore_draft = true;
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    send(
+        &mut socket,
+        2,
+        "command",
+        client_command(ClientCommand::GetContextManifest),
+    )
+    .await;
+    let mut observed_mode = false;
+    loop {
+        match next_frame(&mut socket).await {
+            Frame::Event(ClientEvent::SessionModeChanged {
+                session_id,
+                mode: SessionModeDto::Code,
+                pending_mode: Some(SessionModeDto::Chat),
+                revision: 3,
+            }) if session_id == id.to_string() => observed_mode = true,
+            Frame::Event(ClientEvent::ContextManifest { manifest_json }) => {
+                let manifest: serde_json::Value = serde_json::from_str(&manifest_json).unwrap();
+                assert!(observed_mode);
+                assert_eq!(manifest["session"]["revision"], 3);
+                assert_eq!(manifest["session"]["selected"], "chat");
+                break;
+            }
+            _ => {}
+        }
+    }
+    send(
+        &mut socket,
+        3,
+        "command",
+        client_command(ClientCommand::SetSessionMode {
+            mode: SessionModeDto::Code,
+        }),
+    )
+    .await;
+    loop {
+        match next_frame(&mut socket).await {
+            Frame::Event(ClientEvent::SessionModeChanged {
+                session_id,
+                mode,
+                pending_mode,
+                revision,
+            }) => {
+                assert_eq!(session_id, id.to_string());
+                assert_eq!(mode, SessionModeDto::Code);
+                assert_eq!(pending_mode, None);
+                assert_eq!(revision, 4);
+                break;
+            }
+            Frame::Event(ClientEvent::Error { kind, message }) => {
+                panic!("mode selection failed: {kind:?}: {message:?}")
+            }
+            _ => {}
+        }
+    }
+    let source = std::fs::read_to_string(&path).unwrap();
+    let transition =
+        session::JsonlWriter::session_mode_transition_from_source(&source, &id.to_string())
+            .unwrap();
+    assert_eq!(transition.revision, 4);
+    assert_eq!(
+        transition.selected,
+        lingxi_core::host::session_context::ConversationMode::Code
+    );
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn cold_draft_reopens_real_session_start_attachments_for_code_and_chat() {
+    use lingxi_core::host::{session_context::ConversationMode, OrchestratorHandle};
+
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for expected in [ConversationMode::Code, ConversationMode::Chat] {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let home = cwd.join("config");
+        let id = uuid::Uuid::new_v4();
+        let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+        let hook_input = cwd.join("session-start-input.json");
+        let hook_output = serde_json::json!({"hookSpecificOutput":{
+            "hookEventName":"SessionStart", "additionalContext":"startup context"
+        }});
+        let settings = serde_json::json!({"hooks":{"SessionStart":[{"hooks":[{
+            "type":"command", "command":format!(
+                "cat > '{}'; printf '%s\\n' '{}'", hook_input.display(), hook_output)
+        }]}]}});
+        let mut cfg = isolated_config(&cwd, &home);
+        cfg.session_id_override = Some(id.to_string());
+        cfg.restore_draft = true;
+        cfg.flag_settings = Some(serde_json::from_value(settings.clone()).unwrap());
+        cfg.flag_settings_source = Some(settings.to_string());
+
+        let sessions =
+            lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"));
+        let revision = if expected == ConversationMode::Chat {
+            1
+        } else {
+            0
+        };
+        let (retired_runtime, retired_writer, retired_tools) = {
+            let mut first_cfg = cfg.clone();
+            // Observe the exact claim acquired by normal draft preparation,
+            // including any independent scopes retained after the runtime.
+            prepare_draft_boot_session(&mut first_cfg).await.unwrap();
+            let retired_writer = Arc::downgrade(first_cfg.session_writer_lease.as_ref().unwrap());
+            let first = Box::pin(assemble(first_cfg)).await.unwrap();
+            let retired_runtime = Arc::downgrade(&first.runtime);
+            let retired_tools = Arc::downgrade(&first.runtime.orchestrator.shared_tool_registry());
+            let competing_claim = sessions.claim_session_id(&id.to_string(), std::process::id());
+            assert!(
+                matches!(competing_claim, Err(ref error) if error.kind() == std::io::ErrorKind::AlreadyExists),
+                "the live draft must retain its exclusive writer lease: {competing_claim:?}"
+            );
+            if expected == ConversationMode::Chat {
+                first
+                    .runtime
+                    .orchestrator
+                    .set_conversation_mode(expected)
+                    .await
+                    .unwrap();
+            }
+            // Mirror the host: close the connection before draining accepted
+            // session work, then release the remaining runtime owners.
+            let lifecycle = first.session_lifecycle();
+            let (endpoint, mut socket) = connect(first.connection).await;
+            socket.close(None).await.unwrap();
+            endpoint.shutdown().await;
+            let report = lifecycle.shutdown_and_drain().await;
+            assert!(report.complete, "{:?}", report.errors);
+            (retired_runtime, retired_writer, retired_tools)
+        };
+        // Dropping the connection aborts its queue watcher asynchronously;
+        // wait for its owners and the live tool graph to retire before testing
+        // the claim. The timeout is a failure bound, not a fixed delay.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while retired_runtime.strong_count() != 0
+                || retired_writer.strong_count() != 0
+                || retired_tools.strong_count() != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "closed draft remains owned: runtime={}, writer={}, tools={}",
+                retired_runtime.strong_count(),
+                retired_writer.strong_count(),
+                retired_tools.strong_count()
+            )
+        });
+        let reclaimed = sessions
+            .claim_session_id(&id.to_string(), std::process::id())
+            .expect("the drained and dropped draft must release its writer lease");
+        drop(reclaimed);
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(before.contains("hook_additional_context"), "{before}");
+        assert!(harness_runtime::desktop::session_state::is_mode_only_draft(
+            &before,
+            &id.to_string()
+        ));
+        assert_eq!(
+            before.contains("\"session-mode\""),
+            expected == ConversationMode::Chat
+        );
+
+        let second = Box::pin(assemble(cfg)).await.unwrap();
+        let profile = second.runtime.orchestrator.conversation_mode().await;
+        assert_eq!(
+            (
+                profile.active,
+                profile.selected,
+                profile.revision,
+                profile.pending
+            ),
+            (expected, expected, revision, false)
+        );
+        let input: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&hook_input).unwrap()).unwrap();
+        assert_eq!(input["source"], "resume");
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with(&before));
+        let report = second.session_lifecycle().shutdown_and_drain().await;
+        assert!(report.complete, "{:?}", report.errors);
+    }
+}

@@ -2,6 +2,7 @@
   "chat_compact_during_turn": "チャットの実行中はコンパクトできません",
   "chat_message_copy": "コピー",
   "chat_message_copied": "コピーしました",
+  "chat_recovery_replay_truncated": "一部の応答が一時的に表示されていません。タスク終了後に会話を開き直すと、履歴全体を確認できます。",
   "__info_plist__": {
     "CFBundleDisplayName": "LingXi",
     "NSCameraUsageDescription": "灵犀はモデルによる解析のため、カメラで写真を撮影します。",

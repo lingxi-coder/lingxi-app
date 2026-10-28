@@ -493,7 +493,12 @@ mod tests {
             let captured = crate::init::capture_tui_resume(&mut cfg, session_id)
                 .await
                 .unwrap();
-            assert_eq!(cfg.session_transcript_path.as_deref(), Some(path.as_path()));
+            let canonical_path = path.canonicalize().unwrap();
+            assert_eq!(
+                cfg.session_transcript_path.as_deref(),
+                Some(canonical_path.as_path())
+            );
+            let source = &cfg.session_resume_snapshot.as_ref().unwrap().content;
             let resumed = orchestrator::ConversationOrchestrator::new(
                 orchestrator::OrchestratorConfig::default(),
                 Arc::new(orchestrator::test_support::MockApiClient::new(vec![])),
@@ -514,9 +519,10 @@ mod tests {
                     false,
                     permission::PermissionMode::Plan,
                     session::JsonlWriter::session_mode_transition_from_source(
-                        &cfg.session_resume_snapshot.as_ref().unwrap().content,
+                        source,
                         &session_id.to_string(),
                     ),
+                    source,
                 )
                 .await
                 .unwrap();
@@ -641,6 +647,7 @@ mod tests {
                 false,
                 permission::PermissionMode::Default,
                 profile,
+                source,
             )
             .await
             .unwrap();

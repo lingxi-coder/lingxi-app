@@ -713,6 +713,7 @@ export function buildBridgeArguments(config: {
   sessionId?: string;
   listSessionsJson?: boolean;
   sessionTranscriptPath?: string;
+  restoreDraft?: boolean;
   sessionScope?: 'current' | 'repository' | 'all';
   additionalDirectories?: readonly string[];
   promptDirectories?: readonly string[];
@@ -740,6 +741,7 @@ export function buildBridgeArguments(config: {
   if (config.appVersion) args.push('--app-version', config.appVersion);
   if (config.sessionId) args.push('--session-id', config.sessionId);
   if (config.sessionTranscriptPath) args.push('--session-transcript-path', config.sessionTranscriptPath);
+  if (config.restoreDraft) args.push('--restore-draft');
   if (config.initialProjectRoot) args.push('--session-project-root', config.initialProjectRoot);
   if (config.configHome) args.push('--session-config-home', config.configHome);
   if (config.globalConfigPath) args.push('--session-global-config-path', config.globalConfigPath);

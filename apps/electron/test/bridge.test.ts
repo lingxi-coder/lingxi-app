@@ -141,6 +141,7 @@ test('newSession reuses one unsent draft per project until the first prompt cros
     (this as any).activeWorkspace = projectPath;
     (this as any).activeWorkspaceTrusted = true;
     (this as any).state = { status: 'connected' };
+    (this as any).draftModeRestorationRequired = false; // This fixture substitutes a ready engine.
   };
   const manager = new SessionRuntimeManager({
     launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
@@ -210,6 +211,7 @@ test('first-prompt commit failures keep the draft recoverable and retry without 
     (this as any).activeWorkspace = projectPath;
     (this as any).activeWorkspaceTrusted = true;
     (this as any).state = { status: 'connected' };
+    (this as any).draftModeRestorationRequired = false; // This fixture substitutes a ready engine.
   };
   const manager = new SessionRuntimeManager({
     diagnostics,
@@ -848,10 +850,11 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
   }), { mode: 0o600 });
   const originalConnect = BridgeClient.prototype.connect;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  const startupCommands: unknown[] = [];
   let launchCalls = 0;
   let telemetryRevocations = 0;
   BridgeClient.prototype.connect = async function () {
-    this.sendCommand = (command) => assert.deepEqual(command, { type: 'get_audio_session_context' });
+    this.sendCommand = (command) => { startupCommands.push(command); };
     this.disableTelemetry = async () => { telemetryRevocations += 1; };
     return {
       server_name: 'lingxi-bridge-server/0.9.0',
@@ -875,6 +878,7 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
 
   try {
     const runtime = await manager.openSession(ref);
+    assert.deepEqual(startupCommands, [{ type: 'get_audio_session_context' }, { type: 'get_context_manifest' }]);
     assert.equal(launchCalls, 0);
     assert.equal(telemetryRevocations, 1, 'a newly adopted process honors default-off device policy');
     assert.equal(runtime.connectionState.status, 'connected');
@@ -2224,6 +2228,7 @@ test('successful scheduled creation commits the draft owner, while rejection kee
     (this as any).activeWorkspace = '/workspace';
     (this as any).activeWorkspaceTrusted = true;
     (this as any).state = { status: 'connected' };
+    (this as any).draftModeRestorationRequired = false; // This fixture substitutes a ready engine.
   };
   const manager = new SessionRuntimeManager({
     launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }),

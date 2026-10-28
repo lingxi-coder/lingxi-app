@@ -130,6 +130,10 @@ export interface BridgeManagerOptions {
   onPermissionModeSelected?: (mode: PermissionModeId) => void;
   getSavedSessionMode?: () => RuntimeSessionMode;
   onSessionModeSelected?: (mode: RuntimeSessionMode) => void;
+  /** Manager-owned ordering for an explicit selection, reserved before its acknowledgement. */
+  onSessionModeSelectionStarted?: (mode: RuntimeSessionMode) => () => void;
+  /** Retain a draft's last confirmed engine revision while its runtime is cached out. */
+  onDraftModeSnapshot?: (mode: RuntimeSessionMode, revision: number) => void;
   getSavedFastMode?: () => boolean | undefined;
   onFastModeSelected?: (enabled: boolean) => void;
   /**
@@ -187,7 +191,7 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'onSessionModeSelectionStarted' | 'onDraftModeSnapshot' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
   workspaceSettings?: (projectPath: string) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };

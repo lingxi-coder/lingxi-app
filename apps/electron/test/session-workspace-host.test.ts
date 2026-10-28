@@ -108,6 +108,7 @@ function hostFixture(t: TestContext) {
     setSessionDirectoryGrants: (id: string, paths: readonly string[]) => { grants.set(id, [...paths]); },
     setSessionProjectRoot: (id: string, projectPath: string) => { projectRoots.set(id, projectPath); },
     setSessionPromptDirectories: (id: string, paths: readonly string[]) => { promptDirectories.set(id, [...paths]); },
+    prepareDraftRelocation: (_ref: SessionRef, _projectPath: string) => () => {},
     closeSession: async (requested: SessionRef) => {
       assert.equal(runtimes.get(requested.sessionId)?.leased, false, 'the lease must release immediately before removing the old runtime');
       assert.equal(runtimes.get(requested.sessionId)?.busy, false, 'busy runtimes must remain open');
@@ -271,6 +272,20 @@ test('/cd opens an unsent draft without resuming its computed but unwritten tran
   const restarted = new SettingsStore(f.userData);
   assert.equal(restarted.getPublic().activeSession, undefined, 'cold start must not try to resume an unwritten draft UUID');
   assert.equal(restarted.getPublic().activeProject, f.target);
+});
+
+test('/cd rolls back the native directory move if the target already owns a draft', async (t) => {
+  const f = hostFixture(t);
+  f.settings.setActiveSession(undefined);
+  f.settings.setActiveSessionDraft(f.ref);
+  f.original.hasConversation = false;
+  f.bridge.prepareDraftRelocation = () => { throw new Error('The destination project already has an unsent draft.'); };
+  await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), /already has an unsent draft/);
+  assert.equal(f.original.cwd, f.source);
+  assert.strictEqual(f.runtimes.get(sessionId), f.original);
+  assert.deepEqual(f.calls.close, []);
+  assert.deepEqual(f.calls.open, []);
+  assert.deepEqual(f.settings.getPublic().activeSession, f.ref);
 });
 
 test('/cd with history and no catalog row propagates a missing transcript failure instead of silently opening an empty draft', async (t) => {

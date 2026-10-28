@@ -535,6 +535,7 @@ final class ConversationModel: ObservableObject {
     /// A new session cannot send until its requested initial mode is confirmed.
     @Published var awaitingNewSessionMode = false
     @Published var newSessionModeFailed = false
+    @Published var requestedNewSessionMode: SessionMode?
     var sessionModeRevision: UInt64?
     @Published var activeSessionId: String = "" {
         didSet {

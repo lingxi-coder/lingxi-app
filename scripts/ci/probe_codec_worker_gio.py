@@ -40,15 +40,19 @@ def replace_c_string(path, suffix, target):
     data = path.read_bytes()
     strings = [part for part in data.split(b'\0') if part.startswith(b'/') and part.endswith(suffix)]
     strings = sorted(set(strings))
-    if len(strings) != 1:
-        raise RuntimeError(f'expected one compiled path ending {suffix!r} in {path}: {strings!r}')
-    original = strings[0] + b'\0'
+    if not strings:
+        raise RuntimeError(f'expected a compiled path ending {suffix!r} in {path}')
     replacement = os.fsencode(target) + b'\0'
-    if len(replacement) > len(original):
-        raise RuntimeError('test path is too long for copied SDK string')
-    count = data.count(original)
-    path.write_bytes(data.replace(original, replacement + b'\0' * (len(original) - len(replacement))))
-    return {'original': os.fsdecode(strings[0]), 'copies': count}
+    originals = []
+    for string in strings:
+        original = string + b'\0'
+        if len(replacement) > len(original):
+            raise RuntimeError('test path is too long for copied SDK string')
+        count = data.count(original)
+        data = data.replace(original, replacement + b'\0' * (len(original) - len(replacement)))
+        originals.append({'path': os.fsdecode(string), 'copies': count})
+    path.write_bytes(data)
+    return {'originals': originals}
 
 
 def sign(path):

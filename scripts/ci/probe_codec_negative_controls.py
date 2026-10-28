@@ -51,6 +51,17 @@ try:
         "slow_boot_cannot_hide_a_stale_audio_request",
         ["slow bootstrap must not hide stale capture age"],
     )
+    mutate([("bool::from(proof[..32].ct_eq(token.as_slice()))", "true")])
+    result = run([
+        "cargo", "test", "--locked", "-p", "remote-control-client", "--features",
+        "native-media", "--lib",
+        "isolated_codec::tests::codec_auth_rejects_wrong_token_and_lane_before_accepting_valid_peer",
+        "--", "--exact", "--test-threads=1", "--nocapture", "--color", "never",
+    ])
+    if (result.returncode == 0 or "1 failed;" not in result.stdout or
+            "invalid peer must be closed" not in result.stdout):
+        raise RuntimeError("codec token bypass was not detected")
+    print("Negative control detected: incorrect codec token accepted", flush=True)
     mutate([
         ('        command.env("GIO_MODULE_DIR", &gio_modules);\n', ""),
         ('        command.env("GST_INSTALL_PLUGINS_HELPER", &disabled_installer);\n', ""),

@@ -24,10 +24,11 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    process::{Child, Command},
+    process::Command,
     sync::{watch, Mutex},
     time::timeout,
 };
@@ -680,11 +681,48 @@ async fn accept_authenticated(
         let read = timeout(Duration::from_millis(500), stream.read_exact(&mut proof)).await;
         if matches!(read, Ok(Ok(_)))
             && proof[32] == kind
-            && ring::constant_time::verify_slices_are_equal(&proof[..32], &token).is_ok()
+            && bool::from(proof[..32].ct_eq(token.as_slice()))
         {
             stream.set_nodelay(true)?;
             return Ok(stream);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn codec_auth_rejects_wrong_token_and_lane_before_accepting_valid_peer() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let token = [0x6du8; 32];
+        let task = tokio::spawn(accept_authenticated(listener, token, b'A'));
+
+        for (candidate, kind) in [([0x6cu8; 32], b'A'), (token, b'V')] {
+            let mut socket = TcpStream::connect(address).await.unwrap();
+            socket.write_all(&candidate).await.unwrap();
+            socket.write_all(&[kind]).await.unwrap();
+            let mut byte = [0u8; 1];
+            assert_eq!(
+                timeout(Duration::from_secs(2), socket.read(&mut byte))
+                    .await
+                    .expect("invalid peer must be closed")
+                    .unwrap(),
+                0
+            );
+            assert!(!task.is_finished(), "invalid peer was authenticated");
+        }
+        let mut socket = TcpStream::connect(address).await.unwrap();
+        socket.write_all(&token).await.unwrap();
+        socket.write_all(b"A").await.unwrap();
+        let accepted = timeout(Duration::from_secs(2), task)
+            .await
+            .expect("valid peer must be accepted")
+            .expect("accept task panicked")
+            .expect("valid peer was rejected");
+        drop(accepted);
     }
 }
 fn add_system_environment(

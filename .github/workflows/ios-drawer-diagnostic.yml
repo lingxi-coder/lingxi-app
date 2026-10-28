@@ -131,12 +131,20 @@ jobs:
 
       # Independent diagnostics run before the unchanged full suite. A failed
       # probe must not prevent the other probes and full suite from executing.
+      - name: Build iOS test bundles for diagnostics
+        timeout-minutes: 40
+        working-directory: apps/ios/native
+        run: |
+          xcodebuild build-for-testing \
+            -scheme LingxiCode \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}"
+
       - name: Focused iOS UI diagnostics
         id: focused-ui
         timeout-minutes: 15
         working-directory: apps/ios/native
         run: |
-          xcodebuild test \
+          xcodebuild test-without-building \
             -scheme LingxiCode \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
             -only-testing:LingxiCodeUITests/LingxiCodeUITests/testCompactSidebarReleasesConversationControlsWhenClosed \

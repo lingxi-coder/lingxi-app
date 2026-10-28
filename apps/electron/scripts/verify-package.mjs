@@ -34,7 +34,6 @@ import {
 import {
   BROKER_RESOURCE_DIRNAME,
   brokerIdentifiers,
-  findMachOFiles,
   validateProvisioningProfile,
   verifyIdentifier,
   verifySignedEntitlements,
@@ -42,6 +41,7 @@ import {
 } from './credential-broker.mjs';
 import { verifyModBun } from './mod-bun.mjs';
 import { verifyMacAppSignature, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { verifyMacFrameworkArchitectures } from './verify-desktop-package.mjs';
 
 function requirePath(path, kind = 'path') {
   if (!existsSync(path)) throw new Error(`required ${kind} is missing: ${path}`);
@@ -153,6 +153,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     expectedArch: 'arm64',
     appRoot: paths.appPath,
   });
+  const nestedFrameworkBinaries = verifyMacFrameworkArchitectures(join(contents, 'Frameworks'), 'arm64');
   assertArm64Executable(
     join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE),
     'packaged audio helper app',
@@ -302,7 +303,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
         'com.apple.security.device.camera': true,
       });
       verifyTeamIdentifier(join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE), teamId);
-      for (const path of findMachOFiles(join(contents, 'Frameworks'))) {
+      for (const path of nestedFrameworkBinaries) {
         verifyTeamIdentifier(path, teamId);
       }
     }

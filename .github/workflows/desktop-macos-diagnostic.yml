@@ -1,7 +1,7 @@
 name: Desktop macOS package diagnostic
 on:
   push:
-    branches: [codex/media-macos-package-9b8e]
+    branches: [codex/media-macos-package-v2-9b8e]
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
@@ -414,7 +414,7 @@ jobs:
         working-directory: apps/electron
         run: node scripts/verify-desktop-package.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
 
-      - name: Keyless packaged sidecar and cleanup smoke
+      - name: Keyless packaged sidecar, macOS media, and cleanup smoke
         shell: bash
         working-directory: apps/electron
         run: |

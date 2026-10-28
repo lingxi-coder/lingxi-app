@@ -2,9 +2,9 @@
 
 import { extractAll } from '@electron/asar';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -19,7 +19,7 @@ import {
   sha256File,
   walkTree,
 } from './package-support.mjs';
-import { BROKER_RESOURCE_DIRNAME } from './credential-broker.mjs';
+import { BROKER_RESOURCE_DIRNAME, findMachOFiles } from './credential-broker.mjs';
 import { verifyProtocolRegistration } from './protocol-registration.mjs';
 import { modBunFilename, verifyModBun } from './mod-bun.mjs';
 import { verifyMacAppSignature, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
@@ -39,6 +39,28 @@ function resourcesPath(paths) {
   return paths.platform === 'darwin'
     ? join(paths.payloadRoot, 'Contents', 'Resources')
     : join(paths.payloadRoot, 'resources');
+}
+
+/** Verify every real nested framework/helper image can run on the target. */
+export function verifyMacFrameworkArchitectures(frameworks, expectedArchitecture) {
+  if (lstatSync(frameworks).isSymbolicLink()) throw new Error('packaged Frameworks directory is a symbolic link');
+  const root = realpathSync(frameworks);
+  for (const path of walkTree(frameworks)) {
+    if (!lstatSync(path).isSymbolicLink()) continue;
+    const rest = relative(root, realpathSync(path));
+    if (rest === '..' || rest.startsWith(`..${sep}`) || isAbsolute(rest)) {
+      throw new Error(`packaged framework symlink escapes Frameworks: ${path}`);
+    }
+  }
+  const binaries = findMachOFiles(frameworks);
+  if (binaries.length === 0) throw new Error(`packaged Frameworks contains no Mach-O binaries: ${frameworks}`);
+  for (const binary of binaries) {
+    const architectures = binaryArchitectures(binary);
+    if (!architectures.includes(expectedArchitecture)) {
+      throw new Error(`packaged nested framework or helper has the wrong architecture: ${binary} -> ${architectures.join(', ')}, expected ${expectedArchitecture}`);
+    }
+  }
+  return binaries;
 }
 
 export function verifyDesktopPackage(root, platform, arch) {
@@ -65,6 +87,7 @@ export function verifyDesktopPackage(root, platform, arch) {
       expectedArch: expectedArchitecture,
       appRoot: paths.payloadRoot,
     });
+    verifyMacFrameworkArchitectures(join(paths.payloadRoot, 'Contents', 'Frameworks'), expectedArchitecture);
     verifyMacAppSignature(paths.payloadRoot);
   }
   verifyModBun(resources, platform, arch);

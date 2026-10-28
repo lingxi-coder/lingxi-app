@@ -13,7 +13,7 @@ import {
   parseDesktopTargetArgs,
 } from '../scripts/package-support.mjs';
 import { assertBinaryArchitecture } from '../scripts/package-desktop.mjs';
-import { verifyDesktopPackage } from '../scripts/verify-desktop-package.mjs';
+import { verifyDesktopPackage, verifyMacFrameworkArchitectures } from '../scripts/verify-desktop-package.mjs';
 import { verifyPackage } from '../scripts/verify-package.mjs';
 
 const electronRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -123,6 +123,29 @@ test('standalone desktop verification rejects executable and sidecar target mism
     copyFileSync(arm, executable);
     copyFileSync(intel, join(bin, 'bridge-server'));
     assert.throws(() => verifyDesktopPackage(root, 'darwin', 'arm64'), /sidecar has architecture x86_64; expected arm64/);
+
+    copyFileSync(arm, join(bin, 'bridge-server'));
+    execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', join(bin, 'bridge-server')]);
+    const frameworks = join(contents, 'Frameworks');
+    const framework = join(frameworks, 'Electron Framework.framework', 'Versions', 'A', 'Electron Framework');
+    const helper = join(frameworks, 'Electron Helper.app', 'Contents', 'MacOS', 'Electron Helper');
+    mkdirSync(dirname(framework), { recursive: true });
+    mkdirSync(dirname(helper), { recursive: true });
+    copyFileSync(intel, framework);
+    copyFileSync(arm, helper);
+    assert.throws(() => verifyDesktopPackage(root, 'darwin', 'arm64'), /nested framework or helper has the wrong architecture.*Electron Framework/);
+    copyFileSync(arm, framework);
+    copyFileSync(intel, helper);
+    assert.throws(() => verifyDesktopPackage(root, 'darwin', 'arm64'), /nested framework or helper has the wrong architecture.*Electron Helper/);
+    const universal = join(root, 'universal');
+    execFileSync('/usr/bin/lipo', ['-create', intel, arm, '-output', universal]);
+    copyFileSync(universal, framework);
+    copyFileSync(universal, helper);
+    assert.equal(verifyMacFrameworkArchitectures(frameworks, 'arm64').length, 2);
+    assert.equal(verifyMacFrameworkArchitectures(frameworks, 'x86_64').length, 2);
+    rmSync(helper);
+    symlinkSync(intel, helper);
+    assert.throws(() => verifyMacFrameworkArchitectures(frameworks, 'arm64'), /framework symlink escapes Frameworks/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

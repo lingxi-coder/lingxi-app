@@ -455,7 +455,7 @@ jobs:
         working-directory: apps/electron
         run: node scripts/verify-desktop-package.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
 
-      - name: Keyless packaged sidecar and cleanup smoke
+      - name: Keyless packaged sidecar, macOS media, and cleanup smoke
         shell: bash
         working-directory: apps/electron
         run: |

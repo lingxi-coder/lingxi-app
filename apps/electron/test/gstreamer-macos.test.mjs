@@ -21,6 +21,7 @@ import test from 'node:test';
 import { prepareMacGStreamerRuntime as prepareMacFixture, verifyMacAppSignature, verifyMacGStreamerRuntime } from '../scripts/gstreamer-macos.mjs';
 import { preflightDesktopSidecar, resetDesktopOutputs, signGenericDesktopFrameworks, stageDarwinSidecar } from '../scripts/package-desktop.mjs';
 import { preflightSignedSidecar, resetSignedOutputs, stageSignedSidecar } from '../scripts/package-mac.mjs';
+import { verifyMacFrameworkArchitectures } from '../scripts/verify-desktop-package.mjs';
 import { verifyTeamIdentifier } from '../scripts/credential-broker.mjs';
 import { copyElectronApp } from '../scripts/package-support.mjs';
 
@@ -291,6 +292,80 @@ test('distinct plugin runpaths are checked without generating caller permutation
     signFixture(fixture.sidecar, prepared);
     assert.equal(verifyMacGStreamerRuntime(frameworks, fixture.sidecar, { expectedArch: arch }).bundled, true);
     runCleanSidecar(fixture.sidecar);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a shared Mach-O dependency DAG is processed without enumerating every path', macOnly, () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-dyld-shared-dag-'));
+  try {
+    const fixture = sdkFixture(root);
+    const arch = process.arch === 'x64' ? 'x86_64' : 'arm64';
+    let previous = [];
+    for (let level = 0; level < 10; level += 1) {
+      const current = [];
+      for (const branch of ['a', 'b']) {
+        const name = `gstdag_${level}_${branch}`;
+        const source = join(root, `${name}.c`);
+        const binary = join(fixture.lib, `lib${name}.dylib`);
+        const body = level === 0 ? 'return 1;' :
+          `return gstdag_${level - 1}_a() + gstdag_${level - 1}_b();`;
+        const declarations = level === 0 ? '' :
+          `int gstdag_${level - 1}_a(void); int gstdag_${level - 1}_b(void);`;
+        writeFileSync(source, `${declarations}\nint ${name}(void) { ${body} }\n`);
+        run('clang', ['-arch', arch, '-dynamiclib', '-Wl,-headerpad_max_install_names',
+          `-Wl,-install_name,@rpath/lib${name}.dylib`, '-o', binary, source, ...previous]);
+        current.push(binary);
+      }
+      previous = current;
+    }
+    const main = join(root, 'dag-main.c');
+    writeFileSync(main, '#include <stdio.h>\nint gstdag_9_a(void); int gstdag_9_b(void); int main(void) { printf("%d\\n", gstdag_9_a() + gstdag_9_b()); return 0; }\n');
+    run('clang', ['-arch', arch, '-Wl,-headerpad_max_install_names', `-Wl,-rpath,${fixture.lib}`,
+      '-o', fixture.sidecar, main, ...previous]);
+    assert.equal(runCleanSidecar(fixture.sidecar), '1024');
+    const frameworks = join(root, 'App.app', 'Contents', 'Frameworks');
+    mkdirSync(frameworks, { recursive: true });
+    const prepared = withSdk(fixture.sdk, () => prepareMacGStreamerRuntime(fixture.sidecar, frameworks, arch));
+    assert.ok(prepared.libraries.length >= 20);
+    signFixture(fixture.sidecar, prepared);
+    assert.equal(verifyMacGStreamerRuntime(frameworks, fixture.sidecar, { expectedArch: arch }).bundled, true);
+    assert.equal(runCleanSidecar(fixture.sidecar), '1024');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('cyclic Mach-O dependencies reach a stable runpath state', macOnly, () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-dyld-cycle-'));
+  try {
+    const fixture = sdkFixture(root);
+    const arch = process.arch === 'x64' ? 'x86_64' : 'arm64';
+    const a = join(fixture.lib, 'libgstcyclea.dylib');
+    const b = join(fixture.lib, 'libgstcycleb.dylib');
+    const aSource = join(root, 'cycle-a.c');
+    const bSource = join(root, 'cycle-b.c');
+    writeFileSync(bSource, 'int gst_cycle_b(void) { return 1; }\n');
+    run('clang', ['-arch', arch, '-dynamiclib', '-Wl,-headerpad_max_install_names',
+      '-Wl,-install_name,@rpath/libgstcycleb.dylib', '-o', b, bSource]);
+    writeFileSync(aSource, 'int gst_cycle_b(void); int gst_cycle_a(void) { return gst_cycle_b() + 1; }\n');
+    run('clang', ['-arch', arch, '-dynamiclib', '-Wl,-headerpad_max_install_names',
+      '-Wl,-install_name,@rpath/libgstcyclea.dylib', '-o', a, aSource, b]);
+    writeFileSync(bSource, 'int gst_cycle_a(void); int gst_cycle_b(void) { return 1; } int gst_cycle_reference(void) { return gst_cycle_a(); }\n');
+    run('clang', ['-arch', arch, '-dynamiclib', '-Wl,-headerpad_max_install_names',
+      '-Wl,-install_name,@rpath/libgstcycleb.dylib', '-o', b, bSource, a]);
+    const main = join(root, 'cycle-main.c');
+    writeFileSync(main, '#include <stdio.h>\nint gst_cycle_a(void); int main(void) { printf("%d\\n", gst_cycle_a()); return 0; }\n');
+    run('clang', ['-arch', arch, '-Wl,-headerpad_max_install_names', `-Wl,-rpath,${fixture.lib}`,
+      '-o', fixture.sidecar, main, a]);
+    assert.equal(runCleanSidecar(fixture.sidecar), '2');
+    const frameworks = join(root, 'App.app', 'Contents', 'Frameworks');
+    mkdirSync(frameworks, { recursive: true });
+    const prepared = withSdk(fixture.sdk, () => prepareMacGStreamerRuntime(fixture.sidecar, frameworks, arch));
+    signFixture(fixture.sidecar, prepared);
+    assert.equal(verifyMacGStreamerRuntime(frameworks, fixture.sidecar, { expectedArch: arch }).bundled, true);
+    assert.equal(runCleanSidecar(fixture.sidecar), '2');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -782,6 +857,8 @@ test('real Electron distribution can be signed inside-out and rejects a broken n
     run('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', '--options', 'runtime',
       '--entitlements', entitlements, app]);
     verifyMacAppSignature(app);
+    const expectedArch = process.arch === 'x64' ? 'x86_64' : 'arm64';
+    assert.ok(verifyMacFrameworkArchitectures(frameworks, expectedArch).length > 0);
     const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
     for (const name of ['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'DYLD_FRAMEWORK_PATH']) delete env[name];
     const output = execFileSync(join(app, 'Contents', 'MacOS', 'Electron'), ['--version'], {

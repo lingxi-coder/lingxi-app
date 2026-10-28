@@ -350,7 +350,7 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
     plugins.push({ source: resolvedSource, destination: join(pluginDirectory, name), plugin: true });
   }
 
-  const queue = [{ source: stagedSidecar, destination: sidecar, sidecar: true, ancestors: [], lineage: [] }];
+  const queue = [{ source: stagedSidecar, destination: sidecar, sidecar: true, ancestors: [] }];
   const metadata = new Map();
   const replacementsByDestination = new Map();
   const processedStates = new Set();
@@ -393,7 +393,11 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
       ? [...new Set([...info.ownRpaths, ...(item.pluginPrefix ?? [])])]
       : [];
     if (!item.sidecar) for (const path of info.ownRpaths) potentialCallerRpaths.add(path);
-    const state = JSON.stringify([source, destination, stack, Boolean(item.runtimePlugin), pluginPrefix, item.lineage]);
+    // Dependency resolution depends on this runpath stack, not on the
+    // sequence of images that happened to produce it. Deduplicating the
+    // complete resolution state avoids enumerating exponentially many paths
+    // through a shared dependency DAG.
+    const state = JSON.stringify([source, destination, stack, Boolean(item.runtimePlugin), pluginPrefix]);
     if (processedStates.has(state)) continue;
     if (processedStates.size >= 1024) fail('GStreamer dependency graph has too many runpath states');
     processedStates.add(state);
@@ -428,13 +432,11 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
       destinationNames.set(name, dependencyBinary);
       const dependencyDestination = join(libraryDirectory, name);
       replacementRows.push([dependency, `@rpath/${name}`]);
-      // An already-loaded image is not loaded again through a dependency
-      // cycle. Bound the analysis to simple loader chains rather than
-      // inventing arbitrary permutations of unrelated plugin callers.
-      if (!item.lineage.includes(dependencyBinary) && source !== dependencyBinary) {
-        queue.push({ source: dependencyBinary, destination: dependencyDestination, ancestors: stack,
-          runtimePlugin: item.runtimePlugin, pluginPrefix, lineage: [...item.lineage, source] });
-      }
+      // Revisiting an image can only add conservative contexts. A cycle
+      // whose runpaths have stopped changing reaches an already-seen state;
+      // differing states are still checked and the global bound is retained.
+      queue.push({ source: dependencyBinary, destination: dependencyDestination, ancestors: stack,
+        runtimePlugin: item.runtimePlugin, pluginPrefix });
     }
     if (!item.sidecar && !item.plugin && !existsSync(destination)) copyMachOSlice(source, destination, expectedArch);
     const existing = replacementsByDestination.get(destination);
@@ -445,7 +447,7 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
     // First prove each plugin's whole closure with only its own load chain
     // and the executable's runpaths. The actual dlopen caller is unknown.
     if (item.sidecar) for (const plugin of plugins) {
-      queue.push({ ...plugin, ancestors: stack, runtimePlugin: true, pluginPrefix: [], lineage: [source] });
+      queue.push({ ...plugin, ancestors: stack, runtimePlugin: true, pluginPrefix: [] });
     }
   }
   for (const edge of pluginEdges) {

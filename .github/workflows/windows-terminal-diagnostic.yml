@@ -1,0 +1,39 @@
+name: Windows terminal and process diagnostics
+on:
+  push:
+    branches: [codex/media-windows-terminal-9b8e]
+jobs:
+  terminal:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Install shared bridge client
+        working-directory: packages/bridge-client
+        run: |
+          npm ci
+          npm run build
+      - name: Install Electron dependencies
+        working-directory: apps/electron
+        run: npm ci
+      - name: Exercise real broker and terminal EOF tests
+        run: python scripts/ci/probe_terminal_eof.py --with-node
+  debug-chain:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Observe Job debug chains
+        shell: pwsh
+        run: ./\.github/diagnostics/windows-debug-tree/run.ps1

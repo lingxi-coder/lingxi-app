@@ -386,6 +386,19 @@ test('UTF-8 split frames, ordered bounded history and exit state', async () => {
   assert.deepEqual(events.filter(e => e.kind === 'output').map(e => e.sequence), Array.from({ length: 25 }, (_, i) => i + 1));
   await assert.rejects(f.manager.input(a.id, 'x'), /not running/); await f.manager.dispose();
 });
+test('terminal output remains visible after the shell exit event', async () => {
+  const f = fixture(); const terminal = await f.manager.create(scope);
+  const events: any[] = []; f.manager.onEvent(event => events.push(event));
+  f.send({ kind: 'exit', terminalId: terminal.id, exitCode: 7 });
+  f.send({ kind: 'output', terminalId: terminal.id, data: 'late output 中文' });
+  await tick();
+  assert.equal(f.manager.get(terminal.id)?.status, 'exited');
+  assert.equal(f.manager.get(terminal.id)?.exitCode, 7);
+  assert.equal(f.manager.get(terminal.id)?.output, 'late output 中文');
+  assert.deepEqual(events.map(event => event.kind), ['exit', 'output']);
+  await assert.rejects(f.manager.input(terminal.id, 'x'), /not running/);
+  await f.manager.dispose();
+});
 test('input and dimensions bounded, control characters preserved', async () => {
   const f = fixture(); const a = await f.manager.create(scope); await f.manager.input(a.id, '\u0003中文\t'); await f.manager.resize(a.id, 120, 32);
   assert.equal(f.commands[1].data, '\u0003中文\t'); assert.equal(f.commands[2].cols, 120);

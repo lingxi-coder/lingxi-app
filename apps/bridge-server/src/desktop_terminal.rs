@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 
 const MAX_REQUEST: usize = 512 * 1024;
@@ -67,6 +67,54 @@ impl Utf8Stream {
         }
         output
     }
+}
+
+// A child exit and the PTY output stream have independent lifetimes. In
+// particular, the Windows pseudoconsole keeps its output pipe open while the
+// terminal handle exists. Report the actual child wait result without waiting
+// for pipe EOF, and keep forwarding any output that arrives afterward.
+async fn forward_terminal_events(
+    terminal_id: String,
+    mut output: mpsc::Receiver<Vec<u8>>,
+    mut exited: oneshot::Receiver<i32>,
+    events: mpsc::Sender<Value>,
+) -> bool {
+    let mut utf8 = Utf8Stream::default();
+    let mut output_open = true;
+    let mut exit_open = true;
+    while output_open || exit_open {
+        tokio::select! {
+            bytes = output.recv(), if output_open => {
+                let (data, ended) = match bytes {
+                    Some(bytes) => (utf8.push(&bytes, false), false),
+                    None => (utf8.push(&[], true), true),
+                };
+                output_open = !ended;
+                if !data.is_empty()
+                    && events.send(json!({"kind":"output","terminalId":terminal_id,"data":data})).await.is_err()
+                {
+                    return false;
+                }
+            }
+            result = &mut exited, if exit_open => {
+                exit_open = false;
+                let Ok(code) = result else {
+                    // A lost wait observation is not evidence that the child exited.
+                    return false;
+                };
+                // The PTY backend uses -1 for a failed wait or an exit code
+                // that cannot be represented as i32. Neither proves exit here.
+                if code == -1 {
+                    return false;
+                }
+                if events.send(json!({"kind":"exit","terminalId":terminal_id,"exitCode":code})).await.is_err() {
+                    return false;
+                }
+            }
+            () = events.closed() => return false,
+        }
+    }
+    true
 }
 
 fn shell(request: &Request) -> Result<(String, Vec<String>)> {
@@ -416,31 +464,17 @@ async fn dispatch(
             terminals.insert(request.terminal_id.clone(), handle.clone());
             let terminal_id = request.terminal_id.clone();
             let events = events.clone();
+            // The map owns the PTY. The forwarding task must not keep it alive:
+            // closing the last handle is what lets ConPTY's output pipe reach EOF.
+            let handle = Arc::downgrade(&handle);
             tokio::spawn(async move {
-                let mut output = process.stdout_rx;
-                let mut utf8 = Utf8Stream::default();
-                while let Some(bytes) = output.recv().await {
-                    let data = utf8.push(&bytes, false);
-                    if !data.is_empty()
-                        && events
-                            .send(json!({"kind":"output","terminalId":terminal_id,"data":data}))
-                            .await
-                            .is_err()
-                    {
+                if !forward_terminal_events(terminal_id, process.stdout_rx, process.exit_rx, events)
+                    .await
+                {
+                    if let Some(handle) = handle.upgrade() {
                         handle.terminate();
-                        return;
                     }
                 }
-                let data = utf8.push(&[], true);
-                if !data.is_empty() {
-                    let _ = events
-                        .send(json!({"kind":"output","terminalId":terminal_id,"data":data}))
-                        .await;
-                }
-                let code = handle.wait().await;
-                let _ = events
-                    .send(json!({"kind":"exit","terminalId":terminal_id,"exitCode":code}))
-                    .await;
             });
         }
         "input" => {
@@ -694,6 +728,100 @@ mod tests {
         assert_eq!(output, "中文🌸");
         assert_eq!(decoder.push(&[0xff, 0xe4], false), "�");
         assert_eq!(decoder.push(&[], true), "�");
+    }
+
+    #[tokio::test]
+    async fn exit_does_not_wait_for_pty_eof_and_late_output_is_preserved() {
+        let (output_tx, output_rx) = mpsc::channel(2);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let (events, mut receiver) = mpsc::channel(4);
+        let task = tokio::spawn(forward_terminal_events(
+            "test".into(),
+            output_rx,
+            exit_rx,
+            events,
+        ));
+
+        // The stream may remain open while a ConPTY handle is retained. A
+        // partial character also checks that the decoder survives an exit.
+        output_tx.send(vec![0xe4, 0xb8]).await.unwrap();
+        exit_tx.send(7).unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            exit,
+            json!({"kind":"exit","terminalId":"test","exitCode":7})
+        );
+        assert!(!task.is_finished());
+        output_tx.send(vec![0xad]).await.unwrap();
+        let tail = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            tail,
+            json!({"kind":"output","terminalId":"test","data":"中"})
+        );
+        drop(output_tx);
+        assert!(task.await.unwrap());
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn output_eof_does_not_substitute_for_child_exit() {
+        let (output_tx, output_rx) = mpsc::channel(1);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let (events, mut receiver) = mpsc::channel(2);
+        let task = tokio::spawn(forward_terminal_events(
+            "test".into(),
+            output_rx,
+            exit_rx,
+            events,
+        ));
+        output_tx.send(vec![0xe4]).await.unwrap();
+        drop(output_tx);
+        let tail = receiver.recv().await.unwrap();
+        assert_eq!(
+            tail,
+            json!({"kind":"output","terminalId":"test","data":"�"})
+        );
+        assert!(!task.is_finished());
+        exit_tx.send(23).unwrap();
+        assert_eq!(
+            receiver.recv().await.unwrap(),
+            json!({"kind":"exit","terminalId":"test","exitCode":23})
+        );
+        assert!(task.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn lost_exit_observation_and_disconnected_parent_do_not_fabricate_exit() {
+        let (_output_tx, output_rx) = mpsc::channel(1);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let (events, mut receiver) = mpsc::channel(2);
+        drop(exit_tx);
+        assert!(!forward_terminal_events("test".into(), output_rx, exit_rx, events).await);
+        assert!(receiver.recv().await.is_none());
+
+        let (_output_tx, output_rx) = mpsc::channel(1);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let (events, mut receiver) = mpsc::channel(2);
+        exit_tx.send(-1).unwrap();
+        assert!(!forward_terminal_events("test".into(), output_rx, exit_rx, events).await);
+        assert!(receiver.recv().await.is_none());
+
+        let (_output_tx, output_rx) = mpsc::channel(1);
+        let (_exit_tx, exit_rx) = oneshot::channel();
+        let (events, receiver) = mpsc::channel(2);
+        drop(receiver);
+        assert!(!tokio::time::timeout(
+            Duration::from_secs(2),
+            forward_terminal_events("test".into(), output_rx, exit_rx, events)
+        )
+        .await
+        .unwrap());
     }
 
     #[test]

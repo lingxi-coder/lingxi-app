@@ -46,7 +46,7 @@ async function verifyRawBrokerEof(mode: 'live' | 'exited', binary: string, spawn
   const observation = observeBroker(child);
   const decoder = new StringDecoder('utf8');
   const frames: Array<Record<string, unknown>> = [];
-  let buffer = ''; let inputError: Error | undefined; let frameError: Error | undefined; let closed = false; let outputEnded = false;
+  let buffer = ''; let terminalOutput = ''; let inputError: Error | undefined; let frameError: Error | undefined; let closed = false; let outputEnded = false;
   child.stdin.on('error', error => { inputError = error; });
   child.once('close', () => { closed = true; });
   child.stdout.on('data', chunk => {
@@ -56,6 +56,9 @@ async function verifyRawBrokerEof(mode: 'live' | 'exited', binary: string, spawn
       try {
         const frame: unknown = JSON.parse(line);
         if (!frame || typeof frame !== 'object' || Array.isArray(frame)) throw new Error('invalid broker frame');
+        if ((frame as Record<string, unknown>).kind === 'output' && (frame as Record<string, unknown>).terminalId === 'eof-terminal') {
+          terminalOutput = (terminalOutput + String((frame as Record<string, unknown>).data ?? '')).slice(-4096);
+        }
         if (['response', 'exit', 'shutdown'].includes(String((frame as Record<string, unknown>).kind))) frames.push(frame as Record<string, unknown>);
       } catch (error) { frameError = error as Error; }
     }
@@ -92,7 +95,12 @@ async function verifyRawBrokerEof(mode: 'live' | 'exited', binary: string, spawn
       await until(() => exited() || Boolean(inputError || frameError) || observation.failed(), 'shell exit before negative liveness probe');
       if (inputError || frameError) throw inputError ?? frameError;
       assert.ok(exited(), 'shell must report its exit before the negative probe');
-      await assert.rejects(requireAcceptedInput(), /terminal has exited|unknown terminal|broker observed terminal exit before EOF/);
+      assert.equal(frames.find(frame => frame.kind === 'exit' && frame.terminalId === 'eof-terminal')?.exitCode, 0,
+        'shell must actually exit with the requested status');
+      send('eof-dead', 'input', { data: process.platform === 'win32' ? '\r' : '\n' });
+      const rejected = await response('eof-dead');
+      assert.equal(typeof rejected.error, 'string', 'broker must reject input after shell exit');
+      assert.match(rejected.error as string, /terminal has exited|unknown terminal/);
     } else {
       // The input response follows Rust's has_exited check and input enqueue;
       // it does not prove the OS process is still alive or consumed the input.
@@ -105,7 +113,7 @@ async function verifyRawBrokerEof(mode: 'live' | 'exited', binary: string, spawn
     assert.equal(child.exitCode, 0); assert.equal(child.signalCode, null);
     assert.equal(frames.filter(frame => frame.kind === 'shutdown' && frame.reason === 'eof').length, 1);
   } catch (error) {
-    throw new Error(`${error instanceof Error ? error.message : String(error)}\n${await observation.describe()}`, { cause: error });
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\n${await observation.describe()} terminalOutput=${JSON.stringify(terminalOutput)}`, { cause: error });
   } finally {
     if (!closed) await new Promise<void>(resolve => {
       const timeout = setTimeout(resolve, 2_000);
@@ -132,7 +140,7 @@ io.on('line', line => {
   if (request.kind === 'input' && request.data.trim() === 'exit 0') {
     process.stdout.write(frame(response) + frame({ kind: 'exit', terminalId: request.terminalId, exitCode: 0 })); exited = true;
   } else if (request.kind === 'input' && exited) {
-    response.error = 'terminal has exited'; process.stdout.write(frame(response));
+    if (mode !== 'accept-after-exit') response.error = 'terminal has exited'; process.stdout.write(frame(response));
   } else if (mode === 'dead' && request.requestId === 'eof-live') {
     process.stdout.write(frame(response) + frame({ kind: 'exit', terminalId: request.terminalId, exitCode: 0 })); exited = true;
   } else process.stdout.write(frame(response));
@@ -147,6 +155,7 @@ io.on('close', () => {
   const spawner = (variant: string) => ((_binary: string, _args: string[], options: Parameters<typeof spawn>[2]) => spawn(process.execPath, [fixture, variant], options)) as typeof spawn;
   await verifyRawBrokerEof('live', '/fake', spawner('good'));
   await verifyRawBrokerEof('exited', '/fake', spawner('good'));
+  await assert.rejects(verifyRawBrokerEof('exited', '/fake', spawner('accept-after-exit')), /broker must reject input after shell exit/);
   await assert.rejects(verifyRawBrokerEof('live', '/fake', spawner('dead')), /broker observed terminal exit before EOF/);
   await assert.rejects(verifyRawBrokerEof('live', '/fake', spawner('bad-json')), /Unexpected|JSON/);
   for (const variant of ['partial', 'partial-utf8']) {

@@ -14,6 +14,7 @@ import android.provider.DocumentsProvider;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.UUID;
 
 /** Isolated SAF provider installed exclusively in the test APK. */
 public class WorkspaceTestDocumentsProvider extends DocumentsProvider {
@@ -37,7 +38,37 @@ public class WorkspaceTestDocumentsProvider extends DocumentsProvider {
         }
         throw new IllegalStateException("Test instrumentation target is missing");
     }
-    private File root() { File root = new File(getContext().getFilesDir(), "workspace-fixtures"); root.mkdirs(); return root; }
+    private static File root(Context context) {
+        File root = new File(context.getFilesDir(), "workspace-fixtures");
+        if (!root.isDirectory() && !root.mkdirs()) throw new IllegalStateException("Cannot create test root");
+        try { return root.getCanonicalFile(); }
+        catch (IOException error) { throw new IllegalStateException("Cannot resolve test root", error); }
+    }
+    private File root() { return root(getContext()); }
+    private static File fixture(Context context, String id) {
+        if (id == null || !UUID.fromString(id).toString().equals(id)) throw new IllegalArgumentException("Invalid fixture ID");
+        return new File(root(context), id);
+    }
+    private static File closedMarker(Context context, String id) {
+        fixture(context, id); // Validate before constructing either path.
+        File closed = new File(context.getFilesDir(), "workspace-fixtures-closed");
+        if (!closed.isDirectory() && !closed.mkdirs()) throw new IllegalStateException("Cannot create fixture closure directory");
+        return new File(closed, id);
+    }
+    static void prepareFixture(Context context, String id) {
+        File fixture = fixture(context, id);
+        if (closedMarker(context, id).exists()) throw new IllegalStateException("Test fixture was already closed");
+        if (java.nio.file.Files.isSymbolicLink(fixture.toPath())) throw new IllegalStateException("Invalid fixture directory");
+        if (!fixture.isDirectory() && !fixture.mkdir()) throw new IllegalStateException("Cannot create test fixture");
+    }
+    static void cleanupFixture(Context context, String id) throws FileNotFoundException {
+        File fixture = fixture(context, id);
+        File marker = closedMarker(context, id);
+        try { if (!marker.exists() && !marker.createNewFile()) throw new IOException("Cannot close fixture"); }
+        catch (IOException error) { throw new FileNotFoundException(error.toString()); }
+        if (fixture.exists()) remove(context, fixture, root(context));
+        revokeTree(context, id);
+    }
     @Override public boolean onCreate() { return true; }
     private File file(String id) {
         try {
@@ -75,16 +106,21 @@ public class WorkspaceTestDocumentsProvider extends DocumentsProvider {
         return id(target);
     }
     @Override public String renameDocument(String old, String name) throws FileNotFoundException { validName(name); File source = file(old); File target = new File(source.getParentFile(), name); if (target.exists() || !source.renameTo(target)) throw new FileNotFoundException(name); return id(target); }
-    private void remove(File file) throws FileNotFoundException {
-        String documentId = id(file);
-        boolean directory = file.isDirectory();
-        File[] children = file.listFiles();
-        if (children != null) for (File child : children) remove(child);
-        if (!file.delete()) throw new FileNotFoundException(file.toString());
-        if (directory) getContext().revokeUriPermission(targetPackage(getContext()),
-            DocumentsContract.buildTreeDocumentUri(authority(getContext()), documentId),
+    private static void revokeTree(Context context, String documentId) {
+        context.revokeUriPermission(targetPackage(context),
+            DocumentsContract.buildTreeDocumentUri(authority(context), documentId),
             Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
     }
-    @Override public void deleteDocument(String id) throws FileNotFoundException { if (id.equals("root")) throw new IllegalArgumentException(); remove(file(id)); }
+    private static void remove(Context context, File file, File root) throws FileNotFoundException {
+        String documentId = root.toPath().relativize(file.toPath()).toString();
+        boolean directory = !java.nio.file.Files.isSymbolicLink(file.toPath()) && file.isDirectory();
+        File[] children = directory ? file.listFiles() : null;
+        if (directory && children == null) throw new FileNotFoundException("Cannot list " + file);
+        if (children != null) for (File child : children) remove(context, child, root);
+        // Revoke before removing a directory so a failed revoke leaves its ID retryable.
+        if (directory) revokeTree(context, documentId);
+        if (!file.delete()) throw new FileNotFoundException(file.toString());
+    }
+    @Override public void deleteDocument(String id) throws FileNotFoundException { if (id.equals("root")) throw new IllegalArgumentException(); remove(getContext(), file(id), root()); }
     @Override public boolean isChildDocument(String parent, String child) { return file(child).toPath().startsWith(file(parent).toPath()); }
 }

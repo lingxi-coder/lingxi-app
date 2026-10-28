@@ -1,7 +1,7 @@
 name: Android provider isolation diagnostic
 on:
   push:
-    branches: [codex/media-android-provider-v3-9b8e]
+    branches: [codex/media-android-provider-v4-9b8e]
 jobs:
   provider-smoke:
     runs-on: ubuntu-latest

@@ -1,7 +1,7 @@
 name: iOS drawer diagnostic
 on:
   push:
-    branches: [codex/media-ios-drawer-diag-20261028]
+    branches: [codex/media-ios-roundtrip-diag-20261028-v2]
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
@@ -164,6 +164,26 @@ jobs:
             -scheme LingxiCode \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
             -only-testing:LingxiCodeTests/EngineRoundtripTests
+
+      - name: Focused iOS listener correlation diagnostic
+        if: ${{ always() && steps.sim.outcome == 'success' }}
+        timeout-minutes: 10
+        working-directory: apps/ios/native
+        run: |
+          xcodebuild test \
+            -scheme LingxiCode \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -only-testing:LingxiCodeTests/CollectingListenerContractTests
+
+      - name: Focused iOS isolated history diagnostic
+        if: ${{ always() && steps.sim.outcome == 'success' }}
+        timeout-minutes: 10
+        working-directory: apps/ios/native
+        run: |
+          xcodebuild test \
+            -scheme LingxiCode \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -only-testing:LingxiCodeTests/EngineRoundtripTests/testPersistedMainHistoryUUIDsSurviveNativeResume
 
       # Run EngineRoundtripTests on the simulator under the LingxiCode scheme.
       - name: xcodebuild test (simulator round-trip)

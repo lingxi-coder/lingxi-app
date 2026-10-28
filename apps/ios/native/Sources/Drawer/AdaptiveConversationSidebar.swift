@@ -80,8 +80,8 @@ private struct ConversationSideDrawer<Menu: View, Content: View>: View {
                     .accessibilityFocused($menuFocused)
                     .accessibilityAction(.escape) { setOpen(false) }
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-            .contentShape(Rectangle())
+            // Native navigation chrome may extend into the system's trailing
+            // safe area. A fixed hit rectangle would exclude those controls.
             // Simultaneous recognition preserves scrolling and row taps. Lock
             // intent once; vertical drags never become drawer drags.
             .simultaneousGesture(

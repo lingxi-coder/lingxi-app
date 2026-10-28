@@ -1565,6 +1565,20 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertEqual(forwarded, 3)
         }
 
+        func testFrameAdmissionUsesListenerQueueAndRejectsReleasedSource() async {
+            var source: EngineConversationSource? = makeSource()
+            weak var weakSource = source
+            let listener = source!.makeEventListenerForTesting()
+            let frame = ClientEvent.uiClientFrame(runtimeId: "r", frameJson: "{}")
+            let admitted = await listener.onModUiClientFrame(event: frame)
+            XCTAssertTrue(admitted)
+            await listener.waitUntilIdle()
+            source = nil
+            XCTAssertNil(weakSource)
+            let afterRelease = await listener.onModUiClientFrame(event: frame)
+            XCTAssertFalse(afterRelease)
+        }
+
         func testEngineListenerPreservesFIFOEventOrder() async {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 900, sessionId: "test-session")

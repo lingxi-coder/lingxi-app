@@ -1027,7 +1027,9 @@ class EngineConversationSource private constructor(
             // until the predecessor's terminal checkpoint is released.
             val deferredQueuedEvents = mutableListOf<ClientEvent>()
             var deferredQueuedTimeout: Job? = null
-            lateinit var processIncomingEvent: (ClientEvent) -> Unit
+            // The returned value is admission to the serialized ingress queue,
+            // never proof that a collector projected or displayed this event.
+            lateinit var processIncomingEvent: (ClientEvent) -> Boolean
             fun queuedIdentity(event: ClientEvent): Pair<String, ULong>? = when (event) {
                 is ClientEvent.TurnRecoveryState -> event.snapshot.sessionId to event.snapshot.turnId
                 is ClientEvent.TurnAttachStarted -> event.snapshot.sessionId to event.snapshot.turnId
@@ -1064,7 +1066,7 @@ class EngineConversationSource private constructor(
                 deferredQueuedEvents.clear()
                 deferredQueuedTimeout?.cancel()
                 deferredQueuedTimeout = null
-                pending.forEach(processIncomingEvent)
+                pending.forEach { processIncomingEvent(it) }
             }
             fun finishAttach(attempt: DurableAttachIngress.Attempt) {
                 attachIngress.end(attempt)
@@ -1195,7 +1197,7 @@ class EngineConversationSource private constructor(
                                 val attempt = finishedAttempt ?: return@dispatch
                                 if (attempt.incomplete) eventRelay.offer(ConversationDelivery.TurnEventDecodeFailed(event.sessionId, event.turnId,
                                     attachRequestId = event.requestId, isActive = eventIngress.fence(event.sessionId, event.turnId)))
-                                attempt.pendingSnapshots.toList().forEach(processIncomingEvent)
+                                attempt.pendingSnapshots.toList().forEach { processIncomingEvent(it) }
                                 attempt.pendingSnapshots.clear()
                                 // Reentrant dispatch queues those snapshots. Queue
                                 // the finish boundary after them, so Resume cannot
@@ -1426,7 +1428,8 @@ class EngineConversationSource private constructor(
                 sessionMode = sessionMode,
                 linuxRuntimeMode = linuxRuntimeMode,
                 mediaHost = mediaHost,
-                onEvent = processIncomingEvent,
+                onEvent = { processIncomingEvent(it) },
+                onModUiClientFrame = { processIncomingEvent(it) },
                 onWorkflowProgress = { originSessionId, taskId, runId, progress ->
                     workflowRelay.offer(
                         WorkflowProgressUpdate(

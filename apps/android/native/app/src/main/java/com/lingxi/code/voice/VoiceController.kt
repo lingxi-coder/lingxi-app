@@ -213,6 +213,7 @@ fun buildVoiceEngine(
     onEvent: suspend (ClientEvent) -> Unit = { event ->
         Log.d(TAG, "engine event: ${event::class.simpleName}")
     },
+    onModUiClientFrame: suspend (ClientEvent) -> Boolean = { false },
     onWorkflowProgress: suspend (String, String, String, WorkflowProgressDto) -> Unit =
         { originSessionId, taskId, runId, _ ->
             Log.d(TAG, "workflow progress: $originSessionId/$taskId/$runId")
@@ -249,6 +250,9 @@ fun buildVoiceEngine(
             // its SharedFlow, so the chat surface streams the REAL turn loop.
             onEvent(event)
         }
+
+        override suspend fun onModUiClientFrame(event: ClientEvent): Boolean =
+            onModUiClientFrame(event)
 
         override suspend fun onWorkflowProgress(
             originSessionId: String,

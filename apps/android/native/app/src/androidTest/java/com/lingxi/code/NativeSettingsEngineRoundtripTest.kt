@@ -51,6 +51,7 @@ class NativeSettingsEngineRoundtripTest {
                         mobileLinux = runtime,
                         physicalMemoryBytes = 0u, hostEnvironment = null),
                     listener = object : AndroidEventListener {
+                        override suspend fun onModUiClientFrame(event: ClientEvent): Boolean = false
                         override suspend fun onEvent(event: ClientEvent) {
                             if (event is ClientEvent.SettingsSnapshot || event is ClientEvent.Error) events.trySend(event)
                         }

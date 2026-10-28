@@ -40,7 +40,8 @@ class NativeAdminEngineRoundtripTest {
                 mobileLinux = runtime,
                 physicalMemoryBytes = 0u, hostEnvironment = null),
             listener = object : AndroidEventListener {
-                override suspend fun onEvent(event: ClientEvent) { events.trySend(event) }
+                override suspend fun onModUiClientFrame(event: ClientEvent): Boolean = false
+                        override suspend fun onEvent(event: ClientEvent) { events.trySend(event) }
                 override suspend fun onWorkflowProgress(originSessionId: String, taskId: String, runId: String, progress: WorkflowProgressDto) {}
             },
             mediaHost = AndroidNativeMediaHostProvider.get(context.applicationContext), share = AndroidShareAdapter(),

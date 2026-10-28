@@ -400,6 +400,17 @@ fn is_owned_turn_event(event: &ClientEvent) -> bool {
 
 #[async_trait]
 impl ClientEventSink for FrameEventSink {
+    async fn admit_mod_ui_client_frame(&self, event: ClientEvent) -> Result<(), String> {
+        let out = self.out.lock().await;
+        if self.handshaken.load(Ordering::SeqCst)
+            && out.as_ref().is_some_and(|sink| sink.send(Frame::Event(event)))
+        {
+            Ok(())
+        } else {
+            Err("desktop Client frame queue is unavailable".into())
+        }
+    }
+
     async fn emit(&self, mut event: ClientEvent) {
         if matches!(&event, ClientEvent::CronRunRequested { .. }) {
             let out = self.out.lock().await;
@@ -509,6 +520,15 @@ impl ClientEventSink for FrameEventSink {
 
 #[async_trait]
 impl ClientEventSink for UnscopedFrameEventSink {
+    async fn admit_mod_ui_client_frame(&self, event: ClientEvent) -> Result<(), String> {
+        let out = self.out.lock().await;
+        if out.as_ref().is_some_and(|sink| sink.send(Frame::Event(event))) {
+            Ok(())
+        } else {
+            Err("desktop Client frame queue is unavailable".into())
+        }
+    }
+
     async fn emit(&self, event: ClientEvent) {
         forward_event(&self.out, event).await;
     }
@@ -868,6 +888,17 @@ struct ResumeEventSink {
 
 #[async_trait]
 impl ClientEventSink for ResumeEventSink {
+    async fn admit_mod_ui_client_frame(&self, event: ClientEvent) -> Result<(), String> {
+        let out = self.out.lock().await;
+        let mut admitted = false;
+        self.owner.with_accepted_interaction(|| {
+            if self.handshaken.load(Ordering::SeqCst) {
+                admitted = out.as_ref().is_some_and(|sink| sink.send(Frame::Event(event)));
+            }
+        });
+        if admitted { Ok(()) } else { Err("resume Client frame queue is unavailable".into()) }
+    }
+
     async fn emit(&self, event: ClientEvent) {
         let out = self.out.lock().await;
         self.owner.with_accepted_interaction(|| {
@@ -5472,6 +5503,24 @@ mod tests {
     #[async_trait]
     impl TurnDriver for NoTurn {
         async fn run_turn(&self, _: Utf16JsonProjection) {}
+    }
+
+    #[tokio::test]
+    async fn client_frame_receipt_tracks_the_current_outbound_queue() {
+        use super::connection_regression_test::{captured_sink, next_frame};
+        let connection = BridgeConnection::new();
+        let event_sink = connection.event_sink();
+        let frame = ClientEvent::UiClientFrame { runtime_id: "r".into(), frame_json: "{}".into() };
+        assert!(event_sink.admit_mod_ui_client_frame(frame.clone()).await.is_err());
+        let (_endpoint, mut socket, sink) = captured_sink().await;
+        assert!(connection.claim_outbound(&sink).await);
+        assert!(event_sink.admit_mod_ui_client_frame(frame.clone()).await.is_err(),
+            "a channel without a handshake is not a session sink");
+        connection.handshaken.store(true, Ordering::SeqCst);
+        event_sink.admit_mod_ui_client_frame(frame.clone()).await.unwrap();
+        assert!(matches!(next_frame(&mut socket).await, Frame::Event(received) if received == frame));
+        connection.close_connection(Some(&sink)).await;
+        assert!(event_sink.admit_mod_ui_client_frame(frame).await.is_err());
     }
 
     #[test]

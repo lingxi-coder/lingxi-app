@@ -62,6 +62,7 @@ class CronNativeExecutionTest {
                         mobileLinux = runtimeConfig,
                         physicalMemoryBytes = 0u, hostEnvironment = null),
                     listener = object : AndroidEventListener {
+                        override suspend fun onModUiClientFrame(event: ClientEvent): Boolean = false
                         override suspend fun onEvent(event: ClientEvent) {
                             if (event is ClientEvent.ConversationControlsChanged || event is ClientEvent.Error || event is ClientEvent.TurnEnded) events.trySend(event)
                         }

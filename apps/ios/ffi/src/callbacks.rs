@@ -67,6 +67,9 @@ pub trait IosEventListener: Send + Sync {
     /// promptly — they must not block the engine turn loop.
     async fn on_event(&self, event: client::protocol::events::ClientEvent);
 
+    /// True only if the native listener admitted the frame into its local queue.
+    async fn on_mod_ui_client_frame(&self, event: client::protocol::events::ClientEvent) -> bool;
+
     /// Deliver one structured workflow/subagent progress update without
     /// reconstructing live state from transcript events.
     async fn on_workflow_progress(
@@ -188,6 +191,10 @@ pub(super) struct IosListenerBridge {
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
 impl ClientEventListener for IosListenerBridge {
+    async fn on_mod_ui_client_frame(&self, event: client::protocol::events::ClientEvent) -> bool {
+        self.inner.on_mod_ui_client_frame(event).await
+    }
+
     async fn on_event(&self, event: client::protocol::events::ClientEvent) {
         self.inner.on_event(event).await;
     }

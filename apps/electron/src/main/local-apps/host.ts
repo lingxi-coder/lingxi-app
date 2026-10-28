@@ -10,7 +10,7 @@ import { isDesktopAuthoringRef } from '../../shared/localApps.js';
 import type { AskQuestionDto } from '@lingxi/bridge-client';
 import { LOCAL_APP_AGENT_MAX_FILE_BYTES, LOCAL_APP_AGENT_MAX_FILES, LOCAL_APP_AGENT_MAX_TOTAL_FILE_BYTES, type LocalAppAgentCatalog, type LocalAppAgentSettings } from '../../shared/localAppAgent.js';
 import type { LocalAppAgentBroker, LocalAppAgentOwner, LocalAppAgentAuthorization } from './agentBroker.js';
-import { canonicalJson, sameAgentGrant, validateAgentSettings } from './agentPolicy.js';
+import { canonicalJson, LocalAppAgentError, sameAgentGrant, validateAgentSettings } from './agentPolicy.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, LOCAL_APP_SCHEME } from '../../shared/localApps.js';
 import { CH_LOCAL_APP_NATIVE } from '../../shared/localAppNative.js';
 import { appId, atomicJson, containedFile } from './store.js';
@@ -1267,17 +1267,41 @@ export class LocalAppHost {
       const broker = this.agentBroker, activeOwner = this.runtime.owner(id);
       if (!broker || !invocation || !activeOwner || activeOwner.releaseDigest !== row.releaseDigest) throw new Error('Application Agent host is unavailable');
       const owner: LocalAppAgentOwner = { appId: id, releaseDigest: activeOwner.releaseDigest, invocationId: invocation, webContentsId: event.sender.id };
+      const assertCurrentAgent = () => {
+        current(); need('agent');
+        if (this.blockedAgentApps.has(id) || this.runtime.revision(id) !== revision || this.runtime.owner(id)?.releaseDigest !== activeOwner.releaseDigest) {
+          throw new Error('Application Agent access changed');
+        }
+      };
+      const guardedRead = async <T>(operation: Promise<T>): Promise<T> => {
+        try { const value = await operation; assertCurrentAgent(); return value; }
+        catch (error) { assertCurrentAgent(); throw error; }
+      };
       if (input.method === 'agent.tasks.start') return broker.run(owner, args.input);
-      if (input.method === 'agent.tasks.get') return broker.get(owner, String(args.runId));
-      if (input.method === 'agent.tasks.list') return broker.list(owner, args);
-      if (input.method === 'agent.tasks.events') return broker.events(owner, String(args.runId), args.afterSequence as number | undefined);
+      if (input.method === 'agent.tasks.get') return guardedRead(broker.get(owner, String(args.runId)));
+      if (input.method === 'agent.tasks.list') return guardedRead(broker.list(owner, args));
+      if (input.method === 'agent.tasks.events') return guardedRead(broker.events(owner, String(args.runId), args.afterSequence as number | undefined));
       if (input.method === 'agent.tasks.cancel') return broker.cancel(owner, String(args.runId));
-      if (input.method === 'agent.chats.create') return broker.createChat(owner, args);
-      if (input.method === 'agent.chats.get') return broker.getChat(owner, String(args.chatId));
-      if (input.method === 'agent.chats.list') return broker.listChats(owner, args);
+      if (input.method === 'agent.chats.create' || input.method === 'agent.chats.creationStatus' || input.method === 'agent.chats.list') {
+        // Electron serializes thrown IPC errors without custom fields. Return a
+        // narrow structured result so the page can distinguish definitive
+        // conflicts from an uncertain transport failure.
+        try {
+          const value = input.method === 'agent.chats.create' ? await broker.createChat(owner, args)
+            : input.method === 'agent.chats.creationStatus' ? await broker.chatCreationStatus(owner, args) : await broker.listChats(owner, args);
+          assertCurrentAgent();
+          return { ok: true, value };
+        } catch (error) {
+          try { assertCurrentAgent(); } catch { return { ok: false, error: { code: 'host_unavailable', message: 'The Agent host is unavailable.' } }; }
+          const codes = new Set(['invalid_chat', 'invalid_input', 'chat_create_conflict', 'chat_create_deleted', 'chat_storage_uncertain', 'agent_format_unsupported']);
+          const code = error instanceof LocalAppAgentError && codes.has(error.code) ? error.code : 'host_unavailable';
+          return { ok: false, error: { code, message: code === 'host_unavailable' ? 'The Agent host is unavailable.' : (error as Error).message } };
+        }
+      }
+      if (input.method === 'agent.chats.get') return guardedRead(broker.getChat(owner, String(args.chatId)));
       if (input.method === 'agent.chats.archive') return broker.archiveChat(owner, String(args.chatId));
       if (input.method === 'agent.chats.delete') return broker.deleteChat(owner, String(args.chatId));
-      if (input.method === 'agent.chats.history') return broker.chatHistory(owner, String(args.chatId), args);
+      if (input.method === 'agent.chats.history') return guardedRead(broker.chatHistory(owner, String(args.chatId), args));
       if (input.method === 'agent.chats.send') return broker.sendChat(owner, String(args.chatId), args.input);
       if (input.method === 'agent.chats.cancel') return broker.cancelChat(owner, String(args.chatId));
       throw new Error('Unknown application Agent API');

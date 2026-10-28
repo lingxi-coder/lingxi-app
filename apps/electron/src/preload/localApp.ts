@@ -5,6 +5,7 @@ import type {
   LocalAppAgentChatHistory,
   LocalAppAgentChatHistoryOptions,
   LocalAppAgentChatListOptions,
+  LocalAppAgentChatListPage,
   LocalAppAgentChatSummary,
   LocalAppAgentTask,
   LocalAppAgentTaskEventPage,
@@ -12,6 +13,13 @@ import type {
 } from '../shared/localAppAgent.js';
 
 const invoke = (method: string, args?: Record<string, unknown>) => ipcRenderer.invoke(CH_LOCAL_APP_NATIVE, { method, args });
+
+type ChatCreationInput = { requestId: string; title?: string };
+type ChatResourceResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } };
+async function chatResourceInvoke<T>(method: string, input: Record<string, unknown>): Promise<ChatResourceResult<T>> {
+  try { return await invoke(method, input); }
+  catch { return { ok: false, error: { code: 'host_unavailable', message: 'The Agent host is unavailable.' } }; }
+}
 
 /**
  * Keep this bridge deliberately narrow. The Local App SDK runs in the page's
@@ -46,10 +54,11 @@ contextBridge.exposeInMainWorld('__lingxiLocalAppBridge', Object.freeze({
       cancel: (runId: string): Promise<void> => invoke('agent.tasks.cancel', { runId }),
     }),
     chats: Object.freeze({
-      create: (input?: { title?: string }): Promise<LocalAppAgentChatSummary> => invoke('agent.chats.create', input ?? {}),
+      create: (input: ChatCreationInput): Promise<ChatResourceResult<LocalAppAgentChatSummary | null>> => chatResourceInvoke('agent.chats.create', input),
+      creationStatus: (input: ChatCreationInput): Promise<ChatResourceResult<LocalAppAgentChatSummary | null>> => chatResourceInvoke('agent.chats.creationStatus', input),
       open: (chatId: string): Promise<LocalAppAgentChatSummary> => invoke('agent.chats.get', { chatId }),
       get: (chatId: string): Promise<LocalAppAgentChatSummary> => invoke('agent.chats.get', { chatId }),
-      list: (options?: LocalAppAgentChatListOptions): Promise<{ chats: LocalAppAgentChatSummary[]; nextCursor?: string }> => invoke('agent.chats.list', {
+      list: (options?: LocalAppAgentChatListOptions): Promise<ChatResourceResult<LocalAppAgentChatListPage>> => chatResourceInvoke('agent.chats.list', {
         ...(options?.cursor === undefined ? {} : { cursor: options.cursor }),
         ...(options?.limit === undefined ? {} : { limit: options.limit }),
         ...(options?.includeArchived === undefined ? {} : { includeArchived: options.includeArchived }),

@@ -325,6 +325,23 @@ private struct LocalAppAgentInteractionSheet: View {
     }
 }
 
+enum LocalAppAgentTaskStatusText {
+    static func status(state: String, errorCode: String?) -> String {
+        if state == "interrupted" {
+            switch errorCode {
+            case "ios_background_expired":
+                return String(localized: "iOS 已结束后台执行，任务已中断。请检查已完成操作后，再决定是否手动开始新任务。")
+            case "host_restarted":
+                return String(localized: "宿主重新启动，任务已中断，原因未知。请检查已完成操作后，再决定是否手动开始新任务。")
+            default:
+                return String(localized: "已中断")
+            }
+        }
+        if state == "cancelled" { return String(localized: "已取消") }
+        return state
+    }
+}
+
 /// Active Local App tasks are shown from host-observed state; the view never
 /// invents percentage progress or maps cancellation to another app's task.
 @MainActor
@@ -338,12 +355,12 @@ struct LocalAppAgentTasks: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if tasks.isEmpty {
+            if tasks.isEmpty && error == nil {
                 Text("No Agent tasks for this app version.").font(.footnote).foregroundStyle(.secondary)
             }
             ForEach(tasks) { task in
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("\(String(localized: "session_details_status")): \(task.state)")
+                    Text("\(String(localized: "session_details_status")): \(LocalAppAgentTaskStatusText.status(state: task.state, errorCode: task.error?.code))")
                         .font(.subheadline.weight(.medium))
                         .fixedSize(horizontal: false, vertical: true)
                     if let phase = task.phase {
@@ -402,7 +419,12 @@ struct LocalAppAgentTasks: View {
                     tasks = response.tasks.sorted { $0.sequence > $1.sequence }
                     error = nil
                 } catch is CancellationError { return }
-                catch { self.error = error.localizedDescription }
+                catch {
+                    // A failed lookup must not leave a stale running task on
+                    // screen or imply that the host has no saved tasks.
+                    tasks = []
+                    self.error = "\(String(localized: "无法确认任务状态，请重新打开灵犀后检查。")) \(error.localizedDescription)"
+                }
                 do { try await Task.sleep(for: .seconds(1)) } catch { return }
             }
         }

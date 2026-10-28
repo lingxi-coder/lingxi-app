@@ -45,7 +45,7 @@
     p { margin: .4rem 0 .8rem; }
     section { border: 1px solid color-mix(in srgb, currentColor 24%, transparent); border-radius: .7rem; padding: .85rem; margin: .8rem 0; }
     .row { display: flex; flex-wrap: wrap; gap: .55rem; align-items: center; }
-    button, textarea { font: inherit; }
+    button, textarea, input { font: inherit; }
     button { min-height: 2.65rem; padding: .45rem .75rem; border-radius: .5rem; }
     button:disabled { opacity: .55; }
     textarea { width: 100%; min-height: 5rem; box-sizing: border-box; padding: .55rem; margin: .35rem 0; }
@@ -83,9 +83,20 @@
     <h2 id="chat-title">Persistent Chat</h2>
     <div class="row">
       <button id="create-chat" type="button" data-testid="create-chat" disabled>Create Chat</button>
+      <button id="check-chat-create" type="button" data-testid="check-chat-create" hidden>Check saved Chat creation</button>
+      <button id="retry-chat-create" type="button" data-testid="retry-chat-create" hidden>Retry the same Chat creation</button>
+      <button id="open-created-chat" type="button" data-testid="open-created-chat" hidden>Open recovered Chat</button>
       <button id="open-chat" type="button" data-testid="open-chat" disabled>Open saved Chat</button>
       <button id="refresh-history" type="button" data-testid="refresh-history" disabled>Refresh Chat history</button>
     </div>
+    <output id="chat-create-status" class="muted" aria-live="polite">No Chat creation is awaiting recovery.</output>
+    <label for="chat-create-recover-id">Saved Chat creation request ID</label>
+    <div class="row">
+      <input id="chat-create-recover-id" data-testid="chat-create-recover-id" autocomplete="off" placeholder="Exact request ID">
+      <button id="list-chat-creations" type="button" data-testid="list-chat-creations" disabled>List saved creation IDs</button>
+      <button id="recover-chat-creation" type="button" data-testid="recover-chat-creation" disabled>Recover this exact ID</button>
+    </div>
+    <output id="chat-create-receipts" class="muted" aria-live="polite">No saved creation IDs listed.</output>
     <p id="chat-handle" class="muted">No Chat opened.</p>
     <label for="chat-prompt">Message to send in this Chat</label>
     <textarea id="chat-prompt" data-testid="chat-prompt" placeholder="Send a first turn, then ask a follow-up to verify persistent context."></textarea>
@@ -119,6 +130,9 @@
     const RUN_ENTRY_PREFIX = `${STORAGE_PREFIX}.run.`;
     const RUN_FINISHED_PREFIX = `${STORAGE_PREFIX}.finished.`;
     const CHAT_SELECTION_KEY = `${STORAGE_PREFIX}.selectedChat`;
+    const CHAT_CREATION_HEAD_KEY = `${STORAGE_PREFIX}.selectedChatCreation`;
+    const CHAT_CREATION_ENTRY_PREFIX = `${STORAGE_PREFIX}.chatCreation.`;
+    const CHAT_CREATION_FINISHED_PREFIX = `${STORAGE_PREFIX}.chatCreationFinished.`;
     const EXTENSION_KEY = 'com.lingxi.localApp';
     const MAX_PAGES = 128;
     const MAX_EVENTS = 20000;
@@ -148,6 +162,7 @@
     let agent;
     let sdkInfo = null;
     let chat;
+    let chatCreation = null;
     let publicImageFile = null;
     let imageLoading = false;
     let imageLoadInFlight = null;
@@ -180,6 +195,84 @@
     }
     function safeCode(value) {
       return typeof value === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(value) ? value : 'unknown';
+    }
+    function validChatCreationInput(input) {
+      return isRecord(input) && Object.keys(input).every(key => ['requestId', 'title'].includes(key))
+        && typeof input.requestId === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(input.requestId)
+        && (!Object.prototype.hasOwnProperty.call(input, 'title') || (typeof input.title === 'string'
+          && new TextEncoder().encode(input.title).byteLength <= 512 && !/[\u0000-\u001f\u007f-\u009f]/u.test(input.title)));
+    }
+
+    function sameChatCreationInput(left, right) {
+      return validChatCreationInput(left) && validChatCreationInput(right)
+        && left.requestId === right.requestId
+        && Object.prototype.hasOwnProperty.call(left, 'title') === Object.prototype.hasOwnProperty.call(right, 'title')
+        && left.title === right.title;
+    }
+
+    function readChatCreation(id) {
+      if (!validChatCreationInput({requestId: id})) throw new Error('The saved Chat creation ID is invalid.');
+      const raw = localStorage.getItem(CHAT_CREATION_ENTRY_PREFIX + id);
+      if (raw === null) throw new Error('The saved Chat creation input is missing.');
+      const entry = JSON.parse(raw);
+      if (!isRecord(entry) || entry.version !== 1 || !validChatCreationInput(entry.input)
+          || entry.input.requestId !== id) throw new Error('The saved Chat creation identity is inconsistent.');
+      const marker = localStorage.getItem(CHAT_CREATION_FINISHED_PREFIX + id);
+      if (marker !== null && !['1', 'rejected:chat_create_conflict', 'rejected:chat_create_deleted',
+        'rejected:sdk_rejected'].includes(marker)) {
+        throw new Error('The saved Chat creation completion marker is invalid.');
+      }
+      return {input: entry.input, marker};
+    }
+
+    function loadChatCreation() {
+      try {
+        const id = localStorage.getItem(CHAT_CREATION_HEAD_KEY);
+        chatCreation = id === null ? null : readChatCreation(id);
+      } catch (failure) {
+        chatCreation = null;
+        storageReady = false;
+        storageFailure = failure.message || 'Browser storage is unavailable.';
+      }
+    }
+
+    function saveNewChatCreation(input) {
+      if (!storageReady) throw new Error('Cannot safely persist this Chat creation: ' + storageFailure);
+      try {
+        if (!validChatCreationInput(input)) throw new Error('Chat creation input is invalid.');
+        const currentId = localStorage.getItem(CHAT_CREATION_HEAD_KEY);
+        if (currentId !== null && readChatCreation(currentId).marker === null) {
+          throw recoveryFailure('chat_creation_pending', 'A saved Chat creation is still unresolved; check it or retry the same request.');
+        }
+        const key = CHAT_CREATION_ENTRY_PREFIX + input.requestId;
+        if (localStorage.getItem(key) !== null) throw new Error('This Chat creation ID is already in use.');
+        localStorage.setItem(key, JSON.stringify({version: 1, input}));
+        localStorage.setItem(CHAT_CREATION_HEAD_KEY, input.requestId);
+        if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) !== input.requestId
+            || !sameChatCreationInput(readChatCreation(input.requestId).input, input)) {
+          throw new Error('Chat creation selection changed before submission.');
+        }
+        chatCreation = readChatCreation(input.requestId);
+      } catch (failure) {
+        if (failure?.code !== 'chat_creation_pending') {
+          storageReady = false;
+          storageFailure = failure.message || 'Browser storage is unavailable.';
+        }
+        throw new Error('Cannot safely persist this Chat creation: ' + failure.message);
+      }
+    }
+
+    function showChatCreation() {
+      if (!chatCreation) {
+        $('chat-create-status').textContent = 'No Chat creation is awaiting recovery.';
+      } else if (chatCreation.marker === '1') {
+        $('chat-create-status').textContent = `Chat creation ${chatCreation.input.requestId} is confirmed.`;
+      } else if (chatCreation.marker?.startsWith('rejected:')) {
+        $('chat-create-status').textContent = `Chat creation ${chatCreation.input.requestId} was rejected (${chatCreation.marker.slice(9)}). Start another only by explicit action.`;
+      } else {
+        $('chat-create-status').textContent = `Chat creation ${chatCreation.input.requestId} is pending; its outcome is unknown. No automatic retry was sent.`;
+      }
     }
     function safeFailureText(failure) {
       const message = failure?.message || String(failure);
@@ -597,11 +690,21 @@
     function updateControls() {
       const usable = Boolean(agent && storageReady && !busy);
       const canStart = usable && !state.pending;
+      const pendingCreation = Boolean(chatCreation && chatCreation.marker === null);
+      showChatCreation();
       $('run-image').disabled = !canStart || !publicImageFile;
       $('retry-image').hidden = Boolean(publicImageFile) || imageLoading;
       $('retry-image').disabled = imageLoading;
       $('run-text-file').disabled = !canStart;
-      $('create-chat').disabled = !canStart;
+      $('create-chat').disabled = !canStart || pendingCreation;
+      $('check-chat-create').hidden = !pendingCreation;
+      $('check-chat-create').disabled = !usable || !pendingCreation;
+      $('retry-chat-create').hidden = !pendingCreation;
+      $('retry-chat-create').disabled = !canStart || !pendingCreation;
+      $('open-created-chat').hidden = chatCreation?.marker !== '1';
+      $('open-created-chat').disabled = !usable || chatCreation?.marker !== '1';
+      $('list-chat-creations').disabled = !usable;
+      $('recover-chat-creation').disabled = !usable;
       $('open-chat').disabled = !usable || !state.chatId;
       $('refresh-history').disabled = !agent || !chat || busy;
       $('send-chat').disabled = !canStart || !chat || !$('chat-prompt').value.trim();
@@ -728,6 +831,17 @@
       throw new Error(`Task events were not fully drained after ${MAX_PAGES} pages.`);
     }
 
+    async function readTerminalTaskEvents(runId, threadId) {
+      try {
+        return {events: await drainTaskEvents(runId, threadId), unavailable: false};
+      } catch (failure) {
+        if (failure?.code === 'host_unavailable') return {events: [], unavailable: true};
+        if (failure?.code === 'task_identity_mismatch') throw failure;
+        throw recoveryFailure(failure?.code || 'invalid_task_events',
+          'Saved task event storage is unavailable or invalid; the interruption cause is unknown. No automatic retry was sent. Check the task before starting a new run manually.');
+      }
+    }
+
     function terminalStatus(events, task) {
       const terminals = events.filter(event => event?.type === 'RUN_FINISHED' || event?.type === 'RUN_ERROR');
       if (terminals.length > 1) {
@@ -738,8 +852,28 @@
         return {state: 'failed', terminal: terminals[0], code: 'terminal_event_not_final',
           message: 'The terminal AG-UI event was not the final event in the saved run.', terminalObserved: true};
       }
+      const terminal = terminals[0] || null;
+      if (task?.state === 'interrupted') {
+        // The authenticated, run-scoped task row is authoritative. An AG-UI
+        // callback by itself cannot establish why an interruption occurred.
+        const cause = safeCode(task.error?.code);
+        const conflictingEvent = terminal && (terminal.type !== 'RUN_ERROR'
+          || (terminal.code !== undefined && terminal.code !== cause));
+        const expired = cause === 'ios_background_expired' && !conflictingEvent;
+        return {state: 'interrupted', terminal, terminalObserved: true,
+          code: expired ? 'ios_background_expired' : 'interruption_cause_unknown',
+          message: expired
+            ? 'iOS ended background execution for this run. No automatic retry was sent. To try again, start a new run manually.'
+            : 'The run was interrupted, but its cause is unknown. No automatic retry was sent. To try again, start a new run manually.'};
+      }
+      if (safeCode(task?.error?.code) === 'ios_background_expired'
+          || safeCode(terminal?.code) === 'ios_background_expired') {
+        return {state: 'unknown', terminal, code: 'interruption_cause_unknown',
+          message: 'The host task does not confirm why the run stopped; its cause is unknown. No automatic retry was sent. Check the task before starting a new run manually.',
+          terminalObserved: !['queued', 'running'].includes(task?.state)};
+      }
       if (terminals.length === 0) {
-        if (['failed', 'cancelled', 'interrupted'].includes(task?.state)) {
+        if (['failed', 'cancelled'].includes(task?.state)) {
           return {
             state: task.state,
             terminal: null,
@@ -755,7 +889,6 @@
         return {state: 'active', terminal: null, code: 'terminal_event_pending',
           message: 'The saved run has no terminal AG-UI event yet.', terminalObserved: false};
       }
-      const terminal = terminals[0];
       if (terminal.type === 'RUN_ERROR') {
         return {
           state: 'failed', terminal,
@@ -953,10 +1086,20 @@
     async function observeAfterFailure(input) {
       try {
         const task = await readTask(input.runId, input.threadId);
-        const events = await drainTaskEvents(input.runId, input.threadId);
+        let evidence;
+        try { evidence = await readTerminalTaskEvents(input.runId, input.threadId); }
+        catch (failure) {
+          const message = failure?.code === 'task_identity_mismatch'
+            ? 'The task event identity did not match this run; the interruption cause is unknown. No automatic retry was sent.'
+            : failure.message;
+          if (selectedRunId() === input.runId) addRecoveryError(input.runId, failure?.code, message);
+          return {state: 'unknown', code: 'interruption_cause_unknown', message};
+        }
+        const {events, unavailable} = evidence;
         if (selectedRunId() === input.runId) {
           showTask(task);
-          showEvents(events);
+          if (unavailable) $('events').textContent = 'Task event history is unavailable; status is from the saved host task.';
+          else showEvents(events);
         }
         const terminal = terminalStatus(events, task);
         if (terminal.terminalObserved) {
@@ -964,8 +1107,8 @@
           clearPendingForRun(input.runId);
           if (terminal.state !== 'succeeded') addRecoveryError(input.runId, terminal.code, terminal.message);
         }
-        return true;
-      } catch { return false; }
+        return terminal;
+      } catch { return null; }
     }
 
     async function submitInput(input, kind, chatId = null) {
@@ -1011,14 +1154,25 @@
           await refreshChatHistory();
         }
       } catch (failure) {
-        await observeAfterFailure(input);
+        const terminal = await observeAfterFailure(input);
         if (selectedRunId() !== input.runId) {
           loadState();
           setStatus('A previous run stopped; the newer saved run was preserved.');
           return;
         }
-        setError(failure?.message || String(failure));
-        setStatus(`Run failed or was interrupted · thread ${input.threadId} · run ${input.runId}. A pending request, if shown, can only be retried with the same AG-UI IDs.`);
+        if (terminal?.state === 'interrupted' || terminal?.code === 'interruption_cause_unknown') {
+          setError(terminal.message);
+          setStatus(`Run ${terminal.state} · thread ${input.threadId} · run ${input.runId}. No automatic retry was sent.`);
+        } else if (!terminal && ['ios_background_expired', 'run_cancelled', 'agent_storage_unavailable'].includes(failure?.code)) {
+          setError((failure?.code === 'agent_storage_unavailable'
+            ? 'Host task storage is unavailable; the run status and interruption cause are unknown.'
+            : 'The host task status and interruption cause are unknown.')
+            + ' No automatic retry was sent. Check the task before starting a new run manually.');
+          setStatus(`Run status unknown · thread ${input.threadId} · run ${input.runId}.`);
+        } else {
+          setError(failure?.message || String(failure));
+          setStatus(`Run failed or was interrupted · thread ${input.threadId} · run ${input.runId}. A pending request, if shown, can only be retried with the same AG-UI IDs.`);
+        }
       } finally {
         monitor = false;
         await monitorPromise;
@@ -1086,17 +1240,207 @@
       } catch (failure) { setError(failure?.message || String(failure)); }
     }
 
-    async function createChat() {
-      setError('');
+    async function performChatCreation(input, action) {
+      const id = input.requestId;
+      const selectedChatBefore = localStorage.getItem(CHAT_SELECTION_KEY);
       try {
-        chat = await agent.chats.create({title: 'Agent device acceptance'});
-        saveSelectedChat(chat.id);
-        await refreshChatHistory();
-        void refreshDiagnostics();
-        $('recovery').textContent = `Created host-owned persistent Chat; threadId is ${chat.id}.`;
-        setStatus('Chat created. Send a first turn, then a follow-up to verify persistent context.');
+        let handle;
+        if (action === 'create') {
+          handle = await agent.chats.create(input);
+        } else {
+          handle = await agent.chats.creationStatus(input);
+          if (handle === null && action === 'retry') {
+            const saved = readChatCreation(id);
+            if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) !== id
+                || localStorage.getItem(CHAT_SELECTION_KEY) !== selectedChatBefore
+                || saved.marker !== null || !sameChatCreationInput(saved.input, input)) {
+              return false;
+            }
+            handle = await agent.chats.create(input);
+          }
+        }
+        if (handle === null && action !== 'create') {
+          if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) === id) {
+            setStatus('The saved Chat creation is not currently visible. Its outcome is unknown; no automatic retry was sent.');
+          }
+          return false;
+        }
+        if (!isRecord(handle) || handle.id !== id || typeof handle.history !== 'function') {
+          throw recoveryFailure('chat_creation_identity_mismatch', 'The host returned a Chat with a different identity.');
+        }
+        const saved = readChatCreation(id);
+        if (!sameChatCreationInput(saved.input, input) || (saved.marker !== null && saved.marker !== '1')) {
+          throw recoveryFailure('chat_creation_identity_mismatch', 'The saved Chat creation input changed.');
+        }
+        const sameSelection = localStorage.getItem(CHAT_CREATION_HEAD_KEY) === id;
+        const sameChatSelection = localStorage.getItem(CHAT_SELECTION_KEY) === selectedChatBefore;
+        if (sameSelection && sameChatSelection && action !== 'status') saveSelectedChat(id);
+        localStorage.setItem(CHAT_CREATION_FINISHED_PREFIX + id, '1');
+        if (!sameSelection || !sameChatSelection) return true;
+        if (action === 'status') {
+          setStatus('Saved Chat creation confirmed by a read-only lookup. Open the recovered Chat explicitly.');
+          return true;
+        }
+        chat = handle;
+        setStatus(action === 'create'
+          ? 'Chat created. Send a first turn, then a follow-up to verify persistent context.'
+          : 'Saved Chat creation confirmed by a read-only lookup. No creation was sent.');
+        $('recovery').textContent = `Host-owned persistent Chat opened; threadId is ${id}.`;
+        try { await refreshChatHistory(); }
+        catch { setError('The Chat was confirmed, but its history could not be read.'); }
+        return true;
+      } catch (failure) {
+        const code = safeCode(failure?.code);
+        if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) === id) {
+          if (['chat_create_conflict', 'chat_create_deleted'].includes(code)) {
+            try {
+              const saved = readChatCreation(id);
+              if ((saved.marker === null || saved.marker === '1') && sameChatCreationInput(saved.input, input)) {
+                localStorage.setItem(CHAT_CREATION_FINISHED_PREFIX + id, 'rejected:' + code);
+              }
+            } catch (storageError) {
+              storageReady = false;
+              storageFailure = storageError.message || 'Browser storage is unavailable.';
+            }
+          }
+          setError(`Chat creation · ${code}: ${['chat_create_conflict', 'chat_create_deleted'].includes(code)
+            ? 'This saved creation cannot be reused. A different creation requires a new explicit action.'
+            : 'The outcome is unknown or could not be verified. No automatic retry was sent.'}`);
+          setStatus('Chat creation was not confirmed; no replacement request was sent automatically.');
+        }
+        return false;
+      }
+    }
+
+    function finishChatCreationOperation() {
+      busy = false;
+      loadState();
+      loadChatCreation();
+      if (chat && chat.id !== state.chatId) chat = null;
+      updateControls();
+      scheduleQueuedRecovery();
+      void refreshDiagnostics();
+    }
+
+    async function createChat() {
+      if (!agent || busy || !storageReady || state.pending) return;
+      setError('');
+      busy = true;
+      updateControls();
+      try {
+        const input = {requestId: newId(), title: 'Agent device acceptance'};
+        saveNewChatCreation(input);
+        await performChatCreation(input, 'create');
+      } catch (failure) {
+        setError(safeFailureText(failure));
+      } finally {
+        finishChatCreationOperation();
+      }
+    }
+
+    async function checkChatCreation(action = 'status') {
+      if (!agent || busy || !storageReady) return;
+      try {
+        const id = localStorage.getItem(CHAT_CREATION_HEAD_KEY);
+        if (id === null) return;
+        const saved = readChatCreation(id);
+        if ((action === 'open' && saved.marker !== '1') || (action !== 'open' && saved.marker !== null)
+            || (action === 'retry' && state.pending)) return;
+        setError('');
+        busy = true;
         updateControls();
-      } catch (failure) { setError(failure?.message || String(failure)); }
+        await performChatCreation(saved.input, action);
+      } catch (failure) {
+        setError(safeFailureText(failure));
+      } finally {
+        if (busy) finishChatCreationOperation();
+      }
+    }
+
+    function parseSdkChatCreations(records) {
+      if (!Array.isArray(records) || records.length > 1000) {
+        throw recoveryFailure('invalid_chat_creation_receipts', 'The SDK returned invalid Chat creation receipts.');
+      }
+      const seen = new Set();
+      return records.map(record => {
+        if (!isRecord(record) || Object.keys(record).some(key => !['requestId', 'title', 'state'].includes(key))
+            || !['pending', 'accepted', 'deleted', 'rejected'].includes(record.state)) {
+          throw recoveryFailure('invalid_chat_creation_receipts', 'The SDK returned an unsupported Chat creation receipt.');
+        }
+        const input = {requestId: record.requestId,
+          ...(Object.prototype.hasOwnProperty.call(record, 'title') ? {title: record.title} : {})};
+        if (!validChatCreationInput(input) || seen.has(input.requestId)) {
+          throw recoveryFailure('invalid_chat_creation_receipts', 'The SDK returned an invalid or duplicate Chat creation ID.');
+        }
+        seen.add(input.requestId);
+        return {input, state: record.state};
+      });
+    }
+
+    async function listChatCreations() {
+      if (!agent || busy || !storageReady) return;
+      setError('');
+      busy = true;
+      updateControls();
+      try {
+        const records = parseSdkChatCreations(await agent.chats.pendingCreations());
+        $('chat-create-receipts').textContent = records.length
+          ? records.map(record => `${record.input.requestId} · ${record.state}`).join('\n')
+          : 'No saved Chat creation IDs were found.';
+      } catch (failure) {
+        setError(`Chat creation receipts · ${safeCode(failure?.code)}: Could not safely read saved creation IDs.`);
+      } finally {
+        finishChatCreationOperation();
+      }
+    }
+
+    async function recoverChatCreationById() {
+      if (!agent || busy || !storageReady) return;
+      const id = $('chat-create-recover-id').value.trim();
+      if (!validChatCreationInput({requestId: id})) {
+        setError('Enter the exact lowercase UUIDv4 Chat creation request ID.');
+        return;
+      }
+      const selectedBefore = localStorage.getItem(CHAT_CREATION_HEAD_KEY);
+      const chatBefore = localStorage.getItem(CHAT_SELECTION_KEY);
+      setError('');
+      busy = true;
+      updateControls();
+      try {
+        const records = parseSdkChatCreations(await agent.chats.pendingCreations());
+        const match = records.find(record => record.input.requestId === id);
+        if (!match) throw recoveryFailure('chat_creation_receipt_missing', 'No SDK receipt matched that exact request ID.');
+        if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) !== selectedBefore
+            || localStorage.getItem(CHAT_SELECTION_KEY) !== chatBefore) {
+          setStatus('A newer selection was preserved; no Chat creation was sent.');
+          return;
+        }
+        const key = CHAT_CREATION_ENTRY_PREFIX + id;
+        if (localStorage.getItem(key) === null) {
+          localStorage.setItem(key, JSON.stringify({version: 1, input: match.input}));
+        } else if (!sameChatCreationInput(readChatCreation(id).input, match.input)) {
+          throw recoveryFailure('chat_creation_identity_mismatch', 'The saved input does not match the SDK receipt.');
+        }
+        if (match.state === 'deleted' || match.state === 'rejected') {
+          localStorage.setItem(CHAT_CREATION_FINISHED_PREFIX + id,
+            match.state === 'deleted' ? 'rejected:chat_create_deleted' : 'rejected:sdk_rejected');
+        }
+        localStorage.setItem(CHAT_CREATION_HEAD_KEY, id);
+        const saved = readChatCreation(id);
+        if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) !== id || !sameChatCreationInput(saved.input, match.input)) {
+          throw recoveryFailure('chat_creation_identity_mismatch', 'The Chat creation selection changed before recovery.');
+        }
+        chatCreation = saved;
+        if (match.state === 'deleted' || match.state === 'rejected') {
+          setStatus(`The selected SDK receipt is ${match.state}; no Chat creation was sent.`);
+          return;
+        }
+        await performChatCreation(saved.input, 'open');
+      } catch (failure) {
+        setError(`Chat creation recovery · ${safeCode(failure?.code)}: Could not safely recover that exact ID. No creation was sent.`);
+      } finally {
+        finishChatCreationOperation();
+      }
     }
 
     async function openChat() {
@@ -1169,10 +1513,14 @@
         updateControls();
 
         if (['failed', 'cancelled', 'interrupted'].includes(initialTask.state)) {
-          let events = [];
-          try { events = await drainTaskEvents(runId, reference.threadId); } catch { /* The durable task row still provides its terminal code. */ }
+          const {events, unavailable} = await readTerminalTaskEvents(runId, reference.threadId);
+          if (superseded()) {
+            clearPendingForRun(runId);
+            return false;
+          }
           showTask(initialTask);
-          showEvents(events);
+          if (unavailable) $('events').textContent = 'Task event history is unavailable; status is from the saved host task.';
+          else showEvents(events);
           const terminal = terminalStatus(events, initialTask);
           clearPendingForRun(runId);
           addRecoveryError(runId, terminal.code, terminal.message);
@@ -1210,6 +1558,10 @@
             return false;
           }
           const callbackTerminal = terminalStatus(callbackEvents, initialTask);
+          if (callbackTerminal.code === 'interruption_cause_unknown') {
+            addRecoveryError(runId, callbackTerminal.code, callbackTerminal.message);
+            return false;
+          }
           if (callbackTerminal.terminalObserved && callbackTerminal.state !== 'succeeded') {
             clearPendingForRun(runId);
             addRecoveryError(runId, callbackTerminal.code, callbackTerminal.message);
@@ -1290,6 +1642,7 @@
         }
         return true;
       } catch (failure) {
+        if (superseded()) return false;
         addRecoveryError(runId, failure?.code || 'unknown', failure?.message || 'The saved run could not be restored.');
         $('recovery').textContent = `Read-only recovery stopped for ${runId}; no replacement request was sent.`;
         return false;
@@ -1328,6 +1681,11 @@
     $('retry-image').addEventListener('click', () => { void preloadPublicImage(); });
     $('run-text-file').addEventListener('click', runTextFile);
     $('create-chat').addEventListener('click', createChat);
+    $('check-chat-create').addEventListener('click', () => checkChatCreation('status'));
+    $('retry-chat-create').addEventListener('click', () => checkChatCreation('retry'));
+    $('open-created-chat').addEventListener('click', () => checkChatCreation('open'));
+    $('list-chat-creations').addEventListener('click', listChatCreations);
+    $('recover-chat-creation').addEventListener('click', recoverChatCreationById);
     $('open-chat').addEventListener('click', openChat);
     $('refresh-history').addEventListener('click', async () => {
       try { await refreshChatHistory(); } catch (failure) { setError(failure?.message || String(failure)); }
@@ -1344,9 +1702,13 @@
     window.addEventListener('storage', event => {
       if (!event.key || (!event.key.startsWith(RUN_ENTRY_PREFIX)
           && !event.key.startsWith(RUN_FINISHED_PREFIX)
+          && !event.key.startsWith(CHAT_CREATION_ENTRY_PREFIX)
+          && !event.key.startsWith(CHAT_CREATION_FINISHED_PREFIX)
+          && event.key !== CHAT_CREATION_HEAD_KEY
           && event.key !== RUN_HEAD_KEY && event.key !== CHAT_SELECTION_KEY)) return;
       if (!busy) {
         loadState();
+        loadChatCreation();
         if (chat && chat.id !== state.chatId) chat = null;
         updateControls();
         void refreshDiagnostics();
@@ -1355,6 +1717,7 @@
 
     async function bootstrap() {
       loadState();
+      loadChatCreation();
       activateHandoffCapture();
       try {
         if (!globalThis.localApp) await import('/__local_app_sdk.js');
@@ -1370,6 +1733,7 @@
         void preloadPublicImage();
         if (!storageReady) setError(`Saved acceptance state was not changed: ${storageFailure}`);
         await restoreReadOnly();
+        if (storageReady && chatCreation?.marker === null) await checkChatCreation('status');
         bootstrapReady = true;
         scheduleQueuedRecovery();
       } catch (failure) {

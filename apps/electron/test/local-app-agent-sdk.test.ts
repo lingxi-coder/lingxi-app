@@ -5,8 +5,9 @@ import { webcrypto } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import type { BaseEvent, RunAgentInput } from '@lingxi/local-app-agui';
 import { LOCAL_APP_SDK } from '../src/preload/localAppSdk.ts';
+import { chatCreationIndexedDb } from './support/chat-creation-indexeddb.ts';
 
-function createPage() {
+function createPage(options: { db?: ReturnType<typeof chatCreationIndexedDb>; host?: string; revision?: number; create?: (input: any) => Promise<any>; status?: (input: any) => Promise<any> } = {}) {
   const calls: Array<{ method: string; args?: unknown }> = [];
   const dispatched: Array<{ type: string; detail?: unknown }> = [];
   let activeInput: RunAgentInput | undefined;
@@ -29,7 +30,8 @@ function createPage() {
       detail: unknown;
       constructor(type: string, options: { detail?: unknown } = {}) { this.type = type; this.detail = options.detail; }
     },
-    location: { protocol: 'lingxi-app:', host: 'test-app', href: 'lingxi-app://test-app/' },
+    location: { protocol: 'lingxi-app:', host: options.host ?? 'test-app', href: `lingxi-app://${options.host ?? 'test-app'}/` },
+    indexedDB: options.db ?? chatCreationIndexedDb(),
     fetch: globalThis.fetch.bind(globalThis),
     dispatchEvent: (event: { type: string; detail?: unknown }) => { dispatched.push(event); return true; },
   };
@@ -48,7 +50,7 @@ function createPage() {
   ]);
 
   const bridge = {
-    info: async () => inPage({ id: 'app-one', name: 'Meal', revision: 1, platform: 'desktop', services: ['api'] }),
+    info: async () => inPage({ id: options.host ?? 'test-app', name: 'Meal', revision: options.revision ?? 1, platform: 'desktop', services: ['api'] }),
     clipboard: { read: async () => '', write: async () => {} },
     notify: async () => {},
     process: { exec: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
@@ -81,10 +83,17 @@ function createPage() {
         cancel: async (runId: string) => { calls.push({ method: 'agent.tasks.cancel', args: { runId } }); },
       },
       chats: {
-        create: async () => inPage({ chatId: 'chat-one', title: 'Meal', createdAt: 1, updatedAt: 1, archived: false, state: 'idle' }),
+        create: async (input: any) => {
+          calls.push({ method: 'agent.chats.create', args: JSON.parse(JSON.stringify(input)) });
+          return inPage(options.create ? await options.create(input) : { ok: true, value: { chatId: input.requestId, title: input.title ?? 'New chat', createdAt: 1, updatedAt: 1, archived: false, state: 'idle' } });
+        },
+        creationStatus: async (input: any) => {
+          calls.push({ method: 'agent.chats.creationStatus', args: JSON.parse(JSON.stringify(input)) });
+          return inPage(options.status ? await options.status(input) : { ok: true, value: null });
+        },
         open: async (chatId: string) => inPage({ chatId, title: 'Meal', createdAt: 1, updatedAt: 1, archived: false, state: 'idle' }),
         get: async (chatId: string) => inPage({ chatId, title: 'Meal', createdAt: 1, updatedAt: 1, archived: false, state: 'idle' }),
-        list: async () => inPage({ chats: [{ chatId: 'chat-one', title: 'Meal', createdAt: 1, updatedAt: 1, archived: false, state: 'idle' }] }),
+        list: async () => inPage({ ok: true, value: { chats: [{ chatId: 'chat-one', title: 'Meal', createdAt: 1, updatedAt: 1, archived: false, state: 'idle' }] } }),
         archive: async () => {},
         delete: async () => {},
         history: async (chatId: string, options: { cursor?: string; limit?: number }) => {
@@ -173,7 +182,7 @@ test('cold AbstractAgent reconnect reads standard event history without issuing 
 
 test('persistent chat uses canonical chat resources and standard Message history', async () => {
   const page = createPage();
-  const chat = await page.api.agent.chats.create({ title: 'Meal' });
+  const chat = await page.api.agent.chats.create({ requestId: '11111111-1111-4111-8111-111111111111', title: 'Meal' });
   const userMessage = page.inPage({ id: 'user-chat-1', role: 'user', content: 'hello' });
   page.setHistory([userMessage]);
   const history = await chat.history(page.inPage({ limit: 25 }));
@@ -190,7 +199,7 @@ test('persistent chat uses canonical chat resources and standard Message history
 
 test('chat subscription resumes from the last opaque page cursor and deduplicates its replay', async () => {
   const page = createPage();
-  const chat = await page.api.agent.chats.create(page.inPage({ title: 'History' }));
+  const chat = await page.api.agent.chats.create(page.inPage({ requestId: '22222222-2222-4222-8222-222222222222', title: 'History' }));
   const existing = Array.from({ length: 60 }, (_, index) => page.inPage({
     id: `message-${index}`, role: 'user', content: `message ${index}`,
   }));
@@ -210,4 +219,77 @@ test('chat subscription resumes from the last opaque page cursor and deduplicate
   const historyCalls = page.calls.filter(call => call.method === 'agent.chats.history');
   assert.deepEqual(historyCalls.map(call => (call.args as { cursor?: string }).cursor), [undefined, 'opaque-offset-50-1', 'opaque-offset-50-1']);
   assert.equal(page.dispatched.some(event => event.type === 'localApp:chat-history-error'), false);
+});
+
+
+test('Chat receipts persist before dispatch, survive a page restart and never replay automatically', async () => {
+  const db = chatCreationIndexedDb();
+  const input = { requestId: 'a1111111-1111-4111-8111-111111111111', title: '  exact  ' };
+  const name = 'lingxi-local-app-chat-creates-test-app-revision-1';
+  let calls = 0;
+  const first = createPage({ db, create: async value => {
+    calls++;
+    assert.deepEqual(db.record(name, input.requestId).options, input);
+    assert.equal(db.record(name, input.requestId).state, 'pending');
+    return { ok: false, error: { code: 'host_unavailable', message: 'disconnected' } };
+  }});
+  await assert.rejects(first.api.agent.chats.create(input), { code: 'host_unavailable', requestId: input.requestId });
+  assert.equal(calls, 1);
+  const second = createPage({ db });
+  assert.deepEqual(JSON.parse(JSON.stringify(await second.api.agent.chats.pendingCreations())), [{ ...input, state: 'pending' }]);
+  assert.equal(second.calls.some(call => call.method === 'agent.chats.create'), false);
+  assert.equal(await second.api.agent.chats.creationStatus(input), null);
+  await assert.rejects(second.api.agent.chats.forgetCreation(input.requestId), { code: 'chat_creation_unresolved' });
+  const chat = await second.api.agent.chats.create(input);
+  assert.equal(chat.id, input.requestId);
+  assert.equal(db.record(name, input.requestId).state, 'accepted');
+  await second.api.agent.chats.forgetCreation(input.requestId);
+  assert.equal(db.record(name, input.requestId), undefined);
+});
+
+test('Chat receipt serialization deduplicates simultaneous requests and isolates app revision', async () => {
+  const db = chatCreationIndexedDb();
+  const input = { requestId: 'b2222222-2222-4222-8222-222222222222', title: 'Plan' };
+  const page = createPage({ db });
+  const handles = await Promise.all([page.api.agent.chats.create(input), page.api.agent.chats.create(input)]);
+  assert.deepEqual(handles.map(handle => handle.id), [input.requestId, input.requestId]);
+  assert.equal(page.calls.filter(call => call.method === 'agent.chats.create').length, 1);
+  await assert.rejects(page.api.agent.chats.create({ ...input, title: ' Plan ' }), { code: 'chat_create_conflict' });
+  const otherRevision = createPage({ db, revision: 2 });
+  const otherApp = createPage({ db, host: 'other-app' });
+  assert.deepEqual(JSON.parse(JSON.stringify(await otherRevision.api.agent.chats.pendingCreations())), []);
+  assert.deepEqual(JSON.parse(JSON.stringify(await otherApp.api.agent.chats.pendingCreations())), []);
+});
+
+test('Chat receipt storage failure prevents dispatch; definitive failures can be forgotten', async () => {
+  const db = chatCreationIndexedDb();
+  const input = { requestId: 'c3333333-3333-4333-8333-333333333333' };
+  db.failNextTransaction();
+  const page = createPage({ db, create: async () => ({ ok: false, error: { code: 'chat_create_deleted', message: 'deleted' } }) });
+  await assert.rejects(page.api.agent.chats.create(input), { code: 'storage_unavailable' });
+  assert.equal(page.calls.filter(call => call.method === 'agent.chats.create').length, 0);
+  await assert.rejects(page.api.agent.chats.create(input), { code: 'chat_create_deleted' });
+  assert.deepEqual(JSON.parse(JSON.stringify(await page.api.agent.chats.pendingCreations())), [{ ...input, state: 'deleted' }]);
+  await page.api.agent.chats.forgetCreation(input.requestId);
+  assert.deepEqual(JSON.parse(JSON.stringify(await page.api.agent.chats.pendingCreations())), []);
+});
+
+test('Chat receipt capacity fails before dispatch and is released only by explicit forgetting', async () => {
+  const page = createPage();
+  const requestId = (index: number) => `aaaaaaaa-aaaa-4aaa-8aaa-${index.toString(16).padStart(12, '0')}`;
+  for (let index = 0; index < 64; index++) await page.api.agent.chats.create({ requestId: requestId(index) });
+  await assert.rejects(page.api.agent.chats.create({ requestId: requestId(64) }), { code: 'storage_full' });
+  assert.equal(page.calls.filter(call => call.method === 'agent.chats.create').length, 64);
+  await page.api.agent.chats.forgetCreation(requestId(0));
+  assert.equal((await page.api.agent.chats.create({ requestId: requestId(64) })).id, requestId(64));
+});
+
+test('concurrent pages reserve the same original input without overwriting receipts', async () => {
+  const db = chatCreationIndexedDb();
+  const first = createPage({ db }), second = createPage({ db });
+  const input = { requestId: 'abcdefab-cdef-4abc-8def-abcdefabcdef', title: 'shared' };
+  const [one, two] = await Promise.all([first.api.agent.chats.create(input), second.api.agent.chats.create(input)]);
+  assert.equal(one.id, input.requestId);
+  assert.equal(two.id, input.requestId);
+  assert.deepEqual(JSON.parse(JSON.stringify(await first.api.agent.chats.pendingCreations())), [{ ...input, state: 'accepted' }]);
 });

@@ -70,6 +70,12 @@ export function decodeInlineAgentData(value: unknown, maxBytes = DEFAULTS.maxFil
 function sha256(value: Buffer): string { return createHash('sha256').update(value).digest('hex'); }
 
 function noFollowFlag(): number { return fsConstants.O_NOFOLLOW ?? 0; }
+async function syncAssetDirectory(path: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  const directory = await fs.open(path, 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+
 
 async function assertPrivateDirectory(path: string, mode: number): Promise<void> {
   await fs.mkdir(path, { recursive: true, mode });
@@ -138,7 +144,8 @@ export class LocalAppChatAssetJournal {
   private async writeAsset(digest: string, bytes: Buffer, alreadyStored: boolean): Promise<void> {
     const path = join(this.assetsDirectory, `${digest}.bin`);
     if (alreadyStored) {
-      await readVerifiedAsset(path, digest, bytes.length, this.limits.maxFileBytes);
+      try { await readVerifiedAsset(path, digest, bytes.length, this.limits.maxFileBytes); await syncAssetDirectory(this.assetsDirectory); }
+      catch { throw new LocalAppChatAssetError('asset_storage_failed', 'The Agent chat attachment could not be stored safely.'); }
       return;
     }
     const temporary = join(this.assetsDirectory, `.${randomUUID()}.tmp`);
@@ -154,6 +161,7 @@ export class LocalAppChatAssetJournal {
         await readVerifiedAsset(path, digest, bytes.length, this.limits.maxFileBytes);
       }
       if (process.platform !== 'win32') await fs.chmod(path, 0o600);
+      await syncAssetDirectory(this.assetsDirectory);
     } catch {
       throw new LocalAppChatAssetError('asset_storage_failed', 'The Agent chat attachment could not be stored safely.');
     } finally {

@@ -65,6 +65,27 @@ enum LocalAppAgentWakeReservationDecision: Equatable {
 
 @MainActor
 enum LocalAppAgentWakeCleanup {
+    static func request(
+        wake: LocalAppAgentWakeRequest,
+        reservationID: String,
+        reason: LocalAppAgentCancellationReason? = nil
+    ) -> [String: LocalAppJSON] {
+        var fields: [String: LocalAppJSON] = [
+            "op": .string("wake.clear"),
+            "appId": .string(wake.appID),
+            "revision": .number(Double(wake.revision)),
+            "runId": .string(wake.runID),
+            "reservationId": .string(reservationID)
+        ]
+        // Only the actual BackgroundTasks expiration callback proves this
+        // cause. Other cleanup paths include configuration changes and must
+        // not be presented as a system expiration or an explicit user stop.
+        if reason == .systemExpiration {
+            fields["reason"] = .string("system_expiration")
+        }
+        return fields
+    }
+
     static func perform(
         ownedReservationID: String?,
         clear: (String) async throws -> Void
@@ -323,7 +344,7 @@ final class LocalAppAgentBackgroundController {
             try await LocalAppAgentWakeCleanup.perform(
                 ownedReservationID: context.reservationID
             ) { reservationID in
-                try await clearReservation(wake, reservationID: reservationID, client: client)
+                try await clearReservation(wake, reservationID: reservationID, reason: reason, client: client)
             }
         } catch {
             Self.logFailure(error, contextKey: contextKey)
@@ -608,15 +629,11 @@ final class LocalAppAgentBackgroundController {
     private func clearReservation(
         _ wake: LocalAppAgentWakeRequest,
         reservationID: String,
+        reason: LocalAppAgentCancellationReason? = nil,
         client: LocalAppServiceClient
     ) async throws {
-        let _: LocalAppJSON = try await client.agentHost([
-            "op": .string("wake.clear"),
-            "appId": .string(wake.appID),
-            "revision": .number(Double(wake.revision)),
-            "runId": .string(wake.runID),
-            "reservationId": .string(reservationID)
-        ], as: LocalAppJSON.self)
+        let fields = LocalAppAgentWakeCleanup.request(wake: wake, reservationID: reservationID, reason: reason)
+        let _: LocalAppJSON = try await client.agentHost(fields, as: LocalAppJSON.self)
     }
 
     private func finishTask(contextKey: String, success: Bool) {

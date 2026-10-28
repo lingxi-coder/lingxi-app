@@ -97,6 +97,50 @@ final class LocalAppAgentHostLifecycleTests: XCTestCase {
     }
 
     @MainActor
+    func testOnlySystemExpirationSendsItsCauseForAnOwnedReservation() async throws {
+        let wake = LocalAppAgentWakeRequest(appID: "app-a", revision: 7, runID: "run-a")
+        let reservationID = UUID().uuidString
+        var sent: [[String: LocalAppJSON]] = []
+        try await LocalAppAgentWakeCleanup.perform(ownedReservationID: nil) { id in
+            sent.append(LocalAppAgentWakeCleanup.request(wake: wake, reservationID: id, reason: .systemExpiration))
+        }
+        XCTAssertTrue(sent.isEmpty, "An unowned reservation must not be cleared even on expiration.")
+        try await LocalAppAgentWakeCleanup.perform(ownedReservationID: reservationID) { id in
+            sent.append(LocalAppAgentWakeCleanup.request(wake: wake, reservationID: id, reason: .systemExpiration))
+        }
+        let expired = try XCTUnwrap(sent.first)
+        XCTAssertEqual(expired["op"], .string("wake.clear"))
+        XCTAssertEqual(expired["appId"], .string("app-a"))
+        XCTAssertEqual(expired["revision"], .number(7))
+        XCTAssertEqual(expired["runId"], .string("run-a"))
+        XCTAssertEqual(expired["reservationId"], .string(reservationID))
+        XCTAssertEqual(expired["reason"], .string("system_expiration"))
+
+        for reason: LocalAppAgentCancellationReason in [
+            .explicit, .requestReplaced, .releaseChanged, .monitorDeadline,
+            .acquireFailure, .intentCancellation, .intentDeadline
+        ] {
+            let request = LocalAppAgentWakeCleanup.request(wake: wake, reservationID: reservationID, reason: reason)
+            XCTAssertNil(request["reason"], "Only the system expiration callback may assert its cause.")
+            XCTAssertEqual(request["reservationId"], .string(reservationID))
+        }
+        XCTAssertNil(LocalAppAgentWakeCleanup.request(wake: wake, reservationID: reservationID)["reason"])
+    }
+
+    func testTaskStatusDistinguishesExpirationCancelAndUnknownRestart() {
+        let expired = LocalAppAgentTaskStatusText.status(state: "interrupted", errorCode: "ios_background_expired")
+        let restarted = LocalAppAgentTaskStatusText.status(state: "interrupted", errorCode: "host_restarted")
+        let cancelled = LocalAppAgentTaskStatusText.status(state: "cancelled", errorCode: "cancelled")
+        XCTAssertTrue(expired.contains("后台执行"))
+        XCTAssertTrue(expired.contains("已中断"))
+        XCTAssertTrue(expired.contains("检查已完成操作"))
+        XCTAssertTrue(restarted.contains("原因未知"))
+        XCTAssertFalse(restarted.contains("后台执行"))
+        XCTAssertEqual(cancelled, "已取消")
+        XCTAssertEqual(LocalAppAgentTaskStatusText.status(state: "running", errorCode: "ios_background_expired"), "running")
+    }
+
+    @MainActor
     func testConfigurationCleanupUsesTheHostResultAndCapturedGeneration() async {
         let wake = LocalAppAgentWakeRequest(appID: "app-a", revision: 1, runID: "run-a")
         let old = UUID(), newer = UUID()

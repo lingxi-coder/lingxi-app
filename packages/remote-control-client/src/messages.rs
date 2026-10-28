@@ -919,12 +919,21 @@ pub struct RemoteBotSummary {
     pub description: String,
     /// Status.
     pub status: RemoteBotStatus,
-    /// Chats waiting for an answer right now.
-    #[serde(default)]
+    /// Chats waiting for an answer right now. Missing, or anything but a count, reads as none.
+    #[serde(default, deserialize_with = "count_or_zero")]
     pub waiting_threads: u32,
     /// Epoch milliseconds of the Bot's latest chat activity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<u64>,
+}
+
+/// A count, and zero for anything else: the Bot stays in the list with a bad number.
+fn count_or_zero<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(value
+        .as_u64()
+        .and_then(|count| u32::try_from(count).ok())
+        .unwrap_or(0))
 }
 
 /// `bots.list` / `bots.watch` result.

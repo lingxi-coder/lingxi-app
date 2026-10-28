@@ -365,3 +365,35 @@ fn bot_messages_match_the_typescript_shapes() {
         serde_json::from_value(json!({ "session_id": "s9" })).unwrap();
     assert_eq!(created.session_id, "s9");
 }
+
+#[test]
+fn a_waiting_count_that_is_not_a_count_reads_as_none_and_the_bot_stays() {
+    for waiting in [
+        json!(null),
+        json!("many"),
+        json!(-1),
+        json!(1.5),
+        json!(5_000_000_000_u64),
+        json!([2]),
+    ] {
+        let bot: RemoteBotSummary = serde_json::from_value(json!({
+            "bot_id": "b", "name": "n", "description": "d", "status": "running", "waiting_threads": waiting
+        }))
+        .unwrap();
+        assert_eq!(
+            (bot.waiting_threads, bot.status),
+            (0, RemoteBotStatus::Running),
+            "{waiting}"
+        );
+    }
+    let missing: RemoteBotSummary = serde_json::from_value(json!({
+        "bot_id": "b", "name": "n", "description": "d", "status": "idle"
+    }))
+    .unwrap();
+    assert_eq!(missing.waiting_threads, 0);
+    let counted: RemoteBotSummary = serde_json::from_value(json!({
+        "bot_id": "b", "name": "n", "description": "d", "status": "idle", "waiting_threads": 3
+    }))
+    .unwrap();
+    assert_eq!(counted.waiting_threads, 3);
+}

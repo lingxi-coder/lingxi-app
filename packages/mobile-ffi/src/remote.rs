@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::{
-    NativeMediaHost, PlatformRemoteKeyStore, PlatformRemoteListener,
+    NativeMediaHost, PlatformRemoteBotsListener, PlatformRemoteKeyStore, PlatformRemoteListener,
     PlatformRemoteMediaConfigProvider, PlatformRemoteTokenProvider, REMOTE_DEVICE_PLATFORM,
 };
 use async_trait::async_trait;
@@ -35,8 +35,9 @@ use remote_control_client::media::{
     RemoteMediaIntent, RemoteMediaMode, RemoteMediaOffer,
 };
 use remote_control_client::messages::{
-    PermissionModeId, RemoteImageRef, RemotePending, RemotePendingAction, RemotePromptOrigin,
-    RemoteRecord, RemoteSeqRecord, RemoteSessionStatus, RemoteSessionSummary, RemoteTurnState,
+    PermissionModeId, RemoteBotStatus, RemoteBotSummary, RemoteImageRef, RemotePending,
+    RemotePendingAction, RemotePromptOrigin, RemoteRecord, RemoteSeqRecord, RemoteSessionStatus,
+    RemoteSessionSummary, RemoteTurnState,
 };
 use remote_control_client::native_media::NativeMediaOfferHandler;
 use remote_control_client::peer::PeerConnector;
@@ -46,8 +47,8 @@ use remote_control_client::rtdb::{
     TokenProvider,
 };
 use remote_control_client::session::{
-    OutgoingPrompt, OutgoingStatus, RemoteClient, RemoteClientListener, SessionController,
-    SessionListener, SessionState, SessionStatus,
+    BotThreadsState, BotsState, OutgoingPrompt, OutgoingStatus, RemoteClient, RemoteClientListener,
+    SessionController, SessionListener, SessionState, SessionStatus,
 };
 use remote_control_client::signaling::{
     hosts_path, parse_hosts_listing, HostPresence, HostRecord, TransportKind,
@@ -792,6 +793,60 @@ pub struct RemoteModelsFfi {
     pub details: Vec<ModelDetailsDto>,
 }
 
+/// Where a Bot stands, derived from its chats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RemoteBotStatusFfi {
+    /// No chat is running or waiting.
+    Idle,
+    /// A chat is running a turn.
+    Running,
+    /// A chat is waiting for an answer.
+    RequiresAction,
+}
+
+/// One Bot of the computer whose Remote Control switch is on.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemoteBotSummaryFfi {
+    /// Bot id, for `activate_bot_threads` and `create_bot_thread`.
+    pub bot_id: String,
+    /// Display name, cleaned for one line.
+    pub name: String,
+    /// What the Bot is for, cleaned and cut.
+    pub description: String,
+    /// Status.
+    pub status: RemoteBotStatusFfi,
+    /// Chats waiting for an answer right now.
+    pub waiting_threads: u32,
+    /// Epoch milliseconds of the Bot's latest chat activity.
+    pub last_activity_at_ms: Option<u64>,
+}
+
+/// What the app knows of the computer's Bots.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum RemoteBotsStateFfi {
+    /// The computer has not answered yet (or none is connected).
+    Unknown,
+    /// The computer is a version from before Bots, so there is none to show. It is
+    /// asked again after every reconnect.
+    Unsupported,
+    /// The Bots whose Remote Control switch is on, as the computer sent them last.
+    Bots {
+        /// In the computer's order.
+        bots: Vec<RemoteBotSummaryFfi>,
+    },
+}
+
+/// What the app holds of one Bot's chats.
+#[derive(Debug, Clone, PartialEq, Eq, Default, uniffi::Record)]
+pub struct RemoteBotThreadsStateFfi {
+    /// The Bot's chats, newest first, as listed last; `None` until they have been.
+    /// Follow one with `attach_session`.
+    pub threads: Option<Vec<RemoteSessionSummaryFfi>>,
+    /// Why the last listing failed; the next one that works clears it. The codes
+    /// `unknown_session` and `not_remote_enabled` say that the Bot cannot be reached.
+    pub error: Option<RemoteSessionErrorFfi>,
+}
+
 // ---------------------------------------------------------------------------
 // Conversions
 // ---------------------------------------------------------------------------
@@ -871,6 +926,44 @@ fn session_summary_to_ffi(summary: &RemoteSessionSummary) -> RemoteSessionSummar
         }),
         model: summary.model.clone(),
         viewers: summary.viewers,
+    }
+}
+
+fn bot_summary_to_ffi(bot: &RemoteBotSummary) -> RemoteBotSummaryFfi {
+    RemoteBotSummaryFfi {
+        bot_id: bot.bot_id.clone(),
+        name: bot.name.clone(),
+        description: bot.description.clone(),
+        status: match bot.status {
+            RemoteBotStatus::Idle => RemoteBotStatusFfi::Idle,
+            RemoteBotStatus::Running => RemoteBotStatusFfi::Running,
+            RemoteBotStatus::RequiresAction => RemoteBotStatusFfi::RequiresAction,
+        },
+        waiting_threads: bot.waiting_threads,
+        last_activity_at_ms: bot.last_activity_at,
+    }
+}
+
+fn bots_state_to_ffi(state: &BotsState) -> RemoteBotsStateFfi {
+    match state {
+        BotsState::Unknown => RemoteBotsStateFfi::Unknown,
+        BotsState::Unsupported => RemoteBotsStateFfi::Unsupported,
+        BotsState::Bots(bots) => RemoteBotsStateFfi::Bots {
+            bots: bots.iter().map(bot_summary_to_ffi).collect(),
+        },
+    }
+}
+
+fn bot_threads_state_to_ffi(state: &BotThreadsState) -> RemoteBotThreadsStateFfi {
+    RemoteBotThreadsStateFfi {
+        threads: state
+            .threads
+            .as_ref()
+            .map(|threads| threads.iter().map(session_summary_to_ffi).collect()),
+        error: state.error.as_ref().map(|error| RemoteSessionErrorFfi {
+            code: error.code.clone(),
+            message: error.message.clone(),
+        }),
     }
 }
 
@@ -1140,10 +1233,16 @@ enum Out {
     Hosts(Vec<RemoteHostFfi>),
     HostsFailed(String),
     Sessions(u64, String, Vec<RemoteSessionSummaryFfi>),
+    Bots(u64, String, RemoteBotsStateFfi),
+    BotThreads(u64, String, String, RemoteBotThreadsStateFfi),
     Session(u64, Arc<AtomicBool>, Box<RemoteSessionUpdateFfi>),
 }
 
 type OutSender = mpsc::UnboundedSender<Out>;
+
+/// Where the app's Bots listener is kept: empty until `set_bots_listener`, and read
+/// by the delivery task for every Bots call.
+type BotsListenerSlot = Arc<Mutex<Option<Arc<dyn PlatformRemoteBotsListener>>>>;
 
 /// Forwards a connection's state while it is the current one.
 struct StateRelay {
@@ -1162,7 +1261,8 @@ impl ConnectionListener for StateRelay {
     }
 }
 
-/// Forwards the session list while its connection is the current one.
+/// Forwards the session list, the Bots and the chats of the Bots while its
+/// connection is the current one.
 struct SessionsRelay {
     out: OutSender,
     current: Arc<AtomicU64>,
@@ -1177,6 +1277,27 @@ impl RemoteClientListener for SessionsRelay {
                 self.generation,
                 self.host_id.clone(),
                 sessions.iter().map(session_summary_to_ffi).collect(),
+            ));
+        }
+    }
+
+    fn on_bots(&self, state: &BotsState) {
+        if self.current.load(Ordering::SeqCst) == self.generation {
+            let _ = self.out.send(Out::Bots(
+                self.generation,
+                self.host_id.clone(),
+                bots_state_to_ffi(state),
+            ));
+        }
+    }
+
+    fn on_bot_threads(&self, bot_id: &str, state: &BotThreadsState) {
+        if self.current.load(Ordering::SeqCst) == self.generation {
+            let _ = self.out.send(Out::BotThreads(
+                self.generation,
+                self.host_id.clone(),
+                bot_id.to_owned(),
+                bot_threads_state_to_ffi(state),
             ));
         }
     }
@@ -1210,6 +1331,7 @@ async fn deliver(
     mut queue: mpsc::UnboundedReceiver<Out>,
     listener: Arc<dyn PlatformRemoteListener>,
     current: Arc<AtomicU64>,
+    bots: BotsListenerSlot,
 ) {
     while let Some(item) = queue.recv().await {
         match item {
@@ -1222,6 +1344,23 @@ async fn deliver(
                 if generation == current.load(Ordering::SeqCst) =>
             {
                 listener.on_sessions(host_id, sessions).await;
+            }
+            Out::Bots(generation, host_id, state)
+                if generation == current.load(Ordering::SeqCst) =>
+            {
+                // Cloned out so that the slot is not held across the call.
+                let heard = bots.lock().expect("bots listener").clone();
+                if let Some(heard) = heard {
+                    heard.on_bots(host_id, state).await;
+                }
+            }
+            Out::BotThreads(generation, host_id, bot_id, state)
+                if generation == current.load(Ordering::SeqCst) =>
+            {
+                let heard = bots.lock().expect("bots listener").clone();
+                if let Some(heard) = heard {
+                    heard.on_bot_threads(host_id, bot_id, state).await;
+                }
             }
             Out::Session(generation, attached, update)
                 if generation == current.load(Ordering::SeqCst)
@@ -1360,6 +1499,7 @@ struct Core {
     current: Arc<AtomicU64>,
     active: Mutex<Option<Active>>,
     hosts_task: Mutex<Option<JoinHandle<()>>>,
+    bots_listener: BotsListenerSlot,
     delivery: JoinHandle<()>,
     repairing: tokio::sync::Mutex<()>,
     file_tasks: Mutex<HashMap<String, Arc<FileTask>>>,
@@ -1462,6 +1602,7 @@ impl RemoteControlCore {
     fn from_parts(parts: Parts, listener: Arc<dyn PlatformRemoteListener>) -> Self {
         let (out, queue) = mpsc::unbounded_channel();
         let current = Arc::new(AtomicU64::new(0));
+        let bots_listener = BotsListenerSlot::default();
         let tunnel_memory = Arc::new(TunnelMemory::new(Arc::clone(&parts.clock)));
         Self {
             core: Core {
@@ -1473,7 +1614,8 @@ impl RemoteControlCore {
                 current: Arc::clone(&current),
                 active: Mutex::new(None),
                 hosts_task: Mutex::new(None),
-                delivery: tokio::spawn(deliver(queue, listener, current)),
+                bots_listener: Arc::clone(&bots_listener),
+                delivery: tokio::spawn(deliver(queue, listener, current, bots_listener)),
                 repairing: tokio::sync::Mutex::new(()),
                 file_tasks: Mutex::new(HashMap::new()),
             },
@@ -2141,6 +2283,79 @@ impl RemoteControlCore {
             current: models.current,
             details: models.details.unwrap_or_default(),
         })
+    }
+
+    /// Where the Bots and their chats are reported; `None` stops the reports. Set it
+    /// before reading `bots_state` or `bot_threads_state`: what changes afterwards is
+    /// reported, and what changed before is in those. It stays across connections.
+    pub fn set_bots_listener(&self, listener: Option<Box<dyn PlatformRemoteBotsListener>>) {
+        *self.core.bots_listener.lock().expect("bots listener") = listener.map(Arc::from);
+    }
+
+    /// The current computer's Bots; `Unknown` until it has answered, and while no
+    /// computer is connected.
+    pub fn bots_state(&self) -> RemoteBotsStateFfi {
+        self.client()
+            .map(|client| bots_state_to_ffi(&client.bots()))
+            .unwrap_or(RemoteBotsStateFfi::Unknown)
+    }
+
+    /// What is held of a Bot's chats: nothing yet unless `activate_bot_threads` has
+    /// listed them on this connection, and nothing while no computer is connected.
+    pub fn bot_threads_state(&self, bot_id: String) -> RemoteBotThreadsStateFfi {
+        self.client()
+            .map(|client| bot_threads_state_to_ffi(&client.bot_threads(&bot_id).state()))
+            .unwrap_or_default()
+    }
+
+    /// A screen shows a Bot's chats: list them now, and keep them current (after each
+    /// reconnect, and when the Bot's activity changes) until the screen calls
+    /// `deactivate_bot_threads`. Each call is one screen; they count. The lists
+    /// arrive through `on_bot_threads`. Screens are counted per connection: when the
+    /// connection is replaced, activate again.
+    pub async fn activate_bot_threads(&self, bot_id: String) -> Result<(), RemoteFfiError> {
+        if bot_id.is_empty() {
+            return Err(RemoteFfiError::InvalidArgument {
+                message: "bot_id is empty".into(),
+            });
+        }
+        self.client()?.bot_threads(&bot_id).activate();
+        Ok(())
+    }
+
+    /// A screen stopped showing a Bot's chats.
+    pub fn deactivate_bot_threads(&self, bot_id: String) {
+        if let Ok(client) = self.client() {
+            client.bot_threads(&bot_id).deactivate();
+        }
+    }
+
+    /// Start a new chat with a Bot and return its session id, to follow with
+    /// `attach_session`. A link that drops with the request on it is waited for, up to
+    /// 30 s, and the request repeated once. Fails at once on a computer from before Bots.
+    pub async fn create_bot_thread(&self, bot_id: String) -> Result<String, RemoteFfiError> {
+        if bot_id.is_empty() {
+            return Err(RemoteFfiError::InvalidArgument {
+                message: "bot_id is empty".into(),
+            });
+        }
+        self.client()?
+            .create_bot_thread(&bot_id)
+            .await
+            .map_err(rpc_error)
+    }
+
+    /// The Bot a chat belongs to, if the computer has listed it under a Bot on this
+    /// connection or this device started it.
+    pub fn bot_of_thread(&self, session_id: String) -> Option<String> {
+        self.client().ok()?.bot_of_thread(&session_id)
+    }
+
+    /// The name of the Bot that handed over the prompt of turn `turn_id` of a session
+    /// followed on this connection, if the Bot gave one; `None` for every other prompt.
+    /// The prompt itself reads as `Scheduled` in its record.
+    pub fn prompt_origin_bot_name(&self, session_id: String, turn_id: u64) -> Option<String> {
+        self.client().ok()?.prompt_bot_name(&session_id, turn_id)
     }
 }
 

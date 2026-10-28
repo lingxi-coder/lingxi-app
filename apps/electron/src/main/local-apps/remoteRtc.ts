@@ -102,7 +102,13 @@ export class LocalAppRtc {
           if (url.origin !== new URL(request.url).origin) throw new Error('invalid origin');
           resourceRequest = new Request(url, { method: data.method as string, headers, signal: controller.signal });
           pendingRequests.add(resourceRequest);
-          response = await Promise.race([this.options.resource(run, resourceRequest), abort]);
+          // The resource can resolve after cancellation wins the race. Its body
+          // still needs an owner, even when the provider ignored the signal.
+          const resource = this.options.resource(run, resourceRequest).then(result => {
+            if ((closed || controller.signal.aborted) && result.body) void result.body.cancel().catch(() => undefined);
+            return result;
+          });
+          response = await Promise.race([resource, abort]);
           if (response.status >= 300 && response.status < 400 && response.status !== 304) throw new Error('redirect');
           const type = response.headers.get('content-type')?.toLowerCase() ?? '';
           const length = Number(response.headers.get('content-length'));

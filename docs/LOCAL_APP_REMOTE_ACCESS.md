@@ -31,6 +31,11 @@ the application. Tickets, cookies and browser launches bind to the account,
 approved device, Desktop host, application, release and runtime invocation.
 An HTTP browser session lasts at most eight hours and survives an ordinary Remote
 Control transport disconnect, including the phone switching to its browser.
+Bootstrap admission first checks the pending ticket's Host/Origin route. Its
+JSON body has a separate 1 KiB limit, with at most 32 pending exchanges and one
+per ticket, and a 15-second deadline. Anonymous exchanges cannot consume the
+authenticated request buffer budget. A disconnect before authorization finishes
+keeps the unexpired ticket available for retry without creating an orphan session.
 
 Each opening gets a separate origin:
 
@@ -63,6 +68,9 @@ authorization at queue admission and immediately before dispatching their
 filesystem commit; an OS operation already dispatched can finish. Once the last
 session's Agent cancellation settles, the unused run is reconciled again. Idle
 Local App RTC windows close before the process lifetime check.
+Desktop-origin Agent tasks also trigger run reconciliation when they settle.
+Opening remotely resumes the same revision's retained background invocation,
+preserving an authorized task's identity just as reopening on Desktop does.
 Application permission withdrawal also invalidates pending mutations and
 admissions while their browser session remains valid. Broker shutdown aborts
 pending operations and active executors synchronously, and rejects new writes.
@@ -108,6 +116,9 @@ budget, at most eight requests per peer and a 15-second deadline. Reads may fall
 back to HTTPS. Writes never enter this path and are not replayed during transport
 failure. The peer is scoped to the redeemed browser session and closes when that
 session ends. Inbound RTC requests are limited to 64 KiB before reassembly.
+Bounded input rejects continuation fragments without payload so they cannot
+grow retained chunk metadata without advancing the byte limit. Responses that
+arrive after cancellation or timeout have their bodies cancelled too.
 Upstream request objects remain alive through cancellation so their abort signals
 continue to propagate under garbage collection. Agent start and chat-send JSON requests allow up to 72 MiB to carry
 the existing 25 MiB per-file and 50 MiB total attachment limits. Buffered control

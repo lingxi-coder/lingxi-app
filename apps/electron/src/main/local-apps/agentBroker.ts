@@ -183,11 +183,16 @@ export class LocalAppAgentBroker {
   private readonly requests = new Map<string, string>();
   private readonly chats = new Map<string, ChatRecord>();
   private readonly active = new Map<string, ActiveRun>();
+  private readonly settlementListeners = new Set<(owner: LocalAppAgentOwner) => void>();
   private readonly epochs = new Map<string, number>();
   private readonly appOperations = new Map<string, AbortController>();
   private stopped = false;
   constructor(private readonly options: LocalAppAgentBrokerOptions) {}
   hasActiveApp(appId: string): boolean { return [...this.active.values()].some(active => active.record.owner.appId === appId); }
+  onSettled(listener: (owner: LocalAppAgentOwner) => void): () => void {
+    this.settlementListeners.add(listener);
+    return () => { this.settlementListeners.delete(listener); };
+  }
   private now(): number { return this.options.now?.() ?? Date.now(); }
   private uuid(): string { return this.options.uuid?.() ?? randomUUID(); }
   private operationSignal(appId: string, signal?: AbortSignal): AbortSignal {
@@ -510,7 +515,14 @@ export class LocalAppAgentBroker {
       this.records.set(key, record); this.requests.set(key, key); this.active.set(key, active);
       active.timer = setTimeout(() => { void this.terminate(key, 'failed', { code: 'timeout', message: 'The Agent task exceeded its time limit.' }).catch(() => undefined); }, record.run.limits.timeoutMs);
       active.timer.unref?.();
-      active.settled = Promise.resolve().then(() => this.execute(active, caller)).finally(() => this.active.delete(key));
+      active.settled = Promise.resolve().then(() => this.execute(active, caller)).finally(() => {
+        this.active.delete(key);
+        // Do not wait for listeners: cancellation can itself be waiting for
+        // this promise while a host cleanup is waiting for cancellation.
+        for (const listener of this.settlementListeners) {
+          try { listener(structuredClone(record.owner)); } catch { /* A listener cannot disrupt task settlement. */ }
+        }
+      });
       return { runId: parsed.runId };
     });
   }

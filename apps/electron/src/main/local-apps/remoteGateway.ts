@@ -16,6 +16,9 @@ export interface RemoteGatewayAdapter {
   onAccessEnded?(appId: string, runId: string): void;
 }
 const CONTROL_BODY_LIMIT = 1024 * 1024;
+const BOOTSTRAP_BODY_LIMIT = 1024;
+const BOOTSTRAP_CONCURRENCY = 32;
+const BOOTSTRAP_TIMEOUT = 15_000;
 const AGENT_BODY_LIMIT = 72 * 1024 * 1024;
 const RESOURCE_BODY_LIMIT = 64 * 1024 * 1024;
 const BUFFER_BUDGET = 128 * 1024 * 1024;
@@ -33,6 +36,7 @@ export class LocalAppRemoteGateway {
   private readonly sessions = new Map<string, Session>();
   private readonly tickets = new Map<string, Ticket>();
   private readonly pendingGrants = new Set<PendingGrant>();
+  private readonly pendingBootstraps = new Set<Ticket>();
   private bufferedBytes = 0;
   private readonly template: string;
   private readonly port: number;
@@ -142,11 +146,11 @@ export class LocalAppRemoteGateway {
     if (session.controller.signal.aborted || session.expires <= Date.now()) return;
     return session;
   }
-  private async body(req: IncomingMessage, limit: number, signal?: AbortSignal): Promise<{ data: Buffer; release: () => void }> {
+  private async body(req: IncomingMessage, limit: number, signal?: AbortSignal, sharedBudget = true): Promise<{ data: Buffer; release: () => void }> {
     const length = req.headers['content-length'];
     if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > limit)) throw new Error('Request body too large');
     const chunks: Buffer[] = []; let size = 0, released = false;
-    const release = () => { if (!released) { released = true; this.bufferedBytes -= size; } };
+    const release = () => { if (!released) { released = true; if (sharedBudget) this.bufferedBytes -= size; } };
     const abort = () => req.destroy();
     signal?.addEventListener('abort', abort, { once: true });
     try {
@@ -154,8 +158,8 @@ export class LocalAppRemoteGateway {
       for await (const chunk of req.iterator({ destroyOnReturn: false })) {
         signal?.throwIfAborted();
         const data = Buffer.from(chunk);
-        if (size + data.length > limit || this.bufferedBytes + data.length > this.bufferBudget) throw new Error('Request body exceeds upload budget');
-        size += data.length; this.bufferedBytes += data.length; chunks.push(data);
+        if (size + data.length > limit || (sharedBudget && this.bufferedBytes + data.length > this.bufferBudget)) throw new Error('Request body exceeds upload budget');
+        size += data.length; if (sharedBudget) this.bufferedBytes += data.length; chunks.push(data);
       }
       signal?.throwIfAborted();
       return { data: Buffer.concat(chunks, size), release };
@@ -170,16 +174,37 @@ export class LocalAppRemoteGateway {
         res.end(`<!doctype html><meta name="referrer" content="no-referrer"><body><script>const t=location.hash.slice(1);history.replaceState(null,'',location.pathname);fetch('/__lingxi_remote_bootstrap',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ticket:t})}).then(r=>{if(!r.ok)throw Error();location.replace('/')}).catch(()=>document.body.textContent='This link has expired. Open the app again.')</script>`); return;
       }
       if (path === '/__lingxi_remote_bootstrap' && req.method === 'POST') {
-        const body = await this.body(req, CONTROL_BODY_LIMIT);
-        let value: {ticket?: unknown};
-        try { value = JSON.parse(body.data.toString()) as {ticket?: unknown}; } finally { body.release(); }
-        const ticket = typeof value.ticket === 'string' ? this.tickets.get(value.ticket) : undefined;
-        if (!ticket || ticket.expires <= Date.now() || !this.requestOrigin(req, ticket.session) || req.headers.origin !== ticket.session.origin || !await this.adapter.current(ticket.session) || ticket.session.controller.signal.aborted || this.tickets.get(value.ticket as string) !== ticket) { res.writeHead(403).end(); return; }
-        this.tickets.delete(value.ticket as string); clearTimeout(ticket.timer);
-        const token = secret(); this.sessions.set(token, ticket.session);
-        ticket.session.timer = setTimeout(() => { this.abort(ticket.session); this.sessions.delete(token); this.notifyEnded(ticket.session); }, SESSION_LIFETIME); ticket.session.timer.unref();
-        const secure = ticket.session.origin.startsWith('https:');
-        res.writeHead(204, { 'set-cookie': `${secure ? COOKIE : DEV_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}; Max-Age=${Math.floor(SESSION_LIFETIME / 1000)}`, 'cache-control': 'no-store' }).end(); return;
+        this.sweep();
+        let route: Ticket | undefined;
+        for (const ticket of this.tickets.values()) {
+          if (req.headers.origin === ticket.session.origin && this.requestOrigin(req, ticket.session)) { route = ticket; break; }
+        }
+        if (!route || req.headers['content-type']?.split(';')[0] !== 'application/json') { res.writeHead(403).end(); return; }
+        if (this.pendingBootstraps.size >= BOOTSTRAP_CONCURRENCY || this.pendingBootstraps.has(route)) { res.writeHead(429).end(); return; }
+        this.pendingBootstraps.add(route);
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        req.once('aborted', abort); res.once('close', abort);
+        route.session.controller.signal.addEventListener('abort', abort, { once: true });
+        const timer = setTimeout(abort, BOOTSTRAP_TIMEOUT); timer.unref();
+        try {
+          if (req.aborted || res.destroyed || route.session.controller.signal.aborted) abort();
+          const body = await this.body(req, BOOTSTRAP_BODY_LIMIT, controller.signal, false);
+          let value: {ticket?: unknown};
+          try { value = JSON.parse(body.data.toString()) as {ticket?: unknown}; } finally { body.release(); }
+          const ticket = typeof value.ticket === 'string' ? this.tickets.get(value.ticket) : undefined;
+          if (ticket !== route || ticket.expires <= Date.now() || controller.signal.aborted || res.destroyed) { if (!res.destroyed) res.writeHead(403).end(); return; }
+          const aborted = new Promise<false>(resolve => controller.signal.addEventListener('abort', () => resolve(false), { once: true }));
+          if (!await Promise.race([this.adapter.current(ticket.session), aborted]) || controller.signal.aborted || res.destroyed || ticket.expires <= Date.now() || this.tickets.get(value.ticket as string) !== ticket) { if (!res.destroyed) res.writeHead(403).end(); return; }
+          this.tickets.delete(value.ticket as string); clearTimeout(ticket.timer);
+          const token = secret(); this.sessions.set(token, ticket.session);
+          ticket.session.timer = setTimeout(() => { this.abort(ticket.session); this.sessions.delete(token); this.notifyEnded(ticket.session); }, SESSION_LIFETIME); ticket.session.timer.unref();
+          const secure = ticket.session.origin.startsWith('https:');
+          res.writeHead(204, { 'set-cookie': `${secure ? COOKIE : DEV_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}; Max-Age=${Math.floor(SESSION_LIFETIME / 1000)}`, 'cache-control': 'no-store' }).end(); return;
+        } finally {
+          clearTimeout(timer); req.removeListener('aborted', abort); res.removeListener('close', abort);
+          route.session.controller.signal.removeEventListener('abort', abort); this.pendingBootstraps.delete(route);
+        }
       }
       const candidate = this.cookie(req);
       if (!candidate || candidate.controller.signal.aborted) { res.writeHead(401, { 'cache-control': 'no-store' }).end('Session expired'); return; }
@@ -301,7 +326,7 @@ export class LocalAppRemoteGateway {
         stream.on('error', () => res.destroy());
         if (requestSignal.aborted || res.destroyed) cancel(); else stream.pipe(res);
       } finally { if (responseOwned && response.body) void response.body.cancel().catch(() => undefined); }
-    } catch { if (!res.headersSent) res.writeHead(400, { 'cache-control': 'no-store' }).end('Request failed'); else res.destroy(); }
+    } catch { if (res.destroyed) return; if (!res.headersSent) res.writeHead(400, { 'cache-control': 'no-store' }).end('Request failed'); else res.destroy(); }
   }
   private async upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     try {

@@ -1,5 +1,25 @@
 import Foundation
 
+/// Invalidates pending catalog requests before a current-host forget suspends.
+@MainActor
+final class RemoteAppRequestEpoch {
+    private(set) var value: UInt64 = 0
+    private var forgettingHost: String?
+
+    func advance() { value &+= 1 }
+    func reset() { forgettingHost = nil; advance() }
+    func permits(hostID: String) -> Bool { forgettingHost != hostID }
+
+    func observe(hostID: String, ready: Bool) {
+        if let forgettingHost, forgettingHost != hostID || !ready { self.forgettingHost = nil }
+    }
+
+    func forget(hostID: String, currentHostID: String?, action: () async -> Void) async {
+        if hostID == currentHostID { forgettingHost = hostID; advance() }
+        await action()
+    }
+}
+
 /// Keeps an already presented browser independent of the catalog connection,
 /// while rejecting a launch that completes after its originating view went away.
 struct RemoteAppBrowserLifetime {

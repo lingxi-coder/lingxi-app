@@ -2,6 +2,40 @@ import XCTest
 @testable import LingxiCode
 
 final class RemoteAppLaunchURLTests: XCTestCase {
+    @MainActor
+    func testForgettingCurrentHostInvalidatesPendingLaunchBeforeForgetCompletes() async {
+        let epoch = RemoteAppRequestEpoch()
+        let pending = epoch.value
+        let forgetStarted = expectation(description: "forget entered FFI")
+        var finishForget: CheckedContinuation<Void, Never>?
+        let forget = Task {
+            await epoch.forget(hostID: "current", currentHostID: "current") {
+                await withCheckedContinuation { continuation in
+                    finishForget = continuation
+                    forgetStarted.fulfill()
+                }
+            }
+        }
+        await fulfillment(of: [forgetStarted], timeout: 1)
+        XCTAssertNotEqual(pending, epoch.value, "a delayed open reply must be rejected while forget is suspended")
+        XCTAssertFalse(epoch.permits(hostID: "current"), "new requests cannot use the stale ready state")
+        XCTAssertTrue(epoch.permits(hostID: "other"))
+        guard let finishForget else { forget.cancel(); return }
+        finishForget.resume()
+        await forget.value
+        XCTAssertFalse(epoch.permits(hostID: "current"), "wait for the disconnected state callback")
+        epoch.observe(hostID: "current", ready: false)
+        XCTAssertTrue(epoch.permits(hostID: "current"), "a later connection can admit new requests")
+
+        let stillCurrent = epoch.value
+        await epoch.forget(hostID: "other", currentHostID: "current") { }
+        XCTAssertEqual(stillCurrent, epoch.value, "forgetting another host must not invalidate this host's request")
+
+        await epoch.forget(hostID: "current", currentHostID: "current") { }
+        epoch.reset()
+        XCTAssertTrue(epoch.permits(hostID: "current"), "a replacement account or client must not inherit the block")
+    }
+
     func testPresentedBrowserSurvivesConnectionLossAndStaleLaunchDoesNotReplaceIt() {
         let original = URL(string: "https://first.example/#ticket")!
         let stale = URL(string: "https://second.example/#ticket")!

@@ -364,3 +364,75 @@ Recommendation: **COMMENT**. The confirmed findings in this scope are addressed;
 matching Mobile native builds, actual SwiftUI/device behavior, public tunnel,
 real TURN and long-duration acceptance remain unverified. This source review
 does not establish release readiness or exhaustive absence of defects.
+
+## Fifth independent review
+
+Reviewed the cumulative **88-file** change against the original base, through
+`ae08b0e00` and this repair. Stage 1 mapped Desktop hosting, retained Mobile
+deployment, browser choice and scoped authority before three GPT-6.1 Terra
+xhigh lanes reviewed gateway/RTC, Agent/run lifetime and cross-platform clients.
+The parent cross-read the repairs and ran integrated verification. Seven new
+findings were confirmed and fixed: **seven MEDIUM, zero CRITICAL/HIGH/LOW**.
+No confirmed issue remains open in this review's source scope.
+
+| Severity | Corrected location | Trigger, impact and correction |
+| --- | --- | --- |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteGateway.ts:176` | Anonymous bootstrap bodies entered the same 128 MiB buffer budget as authenticated Agent/control requests before any Host/Origin check. Incomplete uploads could starve legitimate requests. Match a live ticket's origin route before buffering, use a separate 1 KiB body limit, cap pending exchanges at 32 and one per ticket, and abort on the 15-second deadline, disconnect or revocation. |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteGateway.ts:187`, `apps/electron/src/main/local-apps/remoteGateway.ts:198` | A client disconnect during bootstrap authorization still consumed its single-use ticket and created an unreachable eight-hour session, retaining its run and a session slot. Race authorization with disconnect/revocation/deadline and recheck the connection before granting; a disconnected exchange leaves the unexpired ticket reusable. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:656`, `apps/electron/src/main/local-apps/agentBroker.ts:518` | A Desktop-origin Agent could retain an app after the last remote session ended, but its later settlement never retried cleanup. Add settlement subscriptions after active-run removal, reconcile only the matching remotely managed invocation, and recheck process lifetime. Listeners are isolated and not awaited, preventing a cancellation/cleanup deadlock. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:902` | A remote opening used runtime.start for a stopped invocation retained by an authorized Desktop background Agent. The new invocation caused that task's next authority check to fail. Resume the retained same-revision invocation, matching native reopen behavior. |
+| MEDIUM | `apps/ios/native/Sources/Remote/RemoteControlManager.swift:139`, `apps/ios/native/Sources/Remote/RemoteAppLaunchURL.swift:17` | Forgetting the current computer awaited FFI before invalidating app requests. A delayed open response could still launch a browser, and the stale ready state accepted new requests. Invalidate before the first suspension and block requests for that host until the connection state moves on; forgetting another host leaves current requests intact. |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteRtc.ts:107` | If cancellation/timeout won the resource race, a later Response never reached the local response variable and its body was not closed. Give the resource promise responsibility for cancelling late bodies after abort/peer closure; normal successful consumption remains unchanged. |
+| MEDIUM | `packages/bridge-client/src/remote/transport.ts:120` | Empty continuation fragments retained chunk objects without increasing pendingBytes, bypassing the new bounded RTC input mode. Reject zero-payload continuations for explicitly bounded consumers; whole empty messages and ordinary fragmentation retain their semantics. The existing default transport mode is unchanged. |
+
+Controlled production-handler reproductions established both bootstrap failures
+before repair. Regressions now exercise anonymous body isolation, global and
+per-ticket admission, disconnected authorization, blocked body revocation and
+successful ticket retry over real loopback HTTP. The RTC regression covers a
+late body after timeout, explicit request cancellation and session revocation,
+plus normal consumption. Shared transport tests check empty whole messages,
+rejected empty continuations and a normal fragmented message.
+
+The two Desktop-task regressions use the real LocalAppRuntime and
+LocalAppAgentBroker with a controlled gateway; both failed before repair. The
+resume regression isolates the existing stopped-owner behavior in the same way
+as the pre-existing native reopen test. It proves invocation preservation and
+post-resume task success, not unrestricted execution while services are stopped.
+Additional tests cover success/failure/cancellation settlement, a throwing or
+reentrant subscriber, subscription replacement and obsolete invocation cleanup.
+
+Final verification:
+
+- Feature/gateway/peer/real-Chrome/atomic/store suite: **155 passed**, zero
+  failed, cancelled or skipped.
+- Existing Agent/authoring suite: **59 passed**, zero failed, cancelled or skipped.
+- Complete bridge-client suite: **343 passed, five skipped** out of 348; zero
+  failed or cancelled. Its build passed before exercising the changed transport.
+- Desktop Node/renderer typechecks and production JS build passed.
+- Swift frontend parsing passed. The production request-epoch/browser helper and
+  final XCTest source passed simulator SDK typechecking (the test copy only
+  removes its application-module import). A recompiled standalone async harness
+  passed delayed forget, host isolation, reset and presented-browser retention.
+  XCTest itself and the full FFI-backed application were not run.
+- The simulator typecheck needs both the XCTest framework search path and
+  `-I /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/lib`
+  for its Swift overlay. An initial command without the latter failed; the
+  corrected command completed with exit code zero.
+- AST inspection covered **48 changed TS/TSX files**, with no syntax errors or
+  console.log/literal-credential matches. Empty catches were reviewed in context;
+  they isolate listeners, cleanup or explicitly handled fallback paths.
+  `git diff --check` passed. LSP and ast-grep tools are unavailable; compiler and
+  TypeScript AST checks provide the available diagnostics.
+
+Receipts: `/private/tmp/lingxi-local-app-review-round5-feature.log`,
+`/private/tmp/lingxi-local-app-review-round5-agent.log`,
+`/private/tmp/lingxi-local-app-review-round5-bridge.log`,
+`/private/tmp/lingxi-local-app-review-round5-build.log`,
+`/private/tmp/lingxi-local-app-review-round5-swift.log`,
+`/private/tmp/lingxi-local-app-review-round5-swift-typecheck.log`, and
+`/private/tmp/lingxi-local-app-review-round5-ast.json`.
+
+Recommendation: **COMMENT**. Confirmed findings are repaired. Full Mobile native
+builds, physical browser/photo/file flows, public tunnel/TURN and long-duration
+acceptance remain pending; source review and loopback checks do not establish
+release readiness or exhaustive absence of defects.

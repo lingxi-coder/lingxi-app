@@ -122,6 +122,36 @@ test('a stalled response times out, aborts the resource and closes the peer', as
   await closed; assert.equal(resourceSignal?.aborted, true); rtc.dispose();
 });
 
+test('late resource responses are cancelled after timeout, request cancellation, or session closure', async () => {
+  for (const mode of ['timeout', 'cancel', 'session'] as const) {
+    let release!: (response: Response) => void, entered!: () => void, canceled!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const cancellation = new Promise<void>(resolve => { canceled = resolve; });
+    const { rtc, client, controller } = await setup(async () => { entered(); return new Promise<Response>(resolve => { release = resolve; }); }, mode === 'timeout' ? 20 : undefined);
+    const closed = new Promise<void>(resolve => client.onClose(() => resolve()));
+    await client.send(JSON.stringify({ id: 1, method: 'GET', path: '/late', headers: {} }));
+    await waiting;
+    if (mode === 'cancel') await client.send(JSON.stringify({ id: 1, cancel: true }));
+    else if (mode === 'session') controller.abort();
+    if (mode !== 'cancel') await closed;
+    else await new Promise(resolve => setImmediate(resolve));
+    release(new Response(new ReadableStream({ cancel() { canceled(); } })));
+    await cancellation;
+    rtc.dispose();
+  }
+});
+
+test('a completed RTC response retains its body until normally consumed', async () => {
+  let canceled = false;
+  const { rtc, client } = await setup(async () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('normal')); controller.close(); },
+    cancel() { canceled = true; },
+  })));
+  const response = await exchange(client, { id: 1, method: 'GET', path: '/normal', headers: {} });
+  assert.equal(Buffer.from(response.body, 'base64').toString(), 'normal');
+  assert.equal(canceled, false); rtc.dispose();
+});
+
 test('aggregate buffered response cap rejects a fifth concurrent large response', async () => {
   let count = 0;
   const { rtc, client } = await setup(async () => {

@@ -164,6 +164,16 @@ test('the last revoked Agent session reconciles its run after cancellation settl
   assert.equal(f.runtime.phase(),'stopped');
 });
 
+test('a settled Agent from an older invocation cannot clean up its replacement', async t => {
+  const f=await fixture(t);let notify!:(owner:any)=>void, calls=0, unsubscribed=false;
+  f.host.setAgentBroker({onSettled:(listener:any)=>{notify=listener;return()=>{unsubscribed=true;};}});
+  f.host.remoteAccessEnded=async()=>{calls++;};
+  f.host.remoteManagedRuns.set(id,'replacement');
+  notify({appId:id,invocationId:'old'});assert.equal(calls,0);
+  notify({appId:id,invocationId:'replacement'});assert.equal(calls,1);
+  f.host.setAgentBroker({});assert.equal(unsubscribed,true);
+});
+
 test('the last remote access closes idle RTC before rechecking process lifetime', async t => {
   const f=await fixture(t);await f.host.setRemoteAccess(id,true);await f.host.remoteOpen(id,owner);
   const events:string[]=[];f.host.options.onRemoteAccessEnded=()=>{events.push('check-idle');};

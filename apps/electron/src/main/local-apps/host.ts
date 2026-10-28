@@ -472,6 +472,7 @@ export class LocalAppHost {
   private shuttingDown = false;
   private unavailable?: Error;
   private agentBroker?: LocalAppAgentBroker;
+  private unsubscribeAgentSettlement?: () => void;
   private readonly blockedAgentApps = new Set<string>();
   private readonly agentEpochs = new Map<string, number>();
   private readonly backgroundAgentOwners = new Map<string, { revision: number; invocationId: string }>();
@@ -652,7 +653,15 @@ export class LocalAppHost {
     if (this.runtime.invocationId(appId) === runId && !retained) await this.cancelAgentApp(appId, 'Application run ended');
     await this.options.onRunEnded?.(appId, runId, reason);
   }
-  setAgentBroker(broker: LocalAppAgentBroker): void { this.agentBroker = broker; }
+  setAgentBroker(broker: LocalAppAgentBroker): void {
+    this.unsubscribeAgentSettlement?.();
+    this.agentBroker = broker;
+    this.unsubscribeAgentSettlement = broker.onSettled?.(owner => {
+      if (this.remoteManagedRuns.get(owner.appId) === owner.invocationId) {
+        void this.remoteAccessEnded(owner.appId, owner.invocationId).catch(() => undefined);
+      }
+    });
+  }
   async authorizeAgent(owner: LocalAppAgentOwner): Promise<LocalAppAgentAuthorization> {
     const revision = this.runtime.revision(owner.appId);
     if (!revision) throw new Error('Application Agent access is no longer active');
@@ -890,7 +899,12 @@ export class LocalAppHost {
     await this.authorize(id, signal, row.revision);
     const agentEpoch = this.agentEpochs.get(id);
     if (changed()) throw new Error('Remote access changed');
-    await this.runtime.start(id, false, signal, this.runtime.revision(id) !== undefined && this.runtime.revision(id) !== row.revision, row.revision);
+    const backgroundOwner = this.backgroundAgentOwners.get(id);
+    if (backgroundOwner && backgroundOwner.revision === row.revision && backgroundOwner.invocationId === this.runtime.invocationId(id)) {
+      await this.runtime.resume(id, backgroundOwner.revision, backgroundOwner.invocationId, signal);
+    } else {
+      await this.runtime.start(id, false, signal, this.runtime.revision(id) !== undefined && this.runtime.revision(id) !== row.revision, row.revision);
+    }
     const startedRun = this.runtime.invocationId(id); if (startedRun) this.remoteManagedRuns.set(id, startedRun);
     if (this.agentEpochs.get(id) === agentEpoch) this.blockedAgentApps.delete(id);
     signal.throwIfAborted();
@@ -1706,6 +1720,7 @@ export class LocalAppHost {
   }
   async dispose(): Promise<void> {
     this.shuttingDown = true;
+    this.unsubscribeAgentSettlement?.(); this.unsubscribeAgentSettlement = undefined;
     this.invalidateRemoteOpenings();
     await this.remoteGateway?.dispose();
     this.remoteRtc?.dispose();

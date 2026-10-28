@@ -52,6 +52,78 @@ test('single use fragment tickets, app origin isolation, owner revocation and ru
     const next = await session(gateway,port); invalidate(); assert.equal((await request(port,next.host,'/',{cookie:next.cookie})).status,401);
   } finally { await gateway.dispose(); }
 });
+
+test('bootstrap admission isolates anonymous bodies from authenticated control budget', async () => {
+  const {port, gateway} = await setup(128);
+  let held: ReturnType<typeof httpRequest> | undefined;
+  try {
+    const existing = await session(gateway, port);
+    const opened = new URL((await gateway.open({appId:id,revision:1,runId:'run'}, owner)).url);
+    assert.equal((await request(port, 'unknown.example', '/__lingxi_remote_bootstrap', {method:'POST',origin:'https://unknown.example',body:'{}'})).status, 403);
+    held = httpRequest({hostname:'127.0.0.1',port,path:'/__lingxi_remote_bootstrap',method:'POST',headers:{host:opened.host,origin:opened.origin,'content-type':'application/json'}});
+    held.on('error', () => undefined); held.write('x'.repeat(1000));
+    while ((gateway as any).pendingBootstraps.size !== 1) await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await request(port, opened.host, '/__lingxi_remote_bootstrap', {method:'POST',origin:opened.origin,body:JSON.stringify({ticket:opened.hash.slice(1)})})).status, 429);
+    assert.equal((await request(port,existing.host,'/__lingxi_remote_invoke',{method:'POST',cookie:existing.cookie,origin:`https://${existing.host}`,body:'{"method":"info","args":{}}'})).status, 200);
+    held.destroy();
+    while ((gateway as any).pendingBootstraps.size) await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await request(port,opened.host,'/__lingxi_remote_bootstrap',{method:'POST',origin:opened.origin,body:JSON.stringify({ticket:opened.hash.slice(1)})})).status, 204);
+  } finally { held?.destroy(); await gateway.dispose(); }
+});
+
+test('bootstrap disconnect during authorization retains its ticket and creates no session', async () => {
+  const {port, gateway, adapter} = await setup();
+  let client: ReturnType<typeof httpRequest> | undefined;
+  try {
+    const opened = new URL((await gateway.open({appId:id,revision:1,runId:'run'},owner)).url);
+    let entered!: () => void, release!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    adapter.current = async () => { entered(); await new Promise<void>(resolve => { release = resolve; }); return true; };
+    client = httpRequest({hostname:'127.0.0.1',port,path:'/__lingxi_remote_bootstrap',method:'POST',headers:{host:opened.host,origin:opened.origin,'content-type':'application/json'}});
+    client.on('error', () => undefined); client.end(JSON.stringify({ticket:opened.hash.slice(1)}));
+    await waiting; client.destroy();
+    while ((gateway as any).pendingBootstraps.size) await new Promise(resolve => setImmediate(resolve));
+    release(); await new Promise(resolve => setImmediate(resolve));
+    assert.equal((gateway as any).sessions.size, 0);
+    assert.equal((gateway as any).tickets.has(opened.hash.slice(1)), true);
+    adapter.current = async () => true;
+    assert.equal((await request(port,opened.host,'/__lingxi_remote_bootstrap',{method:'POST',origin:opened.origin,body:JSON.stringify({ticket:opened.hash.slice(1)})})).status, 204);
+  } finally { client?.destroy(); await gateway.dispose(); }
+});
+
+test('revocation releases bootstrap admission even when authorization never settles', async () => {
+  const {port, gateway, adapter} = await setup();
+  try {
+    const opened = new URL((await gateway.open({appId:id,revision:1,runId:'run'},owner)).url);
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    adapter.current = async () => { entered(); return new Promise<boolean>(() => {}); };
+    const pending = request(port,opened.host,'/__lingxi_remote_bootstrap',{method:'POST',origin:opened.origin,body:JSON.stringify({ticket:opened.hash.slice(1)})});
+    await waiting; gateway.revokeOwner(owner);
+    assert.equal((await pending).status, 403);
+    assert.equal((gateway as any).pendingBootstraps.size, 0);
+    assert.equal((gateway as any).sessions.size, 0);
+  } finally { await gateway.dispose(); }
+});
+
+test('bootstrap admission has a global cap and revocation releases stalled bodies', async () => {
+  const {port, gateway} = await setup();
+  const clients: ReturnType<typeof httpRequest>[] = [];
+  try {
+    const urls: URL[] = [];
+    for (let index = 0; index < 33; index++) urls.push(new URL((await gateway.open({appId:id,revision:1,runId:'run'},owner)).url));
+    for (const url of urls.slice(0, 32)) {
+      const client = httpRequest({hostname:'127.0.0.1',port,path:'/__lingxi_remote_bootstrap',method:'POST',headers:{host:url.host,origin:url.origin,'content-type':'application/json'}});
+      client.on('error', () => undefined); client.write('{'); clients.push(client);
+    }
+    while ((gateway as any).pendingBootstraps.size !== 32) await new Promise(resolve => setImmediate(resolve));
+    const extra = urls[32]!;
+    assert.equal((await request(port,extra.host,'/__lingxi_remote_bootstrap',{method:'POST',origin:extra.origin,body:JSON.stringify({ticket:extra.hash.slice(1)})})).status, 429);
+    gateway.revokeOwner(owner);
+    while ((gateway as any).pendingBootstraps.size) await new Promise(resolve => setImmediate(resolve));
+    assert.equal((gateway as any).tickets.size, 0);
+  } finally { for (const client of clients) client.destroy(); await gateway.dispose(); }
+});
 test('rejects unsafe origin configuration and enforces request body limits', async () => {
   const {port,gateway} = await setup();
   try {

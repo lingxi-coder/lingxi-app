@@ -347,18 +347,24 @@ struct AppRuntimeView: View {
     @State private var opened = false
     @State private var busy = false
     @State private var consent: UnifiedAppRelease?
+    @State private var inAppBrowser: LocalAppBrowserTicket?
+    @State private var requestedInApp = false
     var body: some View {
         VStack(spacing: 20) {
             Text(library.record(appId)?.name ?? "本地应用").font(.title2)
-            Text("应用页面在系统默认浏览器打开。模型凭据、Agent 授权和工具审批由灵犀管理。")
-            Text("iOS 26 会为已确认的 Agent 请求申请有限后台任务；系统仍可中断任务。普通浏览器页面暂停后，请返回灵犀重新打开。")
+            Text("local_app_browser_intro")
+            Text("local_app_browser_lifetime")
                 .font(.footnote).foregroundStyle(.secondary)
             if busy { ProgressView() }
             if let error { Text(error).foregroundStyle(.red) }
             if let wake = library.browserAgentWake(for: appId) {
                 Text("浏览器 Agent 请求等待后台任务许可。运行：\(wake.runID.prefix(8))")
                     .font(.footnote).foregroundStyle(.secondary)
-                Button("开始 Agent 并返回应用") {
+                Text("local_app_agent_in_app_wake_unsupported")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Text("local_app_agent_default_wake_help")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button("local_app_agent_continue_default") {
                     Task { await returnToBrowser(wake) }
                 }.disabled(busy)
                 Button("取消此次 Agent 请求", role: .cancel) {
@@ -366,6 +372,9 @@ struct AppRuntimeView: View {
                 }.disabled(busy)
             } else {
                 Button(launch == nil ? "启动并在默认浏览器打开" : "返回默认浏览器") { Task { await load(openBrowser: true) } }.disabled(busy)
+                Button("remote_apps_open_in_app") { Task { await load(openBrowser: true, inApp: true) } }.disabled(busy)
+                if hasAgent { Text("local_app_agent_in_app_unsupported")
+                    .font(.footnote).foregroundStyle(.secondary) }
             }
             Button("应用设置与 Agent 授权") { onShowDetails(appId) }
             Button("停止应用与 Agent 任务", role: .destructive) { Task {
@@ -376,9 +385,10 @@ struct AppRuntimeView: View {
         }
         .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: appId) { await load(openBrowser: !opened && !library.consumeBrowserReview(appId)) }
+        .sheet(item: $inAppBrowser) { ticket in LocalAppSystemBrowser(url: ticket.url) }
         .sheet(item: $consent) { release in
             LocalAppConsentSheet(manifest: release.manifest, digest: release.digest, title: "授权此版本运行") {
-                Task { do { try await library.grant(appId, digest: release.digest); consent = nil; await load(openBrowser: true) }
+                Task { do { try await library.grant(appId, digest: release.digest); consent = nil; await load(openBrowser: true, inApp: requestedInApp) }
                 catch { self.error = error.localizedDescription; consent = nil } }
             }
         }
@@ -392,8 +402,9 @@ struct AppRuntimeView: View {
         }
         .accessibilityIdentifier("app-runtime")
     }
-    private func load(openBrowser: Bool) async {
+    private func load(openBrowser: Bool, inApp: Bool = false) async {
         guard !busy else { return }
+        requestedInApp = inApp
         busy = true; error = nil
         defer { busy = false }
         do {
@@ -402,8 +413,8 @@ struct AppRuntimeView: View {
             let release = try await library.release(appId, revision: app.currentRevision)
             hasAgent = (release.manifest.capabilities ?? []).contains("agent")
             if release.manifest.executesCode && !app.executionGrants.contains(release.digest) { consent = release; return }
-            if openBrowser, let wake = library.browserAgentWake(for: appId) {
-                await returnToBrowser(wake)
+            if openBrowser, library.browserAgentWake(for: appId) != nil {
+                // Let the user choose the explicit default-browser handoff.
                 return
             }
             let value = try await library.openExternalBrowser(appId)
@@ -412,7 +423,8 @@ struct AppRuntimeView: View {
             }
             launch = value; info.markOpened(app); opened = true
             if openBrowser {
-                openURL(value.url) { accepted in if !accepted { self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。" } }
+                if inApp { inAppBrowser = LocalAppBrowserTicket(url: value.url) }
+                else { openURL(value.url) { accepted in if !accepted { self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。" } } }
             }
         } catch { self.error = error.localizedDescription }
     }

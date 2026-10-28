@@ -25,7 +25,7 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String) -> Unit, onDetails: (String) -> Unit,
-    onAuthoring: (String?, String, String) -> Unit) {
+    onAuthoring: (String?, String, String) -> Unit, onRemoteApps: () -> Unit) {
     val context = LocalContext.current
     val appsGuestPath = remember(context) { com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath }
     val state by apps.state.collectAsState()
@@ -57,6 +57,7 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
         PrimaryTabRow(selectedTabIndex = tab) {
             listOf(stringResource(R.string.local_app_v2_mine), stringResource(R.string.local_app_v2_market)).forEachIndexed { index, title -> Tab(selected = index == tab, onClick = { tab = index }, text = { Text(title) }) }
         }
+        TextButton(onClick = onRemoteApps, modifier = Modifier.padding(horizontal = 16.dp)) { Text(stringResource(R.string.remote_apps_browse)) }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             TextButton(onClick = { creating = true }) { Text(stringResource(R.string.local_app_v2_create)) }
             if (tab == 0) TextButton(enabled = !busy, onClick = { importSource.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) { Text(stringResource(R.string.local_app_v2_import_source)) }

@@ -392,3 +392,37 @@ test('closing the file lane updates availability and preserves the control peer'
   control.sendFragment(new Uint8Array([1]));
   t.host.dispose();
 });
+
+test('a peer closed while its window opens does not create a late renderer peer', async () => {
+  const clock = new ManualClock(START);
+  const port = new FakePort();
+  let open!: (port: RtcPort) => void;
+  const window: RtcWindow = { open: () => new Promise(resolve => { open = resolve; }), onGone() {}, close() {} };
+  const host = new PeerHost({ clock, createWindow: () => window });
+  const answer = host.answer(A, 'v=0', []);
+  const rejected = assert.rejects(answer, /closed before its answer/);
+  await settle();
+  host.link(A).close('revoked');
+  await rejected;
+  open(port); await settle();
+  assert.equal(port.of('answer').length, 0);
+  assert.equal(host.connectionCount, 0);
+  host.dispose();
+});
+
+test('synchronous window creation failure releases the pending peer', async () => {
+  const host = new PeerHost({ createWindow: () => { throw new Error('no window'); } });
+  await assert.rejects(host.answer(A, 'v=0', []), /no window/);
+  assert.equal(host.connectionCount, 0);
+  host.dispose();
+});
+
+test('synchronous window open failure closes the window and releases the peer', async () => {
+  let closed = 0;
+  const host = new PeerHost({ createWindow: () => ({ open() { throw new Error('open failed'); }, onGone() {}, close() { closed++; } }) });
+  await assert.rejects(host.answer(A, 'v=0', []), /open failed/);
+  assert.equal(host.connectionCount, 0);
+  assert.equal(host.windowOpen, false);
+  assert.equal(closed, 1);
+  host.dispose();
+});

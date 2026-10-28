@@ -118,6 +118,7 @@ private struct RemoteHostView: View {
     let select: (RemoteSessionSummaryFfi) -> Void
     @Environment(\.scenePhase) private var scenePhase
     @State private var error: String?
+    @State private var appBrowser = RemoteAppBrowserLifetime()
     private var host: RemoteHostFfi? { manager.hosts.first { $0.hostId == hostID } }
 
     var body: some View {
@@ -126,6 +127,10 @@ private struct RemoteHostView: View {
                 repair: { Task { try? await manager.repair(hostID) } })
             if let error { Text(error).foregroundStyle(.red) }
             if manager.connection?.phase == .ready, manager.connection?.hostId == hostID {
+                RemoteAppsSection(manager: manager, hostID: hostID,
+                    browserGeneration: { appBrowser.generation },
+                    presentBrowser: { url, generation in appBrowser.present(url, generation: generation) },
+                    invalidateBrowserLaunch: { appBrowser.invalidatePending() })
                 if manager.sessions.isEmpty {
                     Section { Text("remote_no_sessions_help").foregroundStyle(.secondary) } header: { Text("remote_no_sessions") }
                 }
@@ -148,6 +153,9 @@ private struct RemoteHostView: View {
             }
         }
         .navigationTitle(host?.name ?? String(localized: "remote_title"))
+        .sheet(item: Binding(get: { appBrowser.ticket }, set: { if $0 == nil { appBrowser.dismiss() } })) { ticket in
+            LocalAppSystemBrowser(url: ticket.url)
+        }
         .task { do { try await manager.connect(hostID) } catch { self.error = String(localized: "remote_err_generic") } }
         .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await manager.nudge() } } }
     }
@@ -159,6 +167,99 @@ private struct RemoteHostView: View {
         case .idle: "remote_status_idle"
         case .dormant: "remote_status_dormant"
         }
+    }
+}
+
+/// The desktop owns these apps and their runtime. Tickets live only until opened.
+@MainActor
+private struct RemoteAppsSection: View {
+    let manager: RemoteControlManager
+    let hostID: String
+    let browserGeneration: () -> UInt64
+    let presentBrowser: (URL, UInt64) -> Void
+    let invalidateBrowserLaunch: () -> Void
+    @Environment(\.openURL) private var openURL
+    @State private var apps: [RemoteLocalAppFfi] = []
+    @State private var loading = false
+    @State private var opening: String?
+    @State private var error: String?
+    @State private var request: UInt64 = 0
+    @State private var listRequest: UInt64 = 0
+
+    var body: some View {
+        Section {
+            Text("remote_apps_intro")
+                .font(.footnote).foregroundStyle(.secondary)
+            if let error { Text(error).foregroundStyle(.red) }
+            if loading { ProgressView() }
+            else if apps.isEmpty { Text("remote_apps_empty").foregroundStyle(.secondary) }
+            ForEach(apps, id: \.appId) { app in
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(app.name)
+                        if !app.summary.isEmpty { Text(app.summary).font(.caption).foregroundStyle(.secondary) }
+                        HStack(spacing: 4) { Text("remote_apps_desktop"); Text("·"); Text(phase(app.phase)) }
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if opening == app.appId { ProgressView() }
+                    else {
+                        Button("common_open") { Task { await open(app, inApp: false) } }
+                            .buttonStyle(.borderless)
+                        Menu {
+                            Button("remote_apps_open_default") { Task { await open(app, inApp: false) } }
+                            Button("remote_apps_open_in_app") { Task { await open(app, inApp: true) } }
+                        } label: { Image(systemName: "ellipsis.circle") }
+                            .accessibilityLabel("remote_apps_open_choice")
+                    }
+                }
+            }
+            Button("remote_apps_refresh") { Task { await refresh() } }.disabled(loading)
+        } header: { Text("remote_apps_title") }
+        .task { await refresh() }
+        .onDisappear { request &+= 1; invalidateBrowserLaunch() }
+    }
+
+    private func phase(_ value: String) -> LocalizedStringKey {
+        switch value {
+        case "installing": "remote_apps_phase_installing"
+        case "building": "remote_apps_phase_building"
+        case "starting": "remote_apps_phase_starting"
+        case "running": "remote_apps_phase_running"
+        case "stopping": "remote_apps_phase_stopping"
+        case "failed": "remote_apps_phase_failed"
+        default: "remote_apps_phase_stopped"
+        }
+    }
+
+    private func refresh() async {
+        listRequest &+= 1
+        let mine = request
+        let list = listRequest
+        loading = true; error = nil
+        do {
+            let result = try await manager.listApps(hostID: hostID)
+            guard !Task.isCancelled, mine == request, list == listRequest else { return }
+            apps = result; loading = false
+        } catch {
+            guard !Task.isCancelled, mine == request, list == listRequest else { return }
+            apps = []; loading = false; self.error = String(localized: "remote_apps_load_error")
+        }
+    }
+
+    private func open(_ app: RemoteLocalAppFfi, inApp: Bool) async {
+        guard opening == nil else { return }
+        opening = app.appId; error = nil
+        let mine = request
+        let browserRequest = browserGeneration()
+        defer { opening = nil }
+        do {
+            let url = try await manager.openApp(hostID: hostID, app: app)
+            guard !Task.isCancelled, mine == request else { return }
+            if inApp { presentBrowser(url, browserRequest) }
+            else { openURL(url) { accepted in if !accepted { error = String(localized: "remote_apps_browser_error") } } }
+        } catch is CancellationError { }
+        catch { if mine == request { self.error = String(localized: "remote_apps_open_error") } }
     }
 }
 

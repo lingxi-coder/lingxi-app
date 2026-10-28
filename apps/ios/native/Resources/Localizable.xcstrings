@@ -30342,6 +30342,244 @@
         }
       }
     },
+    "local_app_agent_continue_default": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求来自默认浏览器：开始并继续"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請求來自預設瀏覽器：開始並繼續"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request came from default browser: start and continue"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デフォルトのブラウザからのリクエスト：開始して続行"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기본 브라우저에서 시작한 요청: 시작하고 계속"
+          }
+        }
+      }
+    },
+    "local_app_agent_default_wake_help": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "如果此请求由默认浏览器发起，可以在同一浏览器继续。切换浏览器无法恢复请求。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "若此請求來自預設瀏覽器，可在同一瀏覽器繼續。切換瀏覽器無法還原請求。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If this request came from the default browser, continue there. Switching browsers cannot restore the request."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デフォルトのブラウザからのリクエストは同じブラウザで続行できます。ブラウザを切り替えると復元できません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기본 브라우저에서 시작한 요청은 같은 브라우저에서 계속할 수 있습니다. 브라우저를 바꾸면 요청을 복원할 수 없습니다."
+          }
+        }
+      }
+    },
+    "local_app_agent_in_app_unsupported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用内浏览器暂不支持继续 Agent 请求；如需使用 Agent，请在默认浏览器中发起。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "應用程式內瀏覽器暫不支援繼續 Agent 請求；請在預設瀏覽器發起 Agent 請求。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In-app browser Agent requests cannot yet continue. Start Agent requests in the default browser."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリ内ブラウザの Agent リクエストは現在続行できません。デフォルトのブラウザで開始してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 내 브라우저의 Agent 요청은 아직 계속할 수 없습니다. 기본 브라우저에서 요청하세요."
+          }
+        }
+      }
+    },
+    "local_app_agent_in_app_wake_unsupported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用内浏览器的 Agent 请求暂不支持继续。待处理请求保留在原浏览器中；请返回原页面，或在默认浏览器重新发起。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "應用程式內瀏覽器的 Agent 請求暫不支援繼續。待處理請求保留在原瀏覽器中；請返回原頁面，或在預設瀏覽器重新發起。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In-app browser Agent requests cannot yet continue. The pending request remains in the original browser; return to it or start a new request in the default browser."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリ内ブラウザの Agent リクエストは現在続行できません。保留中のリクエストは元のブラウザに残ります。元のページに戻るか、デフォルトのブラウザで新しく開始してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 내 브라우저의 Agent 요청은 아직 계속할 수 없습니다. 대기 중인 요청은 원래 브라우저에 남아 있습니다. 해당 페이지로 돌아가거나 기본 브라우저에서 새로 요청하세요."
+          }
+        }
+      }
+    },
+    "local_app_browser_intro": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用默认在系统默认浏览器打开，也可选择应用内系统浏览器。两种方式的浏览器会话可能不同。模型凭据、Agent 授权和工具审批由灵犀管理。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "應用程式預設在系統瀏覽器開啟，也可使用應用程式內瀏覽器；兩者的瀏覽器工作階段可能不同。靈犀管理模型憑證、Agent 授權及工具核准。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apps open in the default browser by default. You can also use the in-app browser; browser sessions may differ. LingXi manages model credentials, Agent authorization, and tool approvals."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリはデフォルトのブラウザで開きます。アプリ内ブラウザも選べますが、ブラウザのセッションは異なる場合があります。モデルの認証情報、Agent の認可、ツールの承認は LingXi が管理します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱은 기본 브라우저에서 열립니다. 앱 내 브라우저도 선택할 수 있으며 브라우저 세션은 서로 다를 수 있습니다. 모델 자격 증명, Agent 권한 및 도구 승인은 LingXi가 관리합니다."
+          }
+        }
+      }
+    },
+    "local_app_browser_lifetime": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOS 26 会为已确认的 Agent 请求申请有限后台任务；系统仍可中断任务。普通浏览器页面暂停后，请返回灵犀重新打开。长时间运行的任务建议使用电脑。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOS 26 會為已確認的 Agent 請求申請有限背景時間，但系統仍可能中斷。瀏覽器頁面暫停後，請返回靈犀重新開啟。建議使用電腦執行長時間工作。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOS 26 provides limited background time for confirmed Agent requests, but may interrupt them. Return to LingXi to reopen a paused browser page. Use Desktop for long-running tasks."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOS 26 は確認済み Agent リクエストに限られたバックグラウンド時間を提供しますが、中断されることがあります。ページが停止した場合は LingXi に戻って開き直してください。長時間のタスクにはパソコンをお勧めします。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOS 26은 확인된 Agent 요청에 제한된 백그라운드 시간을 제공하지만 시스템이 중단할 수 있습니다. 페이지가 일시 중지되면 LingXi로 돌아와 다시 여세요. 오래 실행되는 작업에는 컴퓨터를 권장합니다."
+          }
+        }
+      }
+    },
+    "local_app_host_recommendation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "长时间运行的应用建议部署在电脑上；也可以继续在手机上运行。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "建議在電腦上執行長時間工作的應用程式；也可以繼續在手機上執行。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "For long-running apps, a computer is recommended. You can also run apps on this phone."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "長時間動作するアプリはパソコンをお勧めします。このスマートフォンでも実行できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오래 실행되는 앱은 컴퓨터에서 실행하는 것이 좋습니다. 이 휴대전화에서도 실행할 수 있습니다."
+          }
+        }
+      }
+    },
     "mcp_add_server": {
       "localizations": {
         "zh-Hans": {
@@ -41596,6 +41834,788 @@
         }
       }
     },
+    "remote_app_revision": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "版本 %1$s"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "版本 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Revision %1$s"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リビジョン %1$s"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "버전 %1$s"
+          }
+        }
+      }
+    },
+    "remote_apps_browse": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "浏览电脑上共享的应用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "瀏覽電腦分享的應用程式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browse apps shared by a computer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンが共有したアプリを見る"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터에서 공유한 앱 둘러보기"
+          }
+        }
+      }
+    },
+    "remote_apps_browser_error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法打开系统默认浏览器。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法開啟系統預設瀏覽器。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not open the default browser."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デフォルトのブラウザを開けませんでした。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기본 브라우저를 열 수 없습니다."
+          }
+        }
+      }
+    },
+    "remote_apps_choose": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择打开方式"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選擇開啟方式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose how to open"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "開き方を選択"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "열기 방식 선택"
+          }
+        }
+      }
+    },
+    "remote_apps_desktop": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Desktop"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터"
+          }
+        }
+      }
+    },
+    "remote_apps_empty": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑尚未共享应用。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦尚未分享應用程式。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No apps shared by this computer."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このパソコンで共有されたアプリはありません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 컴퓨터에서 공유한 앱이 없습니다."
+          }
+        }
+      }
+    },
+    "remote_apps_error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法加载或打开应用，请检查连接后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法載入或開啟應用程式，請檢查連線後重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load or open the app. Check the connection and try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリを読み込めないか開けません。接続を確認して再試行してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱을 불러오거나 열 수 없습니다. 연결을 확인하고 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_apps_help": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "长时间运行的应用建议部署在电脑上。打开链接可能过期；如过期，请重新打开应用。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "建議將長時間執行的應用程式部署在電腦上。開啟連結可能過期；若已過期，請重新開啟應用程式。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "For long-running apps, a computer is recommended. If an opening link expires, open the app again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "長時間動作するアプリはパソコンでの実行をお勧めします。リンクの期限が切れた場合は、アプリを開き直してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오래 실행되는 앱은 컴퓨터에서 실행하는 것이 좋습니다. 열기 링크가 만료되면 앱을 다시 여세요."
+          }
+        }
+      }
+    },
+    "remote_apps_intro": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这些应用在电脑上运行，手机仅用于访问。长时间运行的任务建议使用电脑。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這些應用程式在電腦上執行，手機只用來存取。建議使用電腦執行長時間工作。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "These apps run on the computer; this device accesses them remotely. Use a computer for long-running tasks."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "これらのアプリはパソコンで実行され、スマートフォンからアクセスします。長時間のタスクにはパソコンをお勧めします。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 앱은 컴퓨터에서 실행되며 휴대전화로 접속합니다. 오래 실행되는 작업에는 컴퓨터를 권장합니다."
+          }
+        }
+      }
+    },
+    "remote_apps_load_error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法加载电脑共享的应用，请重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法載入電腦分享的應用程式，請重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load shared apps. Try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "共有アプリを読み込めませんでした。再試行してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "공유 앱을 불러오지 못했습니다. 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_apps_open_choice": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择打开方式"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選擇開啟方式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose how to open"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "開き方を選択"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "열기 방식 선택"
+          }
+        }
+      }
+    },
+    "remote_apps_open_default": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在系统默认浏览器打开"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在系統預設瀏覽器開啟"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open in default browser"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デフォルトのブラウザで開く"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기본 브라우저에서 열기"
+          }
+        }
+      }
+    },
+    "remote_apps_open_error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法打开应用，请刷新后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法開啟應用程式，請重新整理後重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not open the app. Refresh and try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリを開けませんでした。更新して再試行してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱을 열 수 없습니다. 새로고침한 후 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_apps_open_in_app": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在应用内浏览器打开"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在應用程式內瀏覽器開啟"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open in in-app browser"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリ内ブラウザで開く"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 내 브라우저에서 열기"
+          }
+        }
+      }
+    },
+    "remote_apps_phase_building": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "构建中"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "建置中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Building"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ビルド中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "빌드 중"
+          }
+        }
+      }
+    },
+    "remote_apps_phase_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "失败"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "失敗"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "失敗"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "실패"
+          }
+        }
+      }
+    },
+    "remote_apps_phase_installing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安装中"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安裝中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installing"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "インストール中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "설치 중"
+          }
+        }
+      }
+    },
+    "remote_apps_phase_running": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行中"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "執行中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Running"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "実行中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "실행 중"
+          }
+        }
+      }
+    },
+    "remote_apps_phase_starting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动中"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "啟動中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Starting"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "起動中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시작 중"
+          }
+        }
+      }
+    },
+    "remote_apps_phase_stopped": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已停止"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已停止"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stopped"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "중지됨"
+          }
+        }
+      }
+    },
+    "remote_apps_phase_stopping": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止中"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stopping"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "중지 중"
+          }
+        }
+      }
+    },
+    "remote_apps_refresh": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新共享应用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新整理分享的應用程式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh shared apps"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "共有アプリを更新"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "공유 앱 새로고침"
+          }
+        }
+      }
+    },
+    "remote_apps_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑共享的应用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦分享的應用程式"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Desktop apps"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンが共有したアプリ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터에서 공유한 앱"
+          }
+        }
+      }
+    },
     "remote_back": {
       "localizations": {
         "zh-Hans": {
@@ -44006,6 +45026,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "오프라인입니다. 마지막으로 받은 내용을 표시합니다."
+          }
+        }
+      }
+    },
+    "remote_sessions_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "共享会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "分享的會話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shared sessions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "共有セッション"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "공유 세션"
           }
         }
       }

@@ -17,6 +17,8 @@ import com.lingxi.code.bindings.android.RemoteConnectionPhaseFfi
 import com.lingxi.code.bindings.android.RemoteConnectionStateFfi
 import com.lingxi.code.bindings.android.RemoteFfiException
 import com.lingxi.code.bindings.android.RemoteHostFfi
+import com.lingxi.code.bindings.android.RemoteLocalAppFfi
+import com.lingxi.code.bindings.android.RemoteLocalAppOpenFfi
 import com.lingxi.code.bindings.android.RemotePermissionModeFfi
 import com.lingxi.code.bindings.android.RemotePromptImageFfi
 import com.lingxi.code.bindings.android.RemoteSessionSummaryFfi
@@ -121,6 +123,8 @@ interface RemoteClientPort {
     suspend fun setModel(sessionId: String, model: String)
     suspend fun setReasoning(sessionId: String, selection: ReasoningSelectionDto)
     suspend fun setPermissionMode(sessionId: String, mode: com.lingxi.code.bindings.android.RemotePermissionModeFfi)
+    suspend fun listApps(): List<RemoteLocalAppFfi> = throw UnsupportedOperationException()
+    suspend fun openApp(appId: String): RemoteLocalAppOpenFfi = throw UnsupportedOperationException()
     suspend fun listModels(): com.lingxi.code.bindings.android.RemoteModelsFfi
     suspend fun close()
 }
@@ -157,6 +161,7 @@ class RemoteControlManager(
 ) {
     private val mutableHosts = MutableStateFlow(RemoteHostsState())
     private val mutableConnection = MutableStateFlow<RemoteConnectionStateFfi?>(null)
+    private val connectionEpoch = AtomicInteger(0)
     private val mutableSessions = MutableStateFlow(RemoteSessionsState())
     private data class ClientBinding(val uid: String, val client: RemoteClientPort)
     private data class SessionKey(val uid: String, val hostId: String, val sessionId: String)
@@ -235,6 +240,7 @@ class RemoteControlManager(
 
     /** Dial [hostId]; dialling the one already connected only nudges it. */
     suspend fun connect(hostId: String) {
+        connectionEpoch.incrementAndGet()
         screenGeneration.incrementAndGet()
         sessionLifecycle.withLock { client().connect(hostId) }
     }
@@ -245,12 +251,14 @@ class RemoteControlManager(
     suspend fun retry() = client().retry()
 
     suspend fun forget(hostId: String) {
+        connectionEpoch.incrementAndGet()
         client().forgetHost(hostId)
         mutableHosts.update { state -> state.copy(hosts = state.hosts.map { if (it.hostId == hostId) it.copy(paired = false) else it }) }
     }
 
     /** The screens went away: end the connection and stop watching. */
     fun closeConnection() {
+        connectionEpoch.incrementAndGet()
         val mine = screenGeneration.incrementAndGet()
         val binding = mutableClient.value ?: return
         scope.launch {
@@ -324,6 +332,34 @@ class RemoteControlManager(
         return client
     }
 
+    /** Bind each request to the account, host, and connection attempt that started it. */
+    private suspend fun <T> appRequest(hostId: String, action: suspend (RemoteClientPort) -> T): T {
+        val owner = checkNotNull(account.uid.value) { "not signed in" }
+        val bound = port(owner, hostId)
+        val state = checkNotNull(bound.connectionState()) { "remote computer disconnected" }
+        check(state.hostId == hostId && state.phase == RemoteConnectionPhaseFfi.READY) { "remote computer disconnected" }
+        val epoch = connectionEpoch.get()
+        val result = action(bound)
+        val current = bound.connectionState()
+        check(account.uid.value == owner && mutableClient.value?.client === bound && connectionEpoch.get() == epoch &&
+            current?.hostId == hostId && current.phase == RemoteConnectionPhaseFfi.READY && current.attempt == state.attempt) {
+            "remote computer or account changed"
+        }
+        return result
+    }
+
+    suspend fun listApps(hostId: String): List<RemoteLocalAppFfi> = appRequest(hostId) { it.listApps() }
+
+    suspend fun openApp(hostId: String, appId: String, revision: ULong): String = appRequest(hostId) { client ->
+        val result = client.openApp(appId)
+        val uri = runCatching { java.net.URI(result.url) }.getOrNull()
+        check(result.appId == appId && result.revision == revision && result.expiresAt > System.currentTimeMillis().toULong() &&
+            uri?.scheme.equals("https", ignoreCase = true) && !uri?.host.isNullOrBlank() && uri?.userInfo == null && !uri?.rawFragment.isNullOrBlank()) {
+            "Invalid or expired application link"
+        }
+        result.url
+    }
+
     /** A system document picker can outlive the peer. Wait for the existing
      * account/host to reconnect before starting file RPCs on return. */
     internal suspend fun filePort(ownerUid: String?, hostId: String, sessionReady: Flow<Boolean>): RemoteClientPort {
@@ -386,6 +422,7 @@ class RemoteControlManager(
     private inner class ManagerListener(private val mine: Int, private val ownerUid: String) : AndroidRemoteListener {
         override suspend fun onConnectionState(state: RemoteConnectionStateFfi) {
             if (mine != generation.get() || account.uid.value != ownerUid) return
+            if (mutableConnection.value?.let { it.hostId != state.hostId || it.phase != state.phase || it.attempt != state.attempt } != false) connectionEpoch.incrementAndGet()
             mutableConnection.value = state
             if (state.hostId != mutableSessions.value.hostId) mutableSessions.value = RemoteSessionsState(state.hostId)
         }
@@ -562,6 +599,8 @@ internal class FfiRemoteClientPort(private val client: AndroidRemoteControlClien
         sessionId: String,
         mode: com.lingxi.code.bindings.android.RemotePermissionModeFfi,
     ) = client.setPermissionMode(sessionId, mode)
+    override suspend fun listApps() = client.listApps()
+    override suspend fun openApp(appId: String) = client.openApp(appId)
     override suspend fun listModels() = client.listModels()
     override suspend fun close() {
         client.disconnect()

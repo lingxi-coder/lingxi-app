@@ -73,3 +73,72 @@ test('WebSocket gateway validates origin and revokes an already upgraded binary 
   const closed = new Promise<void>(resolve => socket.once('close', () => resolve())); broker.revoke('app', 'one'); await closed; t.diagnostic('revocation closed client');
   await assert.rejects(broker.socketUrl('app', 'one', 'api', 1234, '/', 'lingxi-app://app'), /ended/);
 });
+
+test('decoded compressed service bodies and HEAD carry matching metadata, while unknown encodings retain it', async t => {
+  const {gzipSync, brotliCompressSync} = await import('node:zlib');
+  const text = 'compressed asset';
+  const server = createServer((req,res) => {
+    const coding = req.url === '/br' ? 'br' : req.url === '/unknown' ? 'custom' : 'gzip';
+    const bytes = coding === 'gzip' ? gzipSync(text) : coding === 'br' ? brotliCompressSync(text) : Buffer.from(text);
+    res.writeHead(200, {'content-encoding':coding, 'content-length':bytes.length, 'content-md5':'stale', 'digest':'stale', 'etag':'"compressed"'});
+    res.end(bytes);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as {port:number}).port, broker = new LocalAppServiceBroker();
+  t.after(async () => {await broker.dispose();server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve()));});
+  for (const path of ['/gzip','/br']) {
+    const result = await broker.fetch('app','run','api',port,path,new Request(`http://app${path}`));
+    for (const name of ['content-encoding','content-length','content-md5','digest','etag']) assert.equal(result.headers.get(name),null);
+    assert.equal(await result.text(),text);
+  }
+  const head = await broker.fetch('app','run','api',port,'/gzip',new Request('http://app/gzip',{method:'HEAD'}));
+  for (const name of ['content-encoding','content-length','content-md5','digest','etag']) assert.equal(head.headers.get(name),null);
+  const unknown = await broker.fetch('app','run','api',port,'/unknown',new Request('http://app/unknown'));
+  assert.equal(unknown.headers.get('content-encoding'),'custom'); assert.equal(await unknown.text(),text);
+});
+
+
+test('range requests prefer identity and reject decoded compressed partial responses', async t => {
+  const {gzipSync} = await import('node:zlib');
+  let acceptedEncoding = '';
+  const server = createServer((req,res) => {
+    acceptedEncoding = req.headers['accept-encoding'] ?? '';
+    if (req.url === '/ignored') {
+      const bytes = gzipSync('partial');
+      res.writeHead(206, {'content-encoding':'gzip','content-length':bytes.length,'content-range':`bytes 0-${bytes.length-1}/${bytes.length}`});
+      res.end(bytes);
+    } else {
+      res.writeHead(206, {'content-range':'bytes 0-2/7','content-length':'3'}); res.end('par');
+    }
+  });
+  await new Promise<void>(resolve => server.listen(0,'127.0.0.1',resolve));
+  const port=(server.address() as {port:number}).port, broker=new LocalAppServiceBroker();
+  t.after(async()=>{await broker.dispose();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));});
+  const request = (path:string) => new Request(`http://app${path}`, {headers:{range:'bytes=0-2','accept-encoding':'gzip'}});
+  const identity=await broker.fetch('app','run','api',port,'/ok',request('/ok'));
+  assert.ok(acceptedEncoding.split(',').every(value=>value.trim()==='identity'));assert.equal(identity.status,206);assert.equal(identity.headers.get('content-range'),'bytes 0-2/7');assert.equal(await identity.text(),'par');
+  const ignored=await broker.fetch('app','run','api',port,'/ignored',request('/ignored'));
+  assert.ok(acceptedEncoding.split(',').every(value=>value.trim()==='identity'));assert.equal(ignored.status,502);assert.match(await ignored.text(),/Compressed partial responses/);
+});
+
+
+test('Electron fetch decodes zstd, x-gzip and stacked encodings before the broker removes their headers', async t => {
+  const zlib = await import('node:zlib');
+  const text = 'multi-encoded asset';
+  const server = createServer((req,res) => {
+    let bytes: Buffer, coding: string;
+    if (req.url === '/zstd') { bytes = zlib.zstdCompressSync(text); coding = 'zstd'; }
+    else if (req.url === '/stacked') { bytes = zlib.brotliCompressSync(zlib.gzipSync(text)); coding = 'gzip, br'; }
+    else { bytes = zlib.gzipSync(text); coding = 'x-gzip'; }
+    res.writeHead(200, {'content-encoding':coding, 'content-length':bytes.length}); res.end(bytes);
+  });
+  await new Promise<void>(resolve => server.listen(0,'127.0.0.1',resolve));
+  const port=(server.address() as {port:number}).port, broker=new LocalAppServiceBroker();
+  t.after(async()=>{await broker.dispose();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));});
+  for (const path of ['/zstd','/stacked','/x-gzip']) {
+    const result=await broker.fetch('app','run','api',port,path,new Request(`http://app${path}`));
+    assert.equal(result.headers.get('content-encoding'),null,path);
+    assert.equal(result.headers.get('content-length'),null,path);
+    assert.equal(await result.text(),text,path);
+  }
+});

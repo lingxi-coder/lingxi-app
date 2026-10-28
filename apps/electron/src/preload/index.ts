@@ -364,6 +364,9 @@ const api: LingxiApi = {
   },
   localApps: {
     list: async () => (await ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'list' })).apps,
+    remoteSettings: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'remote-settings' }),
+    remoteConfiguration: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'remote-configuration' }),
+    setRemoteAccess: (id, enabled) => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'remote-access', id, enabled }),
     open: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'open', id }),
     stop: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'stop', id }),
     restart: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'restart', id }),

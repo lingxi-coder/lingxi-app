@@ -19,6 +19,8 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
   const [tab, setTab] = useState<'mine' | 'market'>('mine');
   const [publication, setPublication] = useState<DesktopLocalApp>();
   const [apps, setApps] = useState<DesktopLocalApp[]>([]);
+  const [remoteSettings, setRemoteSettings] = useState<Record<string, boolean>>({});
+  const [remoteConfigured, setRemoteConfigured] = useState(false);
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -30,8 +32,8 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
   const refresh = useCallback(async () => {
     const token = ++request.current;
     try {
-      const [rows, output, releases] = await Promise.all([appsApi().list(), selected ? appsApi().logs(selected) : Promise.resolve([]), selected ? appsApi().versions(selected) : Promise.resolve([])]);
-      if (request.current === token) { setApps(rows); setLogs(output); setVersions(releases); }
+      const [rows, output, releases, sharing, configuration] = await Promise.all([appsApi().list(), selected ? appsApi().logs(selected) : Promise.resolve([]), selected ? appsApi().versions(selected) : Promise.resolve([]), appsApi().remoteSettings(), appsApi().remoteConfiguration()]);
+      if (request.current === token) { setApps(rows); setLogs(output); setVersions(releases); setRemoteSettings(sharing); setRemoteConfigured(configuration.configured); }
     } catch (error) { if (request.current === token) setError(error instanceof Error ? error.message : String(error)); }
   }, [selected]);
   useEffect(() => {
@@ -50,6 +52,8 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
     <nav className="local-app-tabs" aria-label={tr('apps_title')}><button aria-current={tab === 'mine' ? 'page' : undefined} onClick={() => setTab('mine')}>My apps</button><button aria-current={tab === 'market' ? 'page' : undefined} onClick={() => setTab('market')}>Market</button></nav>
     <LocalAppMarket visible={visible && tab === 'market'} installed={apps} onInstalled={() => void refresh()}/>
     <div hidden={tab !== 'mine'}>
+    <p className="local-app-update">{tr('desktop_apps_deployment_hint')}</p>
+    {!remoteConfigured && <p className="local-app-update">{tr('desktop_apps_remote_unconfigured')}</p>}
     {error && <div className="local-app-error" role="alert">{error}<button onClick={() => { setError(''); void refresh(); }}>{tr('common_retry')}</button></div>}
     <label className="local-app-search"><span className="sr-only">{tr('apps_search_hint')}</span><input type="search" placeholder={tr('desktop_apps_search')} value={query} onChange={event => setQuery(event.target.value)} /></label>
     {!apps.length && !error ? <div className="local-app-empty"><AppsGlyph size={38}/><h2>{tr('desktop_apps_empty_title')}</h2><p>{tr('desktop_apps_empty_body')}</p><button onClick={onCreate}>{tr('desktop_apps_start_creating')}</button></div> : <div className="local-app-grid">
@@ -58,6 +62,7 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
           <span className="local-app-avatar">{Array.from(app.name)[0]?.toLocaleUpperCase(locale)}</span><h2>{app.name}</h2><p>{app.summary || tr('desktop_apps_fallback_summary')}</p>
         </button>
         <div className="local-app-tile-footer"><span className="local-app-phase" data-phase={app.phase}>{tr(phaseLabels[app.phase])}</span><span>v{app.revision}</span></div>
+        {remoteSettings[app.id] && <p className="local-app-update">{tr('desktop_apps_remote_shared')}</p>}
         {app.runningRevision && app.runningRevision !== app.revision && <p className="local-app-update">{tr('desktop_apps_update', app.revision)}</p>}
         {app.error && <p className="local-app-error">{app.error}</p>}
         <div className="local-app-actions"><button onClick={() => { setSelected(selected === app.id ? null : app.id); }}>{tr('desktop_logs')}</button><button disabled={Boolean(app.marketOrigin && !app.authoring?.sourceDirectory && !app.manifest.remix?.allowed)} onClick={() => void act(app.id, () => app.marketOrigin && !app.authoring?.sourceDirectory ? appsApi().remix(app.id) : appsApi().edit(app.id))}>{app.marketOrigin && !app.authoring?.sourceDirectory ? 'Customize' : tr('desktop_modify')}</button>
@@ -68,6 +73,7 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
             <button onClick={() => void act(app.id, () => appsApi().repair(app.id))}>{tr('desktop_apps_repair')}</button>
             <button onClick={() => void act(app.id, () => appsApi().openData(app.id))}>Open data folder</button>
             <label><input type="checkbox" checked={app.background} onChange={event => void act(app.id, () => appsApi().setBackground(app.id, event.target.checked))}/> {tr('desktop_apps_background')}</label>
+            <label><input type="checkbox" checked={remoteSettings[app.id] === true} disabled={busy === app.id || (!remoteConfigured && !remoteSettings[app.id])} onChange={event => void act(app.id, () => appsApi().setRemoteAccess(app.id, event.target.checked))}/> {tr('desktop_apps_remote_access')}</label>
             <button onClick={() => setPublication(app)}>Publish to market…</button>
             {app.marketOrigin && !app.marketOrigin.remixedFrom && <button onClick={() => void act(app.id, () => appsApi().marketInstall(app.marketOrigin!.appId, app.id, app.revision))}>Check for update</button>}
             {(!app.marketOrigin || app.authoring?.sourceDirectory) && <button onClick={() => void act(app.id, () => appsApi().restoreSource(app.id))}>Restore source copy</button>}

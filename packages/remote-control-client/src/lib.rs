@@ -19,6 +19,7 @@ pub mod error;
 pub mod framing;
 pub mod files;
 pub mod keys;
+pub mod local_apps;
 pub mod media;
 #[cfg(feature = "native-media")]
 pub mod native_media;

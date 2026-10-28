@@ -167,6 +167,16 @@ impl AndroidRemoteControlClient {
         self.inner.connection_state()
     }
 
+    /// List Local Apps shared by the connected computer.
+    pub async fn list_apps(&self) -> Result<Vec<RemoteLocalAppFfi>, RemoteFfiError> {
+        self.inner.list_apps().await
+    }
+
+    /// Obtain a short-lived browser bootstrap from the connected computer.
+    pub async fn open_app(&self, app_id: String) -> Result<RemoteLocalAppOpenFfi, RemoteFfiError> {
+        self.inner.open_app(app_id).await
+    }
+
     /// The current computer's shared sessions; `None` until the first list arrives.
     pub fn sessions(&self) -> Option<Vec<RemoteSessionSummaryFfi>> {
         self.inner.sessions()

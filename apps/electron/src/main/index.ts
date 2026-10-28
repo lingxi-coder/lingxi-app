@@ -43,8 +43,14 @@ import { nativeImageCodec } from './remoteControl/nativeImageCodec.js';
 import { PushRequester, RemotePush } from './remoteControl/pushRequests.js';
 import { RemoteControlUi } from './remoteControl/rendererIpc.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
+import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
+import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
+import { LocalAppRtc } from './local-apps/remoteRtc.js';
+import { PeerHost } from './remoteControl/peerHost.js';
+import { createRtcWindow } from './remoteControl/rtcWindow.js';
+import { parseRtcIceServers } from '../shared/remoteRtc.js';
 import { remoteControlConfig } from './remoteControl/config.js';
-import { systemClock } from '@lingxi/bridge-client/remote';
+import { DEFAULT_STUN_URLS, systemClock } from '@lingxi/bridge-client/remote';
 import type { RemoteControlService } from './remoteControl/RemoteControlService.js';
 import { ProviderAudioHost } from './audio/providerAudioHost.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
@@ -629,10 +635,33 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     diagnostics: remoteDiagnostics,
   });
   remoteGateway = gateway;
+  let remoteAccessGeneration = 0;
+  const remoteOwnerGenerations = new Map<string, number>();
+  const remoteOwnerKey = (owner: { accountUid: string; deviceId: string; hostId: string }) => JSON.stringify([owner.accountUid, owner.deviceId, owner.hostId]);
+  const revokeRemoteAppAccess = (): void => {
+    remoteAccessGeneration++;
+    remoteOwnerGenerations.clear();
+    localApps?.remoteRevokeAll();
+  };
+  let remoteAccountUid = account.snapshot().user?.uid;
+  account.onChanged(() => {
+    const uid = account.snapshot().user?.uid;
+    if (uid !== remoteAccountUid) { remoteAccountUid = uid; revokeRemoteAppAccess(); }
+  });
+  const appsGateway = new LocalAppsGateway(gateway, createRemoteLocalAppsDelegate({
+    host: () => localApps,
+    accountUid: () => account.snapshot().user?.uid,
+    hostId: () => remoteControl?.status().host_id,
+    active: () => remoteControl?.status().state === 'online' && policy.allows(),
+    generation: viewer => `${remoteAccessGeneration}:${remoteOwnerGenerations.get(remoteOwnerKey({ accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id })) ?? 0}`,
+    approvedDevice: deviceId => remoteControl?.listDevices().some(device => device.device_id === deviceId) ?? false,
+  }));
   remoteControl = createRemoteControl({
     account,
     settings,
-    gateway,
+    gateway: appsGateway,
+    deviceRevoked: owner => { const key = remoteOwnerKey(owner); remoteOwnerGenerations.set(key, (remoteOwnerGenerations.get(key) ?? 0) + 1); localApps?.remoteRevokeOwner(owner); },
+    accessStopped: revokeRemoteAppAccess,
     policyAllows: () => policy.allows(),
     credentialBroker,
     userData,
@@ -676,7 +705,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     hadViewers = has;
   });
   // A change to the administrator's veto or to the shared sessions re-evaluates whether the service runs.
-  policy.onChange(() => service.refresh());
+  policy.onChange(() => { if (!policy.allows()) revokeRemoteAppAccess(); service.refresh(); });
   remotePolicyTimer = setInterval(() => { policy.recheck(); }, REMOTE_POLICY_RECHECK_MS);
   remotePolicyTimer.unref();
   void remoteControl.start();
@@ -730,6 +759,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     });
     localApps = new LocalAppHost({
       configHome: productPaths.configHome,
+      onRemoteAccessEnded: quitIfNothingNeedsTheApp,
       accountToken: () => account.getIdToken(),
       accountId: () => account.snapshot().user?.uid ?? undefined,
       core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.configHome, message => diagnostics.add('warn', 'host', message)),
@@ -764,6 +794,27 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       diagnostics.add('error', 'host', 'Application Agent task storage is unavailable. Existing task records were preserved.');
     }
     await localApps.initialize();
+    if (localApps.remoteConfiguration().configured) {
+      try {
+        const ice = parseRtcIceServers(process.env.LINGXI_LOCAL_APP_ICE_SERVERS
+          ? JSON.parse(process.env.LINGXI_LOCAL_APP_ICE_SERVERS)
+          : [...DEFAULT_STUN_URLS]);
+        if (!ice) throw new Error('Invalid ICE configuration');
+        const appHost = localApps;
+        const peers = new PeerHost({
+          createWindow: () => createRtcWindow({ preload: join(moduleDirectory, '../preload/remoteRtc.cjs'), load: remoteRtcPage() }),
+          diagnostics: remoteDiagnostics,
+        });
+        appHost.setRemoteRtc(new LocalAppRtc({
+          peerHost: peers,
+          current: run => appHost.remoteCurrent(run),
+          resource: (run, request) => appHost.remoteResource(run, request),
+          iceServers: ice,
+        }));
+      } catch {
+        diagnostics.add('warn', 'host', 'Local App WebRTC configuration is unavailable; HTTPS access remains available.');
+      }
+    }
   }
   try {
     await installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), bridge.visualizations);

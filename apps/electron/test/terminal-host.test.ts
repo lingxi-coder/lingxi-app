@@ -1,19 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { HostController } from '../src/main/host';
-import { DiagnosticBuffer } from '../src/main/host-utils';
+import { canonicalWorkspace, DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
 import { TerminalManager } from '../src/main/terminal';
 import { CH_TERMINAL_EVENT, CH_TERMINAL_REQUEST, type TerminalScope, type TerminalSnapshot } from '../src/shared/terminal';
 
 test('terminal IPC validates sender, scope and window attachment without a connected model', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-terminal-host-'));
-  const project = realpathSync(directory);
+  const project = canonicalWorkspace(directory);
+  const untrustedProject = join(directory, 'not-in-project-list');
+  mkdirSync(untrustedProject);
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(project);
   const sessionId = '11111111-2222-4333-8444-555555555555';
@@ -39,9 +41,10 @@ test('terminal IPC validates sender, scope and window attachment without a conne
   const invoke = (request: object, from = event) => handlers.get(CH_TERMINAL_REQUEST)!(from, request);
   try {
     await assert.rejects(invoke({ kind: 'create', scope }, { ...event, senderFrame: { url: event.senderFrame.url } }), /unauthorized/);
+    await assert.rejects(invoke({ kind: 'create', scope: { ...scope, projectPath: untrustedProject } }), /project is not in the project list/);
     await assert.rejects(invoke({ kind: 'create', scope: { ...scope, sessionId: '22222222-3333-4444-8555-666666666666' } }), /different project/);
     await assert.rejects(invoke({ kind: 'create', scope: { ...scope, sessionId: '__draft__' } }), /active session/);
-    const terminal = await invoke({ kind: 'create', scope: { ...scope, shellProgram: '/injected', shellLaunchCwd: '/injected' }, shellSelection: true, shellProgram: '/injected', shellLaunchCwd: '/injected' });
+    const terminal = await invoke({ kind: 'create', scope: { ...scope, projectPath: directory, shellProgram: '/injected', shellLaunchCwd: '/injected' }, shellSelection: true, shellProgram: '/injected', shellLaunchCwd: '/injected' });
     assert.equal(terminal.scope.sessionId, sessionId);
     assert.deepEqual(creationScopes, [scope], 'renderer-provided shell selection never reaches the terminal manager');
     await assert.rejects(invoke({ kind: 'input', terminalId: terminal.id, data: 'pwd\r' }, second), /not attached/);
@@ -58,7 +61,7 @@ test('terminal IPC validates sender, scope and window attachment without a conne
 
 test('create watches a current snapshot when a broker lifecycle event follows the response', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-terminal-host-create-'));
-  const project = realpathSync(directory);
+  const project = canonicalWorkspace(directory);
   const settings = new SettingsStore(join(directory, 'settings')); settings.addProject(project);
   const sessionId = '11111111-2222-4333-8444-555555555555';
   const scope = { projectPath: project, sessionId }; settings.setActiveSessionDraft(scope);
@@ -117,7 +120,7 @@ test('create watches a current snapshot when a broker lifecycle event follows th
  */
 test('the host tells the terminal manager when a chat or project goes away', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-terminal-lifecycle-'));
-  const project = realpathSync(directory);
+  const project = canonicalWorkspace(directory);
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(project);
   const sessionId = '11111111-2222-4333-8444-555555555555';
@@ -183,7 +186,7 @@ test('the host tells the terminal manager when a chat or project goes away', asy
 
 test('a shell opened in the draft scope follows the chat the New-chat action creates', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-terminal-draft-'));
-  const project = realpathSync(directory);
+  const project = canonicalWorkspace(directory);
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(project);
   const created = { projectPath: project, sessionId: '33333333-4444-4555-8666-777777777777' };

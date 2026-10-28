@@ -1,7 +1,7 @@
 name: Windows terminal and process diagnostics
 on:
   push:
-    branches: [codex/media-windows-terminal-v2-9b8e]
+    branches: [codex/media-windows-terminal-v3-9b8e]
 jobs:
   terminal:
     runs-on: windows-latest

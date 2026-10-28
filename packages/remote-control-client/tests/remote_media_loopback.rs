@@ -984,12 +984,30 @@ fn codec_loopback_worker_entry() {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn worker_launch(root: &std::path::Path) -> remote_control_client::isolated_codec::CodecLaunch {
+    // The hosted diagnostic supplies the actual Bridge binary after building
+    // it. Without that explicit override the isolated fixture remains useful
+    // for focused tests that do not build all of bridge-server.
+    let (executable, arguments) = match std::env::var_os("LINGXI_TEST_CODEC_WORKER_BINARY") {
+        Some(path) => {
+            let executable = std::path::PathBuf::from(path);
+            assert!(executable.is_absolute() && executable.is_file());
+            eprintln!("Using actual Bridge codec worker: {}", executable.display());
+            (
+                executable,
+                vec![std::ffi::OsString::from("--desktop-codec-worker")],
+            )
+        }
+        None => (
+            std::env::current_exe().unwrap(),
+            ["--ignored", "--exact", "codec_loopback_worker_entry"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        ),
+    };
     remote_control_client::isolated_codec::CodecLaunch {
-        executable: std::env::current_exe().unwrap(),
-        arguments: ["--ignored", "--exact", "codec_loopback_worker_entry"]
-            .into_iter()
-            .map(std::ffi::OsString::from)
-            .collect(),
+        executable,
+        arguments,
         plugin_directory: lingxi_webrtc_media::configured_codec_plugin_directory().unwrap(),
         private_root: root.to_path_buf(),
     }

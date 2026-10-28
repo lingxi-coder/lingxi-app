@@ -56,3 +56,26 @@ jobs:
         run: cargo test --locked -p remote-control-client --features native-media --test remote_media_loopback production_ -- --test-threads=1 --color never
       - name: Test the actual Bridge binary codec entry
         run: cargo test --locked -p bridge-server --test desktop_codec_worker -- --test-threads=1 --color never
+      - name: Run isolated loopbacks with the actual Bridge worker binary
+        shell: bash
+        run: |
+          set -o pipefail
+          export LINGXI_TEST_CODEC_WORKER_BINARY="$GITHUB_WORKSPACE/target/debug/bridge-server"
+          test -x "$LINGXI_TEST_CODEC_WORKER_BINARY"
+          shasum -a 256 "$LINGXI_TEST_CODEC_WORKER_BINARY"
+          test_log="$RUNNER_TEMP/bridge-worker-loopback.log"
+          cargo test --locked -p remote-control-client --features native-media --test remote_media_loopback _isolated -- --test-threads=1 --nocapture --color never 2>&1 | tee "$test_log"
+          grep -F "Using actual Bridge codec worker: $LINGXI_TEST_CODEC_WORKER_BINARY" "$test_log"
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' "$test_log"
+      - name: Negative control rejects a missing Bridge worker binary
+        shell: bash
+        run: |
+          export LINGXI_TEST_CODEC_WORKER_BINARY="$RUNNER_TEMP/missing-bridge-worker"
+          test_log="$RUNNER_TEMP/bridge-worker-missing-negative.log"
+          if cargo test --locked -p remote-control-client --features native-media --test remote_media_loopback production_camera_peer_is_observed_and_persisted_as_png_on_the_host_isolated -- --exact --test-threads=1 --nocapture --color never > "$test_log" 2>&1; then
+            cat "$test_log"
+            echo 'missing worker was incorrectly accepted' >&2
+            exit 1
+          fi
+          cat "$test_log"
+          grep -F 'assertion failed: executable.is_absolute() && executable.is_file()' "$test_log"

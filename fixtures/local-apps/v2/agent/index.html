@@ -107,6 +107,9 @@
     </div>
     <h3>Canonical Chat history</h3>
     <pre id="chat-history" aria-label="Canonical Chat history">No history loaded.</pre>
+    <h3>Chat lookup failure diagnostics</h3>
+    <p class="muted">The last failure for each operation is saved in this browser and may predate the current status.</p>
+    <pre id="chat-lookup-diagnostics" aria-label="Chat lookup failure diagnostics">No Chat lookup failure recorded.</pre>
   </section>
 
   <section aria-labelledby="evidence-title">
@@ -133,6 +136,7 @@
     const CHAT_CREATION_HEAD_KEY = `${STORAGE_PREFIX}.selectedChatCreation`;
     const CHAT_CREATION_ENTRY_PREFIX = `${STORAGE_PREFIX}.chatCreation.`;
     const CHAT_CREATION_FINISHED_PREFIX = `${STORAGE_PREFIX}.chatCreationFinished.`;
+    const CHAT_LOOKUP_FAILURE_PREFIX = `${STORAGE_PREFIX}.chatLookupFailure.`;
     const EXTENSION_KEY = 'com.lingxi.localApp';
     const MAX_PAGES = 128;
     const MAX_EVENTS = 20000;
@@ -174,6 +178,7 @@
     let latestHandoff = {type: 'none', runId: null, code: null};
     let latestHandoffErrorCode = null;
     let diagnosticsGeneration = 0;
+    const chatLookupFailures = {creationStatus: null, history: null};
     let bootstrapReady = false;
     const queuedRecoveryRunIds = new Set();
     const startedRecoveryRunIds = new Set();
@@ -195,6 +200,59 @@
     }
     function safeCode(value) {
       return typeof value === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(value) ? value : 'unknown';
+    }
+    function safeChatStatusCode(failure) {
+      let code;
+      try { code = failure?.code; } catch { return 'unavailable'; }
+      return ['host_unavailable', 'invalid_host_response', 'invalid_chat', 'chat_create_conflict',
+        'chat_create_deleted', 'chat_storage_uncertain', 'storage_unavailable'].includes(code) ? code : 'unavailable';
+    }
+    function readDiagnosticField(value, key) {
+      try { return isRecord(value) ? value[key] : undefined; } catch { return undefined; }
+    }
+    function sanitizedTransport(transport) {
+      const phase = readDiagnosticField(transport, 'phase');
+      const reason = readDiagnosticField(transport, 'reason');
+      const httpStatus = readDiagnosticField(transport, 'httpStatus');
+      const elapsedMs = readDiagnosticField(transport, 'elapsedMs');
+      const visibility = readDiagnosticField(transport, 'visibility');
+      return {
+        phase: ['request', 'http_response', 'response_body', 'host_response'].includes(phase) ? phase : 'unavailable',
+        reason: ['timeout', 'fetch_failed', 'http_error', 'invalid_json', 'body_failed', 'host_error',
+          'wait_cancelled'].includes(reason) ? reason : 'unavailable',
+        httpStatus: Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? httpStatus : 'unavailable',
+        elapsedMs: Number.isInteger(elapsedMs) && elapsedMs >= 0 && elapsedMs <= 120000 ? elapsedMs : 'unavailable',
+        visibility: ['visible', 'hidden', 'unknown'].includes(visibility) ? visibility : 'unavailable',
+      };
+    }
+    function showChatLookupFailures() {
+      $('chat-lookup-diagnostics').textContent = JSON.stringify(chatLookupFailures, null, 2);
+    }
+    function loadChatLookupFailures() {
+      for (const stage of ['creationStatus', 'history']) {
+        try {
+          const raw = localStorage.getItem(CHAT_LOOKUP_FAILURE_PREFIX + stage);
+          if (raw === null) {
+            chatLookupFailures[stage] = null;
+            continue;
+          }
+          const saved = JSON.parse(raw);
+          if (!isRecord(saved) || saved.version !== 1 || !isRecord(saved.transport)) throw new Error('invalid diagnostic');
+          chatLookupFailures[stage] = {storage: 'saved', transport: sanitizedTransport(saved.transport)};
+        } catch {
+          chatLookupFailures[stage] = {storage: 'unavailable', transport: sanitizedTransport(null)};
+        }
+      }
+      showChatLookupFailures();
+    }
+    function recordChatLookupFailure(stage, failure) {
+      if (!['creationStatus', 'history'].includes(stage)) return;
+      const transport = sanitizedTransport(readDiagnosticField(failure, 'transport'));
+      let storage = 'saved';
+      try { localStorage.setItem(CHAT_LOOKUP_FAILURE_PREFIX + stage, JSON.stringify({version: 1, transport})); }
+      catch { storage = 'unavailable'; }
+      chatLookupFailures[stage] = {storage, transport};
+      showChatLookupFailures();
     }
     function validChatCreationInput(input) {
       return isRecord(input) && Object.keys(input).every(key => ['requestId', 'title'].includes(key))
@@ -619,7 +677,6 @@
       const sdkDatabase = await sdkPendingDatabaseMetadata();
       if (generation !== diagnosticsGeneration) return;
       $('diagnostics').textContent = JSON.stringify({
-        origin: location.origin,
         readyMarkerPresent,
         fixtureStorageRecordExists: localStorageRecord.exists,
         fixtureStorageBytes: localStorageRecord.bytes,
@@ -948,7 +1005,12 @@
 
     async function refreshChatHistory() {
       if (!chat) return;
-      const messages = await allChatMessages(chat);
+      let messages;
+      try { messages = await allChatMessages(chat); }
+      catch (failure) {
+        recordChatLookupFailure('history', failure);
+        throw recoveryFailure('chat_history_unavailable', 'Canonical Chat history could not be read; see Chat lookup diagnostics.');
+      }
       $('chat-history').textContent = JSON.stringify(redactProtocol(messages), null, 2);
       $('chat-handle').textContent = `Open host Chat · threadId ${chat.id} · ${messages.length} canonical Messages`;
     }
@@ -1064,7 +1126,7 @@
           await refreshChatHistory();
         } catch (failure) {
           $('chat-history').textContent = 'Saved Chat could not be opened; see recovery diagnostics.';
-          recoveryErrors.push(`Saved Chat open/history: ${safeFailureText(failure)}`);
+          recoveryErrors.push('Saved Chat could not be opened or its history could not be read.');
           chat = null;
           chatSource = '';
         }
@@ -1243,12 +1305,18 @@
     async function performChatCreation(input, action) {
       const id = input.requestId;
       const selectedChatBefore = localStorage.getItem(CHAT_SELECTION_KEY);
+      let statusLookupFailed = false;
       try {
         let handle;
         if (action === 'create') {
           handle = await agent.chats.create(input);
         } else {
-          handle = await agent.chats.creationStatus(input);
+          try { handle = await agent.chats.creationStatus(input); }
+          catch (failure) {
+            statusLookupFailed = true;
+            recordChatLookupFailure('creationStatus', failure);
+            throw failure;
+          }
           if (handle === null && action === 'retry') {
             const saved = readChatCreation(id);
             if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) !== id
@@ -1290,7 +1358,7 @@
         catch { setError('The Chat was confirmed, but its history could not be read.'); }
         return true;
       } catch (failure) {
-        const code = safeCode(failure?.code);
+        const code = statusLookupFailed ? safeChatStatusCode(failure) : safeCode(failure?.code);
         if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) === id) {
           if (['chat_create_conflict', 'chat_create_deleted'].includes(code)) {
             try {
@@ -1452,7 +1520,7 @@
         $('recovery').textContent = `Opened host Chat ${chat.id}; only canonical history was read.`;
         setStatus('Saved persistent Chat opened.');
         updateControls();
-      } catch (failure) { setError(failure?.message || String(failure)); }
+      } catch { setError('The saved Chat could not be opened or its history could not be read.'); }
     }
 
     async function sendChatTurn() {
@@ -1635,9 +1703,9 @@
           try {
             chat = await agent.chats.open(reference.chatId);
             await refreshChatHistory();
-          } catch (failure) {
-            addRecoveryError(runId, failure?.code || 'chat_history_unavailable', failure?.message
-              || 'The run was recovered, but canonical Chat history could not be refreshed.');
+          } catch {
+            addRecoveryError(runId, 'chat_history_unavailable',
+              'The run was recovered, but the Chat could not be opened or its history could not be read.');
           }
         }
         return true;
@@ -1700,6 +1768,10 @@
       if (document.visibilityState === 'visible') scheduleQueuedRecovery();
     });
     window.addEventListener('storage', event => {
+      if (event.key?.startsWith(CHAT_LOOKUP_FAILURE_PREFIX)) {
+        loadChatLookupFailures();
+        return;
+      }
       if (!event.key || (!event.key.startsWith(RUN_ENTRY_PREFIX)
           && !event.key.startsWith(RUN_FINISHED_PREFIX)
           && !event.key.startsWith(CHAT_CREATION_ENTRY_PREFIX)
@@ -1718,6 +1790,7 @@
     async function bootstrap() {
       loadState();
       loadChatCreation();
+      loadChatLookupFailures();
       activateHandoffCapture();
       try {
         if (!globalThis.localApp) await import('/__local_app_sdk.js');

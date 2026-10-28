@@ -19,6 +19,7 @@ const creationId = '643ff799-6fe7-410c-8ff9-8e643d2f03e4';
 const creationHeadKey = `${storagePrefix}.selectedChatCreation`;
 const creationEntryPrefix = `${storagePrefix}.chatCreation.`;
 const creationFinishedPrefix = `${storagePrefix}.chatCreationFinished.`;
+const chatLookupFailurePrefix = `${storagePrefix}.chatLookupFailure.`;
 
 function creationStorageEntries(input, {finished = false} = {}) {
   return [[creationHeadKey, input.requestId],
@@ -132,6 +133,7 @@ function createBrowser({
   holdEvents = false,
   chatCreateHandler = null,
   chatStatusHandler = null,
+  chatHistoryHandler = null,
   chatPendingHandler = null,
   task = successTask(),
   events = successEvents(),
@@ -174,11 +176,14 @@ function createBrowser({
   };
 
   const counters = {get: 0, getReturned: 0, events: 0, list: 0, chatsList: 0, chatsOpen: 0,
-    chatCreate: 0, chatStatus: 0, chatPending: 0, connect: 0, cancel: 0, run: 0, start: 0, chatSend: 0};
+    chatCreate: 0, chatStatus: 0, chatHistory: 0, chatPending: 0, connect: 0, cancel: 0, run: 0, start: 0, chatSend: 0};
   const chatCreateRequests = [];
   const chatStatusRequests = [];
   const chatHandle = id => ({id, async send() { counters.chatSend++; throw new Error('unexpected chat.send'); },
-    async history() { return {messages: []}; }});
+    async history(query) {
+      counters.chatHistory++;
+      return chatHistoryHandler ? chatHistoryHandler(id, query) : {messages: []};
+    }});
   const activeTask = task;
   let releaseGet;
   const getGate = new Promise(resolve => { releaseGet = resolve; });
@@ -1109,6 +1114,154 @@ test('read-only Chat creation recovery accepts only the exact request ID and nev
   assert.equal(browser.counters.chatCreate, 0);
   assert.deepEqual(browser.chatStatusRequests, [input, input]);
   assert.equal(storage.getItem(creationFinishedPrefix + creationId), '1');
+  assertNoSubmission(browser);
+});
+
+test('creationStatus failure saves only allowlisted transport diagnostics and restores them without requests', async () => {
+  const input = {requestId: creationId, title: 'synthetic-private-title'};
+  const storage = sharedStorageWith(creationStorageEntries(input));
+  const failure = Object.assign(new Error('synthetic-private-message https://private.invalid/?token=synthetic-token'), {
+    code: 'host_unavailable',
+    transport: {phase: 'request', reason: 'timeout', elapsedMs: 5000, visibility: 'hidden',
+      url: 'https://private.invalid/', token: 'synthetic-token', requestId: creationId, message: 'synthetic-private-message'},
+  });
+  const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false,
+    chatStatusHandler: async () => { throw failure; }});
+  const key = chatLookupFailurePrefix + 'creationStatus';
+  await waitFor(() => storage.getItem(key) !== null && browser.elements.get('error')?.textContent.includes('host_unavailable'),
+    'creationStatus failure was not recorded');
+  const expected = {phase: 'request', reason: 'timeout', httpStatus: 'unavailable', elapsedMs: 5000, visibility: 'hidden'};
+  assert.deepEqual(JSON.parse(storage.getItem(key)), {version: 1, transport: expected});
+  const visible = browser.elements.get('chat-lookup-diagnostics').textContent;
+  assert.deepEqual(JSON.parse(visible).creationStatus, {storage: 'saved', transport: expected});
+  assert.doesNotMatch(visible + storage.getItem(key) + browser.elements.get('error').textContent,
+    /synthetic-|private\.invalid|643ff799/);
+  assert.equal(browser.counters.chatStatus, 1);
+  assert.equal(browser.counters.chatCreate, 0);
+  assertNoSubmission(browser);
+
+  const reloadedStorage = sharedStorageWith([[key, storage.getItem(key)]]);
+  const reloaded = createBrowser({seedState: null, sharedStorage: reloadedStorage, readyBeforeBootstrap: false});
+  await waitFor(() => reloaded.elements.get('chat-lookup-diagnostics')?.textContent.includes('timeout'),
+    'saved diagnostic was not restored');
+  assert.deepEqual(JSON.parse(reloaded.elements.get('chat-lookup-diagnostics').textContent).creationStatus,
+    {storage: 'saved', transport: expected});
+  assert.equal(reloaded.counters.chatStatus, 0);
+  assert.equal(reloaded.counters.chatCreate, 0);
+  assertNoSubmission(reloaded);
+});
+
+test('a history failure after a confirmed creationStatus records the history phase without exposing the error', async () => {
+  const input = {requestId: creationId};
+  const storage = sharedStorageWith(creationStorageEntries(input, {finished: true}));
+  const failure = Object.assign(new Error('synthetic-private-history-message'), {code: 'synthetic-token',
+    transport: {phase: 'response_body', reason: 'body_failed', httpStatus: 503, elapsedMs: 387,
+      visibility: 'visible', body: 'synthetic-private-body', headers: {authorization: 'synthetic-token'}}});
+  const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false,
+    chatStatusHandler: async (request, {chatHandle}) => chatHandle(request.requestId),
+    chatHistoryHandler: async () => { throw failure; }});
+  await waitFor(() => browser.elements.get('open-created-chat')?.hidden === false
+      && browser.elements.get('open-created-chat')?.disabled === false,
+    'confirmed Chat was not ready for read-only opening');
+  browser.elements.get('open-created-chat').handlers.get('click')();
+  const key = chatLookupFailurePrefix + 'history';
+  await waitFor(() => storage.getItem(key) !== null && browser.elements.get('error')?.textContent.includes('history could not be read'),
+    'history failure was not recorded');
+  const expected = {phase: 'response_body', reason: 'body_failed', httpStatus: 503, elapsedMs: 387, visibility: 'visible'};
+  assert.deepEqual(JSON.parse(storage.getItem(key)), {version: 1, transport: expected});
+  const visible = browser.elements.get('chat-lookup-diagnostics').textContent;
+  assert.deepEqual(JSON.parse(visible).history, {storage: 'saved', transport: expected});
+  assert.equal(JSON.parse(visible).creationStatus, null);
+  assert.doesNotMatch(visible + storage.getItem(key) + browser.elements.get('error').textContent, /synthetic-/);
+  assert.equal(browser.counters.chatStatus, 1);
+  assert.equal(browser.counters.chatHistory, 1);
+  assert.equal(browser.counters.chatCreate, 0);
+  assertNoSubmission(browser);
+});
+
+test('history failure during saved Chat restoration is recorded without exposing the error or retrying', async () => {
+  const storage = sharedStorageWith([[`${storagePrefix}.selectedChat`, creationId]]);
+  const failure = Object.assign(new Error('synthetic-private-message https://private.invalid/?token=synthetic-token'), {
+    code: 'synthetic-token', transport: {phase: 'request', reason: 'fetch_failed', elapsedMs: 12, visibility: 'visible'},
+  });
+  const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false,
+    chatHistoryHandler: async () => { throw failure; }});
+  const key = chatLookupFailurePrefix + 'history';
+  await waitFor(() => storage.getItem(key) !== null && browser.elements.get('recovery-error')?.textContent.includes('history'),
+    'saved Chat history failure was not recorded');
+  assert.deepEqual(JSON.parse(storage.getItem(key)).transport,
+    {phase: 'request', reason: 'fetch_failed', httpStatus: 'unavailable', elapsedMs: 12, visibility: 'visible'});
+  const shown = browser.elements.get('chat-lookup-diagnostics').textContent
+    + browser.elements.get('recovery-error').textContent + storage.getItem(key);
+  assert.doesNotMatch(shown, /synthetic-|private\.invalid|643ff799/);
+  assert.equal(browser.counters.chatsOpen, 1);
+  assert.equal(browser.counters.chatHistory, 1);
+  assert.equal(browser.counters.chatStatus, 0);
+  assert.equal(browser.counters.chatCreate, 0);
+  assertNoSubmission(browser);
+  await waitFor(() => browser.elements.get('diagnostics')?.textContent.includes('localAppInfo'),
+    'safe diagnostics did not render');
+  assert.doesNotMatch(browser.elements.get('diagnostics').textContent, /origin|https?:\/\//);
+});
+
+test('missing, invalid, or unreadable transport data is unavailable and cannot leak stored or thrown data', async () => {
+  const input = {requestId: creationId};
+  const storage = sharedStorageWith(creationStorageEntries(input));
+  const failure = new Error('synthetic-private-message');
+  failure.code = 'synthetic-token';
+  Object.defineProperty(failure, 'transport', {get() { throw new Error('synthetic-secret'); }});
+  const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false,
+    chatStatusHandler: async () => { throw failure; }});
+  const key = chatLookupFailurePrefix + 'creationStatus';
+  await waitFor(() => storage.getItem(key) !== null, 'missing transport was not recorded');
+  const unavailable = {phase: 'unavailable', reason: 'unavailable', httpStatus: 'unavailable',
+    elapsedMs: 'unavailable', visibility: 'unavailable'};
+  assert.deepEqual(JSON.parse(storage.getItem(key)), {version: 1, transport: unavailable});
+  assert.doesNotMatch(browser.elements.get('error').textContent + browser.elements.get('chat-lookup-diagnostics').textContent,
+    /synthetic-/);
+  assert.equal(browser.counters.chatStatus, 1);
+  assert.equal(browser.counters.chatCreate, 0);
+  assertNoSubmission(browser);
+
+  const badSaved = JSON.stringify({version: 1, transport: {phase: 'synthetic-secret', reason: 'synthetic-secret',
+    httpStatus: 999, elapsedMs: -1, visibility: 'synthetic-secret', token: 'synthetic-secret'}});
+  const restored = createBrowser({seedState: null, sharedStorage: sharedStorageWith([[key, badSaved]]), readyBeforeBootstrap: false});
+  await waitFor(() => restored.elements.get('chat-lookup-diagnostics')?.textContent.includes('unavailable'),
+    'invalid saved diagnostic was not sanitized');
+  const shown = restored.elements.get('chat-lookup-diagnostics').textContent;
+  assert.deepEqual(JSON.parse(shown).creationStatus, {storage: 'saved', transport: unavailable});
+  assert.doesNotMatch(shown, /synthetic-/);
+  assert.equal(restored.counters.chatStatus, 0);
+  assertNoSubmission(restored);
+
+  const corruptStorage = sharedStorageWith([[key, 'synthetic-corrupt-secret']]);
+  const corrupt = createBrowser({seedState: null, sharedStorage: corruptStorage, readyBeforeBootstrap: false});
+  await waitFor(() => corrupt.elements.get('chat-lookup-diagnostics')?.textContent.includes('"storage": "unavailable"'),
+    'corrupt saved diagnostic was not marked unavailable');
+  assert.doesNotMatch(corrupt.elements.get('chat-lookup-diagnostics').textContent, /synthetic-corrupt-secret/);
+  assert.equal(corruptStorage.getItem(key), 'synthetic-corrupt-secret');
+  assert.equal(corrupt.counters.chatStatus, 0);
+  assertNoSubmission(corrupt);
+});
+
+test('diagnostic storage failure keeps the operation failure visible without exposing the storage error or retrying', async () => {
+  const input = {requestId: creationId};
+  const storage = sharedStorageWith(creationStorageEntries(input));
+  const originalSet = storage.setItem;
+  storage.setItem = (key, value) => {
+    if (key.startsWith(chatLookupFailurePrefix)) throw new Error('synthetic-storage-secret');
+    originalSet(key, value);
+  };
+  const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false,
+    chatStatusHandler: async () => { throw Object.assign(new Error('private'), {code: 'host_unavailable'}); }});
+  await waitFor(() => browser.elements.get('chat-lookup-diagnostics')?.textContent.includes('"storage": "unavailable"'),
+    'diagnostic write failure was not shown');
+  assert.equal(storage.getItem(chatLookupFailurePrefix + 'creationStatus'), null);
+  assert.match(browser.elements.get('error').textContent, /host_unavailable/);
+  assert.doesNotMatch(browser.elements.get('chat-lookup-diagnostics').textContent + browser.elements.get('error').textContent,
+    /synthetic-storage-secret|private/);
+  assert.equal(browser.counters.chatStatus, 1);
+  assert.equal(browser.counters.chatCreate, 0);
   assertNoSubmission(browser);
 });
 

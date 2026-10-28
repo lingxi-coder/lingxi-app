@@ -45,20 +45,26 @@ public class ProviderSmokeTest {
         assertEquals(test.getPackageName() + ".filesfixtures", authority);
         assertEquals(target.getPackageName(), WorkspaceTestDocumentsProvider.targetPackage(test));
         Uri tree = DocumentsContract.buildTreeDocumentUri(authority, "root");
+        android.util.Log.i("LingxiTest", "before initial grant");
         launch(instrumentation, test, false);
+        android.util.Log.i("LingxiTest", "after grant check");
         permission(target, tree, PackageManager.PERMISSION_GRANTED);
         Uri root = DocumentsContract.buildDocumentUriUsingTree(tree, "root");
         try (Cursor cursor = target.getContentResolver().query(root, null, null, null, null)) {
             assertNotNull(cursor);
             assertTrue(cursor.moveToFirst());
         }
+        android.util.Log.i("LingxiTest", "before create");
         Uri dir = DocumentsContract.createDocument(target.getContentResolver(), root,
                 DocumentsContract.Document.MIME_TYPE_DIR, "probe-" + System.nanoTime());
         assertNotNull(dir);
         Uri childTree = DocumentsContract.buildTreeDocumentUri(authority, DocumentsContract.getDocumentId(dir));
         permission(target, childTree, PackageManager.PERMISSION_GRANTED);
+        android.util.Log.i("LingxiTest", "before delete");
         assertTrue(DocumentsContract.deleteDocument(target.getContentResolver(), dir));
+        android.util.Log.i("LingxiTest", "after delete");
         permission(target, childTree, PackageManager.PERMISSION_DENIED);
+        android.util.Log.i("LingxiTest", "before revoke");
         launch(instrumentation, test, true);
         permission(target, tree, PackageManager.PERMISSION_DENIED);
         launch(instrumentation, test, false);

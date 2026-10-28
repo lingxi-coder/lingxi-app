@@ -1,0 +1,65 @@
+name: macOS staged media strip diagnostic
+on:
+  push:
+    branches: [codex/media-macos-strip-diagnostic-20261028]
+jobs:
+  staged-media:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install pinned official GStreamer SDK
+        run: python3 scripts/ci/gstreamer_sdk.py macos --root "$RUNNER_TEMP/gstreamer-sdk/macos"
+      - name: Install shared SDK
+        working-directory: packages/bridge-client
+        run: |
+          npm ci
+          npm run build
+      - name: Install Desktop dependencies
+        working-directory: apps/electron
+        run: npm ci
+      - name: Test macOS packaging
+        working-directory: apps/electron
+        run: node --test test/gstreamer-macos.test.mjs test/packaging.test.mjs
+      - name: Stage and exercise real SDK media runtime
+        working-directory: apps/electron
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { mkdirSync, realpathSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { stageMacGStreamerRuntime, signMacGStreamerRuntime, verifyMacGStreamerRuntime } from './scripts/gstreamer-macos.mjs';
+          import { scanTreeForForbiddenContent } from './scripts/package-support.mjs';
+          const root = realpathSync(process.env.RUNNER_TEMP);
+          const sdk = realpathSync(process.env.LINGXI_GSTREAMER_SDK_MACOS);
+          const work = join(root, 'staged-media-diagnostic');
+          const app = join(work, 'Fixture.app');
+          const frameworks = join(app, 'Contents', 'Frameworks');
+          const staged = join(app, 'Contents', 'Resources', 'bin', 'bridge-server');
+          mkdirSync(frameworks, { recursive: true });
+          const source = join(work, 'source-probe');
+          const arch = process.arch === 'x64' ? 'x86_64' : 'arm64';
+          const pkgEnv = { ...process.env, PKG_CONFIG_PATH: '', PKG_CONFIG_LIBDIR: join(sdk, 'lib', 'pkgconfig') };
+          const flags = execFileSync(process.env.PKG_CONFIG || 'pkg-config', ['--cflags', '--libs', 'gstreamer-1.0'], { env: pkgEnv, encoding: 'utf8' }).trim().split(/\s+/);
+          execFileSync('/usr/bin/clang', ['-arch', arch, '-Wl,-headerpad_max_install_names', `-Wl,-rpath,${join(sdk, 'lib')}`, './scripts/packaged-macos-media-probe.c', ...flags, '-o', source], { stdio: 'inherit' });
+          const prepared = stageMacGStreamerRuntime(source, staged, frameworks, arch, work);
+          if (!prepared.bundled) throw new Error('expected the real SDK to be bundled');
+          signMacGStreamerRuntime(frameworks);
+          execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', staged], { stdio: 'inherit' });
+          verifyMacGStreamerRuntime(frameworks, staged, { expectedArch: arch, appRoot: app });
+          scanTreeForForbiddenContent(app);
+          const env = { ...process.env, GST_PLUGIN_PATH: '', GST_PLUGIN_SYSTEM_PATH: '', GST_REGISTRY: join(work, 'registry.bin') };
+          for (const key of ['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'DYLD_FRAMEWORK_PATH']) delete env[key];
+          const result = execFileSync(staged, [prepared.pluginDirectory, join(frameworks, 'GStreamerLibraries')], { env, encoding: 'utf8', timeout: 60000 });
+          if (result.trim() !== 'packaged media plugins and audio/video pipelines OK') throw new Error(`unexpected media probe: ${result}`);
+          console.log('official SDK staged copy: scanner, signatures, nine plugins, and audio/video pipelines passed');
+          JS

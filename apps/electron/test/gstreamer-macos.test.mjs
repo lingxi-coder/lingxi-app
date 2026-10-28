@@ -23,7 +23,7 @@ import { preflightDesktopSidecar, resetDesktopOutputs, signGenericDesktopFramewo
 import { preflightSignedSidecar, resetSignedOutputs, stageSignedSidecar } from '../scripts/package-mac.mjs';
 import { verifyMacFrameworkArchitectures } from '../scripts/verify-desktop-package.mjs';
 import { verifyTeamIdentifier } from '../scripts/credential-broker.mjs';
-import { copyElectronApp } from '../scripts/package-support.mjs';
+import { copyElectronApp, scanTreeForForbiddenContent } from '../scripts/package-support.mjs';
 
 const pluginNames = [
   'libgstapp.dylib', 'libgstaudioconvert.dylib', 'libgstaudioresample.dylib',
@@ -165,6 +165,42 @@ function runCleanSidecar(sidecar, args = []) {
   for (const name of ['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'DYLD_FRAMEWORK_PATH']) delete env[name];
   return execFileSync(sidecar, args, { env, encoding: 'utf8', stdio: 'pipe' }).trim();
 }
+
+test('packaging strips SDK debug paths while retaining runtime path checks', macOnly, () => {
+  for (const runtimePath of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), 'lingxi-dyld-debug-path-'));
+    try {
+      const fixture = sdkFixture(root);
+      const arch = process.arch === 'x64' ? 'x86_64' : 'arm64';
+      const object = join(root, 'debug-fixture.o');
+      writeFileSync(fixture.baseSource, 'int gst_fixture(void) { return 1; }\n'
+        + (runtimePath ? 'const char *gst_marker(void) { return "/Users/packaging-fixture/private/source.c"; }\n' : ''));
+      run('clang', ['-arch', arch, '-g', '-c', fixture.baseSource, '-o', object]);
+      run('clang', ['-arch', arch, '-dynamiclib', '-Wl,-headerpad_max_install_names',
+        '-Wl,-install_name,@rpath/libgstfixture.dylib', '-o', fixture.base, object]);
+      assert.ok(readFileSync(fixture.base).includes(Buffer.from(object)), 'fixture must contain an actual debug-object path');
+      const sourceHash = hashFile(fixture.base);
+      const frameworks = join(root, 'App.app', 'Contents', 'Frameworks');
+      mkdirSync(frameworks, { recursive: true });
+      const prepared = withSdk(fixture.sdk, () => prepareMacGStreamerRuntime(fixture.sidecar, frameworks, arch));
+      const stagedLibrary = prepared.libraries.find((path) => path.endsWith('/libgstfixture.dylib'));
+      assert.ok(stagedLibrary);
+      assert.equal(readFileSync(stagedLibrary).includes(Buffer.from(object)), false);
+      assert.equal(hashFile(fixture.base), sourceHash, 'the SDK source must remain untouched');
+      assert.match(run('/usr/bin/nm', ['-gU', stagedLibrary]), /_gst_fixture/);
+      signFixture(fixture.sidecar, prepared);
+      assert.equal(verifyMacGStreamerRuntime(frameworks, fixture.sidecar, { expectedArch: arch }).bundled, true);
+      assert.equal(runCleanSidecar(fixture.sidecar), '');
+      if (runtimePath) {
+        assert.throws(() => scanTreeForForbiddenContent(frameworks), /absolute macOS user path found/);
+      } else {
+        assert.doesNotThrow(() => scanTreeForForbiddenContent(frameworks));
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
 
 test('dyld uses ancestor rpaths for a transitive library and ignores an SDK search-dir decoy', macOnly, () => {
   for (const decoy of [true, false]) {

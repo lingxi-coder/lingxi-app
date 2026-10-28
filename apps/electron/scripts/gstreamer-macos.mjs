@@ -498,8 +498,13 @@ export function prepareMacGStreamerRuntime(sidecar, frameworksDirectory, expecte
       // directory path while their dependencies resolve through this rpath.
       copyMachOSlice(item.source, destination, expectedArch);
       rebaseBinary(destination, pluginDirectory, item.replacements, expectedArch);
+      // Official SDK binaries may retain build-machine paths in debug and
+      // local symbols. Strip only the staged copy before it is signed; the
+      // package content scan still rejects paths in executable data.
+      execFileSync('/usr/bin/strip', ['-S', '-x', destination]);
     } else {
       rebaseBinary(destination, null, item.replacements, expectedArch);
+      execFileSync('/usr/bin/strip', ['-S', '-x', destination]);
     }
   }
   return {

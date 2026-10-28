@@ -1,7 +1,7 @@
 name: Android provider isolation diagnostic
 on:
   push:
-    branches: [codex/media-android-provider-v4-9b8e]
+    branches: [codex/media-android-provider-v5-9b8e]
 jobs:
   provider-smoke:
     runs-on: ubuntu-latest
@@ -30,7 +30,8 @@ jobs:
           mkdir -p "$probe/gradle" "$probe/app/src/androidTest/java/com/lingxi/code/project"
           cp -R apps/android/native/gradle/wrapper "$probe/gradle/wrapper"
           cp apps/android/native/app/src/androidTest/AndroidManifest.xml "$probe/app/src/androidTest/AndroidManifest.xml"
-          cp apps/android/native/app/src/androidTest/java/com/lingxi/code/project/WorkspaceTestDocuments{Provider,Activity}.java "$probe/app/src/androidTest/java/com/lingxi/code/project/"
+          cp apps/android/native/app/src/androidTest/java/com/lingxi/code/project/WorkspaceTestDocumentsActivity.java "$probe/app/src/androidTest/java/com/lingxi/code/project/"
+          echo "The provider in this diagnostic contains an explicit concurrency test gate."
           cd "$probe"
           ./gradlew --no-daemon --max-workers=1 :app:assemblePlayDebug :app:assemblePlayDebugAndroidTest :app:assembleDirectDebug :app:assembleDirectDebugAndroidTest
       - name: Verify concurrent installation and grants

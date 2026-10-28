@@ -14,6 +14,8 @@ import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.provider.DocumentsContract;
+import android.system.Os;
+import android.os.SystemClock;
 import android.util.Log;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -21,6 +23,9 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -69,6 +74,62 @@ public class ProviderSmokeTest {
         }
     }
 
+    private static void waitForGate(ParcelFileDescriptor gate, long offset, byte expected) throws Exception {
+        byte[] one = new byte[1];
+        long deadline = SystemClock.elapsedRealtime() + 10000;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (Os.pread(gate.getFileDescriptor(), one, 0, 1, offset) == 1 && one[0] == expected) return;
+            SystemClock.sleep(10);
+        }
+        fail("Gate did not reach " + (char)expected);
+    }
+
+    private static void concurrentCleanupWaitsForChildGrant(Instrumentation instrumentation, Context test,
+                                                             Context target, String authority) throws Exception {
+        String firstId = UUID.randomUUID().toString();
+        String secondId = UUID.randomUUID().toString();
+        Uri first = DocumentsContract.buildTreeDocumentUri(authority, firstId);
+        Uri second = DocumentsContract.buildTreeDocumentUri(authority, secondId);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        ParcelFileDescriptor gate = null;
+        try {
+            invoke(instrumentation, test, firstId, false, true);
+            Uri firstDocument = DocumentsContract.buildDocumentUriUsingTree(first, firstId);
+            Uri gateDocument = DocumentsContract.createDocument(target.getContentResolver(), firstDocument,
+                "text/plain", ".lingxi-diagnostic-gate");
+            assertNotNull(gateDocument);
+            gate = target.getContentResolver().openFileDescriptor(gateDocument, "rw");
+            assertNotNull(gate);
+            Os.pwrite(gate.getFileDescriptor(), new byte[] { 0, 0, 0 }, 0, 3, 0);
+            Future<Uri> child = pool.submit(() -> DocumentsContract.createDocument(target.getContentResolver(), firstDocument,
+                DocumentsContract.Document.MIME_TYPE_DIR, ".lingxi-diagnostic-held-child"));
+            waitForGate(gate, 0, (byte)'E');
+            Future<?> cleanup = pool.submit(() -> { invoke(instrumentation, test, firstId, true, true); return null; });
+            waitForGate(gate, 2, (byte)'C');
+            assertFalse("cleanup completed while a child grant was paused", cleanup.isDone());
+            // The Activity main thread must still accept actions for an unrelated fixture.
+            invoke(instrumentation, test, secondId, false, true);
+            permission(target, second, PackageManager.PERMISSION_GRANTED);
+            Os.pwrite(gate.getFileDescriptor(), new byte[] { (byte)'R' }, 0, 1, 1);
+            Uri childDocument = child.get(10, TimeUnit.SECONDS);
+            assertNotNull(childDocument);
+            cleanup.get(10, TimeUnit.SECONDS);
+            Uri childTree = DocumentsContract.buildTreeDocumentUri(authority, DocumentsContract.getDocumentId(childDocument));
+            permission(target, first, PackageManager.PERMISSION_DENIED);
+            permission(target, childTree, PackageManager.PERMISSION_DENIED);
+            permission(target, second, PackageManager.PERMISSION_GRANTED);
+            Log.i("LingxiTest", "v5 concurrent cleanup gate passed");
+        } finally {
+            if (gate != null) {
+                try { Os.pwrite(gate.getFileDescriptor(), new byte[] { (byte)'R' }, 0, 1, 1); }
+                finally { gate.close(); }
+            }
+            pool.shutdownNow();
+            try { invoke(instrumentation, test, firstId, true, true); }
+            finally { invoke(instrumentation, test, secondId, true, true); }
+        }
+    }
+
     @Test public void isolatedTreesAndClosedFixtureRejectLateGrant() throws Exception {
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         Context test = instrumentation.getContext();
@@ -112,5 +173,6 @@ public class ProviderSmokeTest {
             try { invoke(instrumentation, test, firstId, true, true); }
             finally { invoke(instrumentation, test, secondId, true, true); }
         }
+        concurrentCleanupWaitsForChildGrant(instrumentation, test, target, authority);
     }
 }

@@ -10,21 +10,24 @@ public class WorkspaceTestDocumentsActivity extends android.app.Activity {
     static final String EXTRA_ERROR = "error";
     @Override public void onCreate(android.os.Bundle state) {
         super.onCreate(state);
-        String target = null;
         String request = getIntent().getStringExtra(EXTRA_REQUEST_ID);
+        String id = getIntent().getStringExtra(EXTRA_FIXTURE_ID);
+        boolean revoke = ACTION_REVOKE.equals(getIntent().getAction());
+        // A slow action on one fixture must not block the Activity main thread
+        // from accepting work for another fixture.
+        new Thread(() -> runFixtureAction(id, request, revoke), "test-document-fixture").start();
+    }
+    private void runFixtureAction(String id, String request, boolean revoke) {
+        String target = null;
         boolean success = false;
         String failure = null;
         android.util.Log.i("LingxiTest", "Fixture action started: " + request);
         try {
-            String id = getIntent().getStringExtra(EXTRA_FIXTURE_ID);
             target = WorkspaceTestDocumentsProvider.targetPackage(this);
-            if (ACTION_REVOKE.equals(getIntent().getAction())) {
+            if (revoke) {
                 WorkspaceTestDocumentsProvider.cleanupFixture(this, id);
             } else {
-                WorkspaceTestDocumentsProvider.prepareFixture(this, id);
-                android.net.Uri tree = android.provider.DocumentsContract.buildTreeDocumentUri(WorkspaceTestDocumentsProvider.authority(this), id);
-                int modes = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION | android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
-                grantUriPermission(target, tree, modes | android.content.Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                WorkspaceTestDocumentsProvider.grantFixture(this, id);
             }
             success = true;
             android.util.Log.i("LingxiTest", "Fixture action completed: " + request);
@@ -42,7 +45,7 @@ public class WorkspaceTestDocumentsActivity extends android.app.Activity {
                     sendBroadcast(result);
                     android.util.Log.i("LingxiTest", "Fixture receipt sent: " + request);
                 }
-            } finally { finish(); }
+            } finally { runOnUiThread(this::finish); }
         }
     }
 }

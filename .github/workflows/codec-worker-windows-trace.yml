@@ -1,0 +1,71 @@
+name: codec-worker-windows-stop-trace
+
+on:
+  push:
+    branches: [codex/codec-worker-windows-trace-20261028]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '4'
+  RUST_MIN_STACK: '16777216'
+  # Use the same pinned compiler as rust-toolchain.toml without asking rustup
+  # to mutate preinstalled rustfmt/clippy components during these test jobs.
+  RUSTUP_TOOLCHAIN: '1.94.0'
+
+jobs:
+  windows-x64:
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - name: Enable Windows long paths and Git symlinks
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          git config --global core.symlinks true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Ensure Windows crypto assembler is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+      - name: Verify the pinned Rust compiler
+        shell: bash
+        run: |
+          grep -Fx 'channel = "1.94.0"' rust-toolchain.toml
+          rustc --version | grep -E '^rustc 1\.94\.0 '
+      - name: Install the pinned official GStreamer SDK
+        shell: bash
+        run: python3 scripts/ci/gstreamer_sdk.py windows --root "$RUNNER_TEMP/gstreamer-sdk/windows"
+      - name: Select the installed plugin directory
+        shell: bash
+        run: |
+          plugin_dir="$("$PKG_CONFIG" --variable=pluginsdir gstreamer-1.0)"
+          test -d "$plugin_dir"
+          printf 'LINGXI_GSTREAMER_PLUGIN_DIR=%s\n' "$plugin_dir" >> "$GITHUB_ENV"
+          "$PKG_CONFIG" --modversion gstreamer-1.0
+      - name: Verify the exact locked Harness source
+        shell: bash
+        run: |
+          python3 scripts/lib/runtime_source.py --json > "$RUNNER_TEMP/harness-source.json"
+          python3 - "$RUNNER_TEMP/harness-source.json" <<'PY'
+          import json, sys
+          source = json.load(open(sys.argv[1], encoding='utf8'))
+          expected = '41ead2ca341e4ef259faf8b101da4e552f9cf40e'
+          assert source['revision'] == expected, source
+          assert source['development'] is False, source
+          print('Verified canonical locked Harness revision', source['revision'])
+          PY
+      - name: Trace real Windows worker stop without relaxing its receipt
+        run: cargo test --locked -p remote-control-client --features native-media,codec-trace --test codec_worker real_rust_codec_worker_encodes_audio_and_confirms_exit -- --exact --test-threads=1 --nocapture --color never

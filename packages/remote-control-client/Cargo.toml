@@ -10,6 +10,7 @@ description = "Viewer-side client of the LingXi Remote Control protocol (lingxi-
 webrtc = ["dep:lingxi-webrtc-core", "dep:webrtc"]
 native-media = ["webrtc", "dep:media-api", "dep:media-runtime", "dep:lingxi-webrtc-media", "dep:platform-windows", "dep:subtle", "lingxi-webrtc-media/gstreamer-media"]
 static-media = ["native-media", "lingxi-webrtc-media/static-plugins"]
+codec-trace = []
 
 [dependencies]
 # DTOs and `ClientEvent` come from the pinned runtime's client protocol; default

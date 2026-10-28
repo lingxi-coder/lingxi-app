@@ -44,6 +44,15 @@ const CLOCK_SYNC_ROUNDS: usize = 5;
 const CLOCK_MAX_UNCERTAINTY: Duration = Duration::from_millis(50);
 const BOOTSTRAP_VERSION: &[u8; 8] = b"LXCODEC1";
 
+#[cfg(feature = "codec-trace")]
+macro_rules! stage {
+    ($($args:tt)*) => { eprintln!("codec-stage pid={} {}", std::process::id(), format_args!($($args)*)) };
+}
+#[cfg(not(feature = "codec-trace"))]
+macro_rules! stage {
+    ($($args:tt)*) => {};
+}
+
 #[derive(Clone, Debug)]
 pub struct CodecLaunch {
     /// Absolute product-owned executable. No shell or PATH lookup is used.
@@ -555,9 +564,13 @@ pub fn run_worker() -> io::Result<()> {
     let fatal = Arc::new(AtomicBool::new(false));
     let (release, releases) = std_mpsc::sync_channel::<u64>(MAX_PENDING_RELEASES);
     let writer = std::thread::spawn(move || {
+        stage!("writer started");
         let mut stream = control_writer;
         while let Ok(id) = releases.recv() {
             let kind = if id == 0 { b'D' } else { b'R' };
+            if kind == b'D' {
+                stage!("writer sending D");
+            }
             if stream
                 .write_all(&[kind])
                 .and_then(|_| stream.write_all(&id.to_be_bytes()))
@@ -567,6 +580,7 @@ pub fn run_worker() -> io::Result<()> {
                 break;
             }
         }
+        stage!("writer exited");
     });
     let a_release = release.clone();
     let a_fatal = fatal.clone();
@@ -594,15 +608,36 @@ pub fn run_worker() -> io::Result<()> {
     });
     let mut command = [0u8; 1];
     let requested_stop = control.read_exact(&mut command).is_ok() && command[0] == b'Q';
-    let _ = audio_shutdown.shutdown(Shutdown::Both);
-    let _ = video_shutdown.shutdown(Shutdown::Both);
+    stage!("worker stop requested={requested_stop}");
+    let audio_shutdown_result = audio_shutdown.shutdown(Shutdown::Both);
+    stage!(
+        "audio shutdown result={:?}",
+        audio_shutdown_result
+            .as_ref()
+            .err()
+            .map(|e| (e.kind(), e.raw_os_error()))
+    );
+    let video_shutdown_result = video_shutdown.shutdown(Shutdown::Both);
+    stage!(
+        "video shutdown result={:?}",
+        video_shutdown_result
+            .as_ref()
+            .err()
+            .map(|e| (e.kind(), e.raw_os_error()))
+    );
+    stage!("joining audio lane");
     let audio_ok = a.join().is_ok();
+    stage!("audio joined={audio_ok}; joining video lane");
     let video_ok = v.join().is_ok();
+    stage!("video joined={video_ok}");
     if requested_stop && audio_ok && video_ok && !fatal.load(Ordering::Acquire) {
         let _ = release.send(0);
+        stage!("queued D");
     }
     drop(release);
+    stage!("joining writer");
     let _ = writer.join();
+    stage!("worker completed writer join");
     if requested_stop && audio_ok && video_ok && !fatal.load(Ordering::Acquire) {
         Ok(())
     } else {
@@ -835,7 +870,11 @@ impl CodecClient {
             .current_dir(directory.path())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(if cfg!(feature = "codec-trace") {
+                std::process::Stdio::inherit()
+            } else {
+                std::process::Stdio::null()
+            })
             .kill_on_drop(true);
         add_system_environment(
             &mut command,
@@ -849,6 +888,7 @@ impl CodecClient {
         // A directory cannot be executed as the plugin installer helper.
         command.env("GST_INSTALL_PLUGINS_HELPER", &disabled_installer);
         let mut child = command.spawn()?;
+        stage!("spawned worker child={:?}", child.id());
         let input = child.stdin.take();
         let (exit_tx, _) = watch::channel(None);
         let state = Arc::new(Shared {
@@ -878,15 +918,26 @@ impl CodecClient {
                     }
                 }
             };
+            stage!("worker wait completed status_success={}", status.success());
             if let Ok(reader) = reader_rx.await {
+                stage!("waiting for control reader");
                 let _ = reader.await;
+                stage!("control reader joined");
             }
             reaper_state
                 .leases
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
-            let directory_removed = directory.close().is_ok();
+            let directory_result = directory.close();
+            stage!(
+                "directory close result={:?}",
+                directory_result
+                    .as_ref()
+                    .err()
+                    .map(|e| (e.kind(), e.raw_os_error()))
+            );
+            let directory_removed = directory_result.is_ok();
             let receipt = ExitReceipt {
                 success: status.success()
                     && directory_removed
@@ -926,8 +977,10 @@ impl CodecClient {
         let (mut control_read, mut control_write) = control.into_split();
         tokio::spawn(async move {
             if control_rx.recv().await.is_some() {
+                stage!("parent sending Q");
                 let _ = control_write.write_all(b"Q").await;
                 let _ = control_write.shutdown().await;
+                stage!("parent sent Q and shutdown writer");
             }
         });
         let read_state = state.clone();
@@ -952,7 +1005,10 @@ impl CodecClient {
                     }
                     (b'D', 0)
                         if read_state.stopping.load(Ordering::Acquire)
-                            && !read_state.graceful.swap(true, Ordering::AcqRel) => {}
+                            && !read_state.graceful.swap(true, Ordering::AcqRel) =>
+                    {
+                        stage!("parent observed D");
+                    }
                     _ => {
                         invalid = true;
                         break;
@@ -962,6 +1018,10 @@ impl CodecClient {
             if invalid {
                 read_state.protocol_fault.store(true, Ordering::Release);
             }
+            stage!(
+                "control reader done invalid={invalid} graceful={}",
+                read_state.graceful.load(Ordering::Acquire)
+            );
             // A broken or invalid control stream must fence new operations even
             // if no data request happens to notice the child failure first.
             if invalid || !read_state.graceful.load(Ordering::Acquire) {
@@ -1239,6 +1299,7 @@ impl CodecClient {
     /// If the worker does not finish, kill is requested and an unverified
     /// result is returned unless a graceful receipt was observed.
     pub async fn shutdown(&self) -> io::Result<()> {
+        stage!("parent requests shutdown");
         self.inner.state.stopping.store(true, Ordering::Release);
         let _ = self.inner.control.try_send(());
         let mut exit = self.inner.state.exit.subscribe();
@@ -1255,6 +1316,7 @@ impl CodecClient {
         let receipt = match timeout(STOP_TIMEOUT, wait).await {
             Ok(result) => result?,
             Err(_) => {
+                stage!("parent stop timeout; requesting kill");
                 let _ = self.inner.force.try_send(());
                 return Err(failure("codec worker stop unverified"));
             }

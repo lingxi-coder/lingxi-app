@@ -370,6 +370,20 @@ export const shellCatalog: Record<string, Record<string, string>> = {
     "ja": "アカウントを読み込み中…",
     "ko": "계정 로드 중…"
   },
+  "desktop_shell_sign_in": {
+    "zh-Hans": "登录",
+    "zh-Hant": "登入",
+    "en": "Sign In",
+    "ja": "サインイン",
+    "ko": "로그인"
+  },
+  "desktop_shell_account_other_signin": {
+    "zh-Hans": "使用其他方式登录",
+    "zh-Hant": "使用其他方式登入",
+    "en": "Sign in another way",
+    "ja": "別の方法でサインイン",
+    "ko": "다른 방법으로 로그인"
+  },
   "desktop_shell_apple_login": {
     "zh-Hans": "通过 Apple 登录",
     "zh-Hant": "透過 Apple 登入",

@@ -132,6 +132,24 @@ body {
 }
 .desktop-rail-button:active { scale: .94; }
 .desktop-rail-settings { margin-top: auto; }
+.desktop-rail-button:disabled { opacity: .45; cursor: default; }
+.desktop-rail-changes { position: relative; }
+.desktop-rail-count {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--desktop-accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
 .desktop-rail-button:focus-visible,
 .sidebar-header-icon:focus-visible,
 .sidebar-primary-action:focus-visible,

@@ -44,7 +44,7 @@ import { tokens, watchThemePreference, type ThemeMode } from './theme/tokens';
 import { RuntimeCenterInspector, RuntimeCenterOverview } from './components/RuntimeCenter';
 import './components/RuntimeCenter.css';
 import './components/GitReview.css';
-import { GitWorkspaceProvider } from './components/GitReview';
+import { GitChangesPage, GitWorkspaceProvider } from './components/GitReview';
 import './components/TranscriptAgents.css';
 import './components/TerminalPanel.css';
 import { TerminalPanel, useTerminalPanel } from './components/TerminalPanel';
@@ -73,7 +73,7 @@ export function App() {
   const [localAppNavigationError, setLocalAppNavigationError] = useState('');
   const localAppNavigation = useRef(0);
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
-  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps'>('chat');
+  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps' | 'changes'>('chat');
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const [sessionPicker, setSessionPicker] = useState<SessionPickerRequest | null>(null);
@@ -125,7 +125,7 @@ export function App() {
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
   }, []);
-  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps') => {
+  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps' | 'changes') => {
     if (sessionNavigationBlocked()) return;
     cancelLocalAppNavigation();
     setPage(next);
@@ -374,7 +374,7 @@ export function App() {
   return (
     <Theme.Provider value={palette}>
       <ModUiSurfaceClientIdProvider clientId={bridge.uiSurfaceClientId}>
-      <GitWorkspaceProvider scope={gitScope} onOpen={() => bridge.openRuntimeItem({ kind: 'section', id: 'review' })} onTerminal={() => { if (!terminal.open) terminal.toggle(); }}>
+      <GitWorkspaceProvider scope={gitScope} onOpen={() => openPage('changes')} onTerminal={() => { openPage('chat'); if (!terminal.open) terminal.toggle(); }}>
       <div
         className="desktop-shell"
         data-screen-label="LingXi Code Desktop Beta"
@@ -386,6 +386,7 @@ export function App() {
             activityView={activityView}
             onToggleActivityView={toggleActivityView}
             apps={page === 'apps'}
+            changes={page === 'changes'}
             onOpenApps={() => openPage('apps')}
             scheduled={page === 'scheduled'}
             onOpenScheduled={() => openPage('scheduled')}
@@ -416,6 +417,7 @@ export function App() {
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
           <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => openPage('chat')} />
           </div>
+          {page === 'changes' && <GitChangesPage />}
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
           <ErrorBanner bridge={bridge} />
           <div className="desktop-chat-layout" data-runtime-inspector-open={bridge.runtimeCenter.inspectorOpen ? 'true' : undefined}>

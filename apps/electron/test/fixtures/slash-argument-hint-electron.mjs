@@ -17,15 +17,68 @@ async function main() {
   const shown = `document.querySelector('.composer-slash-argument-hint')`;
   const prompt = `document.querySelector('[aria-label="Prompt"]')`;
   const mirror = `document.querySelector('.composer-command-mirror')`;
+  const reviewHint = '[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]';
+  let darkHintColor = null;
+  async function diagnosticSnapshot() {
+    const renderer = await js(`(() => {
+      const editor = ${prompt}, hint = ${shown};
+      const rect = (element) => {
+        if (!element) return null;
+        const box = element.getBoundingClientRect();
+        return { x: box.x, y: box.y, width: box.width, height: box.height };
+      };
+      const endOf = (node) => {
+        if (!node) return null;
+        const range = document.createRange();
+        range.selectNodeContents(node); range.collapse(false);
+        const box = range.getBoundingClientRect();
+        return { x: box.x, y: box.y, height: box.height };
+      };
+      let last = editor;
+      while (last?.lastChild) last = last.lastChild;
+      const firstEnd = endOf(editor?.firstChild), lastEnd = endOf(last);
+      const editorRect = rect(editor), hintRect = rect(hint);
+      const editorStyle = editor && getComputedStyle(editor), hintStyle = hint && getComputedStyle(hint);
+      const available = firstEnd && editorRect
+        ? Math.max(0, editor.clientWidth - parseFloat(editorStyle.paddingRight) - (firstEnd.x - editorRect.x)) : null;
+      const selection = getSelection();
+      return {
+        viewport: { innerWidth, innerHeight, devicePixelRatio },
+        lightNarrowChecks: {
+          narrow: innerWidth <= 480,
+          expectedText: hint?.textContent === ${JSON.stringify(reviewHint)},
+          visible: hintStyle?.visibility === 'visible',
+          changedColor: Boolean(hintStyle && ${JSON.stringify(darkHintColor)} !== null && hintStyle.color !== ${JSON.stringify(darkHintColor)}),
+          widthMatches: Boolean(hint && available !== null && Math.abs(hint.clientWidth - available) < 1),
+        },
+        editor: editor && { text: editor.textContent, rect: editorRect, clientWidth: editor.clientWidth,
+          paddingRight: editorStyle.paddingRight, scrollTop: editor.scrollTop, scrollHeight: editor.scrollHeight,
+          children: Array.from(editor.childNodes, (node) => ({ name: node.nodeName, length: node.textContent?.length })),
+          firstEnd, lastEnd, expectedHintWidth: available },
+        hint: hint && { text: hint.textContent, rect: hintRect, clientWidth: hint.clientWidth,
+          scrollWidth: hint.scrollWidth, visibility: hintStyle.visibility, color: hintStyle.color,
+          pointerEvents: hintStyle.pointerEvents, textOverflow: hintStyle.textOverflow,
+          widthDifference: available === null ? null : hint.clientWidth - available },
+        selection: selection && { collapsed: selection.isCollapsed, focusOffset: selection.focusOffset,
+          focusInEditor: Boolean(editor && selection.focusNode && editor.contains(selection.focusNode)) },
+        selectionTrace: window.__slashHintSelectionTrace ?? [],
+      };
+    })()`);
+    return { windowSize: window.getSize(), contentSize: window.getContentSize(), darkHintColor, renderer };
+  }
   async function until(source) {
     for (let attempt = 0; attempt < 160; attempt++) { if (await js(source)) return; await delay(25); }
-    throw new Error(`Timeout: ${source}`);
+    let state;
+    try { state = await diagnosticSnapshot(); }
+    catch (error) { state = { snapshotError: String(error) }; }
+    throw new Error(`Timeout: ${source}\nstate=${JSON.stringify(state)}`);
   }
   async function setDraft(text, offset = text.length) {
     await js(`(() => {
       const editor = ${prompt}; editor.textContent = ${JSON.stringify(text)}; editor.focus();
       const range = document.createRange(); range.setStart(editor.firstChild, ${offset}); range.collapse(true);
       const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      window.__slashHintTraceMark?.('setDraft selection');
       editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
     })()`);
     // The editor is changed synchronously, but the command mirror reflects
@@ -50,9 +103,28 @@ async function main() {
       - (end.getBoundingClientRect().left - editor.getBoundingClientRect().left);
     return Math.abs(hint.clientWidth - Math.max(0, available)) < 1;
   })()`;
-  const reviewHint = '[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]';
   try {
     await window.loadURL(`${url}?slash-hints`);
+    await js(`(() => {
+      window.__slashHintSelectionTrace = [];
+      window.__slashHintTraceMark = (kind, event) => {
+        const editor = ${prompt}, selection = getSelection();
+        const inside = Boolean(editor && selection?.focusNode && editor.contains(selection.focusNode));
+        let textOffset = null;
+        if (inside) {
+          const prefix = document.createRange(); prefix.selectNodeContents(editor);
+          prefix.setEnd(selection.focusNode, selection.focusOffset); textOffset = prefix.toString().length;
+        }
+        const trace = window.__slashHintSelectionTrace;
+        trace.push({ kind, key: event?.key, code: event?.code, keyCode: event?.keyCode, trusted: event?.isTrusted, innerWidth,
+          focused: document.activeElement === editor, collapsed: selection?.isCollapsed,
+          focusNode: selection?.focusNode?.nodeName, focusOffset: selection?.focusOffset, textOffset });
+        if (trace.length > 80) trace.shift();
+      };
+      document.addEventListener('selectionchange', event => window.__slashHintTraceMark('selectionchange', event));
+      for (const type of ['keydown', 'keyup']) document.addEventListener(type, event => window.__slashHintTraceMark(type, event), true);
+      window.addEventListener('resize', event => window.__slashHintTraceMark('resize', event));
+    })()`);
     await until(`Boolean(window.__composerDraftTest && ${prompt})`);
     await setDraft('/code-review ');
     await waitForHint(reviewHint);
@@ -62,7 +134,7 @@ async function main() {
     assert.ok(geometry.x < 1 && geometry.y < 1, JSON.stringify(geometry));
     assert.deepEqual({ visible: geometry.visible, pointer: geometry.pointer, overflow: geometry.overflow },
       { visible: 'visible', pointer: 'none', overflow: 'ellipsis' });
-    const darkHintColor = await js(`getComputedStyle(${shown}).color`);
+    darkHintColor = await js(`getComputedStyle(${shown}).color`);
     await writeFile(join(tmpdir(), 'lingxi-slash-argument-hint-desktop-dark.png'), (await web.capturePage()).toPNG());
     const wideInnerWidth = await js('window.innerWidth');
 
@@ -131,6 +203,7 @@ async function main() {
     const copied = await js(`(() => {
       const editor = ${prompt}; const range = document.createRange(); range.selectNodeContents(editor);
       const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      window.__slashHintTraceMark?.('copy selection');
       const data = new DataTransfer(); editor.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: data }));
       return data.getData('text/plain');
     })()`);
@@ -140,7 +213,7 @@ async function main() {
     await press('Right');
     assert.equal(await js(`${prompt}.textContent`), '/code-review ');
     assert.equal(await js(`window.__composerDraftTest.sendPending()`), false);
-    await js(`window.__composerDraftTest.setTheme('light')`);
+    await js(`window.__slashHintTraceMark?.('light theme request'); window.__composerDraftTest.setTheme('light')`);
     window.setSize(480, 700);
     await until(`(() => {
       const hint = ${shown};

@@ -1,0 +1,26 @@
+name: Linux slash selection trace
+on:
+  push:
+    branches: [codex/media-slash-trace-9b8e]
+jobs:
+  slash-hint:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Install and build shared SDK
+        working-directory: packages/bridge-client
+        run: |
+          npm ci
+          npm run build
+      - name: Install Desktop dependencies
+        working-directory: apps/electron
+        run: npm ci
+      - name: Run exact Electron slash hint test
+        working-directory: apps/electron
+        run: xvfb-run --auto-servernum node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 test/slash-argument-hint-interaction.test.mjs

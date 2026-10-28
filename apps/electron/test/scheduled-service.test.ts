@@ -4,12 +4,13 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import type { CronAutomationDto, CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
-import { ScheduledTaskService, type RoutineBot, type RoutineBots, type RoutineCatalog } from '../src/main/scheduled';
+import { DUE_SOON_MS, ScheduledTaskService, type RoutineBot, type RoutineBots, type RoutineCatalog, type ScheduledTaskServiceOptions } from '../src/main/scheduled';
 import type { SessionRuntime } from '../src/main/bridge.js';
 import type { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 import type { SettingsStore } from '../src/main/settings';
 import type { ProjectSessionCatalog } from '../src/main/session-catalog';
 import type { SessionRef } from '../src/shared/settings';
+import { awakeFixture } from './bot-helpers.js';
 
 const targetId = '11111111-2222-4333-8444-555555555555';
 function claimWireId(occurrenceId: string, generation = 1): string {
@@ -87,7 +88,7 @@ async function harness(t: TestContext) {
     list: async (path: string) => ({ sessions: (catalogRows.get(path) ?? []).slice(0, 200) }),
     find: async (path: string, sessionId: string) => catalogRows.get(path)?.find((row) => row.uuid === sessionId),
   } as unknown as ProjectSessionCatalog;
-  const createService = () => new ScheduledTaskService(settings, manager, catalog, (title, body, ref) => notifications.push({ title, body, ref }), (error) => errors.push(error));
+  const createService = (options: ScheduledTaskServiceOptions = {}) => new ScheduledTaskService(settings, manager, catalog, (title, body, ref) => notifications.push({ title, body, ref }), (error) => errors.push(error), options);
   const service = createService();
   t.after(async () => { service.dispose(); await rm(directory, { recursive: true, force: true }); });
   return { directory, project, global, projects, archived, catalogRows, ensured, background, turns, requests, leases, notifications, errors, bindings, service, createService,
@@ -549,4 +550,229 @@ test('without Bots attached the scheduler is what it was: projects only, and a B
   const h = await harness(t);
   assert.deepEqual(h.service.scopes().map((scope) => scope.id), ['global', h.project]);
   assert.throws(() => h.service.resolveScope(join(h.directory, 'bots', 'Bot0000000000000000001', 'workspace')), /Project is unavailable/);
+});
+
+// ---- Waking up ----
+
+test('the computer waking up before the scheduler has started does nothing', async (t) => {
+  const h = await harness(t);
+  await writeCatalog(h.project, [{ automation: { status: 'active' } }]);
+  h.service.wake();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(h.leases.length, 0, 'nothing was looked at');
+  assert.equal(h.ensured.length, 0);
+  assert.deepEqual(h.errors, []);
+});
+
+test('the computer waking up makes the scheduler look at the routines at once, not at its next tick', async (t) => {
+  const h = await harness(t);
+  h.service.start();
+  await h.service.sync();
+  assert.equal(h.leases.length, 0);
+  // What happened during the sleep: a routine of the project was found in its catalog.
+  await writeCatalog(h.project, [{ automation: { status: 'active' } }]);
+  h.service.wake();
+  await h.service.sync();
+  assert.equal(h.leases.length, 1, 'the sync that waking began has run');
+  assert.equal(h.leases[0]!.ref.projectPath, h.project);
+  assert.deepEqual(h.errors, []);
+});
+
+test('a sync that waking began and that fails goes to the reporter the tick uses', async (t) => {
+  const h = await harness(t);
+  h.service.start();
+  await h.service.sync();
+  (h.service as unknown as { sync(): Promise<void> }).sync = () => Promise.reject(new Error('the catalog cannot be read'));
+  h.service.wake();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(h.errors.map(String), ['Error: the catalog cannot be read']);
+});
+
+test('the computer waking up after the scheduler was closed does nothing', async (t) => {
+  const h = await harness(t);
+  h.service.start();
+  await h.service.sync();
+  h.service.dispose();
+  await writeCatalog(h.project, [{ automation: { status: 'active' } }]);
+  h.service.wake();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(h.leases.length, 0);
+  assert.deepEqual(h.errors, []);
+});
+
+// ---- Keeping the computer awake for the routines of Bots ----
+
+/** A scheduler that keeps the computer awake as the owner has asked, a Bot, and a clock the test moves. */
+function awakeScheduler(h: Awaited<ReturnType<typeof harness>>, t: TestContext, options: { enabled?: boolean } = {}) {
+  const awake = awakeFixture(options.enabled ?? true);
+  const clock = { time: 1_800_000_000_000 };
+  const service = h.createService({ keepAwake: awake.keepAwake, now: () => clock.time });
+  t.after(() => service.dispose());
+  const b = botsOf(h);
+  service.attachBots(b.api);
+  return { ...awake, clock, service, b };
+}
+
+/** The Bot has a routine that runs next at `next`, and the scheduler looks. */
+async function lookWhenNext(s: ReturnType<typeof awakeScheduler>, h: Awaited<ReturnType<typeof harness>>, next: number | undefined, patch: Partial<CronAutomationDto> = {}): Promise<void> {
+  await writeCatalog(s.b.workspace, [{ automation: { status: 'active' } }]);
+  h.setManaged([{ ...task(patch), ...(next !== undefined ? { next_run_at: next } : {}) }]);
+  await s.service.sync();
+}
+
+test('a routine of a Bot keeps the computer awake while it runs, and one of the owner\'s does not', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  const entered = deferred(); const finish = deferred<string>();
+  h.setExecute(async () => { entered.resolve(); return finish.promise; });
+  const running = runClaim(s.service, h.runtime({ projectPath: s.b.workspace, sessionId: targetId }), 'bot-run', task());
+  await entered.promise;
+  assert.deepEqual(s.log, ['start 41']);
+  finish.resolve('Done');
+  await running;
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+
+  await runClaim(s.service, h.source, 'owner-run', task());
+  assert.deepEqual(s.log, ['start 41', 'stop 41'], 'the owner\'s own routine asked nothing');
+});
+
+test('a routine of a Bot that fails lets the computer sleep again', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  h.setExecute(async () => { throw new Error('interrupted: The session was lost.'); });
+  await assert.rejects(runClaim(s.service, h.runtime({ projectPath: s.b.workspace, sessionId: targetId }), 'bot-run', task()), /session was lost/);
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+});
+
+test('a routine of a Bot that is being deleted, or is gone, does not run and keeps nothing awake', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  s.b.deleting.add(s.b.workspace);
+  await assert.rejects(runClaim(s.service, h.runtime({ projectPath: s.b.workspace, sessionId: targetId }), 'deleting', task()), /The Bot is unavailable/);
+  assert.deepEqual(s.log, []);
+});
+
+test('the computer is kept awake from ten minutes before a routine of a Bot is due, to the moment it is run', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  const due = s.clock.time + 3 * 60 * 60_000;
+  assert.equal(DUE_SOON_MS, 10 * 60_000);
+
+  s.clock.time = due - DUE_SOON_MS - 1;
+  await lookWhenNext(s, h, due);
+  assert.deepEqual(s.log, [], 'not yet: a millisecond more than ten minutes');
+
+  s.clock.time = due - DUE_SOON_MS;
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41'], 'ten minutes exactly is soon enough');
+
+  s.clock.time = due - 1_000;
+  await s.service.sync();
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41'], 'looking again changes nothing');
+
+  // It runs: the run holds the computer from here on, and the next one is tomorrow.
+  s.clock.time = due + 5_000;
+  h.setManaged([{ ...task(), next_run_at: due + 24 * 60 * 60_000 }]);
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+});
+
+test('a routine that is overdue, waiting to be claimed, counts as due', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  await lookWhenNext(s, h, s.clock.time - 45 * 60_000);
+  assert.deepEqual(s.log, ['start 41']);
+});
+
+test('routines that will not run, and routines of the owner\'s, keep nothing awake', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  const soon = s.clock.time + 60_000;
+  await lookWhenNext(s, h, soon, { status: 'paused' });
+  assert.deepEqual(s.log, [], 'a paused routine');
+  await lookWhenNext(s, h, undefined);
+  assert.deepEqual(s.log, [], 'a routine with no next time, such as one that has run for the last time');
+  // The same due time, in a project.
+  h.setManaged([{ ...task(), next_run_at: soon }]);
+  await writeCatalog(s.b.workspace, []);
+  await writeCatalog(h.project, [{ automation: { status: 'active' } }]);
+  await s.service.sync();
+  assert.deepEqual(s.log, [], 'a routine of the owner\'s');
+});
+
+test('one routine soon due is enough, and the computer sleeps again when none is', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  const now = s.clock.time;
+  await writeCatalog(s.b.workspace, [{ automation: { status: 'active' } }]);
+  h.setManaged([{ ...task(), id: 'later', next_run_at: now + 5 * 60 * 60_000 }, { ...task(), id: 'soon', next_run_at: now + 4 * 60_000 }]);
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41']);
+  h.setManaged([{ ...task(), id: 'later', next_run_at: now + 5 * 60 * 60_000 }]);
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+});
+
+test('a catalog that cannot be read, or a Bot that is gone, ends the wait rather than extending it', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  await lookWhenNext(s, h, s.clock.time + 60_000);
+  assert.deepEqual(s.log, ['start 41']);
+  await writeFile(join(s.b.workspace, '.lingxi', 'scheduled_tasks.json'), '{ this is not json');
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+  assert.equal(h.errors.length, 1, 'and the reason was reported');
+
+  await lookWhenNext(s, h, s.clock.time + 60_000);
+  assert.deepEqual(s.log, ['start 41', 'stop 41', 'start 42']);
+  s.b.deleting.add(s.b.workspace);
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41', 'stop 41', 'start 42', 'stop 42']);
+});
+
+test('waking is when the clock shows a routine of a Bot has become due, and the computer is held for it', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  await writeCatalog(s.b.workspace, [{ automation: { status: 'active' } }]);
+  const due = s.clock.time + 2 * 60 * 60_000;
+  h.setManaged([{ ...task(), next_run_at: due }]);
+  s.service.start();
+  await s.service.sync();
+  assert.deepEqual(s.log, []);
+  // The computer slept through two hours; its first words on waking are the clock.
+  s.clock.time = due + 60_000;
+  s.service.wake();
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41']);
+});
+
+test('closing the scheduler lets the computer sleep, and a look that was under way takes no hold afterwards', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  await lookWhenNext(s, h, s.clock.time + 60_000);
+  assert.deepEqual(s.log, ['start 41']);
+  s.service.dispose();
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+  s.service.dispose();
+  assert.deepEqual(s.log, ['start 41', 'stop 41'], 'closing twice lets go once');
+
+  // A look that is in the middle of listing the routines when the scheduler is closed.
+  const other = h.createService({ keepAwake: s.keepAwake, now: () => s.clock.time });
+  t.after(() => other.dispose());
+  other.attachBots(s.b.api);
+  h.setManaged([{ ...task(), next_run_at: s.clock.time + 60_000 }]);
+  const request = h.requests.push.bind(h.requests);
+  h.requests.push = (...items) => { other.dispose(); return request(...items); };
+  await other.sync();
+  assert.deepEqual(s.log, ['start 41', 'stop 41'], 'it held nothing');
+});
+
+test('nothing is asked of the computer when the owner has not asked for it', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t, { enabled: false });
+  await lookWhenNext(s, h, s.clock.time + 60_000);
+  h.setExecute(async () => 'Done');
+  await runClaim(s.service, h.runtime({ projectPath: s.b.workspace, sessionId: targetId }), 'bot-run', task());
+  assert.deepEqual(s.log, []);
 });

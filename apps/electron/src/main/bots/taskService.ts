@@ -43,6 +43,7 @@ import {
   type TaskFile,
   type TaskRecord,
 } from './tasks.js';
+import type { KeepAwake } from './keepAwake.js';
 import type { BotRecord, BotStore } from './store.js';
 import { tasksUi } from './taskUi.js';
 
@@ -81,6 +82,8 @@ export interface BotTasksOptions {
   changed?: (botIds: readonly string[]) => void;
   /** The prompt of a task's turn was handed to the session that does the task. */
   promptSent?: (sessionId: string, text: string) => void;
+  /** Keeps the computer awake while a Bot is working on a task, if the owner wants that. */
+  keepAwake?: KeepAwake;
   now?: () => number;
   /** Milliseconds in a minute and in a second, and how long deleting a Bot waits for work to stop; shorter in tests. */
   minuteMs?: number;
@@ -111,6 +114,8 @@ export class BotTasks implements DelegationBackend {
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly running = new Map<string, Running>();
   private readonly waiters = new Map<string, Set<() => void>>();
+  /** For each task that is `working`, the way to let the computer sleep again. */
+  private readonly awake = new Map<string, () => void>();
   private readonly taskStore: TaskStore;
   private readonly now: () => number;
   private readonly minuteMs: number;
@@ -144,6 +149,18 @@ export class BotTasks implements DelegationBackend {
   /** Every task there is, newest first. */
   list(): TaskRecord[] {
     return [...this.tasks.values()].map((task) => structuredClone(task)).sort((a, b) => b.created_at - a.created_at);
+  }
+
+  /**
+   * Fail every task whose time is up. Each task has a timer that does so, but
+   * timers stand still while the computer sleeps, so the time left on them is
+   * wrong when it wakes. The clock on the wall is not: ask it then.
+   */
+  checkDeadlines(): void {
+    const now = this.now();
+    for (const task of [...this.tasks.values()]) {
+      if (isActive(task.state) && task.deadline_at <= now) this.expire(task, this.running.get(task.task_id)?.controller);
+    }
   }
 
   // What the owner's window asks
@@ -477,11 +494,7 @@ export class BotTasks implements DelegationBackend {
   }
 
   private async execute(task: TaskRecord, prompt: string, fresh: boolean, controller: AbortController): Promise<void> {
-    const timer = setTimeout(() => {
-      if (!isActive(task.state)) return;
-      this.settle(task, 'failed', 'deadline');
-      controller.abort();
-    }, Math.max(0, task.deadline_at - this.now()));
+    const timer = setTimeout(() => this.expire(task, controller), Math.max(0, task.deadline_at - this.now()));
     timer.unref?.();
     try {
       const target = this.record(task.receiver.bot_id);
@@ -516,6 +529,17 @@ export class BotTasks implements DelegationBackend {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * The time of a task is up: it fails, and the turn that was doing it is
+   * interrupted. A turn that was interrupted before has nothing more to answer
+   * for, even if the task has since been given another one.
+   */
+  private expire(task: TaskRecord, controller: AbortController | undefined): void {
+    if (!isActive(task.state) || controller?.signal.aborted) return;
+    this.settle(task, 'failed', 'deadline');
+    controller?.abort();
   }
 
   /** The Bot is waiting for an answer from its owner, or has been given one. */
@@ -557,6 +581,7 @@ export class BotTasks implements DelegationBackend {
   /** Record a change: stamp, save, say so to the window, and wake whoever waits for the task. */
   private touch(task: TaskRecord): void {
     task.updated_at = Math.max(this.now(), task.updated_at);
+    this.keepAwakeWhileWorking(task);
     try {
       this.taskStore.save(task);
     } catch (error) {
@@ -568,6 +593,22 @@ export class BotTasks implements DelegationBackend {
       this.warn(`Bot task ${task.task_id}: the change was not announced: ${error instanceof Error ? error.message : String(error)}`);
     }
     for (const check of [...(this.waiters.get(task.task_id) ?? [])]) check();
+  }
+
+  /**
+   * The computer stays awake for as long as the Bot is working on the task. It
+   * may sleep while the Bot waits for its owner, which can take hours, and once
+   * the task has ended.
+   */
+  private keepAwakeWhileWorking(task: TaskRecord): void {
+    const release = this.awake.get(task.task_id);
+    if (task.state === 'working' && release === undefined) {
+      const hold = this.options.keepAwake?.hold();
+      if (hold !== undefined) this.awake.set(task.task_id, hold);
+    } else if (task.state !== 'working' && release !== undefined) {
+      this.awake.delete(task.task_id);
+      release();
+    }
   }
 
   /** Wait until the task needs the caller's attention, the time is up, or the call is dropped. */

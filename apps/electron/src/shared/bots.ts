@@ -70,11 +70,27 @@ export const CH_BOTS_TASKS_CHANGED = 'lingxi:bots:tasks:changed';
  * was handed to it). The engine's events carry no user prompts, so the window shows the row itself.
  */
 export const CH_BOTS_PROMPT_SENT = 'lingxi:bots:prompt:sent';
+/** Invoke → `BotsLoginItemUi`. Whether the system opens the app in the background when the owner logs in, read from the system each time. */
+export const CH_BOTS_LOGIN_ITEM_GET = 'lingxi:bots:login-item:get';
+/** Invoke(`enabled: boolean`) → `BotsLoginItemUi`. Turns the login item on or off and answers how the system has it now. Rejects where the app cannot be a login item. */
+export const CH_BOTS_LOGIN_ITEM_SET = 'lingxi:bots:login-item:set';
+/** Invoke → `void`. Opens the Login Items pane of System Settings, where the owner allows the app. */
+export const CH_BOTS_LOGIN_ITEMS_OPEN = 'lingxi:bots:login-item:open-settings';
 
 /** Whether Bots can be used on this computer, and if not, why (in words fit for the owner). */
 export interface BotsAvailability {
   available: boolean;
   reason?: string;
+}
+
+/** The app as a login item, as the system has it. */
+export interface BotsLoginItemUi {
+  /** Only the installed app on a Mac can be one. */
+  available: boolean;
+  /** The system opens the app when the owner logs in. */
+  enabled: boolean;
+  /** The app is registered, but the owner has yet to allow it in System Settings → General → Login Items. */
+  needsApproval: boolean;
 }
 
 export type BotWorkspaceMode = 'read' | 'write';
@@ -251,4 +267,12 @@ export interface BotsApi {
   };
   /** Called when the host sent a prompt to a session of a Bot on its own. */
   onPromptSent(callback: (prompt: BotPromptSentUi) => void): () => void;
+  /** Opening the app in the background at login. The system is the source of truth, so the window reads it again whenever it looks. */
+  loginItem: {
+    status(): Promise<BotsLoginItemUi>;
+    /** Rejects where the app cannot be a login item. */
+    set(enabled: boolean): Promise<BotsLoginItemUi>;
+    /** Opens the Login Items pane of System Settings. */
+    openSettings(): Promise<void>;
+  };
 }

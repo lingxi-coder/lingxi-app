@@ -12,6 +12,9 @@ import {
   CH_BOTS_DELETE,
   CH_BOTS_GET,
   CH_BOTS_LIST,
+  CH_BOTS_LOGIN_ITEM_GET,
+  CH_BOTS_LOGIN_ITEM_SET,
+  CH_BOTS_LOGIN_ITEMS_OPEN,
   CH_BOTS_MEMORY_DELETE,
   CH_BOTS_MEMORY_LIST,
   CH_BOTS_MEMORY_READ,
@@ -28,6 +31,7 @@ import {
   CH_BOTS_TASKS_LIST,
   CH_BOTS_UPDATE,
   type BotCreateRequest,
+  type BotsLoginItemUi,
   type BotSessionRefUi,
   type BotSessionsUi,
   type BotTasksUi,
@@ -50,10 +54,19 @@ export interface BotsUiTasks {
   cancelForOwner(botId: string, taskId: string): void;
 }
 
+/** What of the app as a login item the window may see and do. */
+export interface BotsUiLoginItem {
+  status(): BotsLoginItemUi;
+  set(enabled: boolean): void;
+  /** Show where the owner allows or removes login items. */
+  openSettings(): Promise<void>;
+}
+
 export interface BotsUiDeps {
   service: BotService;
   content: BotContent;
   tasks: BotsUiTasks;
+  loginItem: BotsUiLoginItem;
 }
 
 function plainObject(value: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -140,6 +153,11 @@ function updateRequest(value: unknown): BotUpdateRequest {
   };
 }
 
+function flag(value: unknown, what: string): boolean {
+  if (typeof value !== 'boolean') throw new Error(`invalid ${what}`);
+  return value;
+}
+
 function revision(value: unknown): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error('invalid revision');
   return value as number;
@@ -185,7 +203,7 @@ export class BotsUi {
 
   /** The invoke handlers by channel. */
   handlers(): Record<string, BotsIpcHandler> {
-    const { service, content, tasks } = this.deps;
+    const { service, content, tasks, loginItem } = this.deps;
     const present = async (record: BotRecord): Promise<BotUi> => botUi(record, await service.lastActivityAt(record.bot_id));
     const handlers: Record<string, BotsIpcHandler> = {
       [CH_BOTS_LIST]: async (): Promise<BotUi[]> => Promise.all(service.list().map(present)),
@@ -207,6 +225,12 @@ export class BotsUi {
       [CH_BOTS_SKILLS_IMPORTABLE]: () => content.listImportableSkills(),
       [CH_BOTS_TASKS_LIST]: (id): BotTasksUi => tasks.forOwner(botId(id)),
       [CH_BOTS_TASK_CANCEL]: (id, task): void => { tasks.cancelForOwner(botId(id), taskId(task)); },
+      [CH_BOTS_LOGIN_ITEM_GET]: (): BotsLoginItemUi => loginItem.status(),
+      [CH_BOTS_LOGIN_ITEM_SET]: (enabled): BotsLoginItemUi => {
+        loginItem.set(flag(enabled, 'login item setting'));
+        return loginItem.status();
+      },
+      [CH_BOTS_LOGIN_ITEMS_OPEN]: (): Promise<void> => loginItem.openSettings(),
     };
     // Where Bots cannot run, nothing but the question whether they can is answered.
     return {

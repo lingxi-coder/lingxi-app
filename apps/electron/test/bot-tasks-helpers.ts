@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import type { HostTurnOptions, HostTurnResult, RemoteObserver, SessionRef } from '../src/main/bridgeTypes.js';
+import type { KeepAwake } from '../src/main/bots/keepAwake.js';
 import { BotTasks, type TaskRuntime, type TaskRuntimes } from '../src/main/bots/taskService.js';
 import type { BotRecord } from '../src/main/bots/store.js';
 import type { Caller, DelegateArguments } from '../src/main/bots/routerTools.js';
@@ -77,6 +78,8 @@ export interface SetupOptions {
   settleMs?: number;
   /** A clock the test moves, instead of the real one. */
   clock?: { time: number };
+  /** What keeps the computer awake while a Bot works on a task. */
+  keepAwake?: KeepAwake;
 }
 
 /** Bots on a computer, and the tasks between them with their sessions faked. */
@@ -98,6 +101,7 @@ export function setupTasks(t: { after(fn: () => void): void }, names: string[], 
     changed: (botIds) => changes.push([...botIds]),
     promptSent: (sessionId, text) => prompts.push({ sessionId, text }),
     ...(options.clock !== undefined ? { now: () => options.clock!.time } : {}),
+    ...(options.keepAwake !== undefined ? { keepAwake: options.keepAwake } : {}),
     ...(options.minuteMs !== undefined ? { minuteMs: options.minuteMs } : {}),
     ...(options.secondMs !== undefined ? { secondMs: options.secondMs } : {}),
     ...(options.settleMs !== undefined ? { settleMs: options.settleMs } : {}),

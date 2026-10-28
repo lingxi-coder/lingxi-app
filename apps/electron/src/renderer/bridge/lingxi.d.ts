@@ -177,6 +177,7 @@ export interface LingxiApi {
     telemetryEnabled?: boolean;
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;
+    botsKeepAwake?: boolean;
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;

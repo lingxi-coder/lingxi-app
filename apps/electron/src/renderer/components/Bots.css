@@ -30,6 +30,8 @@
 .bots-state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .bots-state[data-state='working'] { color: var(--bots-ok); }
 .bots-state[data-state='waiting'] { color: var(--bots-warn); }
+.bots-background { display: flex; flex-direction: column; gap: 10px; max-width: 860px; margin-top: 34px; }
+.bots-page .bots-background h2 { margin: 0; font-size: 15px; font-weight: 590; }
 .bots-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 350px; color: var(--bots-muted); text-align: center; }
 .bots-empty h2 { color: var(--bots-text); }
 .bots-empty p { max-width: 460px; line-height: 1.7; font-size: 14px; margin: 12px 0 22px; }

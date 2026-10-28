@@ -17,7 +17,7 @@ import { brokerAccountSessionStore } from './account-broker-storage.js';
 import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
-import { app, BrowserWindow, dialog, Menu, net, powerMonitor, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
+import { app, BrowserWindow, dialog, Menu, net, powerMonitor, powerSaveBlocker, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
 import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
 import { installDesktopUpdates } from './desktopUpdates.js';
@@ -44,6 +44,8 @@ import { nativeImageCodec } from './remoteControl/nativeImageCodec.js';
 import { PushRequester, RemotePush } from './remoteControl/pushRequests.js';
 import { RemoteControlUi } from './remoteControl/rendererIpc.js';
 import { BotContent } from './bots/content.js';
+import { KeepAwake } from './bots/keepAwake.js';
+import { LoginItem } from './bots/loginItem.js';
 import { ownerPreferenceHooks } from './bots/ownerPreferences.js';
 import { BotsUi } from './bots/rendererIpc.js';
 import { BotRouter } from './bots/router.js';
@@ -444,6 +446,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   powerMonitor.on('resume', () => {
     codexTokens.check();
     remoteControl?.reconnect();
+    // Timers stand still while the Mac sleeps: the routines that came due and the
+    // tasks whose deadline has passed are looked for by the clock.
+    scheduled?.wake();
+    botTasks?.checkDeadlines();
   });
   /**
    * The one place an OS notification is raised. Shared by the scheduled-task
@@ -455,9 +461,16 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // A Bot's workspace is a folder nobody named; the notification names the Bot.
     const notification = new Notification(notificationPresentation(title, body, ref, process.platform, ref ? bots?.nameFor(ref.projectPath) : undefined));
     notification.on('click', () => {
-      if (ref) void host?.showNotifiedSession(ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error)));
+      const shown = ref ? host?.showNotifiedSession(ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error))) : undefined;
       const window = getMainWindow();
-      window?.show(); window?.focus();
+      if (window) { window.show(); window.focus(); return; }
+      // Opened at login, the app has no window: the click makes one, once the session is
+      // chosen, so that the window opens on it.
+      void Promise.resolve(shown).then(() => {
+        if (!host) return;
+        const created = getMainWindow() ?? createWindow();
+        created.show(); created.focus();
+      });
     });
     notification.show();
   };
@@ -624,11 +637,20 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     nativeAudio ?? undefined,
   );
   host.attachComputerSettings(computerSettings);
+  // Whether the Mac may sleep while Bots work is the owner's to say; the switch is in the Bots page.
+  const keepAwake = new KeepAwake({
+    start: () => powerSaveBlocker.start('prevent-app-suspension'),
+    stop: (id) => powerSaveBlocker.stop(id),
+    enabled: settings.getPublic().botsKeepAwake === true,
+  });
+  host.attachKeepAwake(keepAwake);
+  // Opened at login, the app waits in the background: the Bots work without a window.
+  const loginItem = new LoginItem({ app, openExternal: (url) => shell.openExternal(url) });
   scheduled = new ScheduledTaskService(settings, bridge, sessionCatalog, (title, body, ref) => {
     // Propagate the refusal: `scheduledRun` returns false when the kind is off
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
-  }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
+  }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)), { keepAwake });
   const account = new AccountService(firebaseConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker)
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
@@ -771,6 +793,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         available: () => bots?.availability().available === true,
         isDeleting: (botId) => bots?.isDeleting(botId) === true,
         warn: botWarn,
+        keepAwake,
         changed: (botIds) => taskChanges.changed(botIds),
         // The engine's events carry no user prompts: the window shows the one the task began with.
         promptSent: (sessionId, text) => host?.sendToWindows(CH_BOTS_PROMPT_SENT, { sessionId, text } satisfies BotPromptSentUi),
@@ -795,7 +818,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         warn: botWarn,
       });
       scheduled?.attachBots(bots);
-      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore), tasks }));
+      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore), tasks, loginItem }));
     } catch (error) {
       diagnostics.add('warn', 'host', `bots unavailable: ${sanitizeDiagnostic(error)}`);
     }
@@ -896,7 +919,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     preferencePath: join(userData, 'desktop-update-reminder.json'),
     onError: error => diagnostics.add('warn', 'host', `Desktop update check failed: ${sanitizeDiagnostic(error)}`),
   });
-  createWindow();
+  // Read once, here: the system says "opened at login" only for the start that it did.
+  if (!loginItem.openedInBackground()) createWindow();
   if (app.isPackaged) {
     desktopUpdates.start();
     powerMonitor.on('resume', () => { void desktopUpdates?.check(); });

@@ -7,7 +7,7 @@ import { BotsUi, botUi } from '../src/main/bots/rendererIpc.js';
 import { BotService } from '../src/main/bots/service.js';
 import { MAX_ACCEPT_FROM, parseRecord, type BotRecord, type BotStore } from '../src/main/bots/store.js';
 import { CH_BOTS_CREATE, CH_BOTS_UPDATE } from '../src/shared/bots.js';
-import { botFixture, noTasks } from './bot-helpers.js';
+import { botFixture, noLoginItem, noTasks } from './bot-helpers.js';
 
 const OTHER = 'Bot0000000000000000777';
 
@@ -118,7 +118,7 @@ function setupUi(t: { after(fn: () => void): void }) {
     runtimes: { newSession: async (projectPath) => ({ projectPath, sessionId: '11111111-2222-4333-8444-555555555555' }), openSession: async () => ({}), closeProject: async () => undefined },
     catalogFor: () => ({ list: async () => ({ sessions: [] }), find: async () => undefined, workspaceSettings: async () => ({ environment: {}, configHome: '/unused' }), invalidate: () => undefined }),
   });
-  const handlers = new BotsUi({ service, content: new BotContent(f.store), tasks: noTasks }).handlers();
+  const handlers = new BotsUi({ service, content: new BotContent(f.store), tasks: noTasks, loginItem: noLoginItem }).handlers();
   return { ...f, service, call: async (channel: string, ...args: unknown[]): Promise<any> => handlers[channel]!(...args) };
 }
 

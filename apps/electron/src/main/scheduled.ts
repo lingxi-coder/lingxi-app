@@ -9,6 +9,7 @@ import type { SessionRuntime } from './bridge.js';
 import { isSessionId } from './sessionIdentity.js';
 import { scheduledRunIdentity } from './scheduled-run-identity.js';
 import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
+import type { KeepAwake } from './bots/keepAwake.js';
 import type { ProjectSessionCatalogRow } from './session-catalog.js';
 import type { SessionRef } from '../shared/settings.js';
 
@@ -43,6 +44,14 @@ export interface RoutineBots {
 }
 
 const MAX_RECENT_SCHEDULED_RUNS = 500;
+/** How long before a Bot's routine is due the computer starts being kept awake, so that it does not drift into sleep just before the routine runs. */
+export const DUE_SOON_MS = 10 * 60_000;
+
+export interface ScheduledTaskServiceOptions {
+  /** Kept awake while a Bot's routine runs, and for a while before one is due. */
+  keepAwake?: KeepAwake;
+  now?: () => number;
+}
 
 /** Catalog file the Rust scheduler writes for one scope's workspace. */
 const catalogPath = (workspace: string): string => join(workspace, '.lingxi', 'scheduled_tasks.json');
@@ -62,6 +71,9 @@ export class ScheduledTaskService {
   private readonly scopeCache = new Map<string, { label: string; jobs: CronJobDto[] }>();
   private cacheWrites: Promise<void> = Promise.resolve();
   private bots?: RoutineBots;
+  /** Held while a routine of a Bot is due within `DUE_SOON_MS`. */
+  private releaseDue?: () => void;
+  private readonly now: () => number;
 
   constructor(
     private readonly settings: SettingsStore,
@@ -71,7 +83,9 @@ export class ScheduledTaskService {
      * releases the durable dedupe key so the run can be announced later. */
     private readonly notify: (title: string, body: string, ref?: SessionRef) => boolean,
     private readonly report: (error: unknown) => void,
+    private readonly options: ScheduledTaskServiceOptions = {},
   ) {
+    this.now = options.now ?? Date.now;
     if (typeof settings.settingsPath === 'string') {
       try {
         const rows: unknown = JSON.parse(readFileSync(join(dirname(settings.settingsPath), 'scheduled-scopes.json'), 'utf8'));
@@ -105,6 +119,12 @@ export class ScheduledTaskService {
     void this.sync().catch(this.report);
     this.timer = setInterval(() => void this.sync().catch(this.report), 30_000);
     this.timer.unref();
+  }
+
+  /** The computer woke up, and the tick stood still while it slept: look after the routines now, not at the next tick. Nothing happens before `start`. */
+  wake(): void {
+    if (this.timer === undefined || this.disposed) return;
+    void this.sync().catch(this.report);
   }
 
   private controllerRef(path: string): SessionRef {
@@ -151,19 +171,41 @@ export class ScheduledTaskService {
       for (const [path, controller] of this.controllers) {
         if (!paths.has(path)) { controller.release(); this.controllers.delete(path); }
       }
+      // When the active routines of the Bots run next.
+      const botRuns: number[] = [];
       await Promise.allSettled([...paths].map(async (path) => {
         try {
           const document = JSON.parse(await readFile(catalogPath(path), 'utf8')) as { tasks?: { automation?: { status?: string } }[] };
-          if (document.tasks?.some((task) => !task.automation || task.automation.status === 'active')) { const runtime = await this.controller(path); await this.cacheJobs(path, await runtime.manageCron({ action: 'list' })); }
+          if (document.tasks?.some((task) => !task.automation || task.automation.status === 'active')) {
+            const runtime = await this.controller(path);
+            const jobs = await runtime.manageCron({ action: 'list' });
+            await this.cacheJobs(path, jobs);
+            if (this.bots?.routineBotFor(path)) botRuns.push(...jobs.flatMap((job) => job.next_run_at !== undefined && (!job.automation || job.automation.status === 'active') ? [job.next_run_at] : []));
+          }
           else { this.controllers.get(path)?.release(); this.controllers.delete(path); }
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.report(error);
         }
       }));
+      this.keepAwakeForDue(botRuns);
       await this.enforceHistoryLimit();
     };
     this.syncing = work().finally(() => { this.syncing = undefined; });
     return this.syncing;
+  }
+
+  /**
+   * The computer is kept awake while a routine of a Bot is due within
+   * `DUE_SOON_MS`; from the moment it runs, the run itself holds it. One that is
+   * overdue counts too: it is about to be claimed.
+   */
+  private keepAwakeForDue(runs: readonly number[]): void {
+    const due = !this.disposed && runs.some((at) => at <= this.now() + DUE_SOON_MS);
+    if (due && this.releaseDue === undefined) this.releaseDue = this.options.keepAwake?.hold();
+    else if (!due && this.releaseDue !== undefined) {
+      this.releaseDue();
+      this.releaseDue = undefined;
+    }
   }
 
   /** The chats of a scope are in the Bot's home for a Bot's workspace, and in the owner's otherwise. */
@@ -352,13 +394,23 @@ export class ScheduledTaskService {
     try {
       this.assertRunAllowed();
       if (hostAdmitted) throw new Error('interrupted: This scheduled run was already started, but its completion is unavailable. Retry the task to start a new run.');
-      const result = await this.execute(source, runId, task);
+      const result = await this.keepingAwake(source.projectPath, () => this.execute(source, runId, task));
       if (task.automation?.notificationPolicy === 'all') await this.notifyOnce(`${source.projectPath}:${occurrenceId}`, task.prompt.split('\n')[0].replace(/^# /, ''), result.summary.slice(0, 240) || 'Scheduled task completed.', { projectPath: source.projectPath, sessionId: result.sessionId });
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (task.automation?.notificationPolicy !== 'none' && !message.startsWith('busy:') && !message.startsWith('cancelled:')) await this.notifyOnce(`${source.projectPath}:${occurrenceId}`, 'Scheduled task needs attention', message);
       throw error;
+    }
+  }
+
+  /** A routine of a Bot keeps the computer awake while it runs. The owner's own routines do not. */
+  private async keepingAwake<T>(path: string, run: () => Promise<T>): Promise<T> {
+    const release = this.bots?.routineBotFor(path) ? this.options.keepAwake?.hold() : undefined;
+    try {
+      return await run();
+    } finally {
+      release?.();
     }
   }
 
@@ -400,6 +452,8 @@ export class ScheduledTaskService {
 
   dispose(): void {
     this.disposed = true;
+    this.releaseDue?.();
+    this.releaseDue = undefined;
     if (this.timer) clearInterval(this.timer);
     for (const controller of this.controllers.values()) controller.release();
     this.controllers.clear();

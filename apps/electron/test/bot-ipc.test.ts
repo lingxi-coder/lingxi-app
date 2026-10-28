@@ -5,26 +5,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { BotContent } from '../src/main/bots/content.js';
-import { BotsUi, botUi, type BotsUiTasks } from '../src/main/bots/rendererIpc.js';
+import { LoginItem } from '../src/main/bots/loginItem.js';
+import { BotsUi, botUi, type BotsUiLoginItem, type BotsUiTasks } from '../src/main/bots/rendererIpc.js';
 import { BotService } from '../src/main/bots/service.js';
 import { BotConflictError } from '../src/main/bots/store.js';
 import { HostController } from '../src/main/host.js';
 import { DiagnosticBuffer } from '../src/main/host-utils.js';
 import { SettingsStore } from '../src/main/settings.js';
 import {
-  BOT_CONFLICT_MESSAGE, CH_BOTS_AVAILABILITY, CH_BOTS_CREATE, CH_BOTS_DELETE, CH_BOTS_GET, CH_BOTS_LIST, CH_BOTS_MEMORY_DELETE, CH_BOTS_MEMORY_LIST, CH_BOTS_MEMORY_READ,
+  BOT_CONFLICT_MESSAGE, CH_BOTS_AVAILABILITY, CH_BOTS_CREATE, CH_BOTS_DELETE, CH_BOTS_GET, CH_BOTS_LIST, CH_BOTS_LOGIN_ITEM_GET, CH_BOTS_LOGIN_ITEM_SET,
+  CH_BOTS_LOGIN_ITEMS_OPEN, CH_BOTS_MEMORY_DELETE, CH_BOTS_MEMORY_LIST, CH_BOTS_MEMORY_READ,
   CH_BOTS_MEMORY_WRITE, CH_BOTS_PERSONA_GET, CH_BOTS_PERSONA_SET, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSIONS_LIST, CH_BOTS_SKILL_DELETE, CH_BOTS_SKILL_IMPORT,
   CH_BOTS_SKILLS_IMPORTABLE, CH_BOTS_SKILLS_LIST, CH_BOTS_TASK_CANCEL, CH_BOTS_TASKS_LIST, CH_BOTS_UPDATE,
 } from '../src/shared/bots.js';
-import { botFixture, noTasks, SESSION } from './bot-helpers.js';
+import { botFixture, noLoginItem, noTasks, SESSION } from './bot-helpers.js';
 
 const ALL_CHANNELS = [
   CH_BOTS_AVAILABILITY, CH_BOTS_LIST, CH_BOTS_GET, CH_BOTS_CREATE, CH_BOTS_UPDATE, CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSIONS_LIST,
   CH_BOTS_PERSONA_GET, CH_BOTS_PERSONA_SET, CH_BOTS_MEMORY_LIST, CH_BOTS_MEMORY_READ, CH_BOTS_MEMORY_WRITE, CH_BOTS_MEMORY_DELETE,
   CH_BOTS_SKILLS_LIST, CH_BOTS_SKILL_DELETE, CH_BOTS_SKILL_IMPORT, CH_BOTS_SKILLS_IMPORTABLE, CH_BOTS_TASKS_LIST, CH_BOTS_TASK_CANCEL,
+  CH_BOTS_LOGIN_ITEM_GET, CH_BOTS_LOGIN_ITEM_SET, CH_BOTS_LOGIN_ITEMS_OPEN,
 ];
 
-function setup(t: { after(fn: () => void): void }, tasks: BotsUiTasks = noTasks) {
+function setup(t: { after(fn: () => void): void }, tasks: BotsUiTasks = noTasks, loginItem: BotsUiLoginItem = noLoginItem) {
   const f = botFixture(t);
   const calls: unknown[][] = [];
   const service = new BotService({
@@ -42,7 +45,7 @@ function setup(t: { after(fn: () => void): void }, tasks: BotsUiTasks = noTasks)
       invalidate: () => undefined,
     }),
   });
-  const ui = new BotsUi({ service, content: new BotContent(f.store), tasks });
+  const ui = new BotsUi({ service, content: new BotContent(f.store), tasks, loginItem });
   const handlers = ui.handlers();
   // What the window receives is whatever the handler returns, untyped on the wire.
   return { ...f, service, calls, handlers, call: async (channel: string, ...args: unknown[]): Promise<any> => handlers[channel]!(...args) };
@@ -97,7 +100,7 @@ test('a session is opened by Bot id, optionally with a session id, and listed', 
 test('the host opens a Bot\'s session by the same checks the window\'s request goes through', async (t) => {
   const s = setup(t);
   const bot = await s.call(CH_BOTS_CREATE, { name: 'Hosted' });
-  const ui = new BotsUi({ service: s.service, content: new BotContent(s.store), tasks: noTasks });
+  const ui = new BotsUi({ service: s.service, content: new BotContent(s.store), tasks: noTasks, loginItem: noLoginItem });
   assert.deepEqual(await ui.openSession(bot.botId), { botId: bot.botId, projectPath: s.store.workspaceDir(bot.botId), sessionId: SESSION });
   await assert.rejects(ui.openSession('bad'), /invalid Bot id/);
   for (const bad of [5, null, {}, 'not-a-session', [SESSION]]) await assert.rejects(ui.openSession(bot.botId, bad), /invalid session id/);
@@ -187,6 +190,53 @@ test('the window asks for the tasks of a Bot, and stops one, by ids that are che
   assert.deepEqual(seen, [], 'nothing of the above reached the tasks');
 });
 
+test('the window reads the login item and turns it on or off with a true or a false, answered with how the system has it then', async (t) => {
+  const seen: unknown[][] = [];
+  const state = { enabled: false };
+  const s = setup(t, noTasks, {
+    status: () => ({ available: true, enabled: state.enabled, needsApproval: false }),
+    set: (enabled) => { seen.push(['set', enabled]); state.enabled = enabled; },
+    openSettings: async () => undefined,
+  });
+  assert.deepEqual(await s.call(CH_BOTS_LOGIN_ITEM_GET), { available: true, enabled: false, needsApproval: false });
+  assert.deepEqual(await s.call(CH_BOTS_LOGIN_ITEM_SET, true), { available: true, enabled: true, needsApproval: false });
+  assert.deepEqual(await s.call(CH_BOTS_LOGIN_ITEM_SET, false), { available: true, enabled: false, needsApproval: false });
+  assert.deepEqual(seen, [['set', true], ['set', false]]);
+  seen.length = 0;
+  for (const bad of ['true', 'on', 1, 0, null, undefined, {}, [], [true], { enabled: true }]) {
+    await assert.rejects(s.call(CH_BOTS_LOGIN_ITEM_SET, bad), /invalid login item setting/, JSON.stringify(bad) ?? 'undefined');
+  }
+  assert.deepEqual(seen, [], 'nothing of the above reached the system');
+});
+
+test('the window cannot say which place System Settings is opened at', async (t) => {
+  const seen: unknown[][] = [];
+  const s = setup(t, noTasks, {
+    status: () => ({ available: true, enabled: true, needsApproval: true }),
+    set: () => undefined,
+    openSettings: async (...args: unknown[]) => { seen.push(args); },
+  });
+  assert.equal(await s.call(CH_BOTS_LOGIN_ITEMS_OPEN), undefined);
+  assert.equal(await s.call(CH_BOTS_LOGIN_ITEMS_OPEN, 'https://attacker.example', 'file:///etc/passwd'), undefined);
+  assert.deepEqual(seen, [[], []], 'whatever came with the request, the place is not the window\'s to choose');
+});
+
+test('an app that cannot be a login item refuses to become one when the window asks', async (t) => {
+  const calls: unknown[] = [];
+  const opened: string[] = [];
+  const app = {
+    isPackaged: false,
+    getLoginItemSettings: () => { calls.push('get'); return { openAtLogin: false }; },
+    setLoginItemSettings: (settings: unknown) => { calls.push(settings); },
+  };
+  const s = setup(t, noTasks, new LoginItem({ app, platform: 'darwin', openExternal: async (url) => { opened.push(url); } }));
+  assert.deepEqual(await s.call(CH_BOTS_LOGIN_ITEM_GET), { available: false, enabled: false, needsApproval: false });
+  await assert.rejects(s.call(CH_BOTS_LOGIN_ITEM_SET, true), /available in the installed app/);
+  await assert.rejects(s.call(CH_BOTS_LOGIN_ITEMS_OPEN), /available in the installed app/);
+  assert.deepEqual(calls, [], 'the system was neither read nor changed');
+  assert.deepEqual(opened, []);
+});
+
 test('the host controller registers the handlers behind its sender check and removes them on dispose', async (t) => {
   const s = setup(t);
   const root = mkdtempSync(join(tmpdir(), 'lingxi-bots-ipc-'));
@@ -194,7 +244,7 @@ test('the host controller registers the handlers behind its sender check and rem
   const registered = new Map<string, (...args: any[]) => any>();
   const ipc = { handle: (name: string, handler: (...args: any[]) => any) => registered.set(name, handler), removeHandler: (name: string) => registered.delete(name) };
   const host = new HostController(new SettingsStore(root), { registerIpc() {}, registerWindow() {} } as any, new DiagnosticBuffer(), undefined, ipc as any);
-  host.attachBots(new BotsUi({ service: s.service, content: new BotContent(s.store), tasks: noTasks }));
+  host.attachBots(new BotsUi({ service: s.service, content: new BotContent(s.store), tasks: noTasks, loginItem: noLoginItem }));
   const frame = { url: 'http://127.0.0.1:4242' };
   const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, removeListener() {}, send() {} };
   host.registerWindow(sender as any, frame.url);
@@ -224,7 +274,7 @@ test('Bots attached after the handlers were registered are registered at once', 
   const host = new HostController(new SettingsStore(root), { registerIpc() {}, registerWindow() {} } as any, new DiagnosticBuffer(), undefined, ipc as any);
   host.registerIpc();
   assert.ok(![...registered.keys()].some((name) => name.startsWith('lingxi:bots:')));
-  host.attachBots(new BotsUi({ service: s.service, content: new BotContent(s.store), tasks: noTasks }));
+  host.attachBots(new BotsUi({ service: s.service, content: new BotContent(s.store), tasks: noTasks, loginItem: noLoginItem }));
   for (const channel of ALL_CHANNELS) assert.ok(registered.has(channel), channel);
   host.dispose();
   assert.ok(![...registered.keys()].some((name) => name.startsWith('lingxi:bots:')));
@@ -239,7 +289,7 @@ test('where Bots cannot run only the question whether they can is answered', asy
     runtimes: { newSession: async () => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => undefined },
     catalogFor: () => ({ list: async () => ({ sessions: [] }), find: async () => undefined, workspaceSettings: async () => ({ environment: {}, configHome: '/x' }), invalidate: () => undefined }),
   });
-  const handlers = new BotsUi({ service, content: new BotContent(f.store), tasks: noTasks }).handlers();
+  const handlers = new BotsUi({ service, content: new BotContent(f.store), tasks: noTasks, loginItem: noLoginItem }).handlers();
   assert.deepEqual(Object.keys(handlers).sort(), [...ALL_CHANNELS].sort(), 'the same channels are there');
   assert.deepEqual(await handlers[CH_BOTS_AVAILABILITY]!(), { available: false, reason: 'Bots are available on macOS only.' });
   const args: Record<string, unknown[]> = {

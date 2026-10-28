@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { KeepAwake } from '../src/main/bots/keepAwake.js';
 import { BotStore } from '../src/main/bots/store.js';
 
 /**
@@ -37,3 +38,25 @@ export const SESSION = '11111111-2222-4333-8444-555555555555';
 
 /** What a `BotsUi` is given where the test has nothing to do with tasks. */
 export const noTasks = { forOwner: () => ({ tasks: [], truncated: false, active: { received: 0, sent: 0 } }), cancelForOwner: () => undefined };
+
+/** What a `BotsUi` is given where the test has nothing to do with the login item. */
+export const noLoginItem = {
+  status: () => ({ available: false, enabled: false, needsApproval: false }),
+  set: () => undefined,
+  openSettings: async () => undefined,
+};
+
+/**
+ * A computer that can be kept awake, which says what it was asked: `start 41`, then `stop 41`, and
+ * the next time `start 42`, the way Electron hands out the ids of its blockers.
+ */
+export function awakeFixture(enabled = true) {
+  const log: string[] = [];
+  let id = 40;
+  const keepAwake = new KeepAwake({
+    enabled,
+    start: () => { id += 1; log.push(`start ${id}`); return id; },
+    stop: (stopped) => { log.push(`stop ${stopped}`); },
+  });
+  return { keepAwake, log };
+}

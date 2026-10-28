@@ -2051,6 +2051,11 @@ export function useBridge(): UseBridge {
     try { patchBootstrap({ settings: await host.updateSettings({ collapseThoughtsByDefault }) }); } catch (cause) { capture(cause); }
   }, [capture, host, patchBootstrap]);
 
+  const setBotsKeepAwake = useCallback(async (botsKeepAwake: boolean) => {
+    if (!host) return;
+    try { patchBootstrap({ settings: await host.updateSettings({ botsKeepAwake }) }); } catch (cause) { capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
   const setApiBaseUrl = useCallback(async (apiBaseUrl: string | null) => {
     if (!host) return;
     try { patchBootstrap({ settings: await host.updateSettings({ apiBaseUrl }) }); } catch (cause) { capture(cause); }
@@ -2686,6 +2691,7 @@ export function useBridge(): UseBridge {
     cleanupPluginSecretsAfterUninstall,
     setThemePreference,
     setCollapseThoughtsByDefault,
+    setBotsKeepAwake,
     setApiBaseUrl,
     setVoicePreferences,
     setNotificationPreferences,

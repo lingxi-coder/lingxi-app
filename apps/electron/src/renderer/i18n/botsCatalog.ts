@@ -1097,5 +1097,68 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "en": "The tasks that are still going on could not be checked. Deleting this Bot cancels any that are.",
     "ja": "進行中のタスクを確認できませんでした。この Bot を削除すると、進行中のタスクはキャンセルされます。",
     "ko": "진행 중인 작업을 확인하지 못했습니다. 이 Bot을 삭제하면 진행 중인 작업은 취소됩니다."
+  },
+  "bots_background_title": {
+    "zh-Hans": "在后台运行",
+    "zh-Hant": "在背景執行",
+    "en": "Running in the background",
+    "ja": "バックグラウンドでの実行",
+    "ko": "백그라운드에서 실행"
+  },
+  "bots_keep_awake": {
+    "zh-Hans": "Bot 工作时让这台 Mac 保持唤醒",
+    "zh-Hant": "Bot 工作時讓這台 Mac 保持喚醒",
+    "en": "Keep this Mac awake while Bots are working",
+    "ja": "Bot の作業中は、この Mac をスリープさせない",
+    "ko": "Bot이 작업하는 동안 이 Mac을 깨워 두기"
+  },
+  "bots_keep_awake_hint": {
+    "zh-Hans": "Bot 的例行任务执行前的 10 分钟内，也会保持唤醒。合上盖子时 Mac 仍会进入睡眠。",
+    "zh-Hant": "Bot 的例行任務執行前的 10 分鐘內，也會保持喚醒。闔上螢幕時 Mac 仍會進入睡眠。",
+    "en": "Also stays awake for the ten minutes before a Bot's routine is due. Closing the lid still puts the Mac to sleep.",
+    "ja": "Bot のルーティンの実行時刻の 10 分前からも、スリープしません。ふたを閉じると Mac はスリープします。",
+    "ko": "Bot의 루틴 실행 시각 10분 전부터도 깨어 있습니다. 덮개를 닫으면 Mac은 여전히 잠자기 상태가 됩니다."
+  },
+  "bots_login_item": {
+    "zh-Hans": "登录时在后台打开灵犀",
+    "zh-Hant": "登入時在背景開啟靈犀",
+    "en": "Open LingXi in the background when you log in",
+    "ja": "ログイン時に LingXi をバックグラウンドで開く",
+    "ko": "로그인할 때 LingXi를 백그라운드에서 열기"
+  },
+  "bots_login_item_hint": {
+    "zh-Hans": "只有灵犀在这台 Mac 上保持打开，Bot 才会执行例行任务并接收任务。",
+    "zh-Hant": "只有靈犀在這台 Mac 上保持開啟，Bot 才會執行例行任務並接收任務。",
+    "en": "Bots run routines and take tasks only while LingXi is open on this Mac.",
+    "ja": "Bot がルーティンを実行したりタスクを受け取ったりできるのは、この Mac で LingXi が開いている間だけです。",
+    "ko": "Bot은 이 Mac에서 LingXi가 열려 있는 동안에만 루틴을 실행하고 작업을 받을 수 있습니다."
+  },
+  "bots_login_item_unavailable": {
+    "zh-Hans": "仅在已安装的应用中可用。",
+    "zh-Hant": "僅在已安裝的應用程式中可用。",
+    "en": "Available in the installed app.",
+    "ja": "インストール済みのアプリでのみ利用できます。",
+    "ko": "설치된 앱에서만 사용할 수 있습니다."
+  },
+  "bots_login_item_approval": {
+    "zh-Hans": "请在“系统设置 → 通用 → 登录项”中允许灵犀。",
+    "zh-Hant": "請在「系統設定 → 一般 → 登入項目」中允許靈犀。",
+    "en": "Allow LingXi in System Settings → General → Login Items.",
+    "ja": "「システム設定 → 一般 → ログイン項目」で LingXi を許可してください。",
+    "ko": "'시스템 설정 → 일반 → 로그인 항목'에서 LingXi를 허용하세요."
+  },
+  "bots_login_item_open_settings": {
+    "zh-Hans": "打开登录项",
+    "zh-Hant": "開啟登入項目",
+    "en": "Open Login Items",
+    "ja": "ログイン項目を開く",
+    "ko": "로그인 항목 열기"
+  },
+  "bots_login_item_failed": {
+    "zh-Hans": "系统未接受此更改。请检查“系统设置 → 通用 → 登录项”。",
+    "zh-Hant": "系統未接受此變更。請檢查「系統設定 → 一般 → 登入項目」。",
+    "en": "The system did not accept the change. Check System Settings → General → Login Items.",
+    "ja": "システムが変更を受け付けませんでした。「システム設定 → 一般 → ログイン項目」を確認してください。",
+    "ko": "시스템에서 변경을 받아들이지 않았습니다. '시스템 설정 → 일반 → 로그인 항목'을 확인하세요."
   }
 };

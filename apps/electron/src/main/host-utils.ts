@@ -101,6 +101,8 @@ export interface PersistedSettings {
   /** Local host policy for the local `/team-onboarding` prompt. */
   allowTeamOnboarding?: boolean;
   collapseThoughtsByDefault?: boolean;
+  /** Keep the computer awake while Bots work; see `PublicSettings`. */
+  botsKeepAwake?: boolean;
   model?: string;
   /** Explicit model selections are scoped to their owning session. */
   sessionModels?: Array<SessionRef & { model: string }>;
@@ -209,6 +211,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
   if (typeof value['collapseThoughtsByDefault'] === 'boolean') {
     settings.collapseThoughtsByDefault = value['collapseThoughtsByDefault'];
+  }
+  if (typeof value['botsKeepAwake'] === 'boolean') {
+    settings.botsKeepAwake = value['botsKeepAwake'];
   }
   settings.model = boundedString(value['model'], 256);
   if (Array.isArray(value['sessionModels'])) {
@@ -348,7 +353,7 @@ export function parseSettings(value: unknown): PersistedSettings {
 export function publicSettings(settings: PersistedSettings): PublicSettings {
   const {
     version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions, telemetryEnabled,
-    bypassPermissionsModeAccepted, voice, notifications, modelPickerVisibility, sidebar, collapseThoughtsByDefault,
+    bypassPermissionsModeAccepted, voice, notifications, modelPickerVisibility, sidebar, collapseThoughtsByDefault, botsKeepAwake,
   } = settings;
   return {
     version,
@@ -362,6 +367,7 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
     ...(typeof telemetryEnabled === 'boolean' ? { telemetryEnabled } : {}),
     ...(typeof collapseThoughtsByDefault === 'boolean' ? { collapseThoughtsByDefault } : {}),
+    ...(typeof botsKeepAwake === 'boolean' ? { botsKeepAwake } : {}),
     ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
     ...(voice ? { voice: parseVoicePreferences(voice) } : {}),
     ...(notifications ? { notifications: { ...notifications } } : {}),

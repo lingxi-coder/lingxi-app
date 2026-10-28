@@ -340,8 +340,9 @@ function bridgeStub(runtimes: unknown[] = [], extra: Record<string, unknown> = {
     pickBotFolder: async () => null,
     scheduledScopes: [{ id: '/data/bots/a/workspace', label: 'Alpha', botId: 'a' }],
     manageScheduled: async () => [],
+    setBotsKeepAwake: async () => undefined,
     ...extra,
-  } as unknown as Pick<UseBridge, 'bootstrap' | 'desktop' | 'sessionLoading' | 'sessionRuntimeStatus' | 'openBotSession' | 'deleteBot' | 'pickBotFolder' | 'scheduledScopes' | 'manageScheduled'>;
+  } as unknown as Pick<UseBridge, 'bootstrap' | 'desktop' | 'sessionLoading' | 'sessionRuntimeStatus' | 'openBotSession' | 'deleteBot' | 'pickBotFolder' | 'scheduledScopes' | 'manageScheduled' | 'setBotsKeepAwake'>;
 }
 
 async function pageBots(view: UseBots['view'], bots: BotUi[]): Promise<UseBots> {
@@ -392,6 +393,38 @@ test('the page shows the form that makes a Bot when asked to', async () => {
   const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
   assert.match(html, /<h1>New Bot<\/h1>/);
   assert.match(html, />Create Bot</);
+});
+
+test('what the Bots need of this Mac to go on working is offered below the Bots once there are some, and not before', () => {
+  const background = React.createElement('section', null, 'Background settings');
+  const props = { activityOf: () => 'idle' as const, onNew: noop, onOpen: noop, onRetry: noop, background };
+  assert.ok(!render(React.createElement(BotList, { state: state(), ...props })).includes('Background settings'), 'no Bots, nothing to keep running');
+  assert.ok(!render(React.createElement(BotList, { state: state({ availability: undefined }), ...props })).includes('Background settings'));
+  const html = render(React.createElement(BotList, { state: state({ bots: [bot()] }), ...props }));
+  assert.ok(html.indexOf('bots-grid') >= 0 && html.indexOf('bots-grid') < html.indexOf('Background settings'), 'under the Bots');
+});
+
+test('the page offers keeping the Mac awake and opening at login below the Bots, and the first follows the setting', async () => {
+  const bots = await pageBots({ kind: 'list' }, [bot({ botId: 'a', name: 'Alpha' })]);
+  const page = (extra: Record<string, unknown> = {}) => render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub([], extra), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
+  const keepAwake = (html: string) => /<button[^>]*role="switch"[^>]*aria-label="Keep this Mac awake while Bots are working"[^>]*>/.exec(html)?.[0] ?? '';
+  const off = page();
+  assert.match(off, /Running in the background/);
+  assert.match(off, /Open LingXi in the background when you log in/);
+  assert.match(off, /Available in the installed app\./, 'a window with no host to ask is not in the installed app');
+  assert.ok(off.indexOf('Alpha') < off.indexOf('Running in the background'));
+  assert.match(keepAwake(off), /aria-checked="false"/);
+  assert.match(keepAwake(page({ bootstrap: { runtimes: [], settings: { botsKeepAwake: true } } })), /aria-checked="true"/);
+  assert.match(keepAwake(page({ bootstrap: { runtimes: [], settings: { botsKeepAwake: false } } })), /aria-checked="false"/);
+  assert.match(keepAwake(page({ bootstrap: { runtimes: [], settings: {} } })), /aria-checked="false"/, 'never set is off');
+});
+
+test('a Bot\'s own page and the form that makes a Bot do not carry the settings of the list', async () => {
+  for (const view of [{ kind: 'detail', botId: 'a' }, { kind: 'create' }] as const) {
+    const bots = await pageBots(view, [bot({ botId: 'a', name: 'Alpha' })]);
+    const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
+    assert.ok(!html.includes('Running in the background'), view.kind);
+  }
 });
 
 // ---- The window around the page ----

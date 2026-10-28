@@ -326,6 +326,7 @@ export class SettingsStore {
     telemetryEnabled?: boolean;
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;
+    botsKeepAwake?: boolean;
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
@@ -368,6 +369,9 @@ export class SettingsStore {
     if ('collapseThoughtsByDefault' in patch && typeof patch.collapseThoughtsByDefault !== 'boolean') {
       throw new Error('invalid collapseThoughtsByDefault');
     }
+    if ('botsKeepAwake' in patch && typeof patch.botsKeepAwake !== 'boolean') {
+      throw new Error('invalid botsKeepAwake');
+    }
     if ('theme' in patch) {
       if (patch.theme !== 'dark' && patch.theme !== 'light' && patch.theme !== 'system') {
         throw new Error('invalid theme');
@@ -400,6 +404,9 @@ export class SettingsStore {
     }
     if (typeof patch.collapseThoughtsByDefault === 'boolean') {
       this.settings.collapseThoughtsByDefault = patch.collapseThoughtsByDefault;
+    }
+    if (typeof patch.botsKeepAwake === 'boolean') {
+      this.settings.botsKeepAwake = patch.botsKeepAwake;
     }
     this.persist();
     return this.getPublic();

@@ -15,6 +15,9 @@ import {
   CH_BOTS_DELETE,
   CH_BOTS_GET,
   CH_BOTS_LIST,
+  CH_BOTS_LOGIN_ITEM_GET,
+  CH_BOTS_LOGIN_ITEM_SET,
+  CH_BOTS_LOGIN_ITEMS_OPEN,
   CH_BOTS_MEMORY_DELETE,
   CH_BOTS_MEMORY_LIST,
   CH_BOTS_MEMORY_READ,
@@ -276,6 +279,7 @@ export interface LingxiApi {
     telemetryEnabled?: boolean;
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;
+    botsKeepAwake?: boolean;
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
@@ -502,6 +506,11 @@ const api: LingxiApi = {
       onChanged: callback => subscribe(CH_BOTS_TASKS_CHANGED, callback),
     },
     onPromptSent: callback => subscribe(CH_BOTS_PROMPT_SENT, callback),
+    loginItem: {
+      status: () => ipcRenderer.invoke(CH_BOTS_LOGIN_ITEM_GET),
+      set: enabled => ipcRenderer.invoke(CH_BOTS_LOGIN_ITEM_SET, enabled),
+      openSettings: () => ipcRenderer.invoke(CH_BOTS_LOGIN_ITEMS_OPEN),
+    },
   } satisfies BotsApi,
   bootstrap: () => ipcRenderer.invoke(CH_BOOTSTRAP) as Promise<BootstrapState>,
   settings: () => ipcRenderer.invoke(CH_SETTINGS_GET) as Promise<PublicSettings>,

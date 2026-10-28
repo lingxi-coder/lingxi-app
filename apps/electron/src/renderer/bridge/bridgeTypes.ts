@@ -239,6 +239,8 @@ export interface UseBridge {
   cleanupPluginSecretsAfterUninstall?(pluginId: string, lastScopeRemoved: true): Promise<PluginSecretCleanupResult>;
   setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
   setCollapseThoughtsByDefault(collapseThoughtsByDefault: boolean): Promise<void>;
+  /** Keep this computer awake while Bots work; the host holds the preference and acts on it. */
+  setBotsKeepAwake(botsKeepAwake: boolean): Promise<void>;
   /**
    * Writes the WHOLE notification-preferences object at once, like
    * `setVoicePreferences`. The main process pushes the result straight at

@@ -15,6 +15,7 @@ import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
 import type { RemoteControlUi } from './remoteControl/rendererIpc.js';
 import { CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSION_SHOWN, type BotSessionRefUi } from '../shared/bots.js';
+import type { KeepAwake } from './bots/keepAwake.js';
 import type { BotsUi } from './bots/rendererIpc.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
@@ -535,6 +536,7 @@ export class HostController {
   private offNativeAudio?: () => void;
   private scheduled?: ScheduledTaskService;
   private notifier?: HostNotifier;
+  private keepAwake?: KeepAwake;
 
   constructor(
     private readonly settings: SettingsStore,
@@ -650,6 +652,13 @@ export class HostController {
    * be pushed at it. `CH_SETTINGS_UPDATE` above is the one writer.
    */
   attachNotifier(notifier: HostNotifier): void { this.notifier = notifier; }
+
+  /**
+   * Like the notifier, the blocker that keeps the computer awake has to be told
+   * when the owner turns the preference on or off, or it would hold on until
+   * the Bots' work was over, or never begin.
+   */
+  attachKeepAwake(keepAwake: KeepAwake): void { this.keepAwake = keepAwake; }
 
   attachGit(service: GitService): void {
     this.git = service;
@@ -874,7 +883,7 @@ export class HostController {
       this.assertSender(event);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
-      if (keys.some((key) => key !== 'telemetryEnabled' && key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'voiceRevision' && key !== 'notifications' && key !== 'modelPickerVisibility' && key !== 'sidebar')) throw new Error('unsupported setting');
+      if (keys.some((key) => key !== 'telemetryEnabled' && key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'botsKeepAwake' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'voiceRevision' && key !== 'notifications' && key !== 'modelPickerVisibility' && key !== 'sidebar')) throw new Error('unsupported setting');
       const restartsBridge = 'apiBaseUrl' in patch || ('telemetryEnabled' in patch && patch.telemetryEnabled === true);
       if (restartsBridge) this.assertNoActiveTurn();
       // `model` is applied to a live session through `set_model`, then mirrored
@@ -889,6 +898,7 @@ export class HostController {
         telemetryEnabled?: boolean;
         theme?: 'dark' | 'light' | 'system';
         collapseThoughtsByDefault?: boolean;
+        botsKeepAwake?: boolean;
         model?: string | null;
         apiBaseUrl?: string | null;
         voice?: unknown;
@@ -917,6 +927,7 @@ export class HostController {
       }
       if ('telemetryEnabled' in patch && patch.telemetryEnabled === false) await this.bridge.disableTelemetry();
       if ('notifications' in patch) this.notifier?.setPreferences(result.notifications);
+      if ('botsKeepAwake' in patch) this.keepAwake?.setEnabled(result.botsKeepAwake === true);
       if (restartsBridge) await this.restartIfConfigured();
       return result;
     });

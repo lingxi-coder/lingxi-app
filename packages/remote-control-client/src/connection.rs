@@ -679,7 +679,7 @@ impl ViewerConnection {
         }
     }
 
-    async fn local_app_request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+    async fn local_app_request(&self, method: &str, params: Value, timeout: Option<Duration>) -> Result<Value, RpcError> {
         let attempt = self.inner.core.lock().expect("core").live.clone()
             .ok_or_else(|| RpcError::code(RemoteErrorCode::Closed))?;
         let rpc = {
@@ -687,7 +687,7 @@ impl ViewerConnection {
             if !data.ready || data.disposed { return Err(RpcError::code(RemoteErrorCode::Closed)); }
             data.rpc.clone().ok_or_else(|| RpcError::code(RemoteErrorCode::Closed))?
         };
-        let value = rpc.request(method, Some(params), None).await?;
+        let value = rpc.request(method, Some(params), timeout).await?;
         let core = self.inner.core.lock().expect("core");
         if core.live.as_ref().is_none_or(|live| !Arc::ptr_eq(live, &attempt)) {
             return Err(RpcError::code(RemoteErrorCode::Closed));
@@ -697,7 +697,7 @@ impl ViewerConnection {
 
     /// List Local Apps explicitly shared by this desktop.
     pub async fn list_apps(&self) -> Result<Vec<crate::local_apps::RemoteLocalApp>, RpcError> {
-        let value = self.local_app_request("apps.list", serde_json::json!({})).await?;
+        let value = self.local_app_request("apps.list", serde_json::json!({}), None).await?;
         crate::local_apps::parse_list(value).ok_or_else(|| RpcError::new(RemoteErrorCode::Internal, "invalid apps.list result"))
     }
 
@@ -706,7 +706,7 @@ impl ViewerConnection {
         if !crate::local_apps::valid_id(app_id) {
             return Err(RpcError::new(RemoteErrorCode::InvalidParams, "invalid app id"));
         }
-        let value = self.local_app_request("apps.open", serde_json::json!({"app_id": app_id})).await?;
+        let value = self.local_app_request("apps.open", serde_json::json!({"app_id": app_id}), Some(Duration::from_secs(930))).await?;
         crate::local_apps::parse_open(value, app_id).ok_or_else(|| RpcError::new(RemoteErrorCode::Internal, "invalid apps.open result"))
     }
 

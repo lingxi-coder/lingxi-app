@@ -123,10 +123,20 @@ export class PeerHost {
     this.links.set(connId, new LinkImpl(connId, this));
     return new Promise<string>((resolve, reject) => {
       const timer = this.clock.setTimeout(() => this.failAnswer(connId, new Error('timed out waiting for the WebRTC answer')), ANSWER_TIMEOUT_MS);
-      this.pending.set(connId, { resolve, reject, timer });
-      this.openPort().then(
-        (port) => port.post(request),
-        (error: unknown) => this.failAnswer(connId, error instanceof Error ? error : new Error(describeError(error))),
+      const pending = { resolve, reject, timer };
+      this.pending.set(connId, pending);
+      // Opening the window can finish after the peer was closed or replaced.
+      // Never create a renderer peer for an answer that no longer belongs to us.
+      Promise.resolve().then(() => this.pending.get(connId) === pending ? this.openPort() : undefined).then(
+        (port) => {
+          if (!port || this.pending.get(connId) !== pending) return;
+          try { port.post(request); } catch (error) {
+            this.failAnswer(connId, error instanceof Error ? error : new Error(describeError(error)));
+          }
+        },
+        (error: unknown) => {
+          if (this.pending.get(connId) === pending) this.failAnswer(connId, error instanceof Error ? error : new Error(describeError(error)));
+        },
       );
     });
   }
@@ -187,7 +197,7 @@ export class PeerHost {
     const window = this.createWindow();
     this.window = window;
     window.onGone((reason) => this.windowGone(window, reason));
-    const port = window.open().then((opened) => {
+    const port = Promise.resolve().then(() => window.open()).then((opened) => {
       opened.onMessage((data) => this.receive(window, data));
       return opened;
     });

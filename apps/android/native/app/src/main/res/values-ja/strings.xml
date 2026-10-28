@@ -2457,6 +2457,7 @@
     <string name="local_app_agent_in_app_wake_unsupported">アプリ内ブラウザの Agent リクエストは現在続行できません。保留中のリクエストは元のブラウザに残ります。元のページに戻るか、デフォルトのブラウザで新しく開始してください。</string>
     <string name="local_app_browser_intro">アプリはデフォルトのブラウザで開きます。アプリ内ブラウザも選べますが、ブラウザのセッションは異なる場合があります。モデルの認証情報、Agent の認可、ツールの承認は LingXi が管理します。</string>
     <string name="local_app_browser_lifetime">iOS 26 は確認済み Agent リクエストに限られたバックグラウンド時間を提供しますが、中断されることがあります。ページが停止した場合は LingXi に戻って開き直してください。長時間のタスクにはパソコンをお勧めします。</string>
+    <string name="local_app_agent_browser_return">Agent リクエストは開始したブラウザに保持されています。「開き方を選択」で同じブラウザに戻ってください。</string>
     <string name="local_app_host_recommendation">長時間動作するアプリはパソコンをお勧めします。このスマートフォンでも実行できます。</string>
     <string name="remote_app_revision">リビジョン %1$s</string>
     <string name="remote_apps_browse">パソコンが共有したアプリを見る</string>

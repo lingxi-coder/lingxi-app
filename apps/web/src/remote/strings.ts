@@ -116,7 +116,7 @@ export const strings = {
   appsListFailed: text('无法读取应用列表，请重试。', 'Could not load apps. Try again.'),
   appsOpenFailed: text('无法打开应用，请检查电脑连接后重试。', 'Could not open the app. Check the computer connection and try again.'),
   appsPopupBlocked: text('浏览器拦截了新窗口，请允许弹出窗口后重试。', 'The browser blocked the new window. Allow pop-ups and try again.'),
-  appsInvalidUrl: text('电脑返回了无效或过期的应用链接，请重试。', 'The computer returned an invalid or expired app link. Try again.'),
+  appsInvalidUrl: text('电脑返回了无效或过期的应用链接，请刷新应用列表后重试。', 'The computer returned an invalid or expired app link. Refresh the app list and try again.'),
   sessions: text('会话', 'Sessions'),
   noSessions: text('没有已共享的会话', 'No shared sessions'),
   noSessionsHelp: text('在电脑上的灵犀里打开一个会话，并开启它的远程访问后，会显示在这里。', 'Open a session in LingXi on the computer and allow remote access for it; it will show up here.'),

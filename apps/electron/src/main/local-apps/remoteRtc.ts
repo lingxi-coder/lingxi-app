@@ -46,7 +46,7 @@ export class LocalAppRtc {
     this.peers.get(sessionId)?.close();
     const conn = randomBytes(16).toString('base64url');
     let link: ReturnType<PeerHost['link']> | undefined;
-    const pending = new Set<AbortController>();
+    const pending = new Map<number, AbortController>();
     // Undici's Request follows its input signal through a weak reference to
     // the Request's controller. Keep the Request alive until cancellation or
     // completion so a stalled upstream is still aborted after garbage collection.
@@ -58,7 +58,7 @@ export class LocalAppRtc {
       if (closed) return;
       closed = true;
       resolveEnded();
-      for (const controller of pending) controller.abort();
+      for (const controller of pending.values()) controller.abort();
       link?.close('session_ended');
       signal.removeEventListener('abort', close);
       if (this.peers.get(sessionId)?.close === close) this.peers.delete(sessionId);
@@ -73,9 +73,10 @@ export class LocalAppRtc {
       const transport = new MessageTransport(link, { maxInboundMessageBytes: 64 * 1024 });
       transport.onClose(close);
       transport.onMessage(text => { void (async () => {
-        let data: { id?: unknown; method?: unknown; path?: unknown; headers?: unknown };
+        let data: { id?: unknown; cancel?: unknown; method?: unknown; path?: unknown; headers?: unknown };
         try { data = JSON.parse(text); } catch { transport.close('protocol_error'); return; }
-        if (!data || !Number.isSafeInteger(data.id) || typeof data.path !== 'string' || data.path.length > 4096 || !['GET', 'HEAD'].includes(String(data.method)) || active >= MAX_IN_FLIGHT) { transport.close('protocol_error'); return; }
+        if (data && Number.isSafeInteger(data.id) && data.cancel === true) { pending.get(data.id as number)?.abort(); return; }
+        if (!data || !Number.isSafeInteger(data.id) || pending.has(data.id as number) || typeof data.path !== 'string' || data.path.length > 4096 || !['GET', 'HEAD'].includes(String(data.method)) || active >= MAX_IN_FLIGHT) { transport.close('protocol_error'); return; }
         // URL parsing alone normalizes dot segments, so validate the original form too.
         const path = data.path;
         if (!path.startsWith('/') || path.startsWith('//') || /[\\\r\n\0#]/.test(path) || /%(?:2f|5c|00)/i.test(path) || /(?:^|\/)(?:\.|%2e){1,2}(?:\/|\?|$)/i.test(path) || /^\/__lingxi_remote(?:_|\/|\?|$)/i.test(path)) { transport.close('protocol_error'); return; }
@@ -89,18 +90,19 @@ export class LocalAppRtc {
         } catch { transport.close('protocol_error'); return; }
         headers.set(LOCAL_APP_CREDENTIALS_HEADER, 'omit');
         active++;
-        const controller = new AbortController(); pending.add(controller);
+        const controller = new AbortController(); pending.set(data.id as number, controller);
         const timer = setTimeout(() => { controller.abort(); close(); }, this.options.requestTimeoutMs ?? TIMEOUT);
         let size = 0;
         let resourceRequest: Request | undefined;
+        let response: Response | undefined;
         try {
-          if (closed || controller.signal.aborted || !await this.options.current(run) || closed || controller.signal.aborted) throw new Error('expired');
+          const abort = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+          if (closed || controller.signal.aborted || !await Promise.race([this.options.current(run), abort]) || closed || controller.signal.aborted) throw new Error('expired');
           const url = new URL(path, request.url);
           if (url.origin !== new URL(request.url).origin) throw new Error('invalid origin');
-          const abort = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('timeout')), { once: true }));
           resourceRequest = new Request(url, { method: data.method as string, headers, signal: controller.signal });
           pendingRequests.add(resourceRequest);
-          const response = await Promise.race([this.options.resource(run, resourceRequest), abort]);
+          response = await Promise.race([this.options.resource(run, resourceRequest), abort]);
           if (response.status >= 300 && response.status < 400 && response.status !== 304) throw new Error('redirect');
           const type = response.headers.get('content-type')?.toLowerCase() ?? '';
           const length = Number(response.headers.get('content-length'));
@@ -117,12 +119,15 @@ export class LocalAppRtc {
             try { for (;;) { const next = await Promise.race([reader.read(), abort]); if (next.done) break; size += next.value.byteLength; total += next.value.byteLength; if (size > MAX_RESPONSE || total > MAX_TOTAL) throw new Error('too large'); parts.push(next.value); } }
             finally { if (size > MAX_RESPONSE || total > MAX_TOTAL || controller.signal.aborted) void reader.cancel().catch(() => undefined); }
           }
-          if (closed || controller.signal.aborted || !await this.options.current(run) || closed || controller.signal.aborted) throw new Error('expired');
+          if (closed || controller.signal.aborted || !await Promise.race([this.options.current(run), abort]) || closed || controller.signal.aborted) throw new Error('expired');
           const body = Buffer.concat(parts.map(part => Buffer.from(part)), size).toString('base64');
           await transport.send(JSON.stringify({ id: data.id, status: response.status, statusText: response.statusText, headers: output, body }));
         } catch {
-          if (!closed) await transport.send(JSON.stringify({ id: data.id, fallback: true })).catch(() => close());
-        } finally { total -= size; clearTimeout(timer); pending.delete(controller); if (resourceRequest) pendingRequests.delete(resourceRequest); active--; }
+          const cancelled = controller.signal.aborted;
+          controller.abort();
+          if (response?.body && !response.body.locked) void response.body.cancel().catch(() => undefined);
+          if (!closed && !cancelled) await transport.send(JSON.stringify({ id: data.id, fallback: true })).catch(() => close());
+        } finally { total -= size; clearTimeout(timer); pending.delete(data.id as number); if (resourceRequest) pendingRequests.delete(resourceRequest); active--; }
       })(); });
       const result = await Promise.race([answerPromise.then(answer => ({ answer })), ended.then(() => undefined)]);
       if (!result) return new Response(null, { status: 403 });

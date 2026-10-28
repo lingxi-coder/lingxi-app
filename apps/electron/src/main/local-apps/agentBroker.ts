@@ -636,6 +636,18 @@ export class LocalAppAgentBroker {
     const runs = await this.exclusive(async () => [...this.active.values()].filter(active => active.record.owner.appId === appId));
     await Promise.all(runs.map(active => this.terminate(requestKey(active.record.owner, active.record.publicRunId), 'cancelled', { code: 'application_stopped', message: reason.slice(0, 1024) })));
   }
+  /** Session expiry must cancel its actual tasks, never a different session's idempotent retry. */
+  async cancelRemoteSession(caller: LocalAppAgentOwner): Promise<void> {
+    const principal = owner(caller);
+    if (!principal.remoteSessionId) throw new LocalAppAgentError('invalid_owner', 'A remote browser session is required.');
+    await this.initialize();
+    const runs = await this.exclusive(async () => [...this.active.values()].filter(active => {
+      const taskOwner = active.record.owner;
+      return taskOwner.appId === principal.appId && taskOwner.releaseDigest === principal.releaseDigest
+        && taskOwner.invocationId === principal.invocationId && taskOwner.remoteSessionId === principal.remoteSessionId;
+    }));
+    await Promise.all(runs.map(active => this.terminate(requestKey(active.record.owner, active.record.publicRunId), 'cancelled', { code: 'session_ended', message: 'The remote browser session ended.' })));
+  }
   private async terminate(recordKey: string, state: 'cancelled' | 'failed' | 'interrupted', error: { code: string; message: string }): Promise<void> {
     const active = this.active.get(recordKey); active?.controller.abort();
     await this.finish(recordKey, state, error, undefined, active?.lastUsage);

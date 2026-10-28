@@ -240,6 +240,7 @@ class RemoteControlManager(
 
     /** Dial [hostId]; dialling the one already connected only nudges it. */
     suspend fun connect(hostId: String) {
+        connectionEpoch.incrementAndGet()
         screenGeneration.incrementAndGet()
         sessionLifecycle.withLock { client().connect(hostId) }
     }
@@ -250,12 +251,14 @@ class RemoteControlManager(
     suspend fun retry() = client().retry()
 
     suspend fun forget(hostId: String) {
+        connectionEpoch.incrementAndGet()
         client().forgetHost(hostId)
         mutableHosts.update { state -> state.copy(hosts = state.hosts.map { if (it.hostId == hostId) it.copy(paired = false) else it }) }
     }
 
     /** The screens went away: end the connection and stop watching. */
     fun closeConnection() {
+        connectionEpoch.incrementAndGet()
         val mine = screenGeneration.incrementAndGet()
         val binding = mutableClient.value ?: return
         scope.launch {
@@ -347,10 +350,10 @@ class RemoteControlManager(
 
     suspend fun listApps(hostId: String): List<RemoteLocalAppFfi> = appRequest(hostId) { it.listApps() }
 
-    suspend fun openApp(hostId: String, appId: String): String = appRequest(hostId) { client ->
+    suspend fun openApp(hostId: String, appId: String, revision: ULong): String = appRequest(hostId) { client ->
         val result = client.openApp(appId)
         val uri = runCatching { java.net.URI(result.url) }.getOrNull()
-        check(result.appId == appId && result.expiresAt > System.currentTimeMillis().toULong() &&
+        check(result.appId == appId && result.revision == revision && result.expiresAt > System.currentTimeMillis().toULong() &&
             uri?.scheme.equals("https", ignoreCase = true) && !uri?.host.isNullOrBlank() && uri?.userInfo == null && !uri?.rawFragment.isNullOrBlank()) {
             "Invalid or expired application link"
         }

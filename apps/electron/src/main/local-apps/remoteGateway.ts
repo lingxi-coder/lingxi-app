@@ -64,15 +64,26 @@ export class LocalAppRemoteGateway {
     const server = this.server = createServer((req, res) => { void this.handle(req, res); });
     server.on('upgrade', (req, socket, head) => { void this.upgrade(req, socket, head); });
     server.headersTimeout = 15_000; server.requestTimeout = 120_000;
-    this.listening = new Promise((resolve, reject) => { server.once('error', reject); server.listen(this.port, '127.0.0.1', () => resolve()); });
+    this.listening = new Promise((resolve, reject) => {
+      const fail = (error: Error) => {
+        if (this.server === server) { this.server = undefined; this.listening = undefined; }
+        reject(error);
+      };
+      server.once('error', fail);
+      server.listen(this.port, '127.0.0.1', () => resolve());
+    });
     return this.listening;
   }
-  async open(run: RemoteRun, owner: RemoteOwner): Promise<{ app_id: string; revision: number; url: string; expires_at: number }> {
+  async open(run: RemoteRun, owner: RemoteOwner, signal?: AbortSignal): Promise<{ app_id: string; revision: number; url: string; expires_at: number }> {
+    signal?.throwIfAborted();
     const generation = this.generation;
     if (!owner.accountUid || !owner.deviceId || !owner.hostId || !await this.adapter.current(run)) throw new Error('Application run is unavailable');
+    signal?.throwIfAborted();
     this.sweep(); if (this.sessions.size + this.tickets.size >= 256) throw new Error('Too many remote sessions');
     await this.listen();
+    signal?.throwIfAborted();
     if (!await this.adapter.current(run) || this.generation !== generation) throw new Error('Application run is unavailable');
+    signal?.throwIfAborted();
     this.sweep(); if (this.sessions.size + this.tickets.size >= 256) throw new Error('Too many remote sessions');
     const expires = Date.now() + SESSION_LIFETIME;
     let origin: string;
@@ -246,7 +257,9 @@ export class LocalAppRemoteGateway {
       session.sockets.add(socket);
       const headers: Record<string, string | string[] | undefined> = { ...req.headers, host: `127.0.0.1:${port}` }; const appCookies = (req.headers.cookie ?? '').split(';').map(part => part.trim()).filter(part => part && !part.startsWith(COOKIE + '=') && !part.startsWith(DEV_COOKIE + '='));
       if (appCookies.length) headers.cookie = appCookies.join('; '); else delete headers.cookie;
-      delete headers['x-forwarded-for']; delete headers['x-forwarded-host']; delete headers['x-forwarded-proto'];
+      for (const key of Object.keys(headers)) if (key === 'forwarded' || key === 'x-real-ip' || key.startsWith('x-forwarded-')) delete headers[key];
+      const origin = new URL(session.origin);
+      headers['x-forwarded-host'] = origin.host; headers['x-forwarded-proto'] = origin.protocol.slice(0, -1);
       const upstream = httpRequest({ host: '127.0.0.1', port, path: match ? match[2] ?? '/' : path, headers });
       socket.once('close', () => { session.sockets.delete(socket); upstream.destroy(); }); socket.on('error', () => socket.destroy());
       upstream.once('upgrade', (response, peer, remainder) => {

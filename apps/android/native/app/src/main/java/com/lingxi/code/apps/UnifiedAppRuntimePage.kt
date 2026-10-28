@@ -32,6 +32,7 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
     var needsConsent by remember(appId) { mutableStateOf(false) }
     var needsBrowserConsent by remember(appId) { mutableStateOf(false) }
     var pendingChoose by remember(appId) { mutableStateOf(false) }
+    var pendingOpen by remember(appId) { mutableStateOf(false) }
     var opened by rememberSaveable(appId) { mutableStateOf(appReview != null) }
     fun display(value: AppLaunch, chooseHandler: Boolean = false) {
         LocalAppBrowser.open(context, value.url, chooseHandler)
@@ -39,7 +40,7 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
     }
     suspend fun prepare(openBrowser: Boolean, chooseHandler: Boolean = false) {
         if (busy) return
-        busy = true; error = null; pendingChoose = chooseHandler
+        busy = true; error = null; pendingChoose = chooseHandler; pendingOpen = openBrowser
         try {
             val app = apps.get(appId)
             val current = apps.release(appId, app.currentRevision); release = current
@@ -77,6 +78,7 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Button(enabled = !busy, onClick = { scope.launch { prepare(true) } }) { Text(if (launch == null) "启动并在浏览器打开" else "返回浏览器") }
         TextButton(enabled = !busy, onClick = { scope.launch { prepare(true, chooseHandler = true) } }) { Text(stringResource(R.string.remote_apps_choose)) }
+        if (appReview != null) Text(stringResource(R.string.local_app_agent_browser_return), style = MaterialTheme.typography.bodySmall)
         Text(stringResource(R.string.local_app_host_recommendation), style = MaterialTheme.typography.bodySmall)
         TextButton(enabled = !busy, onClick = { onShowDetails(appId) }) { Text("应用设置与 Agent 授权") }
         TextButton(enabled = !busy, onClick = { scope.launch { try { apps.stop(appId); onClose() } catch (failure: Exception) { error = failure.message } } }) { Text("停止应用与 Agent 任务") }
@@ -90,12 +92,12 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
         title = { Text("允许浏览器使用期间运行") },
         text = { Text("灵犀需要在后台保留此应用的本地服务，并显示持续运行通知。可从通知或管理页面停止应用与 Agent 任务。授权仅适用于版本 ${selected.revision}（${selected.digest.take(16)}）；更新内容后需要重新允许。") },
         confirmButton = { TextButton(onClick = { scope.launch {
-            try { apps.setKeepRunning(appId, selected.digest, true); needsBrowserConsent = false; prepare(true, pendingChoose) }
+            try { apps.setKeepRunning(appId, selected.digest, true); needsBrowserConsent = false; prepare(pendingOpen, pendingChoose) }
             catch (failure: Exception) { error = failure.message }
-        } }) { Text("允许并打开浏览器") } },
+        } }) { Text(if (pendingOpen) "允许并打开浏览器" else "允许") } },
         dismissButton = { TextButton(onClick = { needsBrowserConsent = false; onClose() }) { Text("取消") } },
     )
     if (needsConsent && selected != null) AlertDialog(onDismissRequest = onClose, title = { Text("授权此版本运行") }, text = { Text("此版本将运行应用代码。版本 ${selected.revision}，内容 ${selected.digest.take(16)}。") }, confirmButton = {
-        TextButton(onClick = { scope.launch { try { apps.grant(appId, selected.digest); needsConsent = false; prepare(true, pendingChoose) } catch (failure: Exception) { error = failure.message } } }) { Text("允许此版本") }
+        TextButton(onClick = { scope.launch { try { apps.grant(appId, selected.digest); needsConsent = false; prepare(pendingOpen, pendingChoose) } catch (failure: Exception) { error = failure.message } } }) { Text("允许此版本") }
     }, dismissButton = { TextButton(onClick = onClose) { Text("取消") } })
 }

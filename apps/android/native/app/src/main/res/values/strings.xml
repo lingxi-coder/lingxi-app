@@ -2468,6 +2468,7 @@
     <string name="remote_apps_choose">选择打开方式</string>
     <string name="remote_sessions_title">共享会话</string>
     <string name="remote_app_revision">版本 %1$s</string>
+    <string name="local_app_agent_browser_return">Agent 请求保留在发起请求的浏览器中。请使用“选择打开方式”返回同一浏览器。</string>
     <string name="local_app_host_recommendation">长时间运行的应用建议部署在电脑上；也可以继续在手机上运行。</string>
     <string name="remote_apps_browse">浏览电脑上共享的应用</string>
     <string name="local_app_agent_continue_default">请求来自默认浏览器：开始并继续</string>

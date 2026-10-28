@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useLayoutEffect, useMemo } from 'react';
 import type { Locale } from '../utils/locale';
 import { LocalAppsController, type AppWindow } from './appsController';
 import { t } from './strings';
@@ -9,7 +9,7 @@ import type { ViewerConnection } from './viewerConnection';
 export function LocalApps({ locale, connection, ready }: { locale: Locale; connection: ViewerConnection; ready: boolean }) {
   const controller = useMemo(() => new LocalAppsController(connection), [connection]);
   const state = useStore(controller)!;
-  useEffect(() => {
+  useLayoutEffect(() => {
     controller.activate();
     return () => controller.deactivate();
   }, [controller]);

@@ -2468,6 +2468,7 @@
     <string name="remote_apps_choose">Choose how to open</string>
     <string name="remote_sessions_title">Shared sessions</string>
     <string name="remote_app_revision">Revision %1$s</string>
+    <string name="local_app_agent_browser_return">The Agent request remains in the browser where it started. Use “Choose how to open” to return to that same browser.</string>
     <string name="local_app_host_recommendation">For long-running apps, a computer is recommended. You can also run apps on this phone.</string>
     <string name="remote_apps_browse">Browse apps shared by a computer</string>
     <string name="local_app_agent_continue_default">Request came from default browser: start and continue</string>

@@ -1,6 +1,7 @@
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { randomBytes } from 'node:crypto';
+import * as zlib from 'node:zlib';
 import { LOCAL_APP_CREDENTIALS_HEADER } from './serviceCookies.js';
 
 interface ServiceLease {
@@ -36,6 +37,9 @@ export class LocalAppServiceBroker {
     const headers = new Headers(request.headers); for (const header of ['host', 'origin', 'connection', 'upgrade', LOCAL_APP_CREDENTIALS_HEADER]) headers.delete(header);
     headers.delete('cookie');
     if (cookieHeader) headers.set('cookie', cookieHeader);
+    // Byte ranges refer to the transferred representation. Avoid transparent
+    // decompression changing their offsets and Content-Range metadata.
+    if (headers.has('range')) headers.set('accept-encoding', 'identity');
     const signal = AbortSignal.any([request.signal, lease.controller.signal]);
     let body: BodyInit | null | undefined = request.body;
     // Custom protocol requests do not always retain Content-Length. Materialize
@@ -54,6 +58,24 @@ export class LocalAppServiceBroker {
       ...(request.method !== 'GET' && request.method !== 'HEAD' ? { body, duplex: 'half' } : {}),
     } as RequestInit);
     signal.throwIfAborted();
+    // Node fetch transparently decodes supported Content-Encoding values while
+    // retaining the upstream representation's headers. Do not advertise those
+    // encodings or lengths for the decoded stream delivered to the app.
+    const coding = response.headers.get('content-encoding');
+    const supported = new Set(['gzip', 'x-gzip', 'deflate', 'br']);
+    if (typeof (zlib as { createZstdDecompress?: unknown }).createZstdDecompress === 'function') supported.add('zstd');
+    const codings = coding?.toLowerCase().split(',').map(value => value.trim()) ?? [];
+    if (response.body && request.method !== 'HEAD' && codings.length && codings.every(value => supported.has(value))) {
+      if (response.status === 206) {
+        // A backend may ignore identity and return a compressed partial body.
+        // Fetch decodes it, so its byte offsets cannot be forwarded correctly.
+        await response.body.cancel().catch(() => undefined);
+        return new Response('Compressed partial responses are unavailable', { status: 502 });
+      }
+      const decodedHeaders = new Headers(response.headers);
+      for (const name of ['content-encoding', 'content-length', 'content-md5', 'digest', 'etag']) decodedHeaders.delete(name);
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers: decodedHeaders });
+    }
     return response;
   }
   private listen(): Promise<number> {

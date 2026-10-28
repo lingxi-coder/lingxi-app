@@ -2138,6 +2138,7 @@
   "remote_apps_choose": "開き方を選択",
   "remote_sessions_title": "共有セッション",
   "remote_app_revision": "リビジョン %1$s",
+  "local_app_agent_browser_return": "Agent リクエストは開始したブラウザに保持されています。「開き方を選択」で同じブラウザに戻ってください。",
   "local_app_host_recommendation": "長時間動作するアプリはパソコンをお勧めします。このスマートフォンでも実行できます。",
   "remote_apps_browse": "パソコンが共有したアプリを見る",
   "remote_apps_title": "パソコンが共有したアプリ",

@@ -25,6 +25,7 @@ export class LocalAppsController {
   private generation = 0;
   private listGeneration = 0;
   private popup: AppWindow | null = null;
+  private popupWatch: ReturnType<typeof setInterval> | undefined;
   private active = false;
   private online = false;
   private unsubscribe: (() => void) | undefined;
@@ -58,6 +59,8 @@ export class LocalAppsController {
   private invalidate(): void {
     this.generation += 1;
     this.listGeneration += 1;
+    if (this.popupWatch !== undefined) clearInterval(this.popupWatch);
+    this.popupWatch = undefined;
     this.popup?.close();
     this.popup = null;
     this.set({ apps: undefined, loading: false, opening: undefined, error: undefined });
@@ -78,18 +81,31 @@ export class LocalAppsController {
   }
   /** Reserve a window synchronously from the click before asking the host for a URL. */
   async open(appId: string, reserve: () => AppWindow | null): Promise<void> {
-    if (!this.active || !this.online || this.state.opening !== undefined || !this.state.apps?.some((app) => app.app_id === appId)) return;
+    if (!this.active || !this.online || this.state.opening !== undefined) return;
+    const selected = this.state.apps?.find((app) => app.app_id === appId);
+    if (selected === undefined) return;
     let popup: AppWindow | null;
     try { popup = reserve(); } catch { popup = null; }
     if (popup === null) { this.set({ error: 'popup' }); return; }
     try { popup.opener = null; } catch { popup.close(); this.set({ error: 'popup' }); return; }
     this.popup = popup;
+    // A user can close the reserved window while the host is still starting.
+    // Release the UI promptly; the eventual response must not navigate a new window.
+    this.popupWatch = setInterval(() => {
+      if (this.popup === popup && popup.closed) {
+        clearInterval(this.popupWatch);
+        this.popupWatch = undefined;
+        this.popup = null;
+        this.set({ opening: undefined });
+      }
+    }, 500);
     const generation = this.generation;
     this.set({ opening: appId, error: undefined });
     try {
-      const result: unknown = await this.connection.request('apps.open', { app_id: appId });
+      // Desktop allows up to 15 minutes for authorization and startup.
+      const result: unknown = await this.connection.request('apps.open', { app_id: appId }, { timeoutMs: 930_000 });
       if (!this.active || generation !== this.generation || this.popup !== popup || popup.closed) return;
-      if (!isAppsOpenResult(result) || result.app_id !== appId || result.expires_at <= this.now()) {
+      if (!isAppsOpenResult(result) || result.app_id !== appId || result.revision !== selected.revision || result.expires_at <= this.now()) {
         popup.close();
         this.set({ error: 'invalid' });
       } else {
@@ -98,7 +114,12 @@ export class LocalAppsController {
     } catch {
       if (this.active && generation === this.generation && this.popup === popup) { popup.close(); this.set({ error: 'open' }); }
     } finally {
-      if (this.popup === popup) { this.popup = null; this.set({ opening: undefined }); }
+      if (this.popup === popup) {
+        if (this.popupWatch !== undefined) clearInterval(this.popupWatch);
+        this.popupWatch = undefined;
+        this.popup = null;
+        this.set({ opening: undefined });
+      }
     }
   }
 }

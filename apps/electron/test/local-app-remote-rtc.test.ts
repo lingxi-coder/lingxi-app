@@ -252,3 +252,60 @@ test('revocation aborts a stalled resource after request garbage-collection pres
   for (let i = 0; i < 5; i++) { gc?.(); await new Promise(resolve => setImmediate(resolve)); }
   controller.abort(); assert.equal(resourceSignal?.aborted, true); rtc.dispose();
 });
+
+test('browser abort cancels the associated in-flight Desktop resource without replay', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const { LOCAL_APP_RTC_BROWSER_SOURCE } = await import('../src/main/local-apps/remoteRtcBrowser.js');
+  const origin = 'https://app.example';
+  let incoming: (bytes: Uint8Array) => void = () => {};
+  let ended: (reason: string) => void = () => {};
+  let resourceSignal: AbortSignal | undefined;
+  let started!: () => void; const resourceStarted = new Promise<void>(resolve => { started = resolve; });
+  let networkReads = 0;
+  const channel: any = { readyState: 'open', bufferedAmount: 0, send(bytes: Uint8Array) { incoming(bytes); } };
+  const host: FragmentLink = {
+    sendFragment(bytes) { const copy = Uint8Array.from(bytes); queueMicrotask(() => channel.onmessage({ data: copy.buffer })); },
+    onFragment(fn) { incoming = fn; }, onClose(fn) { ended = fn; }, close(reason) { ended(reason); },
+  };
+  const peerHost = { answer: async () => 'answer', link: () => host as PeerLink, dispose: () => host.close('disposed') } as unknown as PeerHost;
+  const rtc = new LocalAppRtc({ peerHost, current: async () => true, resource: async (_run, request) => {
+    resourceSignal = request.signal; started(); return new Promise<Response>(() => {});
+  } });
+  const session = new AbortController();
+  class FakePc {
+    iceGatheringState = 'complete'; localDescription = { sdp: 'offer' }; connectionState = 'connected';
+    createDataChannel() { return channel; } async createOffer() { return {}; }
+    async setLocalDescription() {} async setRemoteDescription() { channel.onopen(); } close() {}
+  }
+  const native = async (input: any, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(new URL(input, origin), init);
+    if (new URL(request.url).pathname === '/__lingxi_remote_rtc') return rtc.rtc(run, request, 'session', session.signal);
+    networkReads++; return new Response('fallback');
+  };
+  const window: any = { fetch: native, RTCPeerConnection: FakePc };
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  runInNewContext(LOCAL_APP_RTC_BROWSER_SOURCE, { window, RTCPeerConnection: FakePc, Request, Response, URL, TextEncoder, TextDecoder, Uint8Array, DOMException, location: { origin }, setTimeout: (fn: () => void, ms: number) => { const t = setTimeout(fn, ms); timers.push(t); return t; }, clearTimeout, atob });
+  await new Promise(resolve => setImmediate(resolve));
+  const controller = new AbortController();
+  const request = window.fetch(origin + '/slow', { credentials: 'omit', signal: controller.signal });
+  const rejected = assert.rejects(request, { name: 'AbortError' });
+  await resourceStarted; controller.abort(); await rejected;
+  assert.equal(resourceSignal?.aborted, true); assert.equal(networkReads, 0);
+  timers.forEach(clearTimeout); rtc.dispose();
+});
+
+test('duplicate in-flight RTC request IDs cannot alias cancellation', async () => {
+  const { client, rtc } = await setup(async () => new Promise<Response>(() => {}));
+  const closed = new Promise<void>(resolve => client.onClose(() => resolve()));
+  await client.send(JSON.stringify({ id: 1, method: 'GET', path: '/slow', headers: {} }));
+  await client.send(JSON.stringify({ id: 1, method: 'GET', path: '/other', headers: {} })).catch(() => undefined);
+  await closed; rtc.dispose();
+});
+
+test('RTC redirect fallback cancels the discarded upstream body', async () => {
+  let canceled = false;
+  const { rtc, client } = await setup(async () => new Response(new ReadableStream({ cancel() { canceled = true; } }), { status: 302, headers: { location: '/other' } }));
+  assert.equal((await exchange(client, { id: 1, method: 'GET', path: '/redirect', headers: {} })).fallback, true);
+  assert.equal(canceled, true);
+  rtc.dispose();
+});

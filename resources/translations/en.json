@@ -2143,6 +2143,7 @@
   "remote_apps_choose": "Choose how to open",
   "remote_sessions_title": "Shared sessions",
   "remote_app_revision": "Revision %1$s",
+  "local_app_agent_browser_return": "The Agent request remains in the browser where it started. Use “Choose how to open” to return to that same browser.",
   "local_app_host_recommendation": "For long-running apps, a computer is recommended. You can also run apps on this phone.",
   "remote_apps_browse": "Browse apps shared by a computer",
   "remote_apps_title": "Desktop apps",

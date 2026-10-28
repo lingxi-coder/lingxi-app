@@ -301,11 +301,11 @@ private fun RemoteSessionList(
         catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { appError = true }
     }
-    fun openApp(appId: String, choose: Boolean) {
+    fun openApp(app: RemoteLocalAppFfi, choose: Boolean) {
         if (busy) return
         scope.launch {
             busy = true; appError = false
-            try { LocalAppBrowser.open(context, manager.openApp(hostId, appId), choose) }
+            try { LocalAppBrowser.open(context, manager.openApp(hostId, app.appId, app.revision), choose) }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { appError = true }
             finally { busy = false }
@@ -344,8 +344,8 @@ private fun RemoteSessionList(
                     if (app.summary.isNotBlank()) Text(app.summary, color = t.text2, fontSize = 13.sp)
                     Text(stringResource(R.string.remote_app_revision, app.revision.toString()), color = t.text3, fontSize = 12.sp)
                     Row {
-                        TextButton(enabled = !busy, onClick = { openApp(app.appId, false) }) { Text(stringResource(R.string.local_app_v2_open)) }
-                        TextButton(enabled = !busy, onClick = { openApp(app.appId, true) }) { Text(stringResource(R.string.remote_apps_choose)) }
+                        TextButton(enabled = !busy, onClick = { openApp(app, false) }) { Text(stringResource(R.string.local_app_v2_open)) }
+                        TextButton(enabled = !busy, onClick = { openApp(app, true) }) { Text(stringResource(R.string.remote_apps_choose)) }
                     }
                 }
             }

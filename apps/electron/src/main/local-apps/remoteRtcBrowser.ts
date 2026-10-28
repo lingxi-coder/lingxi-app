@@ -22,8 +22,8 @@ export const LOCAL_APP_RTC_BROWSER_SOURCE = `(()=>{
     const headers={}; for(const [key,value] of request.headers){if(!allowed.has(key)||key==='accept'&&value.includes('text/event-stream'))return fallback();headers[key]=value}
     const id=nextId++; let timer, abort;
     try {
-      const result=new Promise((resolve,reject)=>{pending.set(id,{resolve,reject});timer=setTimeout(()=>{pending.delete(id);reject(Error('timeout'))},15000);abort=()=>{pending.delete(id);reject(new DOMException('Aborted','AbortError'))};request.signal.addEventListener('abort',abort,{once:true});});
-      send({id,method:request.method,path:url.pathname+url.search,headers}); const msg=await result;
+      const result=new Promise((resolve,reject)=>{pending.set(id,{resolve,reject});timer=setTimeout(()=>{pending.delete(id);try{send({id,cancel:true})}catch{}reject(Error('timeout'))},15000);abort=()=>{pending.delete(id);try{send({id,cancel:true})}catch{}reject(new DOMException('Aborted','AbortError'))};request.signal.addEventListener('abort',abort,{once:true});});
+      try { send({id,method:request.method,path:url.pathname+url.search,headers}); } catch { fail(); } const msg=await result;
       if(msg.fallback)return fallback(); const bytes=Uint8Array.from(atob(msg.body),c=>c.charCodeAt(0)); const decorate=res=>{const clone=res.clone.bind(res);return Object.defineProperties(res,{url:{value:request.url},type:{value:'basic'},redirected:{value:false},clone:{value:()=>decorate(clone())}})}; return decorate(new Response([204,205,304].includes(msg.status)||request.method==='HEAD'?null:bytes,{status:msg.status,statusText:msg.statusText,headers:msg.headers}));
     } catch(error) {if(request.signal.aborted)throw error;return fallback()} finally {clearTimeout(timer);request.signal.removeEventListener('abort',abort);pending.delete(id)}
   };

@@ -2138,6 +2138,7 @@
   "remote_apps_choose": "選擇開啟方式",
   "remote_sessions_title": "分享的會話",
   "remote_app_revision": "版本 %1$s",
+  "local_app_agent_browser_return": "Agent 請求保留在發起請求的瀏覽器中。請使用「選擇開啟方式」返回同一瀏覽器。",
   "local_app_host_recommendation": "建議在電腦上執行長時間工作的應用程式；也可以繼續在手機上執行。",
   "remote_apps_browse": "瀏覽電腦分享的應用程式",
   "remote_apps_title": "電腦分享的應用程式",

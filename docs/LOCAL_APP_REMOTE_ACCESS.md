@@ -16,6 +16,13 @@ existing native capability confirmation still runs on Desktop. Static releases a
 server-rendered applications use the same gateway. Ordinary Desktop application
 windows continue to work.
 
+Remote startup has a 15-minute host deadline; viewer RPCs allow 15 minutes plus
+30 seconds for the response. Expiry and access withdrawal abort pending work.
+If a runtime activation commits after cancellation, its eventual settlement
+still reconciles the unused run. Disabling independent background execution or
+Agent access keeps an active foreground browser running, and a failed opening
+releases a run retained solely for that opening.
+
 The approved Remote Control connection exposes only `apps.list` and `apps.open`.
 The catalog contains explicitly shared applications. The latter returns a
 60-second, single-use bootstrap ticket in a URL fragment. Bootstrap removes the
@@ -87,6 +94,13 @@ the existing 25 MiB per-file and 50 MiB total attachment limits. Buffered contro
 and Agent request bodies share a 128 MiB gateway budget; other control requests
 are limited to 1 MiB. HTTP application and service uploads stream with a 64 MiB
 per-request limit. Disconnecting a browser request aborts its upstream transfer.
+
+HTML injection buffers at most 8 MiB per response and 32 MiB across a Desktop
+host, cancels on disconnect and preserves empty HEAD/204/205/304 responses.
+Supported compressed backend responses carry headers for their decoded body.
+Range requests ask the backend for identity encoding; a backend that ignores
+this and sends a compressed partial response receives a 502 response, since its
+encoded byte offsets cannot be preserved after automatic decompression.
 
 Trusted optional ICE configuration is provided as JSON in
 `LINGXI_LOCAL_APP_ICE_SERVERS`, for example an array containing a STUN entry and

@@ -2138,6 +2138,7 @@
   "remote_apps_choose": "열기 방식 선택",
   "remote_sessions_title": "공유 세션",
   "remote_app_revision": "버전 %1$s",
+  "local_app_agent_browser_return": "Agent 요청은 시작한 브라우저에 유지됩니다. “열기 방식 선택”을 사용하여 같은 브라우저로 돌아가세요.",
   "local_app_host_recommendation": "오래 실행되는 앱은 컴퓨터에서 실행하는 것이 좋습니다. 이 휴대전화에서도 실행할 수 있습니다.",
   "remote_apps_browse": "컴퓨터에서 공유한 앱 둘러보기",
   "remote_apps_title": "컴퓨터에서 공유한 앱",

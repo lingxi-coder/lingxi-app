@@ -290,7 +290,11 @@ const remoteBridge = String.raw`(() => {
       }), pickDirectory: unsupported, read: unsupported, write: unsupported, list: unsupported,
     }),
     serviceSocketUrl: async (name, path = '/') => {
-      if (!/^[\w-]+$/.test(name) || typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') || /[\\#]/.test(path)) throw new TypeError('Invalid service URL');
+      if (typeof name !== 'string' || !/^[\w-]+$/.test(name) || typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') || /[\\#]/.test(path)) throw new TypeError('Invalid service URL');
+      let decoded;
+      try { decoded = decodeURIComponent(path.split('?')[0]); } catch { throw new TypeError('Invalid service URL'); }
+      if (/%2f|%5c/iu.test(path.split('?')[0]) || decoded.includes('\\') || decoded.includes('\0')
+          || decoded.split('/').some(part => part === '.' || part === '..')) throw new TypeError('Invalid service URL');
       return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/__services/' + name + path;
     },
     agent: Object.freeze({tasks:Object.freeze({start:input=>task('start',{input}),get:runId=>task('get',{runId}),list:args=>task('list',args||{}),events:args=>task('events',args),cancel:runId=>task('cancel',{runId})}),

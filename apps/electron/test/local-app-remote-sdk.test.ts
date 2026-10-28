@@ -52,3 +52,15 @@ test('remote file picker validates limits before reading and propagates read fai
   selected=[file(1,async()=>{throw new Error('read failed');})];
   await assert.rejects(window.__lingxiLocalAppBridge.files.pick({multiple:false}),/read failed/);assert.equal(input.onchange,null);assert.equal(input.oncancel,null);
 });
+
+
+test('remote service socket URLs reject paths that escape their service prefix', async () => {
+  const window: any = {fetch: async () => new Response('ok')}; window.top = window;
+  const location = {origin:'https://app.example',protocol:'https:',host:'app.example'};
+  runInNewContext(REMOTE_LOCAL_APP_SDK.slice(0,-LOCAL_APP_SDK.length-1), {window,location,Request,Response,Headers,URL,navigator:{},document:{},Object,Promise,Error,TypeError,Array});
+  const socket = window.__lingxiLocalAppBridge.serviceSocketUrl;
+  assert.equal(await socket('api','/ws?topic=1'),'wss://app.example/__services/api/ws?topic=1');
+  for (const path of ['/../other/ws','/%2e%2e/other/ws','/x%2f..%2fother','/x%5cother','/%00']) {
+    await assert.rejects(socket('api',path), /Invalid service URL/);
+  }
+});

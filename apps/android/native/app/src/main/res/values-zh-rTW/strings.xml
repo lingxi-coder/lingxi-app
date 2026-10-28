@@ -2457,6 +2457,7 @@
     <string name="local_app_agent_in_app_wake_unsupported">應用程式內瀏覽器的 Agent 請求暫不支援繼續。待處理請求保留在原瀏覽器中；請返回原頁面，或在預設瀏覽器重新發起。</string>
     <string name="local_app_browser_intro">應用程式預設在系統瀏覽器開啟，也可使用應用程式內瀏覽器；兩者的瀏覽器工作階段可能不同。靈犀管理模型憑證、Agent 授權及工具核准。</string>
     <string name="local_app_browser_lifetime">iOS 26 會為已確認的 Agent 請求申請有限背景時間，但系統仍可能中斷。瀏覽器頁面暫停後，請返回靈犀重新開啟。建議使用電腦執行長時間工作。</string>
+    <string name="local_app_agent_browser_return">Agent 請求保留在發起請求的瀏覽器中。請使用「選擇開啟方式」返回同一瀏覽器。</string>
     <string name="local_app_host_recommendation">建議在電腦上執行長時間工作的應用程式；也可以繼續在手機上執行。</string>
     <string name="remote_app_revision">版本 %1$s</string>
     <string name="remote_apps_browse">瀏覽電腦分享的應用程式</string>

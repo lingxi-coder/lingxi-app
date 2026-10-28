@@ -29,6 +29,14 @@ async function session(gateway: LocalAppRemoteGateway, port: number) {
   const result = await request(port,host,'/__lingxi_remote_bootstrap',{method:'POST',origin:`https://${host}`,body:JSON.stringify({ticket})});
   assert.equal(result.status,204); assert.ok(result.cookie); return {ticket,cookie:result.cookie!,opened,host};
 }
+test('a launch deadline during gateway authorization never creates a ticket', async () => {
+  const {gateway,adapter}=await setup();
+  let release!:()=>void,entered!:()=>void;const waiting=new Promise<void>(resolve=>{entered=resolve;});
+  adapter.current=async()=>{entered();await new Promise<void>(resolve=>{release=resolve;});return true;};
+  const controller=new AbortController();const pending=gateway.open({appId:id,revision:1,runId:'run'},owner,controller.signal);
+  const rejected=assert.rejects(pending,/deadline/);
+  await waiting;controller.abort(new Error('deadline'));release();await rejected;assert.equal(gateway.hasAccess(),false);await gateway.dispose();
+});
 test('single use fragment tickets, app origin isolation, owner revocation and run lifetime', async () => {
   const {port,gateway,invalidate} = await setup();
   try {
@@ -119,14 +127,14 @@ test('backend cookies stay app-scoped and omit preserves host authentication', a
 
 test('WebSocket upgrade is origin and run scoped and closes on revoke', async () => {
   const backend = createServer(); let backendSocket: import('node:stream').Duplex | undefined;
-  backend.on('upgrade', (req,socket) => { backendSocket = socket; assert.equal(req.headers.cookie,'app=value'); socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'); socket.on('data', chunk => socket.write(chunk)); });
+  backend.on('upgrade', (req,socket) => { backendSocket = socket; assert.equal(req.headers.cookie,'app=value'); assert.equal(req.headers.forwarded,undefined); assert.equal(req.headers['x-real-ip'],undefined); assert.equal(req.headers['x-forwarded-for'],undefined); assert.equal(req.headers['x-forwarded-prefix'],undefined); assert.match(req.headers['x-forwarded-host'] ?? '', /^a[0-9a-f]{32}-[0-9a-f]{20}\.apps\.example\.com$/); assert.equal(req.headers['x-forwarded-proto'],'https'); socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'); socket.on('data', chunk => socket.write(chunk)); });
   await new Promise<void>(resolve=>backend.listen(0,'127.0.0.1',resolve));
   const backendPort = (backend.address() as {port:number}).port;
   const {port,gateway,adapter} = await setup(); adapter.socket = async (_run,name) => name === 'api' ? backendPort : undefined;
   try {
     const s = await session(gateway,port);
     await new Promise<void>((resolve,reject) => {
-      const req = httpRequest({hostname:'127.0.0.1',port,path:'/__services/api/ws',headers:{host:s.host,origin:`https://${s.host}`,cookie:`${s.cookie}; app=value`,connection:'Upgrade',upgrade:'websocket'}});
+      const req = httpRequest({hostname:'127.0.0.1',port,path:'/__services/api/ws',headers:{host:s.host,origin:`https://${s.host}`,cookie:`${s.cookie}; app=value`,connection:'Upgrade',upgrade:'websocket',forwarded:'host=evil.example','x-real-ip':'127.0.0.1','x-forwarded-for':'127.0.0.1','x-forwarded-host':'evil.example','x-forwarded-proto':'http','x-forwarded-prefix':'/evil'}});
       req.on('upgrade', (_response,socket) => { socket.once('data', chunk=>{ try { assert.equal(chunk.toString(),'hello'); gateway.revokeOwner(owner); } catch (error) {reject(error);} }); socket.once('close',resolve); socket.on('error',()=>resolve()); socket.write('hello'); });
       req.on('response',()=>reject(new Error('upgrade rejected'))); req.on('error',reject); req.end();
     });
@@ -249,4 +257,45 @@ test('expired unused bootstrap ticket releases process access and signals idle c
     (gateway as any).tickets.get(ticket).expires=Date.now()-1;
     assert.equal(gateway.hasAccess(),false);assert.deepEqual(ended,[`${id}:run`]);
   } finally {await gateway.dispose();}
+});
+
+
+test('gateway retries a transient loopback bind failure', async () => {
+  const blocker = createServer();
+  await new Promise<void>(resolve => blocker.listen(0, '127.0.0.1', resolve));
+  const port = (blocker.address() as {port:number}).port;
+  const adapter: RemoteGatewayAdapter = {current:async()=>true,resource:async()=>new Response('ok'),invoke:async()=>null,socket:async()=>undefined};
+  const gateway = new LocalAppRemoteGateway('https://{appId}-{sessionId}.apps.example.com',port,adapter);
+  try {
+    await assert.rejects(gateway.open({appId:id,revision:1,runId:'run'},owner), {code:'EADDRINUSE'});
+    await new Promise<void>(resolve => blocker.close(() => resolve()));
+    const s = await session(gateway,port);
+    assert.equal((await request(port,s.host,'/',{cookie:s.cookie})).body,'ok');
+  } finally {await gateway.dispose(); if (blocker.listening) await new Promise<void>(resolve => blocker.close(()=>resolve()));}
+});
+
+test('compressed backend assets are forwarded with headers matching decoded bytes', async () => {
+  const {gzipSync} = await import('node:zlib');
+  const original = 'body { color: red; }';
+  const compressed = gzipSync(original);
+  const backend = createServer((_req,res) => {
+    res.writeHead(200, {'content-type':'text/css','content-encoding':'gzip','content-length':compressed.length});
+    res.end(compressed);
+  });
+  await new Promise<void>(resolve=>backend.listen(0,'127.0.0.1',resolve));
+  const backendPort=(backend.address() as {port:number}).port;
+  const {port,gateway,adapter}=await setup(); const broker=new LocalAppServiceBroker();
+  adapter.resource=async(run,req)=>broker.fetch(run.appId,run.runId,'api',backendPort,'/style.css',req,'',true);
+  try {
+    const s=await session(gateway,port);
+    await new Promise<void>((resolve,reject)=>{
+      const req=httpRequest({hostname:'127.0.0.1',port,path:'/style.css',headers:{host:s.host,cookie:s.cookie}},res=>{
+        const chunks:Buffer[]=[];res.on('data',chunk=>chunks.push(chunk));res.on('end',()=>{try{
+          assert.equal(res.headers['content-encoding'],undefined);
+          assert.equal(Buffer.concat(chunks).toString(),original);
+          resolve();
+        }catch(error){reject(error);}});
+      });req.on('error',reject);req.end();
+    });
+  } finally {await gateway.dispose();await broker.dispose();backend.closeAllConnections();await new Promise<void>(resolve=>backend.close(()=>resolve()));}
 });

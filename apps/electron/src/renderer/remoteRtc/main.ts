@@ -15,7 +15,7 @@ import {
   SDP_MAX_CHARS,
 } from '@lingxi/bridge-client/remote';
 
-import { MAX_RTC_PEERS, parseMainToPage, type PageToMain, type RtcCandidateType } from '../../shared/remoteRtc';
+import { MAX_RTC_PEERS, parseMainToPage, type PageToMain, type RtcCandidateType, type RtcIceServer } from '../../shared/remoteRtc';
 import { REMOTE_RTC_PORT_MESSAGE } from '../../shared/remoteRtcPort';
 
 // A paused sender is told to continue once the channel's queue is below this.
@@ -183,12 +183,12 @@ function adopt(peer: Peer, channel: RTCDataChannel): void {
   else channel.onopen = opened;
 }
 
-async function answer(conn: string, offer: string, ice: string[]): Promise<void> {
+async function answer(conn: string, offer: string, ice: (string | RtcIceServer)[]): Promise<void> {
   if (peers.has(conn) || peers.size >= MAX_RTC_PEERS) {
     post({ t: 'error', conn, message: 'no room for another peer connection' });
     return;
   }
-  const pc = new RTCPeerConnection({ iceServers: ice.length > 0 ? [{ urls: ice }] : [] });
+  const pc = new RTCPeerConnection({ iceServers: ice.map(server => typeof server === 'string' ? { urls: server } : server) });
   const peer: Peer = { conn, pc, channel: undefined, paused: false };
   peers.set(conn, peer);
   pc.ondatachannel = (event) => adopt(peer, event.channel);

@@ -6,6 +6,8 @@ import com.lingxi.code.bindings.android.AndroidRemoteListener
 import com.lingxi.code.bindings.android.RemoteConnectionPhaseFfi
 import com.lingxi.code.bindings.android.RemoteConnectionStateFfi
 import com.lingxi.code.bindings.android.RemoteHostFfi
+import com.lingxi.code.bindings.android.RemoteLocalAppOpenFfi
+import com.lingxi.code.bindings.android.RemoteLocalAppFfi
 import com.lingxi.code.bindings.android.RemoteImageFfi
 import com.lingxi.code.bindings.android.RemoteModelsFfi
 import com.lingxi.code.bindings.android.RemotePermissionModeFfi
@@ -53,6 +55,10 @@ class RemoteControlManagerTest {
         var pushId: String? = "unset"
         var state: RemoteConnectionStateFfi? = null
         var stopWatchingGate: CompletableDeferred<Unit>? = null
+        var listGate: CompletableDeferred<List<RemoteLocalAppFfi>>? = null
+        override suspend fun listApps() = checkNotNull(listGate).await()
+        var openGate: CompletableDeferred<RemoteLocalAppOpenFfi>? = null
+        override suspend fun openApp(appId: String) = checkNotNull(openGate).await()
         override fun setPushInstallationId(id: String?) { pushId = id }
         override suspend fun watchHosts() { calls += "watchHosts" }
         override suspend fun stopWatchingHosts() { calls += "stopWatchingHosts"; stopWatchingGate?.await() }
@@ -103,6 +109,77 @@ class RemoteControlManagerTest {
     )
 
     private fun host(id: String, paired: Boolean) = RemoteHostFfi(id, "Mac $id", "macos", "1.0", true, 0uL, paired)
+
+    @Test fun appListRejectsResponseAfterReconnectEvenIfAttemptResets() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        client.listener.onConnectionState(client.state!!)
+        val gate = CompletableDeferred<List<RemoteLocalAppFfi>>(); client.listGate = gate
+        var result: Result<List<RemoteLocalAppFfi>>? = null
+        val request = launch { result = runCatching { h.manager.listApps("h") } }
+        runCurrent()
+        client.listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.RECONNECTING))
+        client.listener.onConnectionState(client.state!!)
+        gate.complete(emptyList()); request.join()
+        assertTrue(result!!.isFailure)
+    }
+
+    @Test fun appListRejectsResponseWhenConnectionCloseIsRequested() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        val gate = CompletableDeferred<List<RemoteLocalAppFfi>>(); client.listGate = gate
+        // Keep the old connection ready while asynchronous close is waiting.
+        client.stopWatchingGate = CompletableDeferred()
+        var result: Result<List<RemoteLocalAppFfi>>? = null
+        val request = launch { result = runCatching { h.manager.listApps("h") } }
+        runCurrent(); h.manager.closeConnection(); runCurrent()
+        gate.complete(emptyList()); request.join()
+        assertTrue(result!!.isFailure)
+        client.stopWatchingGate!!.complete(Unit)
+    }
+
+    @Test fun appOpenRejectsChangedHostAndAccount() = runTest(UnconfinedTestDispatcher()) {
+        val appId = "a" + "1".repeat(32)
+        val url = "https://${appId}-0123456789abcdef0123.route.apps.example.com/__lingxi_remote_bootstrap#${"A".repeat(43)}"
+        for (changeAccount in listOf(false, true)) {
+            val h = Harness(this, "u1"); runCurrent()
+            val client = h.clients.single()
+            client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+            val gate = CompletableDeferred<RemoteLocalAppOpenFfi>(); client.openGate = gate
+            var result: Result<String>? = null
+            val request = launch { result = runCatching { h.manager.openApp("h", appId, 1uL) } }
+            runCurrent()
+            if (changeAccount) { h.account.mutableUid.value = "u2"; runCurrent() }
+            else client.state = connectionState("other", RemoteConnectionPhaseFfi.READY)
+            gate.complete(RemoteLocalAppOpenFfi(appId, 1uL, url, 9_007_199_254_740_991uL))
+            request.join()
+            assertTrue(result!!.isFailure)
+        }
+    }
+
+    @Test fun appOpenRejectsInsecureExpiredAndMismatchedLinks() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        val client = h.clients.single(); client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        val appId = "a" + "1".repeat(32)
+        val url = "https://${appId}-0123456789abcdef0123.route.apps.example.com/__lingxi_remote_bootstrap#${"A".repeat(43)}"
+        val expires = 9_007_199_254_740_991uL
+        for (response in listOf(
+            RemoteLocalAppOpenFfi(appId, 1uL, url.replace("https:", "http:") + "secret-ticket", expires),
+            RemoteLocalAppOpenFfi(appId, 1uL, url, 1uL),
+            RemoteLocalAppOpenFfi(appId, 2uL, url, expires),
+            RemoteLocalAppOpenFfi("a" + "2".repeat(32), 1uL, url, expires),
+            RemoteLocalAppOpenFfi(appId, 1uL, url.replace("https://", "https://user@"), expires),
+        )) {
+            client.openGate = CompletableDeferred(response)
+            val failure = runCatching { h.manager.openApp("h", appId, 1uL) }.exceptionOrNull()
+            assertTrue(failure != null)
+            assertFalse(failure.toString().contains("secret-ticket"))
+        }
+        client.openGate = CompletableDeferred(RemoteLocalAppOpenFfi(appId, 1uL, url, expires))
+        assertEquals(url, h.manager.openApp("h", appId, 1uL))
+    }
 
     @Test fun filePickerReturnWaitsForTheSamePeerToReconnect() = runTest(UnconfinedTestDispatcher()) {
         val h = Harness(this, "u1"); runCurrent(); val client = h.clients.single()

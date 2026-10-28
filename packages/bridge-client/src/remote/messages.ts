@@ -1,3 +1,4 @@
+import type { AppsListParams, AppsListResult, AppsOpenParams, AppsOpenResult } from './localApps.js';
 import type { FileOffer, FileReceipt, FileCheckpoint } from './files.js';
 /**
  * Parameter and result types of the `lingxi-rc/1` RPC methods, and the
@@ -388,6 +389,8 @@ export interface ModelsListResult {
 
 /** Requests a viewer sends to the host: method name to its params and result. */
 export interface ViewerRequests {
+  'apps.list': { params: AppsListParams; result: AppsListResult };
+  'apps.open': { params: AppsOpenParams; result: AppsOpenResult };
   'file.offer': { params: FileOffer; result: FileCheckpoint };
   'file.commit': { params: { session_id: string; transfer_id: string }; result: FileReceipt };
   'file.cancel': { params: { session_id: string; transfer_id: string }; result: EmptyResult };

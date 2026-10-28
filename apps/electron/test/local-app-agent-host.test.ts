@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { build } from 'esbuild';
@@ -21,7 +22,18 @@ const mcp = { id: 'mcp:stable', kind: 'mcp' as const, serverConfigId: 'server-on
 const settings: LocalAppAgentSettings = { enabled: true, model, tools: [builtin, mcp], skills: ['nutrition'], background: false, maxTurns: 20, timeoutMs: 600000 };
 const AGUI_FIXTURE = JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json', import.meta.url), 'utf8')) as any;
 function runInput(runId: string, threadId = `thread-${runId}`) { const input = structuredClone(AGUI_FIXTURE); input.runId = runId; input.threadId = threadId; return input; }
-const bundledHost = build({ entryPoints: [new URL('../src/main/local-apps/host.ts', import.meta.url).pathname], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron'] });
+const bundledHost = build({
+  entryPoints: [new URL('../src/main/local-apps/host.ts', import.meta.url).pathname],
+  bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron'], metafile: true,
+  plugins: [{ name: 'bridge-client-test-resolution', setup(builder) {
+    builder.onResolve({ filter: /^@lingxi\/bridge-client(?:\/|$)/ }, args => ({ path: fileURLToPath(import.meta.resolve(args.path)) }));
+  } }],
+}).then(async result => {
+  if (process.env.LINGXI_TEST_ARTIFACT_DIR) await fs.writeFile(join(process.env.LINGXI_TEST_ARTIFACT_DIR, 'standalone-agent-host-inputs.json'), JSON.stringify({
+    bridgeClientEntry: import.meta.resolve('@lingxi/bridge-client'), inputs: Object.keys(result.metafile!.inputs),
+  }, null, 2));
+  return result;
+});
 async function until(check: () => boolean | Promise<boolean>) { for (let i = 0; i < 1000; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 1)); } throw new Error('Timed out waiting for test state'); }
 let windowSequence = 100;
 class TestWindow extends EventEmitter {
@@ -221,6 +233,69 @@ test('closing and reopening an Agent-background app preserves its task and invoc
   assert.equal(finalPage.events.at(-1).type, 'RUN_FINISHED');
   assert.equal(finalPage.events.at(-1).threadId, input.threadId);
   assert.equal(finalPage.events.at(-1).runId, input.runId);
+});
+
+test('a Desktop Agent settling after the last remote session releases its retained app run', async t => {
+  const { host, row, root } = await fixture(t);
+  host.windows.clear();
+  host.runtime = new LocalAppRuntime(host.store, () => host.changed(), { onRunEnded: (id, run, reason) => host.runEnded(id, run, reason) });
+  row.agent.background = true; await host.store.save(row);
+  let live = false, idleChecks = 0, complete!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { complete = resolve; });
+  const executing = new Promise<void>(resolve => { entered = resolve; });
+  host.options.onRemoteAccessEnded = () => { idleChecks++; };
+  host.remoteSettings = async () => ({ [row.id]: true });
+  host.remoteGateway = {
+    open: async (run: any) => { live = true; return { app_id: run.appId, revision: run.revision, url: 'https://example.com/#ticket', expires_at: Date.now() + 60000 }; },
+    hasRun: () => live, hasAccess: () => live, revokeApp: () => { live = false; },
+  };
+  const broker = new LocalAppAgentBroker({ root: join(root, 'remote-ledger'), authorize: owner => host.authorizeAgent(owner), revalidate: (owner, authorization) => host.revalidateAgent(owner, authorization),
+    execute: async execution => { entered(); await held; await execution.assertAuthorized(); return { result: { text: 'done', output: { ok: true }, attachments: [], messageId: 'assistant' }, usage: { turns: 1 } }; } });
+  host.setAgentBroker(broker); t.after(async () => { complete(); await broker.dispose(); });
+  await host.open(row.id);
+  const window = host.windows.get(row.id), invocation = host.runtime.invocationId(row.id);
+  const input = runInput('desktop-remote-cleanup'); input.forwardedProps['com.lingxi.localApp'].skills = ['nutrition'];
+  await host.native({ sender: window.webContents, senderFrame: window.webContents.mainFrame }, { method: 'agent.tasks.start', args: { input } });
+  await executing;
+  await host.remoteOpen(row.id, { accountUid: 'account', deviceId: 'phone', hostId: 'desktop' });
+  window.close(); await host.remoteCleaning.get(row.id);
+  live = false; await host.remoteAccessEnded(row.id, invocation);
+  assert.equal(host.runtime.phase(row.id), 'running');
+  const checksBeforeSettlement = idleChecks;
+  complete();
+  await until(() => host.runtime.phase(row.id) === 'stopped');
+  assert.ok(idleChecks > checksBeforeSettlement, 'task settlement rechecks process lifetime');
+});
+
+test('remote opening resumes the invocation retained by a Desktop background Agent', async t => {
+  const { host, row, root } = await fixture(t);
+  host.windows.clear();
+  host.runtime = new LocalAppRuntime(host.store, () => host.changed(), { onRunEnded: (id, run, reason) => host.runEnded(id, run, reason) });
+  // Isolate the pre-existing stopped-owner behavior: retain the trusted owner
+  // just as the existing native reopen regression does.
+  host.runtime.owner = (id: string) => host.runtime.invocationId(id) ? ({ appId: id, runId: host.runtime.invocationId(id)!, revision: host.runtime.revision(id) ?? 1, releaseDigest: row.releaseDigest! }) : undefined;
+  row.agent.background = true; await host.store.save(row);
+  let live = false, complete!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { complete = resolve; });
+  const executing = new Promise<void>(resolve => { entered = resolve; });
+  host.remoteSettings = async () => ({ [row.id]: true });
+  host.remoteGateway = { open: async (run: any) => { live = true; return { app_id: run.appId, revision: run.revision, url: 'https://example.com/#ticket', expires_at: Date.now() + 60000 }; },
+    hasRun: () => live, hasAccess: () => live, revokeApp: () => { live = false; } };
+  const broker = new LocalAppAgentBroker({ root: join(root, 'resume-ledger'), authorize: owner => host.authorizeAgent(owner), revalidate: (owner, authorization) => host.revalidateAgent(owner, authorization),
+    execute: async execution => { entered(); await held; await execution.assertAuthorized(); return { result: { text: 'done', output: { ok: true }, attachments: [], messageId: 'assistant' }, usage: { turns: 1 } }; } });
+  host.setAgentBroker(broker); t.after(async () => { complete(); await broker.dispose(); });
+  await host.open(row.id);
+  const window = host.windows.get(row.id), invocation = host.runtime.invocationId(row.id);
+  const input = runInput('desktop-remote-resume'); input.forwardedProps['com.lingxi.localApp'].skills = ['nutrition'];
+  const identity = { appId: row.id, releaseDigest: row.releaseDigest!, invocationId: invocation, webContentsId: window.webContents.id };
+  await host.native({ sender: window.webContents, senderFrame: window.webContents.mainFrame }, { method: 'agent.tasks.start', args: { input } });
+  await executing;
+  // No remote grant exists yet, so closing the window stops only app services.
+  window.close(); await until(() => host.runtime.phase(row.id) === 'stopped');
+  await host.remoteOpen(row.id, { accountUid: 'account', deviceId: 'phone', hostId: 'desktop' });
+  assert.equal(host.runtime.invocationId(row.id), invocation);
+  complete(); await until(async () => !['queued', 'running'].includes((await broker.get(identity, input.runId)).state));
+  assert.equal((await broker.get(identity, input.runId)).state, 'succeeded');
 });
 
 test('trusted host question supports text and multi-choice answers and cancellation clears pending prompt', async t => {

@@ -25,6 +25,7 @@ import {
   type PageToMain,
   type RtcCandidateType,
   type RtcPeerState,
+  type RtcIceServer,
 } from '../../shared/remoteRtc.js';
 import { describeError, noDiagnostics, type RemoteDiagnostics } from './diagnostics.js';
 
@@ -111,7 +112,7 @@ export class PeerHost {
    * the window cannot be created. The connection's link is available from
    * {@link link} as soon as this is called, and is released when it rejects.
    */
-  answer(connId: string, offerSdp: string, iceUrls: readonly string[]): Promise<string> {
+  answer(connId: string, offerSdp: string, iceUrls: readonly (string | RtcIceServer)[]): Promise<string> {
     const request = parseMainToPage({ t: 'answer', conn: connId, sdp: offerSdp, ice: [...iceUrls] });
     if (this.disposed) return Promise.reject(new Error('the peer host is shut down'));
     if (request?.t !== 'answer') return Promise.reject(new Error('invalid WebRTC answer request'));
@@ -122,10 +123,20 @@ export class PeerHost {
     this.links.set(connId, new LinkImpl(connId, this));
     return new Promise<string>((resolve, reject) => {
       const timer = this.clock.setTimeout(() => this.failAnswer(connId, new Error('timed out waiting for the WebRTC answer')), ANSWER_TIMEOUT_MS);
-      this.pending.set(connId, { resolve, reject, timer });
-      this.openPort().then(
-        (port) => port.post(request),
-        (error: unknown) => this.failAnswer(connId, error instanceof Error ? error : new Error(describeError(error))),
+      const pending = { resolve, reject, timer };
+      this.pending.set(connId, pending);
+      // Opening the window can finish after the peer was closed or replaced.
+      // Never create a renderer peer for an answer that no longer belongs to us.
+      Promise.resolve().then(() => this.pending.get(connId) === pending ? this.openPort() : undefined).then(
+        (port) => {
+          if (!port || this.pending.get(connId) !== pending) return;
+          try { port.post(request); } catch (error) {
+            this.failAnswer(connId, error instanceof Error ? error : new Error(describeError(error)));
+          }
+        },
+        (error: unknown) => {
+          if (this.pending.get(connId) === pending) this.failAnswer(connId, error instanceof Error ? error : new Error(describeError(error)));
+        },
       );
     });
   }
@@ -162,6 +173,12 @@ export class PeerHost {
   /** @internal A link ended: forget it, tell the page, and start the idle clock when nothing is left. */
   release(connId: string, tellPage: boolean): void {
     if (!this.links.delete(connId)) return;
+    const pending = this.pending.get(connId);
+    if (pending) {
+      this.pending.delete(connId);
+      this.clock.clearTimeout(pending.timer);
+      pending.reject(new Error('the peer connection closed before its answer'));
+    }
     if (tellPage) this.post({ t: 'close', conn: connId });
     if (this.links.size === 0 && this.window !== undefined && this.idleTimer === undefined) {
       this.idleTimer = this.clock.setTimeout(() => {
@@ -180,7 +197,7 @@ export class PeerHost {
     const window = this.createWindow();
     this.window = window;
     window.onGone((reason) => this.windowGone(window, reason));
-    const port = window.open().then((opened) => {
+    const port = Promise.resolve().then(() => window.open()).then((opened) => {
       opened.onMessage((data) => this.receive(window, data));
       return opened;
     });

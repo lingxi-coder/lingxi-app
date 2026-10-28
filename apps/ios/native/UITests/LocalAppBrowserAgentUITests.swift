@@ -701,7 +701,7 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             guard requireTargetFixtureIdentity(browser) else { return nil }
         }
         guard waitForNativeStartButton(browser: browser, host: host) else { return nil }
-        let start = host.buttons["开始 Agent 并返回应用"]
+        let start = host.buttons["local-app-agent-continue-default"]
         let waitingCopy = "浏览器 Agent 请求等待后台任务许可。运行："
         let waitingLabel = host.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", waitingCopy)).firstMatch
         let nativeText = waitingLabel.exists ? waitingLabel.label : ""
@@ -818,7 +818,7 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         host: XCUIApplication,
         timeout: TimeInterval = 45
     ) -> Bool {
-        let start = host.buttons["开始 Agent 并返回应用"]
+        let start = host.buttons["local-app-agent-continue-default"]
         let springBoard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let deadline = Date().addingTimeInterval(timeout)
         var matchingPromptSeen = false
@@ -1137,7 +1137,7 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         host.activate()
         host.open(try agentReviewURL(appID: id, runID: runID))
 
-        let start = host.buttons["开始 Agent 并返回应用"]
+        let start = host.buttons["local-app-agent-continue-default"]
         XCTAssertTrue(start.waitForExistence(timeout: 20), "The app should require a foreground action before it returns to the external browser.")
         XCTAssertTrue(host.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", String(runID.prefix(8)))).firstMatch.exists)
         print("IOS_BROWSER_AGENT_HANDOFF_UI PASS ag-ui-run-id explicit-native-action system-default-browser-neutral")

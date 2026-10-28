@@ -80,6 +80,7 @@ function snapshot() {
   },
   localApps: {
     list: async () => [], legacyEntries: async () => [], onChanged: () => () => {},
+    remoteSettings: async () => ({}), remoteConfiguration: async () => ({ configured: false }), setRemoteAccess: async () => {},
     prepareAuthoring: async (session: typeof ref) => ({ workspaceId: 'fixture-workspace', sourceDirectory: session.projectPath,
       projectRef: { kind: 'desktopPath', path: session.projectPath }, authoringSessionId: session.sessionId }),
     bindAuthoring: async (appId: string, session: typeof ref) => ({ appId, workspaceId: 'fixture-workspace', sourceDirectory: session.projectPath,

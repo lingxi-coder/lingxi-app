@@ -359,12 +359,14 @@ struct AppRuntimeView: View {
     @State private var opened = false
     @State private var busy = false
     @State private var consent: UnifiedAppRelease?
+    @State private var inAppBrowser: LocalAppBrowserTicket?
+    @State private var requestedInApp = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Text(library.record(appId)?.name ?? "本地应用").font(.title2)
-                Text("应用页面在系统默认浏览器打开。模型凭据、Agent 授权和工具审批由灵犀管理。")
-                Text("iOS 26 会为已确认的 Agent 请求申请有限后台任务；系统仍可中断任务。普通浏览器页面暂停后，请返回灵犀重新打开。")
+                Text("local_app_browser_intro")
+                Text("local_app_browser_lifetime")
                     .font(.footnote).foregroundStyle(.secondary)
                 if busy { ProgressView() }
                 if let error {
@@ -378,11 +380,15 @@ struct AppRuntimeView: View {
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button("开始 Agent 并返回应用") {
+                    Text("local_app_agent_in_app_wake_unsupported")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Text("local_app_agent_default_wake_help")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button("local_app_agent_continue_default") {
                         guard !busy, let token = library.browserAgentWakeToken(for: wake) else { return }
                         busy = true
                         Task { await returnToBrowser(wake, token: token) }
-                    }.disabled(busy)
+                    }.disabled(busy).accessibilityIdentifier("local-app-agent-continue-default")
                     Button("取消此次 Agent 请求", role: .cancel) {
                         guard !busy, let token = library.browserAgentWakeToken(for: wake) else { return }
                         busy = true
@@ -395,6 +401,10 @@ struct AppRuntimeView: View {
                     Button(launch == nil ? "启动并在默认浏览器打开" : "返回默认浏览器") {
                         Task { await load(openBrowser: true) }
                     }.disabled(busy)
+                    Button("remote_apps_open_in_app") { Task { await load(openBrowser: true, inApp: true) } }.disabled(busy)
+                    if hasAgent {
+                        Text("local_app_agent_in_app_unsupported").font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 if hasAgent, let revision = library.record(appId)?.currentRevision {
                     LocalAppAgentTasks(client: library.client, appID: appId, revision: revision)
@@ -412,9 +422,10 @@ struct AppRuntimeView: View {
             .accessibilityIdentifier("app-runtime")
         }
         .task(id: appId) { await load(openBrowser: !opened && !library.consumeBrowserReview(appId)) }
+        .sheet(item: $inAppBrowser) { ticket in LocalAppSystemBrowser(url: ticket.url) }
         .sheet(item: $consent) { release in
             LocalAppConsentSheet(manifest: release.manifest, digest: release.digest, title: "授权此版本运行") {
-                Task { do { try await library.grant(appId, digest: release.digest); consent = nil; await load(openBrowser: true) }
+                Task { do { try await library.grant(appId, digest: release.digest); consent = nil; await load(openBrowser: true, inApp: requestedInApp) }
                 catch { self.error = error.localizedDescription; consent = nil } }
             }
         }
@@ -424,8 +435,9 @@ struct AppRuntimeView: View {
             }
         }
     }
-    private func load(openBrowser: Bool) async {
+    private func load(openBrowser: Bool, inApp: Bool = false) async {
         guard !busy else { return }
+        requestedInApp = inApp
         busy = true; error = nil
         defer { busy = false }
         do {
@@ -434,9 +446,9 @@ struct AppRuntimeView: View {
             let release = try await library.release(appId, revision: app.currentRevision)
             hasAgent = (release.manifest.capabilities ?? []).contains("agent")
             if release.manifest.executesCode && !app.executionGrants.contains(release.digest) { consent = release; return }
-            if openBrowser, let wake = library.browserAgentWake(for: appId),
-               let token = library.browserAgentWakeToken(for: wake) {
-                await prepareAndReturnToBrowser(wake, token: token)
+            if openBrowser, library.browserAgentWake(for: appId) != nil {
+                // Pending input belongs to its originating browser. The user
+                // must explicitly confirm the default-browser continuation.
                 return
             }
             let value = try await library.openExternalBrowser(appId)
@@ -445,21 +457,25 @@ struct AppRuntimeView: View {
             }
             launch = value; info.markOpened(app); opened = true
             if openBrowser {
-                let scope = LocalAppBrowserDeliveryScope(appID: appId, revision: value.run.revision)
-                let acquisition = library.openBrowserPage(scope: scope) {
-                    openURL(value.url) { accepted in
-                        guard !accepted else { return }
-                        Task { @MainActor in
-                            library.endBrowserPageDelivery(scope)
-                            self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。"
+                if inApp {
+                    inAppBrowser = LocalAppBrowserTicket(url: value.url)
+                } else {
+                    let scope = LocalAppBrowserDeliveryScope(appID: appId, revision: value.run.revision)
+                    let acquisition = library.openBrowserPage(scope: scope) {
+                        openURL(value.url) { accepted in
+                            guard !accepted else { return }
+                            Task { @MainActor in
+                                library.endBrowserPageDelivery(scope)
+                                self.error = "无法打开系统默认浏览器。请检查默认浏览器设置。"
+                            }
                         }
                     }
-                }
-                guard acquisition != .unavailable else {
-                    throw LocalAppServiceFailure(
-                        "BROWSER_DELIVERY_UNAVAILABLE",
-                        "iOS could not reserve a short background window to open this Local App."
-                    )
+                    guard acquisition != .unavailable else {
+                        throw LocalAppServiceFailure(
+                            "BROWSER_DELIVERY_UNAVAILABLE",
+                            "iOS could not reserve a short background window to open this Local App."
+                        )
+                    }
                 }
             }
         } catch { self.error = error.localizedDescription }

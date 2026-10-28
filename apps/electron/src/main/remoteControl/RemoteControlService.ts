@@ -69,6 +69,10 @@ export interface RemoteControlServiceOptions {
   peers: Pick<PeerHost, 'answer' | 'link' | 'shutdown' | 'dispose'>;
   /** What viewers are told about this computer; read at every start. */
   host: () => Pick<HostInfo, 'name' | 'platform' | 'app_version'>;
+  /** Revoke independently redeemed browser sessions when the trusted device is forgotten. */
+  deviceRevoked?(owner: { accountUid: string; hostId: string; deviceId: string }): void;
+  /** Sign-out, account replacement, policy withdrawal and shutdown end browser grants too. */
+  accessStopped?(): void;
   clock?: Clock;
   diagnostics?: RemoteDiagnostics;
 }
@@ -93,6 +97,8 @@ export class RemoteControlService {
   private readonly listeners = new Set<(status: RemoteControlStatus) => void>();
   private readonly unsubscribe: () => void;
   private identity: Promise<HostIdentity> | undefined;
+  private lastHostId: string | undefined;
+  private accessUid: string | undefined;
   private lastToken: string | undefined;
   private run: Run | undefined;
   private state: RemoteControlState = 'off';
@@ -139,6 +145,7 @@ export class RemoteControlService {
   /** Persist the setting and apply it. Resolves once the service has started or stopped accordingly. */
   async setEnabled(enabled: boolean): Promise<void> {
     this.options.settings.setRemoteControlEnabled(enabled);
+    if (!enabled) this.options.accessStopped?.();
     await this.reconcile();
   }
 
@@ -158,6 +165,8 @@ export class RemoteControlService {
     } catch (error) {
       failure = error;
     }
+    const hostId = this.run?.identity.hostId ?? this.lastHostId;
+    if (hostId) this.options.deviceRevoked?.({ accountUid: uid, hostId, deviceId });
     await Promise.all([...this.connections.values()]
       .filter((connection) => connection.deviceId === deviceId)
       .map((connection) => connection.disconnect('revoked', 'revoked')));
@@ -218,6 +227,10 @@ export class RemoteControlService {
 
   private async apply(): Promise<void> {
     const wanted = this.wantedUid();
+    if (this.accessUid !== wanted) {
+      this.options.accessStopped?.();
+      this.accessUid = wanted;
+    }
     if (this.run !== undefined && this.run.uid === wanted) return;
     // A failed start is already waiting for its retry; account events in between do not hurry it.
     if (this.run === undefined && wanted !== undefined && this.retryTimer !== undefined) return;
@@ -236,6 +249,7 @@ export class RemoteControlService {
     let identity: HostIdentity;
     try {
       identity = await (this.identity ??= this.options.identity());
+      this.lastHostId = identity.hostId;
     } catch (error) {
       this.identity = undefined;
       this.fail(`the host key could not be loaded (${describeError(error)})`);
@@ -274,6 +288,7 @@ export class RemoteControlService {
 
   private async stopRun(): Promise<void> {
     const run = this.run;
+    this.options.accessStopped?.();
     if (run === undefined) return;
     this.run = undefined;
     for (const connection of [...this.connections.values()]) connection.close('service_stopped');

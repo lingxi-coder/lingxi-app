@@ -66,6 +66,40 @@ async function terminal(broker: LocalAppAgentBroker, caller: LocalAppAgentOwner,
   throw new Error('AG-UI task did not finish');
 }
 
+test('settlement subscribers observe success, failure and cancellation after active removal', async t => {
+  for (const outcome of ['succeeded', 'failed', 'cancelled'] as const) {
+    const started = deferred<void>(), notified = deferred<void>();
+    const { broker } = await fixture(t, { execute: async execution => {
+      started.resolve();
+      if (outcome === 'failed') throw new Error('executor failure');
+      if (outcome === 'cancelled') await new Promise<void>((_resolve, reject) => {
+        const abort = () => reject(new Error('cancelled'));
+        execution.signal.addEventListener('abort', abort, { once: true });
+        if (execution.signal.aborted) abort();
+      });
+      return { result: { text: 'done', output: { ok: true }, attachments: [], messageId: 'assistant' }, usage: { turns: 1 } };
+    } });
+    let count = 0, settledOwner: LocalAppAgentOwner | undefined, activeAtSettlement: boolean | undefined;
+    broker.onSettled(() => { throw new Error('listener failure'); });
+    const unsubscribe = broker.onSettled(owner => {
+      count++;
+      settledOwner = owner;
+      activeAtSettlement = broker.hasActiveApp(principal.appId);
+      // Reentrant cleanup must not be awaited by the settled execution.
+      void broker.cancelApp(principal.appId).then(() => notified.resolve());
+    });
+    const input = runInput(`settlement-${outcome}`);
+    await broker.run(principal, input); await started.promise;
+    if (outcome === 'cancelled') await broker.cancel(principal, input.runId);
+    await notified.promise;
+    assert.equal((await broker.get(principal, input.runId)).state, outcome);
+    assert.equal(count, 1);
+    assert.deepEqual(settledOwner, { appId: principal.appId, releaseDigest: principal.releaseDigest, invocationId: principal.invocationId });
+    assert.equal(activeAtSettlement, false);
+    unsubscribe();
+  }
+});
+
 test('official SDK RunAgentInput fixture normalizes in order and retains digest bindings', () => {
   const parsed = parseRunAgentInput(AGUI_FIXTURE);
   assert.equal(parsed.threadId, 'thread-fixture-1');

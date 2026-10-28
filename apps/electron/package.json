@@ -11,6 +11,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "remote:tunnel:config": "node scripts/local-app-remote-tunnel.mjs",
     "test": "node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 test/*.test.ts test/*.test.mjs",
     "sync:local-app-agui": "node scripts/sync-local-app-agui.mjs",
     "sync:local-app-webmcp": "node scripts/sync-local-app-webmcp.mjs",

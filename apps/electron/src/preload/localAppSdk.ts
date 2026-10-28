@@ -1,5 +1,6 @@
 import { browserAgentSource } from '@lingxi/local-app-agui/browser/source';
 import { LOCAL_APP_CREDENTIALS_HEADER } from '../main/local-apps/serviceCookies.js';
+import { LOCAL_APP_AGENT_MAX_FILE_BYTES, LOCAL_APP_AGENT_MAX_FILES, LOCAL_APP_AGENT_MAX_TOTAL_FILE_BYTES } from '../shared/localAppAgent.js';
 
 /**
  * Injected into the app's page world. The public agent surface comes from the
@@ -32,6 +33,7 @@ const localAppBootstrap = String.raw`(() => {
   const chatIds = new Set();
   const chatCreateFlights = new Map();
   let chatCreationRevision;
+  let chatCreationAppId;
   let chatCreationIdentityFlight;
   const chatCreationStore = 'creations';
   const maxChatCreations = 64;
@@ -51,14 +53,23 @@ const localAppBootstrap = String.raw`(() => {
   async function chatCreationDatabase() {
     if (chatCreationRevision === undefined) {
       chatCreationIdentityFlight ||= bridge.info().then(info => {
-        if (!info || info.id !== window.location.host || !Number.isSafeInteger(info.revision) || info.revision < 1) {
+        const localIdentity = info && window.location.protocol === 'lingxi-app:' && info.id === window.location.host;
+        const remoteLabel = window.location.host.split('.')[0];
+        const remoteIdentity = info && info.platform === 'browser' && typeof info.id === 'string' && /^a[a-f0-9]{32}$/u.test(info.id)
+          && (window.location.protocol === 'https:' || (window.location.protocol === 'http:' && window.location.host.split(':')[0].endsWith('.localhost')))
+          && remoteLabel.startsWith(info.id + '-') && /^[a-f0-9]{20}$/u.test(remoteLabel.slice(info.id.length + 1))
+          && window.location.host.includes('.');
+        if (!info || !(localIdentity || remoteIdentity) || !Number.isSafeInteger(info.revision) || info.revision < 1) {
           throw makeError('The application identity is unavailable.', 'host_unavailable');
         }
         chatCreationRevision = info.revision;
+        chatCreationAppId = info.id;
       }).catch(error => { chatCreationIdentityFlight = undefined; throw makeError('The application identity is unavailable.', 'host_unavailable', error); });
       await chatCreationIdentityFlight;
     }
-    const chatCreationDbName = 'lingxi-local-app-chat-creates-' + window.location.host + '-revision-' + chatCreationRevision;
+    // IndexedDB already partitions this database by browser origin. A fresh
+    // remote opening recovers through host list/status, never another origin's DB.
+    const chatCreationDbName = 'lingxi-local-app-chat-creates-' + chatCreationAppId + '-revision-' + chatCreationRevision;
     if (!('indexedDB' in window)) return Promise.reject(makeError('Persistent browser storage is unavailable.', 'storage_unavailable'));
     return new Promise((resolve, reject) => {
       const opening = indexedDB.open(chatCreationDbName, 1);
@@ -93,7 +104,7 @@ const localAppBootstrap = String.raw`(() => {
   }
 
   function sameChatCreation(record, options) {
-    return record?.appId === window.location.host && record.revision === chatCreationRevision && record.key === options.requestId
+    return record?.appId === chatCreationAppId && record.revision === chatCreationRevision && record.key === options.requestId
       && record.requestId === options.requestId && record.options?.requestId === options.requestId
       && Object.hasOwn(record.options || {}, 'title') === Object.hasOwn(options, 'title')
       && record.options?.title === options.title;
@@ -128,7 +139,7 @@ const localAppBootstrap = String.raw`(() => {
             failure = makeError('Chat recovery storage is full. Forget a resolved creation before continuing.', 'storage_full');
             return;
           }
-          store.add({key: options.requestId, appId: window.location.host, revision: chatCreationRevision, requestId: options.requestId,
+          store.add({key: options.requestId, appId: chatCreationAppId, revision: chatCreationRevision, requestId: options.requestId,
             options, state: 'pending', createdAt: Date.now()});
         };
       };
@@ -197,7 +208,7 @@ const localAppBootstrap = String.raw`(() => {
       const request = store.get(options.requestId);
       request.onsuccess = () => {
         const record = request.result;
-        if (record && record.appId === window.location.host && record.revision === chatCreationRevision && record.requestId === requestId
+        if (record && record.appId === chatCreationAppId && record.revision === chatCreationRevision && record.requestId === requestId
             && ['accepted', 'deleted', 'rejected'].includes(record.state)) {
           store.delete(requestId);
         } else if (record) {
@@ -481,3 +492,62 @@ const localAppBootstrap = String.raw`(() => {
 })();`;
 
 export const LOCAL_APP_SDK = `${credentialsBootstrap}\n${browserAgentSource}\n${localAppBootstrap}`;
+
+// Browser-only bridge: all privileged operations stay on the Desktop host. Native
+// UI and host filesystem APIs are deliberately unavailable in a remote page.
+const remoteBridge = String.raw`(() => {
+  if (window.top !== window) return;
+  // Keep the host session cookie while preserving the app's logical omit mode.
+  const hostFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    let request;
+    try { request = new Request(input, init); } catch { return hostFetch(input, init); }
+    const target = new URL(request.url);
+    if (target.origin !== location.origin || request.credentials !== 'omit') return hostFetch(request);
+    const headers = new Headers(request.headers); headers.set('${LOCAL_APP_CREDENTIALS_HEADER}', 'omit');
+    return hostFetch(new Request(request, {credentials:'same-origin', headers}));
+  };
+  const invoke = async (method, args = {}) => {
+    const response = await fetch('/__lingxi_remote_invoke', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({method,args})});
+    if (!response.ok) throw new Error('Application operation is unavailable');
+    return (await response.json()).result;
+  };
+  const unsupported = async () => { throw new Error('This native feature is unavailable in a remote browser'); };
+  const task = (method, args) => invoke('agent.tasks.' + method, args);
+  const chat = (method, args) => invoke('agent.chats.' + method, args);
+  window.__lingxiLocalAppBridge = Object.freeze({
+    info: () => invoke('info'),
+    clipboard: Object.freeze({read: async () => { await invoke('capability.clipboard'); return navigator.clipboard.readText(); }, write: async text => { await invoke('capability.clipboard'); return navigator.clipboard.writeText(text); }}),
+    notify: unsupported, process: Object.freeze({exec: unsupported}),
+    files: Object.freeze({
+      pick: options => new Promise((resolve, reject) => {
+        const input = document.createElement('input'); input.type='file'; input.multiple=!!options.multiple;
+        if (options.accept) input.accept=Array.isArray(options.accept) ? options.accept.join(',') : options.accept;
+        const cleanup = () => { input.onchange = null; input.oncancel = null; };
+        input.onchange = async () => {
+          try {
+            const selected = Array.from(input.files || []);
+            if (selected.length > ${LOCAL_APP_AGENT_MAX_FILES} || (!options.multiple && selected.length > 1)) throw new Error('Too many files selected');
+            if (selected.some(file => !Number.isSafeInteger(file.size) || file.size < 1 || file.size > ${LOCAL_APP_AGENT_MAX_FILE_BYTES})
+                || selected.reduce((total, file) => total + file.size, 0) > ${LOCAL_APP_AGENT_MAX_TOTAL_FILE_BYTES}) throw new Error('Selected files exceed the size limit');
+            const files = await Promise.all(selected.map(async file => ({name:file.name,mediaType:file.type,size:file.size,lastModified:file.lastModified,bytes:await file.arrayBuffer()})));
+            resolve({files});
+          } catch (error) { reject(error); } finally { cleanup(); }
+        };
+        input.oncancel = () => { cleanup(); resolve({files:[]}); };
+        try { input.click(); } catch (error) { cleanup(); reject(error); }
+      }), pickDirectory: unsupported, read: unsupported, write: unsupported, list: unsupported,
+    }),
+    serviceSocketUrl: async (name, path = '/') => {
+      if (typeof name !== 'string' || !/^[\w-]+$/.test(name) || typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') || /[\\#]/.test(path)) throw new TypeError('Invalid service URL');
+      let decoded;
+      try { decoded = decodeURIComponent(path.split('?')[0]); } catch { throw new TypeError('Invalid service URL'); }
+      if (/%2f|%5c/iu.test(path.split('?')[0]) || decoded.includes('\\') || decoded.includes('\0')
+          || decoded.split('/').some(part => part === '.' || part === '..')) throw new TypeError('Invalid service URL');
+      return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/__services/' + name + path;
+    },
+    agent: Object.freeze({tasks:Object.freeze({start:input=>task('start',{input}),get:runId=>task('get',{runId}),list:args=>task('list',args||{}),events:args=>task('events',args),cancel:runId=>task('cancel',{runId})}),
+      chats:Object.freeze({create:args=>chat('create',args),creationStatus:args=>chat('creationStatus',args),open:chatId=>chat('get',{chatId}),get:chatId=>chat('get',{chatId}),list:args=>chat('list',args||{}),archive:chatId=>chat('archive',{chatId}),delete:chatId=>chat('delete',{chatId}),history:(chatId,args)=>chat('history',{chatId,...args}),send:(chatId,input)=>chat('send',{chatId,input}),cancel:chatId=>chat('cancel',{chatId})})}),
+  });
+})();`;
+export const REMOTE_LOCAL_APP_SDK = `${remoteBridge}\n${LOCAL_APP_SDK}`;

@@ -718,6 +718,96 @@ fn requests_of(host: &FakeHost, method: &str) -> Vec<Value> {
 }
 
 #[tokio::test(start_paused = true)]
+async fn local_apps_wire_round_trip_and_rejects_invalid_launch() {
+    const ID: &str = "a00000000000000000000000000000000";
+    let rig = rig();
+    assert!(matches!(
+        rig.client.list_apps().await,
+        Err(RemoteFfiError::NotConnected)
+    ));
+    rig.host.configure(|config| {
+        config.respond = Some(Arc::new(|method, _| match method {
+            "apps.list" => Some(Ok(json!({"apps": [{
+                "app_id": ID, "name": "Shared", "summary": "Desktop app", "revision": 3,
+                "phase": "running", "background": true, "execution_host": "desktop", "remote_enabled": true
+            }]}))),
+            "apps.open" => Some(Ok(json!({
+                "app_id": ID, "revision": 3,
+                "url": "https://a00000000000000000000000000000000-0123456789abcdef0123.example.com/__lingxi_remote_bootstrap#xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "expires_at": 1800000001000u64
+            }))),
+            _ => None,
+        }));
+    });
+    rig.host.publish_presence().await;
+    rig.client.connect(rig.host.host_id.clone()).await.unwrap();
+    until("pairing", || {
+        rig.recorder
+            .states()
+            .iter()
+            .any(|s| s.phase == RemoteConnectionPhaseFfi::Pairing)
+    })
+    .await;
+    rig.host.approve(&rig.host.conns()[0].conn_id).await;
+    until("ready", || {
+        rig.recorder
+            .states()
+            .iter()
+            .any(|s| s.phase == RemoteConnectionPhaseFfi::Ready)
+    })
+    .await;
+
+    let apps = rig.client.list_apps().await.unwrap();
+    assert_eq!(apps.len(), 1);
+    assert_eq!(
+        (
+            &apps[0].app_id,
+            &apps[0].name,
+            &apps[0].summary,
+            apps[0].revision,
+            &apps[0].phase,
+            apps[0].background,
+            &apps[0].execution_host,
+            apps[0].remote_enabled
+        ),
+        (
+            &ID.to_owned(),
+            &"Shared".to_owned(),
+            &"Desktop app".to_owned(),
+            3,
+            &"running".to_owned(),
+            true,
+            &"desktop".to_owned(),
+            true
+        )
+    );
+    let ticket = rig.client.open_app(ID.into()).await.unwrap();
+    assert_eq!(
+        (ticket.app_id.as_str(), ticket.revision, ticket.expires_at),
+        (ID, 3, 1800000001000)
+    );
+    assert!(ticket.url.starts_with("https://"));
+    assert_eq!(
+        requests_of(&rig.host, "apps.open"),
+        vec![json!({"app_id": ID})]
+    );
+
+    rig.host.configure(|config| config.respond = Some(Arc::new(|method, _| match method {
+        "apps.open" => Some(Ok(json!({"app_id": ID, "revision": 3, "url": "http://example.com/#bad", "expires_at": 1800000001000u64}))),
+        _ => None,
+    })));
+    assert!(matches!(
+        rig.client.open_app(ID.into()).await,
+        Err(RemoteFfiError::Rpc { .. })
+    ));
+    rig.client.disconnect().await;
+    assert!(matches!(
+        rig.client.open_app(ID.into()).await,
+        Err(RemoteFfiError::NotConnected)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
 async fn hosts_are_listed_and_watched_with_their_online_state() {
     let rig = rig();
     assert!(rig.client.list_hosts().await.unwrap().is_empty());

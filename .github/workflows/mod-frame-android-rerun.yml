@@ -1,0 +1,67 @@
+name: Mod frame Android receipt diagnostic rerun
+on:
+  push:
+    branches: [codex/media-mod-frame-android-20261028-b]
+env:
+  CARGO_BUILD_JOBS: "2"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_MIN_STACK: "16777216"
+jobs:
+  android:
+    name: Android generated bindings and targeted unit test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: lingxi-coder/harness-runtime
+          ref: 6a3746fca2ec74f291be2ced2d22b1f0e01d53e1
+          path: .diagnostic/harness
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Copy Harness outside the App workspace
+        run: cp -a .diagnostic/harness "$RUNNER_TEMP/frame-receipt-harness"
+      - name: Create runner-only Harness override
+        run: python3 .github/scripts/prepare-frame-receipt-diagnostic.py
+      - name: Install Android NDK and pinned GStreamer SDK
+        run: |
+          sdkmanager --install 'ndk;27.2.12479018' 'cmake;3.22.1'
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          python3 scripts/ci/gstreamer_sdk.py android --root "$RUNNER_TEMP/gstreamer-sdk/android"
+      - name: Build native binaries and matching Kotlin bindings
+        env:
+          LINGXI_FFI_PROFILE: debug
+        run: |
+          bash apps/android/native/scripts/prepare-ci-debug-keystore.sh
+          bash apps/android/native/scripts/build-mobile-linux-native.sh --variant direct
+          python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
+          grep -R -n 'onModUiClientFrame' apps/android/native/app/src/main/java/com/lingxi/code/bindings
+          find apps/android/native/app/src/main/java/com/lingxi/code/bindings -name '*.kt' -exec sha256sum {} \;
+      - name: Run frame ingress unit regression
+        working-directory: apps/android/native
+        run: |
+          ./gradlew --max-workers=1 -Pkotlin.daemon.jvmargs=-Xmx4g \
+            "-PlingxiRootfsEvidenceDir=$RUNNER_TEMP/sdk-rootfs" \
+            :app:testDirectDebugUnitTest \
+            --tests 'com.lingxi.code.conversation.ConversationSourceRecoveryTest.uiFrameAdmissionIsFifoAndRejectsRetiredIngress'

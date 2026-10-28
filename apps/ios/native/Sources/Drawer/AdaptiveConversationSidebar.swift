@@ -72,7 +72,10 @@ private struct ConversationSideDrawer<Menu: View, Content: View>: View {
                     .allowsHitTesting(isOpen && drag.direction != .horizontal)
                     .disabled(drag.direction == .horizontal)
                     .accessibilityElement(children: .contain)
-                    .accessibilityAddTraits(.isModal)
+                    // An offscreen drawer can still be exposed as a modal by
+                    // the accessibility server. Make it modal only while it
+                    // is open or actively being dragged.
+                    .accessibilityAddTraits(isOpen || drag.direction == .horizontal ? .isModal : [])
                     .accessibilityHidden(reveal == 0)
                     .accessibilityFocused($menuFocused)
                     .accessibilityAction(.escape) { setOpen(false) }

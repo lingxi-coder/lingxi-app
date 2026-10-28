@@ -32,6 +32,26 @@ import java.util.concurrent.atomic.AtomicReference;
 /** Isolated Android device diagnostic for the candidate test provider. */
 @RunWith(AndroidJUnit4.class)
 public class ProviderSmokeTest {
+    @FunctionalInterface
+    private interface CleanupAction { void run() throws Throwable; }
+
+    private static void runCleanups(Throwable primary, CleanupAction... actions) throws Throwable {
+        Throwable first = primary;
+        for (CleanupAction action : actions) {
+            try { action.run(); }
+            catch (Throwable failure) {
+                if (first == null) {
+                    first = failure;
+                    Log.e("LingxiTest", "First fixture cleanup failure", failure);
+                } else if (failure != first) {
+                    first.addSuppressed(failure);
+                    Log.e("LingxiTest", "Additional fixture cleanup failure", failure);
+                }
+            }
+        }
+        if (primary == null && first != null) throw first;
+    }
+
     private static void invoke(Instrumentation instrumentation, Context test, String fixture,
                                boolean revoke, boolean expectedSuccess) throws Exception {
         Context target = instrumentation.getTargetContext();
@@ -51,6 +71,7 @@ public class ProviderSmokeTest {
         String command = "am start " + action + "--es " + WorkspaceTestDocumentsActivity.EXTRA_FIXTURE_ID + " " + fixture +
             " --es " + WorkspaceTestDocumentsActivity.EXTRA_REQUEST_ID + " " + request + " -n " +
             test.getPackageName() + "/com.lingxi.code.project.WorkspaceTestDocumentsActivity";
+        Throwable primary = null;
         try {
             Log.i("LingxiTest", "v4 before UiAutomation " + request);
             android.app.UiAutomation automation = instrumentation.getUiAutomation();
@@ -65,7 +86,18 @@ public class ProviderSmokeTest {
             Log.i("LingxiTest", "v4 received receipt " + request);
             assertEquals(result.getStringExtra(WorkspaceTestDocumentsActivity.EXTRA_ERROR), expectedSuccess,
                 result.getBooleanExtra(WorkspaceTestDocumentsActivity.EXTRA_SUCCESS, false));
-        } finally { target.unregisterReceiver(receiver); }
+        } catch (Exception | Error failure) {
+            primary = failure;
+            Log.e("LingxiTest", "Fixture action failed for " + request + " revoke=" + revoke, failure);
+            throw failure;
+        } finally {
+            try { target.unregisterReceiver(receiver); }
+            catch (RuntimeException | Error failure) {
+                Log.e("LingxiTest", "Fixture receiver cleanup failed for " + request, failure);
+                if (primary == null) throw failure;
+                if (primary != failure) primary.addSuppressed(failure);
+            }
+        }
     }
 
     private static void permission(Context context, Uri tree, int expected) {
@@ -85,13 +117,14 @@ public class ProviderSmokeTest {
     }
 
     private static void concurrentCleanupWaitsForChildGrant(Instrumentation instrumentation, Context test,
-                                                             Context target, String authority) throws Exception {
+                                                             Context target, String authority) throws Throwable {
         String firstId = UUID.randomUUID().toString();
         String secondId = UUID.randomUUID().toString();
         Uri first = DocumentsContract.buildTreeDocumentUri(authority, firstId);
         Uri second = DocumentsContract.buildTreeDocumentUri(authority, secondId);
         ExecutorService pool = Executors.newFixedThreadPool(2);
         ParcelFileDescriptor gate = null;
+        Throwable primary = null;
         try {
             invoke(instrumentation, test, firstId, false, true);
             Uri firstDocument = DocumentsContract.buildDocumentUriUsingTree(first, firstId);
@@ -119,18 +152,30 @@ public class ProviderSmokeTest {
             permission(target, childTree, PackageManager.PERMISSION_DENIED);
             permission(target, second, PackageManager.PERMISSION_GRANTED);
             Log.i("LingxiTest", "v5 concurrent cleanup gate passed");
+        } catch (Throwable failure) {
+            primary = failure;
+            Log.e("LingxiTest", "First concurrent fixture failure", failure);
+            throw failure;
         } finally {
-            if (gate != null) {
-                try { Os.pwrite(gate.getFileDescriptor(), new byte[] { (byte)'R' }, 0, 1, 1); }
-                finally { gate.close(); }
-            }
-            pool.shutdownNow();
-            try { invoke(instrumentation, test, firstId, true, true); }
-            finally { invoke(instrumentation, test, secondId, true, true); }
+            ParcelFileDescriptor activeGate = gate;
+            runCleanups(primary,
+                () -> { if (activeGate != null) Os.pwrite(activeGate.getFileDescriptor(), new byte[] { (byte)'R' }, 0, 1, 1); },
+                () -> { if (activeGate != null) activeGate.close(); },
+                () -> pool.shutdownNow(),
+                () -> invoke(instrumentation, test, firstId, true, true),
+                () -> invoke(instrumentation, test, secondId, true, true));
         }
     }
 
-    @Test public void isolatedTreesAndClosedFixtureRejectLateGrant() throws Exception {
+    @Test public void isolatedTreesAndClosedFixtureRejectLateGrant() throws Throwable {
+        try { runSmoke(); }
+        catch (Throwable failure) {
+            Log.e("LingxiTest", "Provider smoke failed", failure);
+            throw failure;
+        }
+    }
+
+    private static void runSmoke() throws Throwable {
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         Context test = instrumentation.getContext();
         Context target = instrumentation.getTargetContext();
@@ -142,6 +187,7 @@ public class ProviderSmokeTest {
         String secondId = UUID.randomUUID().toString();
         Uri first = DocumentsContract.buildTreeDocumentUri(authority, firstId);
         Uri second = DocumentsContract.buildTreeDocumentUri(authority, secondId);
+        Throwable primary = null;
         try {
             invoke(instrumentation, test, firstId, false, true);
             invoke(instrumentation, test, secondId, false, true);
@@ -169,9 +215,14 @@ public class ProviderSmokeTest {
                 assertNotNull(cursor);
                 assertTrue(cursor.moveToFirst());
             }
+        } catch (Throwable failure) {
+            primary = failure;
+            Log.e("LingxiTest", "First ordinary fixture failure", failure);
+            throw failure;
         } finally {
-            try { invoke(instrumentation, test, firstId, true, true); }
-            finally { invoke(instrumentation, test, secondId, true, true); }
+            runCleanups(primary,
+                () -> invoke(instrumentation, test, firstId, true, true),
+                () -> invoke(instrumentation, test, secondId, true, true));
         }
         concurrentCleanupWaitsForChildGrant(instrumentation, test, target, authority);
     }

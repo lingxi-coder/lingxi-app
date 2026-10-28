@@ -618,16 +618,19 @@ export class LocalAppAgentBroker {
     }
   }
   async getChat(caller: LocalAppAgentOwner, chatId: string): Promise<LocalAppAgentChatSummary> {
-    const principal = owner(caller); await this.initialize(); return this.summary(this.getChatRecord(principal, chatId));
+    const principal = owner(caller); await this.initialize();
+    return this.exclusive(async () => this.summary(this.getChatRecord(principal, chatId)));
   }
   async listChats(caller: LocalAppAgentOwner, options: { cursor?: unknown; limit?: unknown; includeArchived?: unknown } = {}): Promise<{ chats: LocalAppAgentChatSummary[]; nextCursor?: string }> {
     const principal = owner(caller); await this.initialize();
     if (options.includeArchived !== undefined && typeof options.includeArchived !== 'boolean') throw new LocalAppAgentError('invalid_input', 'Invalid archived-chat filter.');
-    const rows = [...this.chats.values()].filter(chat => chat.appId === principal.appId && (options.includeArchived || !chat.archived))
-      .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt);
-    const offset = cursorOffset(options.cursor), limit = pageLimit(options.limit), page = rows.slice(offset, offset + limit);
-    const next = nextCursor(offset + page.length, offset + page.length < rows.length);
-    return { chats: structuredClone(page.map(chat => this.summary(chat))), ...(next ? { nextCursor: next } : {}) };
+    return this.exclusive(async () => {
+      const rows = [...this.chats.values()].filter(chat => chat.appId === principal.appId && (options.includeArchived || !chat.archived))
+        .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt);
+      const offset = cursorOffset(options.cursor), limit = pageLimit(options.limit), page = rows.slice(offset, offset + limit);
+      const next = nextCursor(offset + page.length, offset + page.length < rows.length);
+      return { chats: structuredClone(page.map(chat => this.summary(chat))), ...(next ? { nextCursor: next } : {}) };
+    });
   }
   async archiveChat(caller: LocalAppAgentOwner, chatId: string, signal?: AbortSignal): Promise<void> {
     const principal = owner(caller); await this.initialize();
@@ -654,12 +657,14 @@ export class LocalAppAgentBroker {
   }
   async chatHistory(caller: LocalAppAgentOwner, chatId: string, options: { cursor?: unknown; limit?: unknown } = {}): Promise<LocalAppAgentChatHistory> {
     const principal = owner(caller); await this.initialize();
-    await this.ensureAgentRoot(principal.appId);
-    const chat = this.getChatRecord(principal, chatId), journal = new LocalAppChatAssetJournal(this.chatDirectory(principal, chatId));
-    const offset = cursorOffset(options.cursor), limit = pageLimit(options.limit, 100), stored = chat.messages.slice(offset, offset + limit);
-    const { messages } = await journal.rehydrateMessages(stored.map(row => row.message));
-    const next = nextCursor(offset + stored.length, offset + stored.length < chat.messages.length);
-    return { messages: messages as Message[], ...(next ? { nextCursor: next } : {}) };
+    return this.exclusive(async () => {
+      await this.ensureAgentRoot(principal.appId);
+      const chat = this.getChatRecord(principal, chatId), journal = new LocalAppChatAssetJournal(this.chatDirectory(principal, chatId));
+      const offset = cursorOffset(options.cursor), limit = pageLimit(options.limit, 100), stored = chat.messages.slice(offset, offset + limit);
+      const { messages } = await journal.rehydrateMessages(stored.map(row => row.message));
+      const next = nextCursor(offset + stored.length, offset + stored.length < chat.messages.length);
+      return { messages: messages as Message[], ...(next ? { nextCursor: next } : {}) };
+    });
   }
   async cancelChat(caller: LocalAppAgentOwner, chatId: string, signal?: AbortSignal): Promise<void> {
     const principal = owner(caller); await this.initialize(); signal?.throwIfAborted();
@@ -667,8 +672,9 @@ export class LocalAppAgentBroker {
     if (chat.activeRunId) await this.cancel(principal, chat.activeRunId, signal);
   }
   async cancelApp(appId: string, reason = 'Application Agent access changed.'): Promise<void> {
-    this.epochs.set(appId, (this.epochs.get(appId) ?? 0) + 1); await this.initialize();
-    const runs = await this.exclusive(async () => [...this.active.values()].filter(active => active.record.owner.appId === appId));
+    this.epochs.set(appId, (this.epochs.get(appId) ?? 0) + 1);
+    const runs = [...this.active.values()].filter(active => active.record.owner.appId === appId);
+    for (const active of runs) active.controller.abort();
     await Promise.all(runs.map(active => this.terminate(requestKey(active.record.owner, active.record.publicRunId), 'cancelled', { code: 'application_stopped', message: reason.slice(0, 1024) })));
   }
   /** Session expiry must cancel its actual tasks, never a different session's idempotent retry. */
@@ -695,6 +701,15 @@ export class LocalAppAgentBroker {
     await this.exclusive(async () => {
       const active = this.active.get(recordKey), record = this.records.get(recordKey);
       if (!record || TERMINAL.has(record.run.state)) return;
+      // Revocation can happen after the executor's last authorization check
+      // while this success is waiting behind another ledger operation.
+      if (state === 'succeeded' && this.stopped && active && !active.controller.signal.aborted) {
+        throw new LocalAppAgentError('executor_closed', 'The Agent host stopped before this task completed.');
+      }
+      if (state === 'succeeded' && (!active || active.controller.signal.aborted
+        || (this.epochs.get(record.owner.appId) ?? 0) !== active.appEpoch)) {
+        throw new LocalAppAgentError('permission_revoked', 'Application Agent access was revoked or changed.');
+      }
       const finalUsage = safeUsage(usage);
       record.run = { ...record.run, state, phase: undefined, sequence: record.run.sequence + 1, updatedAt: this.now(),
         ...(finalUsage ? { usage: finalUsage } : {}), ...(error ? { error } : {}) };

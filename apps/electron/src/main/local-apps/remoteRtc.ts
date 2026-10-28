@@ -10,7 +10,7 @@ const MAX_IN_FLIGHT = 8;
 const MAX_TOTAL = 1024 * 1024;
 const TIMEOUT = 15_000;
 const REQUEST_HEADERS = new Set(['accept', 'accept-language', 'if-none-match', 'if-modified-since']);
-const RESPONSE_EXCLUDE = new Set(['set-cookie', 'set-cookie2', 'connection', 'transfer-encoding', 'content-length']);
+const RESPONSE_EXCLUDE = new Set(['set-cookie', 'set-cookie2', 'connection', 'transfer-encoding']);
 
 export interface LocalAppRtcOptions {
   peerHost: PeerHost;
@@ -112,7 +112,7 @@ export class LocalAppRtc {
           }
           const output: Record<string, string> = {};
           let headerBytes = 0;
-          response.headers.forEach((value, key) => { if (!RESPONSE_EXCLUDE.has(key.toLowerCase())) { headerBytes += key.length + value.length; if (headerBytes > 32_768) throw new Error('headers too large'); output[key] = value; } });
+          response.headers.forEach((value, key) => { if (!RESPONSE_EXCLUDE.has(key.toLowerCase()) && (key.toLowerCase() !== 'content-length' || data.method === 'HEAD')) { headerBytes += key.length + value.length; if (headerBytes > 32_768) throw new Error('headers too large'); output[key] = value; } });
           const parts: Uint8Array[] = [];
           if (response.body && data.method !== 'HEAD') {
             const reader = response.body.getReader();
@@ -136,6 +136,9 @@ export class LocalAppRtc {
       return Response.json({ sdp: answer, iceServers: this.ice }, { headers: { 'cache-control': 'no-store' } });
     } catch { close(); return new Response(null, { status: signal.aborted ? 403 : 503 }); }
   }
+  /** Release the dedicated hidden window when no browser session has a peer. */
+  releaseIdle(): void { if (this.peers.size === 0) this.options.peerHost.shutdown(); }
+
   /** The RTC adapter owns its dedicated peer host and hidden window. */
   dispose(): void { for (const peer of [...this.peers.values()]) peer.close(); this.options.peerHost.dispose(); }
 }

@@ -55,6 +55,14 @@ still uses the same application run. Closing a browser tab alone does not signal
 cancellation of durable tasks; task IDs and existing host task records remain the
 recovery mechanism. Background execution still follows the application's host
 grants and platform lifetime rules.
+Application and session cancellation immediately abort active executors, with
+terminal records settled through the ledger queue. Success checks cancellation
+again when entering that queue. Chat reads share the mutation queue so pending
+admission and rollback cannot expose provisional history. Mutations recheck
+authorization at queue admission and immediately before dispatching their
+filesystem commit; an OS operation already dispatched can finish. Once the last
+session's Agent cancellation settles, the unused run is reconciled again. Idle
+Local App RTC windows close before the process lifetime check.
 
 ## HTTP, browser SDK and RTC
 
@@ -87,6 +95,8 @@ streams, ranges, downloads and large responses stay on HTTPS. The adapter keeps
 the gateway's own authentication cookie while omitting backend service cookies,
 matching the Desktop SDK's existing service credential convention. It also
 suppresses backend Set-Cookie for logically omitted requests.
+Eligible HEAD responses preserve the same reliable length metadata as HTTPS;
+the resource handler removes metadata for injected or decompressed bodies.
 
 Eligible RTC responses have a 256 KiB per-response and 1 MiB aggregate in-flight
 budget, at most eight requests per peer and a 15-second deadline. Reads may fall
@@ -99,6 +109,12 @@ the existing 25 MiB per-file and 50 MiB total attachment limits. Buffered contro
 and Agent request bodies share a 128 MiB gateway budget; other control requests
 are limited to 1 MiB. HTTP application and service uploads stream with a 64 MiB
 per-request limit. Disconnecting a browser request aborts its upstream transfer.
+Each browser session allows 32 active HTTP requests and 32 browser WebSocket
+connections, including upgrades still awaiting authorization or port resolution.
+Pending WebSocket input is buffered up to 1 MiB per connection and forwarded in
+order when the connection starts. Disconnected authorization attempts release
+their slots, and unconsumed response bodies are cancelled on disconnect or a
+failed authorization recheck.
 
 HTML injection buffers at most 8 MiB per response and 32 MiB across a Desktop
 host, cancels on disconnect and preserves empty HEAD/204/205/304 responses.

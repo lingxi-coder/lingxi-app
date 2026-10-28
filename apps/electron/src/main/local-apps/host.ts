@@ -903,7 +903,13 @@ export class LocalAppHost {
     return gateway.open({ appId: id, revision, runId }, owner, signal);
   }
   private remoteAccessEnded(id: string, runId: string): Promise<void> {
-    return this.queueRunCleanup(id, () => this.cleanRemoteRun(id, runId)).finally(() => this.options.onRemoteAccessEnded?.());
+    return this.queueRunCleanup(id, () => this.cleanRemoteRun(id, runId)).finally(() => {
+      // A dedicated hidden RTC window counts as an Electron window too. Release
+      // it before the app checks whether any foreground/background user remains.
+      if (this.shuttingDown) return;
+      if (!this.remoteOpening.size && !this.remoteGateway?.hasAccess()) this.remoteRtc?.releaseIdle();
+      this.options.onRemoteAccessEnded?.();
+    });
   }
   private queueRunCleanup(id: string, operation: () => Promise<void>): Promise<void> {
     const previous = this.remoteCleaning.get(id) ?? Promise.resolve();
@@ -1025,13 +1031,21 @@ export class LocalAppHost {
     const owner: LocalAppAgentOwner = { appId: run.appId, releaseDigest: active.releaseDigest, invocationId: run.runId, remoteSessionId: sessionId };
     await this.authorizeAgent(owner);
     if (signal.aborted || !await this.remoteCurrent(run) || signal.aborted) throw new Error('Application operation is no longer active');
+    const cancelSession = async () => {
+      try { await broker.cancelRemoteSession(owner); }
+      finally {
+        // The first access-ended callback may still see an active background
+        // Agent while its executor is stopping. Reconcile again after it settles.
+        await this.remoteAccessEnded(run.appId, run.runId);
+      }
+    };
     const start = async (operation: Promise<{runId: string}>) => {
       const result = await operation;
       if (!this.remoteAgentSessions.has(signal)) {
         this.remoteAgentSessions.add(signal);
-        signal.addEventListener('abort', () => { void broker.cancelRemoteSession(owner).catch(() => undefined); }, { once: true });
+        signal.addEventListener('abort', () => { void cancelSession().catch(() => undefined); }, { once: true });
       }
-      if (signal.aborted) await broker.cancelRemoteSession(owner).catch(() => undefined);
+      if (signal.aborted) await cancelSession().catch(() => undefined);
       return result;
     };
     if (method === 'agent.tasks.start') return start(broker.run(owner, args.input, signal));

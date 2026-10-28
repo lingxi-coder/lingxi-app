@@ -4,7 +4,7 @@ import { Readable, Transform, type Duplex } from 'node:stream';
 
 export interface RemoteOwner { accountUid: string; deviceId: string; hostId: string }
 export interface RemoteRun { appId: string; revision: number; runId: string }
-interface Session extends RemoteRun { readonly origin: string; owner: RemoteOwner; expires: number; controller: AbortController; sockets: Set<Duplex>; sessionId: string; timer?: ReturnType<typeof setTimeout>; active: number }
+interface Session extends RemoteRun { readonly origin: string; owner: RemoteOwner; expires: number; controller: AbortController; sockets: Set<Duplex>; upgrades: number; sessionId: string; timer?: ReturnType<typeof setTimeout>; active: number }
 interface Ticket { session: Session; expires: number; timer: ReturnType<typeof setTimeout> }
 interface PendingGrant extends RemoteRun { owner: RemoteOwner; revoked: boolean }
 export interface RemoteGatewayAdapter {
@@ -94,7 +94,7 @@ export class LocalAppRemoteGateway {
       let origin: string;
       do { origin = this.origin(pending.appId, randomBytes(10).toString('hex')); }
       while ([...this.sessions.values(), ...[...this.tickets.values()].map(ticket => ticket.session)].some(session => session.origin === origin));
-      const session: Session = { appId: pending.appId, revision: pending.revision, runId: pending.runId, origin, owner: pending.owner, expires, controller: new AbortController(), sockets: new Set(), sessionId: secret(), active: 0 };
+      const session: Session = { appId: pending.appId, revision: pending.revision, runId: pending.runId, origin, owner: pending.owner, expires, controller: new AbortController(), sockets: new Set(), upgrades: 0, sessionId: secret(), active: 0 };
       const ticket = secret(), ticketExpires = Date.now() + TICKET_LIFETIME;
       const timer = setTimeout(() => { if (this.tickets.delete(ticket)) { this.abort(session); this.notifyEnded(session); } }, TICKET_LIFETIME); timer.unref();
       this.tickets.set(ticket, { session, expires: ticketExpires, timer });
@@ -182,10 +182,13 @@ export class LocalAppRemoteGateway {
         const secure = ticket.session.origin.startsWith('https:');
         res.writeHead(204, { 'set-cookie': `${secure ? COOKIE : DEV_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}; Max-Age=${Math.floor(SESSION_LIFETIME / 1000)}`, 'cache-control': 'no-store' }).end(); return;
       }
+      let countedSession: Session | undefined;
+      res.once('close', () => { if (countedSession) countedSession.active--; });
       const session = await this.authorized(req);
+      if (res.destroyed || req.aborted) return;
       if (!session) { res.writeHead(401, { 'cache-control': 'no-store' }).end('Session expired'); return; }
       if (session.active >= 32) { res.writeHead(429).end('Too many requests'); return; }
-      session.active++; res.once('close', () => { session.active--; });
+      session.active++; countedSession = session;
       if (req.headers.origin && req.headers.origin !== session.origin) { res.writeHead(403).end(); return; }
       if (path === '/__lingxi_remote_invoke' && req.method === 'POST') {
         if (req.headers.origin !== session.origin || req.headers['content-type']?.split(';')[0] !== 'application/json') { res.writeHead(403).end(); return; }
@@ -246,61 +249,86 @@ export class LocalAppRemoteGateway {
       } finally {
         if (bufferedControl) { requestSignal.removeEventListener('abort', bufferedControl.release); bufferedControl.release(); }
       }
-      if (session.controller.signal.aborted || !await this.adapter.current(session)) throw new Error('Session expired');
-      const output: Record<string, string | string[]> = {}; response.headers.forEach((value, key) => { if (!['set-cookie', 'connection', 'transfer-encoding'].includes(key) && (key !== 'content-length' || req.method === 'HEAD')) output[key] = value; });
-      const requestPath = new URL(session.origin + path).pathname;
-      const service = /^\/__services\/([\w-]+)(\/.*)?$/.exec(requestPath);
-      const cookies = response.headers.getSetCookie().flatMap(cookie => {
-        const parts = cookie.split(';').map(part => part.trim());
-        const name = parts[0]?.split('=', 1)[0];
-        if (!name || name === COOKIE || name === DEV_COOKIE || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) return [];
-        // A backend cannot set cookies for sibling app origins.
-        const filtered = parts.filter(part => !/^domain\s*=/i.test(part));
-        if (service) {
-          // __Host- cookies require Path=/ and cannot be scoped to one service.
-          if (name.startsWith('__Host-')) return [];
-          const backendPath = service[2] ?? '/';
-          const slash = backendPath.lastIndexOf('/');
-          let cookiePath = slash <= 0 ? '/' : backendPath.slice(0, slash);
-          for (const part of filtered.slice(1)) {
-            const match = /^path\s*=\s*(.*)$/i.exec(part);
-            if (match?.[1]?.startsWith('/') && !/[\\\x00-\x1f\x7f]/.test(match[1])) cookiePath = match[1];
+      let responseOwned = true;
+      try {
+        if (requestSignal.aborted || res.destroyed || !await this.adapter.current(session) || requestSignal.aborted || res.destroyed) throw new Error('Session expired');
+        const output: Record<string, string | string[]> = {}; response.headers.forEach((value, key) => { if (!['set-cookie', 'connection', 'transfer-encoding'].includes(key) && (key !== 'content-length' || req.method === 'HEAD')) output[key] = value; });
+        const requestPath = new URL(session.origin + path).pathname;
+        const service = /^\/__services\/([\w-]+)(\/.*)?$/.exec(requestPath);
+        const cookies = response.headers.getSetCookie().flatMap(cookie => {
+          const parts = cookie.split(';').map(part => part.trim());
+          const name = parts[0]?.split('=', 1)[0];
+          if (!name || name === COOKIE || name === DEV_COOKIE || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) return [];
+          // A backend cannot set cookies for sibling app origins.
+          const filtered = parts.filter(part => !/^domain\s*=/i.test(part));
+          if (service) {
+            // __Host- cookies require Path=/ and cannot be scoped to one service.
+            if (name.startsWith('__Host-')) return [];
+            const backendPath = service[2] ?? '/';
+            const slash = backendPath.lastIndexOf('/');
+            let cookiePath = slash <= 0 ? '/' : backendPath.slice(0, slash);
+            for (const part of filtered.slice(1)) {
+              const match = /^path\s*=\s*(.*)$/i.exec(part);
+              if (match?.[1]?.startsWith('/') && !/[\\\x00-\x1f\x7f]/.test(match[1])) cookiePath = match[1];
+            }
+            const prefix = `/__services/${service[1]}`;
+            const scopedPath = prefix + (cookiePath === '/' ? '' : cookiePath);
+            const withoutPaths = filtered.filter((part, index) => index === 0 || !/^path\s*=/i.test(part));
+            withoutPaths.push(`Path=${scopedPath}`);
+            return [withoutPaths.join('; ')];
           }
-          const prefix = `/__services/${service[1]}`;
-          const scopedPath = prefix + (cookiePath === '/' ? '' : cookiePath);
-          const withoutPaths = filtered.filter((part, index) => index === 0 || !/^path\s*=/i.test(part));
-          withoutPaths.push(`Path=${scopedPath}`);
-          return [withoutPaths.join('; ')];
-        }
-        return [filtered.join('; ')];
-      });
-      if (cookies.length && req.headers['x-lingxi-local-app-credentials'] !== 'omit') output['set-cookie'] = cookies;
-      output['cache-control'] = 'no-store'; output['x-content-type-options'] = 'nosniff';
-      res.writeHead(response.status, output);
-      if (!response.body || req.method === 'HEAD') { res.end(); return; }
-      const stream = Readable.fromWeb(response.body as import('node:stream/web').ReadableStream); const cancel = () => stream.destroy();
-      requestSignal.addEventListener('abort', cancel, { once: true }); res.once('close', () => { requestSignal.removeEventListener('abort', cancel); stream.destroy(); }); stream.on('error', () => res.destroy()); stream.pipe(res);
+          return [filtered.join('; ')];
+        });
+        if (cookies.length && req.headers['x-lingxi-local-app-credentials'] !== 'omit') output['set-cookie'] = cookies;
+        output['cache-control'] = 'no-store'; output['x-content-type-options'] = 'nosniff';
+        res.writeHead(response.status, output);
+        if (!response.body || req.method === 'HEAD') { res.end(); return; }
+        const stream = Readable.fromWeb(response.body as import('node:stream/web').ReadableStream);
+        responseOwned = false;
+        const cancel = () => { stream.destroy(); res.destroy(); };
+        const close = () => stream.destroy();
+        requestSignal.addEventListener('abort', cancel, { once: true }); res.once('close', close);
+        stream.once('close', () => { requestSignal.removeEventListener('abort', cancel); res.removeListener('close', close); });
+        stream.on('error', () => res.destroy());
+        if (requestSignal.aborted || res.destroyed) cancel(); else stream.pipe(res);
+      } finally { if (responseOwned && response.body) void response.body.cancel().catch(() => undefined); }
     } catch { if (!res.headersSent) res.writeHead(400, { 'cache-control': 'no-store' }).end('Request failed'); else res.destroy(); }
   }
   private async upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     try {
-      const session = await this.authorized(req), path = req.url ?? '/', match = /^\/__services\/([\w-]+)(\/[^#]*)?$/.exec(path);
-      if (!session || session.sockets.size >= 64 || !path.startsWith('/') || path.startsWith('//') || path.startsWith('/__lingxi_') || req.headers.origin !== session.origin || /[\\\r\n\0#]/.test(path)) { socket.destroy(); return; }
+      const session = this.cookie(req), path = req.url ?? '/', match = /^\/__services\/([\w-]+)(\/[^#]*)?$/.exec(path);
+      if (!session || session.controller.signal.aborted || session.upgrades >= 32 || socket.destroyed || !path.startsWith('/') || path.startsWith('//') || path.startsWith('/__lingxi_') || req.headers.origin !== session.origin || /[\\\r\n\0#]/.test(path)) { socket.destroy(); return; }
+      // Count browser connections, including pending upgrades; upstream peers do not consume another slot.
+      session.upgrades++; session.sockets.add(socket);
+      let upstream: ReturnType<typeof httpRequest> | undefined;
+      socket.once('close', () => { session.sockets.delete(socket); session.upgrades--; upstream?.destroy(); });
+      socket.on('error', () => socket.destroy());
+      // Drain a bounded amount while authorization is pending so EOF is observed without losing early frames.
+      const earlyData: Buffer[] = []; let earlySize = 0;
+      const bufferEarlyData = () => {
+        let chunk: Buffer | null;
+        while ((chunk = socket.read() as Buffer | null) !== null) {
+          earlySize += chunk.length;
+          if (earlySize > CONTROL_BODY_LIMIT) { socket.destroy(); return; }
+          earlyData.push(chunk);
+        }
+      };
+      socket.on('readable', bufferEarlyData); socket.once('end', () => socket.destroy());
+      if (await this.authorized(req) !== session || socket.destroyed) { socket.destroy(); return; }
       const port = await this.adapter.socket(session, match?.[1] ?? '');
-      if (!port || session.controller.signal.aborted || !await this.adapter.current(session)) { socket.destroy(); return; }
-      session.sockets.add(socket);
+      if (!port || socket.destroyed || session.controller.signal.aborted || !await this.adapter.current(session) || socket.destroyed || session.controller.signal.aborted) { socket.destroy(); return; }
       const headers: Record<string, string | string[] | undefined> = { ...req.headers, host: `127.0.0.1:${port}` }; const appCookies = (req.headers.cookie ?? '').split(';').map(part => part.trim()).filter(part => part && !part.startsWith(COOKIE + '=') && !part.startsWith(DEV_COOKIE + '='));
       if (appCookies.length) headers.cookie = appCookies.join('; '); else delete headers.cookie;
       for (const key of Object.keys(headers)) if (key === 'forwarded' || key === 'x-real-ip' || key.startsWith('x-forwarded-')) delete headers[key];
       const origin = new URL(session.origin);
       headers['x-forwarded-host'] = origin.host; headers['x-forwarded-proto'] = origin.protocol.slice(0, -1);
-      const upstream = httpRequest({ host: '127.0.0.1', port, path: match ? match[2] ?? '/' : path, headers });
-      socket.once('close', () => { session.sockets.delete(socket); upstream.destroy(); }); socket.on('error', () => socket.destroy());
+      upstream = httpRequest({ host: '127.0.0.1', port, path: match ? match[2] ?? '/' : path, headers });
       upstream.once('upgrade', (response, peer, remainder) => {
-        if (session.controller.signal.aborted) { peer.destroy(); socket.destroy(); return; }
+        if (session.controller.signal.aborted || socket.destroyed) { peer.destroy(); socket.destroy(); return; }
         session.sockets.add(peer); peer.once('close', () => { session.sockets.delete(peer); socket.destroy(); }); peer.on('error', () => peer.destroy());
+        socket.removeListener('readable', bufferEarlyData);
         socket.write(`HTTP/1.1 ${response.statusCode} ${response.statusMessage}\r\n` + response.rawHeaders.reduce((s, v, i, all) => i % 2 || v.toLowerCase() === 'set-cookie' ? s : s + `${v}: ${all[i + 1]}\r\n`, '') + '\r\n');
-        if (head.length) peer.write(head); if (remainder.length) socket.write(remainder); socket.pipe(peer); peer.pipe(socket);
+        if (head.length) peer.write(head); for (const chunk of earlyData) peer.write(chunk); if (remainder.length) socket.write(remainder); socket.pipe(peer); peer.pipe(socket);
       });
       upstream.once('response', response => { response.resume(); socket.destroy(); }); upstream.once('error', () => socket.destroy()); upstream.end();
     } catch { socket.destroy(); }

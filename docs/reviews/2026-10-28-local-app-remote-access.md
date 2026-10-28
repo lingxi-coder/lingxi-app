@@ -251,3 +251,63 @@ above; no matching Mobile binary generation was performed by this review.
 Recommendation remains **COMMENT** pending those platform acceptance gates.
 Within the reviewed source and covered regression scenarios, no confirmed
 findings remain unaddressed. This does not claim exhaustive absence of defects.
+
+## Third independent review
+
+Reviewed the cumulative 85-file feature through `f76c75a60`, with particular
+attention to interactions introduced by the previous two repair commits.
+Requirements coverage was checked before the transport/Agent/lifecycle review.
+The interrupted read-only pass was resumed against a clean checkout; three
+GPT-6.1 Terra xhigh workers then reproduced and repaired the confirmed gateway,
+broker and RTC findings while the parent handled host cleanup integration.
+
+Nine further findings were confirmed and fixed: **two HIGH, six MEDIUM and one
+LOW**. References below identify corrected source locations after this round.
+
+| Severity | Location | Trigger, impact and correction |
+| --- | --- | --- |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteGateway.ts:185` | Disconnecting during asynchronous authorization happened before the active-request close listener was registered. Repeated disconnects leaked slots and eventually caused persistent 429 responses. Register cleanup before authorization and check closed responses before counting or dispatch. |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteGateway.ts:300` | Simultaneous WebSocket upgrades all passed the size check before any was registered, bypassing the session connection limit; a disconnected pending client could also reach the backend. Reserve a browser connection slot before any await, count pending upgrades, release on every close/failure/revocation, and bound early data while observing EOF. |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteGateway.ts:252` | A disconnect during response reauthorization, a rejected recheck, or an unused HEAD response left a returned body without a consumer or cancellation owner. Explicitly cancel unconsumed bodies, transfer ownership to the Node stream once, and recheck already-fired abort/close state before piping. |
+| HIGH | `apps/electron/src/main/local-apps/agentBroker.ts:674` | Stopping/revoking an application waited behind another application's ledger operation before aborting an active executor. Abort exact-app controllers synchronously before queued terminal persistence, matching session cancellation. |
+| HIGH | `apps/electron/src/main/local-apps/agentBroker.ts:704` | A success waiting behind the ledger lock could commit ahead of a cancellation queued after it, even though the controller was already aborted. Recheck host state, controller and app epoch inside success settlement before publishing terminal events or assistant output. |
+| MEDIUM | `apps/electron/src/main/local-apps/agentBroker.ts:620` | Chat reads bypassed the admission lock and exposed provisional user messages/state that could later roll back on revocation; attachment rehydration could race pruning. Serialize summary/list/history reads and asset rehydration through the same ledger queue. |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteRtc.ts:115` | RTC stripped the correct Content-Length from eligible HEAD reads, so page behavior differed from HTTPS fallback. Preserve the resource handler's valid HEAD length while continuing to omit GET lengths and inaccurate transformed metadata. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:1034` | Last-session cleanup could see a background Agent still cancelling and retain its headless run indefinitely. Reconcile the matching run again after session cancellation has actually settled. |
+| LOW | `apps/electron/src/main/local-apps/host.ts:910`, `apps/electron/src/main/local-apps/remoteRtc.ts:140` | The dedicated hidden RTC window delayed an otherwise idle non-macOS process's exit until the peer host's idle timer. Release that reusable window when no opening or browser access remains, before the existing process lifetime check. |
+
+Deterministic pre-fix tests reproduced the broker lock/cancellation/result/read
+races, both host cleanup failures, the HTTP disconnect leak, WebSocket capacity
+bypass and the response reauthorization body leak. The RTC regression includes
+framed transport and browser Response reconstruction. Cross-review found no
+new dependency cycle between broker cancellation, per-app host cleanup and RTC
+shutdown after these fixes.
+
+Cancellation was calibrated at the operation's dispatch/commit boundary. The
+pre-rename signal guard blocks a revoked operation still preparing its temporary
+file; a valid filesystem operation already dispatched may complete. Replacing
+the OS call with a delayed JavaScript stub does not demonstrate that already
+dispatched side effects can be retroactively cancelled, so that speculative
+finding was not treated as an additional defect.
+
+Final verification:
+
+- Feature/peer-host/real-Chrome/atomic/store regression suite: **138 passed**,
+  zero failed, cancelled or skipped.
+- Existing Agent broker/host/executor/SDK/assets and authoring regressions:
+  **56 passed**, zero failed, cancelled or skipped.
+- Desktop Node/renderer typechecks and production JS build passed.
+- AST syntax traversal covered **45 changed TS/TSX files** without syntax
+  errors, console.log calls or literal-secret assignments matching the reviewed
+  patterns. Compiler diagnostics substitute for unavailable LSP tooling.
+- `git diff --check` passed. No Mobile source, Rust wire format or Web source
+  changed in this round; their previous receipts retain their stated scope.
+
+Receipts: `/private/tmp/lingxi-local-app-review-round3-final.log`,
+`/private/tmp/lingxi-local-app-review-round3-agent.log` and
+`/private/tmp/lingxi-local-app-review-round3-build.log`.
+
+Recommendation: **COMMENT**. No confirmed source findings remain unaddressed in
+this review scope. Matching Mobile native builds, installed-device behavior,
+public tunnel/TURN and long-duration acceptance remain pending; passing source
+checks do not establish release readiness or exhaustive absence of defects.

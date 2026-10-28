@@ -145,3 +145,63 @@ test('revocation before an archive rename preserves the original chat', async t 
     assert.deepEqual((await fs.readdir(join(root,'apps',owner.appId,'agent','chats',chat.chatId))).sort(),['assets','chat.json']);
   } finally { release();writable.writeFile=writeFile; }
 });
+
+test('app revocation aborts an executor while another app holds the ledger lock', async t => {
+  const root=await fs.mkdtemp(join(tmpdir(),'agent-app-abort-'));
+  let release!:()=>void, entered!:()=>void, started!:(signal:AbortSignal)=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;}), locked=new Promise<void>(resolve=>{entered=resolve;}), executing=new Promise<AbortSignal>(resolve=>{started=resolve;});
+  const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)}, other={...owner,appId:`a${'2'.repeat(32)}`};
+  const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
+  const broker=new LocalAppAgentBroker({root,authorize:async principal=>{if(principal.appId===other.appId){entered();await gate;}return authorization;},revalidate:async()=>true,execute:async execution=>{
+    if(execution.owner.appId===owner.appId){started(execution.signal);await new Promise<void>((_resolve,reject)=>execution.signal.addEventListener('abort',()=>reject(execution.signal.reason),{once:true}));}
+    return {result:{text:'done',attachments:[],messageId:'m'},usage:{turns:1}};
+  }});
+  t.after(async()=>{release();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
+  const run=await broker.run(owner,{...input,runId:'active'});const signal=await executing;
+  const blocker=broker.run(other,{...input,runId:'blocker'});await locked;
+  const cancellation=broker.cancelApp(owner.appId);
+  const aborted=signal.aborted;release();await Promise.all([cancellation,blocker]);assert.equal(aborted,true);assert.equal((await broker.get(owner,run.runId)).state,'cancelled');
+});
+
+test('revocation before queued success commits prevents assistant output', async t => {
+  const root=await fs.mkdtemp(join(tmpdir(),'agent-success-revoke-'));
+  let releaseLock!:()=>void, enteredLock!:()=>void, releaseResult!:()=>void, executing!:()=>void, successQueued!:()=>void;
+  const lockGate=new Promise<void>(resolve=>{releaseLock=resolve;}), locked=new Promise<void>(resolve=>{enteredLock=resolve;}), resultGate=new Promise<void>(resolve=>{releaseResult=resolve;}), started=new Promise<void>(resolve=>{executing=resolve;}), queued=new Promise<void>(resolve=>{successQueued=resolve;});
+  const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)}, other={...owner,appId:`a${'2'.repeat(32)}`};
+  const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
+  const broker=new LocalAppAgentBroker({root,authorize:async principal=>{if(principal.appId===other.appId){enteredLock();await lockGate;}return authorization;},revalidate:async()=>true,execute:async execution=>{
+    if(execution.owner.appId===owner.appId){executing();await resultGate;}
+    return {result:{text:'secret result',output:{ok:true},attachments:[],messageId:'assistant'},usage:{turns:1}};
+  }});
+  t.after(async()=>{releaseLock();releaseResult();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
+  const internal=broker as any, finish=internal.finish.bind(broker);
+  internal.finish=(...args:any[])=>{if(args[1]==='succeeded' && args[0].includes('target'))successQueued();return finish(...args);};
+  const run=await broker.run(owner,{...input,runId:'target'});await started;
+  const blocker=broker.run(other,{...input,runId:'blocker'});await locked;releaseResult();await queued;
+  const cancellation=broker.cancelRemoteSession(owner);releaseLock();await Promise.all([cancellation,blocker]);
+  assert.equal((await broker.get(owner,run.runId)).state,'cancelled');
+  const events=(await broker.events(owner,run.runId)).events;
+  assert.equal(events.some(event=>event.type.startsWith('TEXT_MESSAGE_')),false);
+  assert.equal(events.some(event=>event.type==='RUN_FINISHED' && !('outcome' in event)),false);
+});
+
+test('chat reads wait for aborted admission rollback before exposing history', async t => {
+  const root=await fs.mkdtemp(join(tmpdir(),'agent-chat-admission-read-'));
+  let release!:()=>void, entered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;}), waiting=new Promise<void>(resolve=>{entered=resolve;});
+  const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
+  const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
+  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>({result:{text:'done',attachments:[],messageId:'m'},usage:{turns:1}})});
+  t.after(async()=>{release();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
+  const chat=await broker.createChat(owner,{title:'Chat'});
+  const internal=broker as any, save=internal.saveChat.bind(broker);
+  internal.saveChat=async (...args:any[])=>{await save(...args);entered();await gate;};
+  const controller=new AbortController();
+  const admission=assert.rejects(broker.sendChat(owner,chat.chatId,{...input,threadId:chat.chatId,runId:'aborted'},controller.signal),/revoked/);
+  await waiting;let completed=0;
+  const summary=broker.getChat(owner,chat.chatId).then(value=>{completed++;return value;}), list=broker.listChats(owner).then(value=>{completed++;return value;}), history=broker.chatHistory(owner,chat.chatId).then(value=>{completed++;return value;});
+  await new Promise(resolve=>setImmediate(resolve));const observed=completed;
+  controller.abort(new Error('revoked'));release();await admission;
+  assert.equal(observed,0,'readers must not observe provisional chat state');
+  assert.equal((await summary).state,'idle');assert.equal((await list).chats[0].state,'idle');assert.deepEqual((await history).messages,[]);
+});

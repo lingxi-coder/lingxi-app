@@ -369,3 +369,132 @@ test('named service cookies use service paths and HEAD preserves representation 
     assert.deepEqual({cookies:cookies.headers['set-cookie'],length:head.headers['content-length']},{cookies:['explicit=one; HttpOnly; Path=/__services/api/api','default=two; HttpOnly; Path=/__services/api/api','root=three; Path=/__services/api'],length:'123'});
   } finally {await gateway.dispose();}
 });
+
+test('disconnect during request authorization does not consume request slots or dispatch', async () => {
+  const {port,gateway,adapter}=await setup();
+  let release!:()=>void;
+  try {
+    const s=await session(gateway,port); let entered=0, dispatches=0, allEntered!:()=>void;
+    const gate=new Promise<void>(resolve=>{release=resolve;});
+    const ready=new Promise<void>(resolve=>{allEntered=resolve;});
+    adapter.current=async()=>{if (++entered===32) allEntered(); await gate; return true;};
+    adapter.resource=async()=>{dispatches++;return new Response('alive');};
+    let closed=0, allClosed!:()=>void;
+    const serverClosed=new Promise<void>(resolve=>{allClosed=resolve;});
+    (gateway as any).server.on('request', (_req: unknown,res: import('node:http').ServerResponse)=>res.once('close',()=>{if (++closed===32) allClosed();}));
+    const requests=Array.from({length:32},()=>{const req=httpRequest({hostname:'127.0.0.1',port,path:'/',headers:{host:s.host,cookie:s.cookie}});req.on('error',()=>{});req.end();return req;});
+    await ready; requests.forEach(req=>req.destroy()); await serverClosed; release();
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    assert.equal(dispatches,0);
+    adapter.current=async()=>true;
+    assert.equal((await request(port,s.host,'/',{cookie:s.cookie})).body,'alive');
+  } finally {release?.();await gateway.dispose();}
+});
+
+test('pending WebSocket upgrades reserve slots and release them on disconnect and revoke', async () => {
+  const backend=createServer();let upstreamCalls=0;
+  backend.on('upgrade',(_req,socket)=>{upstreamCalls++;socket.destroy();});
+  await new Promise<void>(resolve=>backend.listen(0,'127.0.0.1',resolve));
+  const backendPort=(backend.address() as {port:number}).port;
+  const {port,gateway,adapter}=await setup();
+  const clients: import('node:http').ClientRequest[]=[];
+  let release!:()=>void;
+  try {
+    const s=await session(gateway,port); let entered=0, ready!:()=>void, replacement!:()=>void;
+    const gate=new Promise<void>(resolve=>{release=resolve;});
+    const firstReady=new Promise<void>(resolve=>{ready=resolve;});
+    const replacementReady=new Promise<void>(resolve=>{replacement=resolve;});
+    adapter.socket=async()=>{entered++;if(entered===32)ready();if(entered===33)replacement();await gate;return backendPort;};
+    const serverSession=[...(gateway as any).sessions.values()][0] as {sockets:Set<import('node:stream').Duplex>};
+    const upgrade=()=>{const req=httpRequest({hostname:'127.0.0.1',port,path:'/__services/api/ws',headers:{host:s.host,cookie:s.cookie,origin:`https://${s.host}`,connection:'Upgrade',upgrade:'websocket'}});req.on('error',()=>{});req.end();clients.push(req);return req;};
+    for(let i=0;i<32;i++) upgrade();
+    await firstReady;
+    const rejected=upgrade();
+    await Promise.race([new Promise<void>(resolve=>rejected.once('close',resolve)),new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('upgrade limit did not reject')),1000))]);
+    assert.equal(entered,32);assert.equal(serverSession.sockets.size,32);
+    const serverSocket=[...serverSession.sockets][0]!;
+    const serverSocketClosed=new Promise<void>(resolve=>serverSocket.once('close',resolve));
+    clients[0]!.destroy(); await serverSocketClosed;
+    upgrade();await replacementReady;
+    assert.equal(serverSession.sockets.size,32);
+    const socketsClosed=Promise.all([...serverSession.sockets].map(socket=>new Promise<void>(resolve=>socket.once('close',resolve))));
+    gateway.revokeOwner(owner);await socketsClosed;
+    release();await new Promise<void>(resolve=>setImmediate(resolve));
+    assert.equal(upstreamCalls,0);assert.equal(serverSession.sockets.size,0);assert.equal(gateway.hasAccess(),false);
+  } finally {release?.();clients.forEach(req=>req.destroy());await gateway.dispose();backend.closeAllConnections();await new Promise<void>(resolve=>backend.close(()=>resolve()));}
+});
+
+test('WebSocket frames sent while authorization is pending reach the upstream in order', async () => {
+  const backend=createServer();let received!: (value:string)=>void;
+  const data=new Promise<string>(resolve=>{received=resolve;});
+  backend.on('upgrade',(_req,socket,head)=>{socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');let chunks=head.toString();socket.on('data',chunk=>{chunks+=chunk.toString();if(chunks.length>=5){received(chunks);socket.destroy();}});if(chunks.length>=5){received(chunks);socket.destroy();}});
+  await new Promise<void>(resolve=>backend.listen(0,'127.0.0.1',resolve));
+  const {port,gateway,adapter}=await setup();let release!:()=>void;
+  try {
+    const s=await session(gateway,port);let entered!:()=>void;
+    const ready=new Promise<void>(resolve=>{entered=resolve;});const gate=new Promise<void>(resolve=>{release=resolve;});
+    adapter.socket=async()=>{entered();await gate;return (backend.address() as {port:number}).port;};
+    const req=httpRequest({hostname:'127.0.0.1',port,path:'/__services/api/ws',headers:{host:s.host,cookie:s.cookie,origin:`https://${s.host}`,connection:'Upgrade',upgrade:'websocket'}});
+    req.on('error',()=>{});req.on('upgrade',(_response,socket)=>socket.on('error',()=>{}));req.end();
+    await ready;
+    const serverSession=[...(gateway as any).sessions.values()][0] as {sockets:Set<import('node:stream').Duplex>};
+    const serverSocket=[...serverSession.sockets][0]!;
+    const readable=new Promise<void>(resolve=>serverSocket.once('readable',()=>resolve()));
+    req.socket!.write('early');await readable;release();
+    assert.equal(await data,'early');req.destroy();
+  } finally {release?.();await gateway.dispose();backend.closeAllConnections();await new Promise<void>(resolve=>backend.close(()=>resolve()));}
+});
+
+test('WebSocket capacity is reserved during authorization and released after failure', async () => {
+  const {port,gateway,adapter}=await setup();const clients: import('node:http').ClientRequest[]=[];let release!:()=>void;
+  try {
+    const s=await session(gateway,port);let entered=0, ready!:()=>void, socketCalls=0;
+    const gate=new Promise<void>(resolve=>{release=resolve;});const allEntered=new Promise<void>(resolve=>{ready=resolve;});
+    adapter.current=async()=>{if(++entered===32)ready();await gate;return true;};
+    adapter.socket=async()=>{socketCalls++;throw new Error('unavailable');};
+    const upgrade=()=>{const req=httpRequest({hostname:'127.0.0.1',port,path:'/__services/api/ws',headers:{host:s.host,cookie:s.cookie,origin:`https://${s.host}`,connection:'Upgrade',upgrade:'websocket'}});req.on('error',()=>{});req.end();clients.push(req);return req;};
+    for(let i=0;i<32;i++)upgrade();await allEntered;
+    const rejected=upgrade();await Promise.race([new Promise<void>(resolve=>rejected.once('close',resolve)),new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('authorization capacity did not reject')),1000))]);
+    assert.equal(entered,32);
+    const serverSession=[...(gateway as any).sessions.values()][0] as {sockets:Set<import('node:stream').Duplex>;upgrades:number};
+    const closed=Promise.all([...serverSession.sockets].map(socket=>new Promise<void>(resolve=>socket.once('close',resolve))));
+    release();await closed;
+    assert.equal(socketCalls,32);assert.equal(serverSession.upgrades,0);assert.equal(serverSession.sockets.size,0);
+  } finally {release?.();clients.forEach(req=>req.destroy());await gateway.dispose();}
+});
+
+test('unconsumed resource responses are cancelled on disconnect or failed reauthorization', async () => {
+  for (const outcome of ['disconnect','denied','error','head'] as const) {
+    const {port,gateway,adapter}=await setup();
+    try {
+      const s=await session(gateway,port);let calls=0, entered!:()=>void, release!:()=>void, reject!: (error:Error)=>void, cancelled!:()=>void;
+      const ready=new Promise<void>(resolve=>{entered=resolve;});const gate=new Promise<void>((resolve,rejectGate)=>{release=resolve;reject=rejectGate;});
+      const stopped=new Promise<void>(resolve=>{cancelled=resolve;});
+      adapter.resource=async()=>new Response(new ReadableStream({pull(){},cancel(){cancelled();}}));
+      adapter.current=async()=>{if(++calls===2){entered();if(outcome==='disconnect'||outcome==='error')await gate;return outcome!=='denied';}return true;};
+      if(outcome==='disconnect') {
+        const closed=new Promise<void>(resolve=>(gateway as any).server.once('request',(_req:unknown,res:import('node:http').ServerResponse)=>res.once('close',resolve)));
+        const req=httpRequest({hostname:'127.0.0.1',port,path:'/',headers:{host:s.host,cookie:s.cookie}});req.on('error',()=>{});req.end();
+        await ready;req.destroy();await closed;release();
+      } else if(outcome==='error') {
+        const result=request(port,s.host,'/',{cookie:s.cookie});await ready;reject(new Error('current failed'));assert.equal((await result).status,400);
+      } else {
+        const result=request(port,s.host,'/',{cookie:s.cookie,...(outcome==='head'?{method:'HEAD'}:{})});await ready;assert.equal((await result).status,outcome==='head'?200:400);
+      }
+      await Promise.race([stopped,new Promise<never>((_,rejectTimeout)=>setTimeout(()=>rejectTimeout(new Error(`${outcome} did not cancel response body`)),1000))]);
+    } finally {await gateway.dispose();}
+  }
+});
+
+test('a resource response arriving after browser disconnect is cancelled', async () => {
+  const {port,gateway,adapter}=await setup();let release!:()=>void;
+  try {
+    const s=await session(gateway,port);let entered!:()=>void, cancelled!:()=>void;
+    const ready=new Promise<void>(resolve=>{entered=resolve;});const gate=new Promise<void>(resolve=>{release=resolve;});const stopped=new Promise<void>(resolve=>{cancelled=resolve;});
+    adapter.resource=async()=>{entered();await gate;return new Response(new ReadableStream({pull(){},cancel(){cancelled();}}));};
+    const closed=new Promise<void>(resolve=>(gateway as any).server.once('request',(_req:unknown,res:import('node:http').ServerResponse)=>res.once('close',resolve)));
+    const req=httpRequest({hostname:'127.0.0.1',port,path:'/',headers:{host:s.host,cookie:s.cookie}});req.on('error',()=>{});req.end();
+    await ready;req.destroy();await closed;release();
+    await Promise.race([stopped,new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('late response was not cancelled')),1000))]);
+  } finally {release?.();await gateway.dispose();}
+});

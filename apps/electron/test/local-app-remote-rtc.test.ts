@@ -196,6 +196,28 @@ test('disposing RTC also disposes its dedicated peer host', () => {
   rtc.dispose(); assert.equal(disposed, 1);
 });
 
+test('releasing an idle RTC window preserves live peers and permits later sessions', async () => {
+  let shutdowns = 0; let host: FragmentLink;
+  const peerHost = {
+    answer: async () => { [host] = links(); return 'answer'; },
+    link: () => host as PeerLink,
+    shutdown: () => { shutdowns++; },
+    dispose: () => {},
+  } as unknown as PeerHost;
+  const rtc = new LocalAppRtc({ peerHost, resource: async () => new Response(), current: async () => true });
+  rtc.releaseIdle(); assert.equal(shutdowns, 1);
+  const connect = async (session: string, controller: AbortController) => rtc.rtc(run, new Request('https://app.example/__lingxi_remote_rtc', { method: 'POST', body: JSON.stringify({ sdp: 'offer' }) }), session, controller.signal);
+  const first = new AbortController();
+  assert.equal((await connect('first', first)).status, 200);
+  rtc.releaseIdle(); assert.equal(shutdowns, 1);
+  first.abort(); rtc.releaseIdle(); assert.equal(shutdowns, 2);
+  const second = new AbortController();
+  assert.equal((await connect('second', second)).status, 200);
+  rtc.releaseIdle(); assert.equal(shutdowns, 2);
+  second.abort(); rtc.releaseIdle(); assert.equal(shutdowns, 3);
+  rtc.dispose();
+});
+
 test('session-specific origin carries browser-framed omit reads end to end', async () => {
   const { runInNewContext } = await import('node:vm');
   const { LOCAL_APP_RTC_BROWSER_SOURCE } = await import('../src/main/local-apps/remoteRtcBrowser.js');
@@ -207,9 +229,12 @@ test('session-specific origin carries browser-framed omit reads end to end', asy
     onFragment(fn) { incoming = fn; }, onClose(fn) { ended = fn; }, close(reason) { ended(reason); },
   };
   const peerHost = { answer: async () => 'answer', link: () => host as PeerLink, dispose: () => host.close('disposed') } as unknown as PeerHost;
+  const resourceResponse = (request: Request) => new Response(request.method === 'HEAD' ? null : expected, {
+    headers: { 'content-type': 'text/plain', ...(new URL(request.url).pathname === '/injected' ? {} : { 'content-length': String(Buffer.byteLength(expected)) }) },
+  });
   const rtc = new LocalAppRtc({ peerHost, current: async () => true, resource: async (_run, request) => {
     fetchedUrl = request.url; assert.equal(request.headers.get('x-lingxi-local-app-credentials'), 'omit');
-    return new Response(expected, { headers: { 'content-type': 'text/plain' } });
+    return resourceResponse(request);
   } });
   const signal = new AbortController();
   class FakePc {
@@ -220,7 +245,11 @@ test('session-specific origin carries browser-framed omit reads end to end', asy
   const native = async (input: any, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(input, origin), init);
     if (new URL(request.url).pathname === '/__lingxi_remote_rtc') return rtc.rtc(run, request, 'test-session', signal.signal);
-    networkReads++; return new Response('https fallback');
+    networkReads++;
+    const response = resourceResponse(request);
+    const headers = new Headers(response.headers);
+    if (request.method !== 'HEAD') headers.delete('content-length');
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   };
   const window: any = { fetch: native, RTCPeerConnection: FakePc };
   const timers: ReturnType<typeof setTimeout>[] = [];
@@ -230,6 +259,16 @@ test('session-specific origin carries browser-framed omit reads end to end', asy
   assert.equal(response.url, origin + '/api?q=1'); assert.equal(response.type, 'basic'); assert.equal(response.redirected, false);
   const clone = response.clone(); assert.equal(clone.url, response.url); assert.equal(clone.type, 'basic');
   assert.equal(await response.text(), expected); assert.equal(fetchedUrl, origin + '/api?q=1'); assert.equal(networkReads, 0);
+  for (const [method, path, length] of [['HEAD', '/api', String(Buffer.byteLength(expected))], ['HEAD', '/injected', null], ['GET', '/api', null]] as const) {
+    const init = { method, credentials: 'omit' as const };
+    const viaRtc = await window.fetch(origin + path, init);
+    assert.equal(networkReads, 0);
+    const viaHttps = await native(origin + path, init);
+    assert.equal(viaRtc.headers.get('content-length'), length);
+    assert.deepEqual([...viaRtc.headers], [...viaHttps.headers]);
+    assert.equal(await viaRtc.text(), await viaHttps.text());
+    networkReads = 0;
+  }
   timers.forEach(clearTimeout); rtc.dispose();
 });
 

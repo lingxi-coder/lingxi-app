@@ -18,6 +18,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, launchTimeou
   let windowCount = 0, running = false, revision = 1, runId = 'run-one', liveSession = false, honorAbort = true, ended = 0;
   let startHook = async (_signal?: AbortSignal) => {};
   const electron = { BrowserWindow: class {
+    static getAllWindows(){return [];}
     private closed?:()=>void;private destroyed=false;
     webContents={id:17,on(){},setWindowOpenHandler(){}};
     constructor(){windowCount++;}isDestroyed(){return this.destroyed;}on(name:string,fn:()=>void){if(name==='closed')this.closed=fn;}
@@ -135,6 +136,26 @@ test('remote browser access keeps the host alive and its unused headless run sto
   assert.equal(await f.host.hasBackgroundApps(),false);
   await f.host.remoteAccessEnded(id,'run-one');
   assert.equal(f.runtime.phase(),'stopped');
+});
+
+test('the last revoked Agent session reconciles its run after cancellation settles', async t => {
+  const f=await fixture(t);f.row.agent.background=true;await f.host.setRemoteAccess(id,true);await f.host.remoteOpen(id,owner);
+  let active=true, release!:()=>void;const cancelling=new Promise<void>(resolve=>{release=resolve;});
+  f.host.setAgentBroker({run:async()=>({runId:'agent-run'}),hasActiveApp:()=>active,cancelApp:async()=>{},cancelRemoteSession:async()=>{await cancelling;active=false;}});
+  const controller=new AbortController();
+  await f.host.remoteInvoke({appId:id,revision:1,runId:'run-one'},'agent.tasks.start',{input:{}},controller.signal,'s'.repeat(43));
+  f.host.remoteRevokeOwner(owner);controller.abort();await f.host.remoteAccessEnded(id,'run-one');assert.equal(f.runtime.phase(),'running');
+  release();for(let attempt=0;attempt<30 && f.runtime.phase()==='running';attempt++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(f.runtime.phase(),'stopped');
+});
+
+test('the last remote access closes idle RTC before rechecking process lifetime', async t => {
+  const f=await fixture(t);await f.host.setRemoteAccess(id,true);await f.host.remoteOpen(id,owner);
+  const events:string[]=[];f.host.options.onRemoteAccessEnded=()=>{events.push('check-idle');};
+  f.host.setRemoteRtc({releaseIdle(){events.push('release-rtc');},dispose(){}});
+  await f.host.remoteAccessEnded(id,'run-one');assert.equal(events.includes('release-rtc'),false);
+  events.length=0;f.host.remoteRevokeOwner(owner);await f.host.remoteAccessEnded(id,'run-one');
+  assert.ok(events.indexOf('release-rtc')>=0);assert.ok(events.indexOf('release-rtc')<events.indexOf('check-idle'));
 });
 
 test('remote launch deadline and revocation abort actual startup work', async t => {

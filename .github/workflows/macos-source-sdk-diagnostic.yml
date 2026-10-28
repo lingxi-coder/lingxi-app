@@ -80,10 +80,10 @@ jobs:
           set -euo pipefail
           node --input-type=module <<'JS'
           import { execFileSync } from 'node:child_process';
-          import { mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+          import { mkdirSync, readdirSync, readFileSync, realpathSync, renameSync } from 'node:fs';
           import { join } from 'node:path';
           import { stageMacGStreamerRuntime, signMacGStreamerRuntime, verifyMacGStreamerRuntime } from './scripts/gstreamer-macos.mjs';
-          import { runPackagedMacMediaProbe } from './scripts/packaged-sidecar-smoke.mjs';
+          import { runPackagedMacMediaProbe, sanitizedEnvironment } from './scripts/packaged-sidecar-smoke.mjs';
           import { scanTreeForForbiddenContent } from './scripts/package-support.mjs';
           const work = join(realpathSync(process.env.RUNNER_TEMP), 'cerbero-media-diagnostic');
           const sdk = realpathSync(process.env.LINGXI_GSTREAMER_SDK_MACOS);
@@ -109,5 +109,68 @@ jobs:
           console.log(`staged binaries containing source build prefix: ${retained.length}`);
           scanTreeForForbiddenContent(app);
           console.log('unchanged package content scan passed');
+          function classifyPrefix(image) {
+            const data = readFileSync(image);
+            if (data.readUInt32LE(0) !== 0xfeedfacf) throw new Error('expected a thin 64-bit Mach-O');
+            const count = data.readUInt32LE(16);
+            const commandsEnd = 32 + data.readUInt32LE(20);
+            if (commandsEnd > data.length) throw new Error('invalid Mach-O load commands');
+            const sections = [];
+            let pos = 32;
+            for (let i = 0; i < count; i++) {
+              const command = data.readUInt32LE(pos);
+              const size = data.readUInt32LE(pos + 4);
+              if (size < 8 || pos + size > commandsEnd) throw new Error('invalid load command size');
+              if (command === 0x19) {
+                const nsects = data.readUInt32LE(pos + 64);
+                for (let j = 0; j < nsects; j++) {
+                  const section = pos + 72 + j * 80;
+                  if (section + 80 > pos + size) throw new Error('invalid Mach-O section');
+                  const sect = data.subarray(section, section + 16).toString('ascii').split('\0')[0];
+                  const seg = data.subarray(section + 16, section + 32).toString('ascii').split('\0')[0];
+                  const length = Number(data.readBigUInt64LE(section + 40));
+                  const offset = data.readUInt32LE(section + 48);
+                  if (Number.isSafeInteger(length) && offset + length <= data.length) sections.push([offset, offset + length, seg + ',' + sect]);
+                }
+              } else if (command === 2) {
+                const offset = data.readUInt32LE(pos + 16);
+                const length = data.readUInt32LE(pos + 20);
+                if (offset + length <= data.length) sections.push([offset, offset + length, 'symbol-string-table']);
+              }
+              pos += size;
+            }
+            const records = [];
+            for (let offset = data.indexOf(buildPrefix); offset !== -1; offset = data.indexOf(buildPrefix, offset + buildPrefix.length)) {
+              const section = sections.find(([start, end]) => start <= offset && offset < end)?.[2]
+                ?? (offset < commandsEnd ? 'load-commands' : 'other');
+              let start = data.lastIndexOf(0, offset);
+              start = start === -1 || offset - start > 256 ? offset : start + 1;
+              let end = data.indexOf(0, offset);
+              if (end === -1 || end - start > 300) end = Math.min(data.length, start + 300);
+              const example = data.subarray(start, end).toString('utf8')
+                .replaceAll(process.env.CERBERO_BUILD_ROOT, '<cerbero-root>')
+                .replace(/[^\x20-\x7e]/g, '?');
+              records.push({ section, example });
+            }
+            return records;
+          }
+          for (const name of retained) {
+            const records = classifyPrefix(join(frameworks, name));
+            const counts = Object.create(null);
+            for (const record of records) counts[record.section] = (counts[record.section] ?? 0) + 1;
+            console.log('embedded-prefix', name, JSON.stringify({ counts, examples: records.slice(0, 8) }));
+          }
+          const buildRoot = process.env.CERBERO_BUILD_ROOT;
+          const parked = buildRoot + '-parked';
+          renameSync(buildRoot, parked);
+          try {
+            const output = execFileSync(join(work, 'packaged-media-probe'), [
+              join(frameworks, 'GStreamerPlugins'), join(frameworks, 'GStreamerLibraries'),
+            ], { cwd: work, env: sanitizedEnvironment(work, resources, 'darwin'), encoding: 'utf8', timeout: 60_000 }).trim();
+            if (output !== 'packaged media plugins and audio/video pipelines OK') throw new Error('unexpected relocated probe output');
+            console.log('packaged media probe passed with source SDK path absent');
+          } finally {
+            renameSync(parked, buildRoot);
+          }
           if (retained.length) throw new Error('source SDK retains build-prefix strings; runtime relocation requires review');
           JS

@@ -364,6 +364,29 @@ function assertNoSubmission(browser) {
   assert.equal(browser.counters.chatSend, 0);
 }
 
+function chatDiagnostics(browser) {
+  const value = JSON.parse(browser.elements.get('chat-lookup-diagnostics').textContent);
+  assert.equal(value.version, 2);
+  assert.match(value.pageId, /^[0-9a-f-]{36}$/);
+  return value;
+}
+
+function currentChatCall(source, sequence, requestRef, state, transport, storage = 'saved') {
+  return {attribution: 'current-page', storage: state === 'failed' ? storage : 'not-saved',
+    source, sequence, requestRef, state, ...(transport ? {transport} : {})};
+}
+
+function unboundChatFailure(transport, storage = 'saved') {
+  return {attribution: 'saved-unbound', storage, source: 'unavailable', sequence: null,
+    requestRef: null, state: 'failed', transport};
+}
+
+function assertSavedChatFailure(browser, storage, stage, source, sequence, requestRef, transport) {
+  assert.deepEqual(JSON.parse(storage.getItem(chatLookupFailurePrefix + stage)), {
+    version: 2, pageId: chatDiagnostics(browser).pageId, source, sequence, requestRef, transport,
+  });
+}
+
 test('accepted existing run reconnects read-only and preserves input and IDs', async () => {
   const browser = createBrowser();
   await waitFor(() => browser.elements.get('status')?.textContent.includes('Read-only reconnect succeeded'), 'existing run did not recover');
@@ -1054,6 +1077,50 @@ test('Chat creation persists the stable UUID and exact input before the first ho
   assert.equal(storage.getItem(creationFinishedPrefix + request.requestId), '1');
   assert.equal(browser.state().chatId, request.requestId);
   assert.match(browser.elements.get('chat-handle').textContent, new RegExp(request.requestId));
+  const diagnostics = chatDiagnostics(browser);
+  assert.equal(diagnostics.selectedCreationRef, diagnostics.selectedChatRef);
+  assert.deepEqual(diagnostics.create, currentChatCall('create-button', 1, diagnostics.selectedCreationRef, 'returned'));
+  assert.deepEqual(diagnostics.history, currentChatCall('create-button', 2, diagnostics.selectedChatRef, 'returned'));
+  assert.equal(diagnostics.creationStatus, null);
+  assertNoSubmission(browser);
+});
+
+test('a failed create captures only allowlisted transport metadata and never repeats the creation', async () => {
+  const storage = sharedStorageWith();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const failure = Object.assign(new Error('synthetic-private-message https://private.invalid/file?token=synthetic-token'), {
+    code: 'synthetic-private-code', request: {messages: ['synthetic-message'], file: 'synthetic-file'},
+    transport: {phase: 'http_response', reason: 'http_error', httpStatus: 401, elapsedMs: 89, visibility: 'visible',
+      requestId: 'synthetic-request-id', url: 'https://private.invalid/', body: 'synthetic-body',
+      headers: {authorization: 'synthetic-token'}, arbitrary: {content: 'synthetic-message'}},
+  });
+  const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false,
+    chatCreateHandler: async () => { await gate; throw failure; }});
+  await waitFor(() => browser.elements.get('status')?.textContent.includes('Host Agent ready'), 'bootstrap did not finish');
+  const click = browser.elements.get('create-chat').handlers.get('click');
+  const pending = click();
+  await waitFor(() => browser.counters.chatCreate === 1, 'create was not sent');
+  const before = chatDiagnostics(browser);
+  assert.deepEqual(before.create, currentChatCall('create-button', 1, before.selectedCreationRef, 'pending'));
+  await click();
+  assert.equal(browser.counters.chatCreate, 1, 'a second click must not create while diagnostics are pending');
+  release();
+  await pending;
+  const expected = {phase: 'http_response', reason: 'http_error', httpStatus: 401, elapsedMs: 89, visibility: 'visible'};
+  const diagnostic = chatDiagnostics(browser);
+  assert.deepEqual(diagnostic.create, currentChatCall('create-button', 1, diagnostic.selectedCreationRef, 'failed', expected));
+  assertSavedChatFailure(browser, storage, 'create', 'create-button', 1, diagnostic.selectedCreationRef, expected);
+  const input = browser.chatCreateRequests[0];
+  assert.equal(storage.getItem(creationHeadKey), input.requestId);
+  assert.equal(storage.getItem(creationFinishedPrefix + input.requestId), null);
+  assert.equal(browser.state().chatId, null);
+  assert.doesNotMatch(JSON.stringify(diagnostic) + storage.getItem(chatLookupFailurePrefix + 'create')
+    + browser.elements.get('error').textContent, /synthetic-|private\.invalid|https?:\/\//);
+  assert.ok(!JSON.stringify(diagnostic).includes(input.requestId), 'request binding must not expose the raw request ID');
+  assert.equal(browser.counters.chatCreate, 1);
+  assert.equal(browser.counters.chatStatus, 0);
+  assert.equal(browser.counters.chatHistory, 0);
   assertNoSubmission(browser);
 });
 
@@ -1079,6 +1146,11 @@ test('uncertain Chat creation is checked read-only on refresh and retried only b
   assert.deepEqual(refreshed.chatStatusRequests, [input, input], 'explicit retry must check the exact ID before reissuing it');
   assert.equal(storage.getItem(creationFinishedPrefix + input.requestId), '1');
   assert.equal(refreshed.state().chatId, input.requestId);
+  const diagnostics = chatDiagnostics(refreshed);
+  assert.deepEqual(diagnostics.creationStatus, currentChatCall('retry-button', 2, diagnostics.selectedCreationRef, 'returned'));
+  assert.deepEqual(diagnostics.create, currentChatCall('retry-button', 3, diagnostics.selectedCreationRef, 'returned'));
+  assert.deepEqual(diagnostics.history, currentChatCall('retry-button', 4, diagnostics.selectedChatRef, 'returned'));
+  assert.equal(diagnostics.selectedCreationRef, diagnostics.selectedChatRef);
   assertNoSubmission(refreshed);
 });
 
@@ -1131,9 +1203,10 @@ test('creationStatus failure saves only allowlisted transport diagnostics and re
   await waitFor(() => storage.getItem(key) !== null && browser.elements.get('error')?.textContent.includes('host_unavailable'),
     'creationStatus failure was not recorded');
   const expected = {phase: 'request', reason: 'timeout', httpStatus: 'unavailable', elapsedMs: 5000, visibility: 'hidden'};
-  assert.deepEqual(JSON.parse(storage.getItem(key)), {version: 1, transport: expected});
+  const diagnostic = chatDiagnostics(browser);
+  assertSavedChatFailure(browser, storage, 'creationStatus', 'bootstrap', 1, diagnostic.selectedCreationRef, expected);
   const visible = browser.elements.get('chat-lookup-diagnostics').textContent;
-  assert.deepEqual(JSON.parse(visible).creationStatus, {storage: 'saved', transport: expected});
+  assert.deepEqual(diagnostic.creationStatus, currentChatCall('bootstrap', 1, diagnostic.selectedCreationRef, 'failed', expected));
   assert.doesNotMatch(visible + storage.getItem(key) + browser.elements.get('error').textContent,
     /synthetic-|private\.invalid|643ff799/);
   assert.equal(browser.counters.chatStatus, 1);
@@ -1144,11 +1217,82 @@ test('creationStatus failure saves only allowlisted transport diagnostics and re
   const reloaded = createBrowser({seedState: null, sharedStorage: reloadedStorage, readyBeforeBootstrap: false});
   await waitFor(() => reloaded.elements.get('chat-lookup-diagnostics')?.textContent.includes('timeout'),
     'saved diagnostic was not restored');
-  assert.deepEqual(JSON.parse(reloaded.elements.get('chat-lookup-diagnostics').textContent).creationStatus,
-    {storage: 'saved', transport: expected});
+  const reloadedDiagnostic = chatDiagnostics(reloaded);
+  assert.notEqual(reloadedDiagnostic.pageId, diagnostic.pageId);
+  assert.deepEqual(reloadedDiagnostic.creationStatus, unboundChatFailure(expected));
   assert.equal(reloaded.counters.chatStatus, 0);
   assert.equal(reloaded.counters.chatCreate, 0);
   assertNoSubmission(reloaded);
+});
+
+test('bootstrap and explicit status queries have distinct ordered evidence bound to the same selected request', async () => {
+  const input = {requestId: creationId, title: 'synthetic-private-title'};
+  const storage = sharedStorageWith(creationStorageEntries(input));
+  const failure = Object.assign(new Error('synthetic-private-error'), {code: 'host_unavailable',
+    transport: {phase: 'request', reason: 'timeout', elapsedMs: 5000, visibility: 'visible'}});
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let calls = 0;
+  const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false,
+    chatStatusHandler: async () => {
+      if (++calls === 1) throw failure;
+      await gate;
+      return null;
+    }});
+  await waitFor(() => browser.elements.get('check-chat-create')?.disabled === false
+    && chatDiagnostics(browser).creationStatus?.state === 'failed', 'bootstrap status did not fail');
+  const before = chatDiagnostics(browser);
+  const ref = before.selectedCreationRef;
+  assert.deepEqual(before.creationStatus, currentChatCall('bootstrap', 1, ref, 'failed',
+    {phase: 'request', reason: 'timeout', httpStatus: 'unavailable', elapsedMs: 5000, visibility: 'visible'}));
+  const savedFailure = storage.getItem(chatLookupFailurePrefix + 'creationStatus');
+  const pending = browser.elements.get('check-chat-create').handlers.get('click')();
+  await waitFor(() => browser.counters.chatStatus === 2, 'explicit status query did not start');
+  assert.deepEqual(chatDiagnostics(browser).creationStatus, currentChatCall('status-button', 2, ref, 'pending'));
+  assert.equal(storage.getItem(chatLookupFailurePrefix + 'creationStatus'), savedFailure,
+    'an in-flight query must not persist an invented failure');
+  release();
+  await pending;
+  const after = chatDiagnostics(browser);
+  assert.equal(after.pageId, before.pageId);
+  assert.equal(after.selectedCreationRef, ref);
+  assert.deepEqual(after.creationStatus, currentChatCall('status-button', 2, ref, 'returned'));
+  assert.equal(storage.getItem(chatLookupFailurePrefix + 'creationStatus'), savedFailure,
+    'a successful read must preserve the last saved failure as historical evidence');
+  assert.doesNotMatch(JSON.stringify(after), /synthetic-|643ff799|timeout/);
+  assert.deepEqual(browser.chatStatusRequests, [input, input]);
+  assert.equal(browser.counters.chatCreate, 0);
+  assertNoSubmission(browser);
+});
+
+test('saved context is always unbound and a cross-page write cannot replace a current invocation', async () => {
+  const input = {requestId: creationId};
+  const transport = {phase: 'request', reason: 'timeout', httpStatus: 'unavailable', elapsedMs: 32, visibility: 'hidden'};
+  const key = chatLookupFailurePrefix + 'creationStatus';
+  const storage = sharedStorageWith([[key, JSON.stringify({version: 2, pageId: 'synthetic-forged-page',
+    source: 'status-button', sequence: 99, requestRef: 99, attribution: 'current-page',
+    requestId: creationId, title: 'synthetic-private-title', transport})]]);
+  const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false});
+  await waitFor(() => browser.elements.get('status')?.textContent.includes('Host Agent ready'), 'bootstrap did not finish');
+  const initial = chatDiagnostics(browser);
+  assert.deepEqual(initial.creationStatus, unboundChatFailure(transport));
+  assert.equal(initial.selectedCreationRef, null);
+  assert.doesNotMatch(JSON.stringify(initial), /synthetic-|643ff799/);
+  assert.equal(browser.counters.chatStatus, 0);
+  storage.setItem(key, JSON.stringify({version: 2, pageId: initial.pageId, source: 'status-button',
+    sequence: 1, requestRef: 1, attribution: 'current-page', transport}));
+  browser.window.dispatchEvent({type: 'storage', key});
+  assert.deepEqual(chatDiagnostics(browser).creationStatus, unboundChatFailure(transport),
+    'even a saved record claiming this exact page scope cannot establish a current invocation');
+  for (const [entryKey, value] of creationStorageEntries(input)) storage.setItem(entryKey, value);
+  await browser.elements.get('check-chat-create').handlers.get('click')();
+  const current = chatDiagnostics(browser);
+  assert.deepEqual(current.creationStatus, currentChatCall('status-button', 1, current.selectedCreationRef, 'returned'));
+  browser.window.dispatchEvent({type: 'storage', key});
+  assert.deepEqual(chatDiagnostics(browser), current, 'another page cannot relabel or replace this page\'s call');
+  assert.equal(browser.counters.chatStatus, 1);
+  assert.equal(browser.counters.chatCreate, 0);
+  assertNoSubmission(browser);
 });
 
 test('a history failure after a confirmed creationStatus records the history phase without exposing the error', async () => {
@@ -1168,10 +1312,12 @@ test('a history failure after a confirmed creationStatus records the history pha
   await waitFor(() => storage.getItem(key) !== null && browser.elements.get('error')?.textContent.includes('history could not be read'),
     'history failure was not recorded');
   const expected = {phase: 'response_body', reason: 'body_failed', httpStatus: 503, elapsedMs: 387, visibility: 'visible'};
-  assert.deepEqual(JSON.parse(storage.getItem(key)), {version: 1, transport: expected});
+  const diagnostic = chatDiagnostics(browser);
+  assertSavedChatFailure(browser, storage, 'history', 'open-created-button', 2, diagnostic.selectedChatRef, expected);
   const visible = browser.elements.get('chat-lookup-diagnostics').textContent;
-  assert.deepEqual(JSON.parse(visible).history, {storage: 'saved', transport: expected});
-  assert.equal(JSON.parse(visible).creationStatus, null);
+  assert.deepEqual(diagnostic.history, currentChatCall('open-created-button', 2, diagnostic.selectedChatRef, 'failed', expected));
+  assert.deepEqual(diagnostic.creationStatus, currentChatCall('open-created-button', 1, diagnostic.selectedCreationRef, 'returned'));
+  assert.equal(diagnostic.selectedCreationRef, diagnostic.selectedChatRef);
   assert.doesNotMatch(visible + storage.getItem(key) + browser.elements.get('error').textContent, /synthetic-/);
   assert.equal(browser.counters.chatStatus, 1);
   assert.equal(browser.counters.chatHistory, 1);
@@ -1191,6 +1337,9 @@ test('history failure during saved Chat restoration is recorded without exposing
     'saved Chat history failure was not recorded');
   assert.deepEqual(JSON.parse(storage.getItem(key)).transport,
     {phase: 'request', reason: 'fetch_failed', httpStatus: 'unavailable', elapsedMs: 12, visibility: 'visible'});
+  const diagnostic = chatDiagnostics(browser);
+  assert.deepEqual(diagnostic.history, currentChatCall('bootstrap', 1, diagnostic.selectedChatRef, 'failed',
+    {phase: 'request', reason: 'fetch_failed', httpStatus: 'unavailable', elapsedMs: 12, visibility: 'visible'}));
   const shown = browser.elements.get('chat-lookup-diagnostics').textContent
     + browser.elements.get('recovery-error').textContent + storage.getItem(key);
   assert.doesNotMatch(shown, /synthetic-|private\.invalid|643ff799/);
@@ -1202,6 +1351,42 @@ test('history failure during saved Chat restoration is recorded without exposing
   await waitFor(() => browser.elements.get('diagnostics')?.textContent.includes('localAppInfo'),
     'safe diagnostics did not render');
   assert.doesNotMatch(browser.elements.get('diagnostics').textContent, /origin|https?:\/\//);
+});
+
+test('a late history failure cannot overwrite the newer explicit history query or its stored evidence', async () => {
+  const storage = sharedStorageWith([[`${storagePrefix}.selectedChat`, creationId]]);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let calls = 0;
+  const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false,
+    chatHistoryHandler: async () => {
+      const call = ++calls;
+      if (call === 1) return {messages: []};
+      if (call === 2) await gate;
+      throw Object.assign(new Error('synthetic-private-history-error'), {transport: {
+        phase: 'request', reason: call === 2 ? 'timeout' : 'fetch_failed', elapsedMs: call, visibility: 'visible',
+      }});
+    }});
+  await waitFor(() => browser.elements.get('refresh-history')?.disabled === false
+    && chatDiagnostics(browser).history?.state === 'returned', 'bootstrap history did not complete');
+  const initial = chatDiagnostics(browser);
+  assert.deepEqual(initial.history, currentChatCall('bootstrap', 1, initial.selectedChatRef, 'returned'));
+  const click = browser.elements.get('refresh-history').handlers.get('click');
+  const old = click();
+  await waitFor(() => browser.counters.chatHistory === 2, 'older explicit history query did not start');
+  await click();
+  const latest = chatDiagnostics(browser);
+  assert.deepEqual(latest.history, currentChatCall('refresh-history-button', 3, initial.selectedChatRef, 'failed',
+    {phase: 'request', reason: 'fetch_failed', httpStatus: 'unavailable', elapsedMs: 3, visibility: 'visible'}));
+  const saved = storage.getItem(chatLookupFailurePrefix + 'history');
+  release();
+  await old;
+  assert.deepEqual(chatDiagnostics(browser), latest);
+  assert.equal(storage.getItem(chatLookupFailurePrefix + 'history'), saved);
+  assert.equal(browser.counters.chatHistory, 3);
+  assert.equal(browser.counters.chatCreate, 0);
+  assert.equal(browser.counters.chatStatus, 0);
+  assertNoSubmission(browser);
 });
 
 test('missing, invalid, or unreadable transport data is unavailable and cannot leak stored or thrown data', async () => {
@@ -1216,7 +1401,7 @@ test('missing, invalid, or unreadable transport data is unavailable and cannot l
   await waitFor(() => storage.getItem(key) !== null, 'missing transport was not recorded');
   const unavailable = {phase: 'unavailable', reason: 'unavailable', httpStatus: 'unavailable',
     elapsedMs: 'unavailable', visibility: 'unavailable'};
-  assert.deepEqual(JSON.parse(storage.getItem(key)), {version: 1, transport: unavailable});
+  assertSavedChatFailure(browser, storage, 'creationStatus', 'bootstrap', 1, chatDiagnostics(browser).selectedCreationRef, unavailable);
   assert.doesNotMatch(browser.elements.get('error').textContent + browser.elements.get('chat-lookup-diagnostics').textContent,
     /synthetic-/);
   assert.equal(browser.counters.chatStatus, 1);
@@ -1229,7 +1414,7 @@ test('missing, invalid, or unreadable transport data is unavailable and cannot l
   await waitFor(() => restored.elements.get('chat-lookup-diagnostics')?.textContent.includes('unavailable'),
     'invalid saved diagnostic was not sanitized');
   const shown = restored.elements.get('chat-lookup-diagnostics').textContent;
-  assert.deepEqual(JSON.parse(shown).creationStatus, {storage: 'saved', transport: unavailable});
+  assert.deepEqual(JSON.parse(shown).creationStatus, unboundChatFailure(unavailable));
   assert.doesNotMatch(shown, /synthetic-/);
   assert.equal(restored.counters.chatStatus, 0);
   assertNoSubmission(restored);
@@ -1262,6 +1447,36 @@ test('diagnostic storage failure keeps the operation failure visible without exp
     /synthetic-storage-secret|private/);
   assert.equal(browser.counters.chatStatus, 1);
   assert.equal(browser.counters.chatCreate, 0);
+  assertNoSubmission(browser);
+});
+
+test('diagnostic read and write failures do not disable creation or expose storage exceptions', async () => {
+  const storage = sharedStorageWith();
+  const originalGet = storage.getItem;
+  const originalSet = storage.setItem;
+  storage.getItem = key => {
+    if (key.startsWith(chatLookupFailurePrefix)) throw new Error('synthetic-read-secret');
+    return originalGet(key);
+  };
+  storage.setItem = (key, value) => {
+    if (key.startsWith(chatLookupFailurePrefix)) throw new Error('synthetic-write-secret');
+    originalSet(key, value);
+  };
+  const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false,
+    chatCreateHandler: async () => { throw Object.assign(new Error('synthetic-create-secret'), {
+      code: 'host_unavailable', transport: {phase: 'request', reason: 'fetch_failed', elapsedMs: 4, visibility: 'visible'},
+    }); }});
+  await waitFor(() => browser.elements.get('create-chat')?.disabled === false, 'diagnostic read errors disabled creation');
+  assert.deepEqual(chatDiagnostics(browser).create, unboundChatFailure({phase: 'unavailable', reason: 'unavailable',
+    httpStatus: 'unavailable', elapsedMs: 'unavailable', visibility: 'unavailable'}, 'unavailable'));
+  await browser.elements.get('create-chat').handlers.get('click')();
+  const after = chatDiagnostics(browser);
+  assert.deepEqual(after.create, currentChatCall('create-button', 1, after.selectedCreationRef, 'failed',
+    {phase: 'request', reason: 'fetch_failed', httpStatus: 'unavailable', elapsedMs: 4, visibility: 'visible'}, 'unavailable'));
+  assert.doesNotMatch(JSON.stringify(after) + browser.elements.get('error').textContent, /synthetic-/);
+  assert.equal(originalGet(chatLookupFailurePrefix + 'create'), null);
+  assert.equal(browser.counters.chatCreate, 1);
+  assert.equal(browser.counters.chatStatus, 0);
   assertNoSubmission(browser);
 });
 
@@ -1378,16 +1593,31 @@ test('a stale read-only Chat creation lookup cannot select over a newer tab', as
   const browser = createBrowser({seedState: null, sharedStorage: storage, readyBeforeBootstrap: false,
     chatStatusHandler: async (input, {chatHandle}) => { await gate; return chatHandle(input.requestId); }});
   await waitFor(() => browser.counters.chatStatus === 1, 'old read-only creation check did not start');
+  const initialDiagnostic = chatDiagnostics(browser);
+  assert.deepEqual(initialDiagnostic.creationStatus,
+    currentChatCall('bootstrap', 1, initialDiagnostic.selectedCreationRef, 'pending'));
   const newer = {requestId: 'ce4edb3e-72f5-4ddf-ae77-35292d311f1a', title: 'Newer'};
   storage.setItem(creationEntryPrefix + newer.requestId, JSON.stringify({version: 1, input: newer}));
   storage.setItem(creationHeadKey, newer.requestId);
   storage.setItem(`${storagePrefix}.selectedChat`, 'newer-selected-chat');
+  browser.window.dispatchEvent({type: 'storage', key: creationHeadKey});
+  const changedDiagnostic = chatDiagnostics(browser);
+  assert.notEqual(changedDiagnostic.selectedCreationRef, initialDiagnostic.selectedCreationRef);
+  assert.equal(changedDiagnostic.creationStatus.requestRef, initialDiagnostic.selectedCreationRef,
+    'an in-flight old request must not be rebound to a newer selection');
   release();
   await waitFor(() => browser.elements.get('chat-create-status')?.textContent.includes(newer.requestId),
     'the current tab did not reload the newer creation selection');
   assert.equal(storage.getItem(creationHeadKey), newer.requestId);
   assert.equal(storage.getItem(`${storagePrefix}.selectedChat`), 'newer-selected-chat');
   assert.equal(storage.getItem(creationFinishedPrefix + newer.requestId), null);
+  const finishedDiagnostic = chatDiagnostics(browser);
+  assert.deepEqual(finishedDiagnostic.creationStatus,
+    currentChatCall('bootstrap', 1, initialDiagnostic.selectedCreationRef, 'returned'));
+  assert.notEqual(finishedDiagnostic.creationStatus.requestRef, finishedDiagnostic.selectedCreationRef,
+    'the late result must remain distinguishable from the current selected request');
+  assert.ok(!JSON.stringify(finishedDiagnostic).includes(creationId));
+  assert.ok(!JSON.stringify(finishedDiagnostic).includes(newer.requestId));
   assert.equal(browser.counters.chatCreate, 0);
   assertNoSubmission(browser);
 });

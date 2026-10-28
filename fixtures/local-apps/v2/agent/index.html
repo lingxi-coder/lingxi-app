@@ -108,7 +108,7 @@
     <h3>Canonical Chat history</h3>
     <pre id="chat-history" aria-label="Canonical Chat history">No history loaded.</pre>
     <h3>Chat lookup failure diagnostics</h3>
-    <p class="muted">The last failure for each operation is saved in this browser and may predate the current status.</p>
+    <p class="muted">Current-page calls have a source, start sequence and page-local request reference. References match only within this page; saved failures are unbound after reopening. Only allowlisted transport metadata is saved.</p>
     <pre id="chat-lookup-diagnostics" aria-label="Chat lookup failure diagnostics">No Chat lookup failure recorded.</pre>
   </section>
 
@@ -178,7 +178,11 @@
     let latestHandoff = {type: 'none', runId: null, code: null};
     let latestHandoffErrorCode = null;
     let diagnosticsGeneration = 0;
-    const chatLookupFailures = {creationStatus: null, history: null};
+    const chatLookupFailures = {create: null, creationStatus: null, history: null};
+    const chatDiagnosticReferences = new Map();
+    let chatDiagnosticSequence = 0;
+    // This random scope and its numeric references contain no host or user identifiers.
+    const chatDiagnosticPageId = (() => { try { return newId(); } catch { return null; } })();
     let bootstrapReady = false;
     const queuedRecoveryRunIds = new Set();
     const startedRecoveryRunIds = new Set();
@@ -205,7 +209,8 @@
       let code;
       try { code = failure?.code; } catch { return 'unavailable'; }
       return ['host_unavailable', 'invalid_host_response', 'invalid_chat', 'chat_create_conflict',
-        'chat_create_deleted', 'chat_storage_uncertain', 'storage_unavailable'].includes(code) ? code : 'unavailable';
+        'chat_create_deleted', 'chat_storage_uncertain', 'storage_unavailable',
+        'chat_creation_identity_mismatch'].includes(code) ? code : 'unavailable';
     }
     function readDiagnosticField(value, key) {
       try { return isRecord(value) ? value[key] : undefined; } catch { return undefined; }
@@ -225,11 +230,35 @@
         visibility: ['visible', 'hidden', 'unknown'].includes(visibility) ? visibility : 'unavailable',
       };
     }
+    function chatDiagnosticReference(id) {
+      if (!safeRunId(id)) return null;
+      if (!chatDiagnosticReferences.has(id)) {
+        if (chatDiagnosticReferences.size >= 1000) return null;
+        chatDiagnosticReferences.set(id, chatDiagnosticReferences.size + 1);
+      }
+      return chatDiagnosticReferences.get(id);
+    }
+    function chatDiagnosticSelection(key) {
+      try { return chatDiagnosticReference(localStorage.getItem(key)); }
+      catch { return 'unavailable'; }
+    }
     function showChatLookupFailures() {
-      $('chat-lookup-diagnostics').textContent = JSON.stringify(chatLookupFailures, null, 2);
+      $('chat-lookup-diagnostics').textContent = JSON.stringify({
+        version: 2,
+        pageId: chatDiagnosticPageId,
+        selectedCreationRef: chatDiagnosticSelection(CHAT_CREATION_HEAD_KEY),
+        selectedChatRef: chatDiagnosticSelection(CHAT_SELECTION_KEY),
+        ...chatLookupFailures,
+      }, null, 2);
+    }
+    function unboundChatLookupFailure(storage, transport) {
+      return {attribution: 'saved-unbound', storage, source: 'unavailable', sequence: null,
+        requestRef: null, state: 'failed', transport: sanitizedTransport(transport)};
     }
     function loadChatLookupFailures() {
-      for (const stage of ['creationStatus', 'history']) {
+      for (const stage of ['create', 'creationStatus', 'history']) {
+        // Another page's storage event cannot replace this page's call evidence.
+        if (chatLookupFailures[stage]?.attribution === 'current-page') continue;
         try {
           const raw = localStorage.getItem(CHAT_LOOKUP_FAILURE_PREFIX + stage);
           if (raw === null) {
@@ -237,22 +266,51 @@
             continue;
           }
           const saved = JSON.parse(raw);
-          if (!isRecord(saved) || saved.version !== 1 || !isRecord(saved.transport)) throw new Error('invalid diagnostic');
-          chatLookupFailures[stage] = {storage: 'saved', transport: sanitizedTransport(saved.transport)};
+          if (!isRecord(saved) || ![1, 2].includes(saved.version) || !isRecord(saved.transport)) throw new Error('invalid diagnostic');
+          // Persisted context cannot prove a binding in this document, even if it
+          // claims the same page ID, source, sequence or request reference.
+          chatLookupFailures[stage] = unboundChatLookupFailure('saved', saved.transport);
         } catch {
-          chatLookupFailures[stage] = {storage: 'unavailable', transport: sanitizedTransport(null)};
+          chatLookupFailures[stage] = unboundChatLookupFailure('unavailable', null);
         }
       }
       showChatLookupFailures();
     }
-    function recordChatLookupFailure(stage, failure) {
-      if (!['creationStatus', 'history'].includes(stage)) return;
-      const transport = sanitizedTransport(readDiagnosticField(failure, 'transport'));
-      let storage = 'saved';
-      try { localStorage.setItem(CHAT_LOOKUP_FAILURE_PREFIX + stage, JSON.stringify({version: 1, transport})); }
-      catch { storage = 'unavailable'; }
-      chatLookupFailures[stage] = {storage, transport};
+    async function observeChatCall(stage, source, id, invoke) {
+      const call = {
+        attribution: 'current-page', storage: 'not-saved',
+        source: ['bootstrap', 'create-button', 'status-button', 'retry-button', 'open-created-button',
+          'recover-id-button', 'open-chat-button', 'refresh-history-button', 'run-completion',
+          'automatic-recovery', 'reconnect-button'].includes(source) ? source : 'unavailable',
+        sequence: ++chatDiagnosticSequence,
+        requestRef: chatDiagnosticReference(id),
+        state: 'pending',
+      };
+      chatLookupFailures[stage] = call;
       showChatLookupFailures();
+      try {
+        const result = await invoke();
+        if (chatLookupFailures[stage] === call) {
+          call.state = 'returned';
+          showChatLookupFailures();
+        }
+        return result;
+      } catch (failure) {
+        // A late older response must not overwrite a newer invocation's evidence.
+        if (chatLookupFailures[stage] === call) {
+          call.state = 'failed';
+          call.transport = sanitizedTransport(readDiagnosticField(failure, 'transport'));
+          try {
+            localStorage.setItem(CHAT_LOOKUP_FAILURE_PREFIX + stage, JSON.stringify({
+              version: 2, pageId: chatDiagnosticPageId, source: call.source,
+              sequence: call.sequence, requestRef: call.requestRef, transport: call.transport,
+            }));
+            call.storage = 'saved';
+          } catch { call.storage = 'unavailable'; }
+          showChatLookupFailures();
+        }
+        throw failure;
+      }
     }
     function validChatCreationInput(input) {
       return isRecord(input) && Object.keys(input).every(key => ['requestId', 'title'].includes(key))
@@ -1003,12 +1061,11 @@
       throw new Error(`Chat history was not fully read after ${MAX_PAGES} pages.`);
     }
 
-    async function refreshChatHistory() {
+    async function refreshChatHistory(source) {
       if (!chat) return;
       let messages;
-      try { messages = await allChatMessages(chat); }
+      try { messages = await observeChatCall('history', source, readDiagnosticField(chat, 'id'), () => allChatMessages(chat)); }
       catch (failure) {
-        recordChatLookupFailure('history', failure);
         throw recoveryFailure('chat_history_unavailable', 'Canonical Chat history could not be read; see Chat lookup diagnostics.');
       }
       $('chat-history').textContent = JSON.stringify(redactProtocol(messages), null, 2);
@@ -1123,7 +1180,7 @@
       if (state.chatId) {
         try {
           chat = await agent.chats.open(state.chatId);
-          await refreshChatHistory();
+          await refreshChatHistory('bootstrap');
         } catch (failure) {
           $('chat-history').textContent = 'Saved Chat could not be opened; see recovery diagnostics.';
           recoveryErrors.push('Saved Chat could not be opened or its history could not be read.');
@@ -1213,7 +1270,7 @@
         setStatus(`${kind} run succeeded · thread ${input.threadId} · run ${input.runId}`);
         if (kind === 'chat') {
           chat = await agent.chats.open(chatId);
-          await refreshChatHistory();
+          await refreshChatHistory('run-completion');
         }
       } catch (failure) {
         const terminal = await observeAfterFailure(input);
@@ -1302,21 +1359,15 @@
       } catch (failure) { setError(failure?.message || String(failure)); }
     }
 
-    async function performChatCreation(input, action) {
+    async function performChatCreation(input, action, source) {
       const id = input.requestId;
       const selectedChatBefore = localStorage.getItem(CHAT_SELECTION_KEY);
-      let statusLookupFailed = false;
       try {
         let handle;
         if (action === 'create') {
-          handle = await agent.chats.create(input);
+          handle = await observeChatCall('create', source, id, () => agent.chats.create(input));
         } else {
-          try { handle = await agent.chats.creationStatus(input); }
-          catch (failure) {
-            statusLookupFailed = true;
-            recordChatLookupFailure('creationStatus', failure);
-            throw failure;
-          }
+          handle = await observeChatCall('creationStatus', source, id, () => agent.chats.creationStatus(input));
           if (handle === null && action === 'retry') {
             const saved = readChatCreation(id);
             if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) !== id
@@ -1324,7 +1375,7 @@
                 || saved.marker !== null || !sameChatCreationInput(saved.input, input)) {
               return false;
             }
-            handle = await agent.chats.create(input);
+            handle = await observeChatCall('create', source, id, () => agent.chats.create(input));
           }
         }
         if (handle === null && action !== 'create') {
@@ -1354,11 +1405,11 @@
           ? 'Chat created. Send a first turn, then a follow-up to verify persistent context.'
           : 'Saved Chat creation confirmed by a read-only lookup. No creation was sent.');
         $('recovery').textContent = `Host-owned persistent Chat opened; threadId is ${id}.`;
-        try { await refreshChatHistory(); }
+        try { await refreshChatHistory(source); }
         catch { setError('The Chat was confirmed, but its history could not be read.'); }
         return true;
       } catch (failure) {
-        const code = statusLookupFailed ? safeChatStatusCode(failure) : safeCode(failure?.code);
+        const code = safeChatStatusCode(failure);
         if (localStorage.getItem(CHAT_CREATION_HEAD_KEY) === id) {
           if (['chat_create_conflict', 'chat_create_deleted'].includes(code)) {
             try {
@@ -1386,6 +1437,7 @@
       loadChatCreation();
       if (chat && chat.id !== state.chatId) chat = null;
       updateControls();
+      showChatLookupFailures();
       scheduleQueuedRecovery();
       void refreshDiagnostics();
     }
@@ -1398,7 +1450,7 @@
       try {
         const input = {requestId: newId(), title: 'Agent device acceptance'};
         saveNewChatCreation(input);
-        await performChatCreation(input, 'create');
+        await performChatCreation(input, 'create', 'create-button');
       } catch (failure) {
         setError(safeFailureText(failure));
       } finally {
@@ -1406,7 +1458,9 @@
       }
     }
 
-    async function checkChatCreation(action = 'status') {
+    async function checkChatCreation(action = 'status', source = {
+      status: 'status-button', retry: 'retry-button', open: 'open-created-button',
+    }[action]) {
       if (!agent || busy || !storageReady) return;
       try {
         const id = localStorage.getItem(CHAT_CREATION_HEAD_KEY);
@@ -1417,7 +1471,7 @@
         setError('');
         busy = true;
         updateControls();
-        await performChatCreation(saved.input, action);
+        await performChatCreation(saved.input, action, source);
       } catch (failure) {
         setError(safeFailureText(failure));
       } finally {
@@ -1503,7 +1557,7 @@
           setStatus(`The selected SDK receipt is ${match.state}; no Chat creation was sent.`);
           return;
         }
-        await performChatCreation(saved.input, 'open');
+        await performChatCreation(saved.input, 'open', 'recover-id-button');
       } catch (failure) {
         setError(`Chat creation recovery · ${safeCode(failure?.code)}: Could not safely recover that exact ID. No creation was sent.`);
       } finally {
@@ -1516,7 +1570,7 @@
       try {
         if (!state.chatId) throw new Error('No saved Chat ID is available.');
         chat = await agent.chats.open(state.chatId);
-        await refreshChatHistory();
+        await refreshChatHistory('open-chat-button');
         $('recovery').textContent = `Opened host Chat ${chat.id}; only canonical history was read.`;
         setStatus('Saved persistent Chat opened.');
         updateControls();
@@ -1702,7 +1756,7 @@
         if (reference.kind === 'chat' && reference.chatId) {
           try {
             chat = await agent.chats.open(reference.chatId);
-            await refreshChatHistory();
+            await refreshChatHistory(automatic ? 'automatic-recovery' : 'reconnect-button');
           } catch {
             addRecoveryError(runId, 'chat_history_unavailable',
               'The run was recovered, but the Chat could not be opened or its history could not be read.');
@@ -1756,7 +1810,7 @@
     $('recover-chat-creation').addEventListener('click', recoverChatCreationById);
     $('open-chat').addEventListener('click', openChat);
     $('refresh-history').addEventListener('click', async () => {
-      try { await refreshChatHistory(); } catch (failure) { setError(failure?.message || String(failure)); }
+      try { await refreshChatHistory('refresh-history-button'); } catch (failure) { setError(failure?.message || String(failure)); }
     });
     $('send-chat').addEventListener('click', sendChatTurn);
     $('chat-prompt').addEventListener('input', updateControls);
@@ -1778,6 +1832,7 @@
           && !event.key.startsWith(CHAT_CREATION_FINISHED_PREFIX)
           && event.key !== CHAT_CREATION_HEAD_KEY
           && event.key !== RUN_HEAD_KEY && event.key !== CHAT_SELECTION_KEY)) return;
+      showChatLookupFailures();
       if (!busy) {
         loadState();
         loadChatCreation();
@@ -1806,7 +1861,7 @@
         void preloadPublicImage();
         if (!storageReady) setError(`Saved acceptance state was not changed: ${storageFailure}`);
         await restoreReadOnly();
-        if (storageReady && chatCreation?.marker === null) await checkChatCreation('status');
+        if (storageReady && chatCreation?.marker === null) await checkChatCreation('status', 'bootstrap');
         bootstrapReady = true;
         scheduleQueuedRecovery();
       } catch (failure) {

@@ -1,0 +1,54 @@
+name: Mod frame iOS receipt diagnostic rerun
+on:
+  push:
+    branches: [codex/media-mod-frame-ios-20261028-b]
+env:
+  CARGO_BUILD_JOBS: "2"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_MIN_STACK: "16777216"
+jobs:
+  ios:
+    name: iOS generated bindings and simulator regression
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: lingxi-coder/harness-runtime
+          ref: 6a3746fca2ec74f291be2ced2d22b1f0e01d53e1
+          path: .diagnostic/harness
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: aarch64-apple-ios-sim
+      - name: Copy Harness outside the App workspace
+        run: cp -a .diagnostic/harness "$RUNNER_TEMP/frame-receipt-harness"
+      - name: Create runner-only Harness override
+        run: python3 .github/scripts/prepare-frame-receipt-diagnostic.py
+      - name: Install iOS build tools and pinned GStreamer SDKs
+        run: |
+          brew install xcodegen meson ninja llvm lld libarchive
+          echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+          python3 scripts/ci/gstreamer_sdk.py ios --root "$RUNNER_TEMP/gstreamer-sdk/ios"
+          python3 scripts/ci/gstreamer_sdk.py macos --root "$RUNNER_TEMP/gstreamer-sdk/macos"
+          bash apps/ios/native/scripts/install-sherpa-runtime.sh
+      - name: Build simulator framework and Swift bindings
+        env:
+          LINGXI_SIM_ARM64_ONLY: '1'
+          LINGXI_FFI_PROFILE: debug
+        run: |
+          bash apps/ios/native/scripts/build-xcframework.sh
+          grep -R -n 'onModUiClientFrame' apps/ios/native/Generated
+          find apps/ios/native/Generated -type f -exec shasum -a 256 {} \;
+      - name: Generate project and run focused simulator regression
+        working-directory: apps/ios/native
+        run: |
+          xcodegen generate
+          sim="$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin); a=[(k,v) for k,vs in d["devices"].items() if "iOS" in k for v in vs if v.get("isAvailable") and v["name"].startswith("iPhone")]; print(a[-1][1]["udid"] if a else "")')"
+          test -n "$sim"
+          xcodebuild test -scheme LingxiCode -destination "platform=iOS Simulator,id=$sim" -only-testing:LingxiCodeTests/ConversationTurnCompletionTests/testFrameAdmissionUsesListenerQueueAndRejectsReleasedSource

@@ -34,14 +34,17 @@ export type ModUiClientSurfaceEvent = NativeUiClientPressEventDto;
 export type NativeUiClientPressRequest = Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>;
 
 const nativeInputAckBrand = Symbol('native-input-ack');
+/** A request became stale before React received the new parent revision. */
+export const nativeInputSuperseded = Symbol('native-input-superseded');
+type NativeInputAckValue = string | undefined | null | typeof nativeInputSuperseded;
 type NativeInputAck = {
   readonly [nativeInputAckBrand]: true;
   readonly value?: string;
-  readonly latestValue?: () => string | undefined | null;
+  readonly latestValue?: () => NativeInputAckValue;
 };
 
 /** Internal success result for Input dispatches; this never crosses the bridge. */
-export function createNativeInputAck(value: string | undefined, latestValue?: () => string | undefined | null): NativeInputAck {
+export function createNativeInputAck(value: string | undefined, latestValue?: () => NativeInputAckValue): NativeInputAck {
   return {
     [nativeInputAckBrand]: true,
     ...(value === undefined ? {} : { value }),
@@ -50,14 +53,15 @@ export function createNativeInputAck(value: string | undefined, latestValue?: ()
 }
 
 /** Read only acknowledgements created by the local Host adapter. */
-export function readNativeInputAck(result: unknown): string | undefined | null {
+export function readNativeInputAck(result: unknown): NativeInputAckValue {
+  if (result === nativeInputSuperseded) return nativeInputSuperseded;
   if (typeof result !== 'object' || result === null) return null;
   const candidate = result as { [nativeInputAckBrand]?: unknown; value?: unknown; latestValue?: unknown };
   if (candidate[nativeInputAckBrand] !== true
     || (candidate.value !== undefined && typeof candidate.value !== 'string')
     || (candidate.latestValue !== undefined && typeof candidate.latestValue !== 'function')) return null;
   const value = typeof candidate.latestValue === 'function' ? candidate.latestValue() : candidate.value;
-  return value === undefined || typeof value === 'string' ? value : null;
+  return value === undefined || value === nativeInputSuperseded || typeof value === 'string' ? value : null;
 }
 
 export interface ModUiClientPressRef {
@@ -150,6 +154,10 @@ export interface ModUiClientTreeProps {
   tree: unknown;
   /** Changes whenever the Host accepts a new authoritative Client frame. */
   inputFrameVersion?: string | number;
+  /** False while the displayed frame belongs to a superseded parent revision. */
+  frameCurrent?: boolean;
+  /** Identifies the parent revision allowed to receive queued interactions. */
+  dispatchEpoch?: string | number;
   site: ModUiRenderSite;
   client: ModUiClientIdentity;
   /** Native ui_client_press request dispatcher. Runtime policy/VM handoff stays outside React. */
@@ -393,6 +401,14 @@ function validateProps(node: Record<string, unknown>, type: ModUiSurfaceNodeType
   }
 }
 
+function explicitNodeKey(node: ModUiSurfaceNode): string | null {
+  if (node.type === 'Button' || node.type === 'Input' || node.type === 'Select') return node.props.key;
+  if (node.type === 'Box' || node.type === 'Text' || node.type === 'Markdown') {
+    return typeof node.props?.key === 'string' ? node.props.key : null;
+  }
+  return null;
+}
+
 function validateNode(value: unknown, depth: number, state: { nodes: number }, expectedPlugin?: string): asserts value is ModUiSurfaceNode {
   if (depth > MAX_TREE_DEPTH) fail('tree exceeds the nesting limit');
   state.nodes += 1;
@@ -420,9 +436,15 @@ function validateNode(value: unknown, depth: number, state: { nodes: number }, e
   if (children !== undefined) {
     if (!Array.isArray(children)) fail(`${type}.children must be an array`);
     if (['Input', 'Select', 'Code', 'Markdown'].includes(type) && children.length > 0) fail(`${type} is a leaf`);
+    const siblingKeys = new Set<string>();
     for (const child of children) {
       if (typeof child === 'string') continue;
       validateNode(child, depth + 1, state, expectedPlugin);
+      const key = explicitNodeKey(child);
+      if (key !== null) {
+        if (siblingKeys.has(key)) fail('sibling keys must be unique');
+        siblingKeys.add(key);
+      }
     }
   }
 }
@@ -504,9 +526,9 @@ class ClientSurfaceErrorBoundary extends Component<{
 }
 
 /** React renderer for the bounded JSON tree returned by the Harness Node VM. It never imports or evaluates Mod source. */
-export const ModUiClientTree = memo(function ModUiClientTree({ tree, inputFrameVersion, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true }: ModUiClientTreeProps) {
+export const ModUiClientTree = memo(function ModUiClientTree({ tree, inputFrameVersion, frameCurrent = true, dispatchEpoch, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true }: ModUiClientTreeProps) {
   useI18n();
-  const body = React.createElement(ModUiClientTreeBody, { tree, inputFrameVersion, site, client, onPress, onRunFault, interactionsEnabled });
+  const body = React.createElement(ModUiClientTreeBody, { tree, inputFrameVersion, frameCurrent, dispatchEpoch, site, client, onPress, onRunFault, interactionsEnabled });
   return React.createElement(ClientSurfaceErrorBoundary, {
     key: modUiClientSurfaceIdentityKey(site, client),
     onFault: onRenderFault,
@@ -514,14 +536,18 @@ export const ModUiClientTree = memo(function ModUiClientTree({ tree, inputFrameV
   });
 });
 
-const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, inputFrameVersion, site, client, onPress, onRunFault, interactionsEnabled = true }: Omit<ModUiClientTreeProps, 'onRenderFault'>) {
+const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, inputFrameVersion, frameCurrent = true, dispatchEpoch, site, client, onPress, onRunFault, interactionsEnabled = true }: Omit<ModUiClientTreeProps, 'onRenderFault'>) {
   const parsed = parseModUiClientTree(tree, client.plugin);
   const lifecycle = useRef(0);
   const onPressRef = useRef(onPress);
   const onRunFaultRef = useRef(onRunFault);
   const dispatchTail = useRef<Promise<void>>(Promise.resolve());
+  const dispatchEpochRef = useRef(dispatchEpoch);
+  const dispatchReadyRef = useRef(interactionsEnabled && frameCurrent);
   onPressRef.current = onPress;
   onRunFaultRef.current = onRunFault;
+  dispatchEpochRef.current = dispatchEpoch;
+  dispatchReadyRef.current = interactionsEnabled && frameCurrent;
 
   useClientLayoutEffect(() => {
     const activeGeneration = ++lifecycle.current;
@@ -531,11 +557,12 @@ const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, inputFrame
   }, [site.component, site.instanceId, client.plugin, client.key, client.module]);
 
   const dispatch = useCallback((press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown> => {
-    if (!interactionsEnabled) return Promise.resolve(undefined);
+    if (!interactionsEnabled || !frameCurrent) return Promise.resolve(undefined);
     const request = buildNativeUiClientPressRequest(site, client, element, event, press.plugin);
     const activeGeneration = lifecycle.current;
+    const eventEpoch = dispatchEpoch;
     const queued = dispatchTail.current.catch(() => undefined).then(() => {
-      if (lifecycle.current !== activeGeneration) return undefined;
+      if (lifecycle.current !== activeGeneration || eventEpoch !== dispatchEpochRef.current || !dispatchReadyRef.current) return undefined;
       return onPressRef.current(request, press.handle);
     });
     dispatchTail.current = queued.then(() => undefined, () => undefined);
@@ -545,16 +572,18 @@ const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, inputFrame
       onRunFaultRef.current?.(request, reason);
       return undefined;
     });
-  }, [site.component, site.instanceId, client.plugin, client.key, client.module, interactionsEnabled]);
+  }, [site.component, site.instanceId, client.plugin, client.key, client.module, interactionsEnabled, frameCurrent, dispatchEpoch]);
 
   return <div className="mod-ui-client-surface" data-mod-client={client.key} data-mod-plugin={client.plugin} data-mod-module={client.module}>
-    {typeof parsed === 'string' ? parsed : <SurfaceNode node={parsed} inputFrameVersion={inputFrameVersion} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />}
+    {typeof parsed === 'string' ? parsed : <SurfaceNode node={parsed} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />}
   </div>;
 });
 
-const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, dispatch, interactionsEnabled }: {
+const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, frameCurrent, dispatchEpoch, dispatch, interactionsEnabled }: {
   node: ModUiSurfaceNode;
   inputFrameVersion?: string | number;
+  frameCurrent: boolean;
+  dispatchEpoch?: string | number;
   dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown>;
   interactionsEnabled: boolean;
 }): ReactElement {
@@ -562,7 +591,7 @@ const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, dispatc
   useI18n();
   const children = node.children?.map((child, index) => typeof child === 'string'
     ? child
-    : <SurfaceNode key={childKey(child, index)} node={child} inputFrameVersion={inputFrameVersion} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />);
+    : <SurfaceNode key={childKey(child, index)} node={child} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />);
   const style = node.type === 'Box' ? modUiBoxStyle(node.props)
     : node.type === 'Text' ? modUiTextStyle(node.props) : undefined;
 
@@ -583,12 +612,12 @@ const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, dispatc
         padding: plain ? '3px 6px' : '6px 10px',
         opacity: dimColor ? 0.72 : 1,
       };
-      return <button type="button" className="mod-ui-client-button" style={buttonStyle} autoFocus={autoFocus} disabled={!interactionsEnabled} aria-keyshortcuts={hotkey} aria-label={label} data-action={action} data-role={role} onClick={() => dispatch(node.press, key, { type: 'press' })}>{children?.length ? children : label}</button>;
+      return <button type="button" className="mod-ui-client-button" style={buttonStyle} autoFocus={autoFocus} disabled={!interactionsEnabled || !frameCurrent} aria-keyshortcuts={hotkey} aria-label={label} data-action={action} data-role={role} onClick={() => dispatch(node.press, key, { type: 'press' })}>{children?.length ? children : label}</button>;
     }
     case 'Input':
-      return <SurfaceInput node={node} inputFrameVersion={inputFrameVersion} dispatch={dispatch} disabled={!interactionsEnabled} />;
+      return <SurfaceInput node={node} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} disabled={!interactionsEnabled} />;
     case 'Select':
-      return <SurfaceSelect node={node} dispatch={dispatch} disabled={!interactionsEnabled} />;
+      return <SurfaceSelect node={node} dispatch={dispatch} disabled={!interactionsEnabled || !frameCurrent} />;
     case 'Link': {
       const href = safeLink(node.props.href);
       const content = children?.length ? children : node.props.label ?? node.props.href;
@@ -608,9 +637,11 @@ const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, dispatc
   }
 });
 
-const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, dispatch, disabled }: {
+const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, frameCurrent, dispatchEpoch, dispatch, disabled }: {
   node: Extract<ModUiSurfaceNode, { type: 'Input' }>;
   inputFrameVersion?: string | number;
+  frameCurrent: boolean;
+  dispatchEpoch?: string | number;
   dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown>;
   disabled: boolean;
 }) {
@@ -620,31 +651,53 @@ const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, dispa
   const [draft, setDraft] = useState(value ?? '');
   const valueRef = useRef(value);
   const editSequence = useRef(0);
-  const localEditRef = useRef<{ sequence: number } | null>(null);
+  const localEditRef = useRef<{ sequence: number; epoch: string | number | undefined } | null>(null);
+  const frameCurrentRef = useRef(frameCurrent);
+  const dispatchEpochRef = useRef(dispatchEpoch);
+  const unconfirmedDraftRef = useRef(false);
+  const [unconfirmedDraft, setUnconfirmedDraft] = useState(false);
   valueRef.current = value;
+  frameCurrentRef.current = frameCurrent;
+  dispatchEpochRef.current = dispatchEpoch;
+  useEffect(() => {
+    if (localEditRef.current && (localEditRef.current.epoch !== dispatchEpoch || !frameCurrent)) {
+      unconfirmedDraftRef.current = true;
+      setUnconfirmedDraft(true);
+    }
+  }, [dispatchEpoch, frameCurrent]);
   // A newer frame can return to the same value before React commits the
   // intermediate frames. Its version still makes that value authoritative.
   useEffect(() => {
-    if (localEditRef.current || value === undefined) return;
+    if (!frameCurrent || localEditRef.current || unconfirmedDraftRef.current || value === undefined) return;
     setDraft(value);
-  }, [key, value, inputFrameVersion]);
+  }, [key, value, inputFrameVersion, frameCurrent]);
   const dispatchInput = useCallback((kind: 'change' | 'submit', nextValue: string) => {
-    const edit = { sequence: ++editSequence.current };
+    if (!frameCurrent) return;
+    const edit = { sequence: ++editSequence.current, epoch: dispatchEpoch };
     localEditRef.current = edit;
     void dispatch(node.press, key, { type: 'input', kind, value: nextValue }).then((result) => {
       const currentEdit = localEditRef.current;
       if (!currentEdit || currentEdit.sequence !== edit.sequence) return;
       localEditRef.current = null;
       const authoritativeValue = readNativeInputAck(result);
+      if (authoritativeValue === nativeInputSuperseded || edit.epoch !== dispatchEpochRef.current || !frameCurrentRef.current) {
+        // A superseded request cannot acknowledge or overwrite the draft.
+        // Its callback may already have run, so retry requires user action.
+        unconfirmedDraftRef.current = true;
+        setUnconfirmedDraft(true);
+        return;
+      }
       if (authoritativeValue !== null) {
+        unconfirmedDraftRef.current = false;
+        setUnconfirmedDraft(false);
         if (authoritativeValue !== undefined) setDraft(authoritativeValue);
         return;
       }
       // Failed, stale, or cancelled dispatches release the draft lock. A newer
       // controlled value that arrived while pending is then authoritative.
-      if (valueRef.current !== undefined) setDraft(valueRef.current);
+      if (!unconfirmedDraftRef.current && valueRef.current !== undefined) setDraft(valueRef.current);
     });
-  }, [dispatch, key, node.press]);
+  }, [dispatch, key, node.press, frameCurrent, dispatchEpoch]);
   const submit = useCallback((event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const input = event.currentTarget.querySelector('input');
@@ -663,9 +716,10 @@ const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, dispa
   return <form className="mod-ui-client-input-row" onSubmit={submit} style={{ display: 'flex', gap: 8, minWidth: 0 }}>
     <label className="mod-ui-client-input-label" style={{ display: 'grid', flex: 1, minWidth: 0, gap: 4, color: t.text2 }}>
       {label && <span>{label}</span>}
-      <input className="mod-ui-client-input" type="text" value={draft} placeholder={placeholder} autoFocus={autoFocus} disabled={disabled} maxLength={MAX_INPUT_VALUE} onChange={onChange} onKeyDown={submitOnEnter} style={{ minWidth: 0, border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 9px', background: t.windowBg, color: t.text, font: 'inherit' }} />
+      <input className="mod-ui-client-input" type="text" value={draft} placeholder={placeholder} autoFocus={autoFocus} disabled={disabled} readOnly={!frameCurrent} maxLength={MAX_INPUT_VALUE} onChange={onChange} onKeyDown={submitOnEnter} style={{ minWidth: 0, border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 9px', background: t.windowBg, color: t.text, font: 'inherit' }} />
+      {unconfirmedDraft && <span role="status">{tr('desktop_ui_mod_input_unconfirmed')}</span>}
     </label>
-    {submitLabel && <button type="submit" className="mod-ui-client-input-submit" disabled={disabled} style={{ alignSelf: 'end', border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 10px', background: t.surface, color: t.text, font: 'inherit', cursor: disabled ? 'not-allowed' : 'pointer' }}>{submitLabel}</button>}
+    {submitLabel && <button type="submit" className="mod-ui-client-input-submit" disabled={disabled || !frameCurrent} style={{ alignSelf: 'end', border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 10px', background: t.surface, color: t.text, font: 'inherit', cursor: disabled || !frameCurrent ? 'not-allowed' : 'pointer' }}>{submitLabel}</button>}
   </form>;
 });
 
@@ -694,9 +748,8 @@ const SurfaceSelect = memo(function SurfaceSelect({ node, dispatch, disabled }: 
 });
 
 function childKey(node: ModUiSurfaceNode, index: number): string {
-  if (node.type === 'Button' || node.type === 'Input' || node.type === 'Select') return `${node.type}:${node.props.key}`;
-  if (node.type === 'Markdown' && node.props.key) return `Markdown:${node.props.key}`;
-  return `${node.type}:${index}`;
+  const key = explicitNodeKey(node);
+  return key === null ? `index:${node.type}:${index}` : `key:${key}`;
 }
 
 export function modUiBoxStyle(props?: PrimitiveRecord): CSSProperties {

@@ -640,6 +640,155 @@ async function main() {
         && state.rapidPropValue === 'newer-host-frame' && state.value === 'newer-host-frame';
     })()`);
 
+    // Keep one callback in flight and another queued while the parent moves
+    // to N+1. The old tree remains visible until the N+1 frame is ready.
+    await run(`window.__modUiClientFixture.emitRapidExternalValue('')`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`);
+    const beforeRevision = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    const heldRevisionPost = beforeRevision.rapidPostOrdinal + 1;
+    await run(`window.__modUiClientFixture.captureRapidInput(); window.__modUiClientFixture.holdRapidPostAt(${heldRevisionPost})`);
+    sendText('qr');
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+      return s.value === 'qr' && s.rapidBackgroundPending.some(p => p.ordinal === ${heldRevisionPost}); })()`);
+    await run(`window.__modUiClientFixture.invalidateRapidSite('new-revision-value')`);
+    await wait(`window.__modUiClientFixture.calls.some(call => call.kind === 'operation'
+      && call.sessionId === 'mod-ui-client-rapid-input-session' && call.request.type === 'draw_commit'
+      && call.request.render_revision === 201 && call.returnedRevision === 201)`);
+    const revisionPending = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(revisionPending.sameInputNode, true, 'parent revision must keep the same Input DOM node');
+    assert.equal(revisionPending.clientFocused, true, 'pending revision must retain Input focus');
+    assert.equal(revisionPending.value, 'qr', 'pending revision must retain the local draft');
+    assert.equal(revisionPending.inputReadOnly, true, 'an old frame must not accept new input');
+    assert.match(revisionPending.unconfirmedNotice, /not confirmed/i);
+    await run(`(() => { window.__revisionKeyDelivered = false;
+      document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').addEventListener('keydown',
+        event => { window.__revisionKeyDelivered = event.isTrusted && event.key === 't'; }, { once: true }); })()`);
+    sendText('t');
+    await wait(`window.__revisionKeyDelivered === true`);
+    const whileReadOnly = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(whileReadOnly.value, 'qr');
+    assert.equal(whileReadOnly.controlRequests.length, beforeRevision.controlRequests.length + 1);
+    await run(`window.__modUiClientFixture.releaseRapidPostAt(${heldRevisionPost})`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().revisionFrameHeld`);
+    const afterOldAck = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(afterOldAck.sameInputNode, true);
+    assert.equal(afterOldAck.clientFocused, true);
+    assert.equal(afterOldAck.value, 'qr', 'the old acknowledgement cannot overwrite the draft');
+    assert.equal(afterOldAck.controlRequests.length, beforeRevision.controlRequests.length + 1,
+      'a queued old-revision event must not be sent while the new frame is pending');
+    await run(`window.__modUiClientFixture.releaseRapidRevisionFrame()`);
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+      return s.inputReadOnly === false && s.rapidPropValue === 'new-revision-value'; })()`);
+    const revisionReady = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(revisionReady.sameInputNode, true);
+    assert.equal(revisionReady.clientFocused, true);
+    assert.equal(revisionReady.value, 'qr', 'an unconfirmed draft must remain visible after the new frame');
+    assert.match(revisionReady.unconfirmedNotice, /not confirmed/i);
+    assert.equal(revisionReady.controlRequests.length, beforeRevision.controlRequests.length + 1,
+      'old queued input must not be replayed implicitly');
+    sendEnter();
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+      return s.rapidInputCallbacks.length === ${beforeRevision.rapidInputCallbacks.length + 2}
+        && s.unconfirmedNotice === null; })()`);
+    const revisionRetry = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.deepEqual(revisionRetry.rapidInputCallbacks.slice(beforeRevision.rapidInputCallbacks.length), [
+      { kind: 'change', value: 'q' }, { kind: 'submit', value: 'qr' },
+    ]);
+    assert.equal(revisionRetry.runHeld.at(-1).revision, 201, 'an explicit retry must reach the new revision');
+    assert.equal(revisionRetry.value, 'qr');
+
+    // Advance the Host revision while deliberately holding React's parent
+    // commit. A late control result in this window must not roll back the
+    // draft before the component can observe the new revision in its props.
+    await run(`window.__modUiClientFixture.emitRapidExternalValue('')`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`);
+    await run(`window.__modUiClientFixture.captureRapidInput(); window.__modUiClientFixture.holdNextRapidControl()`);
+    const beforeParentCommit = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    sendText('p');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidControlHeld`);
+    await run(`window.__holdRapidParentCommit = true; window.__modUiClientFixture.invalidateRapidSite('precommit-host-value')`);
+    await wait(`typeof window.__heldRapidParentCommit === 'function'`);
+    await run(`window.__modUiClientFixture.releaseRapidControl()`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().unconfirmedNotice !== null`);
+    const beforeReactCommit = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(beforeReactCommit.sameInputNode, true);
+    assert.equal(beforeReactCommit.clientFocused, true);
+    assert.equal(beforeReactCommit.value, 'p', 'a superseded control result cannot reset an uncommitted draft');
+    assert.equal(beforeReactCommit.runHeld.length, beforeParentCommit.runHeld.length,
+      'a result from the old Host revision must not start runHeld');
+    await run(`window.__holdRapidParentCommit = false; const commit = window.__heldRapidParentCommit;
+      window.__heldRapidParentCommit = null; commit()`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().revisionFrameHeld`);
+    await run(`window.__modUiClientFixture.releaseRapidRevisionFrame()`);
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+      return s.inputReadOnly === false && s.rapidPropValue === 'precommit-host-value'; })()`);
+    const afterParentCommit = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(afterParentCommit.value, 'p');
+    assert.match(afterParentCommit.unconfirmedNotice, /not confirmed/i);
+    sendEnter();
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+      return s.rapidInputCallbacks.length === ${beforeParentCommit.rapidInputCallbacks.length + 1}
+        && s.unconfirmedNotice === null; })()`);
+    const precommitRetry = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.deepEqual(precommitRetry.rapidInputCallbacks.at(-1), { kind: 'submit', value: 'p' });
+    assert.equal(precommitRetry.runHeld.at(-1).revision, beforeParentCommit.rapidRevision + 1);
+
+    // Reorder two keyed ancestor Boxes while an Input callback is held.
+    // The key, draft, focus and pending callback must stay with the Input.
+    await run(`window.__modUiClientFixture.emitRapidExternalValue('')`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`);
+    await run(`window.__modUiClientFixture.enableRapidGroups()`);
+    await wait(`Boolean(document.querySelector('[data-client="rapid-input"] .mod-ui-client-surface > .mod-ui-client-box > .mod-ui-client-box .mod-ui-client-input'))`);
+    await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').focus(); window.__modUiClientFixture.captureRapidInput()`);
+    const beforeReorder = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    const heldReorderPost = beforeReorder.rapidPostOrdinal + 1;
+    await run(`window.__modUiClientFixture.holdRapidPostAt(${heldReorderPost})`);
+    sendText('k');
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+      return s.value === 'k' && s.rapidBackgroundPending.some(p => p.ordinal === ${heldReorderPost}); })()`);
+    await run(`window.__modUiClientFixture.swapRapidGroups()`);
+    await wait(`Boolean(document.querySelector('[data-client="rapid-input"] .mod-ui-client-surface > .mod-ui-client-box > .mod-ui-client-box:first-child .mod-ui-client-button'))`);
+    const reordered = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(reordered.sameInputNode, true, 'a keyed ancestor reorder must keep the Input node');
+    assert.equal(reordered.clientFocused, true, 'a keyed ancestor reorder must retain focus');
+    assert.equal(reordered.value, 'k', 'a keyed ancestor reorder must retain the pending draft');
+    await run(`window.__modUiClientFixture.releaseRapidPostAt(${heldReorderPost})`);
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+      return !s.rapidBackgroundPending.some(p => p.ordinal === ${heldReorderPost}) && s.rapidPropValue === 'k'; })()`);
+    assert.equal((await run(`window.__modUiClientFixture.rapidInputSnapshot()`)).sameInputNode, true);
+
+    // Hold Native control while its owning ParentSite is replaced. Its late
+    // response must not schedule runHeld even if passive cleanup is delayed.
+    await run(`window.__modUiClientFixture.holdNextRapidControl()`);
+    sendText('m');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidControlHeld`);
+    const beforeOwnerChange = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    await run(`window.__deferRapidPassiveCleanup = true; window.__modUiClientFixture.replaceRapidSite()`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.readOnly === false
+      && window.__modUiClientFixture.calls.some(call => call.kind === 'operation' && call.request.type === 'draw_commit'
+        && call.request.instance_id === 'rapid-input-site-replacement' && call.returnedRevision === ${beforeParentCommit.rapidRevision + 1})`);
+    await run(`window.__modUiClientFixture.releaseRapidControl(); new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    const afterOwnerChange = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(afterOwnerChange.runHeld.length, beforeOwnerChange.runHeld.length,
+      'a late Native control result cannot start runHeld for a removed ParentSite');
+    await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').focus()`);
+
+    // A newer sequence from a different live runtime must never be accepted
+    // as the response to this Client's runHeld operation.
+    await run(`window.__modUiClientFixture.enableRapidSibling()`);
+    await wait(`document.querySelector('[data-client="rapid-sibling"]')?.textContent.includes('Rapid sibling alive')
+      && document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.readOnly === false`);
+    await run(`window.__modUiClientFixture.misrouteNextRapidFrame()`);
+    sendText('x');
+    await wait(`Boolean(document.querySelector('[data-client="rapid-input"] .mod-ui-client-fallback'))`);
+    assert.equal(await run(`document.querySelector('[data-client="rapid-sibling"]')?.textContent.includes('Rapid sibling alive')`), true);
+    assert.equal(await run(`window.__modUiClientFixture.calls.some(call => call.kind === 'operation'
+      && call.request.type === 'runHeld' && call.request.runtimeId === 'runtime-rapid-input'
+      && call.returnedRuntimeId === 'runtime-rapid-sibling')`), true);
+    assert.equal(await run(`window.__modUiClientFixture.calls.some(call => call.kind === 'control'
+      && call.request.subtype === 'ui_client_fault' && call.request.client === 'rapid-input'
+      && call.request.reason.includes('different runtime'))`), true);
+
     process.stdout.write(`${JSON.stringify({ initialStatusMountSuperseded, initialSiblingMountSuperseded, parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, inputSubmitUsesHookReachedValue, inputRunHeldEvents, selectUsesHookReachedValue, selectRunHeldEvents, markdownExternalLinkUsesNormalNavigation, markdownOpenLinkUsesNormalNavigation, markdownLinksDoNotDispatchClientCallbacks, contextMentionHref, contextMentionClickPreventedNavigation, contextMentionOpenEvents, ordinaryMentionClickPreventedNavigation, ordinaryMentionOpenEvents, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp, rapidBeforeRelease: rapidBeforeRelease, rapidAfterFirstAck, rapidInputRegression, focusDiagnostics: { beforeActivation: documentFocusedBeforeActivation, afterActivation: documentFocusedAfterActivation } })}\n`);
   } finally {
     window.destroy();

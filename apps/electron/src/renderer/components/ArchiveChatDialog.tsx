@@ -6,16 +6,25 @@ import { Icon } from './Icon';
 
 const useDialogLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
-export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, onConfirm, onRetry }: {
+export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, onConfirm, onRetry, onRestoreFocus }: {
   title: string; jobs: ScheduledCronJob[]; loading: boolean; busy: boolean; error: string;
-  onClose(): void; onConfirm(): void; onRetry?(): void;
+  onClose(): void; onConfirm(): void; onRetry?(): void; onRestoreFocus?(shouldRestore: boolean): void;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
-  useEffect(() => {
+  const restoreFocus = useRef(onRestoreFocus);
+  restoreFocus.current = onRestoreFocus;
+  // Capture the opener before the busy-state layout effect moves focus.
+  useDialogLayoutEffect(() => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    dialog.current?.setAttribute('aria-modal', 'true');
-    dialog.current?.querySelector<HTMLButtonElement>('button')?.focus();
-    return () => opener?.focus();
+    const root = dialog.current;
+    root?.setAttribute('aria-modal', 'true');
+    root?.querySelector<HTMLButtonElement>('button')?.focus();
+    return () => {
+      const active = document.activeElement;
+      const shouldRestore = !active || active === document.body || active === document.documentElement || !!root?.contains(active);
+      if (restoreFocus.current) restoreFocus.current(shouldRestore);
+      else if (shouldRestore && opener?.isConnected) opener.focus();
+    };
   }, []);
   // Disabling the focused button can send focus to the document body. Move
   // focus in the same commit, before a delayed passive effect or another

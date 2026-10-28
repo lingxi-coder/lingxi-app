@@ -15,10 +15,28 @@ localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en');
 function Fixture() {
   const sidebarAttempts = useRef(0);
   const [sidebarCalls, setSidebarCalls] = useState(0);
+  const [sidebarSessions, setSidebarSessions] = useState([
+    { uuid: 'fixture-session', title: 'Sidebar chat' },
+    { uuid: 'fixture-neighbor', title: 'Neighbor chat' },
+  ]);
+  const [openedSession, setOpenedSession] = useState('');
   const bridge = {
-    bootstrap: { settings: { projects: ['/fixture'], pinnedSessions: [], activeProject: '/fixture' }, workspace: { path: '/fixture' }, projectCatalogs: { '/fixture': { sessions: [{ uuid: 'fixture-session', title: 'Sidebar chat' }] } } },
-    sessionRuntimeStatus: () => undefined, preflightSessionArchive: async () => [],
-    archiveSession: async () => { setSidebarCalls(value => value + 1); if (sidebarAttempts.current++ === 0) throw new Error('Fixture archive failure'); },
+    bootstrap: {
+      settings: { projects: ['/fixture'], pinnedSessions: [], activeProject: '/fixture' },
+      workspace: { path: '/fixture' },
+      scheduledWorkspace: '/scheduled',
+      projectCatalogs: {
+        '/fixture': { sessions: sidebarSessions.filter((session) => session.uuid === 'fixture-session') },
+        '/scheduled': { sessions: sidebarSessions.filter((session) => session.uuid === 'fixture-neighbor') },
+      },
+    },
+    sessionLoading: false, sessionRuntimeStatus: () => undefined, preflightSessionArchive: async () => [],
+    openSession: async (_project: string, sessionId: string) => { setOpenedSession(sessionId); },
+    archiveSession: async (_project: string, sessionId: string) => {
+      setSidebarCalls(value => value + 1);
+      if (sidebarAttempts.current++ === 0) throw new Error('Fixture archive failure');
+      setSidebarSessions((sessions) => sessions.filter((session) => session.uuid !== sessionId));
+    },
   } as unknown as UseBridge;
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -30,7 +48,7 @@ function Fixture() {
     configure: ({ loading = false, busy = false, error = '' } = {}) => {
       setLoading(loading); setBusy(busy); setError(error);
     },
-    state: () => ({ open, confirms, closes, sidebarCalls }),
+    state: () => ({ open, confirms, closes, sidebarCalls, openedSession }),
   } });
   return <div className="desktop-shell" style={{ display: 'flex', position: 'relative', width: '100vw', height: '100vh' }}><BetaSidebar bridge={bridge} onOpenSettings={() => {}} /><main className="desktop-main" style={{ padding: 40, flex: 1, position: 'relative' }}>
     <h1>Project chat</h1><button id="opener" onClick={() => setOpen(true)}>Archive chat</button>

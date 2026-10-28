@@ -28,21 +28,110 @@ test('Electron renders Native Client input and Select held events while keeping 
       configFile: false,
       logLevel: 'error',
       plugins: [{
-        name: 'mod-ui-ack-negative-control',
+        name: 'mod-ui-negative-controls',
         enforce: 'pre',
         transform(source, id) {
-          if (process.env.LINGXI_TEST_DISABLE_ACK_FRESHNESS !== '1' || !id.endsWith('/modUiAbovePrompt.tsx')) return null;
+          if (id.endsWith('/modUiClientTree.tsx') && process.env.LINGXI_TEST_DISABLE_ANCESTOR_KEYS === '1') {
+            const keyed = `function childKey(node: ModUiSurfaceNode, index: number): string {
+  const key = explicitNodeKey(node);
+  return key === null ? \`index:\${node.type}:\${index}\` : \`key:\${key}\`;
+}`;
+            assert.ok(source.includes(keyed), 'negative control must remove keyed ancestor reconciliation');
+            return source.replace(keyed, `function childKey(node: ModUiSurfaceNode, index: number): string {
+  if (node.type === 'Button' || node.type === 'Input' || node.type === 'Select') return \`\${node.type}:\${node.props.key}\`;
+  if (node.type === 'Markdown' && node.props.key) return \`Markdown:\${node.props.key}\`;
+  return \`\${node.type}:\${index}\`;
+}`);
+          }
+          if (!id.endsWith('/modUiAbovePrompt.tsx')) return null;
+          let result = source;
+          const parentCommit = `      setParentFrame({
+        sessionId,
+        revision,
+        response: result.response,
+        clientRuntimeEpochs: result.metadata?.clientRuntimeEpochs ?? {},
+        clientStateToken: result.metadata?.clientStateToken ?? null,
+      });`;
+          assert.ok(result.includes(parentCommit), 'fixture must be able to hold the parent commit');
+          result = result.replace(parentCommit, `      const commitParentFrame = () => setParentFrame({
+        sessionId,
+        revision,
+        response: result.response,
+        clientRuntimeEpochs: result.metadata?.clientRuntimeEpochs ?? {},
+        clientStateToken: result.metadata?.clientStateToken ?? null,
+      });
+      if ((window as any).__holdRapidParentCommit && sessionId === 'mod-ui-client-rapid-input-session') {
+        (window as any).__heldRapidParentCommit = commitParentFrame;
+      } else commitParentFrame();`);
+          if (process.env.LINGXI_TEST_DISABLE_SUPERSEDED_MARKER === '1') {
+            const marker = "const superseded = request.event.type === 'input' ? nativeInputSuperseded : undefined;";
+            assert.ok(result.includes(marker), 'negative control must remove the superseded input marker');
+            result = result.replace(marker, 'const superseded = undefined;');
+          }
+          if (process.env.LINGXI_TEST_DELAY_PASSIVE_CLEANUP === '1') {
+            const cleanup = `    return () => {
+      active = false;
+      if (generation === operationGeneration.current) operationGeneration.current += 1;
+    };`;
+            assert.ok(result.includes(cleanup), 'fixture must delay the operation passive cleanup');
+            result = result.replace(cleanup, `    return () => {
+      const dispose = () => {
+        active = false;
+        if (generation === operationGeneration.current) operationGeneration.current += 1;
+      };
+      if ((window as any).__deferRapidPassiveCleanup) window.setTimeout(dispose, 500);
+      else dispose();
+    };`);
+          }
+          if (process.env.LINGXI_TEST_DISABLE_OWNER_FENCE === '1') {
+            const ownerFence = `  useLayoutEffect(() => () => {
+    // Invalidate in-flight control calls at commit, before passive cleanup can
+    // run or a replacement instance can mount a runtime with the same id.
+    operationGeneration.current += 1;
+    const currentRuntimeId = runtimeIdRef.current;
+    const revision = mountedRevisionRef.current;
+    if (!currentRuntimeId || revision === null) return;
+    runtimeIdRef.current = null;
+    unmountOperationRef.current(currentRuntimeId, revision);
+  }, [descriptor.key, descriptor.module, descriptor.plugin, site?.instanceId, site?.sessionId]);`;
+            assert.ok(result.includes(ownerFence), 'negative control must restore passive owner cleanup');
+            result = result.replace(ownerFence, `  useEffect(() => () => {
+    const dispose = () => {
+      const currentRuntimeId = runtimeIdRef.current;
+      const revision = mountedRevisionRef.current;
+      if (!currentRuntimeId || revision === null) return;
+      runtimeIdRef.current = null;
+      unmountOperationRef.current(currentRuntimeId, revision);
+    };
+    if ((window as any).__deferRapidPassiveCleanup) window.setTimeout(dispose, 500);
+    else dispose();
+  }, [descriptor.key, descriptor.module, descriptor.plugin, site?.instanceId, site?.sessionId]);`);
+          }
+          if (process.env.LINGXI_TEST_RESTORE_REVISION_GATE === '1') {
+            const retainedFrame = ': frame ? <ModUiClientTree';
+            assert.ok(result.includes(retainedFrame), 'negative control must restore the old revision gate');
+            result = result.replace(retainedFrame, ': frame && frame.renderRevision === site?.renderRevision ? <ModUiClientTree');
+          }
+          if (process.env.LINGXI_TEST_DISABLE_RUNTIME_CHECK === '1') {
+            const runtimeCheck = `    if (isFrame(frameResult) && frameResult.runtimeId !== runtimeAtStart) {
+      throw new Error('Client module host returned a frame for a different runtime');
+    }
+`;
+            assert.ok(result.includes(runtimeCheck), 'negative control must remove the runtime identity check');
+            result = result.replace(runtimeCheck, '');
+          }
+          if (process.env.LINGXI_TEST_DISABLE_ACK_FRESHNESS !== '1') return result === source ? null : result;
           const current = `return createNativeInputAck(acknowledgedValue, () => {
         if (runtimeIdRef.current !== runtimeAtStart || operationGeneration.current !== generation
-          || currentRevisionRef.current !== revision) return null;
+          || currentRevisionRef.current !== revision || !context.isRevisionCurrent(revision)) return nativeInputSuperseded;
         const latest = frameRef.current;
         if (latest?.renderRevision === revision && latest.frameSequence > frameResult.frameSequence) {
           return inputValueForElement(latest.tree, request.element, descriptor.plugin);
         }
         return acknowledgedValue;
       });`;
-          assert.ok(source.includes(current), 'negative control must remove the Host acknowledgement freshness check');
-          return source.replace(current, 'return createNativeInputAck(acknowledgedValue);');
+          assert.ok(result.includes(current), 'negative control must remove the Host acknowledgement freshness check');
+          return result.replace(current, 'return createNativeInputAck(acknowledgedValue);');
         },
       }, react()],
       resolve: {

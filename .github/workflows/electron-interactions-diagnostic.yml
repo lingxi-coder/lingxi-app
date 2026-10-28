@@ -1,7 +1,7 @@
 name: Electron interaction diagnostics
 on:
   push:
-    branches: [codex/media-electron-interactions-9b8e]
+    branches: [codex/media-electron-interactions-v2-9b8e]
 jobs:
   interactions:
     strategy:

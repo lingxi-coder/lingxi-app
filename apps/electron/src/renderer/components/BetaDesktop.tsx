@@ -231,7 +231,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   status?: ReturnType<UseBridge['sessionRuntimeStatus']>;
   onClick(): void;
   onPin(): void;
-  onArchive(): void;
+  onArchive(restoreTarget: HTMLButtonElement | null): void;
   onRename(): void;
   reorderable?: boolean;
   sortableIndex?: number;
@@ -243,6 +243,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   const remoteAvail = remoteAvailability(remote.status);
   const [actionsPosition, setActionsPosition] = useState<{ left: number; top: number } | null>(null);
   const actionsMenuRef = useRef<HTMLDivElement>(null);
+  const rowButtonRef = useRef<HTMLButtonElement | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerGesture = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const suppressClick = useRef(false);
@@ -261,6 +262,10 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
       pinnedSection,
     },
   });
+  const setRowButtonRef = useCallback((element: HTMLButtonElement | null) => {
+    rowButtonRef.current = element;
+    if (reorderable) sortable.handleRef(element);
+  }, [reorderable, sortable.handleRef]);
   const needsInput = sessionNeedsInput(status);
   const highlighted = active || opening;
   const attention = opening
@@ -278,13 +283,18 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   }, []);
   const closeActions = useCallback(() => setActionsPosition(null), []);
   useEffect(() => () => clearLongPress(), [clearLongPress]);
+  useLayoutEffect(() => {
+    if (actionsPosition) actionsMenuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+  }, [actionsPosition]);
   useEffect(() => {
     if (!actionsPosition) return;
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (!actionsMenuRef.current?.contains(event.target as Node)) closeActions();
     };
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); closeActions(); }
+      if (event.key === 'Escape' && actionsMenuRef.current?.isConnected) {
+        event.preventDefault(); closeActions(); rowButtonRef.current?.focus({ preventScroll: true });
+      }
     };
     document.addEventListener('pointerdown', closeOnOutsidePointer, true);
     document.addEventListener('keydown', closeOnEscape);
@@ -308,7 +318,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
     >
       <button
         type="button"
-        ref={reorderable ? sortable.handleRef : undefined}
+        ref={setRowButtonRef}
         onPointerDown={(event) => {
           if (event.button !== 0) return;
           clearLongPress();
@@ -351,6 +361,13 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
           clearLongPress();
           openActions(event.clientX, event.clientY);
         }}
+        onKeyDown={(event) => {
+          if (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey)) return;
+          event.preventDefault();
+          const rect = event.currentTarget.getBoundingClientRect();
+          openActions(rect.left, rect.bottom);
+          suppressClick.current = false;
+        }}
         onClick={(event) => {
           if (suppressClick.current) { event.preventDefault(); suppressClick.current = false; return; }
           onClick();
@@ -392,7 +409,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
         <Icon name="pin" size={16} />
       </button>
       <button type="button" className="sidebar-row-action" aria-label={tr('desktop_chat_archive_named', session.title || tr('remote_untitled'))}
-        title={tr('desktop_chat_archive_chat')} onClick={onArchive} disabled={opening}
+        title={tr('desktop_chat_archive_chat')} onClick={() => onArchive(rowButtonRef.current)} disabled={opening}
         style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)', width: 26, height: 26, padding: 0, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
         <Icon name="archive" size={16} />
       </button>
@@ -414,7 +431,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
           style={{ left: Math.max(12, Math.min(actionsPosition.left, window.innerWidth - 220)), top: Math.max(12, Math.min(actionsPosition.top, window.innerHeight - 190)) }}>
           <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onRename(); }}><Icon name="pencil" size={16} /> {tr('desktop_chat_rename')}</button>
           <button type="button" role="menuitem" onClick={() => { closeActions(); onPin(); }}><Icon name="pin" size={16} /> {pinned ? tr('drawer_session_unpin') : tr('drawer_session_pin')}</button>
-          <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onArchive(); }}><Icon name="archive" size={16} /> {tr('settings_parity_archive')}</button>
+          <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onArchive(rowButtonRef.current); }}><Icon name="archive" size={16} /> {tr('settings_parity_archive')}</button>
           {remoteApi && (
             <button type="button" role="menuitem" data-remote-control-toggle={remoteOn ? 'on' : 'off'}
               disabled={opening || (!remoteOn && !remoteAvail.available)}
@@ -518,12 +535,37 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [archiveError, setArchiveError] = useState('');
+  const archiveFocus = useRef<{
+    opener: HTMLButtonElement | null;
+    neighbors: HTMLButtonElement[];
+    list: HTMLElement | null;
+    archived: boolean;
+  } | null>(null);
   const [renameTarget, setRenameTarget] = useState<{ projectPath: string; sessionId: string; title: string } | null>(null);
   const [renamingSession, setRenamingSession] = useState(false);
   const [renameError, setRenameError] = useState('');
   const archiveRequest = useRef(0);
   const closeArchive = () => { archiveRequest.current++; setArchiveTarget(null); };
-  const prepareArchive = async (projectPath: string, sessionId: string, title: string) => {
+  const restoreArchiveFocus = (shouldRestore: boolean) => {
+    const focus = archiveFocus.current;
+    archiveFocus.current = null;
+    if (!focus || !shouldRestore) return;
+    const candidates = focus.archived ? focus.neighbors : [focus.opener, ...focus.neighbors];
+    const target = candidates.find((candidate) => candidate?.isConnected && !candidate.disabled
+      && candidate.getClientRects().length > 0 && !candidate.closest('[inert], [aria-hidden="true"]'));
+    if (target) target.focus({ preventScroll: true });
+    else if (focus.list?.isConnected && focus.list.getClientRects().length > 0
+      && !focus.list.closest('[inert], [aria-hidden="true"]')) focus.list.focus({ preventScroll: true });
+  };
+  const prepareArchive = async (projectPath: string, sessionId: string, title: string, restoreTarget?: HTMLButtonElement | null) => {
+    if (restoreTarget !== undefined) {
+      const list = restoreTarget?.closest<HTMLElement>('.desktop-sidebar-list') ?? asideRef.current?.querySelector<HTMLElement>('.desktop-sidebar-list') ?? null;
+      const rows = list ? [...list.querySelectorAll<HTMLButtonElement>('.sidebar-session-row > button[data-session-id]')] : [];
+      const index = restoreTarget ? rows.indexOf(restoreTarget) : -1;
+      const ordered = index < 0 ? rows : [...rows.slice(index + 1), ...rows.slice(0, index).reverse()];
+      const neighbors = ordered.filter((row) => row.dataset.sessionId !== sessionId || row.dataset.sessionProjectPath !== projectPath);
+      archiveFocus.current = { opener: restoreTarget, neighbors, list, archived: false };
+    }
     const version = ++archiveRequest.current;
     setArchiveTarget({ projectPath, sessionId, title });
     setArchiveJobs([]); setArchiveError(''); setArchiveLoading(true);
@@ -534,7 +576,11 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const confirmArchive = async () => {
     if (!archiveTarget || archiving) return;
     setArchiving(true); setArchiveError('');
-    try { await bridge.archiveSession(archiveTarget.projectPath, archiveTarget.sessionId); closeArchive(); }
+    try {
+      await bridge.archiveSession(archiveTarget.projectPath, archiveTarget.sessionId);
+      if (archiveFocus.current) archiveFocus.current.archived = true;
+      closeArchive();
+    }
     catch (cause) { setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setArchiving(false); }
   };
@@ -648,6 +694,13 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   );
   const openSidebarSession = useCallback((projectPath: string, sessionId: string) => {
     if (bridge.sessionLoading) return;
+    if (archiveTarget) {
+      // A session change owns the new focus; closing the previous session's
+      // archive dialog must not restore its old row.
+      archiveFocus.current = null;
+      archiveRequest.current += 1;
+      setArchiveTarget(null);
+    }
     onOpenChat?.();
     const key = `${projectPath}\0${sessionId}`;
     setOpeningSessionKey(key);
@@ -658,7 +711,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     void opening
       .catch(() => undefined)
       .finally(() => setOpeningSessionKey((current) => current === key ? null : current));
-  }, [bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.sessionLoading, onOpenChat]);
+  }, [archiveTarget, bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.sessionLoading, onOpenChat]);
   const editProject = useCallback((projectPath: string) => {
     if (bridge.sessionLoading) return;
     onOpenChat?.();
@@ -872,7 +925,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         sensors={(defaults) => defaults.map((sensor) => sensor === PointerSensor ? SESSION_POINTER_SENSOR : sensor)}
         onDragEnd={handleSessionDragEnd}
       >
-      <nav className="no-drag desktop-sidebar-list" aria-label={tr('desktop_projects_sessions')} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 10px 12px' }}>
+      <nav className="no-drag desktop-sidebar-list" tabIndex={-1} aria-label={tr('desktop_projects_sessions')} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 10px 12px' }}>
         {pinnedSessions.length > 0 ? (
           <section aria-labelledby="pinned-sessions-heading" style={{ marginBottom: 24 }}>
             <h2 id="pinned-sessions-heading" className="sidebar-section-heading"><button type="button" aria-expanded={pinnedExpanded} onClick={() => setPinnedExpanded((value) => !value)} style={{ color: t.text4 }}>{tr('drawer_recents_pinned')} <Icon name="chevron" size={13} stroke={1.7} style={{ transform: pinnedExpanded ? 'none' : 'rotate(-90deg)' }} /></button></h2>
@@ -898,7 +951,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                   onClick={() => openSidebarSession(pinned.projectPath, pinned.sessionId)}
                   onRename={() => prepareRename(pinned.projectPath, pinned.sessionId, title)}
                   onPin={() => invoke(() => bridge.setSessionPinned(pinInput(pinned.projectPath, pinned.sessionId, title), false))}
-                  onArchive={() => void prepareArchive(pinned.projectPath, pinned.sessionId, title)} />
+                  onArchive={(restoreTarget) => void prepareArchive(pinned.projectPath, pinned.sessionId, title, restoreTarget)} />
               );
             })}
           </section>
@@ -913,7 +966,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
               pinned={pinned} opening={openingSessionKey === `${scheduledWorkspace}\0${session.uuid}`}
               status={bridge.sessionRuntimeStatus(session.uuid)}
               onClick={() => openSidebarSession(scheduledWorkspace, session.uuid)}
-              onArchive={() => void prepareArchive(scheduledWorkspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+              onArchive={(restoreTarget) => void prepareArchive(scheduledWorkspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'), restoreTarget)}
               onRename={() => prepareRename(scheduledWorkspace, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
               onPin={() => invoke(() => bridge.setSessionPinned(pinInput(scheduledWorkspace, session.uuid, session.title || tr('remote_untitled')), !pinned))} />;
           })}
@@ -1021,7 +1074,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                 active={!scheduled && visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
                 pinned={pinned} opening={opening} status={bridge.sessionRuntimeStatus(session.uuid)}
                   onClick={() => openSidebarSession(projectPath, session.uuid)}
-                onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+                onArchive={(restoreTarget) => void prepareArchive(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'), restoreTarget)}
                 onRename={() => prepareRename(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
                 onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || tr('remote_untitled')), !pinned))}
                 reorderable={!opening}
@@ -1126,7 +1179,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                           opening={opening}
                           status={bridge.sessionRuntimeStatus(session.uuid)}
                           onClick={() => openSidebarSession(projectPath, session.uuid)}
-                          onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
+                          onArchive={(restoreTarget) => void prepareArchive(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'), restoreTarget)}
                           onRename={() => prepareRename(projectPath, session.uuid, session.title || tr('desktop_chat_untitled_chat'))}
                           onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || tr('remote_untitled')), !pinned))}
                           reorderable={!opening}
@@ -1206,7 +1259,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     </div>
     </div>
     </div>
-    {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} onRetry={() => void prepareArchive(archiveTarget.projectPath, archiveTarget.sessionId, archiveTarget.title)} />}
+    {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} onRetry={() => void prepareArchive(archiveTarget.projectPath, archiveTarget.sessionId, archiveTarget.title)} onRestoreFocus={restoreArchiveFocus} />}
     {renameTarget && <RenameSessionDialog title={renameTarget.title} busy={renamingSession} error={renameError} onClose={() => { if (!renamingSession) setRenameTarget(null); }} onConfirm={(title) => void confirmRename(title)} />}
     </>
   );

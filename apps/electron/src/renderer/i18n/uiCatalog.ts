@@ -1,4 +1,5 @@
 const rows: Record<string, readonly [string, string, string, string, string]> = {
+  mod_input_unconfirmed: ['更改尚未确认。请编辑或按 Enter 重新发送。', '變更尚未確認。請編輯或按 Enter 重新傳送。', 'Change not confirmed. Edit or press Enter to send again.', '変更は確認されていません。編集するか Enter キーでもう一度送信してください。', '변경이 확인되지 않았습니다. 수정하거나 Enter 키를 눌러 다시 보내세요.'],
   output_truncated: ['… 输出已截断', '… 輸出已截斷', '… output truncated', '… 出力は省略されています', '… 출력이 일부 생략됨'],
   truncated_lines: ['… 已截断 — 显示 %1$d / %2$d 行', '… 已截斷 — 顯示 %1$d / %2$d 行', '… truncated — showing %1$d of %2$d lines', '… 省略あり — %2$d 行中 %1$d 行を表示', '… 일부 생략됨 — %2$d줄 중 %1$d줄 표시'],
   percent_elapsed: ["%1$d%% · %2$d秒", "%1$d%% · %2$d秒", "%1$d%% · %2$ds", "%1$d%% · %2$d秒", "%1$d%% · %2$d초"],

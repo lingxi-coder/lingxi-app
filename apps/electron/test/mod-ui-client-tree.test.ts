@@ -236,9 +236,9 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
         enforce: 'pre',
         transform(source, id) {
           if (process.env.LINGXI_TEST_DISABLE_INPUT_FRAME !== '1' || !id.endsWith('/modUiClientTree.tsx')) return null;
-          const frameDependency = '}, [key, value, inputFrameVersion]);';
+          const frameDependency = '}, [key, value, inputFrameVersion, frameCurrent]);';
           assert.ok(source.includes(frameDependency), 'negative control must remove the frame sequence dependency');
-          return source.replace(frameDependency, '}, [key, value]);');
+          return source.replace(frameDependency, '}, [key, value, frameCurrent]);');
         },
       }, reactPlugin()],
       resolve: {
@@ -302,6 +302,16 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
     if (child && child.exitCode === null) child.kill('SIGTERM');
     rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test('rejects duplicate explicit sibling keys across Client node kinds', () => {
+  assert.throws(() => parseModUiClientTree({
+    type: 'Box',
+    children: [
+      { type: 'Box', props: { key: 'duplicate' }, children: [] },
+      { type: 'Text', props: { key: 'duplicate' }, children: ['other'] },
+    ],
+  }), /sibling keys must be unique/);
 });
 
 test('renders a root Client string as escaped text and preserves its UTF-16 value', () => {

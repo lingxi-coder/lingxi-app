@@ -9,6 +9,7 @@ import os
 import pathlib
 import plistlib
 import re
+import shlex
 import sys
 import tarfile
 import tempfile
@@ -41,7 +42,68 @@ def job_block(path: pathlib.Path, job_name: str) -> str:
     return "\n".join(lines[start:end])
 
 
+def job_run_commands(block: str) -> list[tuple[tuple[int, int], str, bool]]:
+    """Read step-level run commands, excluding YAML and shell comments."""
+    commands = []
+    for step_index, step in enumerate(re.split(r"(?m)^      - ", block)):
+        run = re.search(r"(?m)^        run:[ \t]*(.*)$", step)
+        if not run:
+            continue
+        conditional = bool(re.search(r"(?m)^        (?:if|continue-on-error):", step))
+        value = run.group(1).strip()
+        # Folded YAML scalars combine lines and cannot prove separate shell commands.
+        if value in ("|", "|-", "|+"):
+            lines = []
+            for line in step[run.end():].splitlines():
+                if not line.strip():
+                    continue
+                if not line.startswith("          "):
+                    break
+                lines.append(line.strip())
+        else:
+            lines = [value]
+        for line_index, line in enumerate(lines):
+            if line and not line.startswith("#"):
+                commands.append(((step_index, line_index), line, conditional))
+    return commands
+
+
 class GStreamerSDKTests(unittest.TestCase):
+    def assert_android_sdk_before_native_builds(self, block: str, job_name: str) -> None:
+        commands = job_run_commands(block)
+        steps = {}
+        for position, command, _ in commands:
+            steps.setdefault(position[0], []).append(command)
+        setup = []
+        builds = {"play": [], "direct": []}
+        allowed_builds = [["bash", "apps/android/native/scripts/build-mobile-linux-native.sh", "--variant", variant]
+                          for variant in builds]
+        build_steps = set()
+        for position, command, conditional in commands:
+            if command.startswith("python3 scripts/ci/gstreamer_sdk.py android"):
+                args = shlex.split(command, comments=True)
+                if (len(args) == 5 and args[:4] == ["python3", "scripts/ci/gstreamer_sdk.py", "android", "--root"]
+                        and args[4] and not re.search(r"[;&|]", args[4]) and not conditional
+                        and len(steps[position[0]]) == 1):
+                    setup.append(position)
+            elif command.startswith("bash apps/android/native/scripts/build-mobile-linux-native.sh"):
+                args = shlex.split(command, comments=True)
+                self.assertIn(args, allowed_builds, f"{job_name}: unchecked native build command")
+                variant = args[-1]
+                self.assertFalse(conditional, f"{job_name}: {variant} native build is conditional")
+                builds[variant].append(position)
+                build_steps.add(position[0])
+        for step in build_steps:
+            for command in steps[step]:
+                self.assertIn(shlex.split(command, comments=True), allowed_builds,
+                              f"{job_name}: native build step contains other shell commands")
+        self.assertTrue(setup, f"{job_name}: missing unconditional Android GStreamer SDK setup")
+        for variant, positions in builds.items():
+            self.assertTrue(positions, f"{job_name}: missing {variant} native build command")
+            for position in positions:
+                self.assertTrue(any(sdk < position for sdk in setup),
+                                f"{job_name}: Android GStreamer SDK setup must precede {variant} native build")
+
     def test_lock_pins_official_1288_artifacts(self) -> None:
         lock = gstreamer_sdk.load_lock()
         expected_digests = {
@@ -411,13 +473,49 @@ class GStreamerSDKTests(unittest.TestCase):
         self.assertLess(lint.index("Install GStreamer development libraries"), lint.index("cargo clippy --locked --workspace"))
 
         clients = ROOT / ".github/workflows/clients.yml"
-        for job_name, gate in (("android", "Build Store and Full native runtimes"), ("android-emulator", "Build Store native runtime"), ("ios", "Build XCFramework + Swift bindings")):
+        for job_name in ("android", "android-emulator"):
             block = job_block(clients, job_name)
-            platform = "ios" if job_name == "ios" else "android"
-            self.assertIn(f"scripts/ci/gstreamer_sdk.py {platform}", block)
-            self.assertLess(block.index(f"scripts/ci/gstreamer_sdk.py {platform}"), block.index(gate))
+            self.assert_android_sdk_before_native_builds(block, job_name)
+            sdk_run = "run: python3 scripts/ci/gstreamer_sdk.py android"
+            with self.subTest(job=job_name, defect="missing SDK"):
+                with self.assertRaisesRegex(AssertionError, "missing unconditional Android GStreamer SDK setup"):
+                    self.assert_android_sdk_before_native_builds(block.replace(sdk_run, "run: echo no-sdk"), job_name)
+            sdk_line = next(line.strip() for line in block.splitlines() if sdk_run in line)
+            sdk_step_start = block.rfind("\n      - ", 0, block.index(sdk_run))
+            self.assertNotEqual(sdk_step_start, -1, f"{job_name}: SDK setup step was not found")
+            sdk_step_start += 1
+            hidden_sdk = f"run: |\n          if false; then\n            {sdk_line[5:]}\n          fi"
+            with self.subTest(job=job_name, defect="SDK behind false condition"):
+                with self.assertRaisesRegex(AssertionError, "missing unconditional Android GStreamer SDK setup"):
+                    self.assert_android_sdk_before_native_builds(block.replace(sdk_line, hidden_sdk), job_name)
+            native_step = next(step for step in re.split(r"(?m)^      - ", block)
+                               if "build-mobile-linux-native.sh --variant play" in step)
+            folded_step = native_step.replace("run: |", "run: >", 1)
+            with self.subTest(job=job_name, defect="folded build commands"):
+                self.assertNotEqual(native_step, folded_step)
+                with self.assertRaisesRegex(AssertionError, "missing play native build command"):
+                    self.assert_android_sdk_before_native_builds(block.replace(native_step, folded_step), job_name)
+            for variant in ("play", "direct"):
+                build = f"bash apps/android/native/scripts/build-mobile-linux-native.sh --variant {variant}"
+                with self.subTest(job=job_name, defect=f"missing {variant}"):
+                    with self.assertRaisesRegex(AssertionError, f"missing {variant} native build command"):
+                        self.assert_android_sdk_before_native_builds(block.replace(build, f"# {build}"), job_name)
+                with self.subTest(job=job_name, defect=f"{variant} before SDK"):
+                    premature = f"      - name: Premature {variant} build\n        run: {build}\n"
+                    altered = block[:sdk_step_start] + premature + block[sdk_step_start:]
+                    with self.assertRaisesRegex(AssertionError, f"setup must precede {variant} native build"):
+                        self.assert_android_sdk_before_native_builds(altered, job_name)
+                with self.subTest(job=job_name, defect=f"{variant} behind false condition"):
+                    hidden_build = f"if false; then\n            {build}\n          fi"
+                    with self.assertRaisesRegex(AssertionError, "native build step contains other shell commands"):
+                        self.assert_android_sdk_before_native_builds(block.replace(build, hidden_build), job_name)
+                with self.subTest(job=job_name, defect=f"{variant} ignores failure"):
+                    with self.assertRaisesRegex(AssertionError, "unchecked native build command"):
+                        self.assert_android_sdk_before_native_builds(block.replace(build, f"{build} || true"), job_name)
 
         ios = job_block(clients, "ios")
+        self.assertIn("scripts/ci/gstreamer_sdk.py ios", ios)
+        self.assertLess(ios.index("scripts/ci/gstreamer_sdk.py ios"), ios.index("Build XCFramework + Swift bindings"))
         self.assertLess(ios.index("Build native support and verified release rootfs"),
                         ios.index("scripts/ci/gstreamer_sdk.py macos"))
         self.assertLess(ios.index("scripts/ci/gstreamer_sdk.py macos"),

@@ -16,6 +16,7 @@ async function main() {
   const js = (source) => web.executeJavaScript(source);
   const shown = `document.querySelector('.composer-slash-argument-hint')`;
   const prompt = `document.querySelector('[aria-label="Prompt"]')`;
+  const mirror = `document.querySelector('.composer-command-mirror')`;
   async function until(source) {
     for (let attempt = 0; attempt < 160; attempt++) { if (await js(source)) return; await delay(25); }
     throw new Error(`Timeout: ${source}`);
@@ -27,10 +28,13 @@ async function main() {
       const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
       editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
     })()`);
-    await delay(35);
+    // The editor is changed synchronously, but the command mirror reflects
+    // the draft React actually committed. Do not inspect a previous draft.
+    await until(`${mirror}?.textContent === ${JSON.stringify(text)}`);
   }
   async function press(keyCode) { web.sendInputEvent({ type: 'keyDown', keyCode }); web.sendInputEvent({ type: 'keyUp', keyCode }); await delay(40); }
   const hintText = () => js(`${shown}?.textContent`);
+  const waitForHint = (text) => until(`${shown}?.textContent === ${JSON.stringify(text)}`);
   const hintGeometry = () => js(`(() => {
     const editor = ${prompt}, hint = ${shown};
     const end = document.createRange(); end.selectNodeContents(editor.firstChild); end.collapse(false);
@@ -40,6 +44,7 @@ async function main() {
   })()`);
   const hintWidthMatchesEditor = `(() => {
     const editor = ${prompt}, hint = ${shown};
+    if (!hint) return false;
     const end = document.createRange(); end.selectNodeContents(editor.firstChild); end.collapse(false);
     const available = editor.clientWidth - parseFloat(getComputedStyle(editor).paddingRight)
       - (end.getBoundingClientRect().left - editor.getBoundingClientRect().left);
@@ -50,13 +55,14 @@ async function main() {
     await window.loadURL(`${url}?slash-hints`);
     await until(`Boolean(window.__composerDraftTest && ${prompt})`);
     await setDraft('/code-review ');
-    await until(`Boolean(${shown})`);
+    await waitForHint(reviewHint);
     assert.equal(await hintText(), reviewHint);
     assert.equal(await js(`${prompt}.textContent`), '/code-review ');
     const geometry = await hintGeometry();
     assert.ok(geometry.x < 1 && geometry.y < 1, JSON.stringify(geometry));
     assert.deepEqual({ visible: geometry.visible, pointer: geometry.pointer, overflow: geometry.overflow },
       { visible: 'visible', pointer: 'none', overflow: 'ellipsis' });
+    const darkHintColor = await js(`getComputedStyle(${shown}).color`);
     await writeFile(join(tmpdir(), 'lingxi-slash-argument-hint-desktop-dark.png'), (await web.capturePage()).toPNG());
     const wideInnerWidth = await js('window.innerWidth');
 
@@ -76,33 +82,50 @@ async function main() {
     assert.ok(restoredGeometry.x < 1 && restoredGeometry.y < 1, JSON.stringify(restoredGeometry));
     assert.deepEqual({ visible: restoredGeometry.visible, pointer: restoredGeometry.pointer, overflow: restoredGeometry.overflow },
       { visible: 'visible', pointer: 'none', overflow: 'ellipsis' });
+    // Start from a committed zero cursor so a visible hint proves that the
+    // interior cursor position was observed by the composer.
+    await setDraft('/code-review ', 0);
+    await until(`!${shown}`);
     await setDraft('/code-review ', 2);
+    await waitForHint(reviewHint);
     assert.equal(await hintText(), reviewHint);
     assert.equal(await js(`Boolean(document.querySelector('#slash-command-results'))`), false);
     await setDraft('/code-review ', 0);
     await until(`!${shown}`);
+    // Re-establish a nonzero committed cursor before checking invalid drafts.
+    await setDraft('/code-review ');
+    await waitForHint(reviewHint);
     await setDraft('/code-review  ');
     assert.equal(await hintText(), undefined);
     await setDraft('/code-review high ');
     assert.equal(await hintText(), undefined);
     await setDraft('/deploy "staging west" ');
+    await waitForHint('[version] [region]');
     assert.equal(await hintText(), '[version] [region]');
     await setDraft('/deploy staging\nv1 ');
+    await waitForHint('[version] [region]');
     assert.equal(await hintText(), '[version] [region]');
     await setDraft(`/deploy staging${'\nv1'.repeat(12)} `);
+    await waitForHint('[version] [region]');
     await js(`${prompt}.scrollTop = ${prompt}.scrollHeight`);
-    await until(`getComputedStyle(${shown}).visibility === 'visible'`);
+    await until(`(() => {
+      const editor = ${prompt}, hint = ${shown};
+      return editor.scrollTop > 0 && hint?.textContent === '[version] [region]'
+        && getComputedStyle(hint).visibility === 'visible';
+    })()`);
     assert.equal(await hintText(), '[version] [region]');
     await setDraft('/raw ');
+    await waitForHint('  <文件>\t[选项]  ');
     assert.equal(await hintText(), '  <文件>\t[选项]  ');
     await js(`${prompt}.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))`);
     await until(`!${shown}`);
     await js(`${prompt}.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))`);
-    await until(`Boolean(${shown})`);
+    await waitForHint('  <文件>\t[选项]  ');
     await setDraft('/code-rev');
     await until(`Boolean(document.querySelector('#slash-command-results'))`);
     await press('Tab');
     await until(`${prompt}.textContent === '/code-review '`);
+    await waitForHint(reviewHint);
     assert.equal(await hintText(), reviewHint);
     // The hint is neither selectable/copyable source text nor a submission.
     const copied = await js(`(() => {
@@ -113,12 +136,19 @@ async function main() {
     })()`);
     assert.equal(copied, '/code-review ');
     await setDraft('/code-review ');
+    await waitForHint(reviewHint);
     await press('Right');
     assert.equal(await js(`${prompt}.textContent`), '/code-review ');
     assert.equal(await js(`window.__composerDraftTest.sendPending()`), false);
     await js(`window.__composerDraftTest.setTheme('light')`);
     window.setSize(480, 700);
-    await delay(100);
+    await until(`(() => {
+      const hint = ${shown};
+      return window.innerWidth <= 480 && hint?.textContent === ${JSON.stringify(reviewHint)}
+        && getComputedStyle(hint).visibility === 'visible'
+        && getComputedStyle(hint).color !== ${JSON.stringify(darkHintColor)}
+        && ${hintWidthMatchesEditor};
+    })()`);
     assert.equal(await js(`getComputedStyle(${shown}).visibility`), 'visible');
     await writeFile(join(tmpdir(), 'lingxi-slash-argument-hint-desktop-light-narrow.png'), (await web.capturePage()).toPNG());
     await press('Enter');

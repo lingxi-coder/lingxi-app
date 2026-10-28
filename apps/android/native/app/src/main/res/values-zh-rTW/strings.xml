@@ -2087,6 +2087,13 @@
     <string name="remote_send_failed">訊息未能傳送，請重試。</string>
     <string name="remote_images_only_when_idle">執行中只能傳送文字。</string>
     <string name="remote_image_unusable">無法使用這張圖片。</string>
+    <string name="remote_bots">Bot</string>
+    <string name="remote_bot_new_chat">新對話</string>
+    <string name="remote_bot_no_chats">還沒有對話</string>
+    <string name="remote_bot_gone">這個 Bot 現在無法遠端存取。可能是電腦上關掉了它的遠端開關，或者它已被刪除。</string>
+    <string name="remote_bot_waiting_fmt">%1$d 個對話等你回覆</string>
+    <string name="remote_back_to_bot_fmt">返回 %1$s</string>
+    <string name="remote_origin_bot_fmt">來自 Bot「%1$s」</string>
     <string name="composer_model_options">模型設定</string>
     <string name="composer_model_updating">正在切換模型…</string>
     <string name="composer_model_details">模型詳細資訊</string>

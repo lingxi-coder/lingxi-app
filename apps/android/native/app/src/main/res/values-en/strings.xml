@@ -2085,6 +2085,13 @@
     <string name="remote_send_failed">The message was not sent. Try again.</string>
     <string name="remote_images_only_when_idle">Only text can be sent while a turn is running.</string>
     <string name="remote_image_unusable">That image could not be used.</string>
+    <string name="remote_bots">Bots</string>
+    <string name="remote_bot_new_chat">New chat</string>
+    <string name="remote_bot_no_chats">No chats yet</string>
+    <string name="remote_bot_gone">This Bot can\'t be reached now. Its Remote control switch may be off on the computer, or it was deleted.</string>
+    <string name="remote_bot_waiting_fmt">%1$d waiting for you</string>
+    <string name="remote_back_to_bot_fmt">Back to %1$s</string>
+    <string name="remote_origin_bot_fmt">From Bot %1$s</string>
     <string name="composer_model_options">Model Settings</string>
     <string name="composer_model_updating">Switching model…</string>
     <string name="composer_model_details">Model Details</string>

@@ -49,6 +49,12 @@ interface RemoteSessionPort {
     suspend fun setReasoning(selection: ReasoningSelectionDto)
     suspend fun setPermissionMode(mode: RemotePermissionModeFfi)
     suspend fun listModels(): RemoteModelsFfi
+
+    /**
+     * The name of the Bot that handed over the prompt of turn [turnId], or null when the connection
+     * knows of none (the prompt came from a schedule, or the Bot is not known any more).
+     */
+    fun promptOriginBotName(turnId: ULong): String?
 }
 
 /** The parts of a followed session the screen shows besides the transcript. */
@@ -94,7 +100,7 @@ class RemoteConversationSource(
     override val modelState: StateFlow<EngineModelState> = mutableModels.asStateFlow()
 
     override val externalFeed: Flow<ExternalFeedItem> = channelFlow {
-        val mapper = RemoteFeedMapper(strings, thisDeviceName)
+        val mapper = RemoteFeedMapper(strings, thisDeviceName) { port.promptOriginBotName(it) }
         var modelsRequested = false
         port.follow().collect { incoming ->
             if (incoming.phase == RemoteSessionPhaseFfi.LOADING) synchronized(imageLock) {
@@ -260,6 +266,8 @@ internal fun remotePermissionMode(id: String): RemotePermissionModeFfi? = when (
 class RemoteFeedMapper(
     private val strings: ConversationStrings,
     private val thisDeviceName: String,
+    /** Names the Bot that handed over the prompt of a turn, if one did: its prompts still arrive as scheduled ones. */
+    private val botNameOf: (turnId: ULong) -> String? = { null },
 ) {
     fun map(update: RemoteSessionUpdateFfi): List<ExternalFeedItem> {
         val items = mutableListOf<ExternalFeedItem>()
@@ -288,7 +296,7 @@ class RemoteFeedMapper(
                     turnId = record.turnId.toLong(),
                     text = record.text,
                     imageCount = record.images.size,
-                    originLabel = originLabel(record.origin, record.deviceName),
+                    originLabel = originLabel(record.origin, record.deviceName, record.turnId),
                 )
                 is RemoteRecordFfi.Omitted -> omitted += record.eventType.orEmpty()
                 // Pending actions come from the meta fields; an unknown kind has nothing to show.
@@ -362,9 +370,11 @@ class RemoteFeedMapper(
         else -> strings.resolve(R.string.remote_err_generic, "出错了，请重试。")
     }
 
-    private fun originLabel(origin: RemotePromptOriginFfi, deviceName: String?): String = when (origin) {
+    private fun originLabel(origin: RemotePromptOriginFfi, deviceName: String?, turnId: ULong): String = when (origin) {
         RemotePromptOriginFfi.DESKTOP -> strings.resolve(R.string.remote_origin_desktop, "来自桌面")
-        RemotePromptOriginFfi.SCHEDULED -> strings.resolve(R.string.remote_origin_scheduled, "定时任务")
+        RemotePromptOriginFfi.SCHEDULED -> botNameOf(turnId)?.let {
+            strings.resolve(R.string.remote_origin_bot_fmt, "来自 Bot「%1\$s」", it)
+        } ?: strings.resolve(R.string.remote_origin_scheduled, "定时任务")
         RemotePromptOriginFfi.DEVICE -> when {
             deviceName.isNullOrBlank() -> strings.resolve(R.string.remote_origin_other_device, "来自其他设备")
             deviceName == thisDeviceName -> strings.resolve(R.string.remote_origin_this_device, "来自此设备")

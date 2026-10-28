@@ -6,8 +6,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -33,9 +35,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
+import com.lingxi.code.bindings.android.RemoteBotSummaryFfi
 import com.lingxi.code.bindings.android.RemoteFailureKindFfi
 import com.lingxi.code.bindings.android.RemoteHostFfi
 import com.lingxi.code.bindings.android.RemoteLocalAppFfi
@@ -156,27 +160,31 @@ private fun platformLabel(platform: String) = when (platform) {
 
 /**
  * One computer: while it connects, the pairing code or the reason it stopped;
- * once connected, its shared sessions.
+ * once connected, its Bots (when it has any) and its shared sessions.
  */
 @Composable
 internal fun RemoteHostScreen(
     manager: RemoteControlManager,
     hostId: String,
     hostName: String,
+    onOpenBot: (String) -> Unit,
     onOpenSession: (RemoteSessionSummaryFfi) -> Unit,
     onLeave: () -> Unit,
 ) {
     val connection by manager.connection.collectAsState()
     val sessions by manager.sessions.collectAsState()
+    val bots by manager.bots.collectAsState()
     val scope = rememberCoroutineScope()
     LaunchedEffect(hostId) { runCatching { manager.connect(hostId) } }
     val ui = remoteConnectionUi(connection?.takeIf { it.hostId == hostId })
     when (ui) {
-        is RemoteConnectionUi.Ready -> RemoteSessionList(
+        is RemoteConnectionUi.Ready -> RemoteAppsSessionList(
             manager = manager, hostId = hostId, attempt = connection?.attempt,
             transport = ui.transport,
+            bots = bots.listFor(hostId),
             sessions = sessions.takeIf { it.hostId == hostId }?.sessions,
-            onOpen = onOpenSession,
+            onOpenBot = { onOpenBot(it.botId) },
+            onOpenSession = onOpenSession,
         )
         is RemoteConnectionUi.Reconnecting -> RemoteConnecting(
             title = stringResource(R.string.remote_reconnecting),
@@ -278,15 +286,17 @@ private fun RemoteFailed(
     }
 }
 
-/** The connected computer's shared sessions, with status and what each waits on. */
+/** Apps owned by the desktop, shown in the same scrolling list as Bots and sessions. */
 @Composable
-private fun RemoteSessionList(
+private fun RemoteAppsSessionList(
     manager: RemoteControlManager,
     hostId: String,
     attempt: UInt?,
     transport: RemoteTransportFfi?,
+    bots: List<RemoteBotSummaryFfi>,
     sessions: List<RemoteSessionSummaryFfi>?,
-    onOpen: (RemoteSessionSummaryFfi) -> Unit,
+    onOpenBot: (RemoteBotSummaryFfi) -> Unit,
+    onOpenSession: (RemoteSessionSummaryFfi) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val context = LocalContext.current
@@ -311,21 +321,7 @@ private fun RemoteSessionList(
             finally { busy = false }
         }
     }
-    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        transport?.let {
-            Text(
-                stringResource(if (it == RemoteTransportFfi.WEBRTC) R.string.remote_direct_help else R.string.remote_tunnel_help),
-                color = t.text3, fontSize = 12.sp,
-            )
-        }
-        when {
-            sessions == null -> Text(stringResource(R.string.remote_loading), color = t.text3, fontSize = 14.sp)
-            sessions.isEmpty() -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(stringResource(R.string.remote_no_sessions), color = t.text, fontWeight = FontWeight.Medium)
-                Text(stringResource(R.string.remote_no_sessions_help), color = t.text2, fontSize = 14.sp)
-            }
-        }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    RemoteSessionList(transport, bots, sessions, onOpenBot, onOpenSession, localApps = {
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -350,29 +346,103 @@ private fun RemoteSessionList(
                 }
             }
             item { Text(stringResource(R.string.remote_sessions_title), color = t.text, fontWeight = FontWeight.SemiBold) }
-            items(sessions.orEmpty(), key = { it.sessionId }) { session ->
-                Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(t.surface)
-                        .clickable { onOpen(session) }.padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(
-                            session.title.ifBlank { stringResource(R.string.remote_untitled) },
-                            color = t.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, maxLines = 2,
-                        )
-                        Text(
-                            listOfNotNull(session.projectLabel.ifBlank { null }, session.model).joinToString(" · "),
-                            color = t.text3, fontSize = 13.sp, maxLines = 1,
-                        )
-                        session.pendingAction?.let {
-                            Text(stringResource(pendingActionText(it)), color = t.accent, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                        }
+    })
+}
+
+/**
+ * The connected computer's Bots, when it has any to show, above its shared sessions with status and
+ * what each waits on. A computer that does not know Bots, or has none, looks as it always did.
+ */
+@Composable
+internal fun RemoteSessionList(
+    transport: RemoteTransportFfi?,
+    bots: List<RemoteBotSummaryFfi>,
+    sessions: List<RemoteSessionSummaryFfi>?,
+    onOpenBot: (RemoteBotSummaryFfi) -> Unit,
+    onOpenSession: (RemoteSessionSummaryFfi) -> Unit,
+    localApps: androidx.compose.foundation.lazy.LazyListScope.() -> Unit = {},
+) {
+    val t = LingXiTheme.palette
+    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        transport?.let {
+            Text(
+                stringResource(if (it == RemoteTransportFfi.WEBRTC) R.string.remote_direct_help else R.string.remote_tunnel_help),
+                color = t.text3, fontSize = 12.sp,
+            )
+        }
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            localApps()
+            if (bots.isNotEmpty()) {
+                item(key = "bots") {
+                    Text(stringResource(R.string.remote_bots), color = t.text3, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                }
+                items(bots, key = { "bot/${it.botId}" }) { bot -> RemoteBotRow(bot, onOpenBot) }
+                item(key = "bots-end") { Spacer(Modifier.height(4.dp)) }
+            }
+            when {
+                sessions == null -> item(key = "loading") {
+                    Text(stringResource(R.string.remote_loading), color = t.text3, fontSize = 14.sp)
+                }
+                sessions.isEmpty() -> item(key = "empty") {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(stringResource(R.string.remote_no_sessions), color = t.text, fontWeight = FontWeight.Medium)
+                        Text(stringResource(R.string.remote_no_sessions_help), color = t.text2, fontSize = 14.sp)
                     }
-                    Text(stringResource(sessionStatusText(session.status)), color = t.text3, fontSize = 13.sp)
                 }
             }
+            items(sessions.orEmpty(), key = { it.sessionId }) { session -> RemoteSessionRow(session, onOpenSession) }
         }
+    }
+}
+
+/** One session, or one chat of a Bot: title, where and with which model, what it waits on, its status. */
+@Composable
+internal fun RemoteSessionRow(session: RemoteSessionSummaryFfi, onOpen: (RemoteSessionSummaryFfi) -> Unit) {
+    val t = LingXiTheme.palette
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(t.surface)
+            .clickable { onOpen(session) }.padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(
+                session.title.ifBlank { stringResource(R.string.remote_untitled) },
+                color = t.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, maxLines = 2,
+            )
+            Text(
+                listOfNotNull(session.projectLabel.ifBlank { null }, session.model).joinToString(" · "),
+                color = t.text3, fontSize = 13.sp, maxLines = 1,
+            )
+            session.pendingAction?.let {
+                Text(stringResource(pendingActionText(it)), color = t.accent, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+        Text(stringResource(sessionStatusText(session.status)), color = t.text3, fontSize = 13.sp)
+    }
+}
+
+/** One Bot of the computer: its name, what it is for, how many chats wait on the user, its status. */
+@Composable
+internal fun RemoteBotRow(bot: RemoteBotSummaryFfi, onOpen: (RemoteBotSummaryFfi) -> Unit) {
+    val t = LingXiTheme.palette
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(t.surface)
+            .clickable { onOpen(bot) }.padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(bot.name, color = t.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, maxLines = 2)
+            if (bot.description.isNotBlank()) {
+                Text(bot.description, color = t.text3, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (bot.waitingThreads > 0u) {
+                Text(
+                    stringResource(R.string.remote_bot_waiting_fmt, bot.waitingThreads.toInt()),
+                    color = t.accent, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+        Text(stringResource(botStatusText(bot.status)), color = t.text3, fontSize = 13.sp)
     }
 }
 

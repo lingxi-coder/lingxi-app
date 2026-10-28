@@ -4,20 +4,24 @@ import com.lingxi.code.navigation.DeepLink
 import com.lingxi.code.push.PushRoute
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RemoteRouteTest {
     private val host = "Hk3xQ9vR2mT7wL1pZ8cN4a"
     private val session = "11111111-2222-4333-8444-555555555555"
 
+    /** A Bot id as the desktop makes them: 22 characters of base64url, so `-` and `_` occur. */
+    private val bot = "A-_b1234567890123456Zz"
+
     @Test fun encodeAndDecodeRoundTripEveryRoute() {
-        for (route in listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), RemoteRoute.Session(host, session))) {
+        for (route in listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), RemoteRoute.Bot(host, bot), RemoteRoute.Session(host, session))) {
             assertEquals(route, RemoteRoute.decode(route.encode()))
         }
     }
 
     @Test fun decodeRejectsMalformedText() {
-        for (text in listOf("", "host", "host/", "session/a", "session//b", "session/a/b/c", "other/x")) {
+        for (text in listOf("", "host", "host/", "session/a", "session//b", "session/a/b/c", "other/x", "bot", "bot/a", "bot//b", "bot/a/", "bot/a/b/c")) {
             assertNull(text, RemoteRoute.decode(text))
         }
     }
@@ -49,6 +53,43 @@ class RemoteRouteTest {
         val target = RemoteRoute.Session(host, session)
         assertEquals(listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), target), RemoteRoute.stackFor(target))
         assertEquals(listOf(RemoteRoute.Hosts), RemoteRoute.stackFor(RemoteRoute.Hosts))
+    }
+
+    @Test fun aBotPageKeepsAnHonestBackStack() {
+        val target = RemoteRoute.Bot(host, bot)
+        assertEquals(listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), target), RemoteRoute.stackFor(target))
+    }
+
+    @Test fun backFromAChatOpenedFromItsBotReturnsToTheBotOnce() {
+        val stack = listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), RemoteRoute.Bot(host, bot), RemoteRoute.Session(host, session))
+        // The Bot is already beneath: back leads there, and is not pushed a second time.
+        assertEquals(stack.dropLast(1), RemoteRoute.afterBack(stack) { _, _ -> bot })
+        assertEquals(stack.dropLast(1), RemoteRoute.afterBack(stack) { _, _ -> null })
+    }
+
+    @Test fun backFromAChatOpenedByALinkGoesToItsBotWhenTheConnectionKnowsWhich() {
+        val stack = RemoteRoute.stackFor(RemoteRoute.Session(host, session))
+        val asked = mutableListOf<Pair<String, String>>()
+        val after = RemoteRoute.afterBack(stack) { hostId, sessionId -> asked += hostId to sessionId; bot }
+        assertEquals(listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), RemoteRoute.Bot(host, bot)), after)
+        assertEquals(listOf(host to session), asked)
+        // From the Bot, back is the computer, as for any page.
+        assertEquals(listOf(RemoteRoute.Hosts, RemoteRoute.Host(host)), RemoteRoute.afterBack(after) { _, _ -> bot })
+    }
+
+    @Test fun backFromASessionThatIsNoBotsChatBehavesAsItAlwaysDid() {
+        val stack = RemoteRoute.stackFor(RemoteRoute.Session(host, session))
+        assertEquals(listOf(RemoteRoute.Hosts, RemoteRoute.Host(host)), RemoteRoute.afterBack(stack) { _, _ -> null })
+    }
+
+    @Test fun backFromAnythingButASessionNeverAsksForABot() {
+        var asked = false
+        val lookup = { _: String, _: String -> asked = true; bot }
+        val stack = listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), RemoteRoute.Bot(host, bot))
+        assertEquals(stack.dropLast(1), RemoteRoute.afterBack(stack, lookup))
+        assertEquals(listOf(RemoteRoute.Hosts), RemoteRoute.afterBack(stack.dropLast(1), lookup))
+        assertEquals(emptyList<RemoteRoute>(), RemoteRoute.afterBack(listOf(RemoteRoute.Hosts), lookup))
+        assertTrue(!asked)
     }
 
     @Test fun pushRouteBecomesTheSameLinkTheInboxVets() {

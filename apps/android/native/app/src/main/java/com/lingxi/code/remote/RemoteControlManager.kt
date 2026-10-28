@@ -6,12 +6,15 @@ import android.os.Build
 import com.google.firebase.auth.FirebaseAuth
 import com.lingxi.code.BuildConfig
 import com.lingxi.code.bindings.android.AndroidRemoteControlClient
+import com.lingxi.code.bindings.android.AndroidRemoteBotsListener
 import com.lingxi.code.bindings.android.AndroidRemoteKeyStore
 import com.lingxi.code.bindings.android.AndroidRemoteListener
 import com.lingxi.code.bindings.android.AndroidRemoteMediaConfigProvider
 import com.lingxi.code.bindings.android.AndroidNativeMediaHost
 import com.lingxi.code.bindings.android.RemoteMediaConfigRequestFfi
 import com.lingxi.code.bindings.android.RemoteMediaConfigFfi
+import com.lingxi.code.bindings.android.RemoteBotThreadsStateFfi
+import com.lingxi.code.bindings.android.RemoteBotsStateFfi
 import com.lingxi.code.bindings.android.AndroidRemoteTokenProvider
 import com.lingxi.code.bindings.android.RemoteConnectionPhaseFfi
 import com.lingxi.code.bindings.android.RemoteConnectionStateFfi
@@ -21,6 +24,7 @@ import com.lingxi.code.bindings.android.RemoteLocalAppFfi
 import com.lingxi.code.bindings.android.RemoteLocalAppOpenFfi
 import com.lingxi.code.bindings.android.RemotePermissionModeFfi
 import com.lingxi.code.bindings.android.RemotePromptImageFfi
+import com.lingxi.code.bindings.android.RemoteSessionErrorFfi
 import com.lingxi.code.bindings.android.RemoteSessionSummaryFfi
 import com.lingxi.code.bindings.android.RemoteSessionUpdateFfi
 import com.lingxi.code.bindings.android.RemoteTransportFfi
@@ -36,7 +40,11 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,6 +58,7 @@ import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.sync.Mutex
@@ -126,6 +135,12 @@ interface RemoteClientPort {
     suspend fun listApps(): List<RemoteLocalAppFfi> = throw UnsupportedOperationException()
     suspend fun openApp(appId: String): RemoteLocalAppOpenFfi = throw UnsupportedOperationException()
     suspend fun listModels(): com.lingxi.code.bindings.android.RemoteModelsFfi
+    fun setBotsListener(listener: AndroidRemoteBotsListener?)
+    suspend fun activateBotThreads(botId: String)
+    fun deactivateBotThreads(botId: String)
+    suspend fun createBotThread(botId: String): String
+    fun botOfThread(sessionId: String): String?
+    fun promptOriginBotName(sessionId: String, turnId: ULong): String?
     suspend fun close()
 }
 
@@ -140,6 +155,18 @@ data class RemoteHostsState(
 data class RemoteSessionsState(
     val hostId: String? = null,
     val sessions: List<RemoteSessionSummaryFfi>? = null,
+)
+
+/** The current computer's Bots; [hostId] says whose they are. */
+data class RemoteBotsState(
+    val hostId: String? = null,
+    val bots: RemoteBotsStateFfi = RemoteBotsStateFfi.Unknown,
+)
+
+/** The chats of the Bots the screens have shown on the current computer, by Bot id; [hostId] says whose they are. */
+data class RemoteBotChatsState(
+    val hostId: String? = null,
+    val byBot: Map<String, RemoteBotThreadsStateFfi> = emptyMap(),
 )
 
 /** How a [RemoteClientPort] is made for one user; the production one calls the FFI. */
@@ -170,6 +197,8 @@ class RemoteControlManager(
     }
     private val forgetBarriers = mutableListOf<ForgetBarrier>()
     private val mutableSessions = MutableStateFlow(RemoteSessionsState())
+    private val mutableBots = MutableStateFlow(RemoteBotsState())
+    private val mutableBotChats = MutableStateFlow(RemoteBotChatsState())
     private data class ClientBinding(val uid: String, val client: RemoteClientPort)
     private data class SessionKey(val uid: String, val hostId: String, val sessionId: String)
     private val mutableClient = MutableStateFlow<ClientBinding?>(null)
@@ -181,6 +210,8 @@ class RemoteControlManager(
     val hosts: StateFlow<RemoteHostsState> = mutableHosts.asStateFlow()
     val connection: StateFlow<RemoteConnectionStateFfi?> = mutableConnection.asStateFlow()
     val sessions: StateFlow<RemoteSessionsState> = mutableSessions.asStateFlow()
+    val bots: StateFlow<RemoteBotsState> = mutableBots.asStateFlow()
+    val botChats: StateFlow<RemoteBotChatsState> = mutableBotChats.asStateFlow()
 
     /** The signed-in uid, or null when the screens must ask the user to sign in. */
     val uid: StateFlow<String?> get() = account.uid
@@ -206,7 +237,12 @@ class RemoteControlManager(
         mutableHosts.value = RemoteHostsState()
         mutableConnection.value = null
         mutableSessions.value = RemoteSessionsState()
-        previous?.let { runCatching { it.client.close() } }
+        mutableBots.value = RemoteBotsState()
+        mutableBotChats.value = RemoteBotChatsState()
+        previous?.let { old ->
+            runCatching { old.client.setBotsListener(null) }
+            runCatching { old.client.close() }
+        }
         if (uid == null) return
         val listener = ManagerListener(mine, uid)
         val client = try {
@@ -224,6 +260,7 @@ class RemoteControlManager(
             return
         }
         client.setPushInstallationId(pushInstallationId())
+        client.setBotsListener(ManagerBotsListener(mine, uid))
         mutableClient.value = ClientBinding(uid, client)
     }
 
@@ -366,6 +403,91 @@ class RemoteControlManager(
         }
     }.buffer(Channel.UNLIMITED)
 
+    /**
+     * Show the chats of [botId] of [hostId] for as long as the caller stays in here: dial the computer
+     * unless it is the one connected, ask for the chats, and keep them current until the caller is
+     * cancelled. The screens are counted per connection, so a connection made for another computer
+     * since the last call needs the asking again, as a followed session needs its attaching. A failure
+     * to ask is held as the chats' error; [retryBotChats] asks again.
+     */
+    suspend fun showBotChats(hostId: String, botId: String) = showBotChats(hostId, botId, account.uid.value)
+
+    internal suspend fun showBotChats(hostId: String, botId: String, ownerUid: String?) {
+        screenGeneration.incrementAndGet()
+        val owner = checkNotNull(ownerUid) { "not signed in" }
+        var bound: RemoteClientPort? = null
+        try {
+            sessionLifecycle.withLock {
+                val client = client(owner)
+                bound = client
+                askForBotChats(client, hostId, botId)
+            }
+            awaitCancellation()
+        } finally {
+            bound?.let { client ->
+                scope.launch {
+                    sessionLifecycle.withLock {
+                        // Another computer's connection has no count of this screen's to end.
+                        if (client.connectionState()?.hostId?.let { it == hostId } != false) {
+                            runCatching { client.deactivateBotThreads(botId) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** List [botId]'s chats again: ending the screen's count and starting it again asks at once. */
+    suspend fun retryBotChats(hostId: String, botId: String) {
+        val owner = checkNotNull(account.uid.value) { "not signed in" }
+        sessionLifecycle.withLock {
+            val client = client(owner)
+            client.deactivateBotThreads(botId)
+            askForBotChats(client, hostId, botId)
+        }
+    }
+
+    private suspend fun askForBotChats(client: RemoteClientPort, hostId: String, botId: String) {
+        try {
+            val state = client.connectionState() ?: mutableConnection.value
+            if (state?.hostId != hostId || state.phase == RemoteConnectionPhaseFfi.IDLE) client.connect(hostId)
+            client.activateBotThreads(botId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            val failure = RemoteSessionErrorFfi("internal", error.message ?: error.javaClass.simpleName)
+            mutableBotChats.update { held ->
+                val kept = if (held.hostId == hostId) held.byBot else emptyMap()
+                RemoteBotChatsState(hostId, kept + (botId to RemoteBotThreadsStateFfi(kept[botId]?.threads, failure)))
+            }
+        }
+    }
+
+    /**
+     * Start a chat with [botId] and return its session id. The chat is made on the computer whether
+     * or not the caller waits for it; a caller that was cancelled is not told which chat it is.
+     */
+    suspend fun createBotThread(hostId: String, botId: String): String {
+        val client = port(account.uid.value, hostId)
+        val sessionId = withContext(NonCancellable) { client.createBotThread(botId) }
+        // Leaving the block does not look at the caller: a screen that was left must not be taken to the chat.
+        currentCoroutineContext().ensureActive()
+        return sessionId
+    }
+
+    /** The Bot the chat [sessionId] of [hostId] belongs to, if the connection has been told which. */
+    fun botOfThread(hostId: String, sessionId: String): String? =
+        connectedClient(account.uid.value, hostId)?.botOfThread(sessionId)
+
+    internal fun promptOriginBotName(ownerUid: String?, hostId: String, sessionId: String, turnId: ULong): String? =
+        connectedClient(ownerUid, hostId)?.promptOriginBotName(sessionId, turnId)
+
+    /** The client of [ownerUid] while it is connected to [hostId]; its Bot lookups are synchronous. */
+    private fun connectedClient(ownerUid: String?, hostId: String): RemoteClientPort? {
+        val client = mutableClient.value?.takeIf { it.uid == ownerUid }?.client ?: return null
+        return client.takeIf { it.connectionState()?.hostId == hostId }
+    }
+
     /** The calls of one followed session. */
     fun sessionPort(hostId: String, sessionId: String): RemoteSessionPort = ManagerSessionPort(this, hostId, sessionId, account.uid.value)
 
@@ -486,6 +608,8 @@ class RemoteControlManager(
                 mutableConnection.value = state
             }
             if (state.hostId != mutableSessions.value.hostId) mutableSessions.value = RemoteSessionsState(state.hostId)
+            if (state.hostId != mutableBots.value.hostId) mutableBots.value = RemoteBotsState(state.hostId)
+            if (state.hostId != mutableBotChats.value.hostId) mutableBotChats.value = RemoteBotChatsState(state.hostId)
         }
 
         override suspend fun onHosts(hosts: List<RemoteHostFfi>) {
@@ -505,6 +629,19 @@ class RemoteControlManager(
             val hostId = mutableClient.value?.client?.connectionState()?.hostId
                 ?: mutableConnection.value?.hostId ?: return
             sinks[SessionKey(ownerUid, hostId, update.sessionId)]?.forEach { it.trySend(update) }
+        }
+    }
+
+    private inner class ManagerBotsListener(private val mine: Int, private val ownerUid: String) : AndroidRemoteBotsListener {
+        override suspend fun onBots(hostId: String, state: RemoteBotsStateFfi) {
+            if (mine == generation.get() && account.uid.value == ownerUid) mutableBots.value = RemoteBotsState(hostId, state)
+        }
+
+        override suspend fun onBotThreads(hostId: String, botId: String, state: RemoteBotThreadsStateFfi) {
+            if (mine != generation.get() || account.uid.value != ownerUid) return
+            mutableBotChats.update { held ->
+                RemoteBotChatsState(hostId, (if (held.hostId == hostId) held.byBot else emptyMap()) + (botId to state))
+            }
         }
     }
 
@@ -540,6 +677,7 @@ private class ManagerSessionPort(
     override suspend fun setPermissionMode(mode: RemotePermissionModeFfi) =
         client().setPermissionMode(sessionId, mode)
     override suspend fun listModels() = client().listModels()
+    override fun promptOriginBotName(turnId: ULong) = manager.promptOriginBotName(ownerUid, hostId, sessionId, turnId)
 }
 
 /** The production wiring: Firebase Auth, the Keystore-sealed key store, the generated client. */
@@ -663,6 +801,12 @@ internal class FfiRemoteClientPort(private val client: AndroidRemoteControlClien
     override suspend fun listApps() = client.listApps()
     override suspend fun openApp(appId: String) = client.openApp(appId)
     override suspend fun listModels() = client.listModels()
+    override fun setBotsListener(listener: AndroidRemoteBotsListener?) = client.setBotsListener(listener)
+    override suspend fun activateBotThreads(botId: String) = client.activateBotThreads(botId)
+    override fun deactivateBotThreads(botId: String) = client.deactivateBotThreads(botId)
+    override suspend fun createBotThread(botId: String) = client.createBotThread(botId)
+    override fun botOfThread(sessionId: String) = client.botOfThread(sessionId)
+    override fun promptOriginBotName(sessionId: String, turnId: ULong) = client.promptOriginBotName(sessionId, turnId)
     override suspend fun close() {
         client.disconnect()
         client.stopWatchingHosts()

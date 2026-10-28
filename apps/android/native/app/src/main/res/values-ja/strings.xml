@@ -2087,6 +2087,13 @@
     <string name="remote_send_failed">メッセージを送信できませんでした。もう一度お試しください。</string>
     <string name="remote_images_only_when_idle">実行中はテキストのみ送信できます。</string>
     <string name="remote_image_unusable">この画像は使用できません。</string>
+    <string name="remote_bots">Bot</string>
+    <string name="remote_bot_new_chat">新しいチャット</string>
+    <string name="remote_bot_no_chats">まだチャットがありません</string>
+    <string name="remote_bot_gone">この Bot には現在アクセスできません。パソコンでこの Bot のリモート操作のスイッチがオフになっているか、削除された可能性があります。</string>
+    <string name="remote_bot_waiting_fmt">%1$d 件のチャットが返信を待っています</string>
+    <string name="remote_back_to_bot_fmt">%1$s に戻る</string>
+    <string name="remote_origin_bot_fmt">Bot「%1$s」から</string>
     <string name="composer_model_options">モデル設定</string>
     <string name="composer_model_updating">モデルを切り替え中…</string>
     <string name="composer_model_details">モデルの詳細</string>

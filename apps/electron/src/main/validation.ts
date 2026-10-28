@@ -600,12 +600,12 @@ export function validateModUiOperation(value: unknown): UiClientOperation {
   return validateUiClientOperation(value);
 }
 
+// Effort is a live engine setting; do not block it before the engine can apply it.
 export function assertCommandAllowedDuringTurn(command: ClientCommand, turnActive: boolean): void {
   if (
     turnActive
     && (
-      command.type === 'set_reasoning_selection'
-      || command.type === 'set_fast_mode'
+      command.type === 'set_fast_mode'
       || (command.type === 'run_slash_command' && !/^\/btw(?:\s|$)/.test(command.raw))
       || command.type === 'login'
       || command.type === 'logout'

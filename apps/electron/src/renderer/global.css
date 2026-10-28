@@ -1712,6 +1712,43 @@ body {
 .narration-disclosure-trigger:hover { background: color-mix(in oklab, currentColor 8%, transparent); }
 .narration-disclosure-trigger:active { scale: 0.96; }
 
+.local-app-instructions { min-width: 0; color: var(--instructions-text); }
+.local-app-instructions-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+.local-app-instructions-toggle > svg { flex-shrink: 0; color: var(--instructions-muted); }
+.local-app-instructions-title { font-weight: 550; }
+.local-app-instructions-label { color: var(--instructions-muted); font-size: 12px; }
+.local-app-instructions-toggle:hover,
+.local-app-instructions-toggle:active { background: var(--instructions-hover); }
+.local-app-instructions-toggle:focus-visible {
+  outline: 2px solid var(--instructions-focus);
+  outline-offset: 2px;
+}
+.local-app-instructions-body {
+  margin: 4px 0 8px 15px;
+  padding: 4px 16px;
+  border-left: 1px solid var(--instructions-border);
+  max-width: 68ch;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.65;
+}
+
 .transcript-tool-row {
   border-radius: 7px;
   transition-property: background-color;

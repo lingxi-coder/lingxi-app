@@ -28,6 +28,8 @@ import { transcriptRows, type TranscriptToolGroup } from './transcriptRows';
 import { ToolGroup } from './ToolGroup';
 import { TurnFileSummary } from './TurnFileSummary';
 import { MarkdownContent } from './MarkdownContent';
+import { LocalAppInstructions } from './LocalAppInstructions';
+import { localAppInstructionIds } from './localAppInstructionPresentation';
 import { CommandIdentity } from './CommandIdentity';
 import { parseSlashCommandMessage } from './slashCommandMessage';
 import { formatClockTime } from '../bridge/sessionPresentation';
@@ -362,6 +364,7 @@ const BOTTOM_SLACK = 24;
 export function Stage({ messageTarget, onMessageLocated, activityView = false, onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
+  const instructionIds = useMemo(() => localAppInstructionIds(liveItems), [liveItems]);
   useEffect(() => setLocalPlan(null), [sessionKey]);
   const stageRef = useRef<HTMLDivElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
@@ -737,6 +740,10 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;
           if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
           if (item.type === 'narration') {
+            if (instructionIds.has(item.id)) return <div className="transcript-run-item" data-run-type="skill-instructions" key={item.id}>
+              <LocalAppInstructions id={item.id} text={item.text}
+                open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} />
+            </div>;
             const document = submittedPlans.find(plan => plan.id === item.id);
             if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;
             const user = item.role === 'user';

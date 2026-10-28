@@ -24,6 +24,11 @@ test('desktop errors distinguish credential, protocol, engine, workspace, and tr
   assert.equal(classifyDesktopError('socket disconnected').title, 'Engine connection interrupted');
 });
 
+test('active-turn restrictions are not provider authentication failures', () => {
+  const raw = 'cancel the active turn before changing session controls, authentication, compaction, or running a slash command';
+  assert.deepEqual(classifyDesktopError(raw), { title: 'Turn in progress', detail: raw });
+});
+
 test('unreadable responses offer plain language and retain the technical error', () => {
   const raw = 'unexpected result: invalid type: newtype struct, expected any valid JSON value';
   assert.deepEqual(classifyDesktopError(raw), {

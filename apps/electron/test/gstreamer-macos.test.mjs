@@ -709,9 +709,11 @@ test('real universal Mach-O dependencies are bundled and verified for the select
     const root = mkdtempSync(join(tmpdir(), 'lingxi gstreamer mac-'));
     try {
       const fixture = sdkFixture(root);
-      const original = run('/usr/bin/otool', ['-L', join(fixture.plugins, pluginNames[0])]);
-      assert.match(original, /\(architecture arm64\):/);
-      assert.match(original, /\(architecture x86_64\):/);
+      const original = join(fixture.plugins, pluginNames[0]);
+      assert.deepEqual(new Set(run('/usr/bin/lipo', ['-archs', original]).split(/\s+/)), new Set(['arm64', 'x86_64']));
+      for (const slice of ['arm64', 'x86_64']) {
+        assert.match(run('/usr/bin/otool', ['-arch', slice, '-L', original]), /@rpath\/libgstfixture\.dylib/);
+      }
       const frameworks = join(root, 'App.app', 'Contents', 'Frameworks');
       mkdirSync(frameworks, { recursive: true });
       const prepared = withSdk(fixture.sdk, () => prepareMacGStreamerRuntime(fixture.sidecar, frameworks, arch));

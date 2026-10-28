@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Create a runner-only Cargo source override without changing the App pin."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,7 @@ import subprocess
 import tomllib
 
 workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-harness = workspace / ".diagnostic" / "harness"
+harness = Path(os.environ["RUNNER_TEMP"]).resolve() / "frame-receipt-harness"
 expected = "6a3746fca2ec74f291be2ced2d22b1f0e01d53e1"
 actual = subprocess.check_output(["git", "-C", str(harness), "rev-parse", "HEAD"], text=True).strip()
 if actual != expected:
@@ -38,8 +39,12 @@ config.write_text('[patch."' + repository + '"]\n' + ''.join(
 print(f"App manifest pin stays {deps['harness-runtime']['rev']}")
 print(f"Diagnostic path override: {actual}; {len(selected)} direct packages")
 # The source override requires a throwaway runner-local lock. Do not commit it.
+lock = workspace / "Cargo.lock"
+print(f"Original App lock SHA256: {hashlib.sha256(lock.read_bytes()).hexdigest()}")
+print(f"Local patch config SHA256: {hashlib.sha256(config.read_bytes()).hexdigest()}")
 subprocess.run(["cargo", "metadata", "--all-features", "--format-version=1"],
                cwd=workspace, stdout=subprocess.DEVNULL, check=True)
+print(f"Runner-derived lock SHA256: {hashlib.sha256(lock.read_bytes()).hexdigest()}")
 resolved = json.loads(subprocess.check_output(
     ["python3", "scripts/lib/runtime_source.py", "--json"], cwd=workspace, text=True))
 if not resolved["development"] or Path(resolved["root"]).resolve() != harness:

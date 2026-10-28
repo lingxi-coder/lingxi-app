@@ -24,6 +24,8 @@ jobs:
         with:
           python-version: '3.11'
       - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Copy Harness outside the App workspace
+        run: cp -a .diagnostic/harness "$RUNNER_TEMP/frame-receipt-harness"
       - name: Create runner-only Harness override
         run: python3 .github/scripts/prepare-frame-receipt-diagnostic.py
       - name: Install GStreamer development libraries
@@ -69,6 +71,8 @@ jobs:
         with:
           packages: platform-tools
       - uses: gradle/actions/setup-gradle@v4
+      - name: Copy Harness outside the App workspace
+        run: cp -a .diagnostic/harness "$RUNNER_TEMP/frame-receipt-harness"
       - name: Create runner-only Harness override
         run: python3 .github/scripts/prepare-frame-receipt-diagnostic.py
       - name: Install Android NDK and pinned GStreamer SDK
@@ -84,6 +88,7 @@ jobs:
           bash apps/android/native/scripts/build-mobile-linux-native.sh --variant direct
           python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
           rg -n 'onModUiClientFrame' apps/android/native/app/src/main/java/com/lingxi/code/bindings
+          find apps/android/native/app/src/main/java/com/lingxi/code/bindings -name '*.kt' -exec sha256sum {} \;
       - name: Run frame ingress unit regression
         working-directory: apps/android/native
         run: |
@@ -108,6 +113,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: aarch64-apple-ios-sim
+      - name: Copy Harness outside the App workspace
+        run: cp -a .diagnostic/harness "$RUNNER_TEMP/frame-receipt-harness"
       - name: Create runner-only Harness override
         run: python3 .github/scripts/prepare-frame-receipt-diagnostic.py
       - name: Install iOS build tools and pinned GStreamer SDKs
@@ -124,6 +131,7 @@ jobs:
         run: |
           bash apps/ios/native/scripts/build-xcframework.sh
           rg -n 'onModUiClientFrame' apps/ios/native/Generated
+          find apps/ios/native/Generated -type f -exec shasum -a 256 {} \;
       - name: Generate project and run focused simulator regression
         working-directory: apps/ios/native
         run: |

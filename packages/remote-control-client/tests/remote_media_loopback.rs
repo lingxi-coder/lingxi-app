@@ -975,6 +975,501 @@ fn unix_now_ms() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[test]
+#[ignore = "private codec subprocess entry point"]
+fn codec_loopback_worker_entry() {
+    remote_control_client::isolated_codec::run_worker().unwrap();
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn worker_launch(root: &std::path::Path) -> remote_control_client::isolated_codec::CodecLaunch {
+    remote_control_client::isolated_codec::CodecLaunch {
+        executable: std::env::current_exe().unwrap(),
+        arguments: ["--ignored", "--exact", "codec_loopback_worker_entry"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+        plugin_directory: lingxi_webrtc_media::configured_codec_plugin_directory().unwrap(),
+        private_root: root.to_path_buf(),
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn production_media_offer_and_answer_stream_pcm_and_close_one_native_lease_isolated() {
+    timeout(Duration::from_secs(30), async {
+        let session_id = SESSION_ID.to_owned();
+        let service = Arc::new(LoopbackMediaService {
+            sources: media_sources(),
+            attached: Mutex::new(Vec::new()),
+        });
+        let ports = LoopbackPorts::new();
+        // Connection teardown retries the native stop once after this
+        // deliberately transient failure, then deregisters the service row.
+        ports.stop_failures_remaining.store(1, Ordering::Release);
+        let handler =
+            NativeMediaOfferHandler::new(service.clone(), ports.clone(), Arc::new(StaticConfig));
+        let connection = RemoteMediaConnection {
+            account_uid: "loopback-account".to_owned(),
+            host_id: "loopback-host".to_owned(),
+            device_id: "loopback-device".to_owned(),
+            connection_id: "loopback-control-connection".to_owned(),
+        };
+        let route_channel = Arc::new(LoopbackChannel {
+            handler: handler.clone(),
+            connection: connection.clone(),
+            last_played_sample_frames: Mutex::new(0),
+        });
+        let owner = MediaOwner::Session {
+            session_id: session_id.clone(),
+        };
+        let resources = LoopbackResourceStore::new();
+        let worker_root = tempfile::tempdir().unwrap();
+        let connector = RemoteMediaConnector::new_isolated(Arc::new(StaticConfig), resources, worker_launch(worker_root.path()));
+        connector.bind_media_service(service.clone());
+        connector
+            .register_route(
+                owner.clone(),
+                ROUTE_ID.to_owned(),
+                "Loopback phone".to_owned(),
+                vec![MediaSessionMode::Audio],
+                vec![MediaSourceKindDto::Microphone],
+                route_channel,
+            )
+            .await
+            .unwrap();
+        let remote_microphone =
+            remote_media_source_ref(ROUTE_ID, RemoteMediaSourceKind::Microphone).unwrap();
+        let context = MediaOperationContext::new(MediaOperationId::new(1, 1), owner.clone())
+            .with_max_payload_bytes(1024 * 1024);
+        let session = connector
+            .start_session(
+                context.clone(),
+                MediaSessionRequest {
+                    intent: MediaSessionIntent::Conversation,
+                    mode: MediaSessionMode::Audio,
+                    audio_source: Some(MediaSourceRef(remote_microphone.clone().into())),
+                    video_source: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "conversation audio session failed to start; device open count={}, error={error:?}",
+                    ports.open_count.load(Ordering::Acquire),
+                )
+            });
+        let audio = session.audio_channel().await.unwrap();
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if session.status().state == MediaSessionState::Ready {
+                    break;
+                }
+                if matches!(
+                    session.status().state,
+                    MediaSessionState::Failed | MediaSessionState::Ended
+                ) {
+                    panic!(
+                        "media connection failed before becoming ready: {:?}",
+                        session.status()
+                    );
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("loopback peer should reach Ready");
+
+        for sequence in 1..=6 {
+            ports.send_capture(microphone_frame(sequence)).await;
+            sleep(Duration::from_millis(20)).await;
+        }
+        let captured = timeout(Duration::from_secs(10), audio.read())
+            .await
+            .expect("native microphone PCM should decode on the host")
+            .unwrap()
+            .expect("microphone stream should remain active");
+        assert_eq!(captured.source.0 .0.as_str(), remote_microphone);
+        assert!(matches!(captured.payload, MediaFramePayload::Audio(_)));
+
+        for _ in 0..4 {
+            audio
+                .write(MediaPcmFrame {
+                    sample_rate_hz: 24_000,
+                    channels: 1,
+                    pcm16le: microphone_pcm(1),
+                })
+                .await
+                .unwrap();
+        }
+        let rendered = timeout(Duration::from_secs(10), ports.next_rendered())
+            .await
+            .expect("generated peer PCM should render through the shared native lease")
+            .expect("native renderer should receive an audio frame");
+        assert_eq!(rendered.sample_rate_hz, 48_000);
+        assert!(rendered.pcm16le.len() >= 960);
+        let barrier = timeout(Duration::from_secs(10), audio.flush())
+            .await
+            .expect("flush should receive actual native playback progress")
+            .unwrap();
+        assert!(barrier.played_sample_frames > 0);
+        assert_eq!(ports.open_count.load(Ordering::Acquire), 1);
+
+        handler.connection_closed(&connection).await;
+        let ended = session.stop(context).await.unwrap();
+        assert_eq!(ended.state, MediaSessionState::Ended);
+        assert_eq!(std::fs::read_dir(worker_root.path()).unwrap().count(), 0, "worker directory remained after confirmed stop");
+        assert_eq!(ports.stop_count.load(Ordering::Acquire), 1);
+        assert_eq!(ports.stop_attempts.load(Ordering::Acquire), 2);
+        wait_for_attached_sessions_to_drain(&service).await;
+    })
+    .await
+    .expect("local WebRTC media loopback must finish within its offline deadline");
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn production_audio_video_observation_keeps_uplink_without_native_playback_isolated() {
+    timeout(Duration::from_secs(30), async {
+        let service = Arc::new(LoopbackMediaService {
+            sources: media_sources(),
+            attached: Mutex::new(Vec::new()),
+        });
+        let ports = LoopbackPorts::new();
+        let handler =
+            NativeMediaOfferHandler::new(service.clone(), ports.clone(), Arc::new(StaticConfig));
+        let connection = RemoteMediaConnection {
+            account_uid: "loopback-account".to_owned(),
+            host_id: "loopback-host".to_owned(),
+            device_id: "loopback-observation-microphone".to_owned(),
+            connection_id: "loopback-observation-connection".to_owned(),
+        };
+        let route_channel = Arc::new(LoopbackChannel {
+            handler: handler.clone(),
+            connection: connection.clone(),
+            last_played_sample_frames: Mutex::new(0),
+        });
+        let owner = MediaOwner::Session {
+            session_id: SESSION_ID.to_owned(),
+        };
+        let resources = LoopbackResourceStore::new();
+        let worker_root = tempfile::tempdir().unwrap();
+        let connector = RemoteMediaConnector::new_isolated(Arc::new(StaticConfig), resources.clone(), worker_launch(worker_root.path()));
+        connector.bind_media_service(service.clone());
+        connector
+            .register_route(
+                owner.clone(),
+                ROUTE_ID.to_owned(),
+                "Loopback observation AV".to_owned(),
+                vec![MediaSessionMode::AudioVideo],
+                vec![MediaSourceKindDto::Microphone, MediaSourceKindDto::Camera],
+                route_channel,
+            )
+            .await
+            .unwrap();
+        let remote_microphone =
+            remote_media_source_ref(ROUTE_ID, RemoteMediaSourceKind::Microphone).unwrap();
+        let remote_camera =
+            remote_media_source_ref(ROUTE_ID, RemoteMediaSourceKind::Camera).unwrap();
+        let context = MediaOperationContext::new(MediaOperationId::new(3, 1), owner)
+            .with_max_payload_bytes(1024 * 1024);
+        let session = connector
+            .start_session(
+                context.clone(),
+                MediaSessionRequest {
+                    intent: MediaSessionIntent::Observation,
+                    mode: MediaSessionMode::AudioVideo,
+                    audio_source: Some(MediaSourceRef(remote_microphone.clone().into())),
+                    video_source: Some(MediaSourceRef(remote_camera.clone().into())),
+                },
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "observation audio/video session failed to start; device open count={}, error={error:?}",
+                    ports.open_count.load(Ordering::Acquire),
+                )
+            });
+        let audio = session.audio_channel().await.unwrap();
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                match session.status().state {
+                    MediaSessionState::Ready => break,
+                    MediaSessionState::Failed | MediaSessionState::Ended => {
+                        panic!(
+                            "observation audio peer failed before becoming Ready: {:?}",
+                            session.status()
+                        );
+                    }
+                    MediaSessionState::Preparing | MediaSessionState::Reconnecting => {
+                        sleep(Duration::from_millis(25)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("observation audio peer should reach Ready");
+
+        let control = |action| RemoteMediaControlRequest {
+            v: 1,
+            media_session_ref: session.reference().0 .0.clone(),
+            generation: context.identity.generation,
+            action,
+            target_audio_sequence: 0,
+            target_sample_frames: 0,
+        };
+        for action in [
+            RemoteMediaControlAction::FlushAudio,
+            RemoteMediaControlAction::InterruptAudio,
+        ] {
+            let error = handler
+                .control(&connection, control(action))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                remote_control_client::rpc::RemoteErrorCode::NotRemoteEnabled
+            );
+        }
+        let gain_error = session
+            .update(
+                context.clone(),
+                MediaSessionUpdate::SetPlaybackGain { gain: 0.5 },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(gain_error.kind, MediaErrorKind::Unsupported);
+        assert_eq!(session.status().state, MediaSessionState::Ready);
+
+        // Incoming remote PCM must not invoke a speaker callback on a
+        // capture-only observation lease. Local microphone capture still has
+        // to travel back over the same peer.
+        for _ in 0..4 {
+            audio
+                .write(MediaPcmFrame {
+                    sample_rate_hz: 24_000,
+                    channels: 1,
+                    pcm16le: microphone_pcm(1),
+                })
+                .await
+                .unwrap();
+        }
+        // Preserve the native microphone's expected 20 ms cadence; video has
+        // its own one-frame-per-100 ms capture schedule.
+        for sequence in 1..=6 {
+            ports.send_capture(microphone_frame(sequence)).await;
+            sleep(Duration::from_millis(20)).await;
+        }
+        for sequence in 1..=6 {
+            ports.send_capture(camera_frame(sequence)).await;
+            sleep(Duration::from_millis(100)).await;
+        }
+        let captured_audio = timeout(Duration::from_secs(10), audio.read())
+            .await
+            .unwrap_or_else(|_| {
+                let native_status = service
+                    .attached
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .first()
+                    .map(|(_, session)| session.status());
+                panic!(
+                    "observation microphone input should remain active; host={:?}, native={native_status:?}, input audio/video={}/{}, render attempts={}",
+                    session.status(),
+                    ports.input_audio_frames.load(Ordering::Acquire),
+                    ports.input_video_frames.load(Ordering::Acquire),
+                    ports.render_attempts.load(Ordering::Acquire),
+                )
+            })
+            .unwrap()
+            .expect("the remote peer should receive microphone PCM");
+        assert_eq!(captured_audio.source.0 .0, remote_microphone);
+        assert!(matches!(
+            captured_audio.payload,
+            MediaFramePayload::Audio(_)
+        ));
+        let asset = timeout(Duration::from_secs(15), async {
+            let mut after = None;
+            loop {
+                let batch = session
+                    .observe(context.clone(), after, 32, Some(500))
+                    .await
+                    .unwrap();
+                after = batch.next_cursor;
+                if let Some(asset) = batch.events.into_iter().find_map(|event| match event.kind {
+                    MediaEventKind::Frame { source, asset } if source.0 .0 == remote_camera => {
+                        Some(asset)
+                    }
+                    _ => None,
+                }) {
+                    break asset;
+                }
+            }
+        })
+        .await
+        .expect("observation camera input should produce a persisted host frame");
+        assert_eq!(asset.metadata.mime_type, "image/png");
+        assert_eq!(asset.metadata.width_px, Some(320));
+        assert_eq!(asset.metadata.height_px, Some(240));
+        let stored = resources
+            .get(&context, &asset.reference, context.max_payload_bytes)
+            .await
+            .unwrap();
+        assert!(stored.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(ports.render_attempts.load(Ordering::Acquire), 0);
+        assert_eq!(
+            ports.playback_control_attempts.load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(session.status().state, MediaSessionState::Ready);
+
+        let ended = session.stop(context).await.unwrap();
+        assert_eq!(ended.state, MediaSessionState::Ended);
+        assert_eq!(std::fs::read_dir(worker_root.path()).unwrap().count(), 0, "worker directory remained after confirmed stop");
+        assert_eq!(ports.open_count.load(Ordering::Acquire), 1);
+        assert_eq!(ports.stop_count.load(Ordering::Acquire), 1);
+        assert_eq!(
+            ports.playback_control_attempts.load(Ordering::Acquire),
+            0
+        );
+        wait_for_attached_sessions_to_drain(&service).await;
+    })
+    .await
+    .expect("local WebRTC observation-audio loopback must finish within its offline deadline");
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn production_camera_peer_is_observed_and_persisted_as_png_on_the_host_isolated() {
+    timeout(Duration::from_secs(30), async {
+        let service = Arc::new(LoopbackMediaService {
+            sources: media_sources(),
+            attached: Mutex::new(Vec::new()),
+        });
+        let ports = LoopbackPorts::new();
+        let handler =
+            NativeMediaOfferHandler::new(service.clone(), ports.clone(), Arc::new(StaticConfig));
+        let route_channel = Arc::new(LoopbackChannel {
+            handler,
+            connection: RemoteMediaConnection {
+                account_uid: "loopback-account".to_owned(),
+                host_id: "loopback-host".to_owned(),
+                device_id: "loopback-camera".to_owned(),
+                connection_id: "loopback-camera-connection".to_owned(),
+            },
+            last_played_sample_frames: Mutex::new(0),
+        });
+        let owner = MediaOwner::Session {
+            session_id: SESSION_ID.to_owned(),
+        };
+        let resources = LoopbackResourceStore::new();
+        let worker_root = tempfile::tempdir().unwrap();
+        let connector = RemoteMediaConnector::new_isolated(
+            Arc::new(StaticConfig),
+            resources.clone(),
+            worker_launch(worker_root.path()),
+        );
+        connector.bind_media_service(service.clone());
+        connector
+            .register_route(
+                owner.clone(),
+                ROUTE_ID.to_owned(),
+                "Loopback camera".to_owned(),
+                vec![MediaSessionMode::Video],
+                vec![MediaSourceKindDto::Camera],
+                route_channel,
+            )
+            .await
+            .unwrap();
+        let remote_camera =
+            remote_media_source_ref(ROUTE_ID, RemoteMediaSourceKind::Camera).unwrap();
+        let context = MediaOperationContext::new(MediaOperationId::new(2, 1), owner)
+            .with_max_payload_bytes(1024 * 1024);
+        let session = connector
+            .start_session(
+                context.clone(),
+                MediaSessionRequest {
+                    intent: MediaSessionIntent::Observation,
+                    mode: MediaSessionMode::Video,
+                    audio_source: None,
+                    video_source: Some(MediaSourceRef(remote_camera.clone().into())),
+                },
+            )
+            .await
+            .unwrap();
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                match session.status().state {
+                    MediaSessionState::Ready => break,
+                    MediaSessionState::Failed | MediaSessionState::Ended => {
+                        panic!(
+                            "camera peer failed before becoming ready: {:?}",
+                            session.status()
+                        );
+                    }
+                    MediaSessionState::Preparing | MediaSessionState::Reconnecting => {
+                        sleep(Duration::from_millis(25)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("camera loopback peer should reach Ready");
+
+        for sequence in 1..=6 {
+            ports.send_capture(camera_frame(sequence)).await;
+            sleep(Duration::from_millis(100)).await;
+        }
+        let asset = timeout(Duration::from_secs(15), async {
+            let mut after = None;
+            loop {
+                let batch = session
+                    .observe(context.clone(), after, 32, Some(500))
+                    .await
+                    .unwrap();
+                after = batch.next_cursor;
+                if let Some(asset) = batch.events.into_iter().find_map(|event| match event.kind {
+                    MediaEventKind::Frame { source, asset } if source.0 .0 == remote_camera => {
+                        Some(asset)
+                    }
+                    _ => None,
+                }) {
+                    break asset;
+                }
+            }
+        })
+        .await
+        .expect("real VP8 camera ingress should produce an observed host frame");
+        assert_eq!(asset.metadata.mime_type, "image/png");
+        assert_eq!(asset.metadata.width_px, Some(320));
+        assert_eq!(asset.metadata.height_px, Some(240));
+
+        let stored = resources
+            .get(&context, &asset.reference, context.max_payload_bytes)
+            .await
+            .unwrap();
+        assert!(stored.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(ports.open_count.load(Ordering::Acquire), 1);
+        assert_eq!(session.status().state, MediaSessionState::Ready);
+
+        let ended = session.stop(context).await.unwrap();
+        assert_eq!(ended.state, MediaSessionState::Ended);
+        assert_eq!(
+            std::fs::read_dir(worker_root.path()).unwrap().count(),
+            0,
+            "worker directory remained after confirmed stop"
+        );
+        assert_eq!(ports.stop_count.load(Ordering::Acquire), 1);
+        wait_for_attached_sessions_to_drain(&service).await;
+    })
+    .await
+    .expect("local WebRTC camera loopback must finish within its offline deadline");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn production_media_offer_and_answer_stream_pcm_and_close_one_native_lease() {
     timeout(Duration::from_secs(30), async {

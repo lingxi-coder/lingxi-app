@@ -19,7 +19,14 @@ pub mod error;
 pub mod files;
 pub mod framing;
 #[cfg(feature = "native-media")]
+mod host_codec;
+#[cfg(feature = "native-media")]
 pub mod host_media;
+#[cfg(all(
+    feature = "native-media",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub mod isolated_codec;
 pub mod keys;
 pub mod media;
 pub mod messages;

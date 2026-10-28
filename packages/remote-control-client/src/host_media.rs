@@ -7,6 +7,7 @@
 
 use crate::{
     encoding::random_id,
+    host_codec::{CodecConfig, HostCodec},
     media::{
         parse_remote_media_source_ref, remote_media_source_ref, RemoteMediaConfig,
         RemoteMediaSourceKind, MEDIA_AUDIO_SAMPLE_FRAMES_MAX, MEDIA_AUDIO_SEQUENCE_MAX,
@@ -101,6 +102,7 @@ pub struct RemoteMediaConnector {
     resources: Arc<dyn MediaResourceStore>,
     media_service: std::sync::RwLock<Option<std::sync::Weak<dyn MediaService>>>,
     routes: RwLock<HashMap<MediaOwner, HashMap<String, Arc<Route>>>>,
+    codec: CodecConfig,
 }
 
 impl RemoteMediaConnector {
@@ -110,11 +112,31 @@ impl RemoteMediaConnector {
         config: Arc<dyn RemoteMediaHostConfigProvider>,
         resources: Arc<dyn MediaResourceStore>,
     ) -> Arc<Self> {
+        Self::with_codec(config, resources, CodecConfig::Local)
+    }
+
+    /// Use the host-owned codec worker for this connector's desktop sessions.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[must_use]
+    pub fn new_isolated(
+        config: Arc<dyn RemoteMediaHostConfigProvider>,
+        resources: Arc<dyn MediaResourceStore>,
+        launch: crate::isolated_codec::CodecLaunch,
+    ) -> Arc<Self> {
+        Self::with_codec(config, resources, CodecConfig::Isolated(launch))
+    }
+
+    fn with_codec(
+        config: Arc<dyn RemoteMediaHostConfigProvider>,
+        resources: Arc<dyn MediaResourceStore>,
+        codec: CodecConfig,
+    ) -> Arc<Self> {
         Arc::new(Self {
             config,
             resources,
             media_service: std::sync::RwLock::new(None),
             routes: RwLock::new(HashMap::new()),
+            codec,
         })
     }
 
@@ -387,164 +409,168 @@ impl MediaConnector for RemoteMediaConnector {
                 "configured ICE transport is unsupported",
             )
         })?;
-        lingxi_webrtc_media::runtime::initialize_configured(mode_has_video(request.mode)).map_err(
-            |_| {
-                MediaError::new(
-                    MediaErrorKind::Unavailable,
-                    "media codec runtime is unavailable",
-                )
-            },
-        )?;
-        if route.closed.load(Ordering::Acquire) || route.unregistering.load(Ordering::Acquire) {
-            return Err(MediaError::new(
-                MediaErrorKind::Cancelled,
-                "media route was removed",
-            ));
-        }
-
-        let reference = MediaSessionRef(MediaSessionId::from(format!("media_{}", random_id())));
-        let generation = context.identity.generation.max(1);
-        let session_ref = MediaSessionRefDto {
-            id: reference.0 .0.clone(),
-        };
-        let ice = IceConfig {
-            servers: config
-                .ice_servers
-                .iter()
-                .map(|server| IceServer {
-                    urls: server.urls.clone(),
-                    username: server.username.clone().unwrap_or_default(),
-                    credential: server.credential.clone().unwrap_or_default(),
-                })
-                .collect(),
-            relay_only: config.relay_only,
-        };
-        let mut rtc = RtcSession::with_config(SessionConfig {
-            audio: mode_has_audio(request.mode),
-            video: mode_has_video(request.mode),
-            video_direction: VideoDirection::ReceiveOnly,
-            data_channel: false,
-            answerer: false,
-            ice,
-            gather_timeout: Some(Duration::from_millis(config.gather_timeout_ms)),
-            ..SessionConfig::default()
-        })
-        .await
-        .map_err(native_media_error)?;
-        if mode_has_audio(request.mode) {
-            // Incoming RTP is intentionally suppressed by the core until the
-            // product installs a live decoder/playout consumer. This session
-            // pump is that consumer, so enable its bounded ingress queue before
-            // sending the offer and receiving the answer.
-            rtc.set_playback_suppressed(false)
-                .map_err(native_media_error)?;
-        }
-        let offer_sdp = match rtc.offer().await {
-            Ok(sdp) if sdp.len() <= client::protocol::media::MAX_REMOTE_MEDIA_SDP_BYTES => sdp,
-            Ok(_) => {
-                let _ = rtc.close().await;
+        let codec = self
+            .codec
+            .open(mode_has_audio(request.mode), mode_has_video(request.mode))
+            .await?;
+        let result: Result<Box<dyn MediaSession>, MediaError> = async {
+            if route.closed.load(Ordering::Acquire) || route.unregistering.load(Ordering::Acquire) {
                 return Err(MediaError::new(
-                    MediaErrorKind::MediaTooLarge,
-                    "media offer exceeds its size limit",
+                    MediaErrorKind::Cancelled,
+                    "media route was removed",
                 ));
             }
-            Err(error) => {
+
+            let reference = MediaSessionRef(MediaSessionId::from(format!("media_{}", random_id())));
+            let generation = context.identity.generation.max(1);
+            let session_ref = MediaSessionRefDto {
+                id: reference.0 .0.clone(),
+            };
+            let ice = IceConfig {
+                servers: config
+                    .ice_servers
+                    .iter()
+                    .map(|server| IceServer {
+                        urls: server.urls.clone(),
+                        username: server.username.clone().unwrap_or_default(),
+                        credential: server.credential.clone().unwrap_or_default(),
+                    })
+                    .collect(),
+                relay_only: config.relay_only,
+            };
+            let mut rtc = RtcSession::with_config(SessionConfig {
+                audio: mode_has_audio(request.mode),
+                video: mode_has_video(request.mode),
+                video_direction: VideoDirection::ReceiveOnly,
+                data_channel: false,
+                answerer: false,
+                ice,
+                gather_timeout: Some(Duration::from_millis(config.gather_timeout_ms)),
+                ..SessionConfig::default()
+            })
+            .await
+            .map_err(native_media_error)?;
+            if mode_has_audio(request.mode) {
+                // Incoming RTP is intentionally suppressed by the core until the
+                // product installs a live decoder/playout consumer. This session
+                // pump is that consumer, so enable its bounded ingress queue before
+                // sending the offer and receiving the answer.
+                rtc.set_playback_suppressed(false)
+                    .map_err(native_media_error)?;
+            }
+            let offer_sdp = match rtc.offer().await {
+                Ok(sdp) if sdp.len() <= client::protocol::media::MAX_REMOTE_MEDIA_SDP_BYTES => sdp,
+                Ok(_) => {
+                    let _ = rtc.close().await;
+                    return Err(MediaError::new(
+                        MediaErrorKind::MediaTooLarge,
+                        "media offer exceeds its size limit",
+                    ));
+                }
+                Err(error) => {
+                    let _ = rtc.close().await;
+                    return Err(native_media_error(error));
+                }
+            };
+            let offer_request = MediaConnectionRequestDto {
+                request_id: random_id(),
+                connection_id: route.id.clone(),
+                session_id: owner_session_id,
+                media_session_ref: session_ref,
+                operation_id: dto_operation_id(&context.identity),
+                owner: dto_owner(&context.owner)?,
+                mode: dto_mode(request.mode),
+                intent: dto_intent(request.intent),
+                audio_source: request.audio_source.as_ref().map(dto_source_ref),
+                video_source: request.video_source.as_ref().map(dto_source_ref),
+                description: MediaSessionDescriptionDto {
+                    kind: MediaSessionDescriptionTypeDto::Offer,
+                    sdp: offer_sdp,
+                },
+            };
+            offer_request
+                .validate()
+                .map_err(|_| invalid("media offer request is invalid"))?;
+            let response = match route.channel.negotiate(offer_request.clone()).await {
+                Ok(response) => response,
+                Err(error) => {
+                    let _ = rtc.close().await;
+                    return Err(error);
+                }
+            };
+            response
+                .validate()
+                .map_err(|_| invalid("media answer response is invalid"))?;
+            if !response.matches_request(&offer_request) {
+                let _ = rtc.close().await;
+                return Err(invalid("media answer did not match the pending offer"));
+            }
+            if let Some(error) = response.error {
+                let _ = rtc.close().await;
+                return Err(dto_error(error.kind, error.message));
+            }
+            let answer = response
+                .description
+                .ok_or_else(|| invalid("media answer is missing"))?;
+            if answer.kind != MediaSessionDescriptionTypeDto::Answer {
+                let _ = rtc.close().await;
+                return Err(invalid("media connection response was not an Answer"));
+            }
+            if let Err(error) = rtc.apply_answer(answer.sdp).await {
                 let _ = rtc.close().await;
                 return Err(native_media_error(error));
             }
-        };
-        let offer_request = MediaConnectionRequestDto {
-            request_id: random_id(),
-            connection_id: route.id.clone(),
-            session_id: owner_session_id,
-            media_session_ref: session_ref,
-            operation_id: dto_operation_id(&context.identity),
-            owner: dto_owner(&context.owner)?,
-            mode: dto_mode(request.mode),
-            intent: dto_intent(request.intent),
-            audio_source: request.audio_source.as_ref().map(dto_source_ref),
-            video_source: request.video_source.as_ref().map(dto_source_ref),
-            description: MediaSessionDescriptionDto {
-                kind: MediaSessionDescriptionTypeDto::Offer,
-                sdp: offer_sdp,
-            },
-        };
-        offer_request
-            .validate()
-            .map_err(|_| invalid("media offer request is invalid"))?;
-        let response = match route.channel.negotiate(offer_request.clone()).await {
-            Ok(response) => response,
-            Err(error) => {
+            if route.closed.load(Ordering::Acquire) || route.unregistering.load(Ordering::Acquire) {
                 let _ = rtc.close().await;
+                return Err(MediaError::new(
+                    MediaErrorKind::Cancelled,
+                    "media route was removed",
+                ));
+            }
+
+            let session = RemoteHostMediaSession::new_with_codec(
+                reference,
+                context.clone(),
+                request,
+                route.clone(),
+                generation,
+                codec.clone(),
+                self.resources.clone(),
+                self.media_service
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+            );
+            let route_full = {
+                let mut sessions = route
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if sessions.len() >= MAX_SESSIONS_PER_ROUTE {
+                    true
+                } else {
+                    sessions.insert(session.reference.0 .0.clone(), session.clone());
+                    false
+                }
+            };
+            if route_full {
+                session.stop_internal().await?;
+                return Err(MediaError::new(
+                    MediaErrorKind::Busy,
+                    "remote route has too many active media sessions",
+                ));
+            }
+            if let Err(error) = session.start(rtc, config.connect_timeout_ms).await {
+                session.stop_internal().await?;
                 return Err(error);
             }
-        };
-        response
-            .validate()
-            .map_err(|_| invalid("media answer response is invalid"))?;
-        if !response.matches_request(&offer_request) {
-            let _ = rtc.close().await;
-            return Err(invalid("media answer did not match the pending offer"));
+            Ok(Box::new(RemoteHostMediaSessionHandle(session)) as Box<dyn MediaSession>)
         }
-        if let Some(error) = response.error {
-            let _ = rtc.close().await;
-            return Err(dto_error(error.kind, error.message));
+        .await;
+        if result.is_err() {
+            codec.shutdown().await?;
         }
-        let answer = response
-            .description
-            .ok_or_else(|| invalid("media answer is missing"))?;
-        if answer.kind != MediaSessionDescriptionTypeDto::Answer {
-            let _ = rtc.close().await;
-            return Err(invalid("media connection response was not an Answer"));
-        }
-        if let Err(error) = rtc.apply_answer(answer.sdp).await {
-            let _ = rtc.close().await;
-            return Err(native_media_error(error));
-        }
-        if route.closed.load(Ordering::Acquire) || route.unregistering.load(Ordering::Acquire) {
-            let _ = rtc.close().await;
-            return Err(MediaError::new(
-                MediaErrorKind::Cancelled,
-                "media route was removed",
-            ));
-        }
-
-        let session = RemoteHostMediaSession::new(
-            reference,
-            context.clone(),
-            request,
-            route.clone(),
-            generation,
-            self.resources.clone(),
-            self.media_service
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
-        );
-        let route_full = {
-            let mut sessions = route
-                .sessions
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if sessions.len() >= MAX_SESSIONS_PER_ROUTE {
-                true
-            } else {
-                sessions.insert(session.reference.0 .0.clone(), session.clone());
-                false
-            }
-        };
-        if route_full {
-            session.stop_internal().await?;
-            return Err(MediaError::new(
-                MediaErrorKind::Busy,
-                "remote route has too many active media sessions",
-            ));
-        }
-        if let Err(error) = session.start(rtc, config.connect_timeout_ms).await {
-            session.stop_internal().await?;
-            return Err(error);
-        }
-        Ok(Box::new(RemoteHostMediaSessionHandle(session)))
+        result
     }
 }
 
@@ -593,6 +619,7 @@ struct RemoteHostMediaSession {
     request: MediaSessionRequest,
     route: Arc<Route>,
     generation: u64,
+    codec: HostCodec,
     resources: Arc<dyn MediaResourceStore>,
     media_service: Option<std::sync::Weak<dyn MediaService>>,
     status_tx: watch::Sender<MediaSessionStatus>,
@@ -682,6 +709,7 @@ fn rtp_sample_frames_to_source_frames(
 
 #[derive(Default)]
 struct AudioEncoderState {
+    rate: Option<u32>,
     processor: Option<(u32, AudioProcessor)>,
     pending_sample_frames: u64,
     sequence: u64,
@@ -733,12 +761,35 @@ impl MediaSession for RemoteHostMediaSessionHandle {
 }
 
 impl RemoteHostMediaSession {
+    #[cfg(test)]
     fn new(
         reference: MediaSessionRef,
         context: MediaOperationContext,
         request: MediaSessionRequest,
         route: Arc<Route>,
         generation: u64,
+        resources: Arc<dyn MediaResourceStore>,
+        media_service: Option<std::sync::Weak<dyn MediaService>>,
+    ) -> Arc<Self> {
+        Self::new_with_codec(
+            reference,
+            context,
+            request,
+            route,
+            generation,
+            HostCodec::Local,
+            resources,
+            media_service,
+        )
+    }
+
+    fn new_with_codec(
+        reference: MediaSessionRef,
+        context: MediaOperationContext,
+        request: MediaSessionRequest,
+        route: Arc<Route>,
+        generation: u64,
+        codec: HostCodec,
         resources: Arc<dyn MediaResourceStore>,
         media_service: Option<std::sync::Weak<dyn MediaService>>,
     ) -> Arc<Self> {
@@ -797,6 +848,7 @@ impl RemoteHostMediaSession {
             request,
             route,
             generation,
+            codec,
             resources,
             media_service,
             status_tx,
@@ -886,14 +938,14 @@ impl RemoteHostMediaSession {
         let video_source = self.request.video_source.clone();
         let audio_time_anchor = Instant::now();
         let wall_time_anchor = unix_now_ms();
-        let mut playout = if mode_has_audio(self.request.mode) {
+        let mut playout = if mode_has_audio(self.request.mode) && !self.codec.isolated() {
             Some(DecodedAudioPlayout::new(AUDIO_RATE_HZ).map_err(native_media_error)?)
         } else {
             None
         };
         let video_wall_monotonic_anchor = Instant::now();
         let video_wall_anchor = unix_now_ms();
-        let mut video = if mode_has_video(self.request.mode) {
+        let mut video = if mode_has_video(self.request.mode) && !self.codec.isolated() {
             let (mut video, _, _) = NativeVideo::new();
             video
                 .controls(false, false, true)
@@ -910,6 +962,7 @@ impl RemoteHostMediaSession {
             HashMap::new()
         };
         let mut encoder = AudioEncoderState::default();
+        let mut last_video_enabled = None;
         let mut last_audio_sequence = None;
         let mut connection_state = rtc.subscribe_connection_state();
         let mut interval = tokio::time::interval(AUDIO_TICK);
@@ -944,28 +997,32 @@ impl RemoteHostMediaSession {
                     let Some(command) = command else { audio_commands = None; continue; };
                     match command {
                         WorkerAudioCommand::Write { frame, reply } => {
-                            let result = encode_audio(rtc, &mut encoder, frame, self.context.max_payload_bytes).await;
+                            let result = encode_audio(rtc, &mut encoder, frame, self.context.max_payload_bytes, &self.codec).await;
                             let _ = reply.send(result);
                         }
                         WorkerAudioCommand::Flush { reply } => {
-                            let result = flush_encoder(rtc, &mut encoder).await;
+                            let result = flush_encoder(rtc, &mut encoder, &self.codec).await;
                             let _ = reply.send(result);
                         }
                         WorkerAudioCommand::Interrupt { reply } => {
-                            let result = interrupt_encoder(&mut encoder);
-                            let _ = reply.send(Ok(result));
+                            let result = interrupt_encoder(&mut encoder, &self.codec).await;
+                            let _ = reply.send(result);
                         }
                     }
                 }
                 _ = interval.tick() => {
-                    if let Some(playout) = playout.as_mut() {
+                    if mode_has_audio(self.request.mode) {
                         for _ in 0..64 {
                             let packet = rtc.take_audio_packet().map_err(native_media_error)?;
                             let Some(packet) = packet else { break; };
-                            playout.push(packet).map_err(native_media_error)?;
+                            if self.codec.isolated() { self.codec.push_audio(packet).await?; }
+                            else if let Some(playout) = playout.as_mut() { playout.push(packet).map_err(native_media_error)?; }
                         }
                         for _ in 0..8 {
-                            let Some(frame) = playout.try_read().map_err(native_media_error)? else { break; };
+                            let frame = if self.codec.isolated() { self.codec.poll_audio().await? }
+                                else if let Some(playout) = playout.as_mut() { playout.try_read().map_err(native_media_error)? }
+                                else { None };
+                            let Some(frame) = frame else { break; };
                             if !self.enabled_audio.load(Ordering::Acquire) { continue; }
                             if last_audio_sequence.is_some_and(|previous| frame.sequence <= previous) {
                                 return Err(invalid("remote audio sequence did not advance"));
@@ -977,13 +1034,7 @@ impl RemoteHostMediaSession {
                             let media_frame = MediaFrame {
                                 source,
                                 sequence: frame.sequence,
-                                // RTP does not carry the device's absolute capture clock. Preserve
-                                // the decoded presentation/receive time instead of stamping decode-now.
-                                captured_at_unix_ms: monotonic_to_unix_ms(
-                                    audio_time_anchor,
-                                    wall_time_anchor,
-                                    frame.at,
-                                ),
+                                captured_at_unix_ms: monotonic_to_unix_ms(audio_time_anchor, wall_time_anchor, frame.at),
                                 payload: MediaFramePayload::Audio(MediaPcmFrame {
                                     sample_rate_hz: frame.sample_rate_hz,
                                     channels: frame.channels,
@@ -995,9 +1046,23 @@ impl RemoteHostMediaSession {
                             }
                         }
                     }
-                    if let Some(video) = video.as_mut() {
-                        video.controls(false, false, self.enabled_video.load(Ordering::Acquire)).map_err(native_media_error)?;
-                        let frames = video.service(rtc).await.map_err(native_media_error)?;
+                    if mode_has_video(self.request.mode) {
+                        let enabled = self.enabled_video.load(Ordering::Acquire);
+                        let frames = if self.codec.isolated() {
+                            if last_video_enabled != Some(enabled) {
+                                self.codec.enable_video(enabled).await?;
+                                last_video_enabled = Some(enabled);
+                            }
+                            rtc.set_video_suppressed(!enabled).map_err(native_media_error)?;
+                            for _ in 0..64 {
+                                let Some(packet) = rtc.take_video_packet().map_err(native_media_error)? else { break; };
+                                self.codec.push_video(packet).await?;
+                            }
+                            self.codec.poll_video().await?
+                        } else if let Some(video) = video.as_mut() {
+                            video.controls(false, false, enabled).map_err(native_media_error)?;
+                            video.service(rtc).await.map_err(native_media_error)?
+                        } else { Vec::new() };
                         for remote in frames {
                             let kind = video_sources.get(&remote.ssrc).copied().ok_or_else(|| invalid("remote video source is not in the negotiated SDP"))?;
                             let selected_kind = match parse_remote_media_source_ref(video_source.as_ref().map(|source| source.0.0.as_str()).unwrap_or_default()) {
@@ -1006,12 +1071,7 @@ impl RemoteHostMediaSession {
                                 _ => return Err(invalid("remote video source reference is invalid")),
                             };
                             if kind != selected_kind { return Err(invalid("remote video frame came from an unselected source")); }
-                            self.store_video_frame(
-                                remote,
-                                video_source.clone().ok_or_else(|| invalid("remote video source is unavailable"))?,
-                                video_wall_monotonic_anchor,
-                                video_wall_anchor,
-                            ).await?;
+                            self.store_video_frame(remote, video_source.clone().ok_or_else(|| invalid("remote video source is unavailable"))?, video_wall_monotonic_anchor, video_wall_anchor).await?;
                         }
                     }
                 }
@@ -1147,6 +1207,7 @@ impl RemoteHostMediaSession {
         }
 
         self.cancel.cancel();
+        self.codec.shutdown().await?;
         let mut pump = self.pump.lock().await;
         if let Some(task) = pump.as_mut() {
             let result = join_media_task(task, "remote media pump").await;
@@ -1808,18 +1869,18 @@ async fn encode_audio(
     state: &mut AudioEncoderState,
     frame: MediaPcmFrame,
     max_payload_bytes: u64,
+    codec: &HostCodec,
 ) -> Result<MediaRenderReceipt, MediaError> {
     frame.validate(max_payload_bytes)?;
     let rate = frame.sample_rate_hz;
-    if state
-        .processor
-        .as_ref()
-        .is_none_or(|(current, _)| *current != rate)
-    {
-        state.processor = Some((
-            rate,
-            AudioProcessor::new(rate, rate).map_err(native_media_error)?,
-        ));
+    if state.rate != Some(rate) {
+        if !codec.isolated() {
+            state.processor = Some((
+                rate,
+                AudioProcessor::new(rate, rate).map_err(native_media_error)?,
+            ));
+        }
+        state.rate = Some(rate);
         state.pending_sample_frames = 0;
     }
     let channels = usize::from(frame.channels);
@@ -1837,7 +1898,7 @@ async fn encode_audio(
     state.pending_sample_frames = state
         .pending_sample_frames
         .saturating_add(samples.len() as u64);
-    process_audio_samples(rtc, state, &samples, rate).await?;
+    process_audio_samples(rtc, state, &samples, rate, codec).await?;
     Ok(MediaRenderReceipt {
         accepted_sample_frames: u32::try_from(samples.len()).map_err(|_| {
             MediaError::new(
@@ -1855,29 +1916,48 @@ async fn process_audio_samples(
     state: &mut AudioEncoderState,
     samples: &[f32],
     rate: u32,
+    codec: &HostCodec,
 ) -> Result<(), MediaError> {
-    let processor = &mut state
-        .processor
-        .as_mut()
-        .ok_or_else(|| invalid("audio processor is unavailable"))?
-        .1;
     let packet_samples = u64::from(rate).div_ceil(50);
-    for chunk in samples.chunks(AUDIO_CAPTURE_CHUNK) {
-        for encoded in processor
-            .capture(chunk, std::time::Instant::now())
-            .map_err(native_media_error)?
-        {
-            rtc.send_opus(encoded.data, encoded.at)
-                .await
-                .map_err(native_media_error)?;
-            state.sequence = state.sequence.checked_add(1).ok_or_else(|| {
-                MediaError::new(
-                    MediaErrorKind::MediaTooLarge,
-                    "remote audio sequence exhausted",
-                )
-            })?;
-            state.pending_sample_frames =
-                state.pending_sample_frames.saturating_sub(packet_samples);
+    if codec.isolated() {
+        for chunk in samples.chunks(AUDIO_CAPTURE_CHUNK) {
+            for packet in codec.encode(rate, chunk).await? {
+                rtc.send_opus(packet.data, packet.at)
+                    .await
+                    .map_err(native_media_error)?;
+                state.sequence = state.sequence.checked_add(1).ok_or_else(|| {
+                    MediaError::new(
+                        MediaErrorKind::MediaTooLarge,
+                        "remote audio sequence exhausted",
+                    )
+                })?;
+                state.pending_sample_frames =
+                    state.pending_sample_frames.saturating_sub(packet_samples);
+            }
+        }
+    } else {
+        let processor = &mut state
+            .processor
+            .as_mut()
+            .ok_or_else(|| invalid("audio processor is unavailable"))?
+            .1;
+        for chunk in samples.chunks(AUDIO_CAPTURE_CHUNK) {
+            for packet in processor
+                .capture(chunk, std::time::Instant::now())
+                .map_err(native_media_error)?
+            {
+                rtc.send_opus(packet.data, packet.at)
+                    .await
+                    .map_err(native_media_error)?;
+                state.sequence = state.sequence.checked_add(1).ok_or_else(|| {
+                    MediaError::new(
+                        MediaErrorKind::MediaTooLarge,
+                        "remote audio sequence exhausted",
+                    )
+                })?;
+                state.pending_sample_frames =
+                    state.pending_sample_frames.saturating_sub(packet_samples);
+            }
         }
     }
     Ok(())
@@ -1886,12 +1966,13 @@ async fn process_audio_samples(
 async fn flush_encoder(
     rtc: &mut RtcSession,
     state: &mut AudioEncoderState,
+    codec: &HostCodec,
 ) -> Result<AudioTarget, MediaError> {
     if state.pending_sample_frames > 0 {
-        let Some((rate, _)) = state.processor.as_ref() else {
-            return Err(invalid("audio processor is unavailable"));
-        };
-        let padding = audio_tail_padding_samples(state.pending_sample_frames, *rate);
+        let rate = state
+            .rate
+            .ok_or_else(|| invalid("audio processor is unavailable"))?;
+        let padding = audio_tail_padding_samples(state.pending_sample_frames, rate);
         let zeros = vec![
             0.0;
             usize::try_from(padding).map_err(|_| MediaError::new(
@@ -1899,7 +1980,7 @@ async fn flush_encoder(
                 "audio padding exceeds its limit"
             ))?
         ];
-        process_audio_samples(rtc, state, &zeros, *rate).await?;
+        process_audio_samples(rtc, state, &zeros, rate, codec).await?;
     }
     Ok(AudioTarget {
         sequence: state.sequence,
@@ -1916,15 +1997,20 @@ fn audio_tail_padding_samples(pending_sample_frames: u64, sample_rate_hz: u32) -
         .saturating_sub(pending_sample_frames)
 }
 
-fn interrupt_encoder(state: &mut AudioEncoderState) -> AudioTarget {
-    if let Some((_, processor)) = state.processor.as_mut() {
+async fn interrupt_encoder(
+    state: &mut AudioEncoderState,
+    codec: &HostCodec,
+) -> Result<AudioTarget, MediaError> {
+    if codec.isolated() {
+        codec.reset().await?;
+    } else if let Some((_, processor)) = state.processor.as_mut() {
         let _ = processor.reset();
     }
     state.pending_sample_frames = 0;
-    AudioTarget {
+    Ok(AudioTarget {
         sequence: state.sequence,
         sample_frames: state.sequence.saturating_mul(AUDIO_RTP_SAMPLES),
-    }
+    })
 }
 
 fn decoded_video_frame(

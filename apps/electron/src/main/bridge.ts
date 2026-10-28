@@ -1859,7 +1859,16 @@ export class SessionRuntime {
     } else {
       delete environment.LINGXI_REMOTE_STUN;
     }
-    delete environment.LINGXI_GSTREAMER_PLUGIN_DIR;
+    // Select the codec distribution from the host, never from a workspace
+    // override, including case-insensitive aliases on Windows. Development can
+    // still explicitly select its host SDK through the parent environment.
+    const hostPluginDirectory = process.env.LINGXI_GSTREAMER_PLUGIN_DIR;
+    for (const key of Object.keys(environment)) {
+      if (key.toUpperCase() === 'LINGXI_GSTREAMER_PLUGIN_DIR') delete environment[key];
+    }
+    if (!this.opts.isPackaged && hostPluginDirectory !== undefined) {
+      environment.LINGXI_GSTREAMER_PLUGIN_DIR = hostPluginDirectory;
+    }
     if (this.opts.isPackaged) {
       const resourcesPath = this.opts.resourcesPath ?? process.resourcesPath;
       if (process.platform === 'darwin') {

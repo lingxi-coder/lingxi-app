@@ -1961,9 +1961,26 @@ pub async fn assemble_with_provider_keys(
 
 /// Assemble a host-owned OAuth session without storing secrets in configuration.
 pub async fn assemble_with_credentials(
+    cfg: DesktopConfig,
+    provider_keys: BTreeMap<String, String>,
+    openai_oauth: Option<client::protocol::events::OpenAiOAuthSessionDto>,
+) -> Result<BoundServer, String> {
+    assemble_with_codec(cfg, provider_keys, openai_oauth, None).await
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub type DesktopCodecLaunch = remote_control_client::isolated_codec::CodecLaunch;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub struct DesktopCodecLaunch {
+    _private: (),
+}
+
+/// Assemble a desktop Bridge with an explicitly selected private codec worker.
+pub async fn assemble_with_codec(
     mut cfg: DesktopConfig,
     provider_keys: BTreeMap<String, String>,
     openai_oauth: Option<client::protocol::events::OpenAiOAuthSessionDto>,
+    codec_launch: Option<DesktopCodecLaunch>,
 ) -> Result<BoundServer, String> {
     let media_handoffs =
         Arc::new(harness_runtime::desktop::DesktopMediaAgentHandoffQueue::default());
@@ -2161,10 +2178,27 @@ pub async fn assemble_with_credentials(
     let (media_connection_channel, media_connection_responder) =
         connection.media_connection_channel();
     let (media_control_channel, media_control_responder) = connection.media_control_channel();
-    let remote_media_connector = remote_control_client::host_media::RemoteMediaConnector::new(
-        Arc::new(DesktopRemoteMediaConfigProvider::from_process_environment()),
-        media_host.resource_store(),
-    );
+    let remote_config = Arc::new(DesktopRemoteMediaConfigProvider::from_process_environment());
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let remote_media_connector = match codec_launch {
+        Some(launch) => remote_control_client::host_media::RemoteMediaConnector::new_isolated(
+            remote_config,
+            media_host.resource_store(),
+            launch,
+        ),
+        None => remote_control_client::host_media::RemoteMediaConnector::new(
+            remote_config,
+            media_host.resource_store(),
+        ),
+    };
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let remote_media_connector = {
+        let _ = codec_launch;
+        remote_control_client::host_media::RemoteMediaConnector::new(
+            remote_config,
+            media_host.resource_store(),
+        )
+    };
     remote_media_connector.bind_media_service(media_host.media_service());
     media_host.install_connector(remote_media_connector.clone(), []);
     let (ask_user_question_tx, ask_user_question_rx) =

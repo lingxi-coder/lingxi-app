@@ -21,10 +21,11 @@ thiserror.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "fs", "io-util"] }
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "fs", "io-util", "io-std", "net", "process"] }
 tokio-util.workspace = true
 futures-util.workspace = true
 ring = "0.17"
+tempfile = "3"
 base64 = "0.22"
 zeroize = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

@@ -82,6 +82,12 @@ interface FixtureApi {
   ignoreNextRapidRunAsStale(): void;
   holdNextRapidRunResponse(): void;
   releaseRapidRunResponse(): void;
+  holdNextRapidResize(): void;
+  releaseRapidResize(): void;
+  removeRapidInput(): void;
+  restoreRapidInput(value: string): void;
+  oldHostNoopAfterNextSubmit(): void;
+  failAfterNextSubmit(): void;
   emitRapidExternalValue(value: string | undefined): void;
   rapidInputSnapshot(): unknown;
   raceNextRapidAck(value: string): void;
@@ -96,7 +102,7 @@ interface FixtureApi {
   timeoutNextRapidControl(): void;
   holdNextRapidRunRejection(): void;
   releaseRapidRunRejection(): void;
-  replaceRapidSite(): void;
+  replaceRapidSite(instanceId?: string): void;
   releaseRapidControl(): void;
 }
 
@@ -167,6 +173,12 @@ let rapidNextAckExternalValue: string | undefined;
 let rapidAckRaceFired = false;
 let holdNextRapidRunResponse = false;
 let rapidRunResponseRelease: (() => void) | null = null;
+let holdNextRapidResize = false;
+let rapidResizeRelease: (() => void) | null = null;
+let rapidRejectedHandles = 0;
+let rapidInputPresent = true;
+let oldHostNoopAfterNextSubmit = false;
+let failAfterNextSubmit = false;
 let rapidRevision = 200;
 let holdRapidRevisionFrame = false;
 let rapidRevisionFrameRelease: (() => void) | null = null;
@@ -241,19 +253,19 @@ function rapidSurfaceTree(): UiClientFrameDto['tree'] {
   rapidHandleKinds.clear();
   rapidInputHandle = ++rapidNextHandle;
   rapidButtonHandle = ++rapidNextHandle;
-  rapidHandleKinds.set(rapidInputHandle, 'input');
+  if (rapidInputPresent) rapidHandleKinds.set(rapidInputHandle, 'input');
   rapidHandleKinds.set(rapidButtonHandle, 'button');
   const input: UiJsonValue = { type: 'Input', props: { key: 'rapid-message', label: 'Message', ...(rapidPropValue === undefined ? {} : { value: rapidPropValue }) }, press: { plugin: 'fixture-plugin', handle: rapidInputHandle } };
   const button: UiJsonValue = { type: 'Button', props: { key: 'rapid-submit', label: 'Submit' }, press: { plugin: 'fixture-plugin', handle: rapidButtonHandle } };
   const status: UiJsonValue = { type: 'Text', children: [rapidInputResult] };
-  const inputGroup: UiJsonValue = { type: 'Box', props: { key: 'rapid-input-group' }, children: [input] };
+  const inputGroup: UiJsonValue = { type: 'Box', props: { key: 'rapid-input-group' }, children: rapidInputPresent ? [input] : [] };
   const controlGroup: UiJsonValue = { type: 'Box', props: { key: 'rapid-control-group' }, children: [button, status] };
   return {
     type: 'Box',
     props: { flexDirection: 'column', gap: 6 },
     children: rapidGroupsEnabled
       ? rapidGroupsReversed ? [controlGroup, inputGroup] : [inputGroup, controlGroup]
-      : [input, button, status],
+      : [...(rapidInputPresent ? [input] : []), button, status],
   };
 }
 
@@ -514,6 +526,16 @@ const host: ModUiClientHostApi = {
           rapidOnSubmitCallbacks.push(value);
           rapidInputSubmitCount += 1;
           if (rapidInputMode === 'clear-on-submit') rapidInputValue = '';
+          if (oldHostNoopAfterNextSubmit) {
+            oldHostNoopAfterNextSubmit = false;
+            // An older Host may return the same noop after the callback ran
+            // when its follow-up render went stale.
+            return { handled: false, renderRevision: request.render_revision } as UiClientOperationResponseFor<T>;
+          }
+          if (failAfterNextSubmit) {
+            failAfterNextSubmit = false;
+            throw new Error('fixture timeout after callback acceptance');
+          }
         } else {
           rapidOnInputCallbacks.push(value);
           rapidInputValue = rapidInputMode === 'uppercase' ? value.toUpperCase() : value;
@@ -537,6 +559,10 @@ const host: ModUiClientHostApi = {
         rapidInputResult = `Button accepted: ${rapidInputValue}`;
       } else {
         call.handled = false;
+        rapidRejectedHandles += 1;
+        // Model the new Host contract: a missing held handle is a confirmed
+        // pre-dispatch rejection, never an ordinary success frame.
+        return { handled: false, renderRevision: request.render_revision } as UiClientOperationResponseFor<T>;
       }
       let frame = makeRuntimeFrame(request.runtimeId, request.render_revision, rapidSurfaceTree());
       if (rapidMisrouteNextFrame) {
@@ -587,6 +613,10 @@ const host: ModUiClientHostApi = {
       const frame = makeRuntimeFrame(request.runtimeId, request.render_revision, rapidSurfaceTree());
       call.returnedRevision = frame.renderRevision;
       call.returnedFrameSequence = frame.frameSequence;
+      if (request.type === 'resize' && holdNextRapidResize) {
+        holdNextRapidResize = false;
+        await new Promise<void>(resolve => { rapidResizeRelease = resolve; });
+      }
       return frame as UiClientOperationResponseFor<T>;
     }
     const runtimeId = request.runtimeId;
@@ -689,9 +719,9 @@ window.__modUiClientFixture = {
   timeoutNextRapidControl() { timeoutNextRapidControl = true; },
   holdNextRapidRunRejection() { holdNextRapidRunRejection = true; },
   releaseRapidRunRejection() { rapidRunRejectionRelease?.(); rapidRunRejectionRelease = null; },
-  replaceRapidSite() {
+  replaceRapidSite(instanceId = 'rapid-input-site-replacement') {
     flushSync(() => setRapidInputEnabled(false));
-    rapidSiteInstanceId = 'rapid-input-site-replacement';
+    rapidSiteInstanceId = instanceId;
     flushSync(() => setRapidInputEnabled(true));
   },
   releaseRapidControl() { rapidControlRelease?.(); rapidControlRelease = null; },
@@ -702,6 +732,12 @@ window.__modUiClientFixture = {
   ignoreNextRapidRunAsStale() { rapidIgnoreNextRunAsStale = true; },
   holdNextRapidRunResponse() { holdNextRapidRunResponse = true; },
   releaseRapidRunResponse() { rapidRunResponseRelease?.(); rapidRunResponseRelease = null; },
+  holdNextRapidResize() { holdNextRapidResize = true; },
+  releaseRapidResize() { rapidResizeRelease?.(); rapidResizeRelease = null; },
+  removeRapidInput() { rapidInputPresent = false; emitRapidBackgroundFrame(rapidPropValue); },
+  restoreRapidInput(value) { rapidInputPresent = true; emitRapidBackgroundFrame(value); },
+  oldHostNoopAfterNextSubmit() { oldHostNoopAfterNextSubmit = true; },
+  failAfterNextSubmit() { failAfterNextSubmit = true; },
   emitRapidExternalValue(value) {
     rapidPropValue = value;
     emitRapidBackgroundFrame(value);
@@ -723,6 +759,8 @@ window.__modUiClientFixture = {
       rapidControlTimeouts,
       rapidRunRejectionHeld: rapidRunRejectionRelease !== null,
       rapidRunResponseHeld: rapidRunResponseRelease !== null,
+      rapidResizeHeld: rapidResizeRelease !== null,
+      rapidRejectedHandles,
       rapidRunRejections,
       rapidSiteInstanceId,
       promptText: prompt?.textContent ?? null,

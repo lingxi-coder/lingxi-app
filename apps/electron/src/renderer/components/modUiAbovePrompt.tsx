@@ -825,6 +825,16 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     return run;
   }, [context]);
 
+  const queueHeldOperation = useCallback((buildOperation: () => Extract<UiClientOperation, { type: 'runHeld' }> | null) => {
+    if (!context) return Promise.reject(new Error('Client surface host is unavailable'));
+    const run = operationTail.current.catch(() => undefined).then(() => {
+      const operation = buildOperation();
+      return operation ? context.host.operation(context.site.sessionId, operation) : null;
+    });
+    operationTail.current = run.then(() => undefined, () => undefined);
+    return run;
+  }, [context]);
+
   const reportCurrentFault = useCallback((phase: 'load' | 'render' | 'run', message: string, revision: number) => {
     if (!context || currentRevisionRef.current !== revision || context.site.committedRevision !== revision
       || !context.isRevisionCurrent(revision)) return;
@@ -1034,44 +1044,53 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     // failed host dispatch is not evidence that the Client callback failed.
     if (runtimeIdRef.current !== runtimeAtStart || operationGeneration.current !== generation
       || currentRevisionRef.current !== revision || !context.isRevisionCurrent(revision)) return superseded;
-    if (!result?.response.reached) return;
-    const currentFrame = frameRef.current;
-    if (!currentFrame || currentFrame.renderRevision !== revision) return;
+    if (!result?.response.reached) return superseded;
     const reachedElement = result.response.reached.element;
-    const reachedHandle = heldHandleForElement(currentFrame.tree, reachedElement, descriptor.plugin);
-    if (reachedHandle === null) return;
     const reachedValue = result.response.reached.value;
     let event: UiJsonValue | undefined;
     if (request.event.type === 'input') {
-      if (typeof reachedValue !== 'string') return;
+      if (typeof reachedValue !== 'string') return superseded;
       // Native's ui_client_press response returns the hook-reached element and
       // value, while the original event kind remains authoritative. Preserve
       // both so the Client Input adapter can distinguish change from submit.
       event = { kind: request.event.kind, value: reachedValue };
     } else if (request.event.type === 'select') {
-      if (typeof reachedValue !== 'string') return;
+      if (typeof reachedValue !== 'string') return superseded;
       // Native Select callbacks receive the selected value as their first
       // argument and `{ value }` as the event, matching the author API.
       event = { value: reachedValue };
     }
-    const operation = {
-      type: 'runHeld',
-      runtimeId: runtimeAtStart,
-      render_revision: revision,
-      ...(event === undefined ? {} : { event }),
-      handle: reachedHandle,
-    } satisfies UiClientOperation;
+    const buildOperation = () => {
+      // A queued resize or render can replace every held handle. Resolve it
+      // only after that operation settles, and only for the same owner.
+      if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
+        || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)
+        || failedRuntimeEpochRef.current === runtimeEpochRef.current || failedRuntimeIdRef.current === runtimeAtStart) return null;
+      const currentFrame = frameRef.current;
+      if (!currentFrame || currentFrame.renderRevision !== revision) return null;
+      const reachedHandle = heldHandleForElement(currentFrame.tree, reachedElement, descriptor.plugin);
+      if (reachedHandle === null) return null;
+      return {
+        type: 'runHeld', runtimeId: runtimeAtStart, render_revision: revision,
+        ...(event === undefined ? {} : { event }), handle: reachedHandle,
+      } satisfies Extract<UiClientOperation, { type: 'runHeld' }>;
+    };
     let frameResult;
     try {
-      frameResult = await queueOperation(operation);
+      frameResult = await queueHeldOperation(buildOperation);
     } catch (error) {
       if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
         || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;
+      // A transport or protocol failure can arrive after the callback ran.
+      // Preserve the Input and require an explicit decision before retrying.
+      if (request.event.type === 'input') return nativeInputSuperseded;
       throw error;
     }
     if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
       || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;
-    if (isStaleOperation(frameResult)) return;
+    // Old Hosts can return the same noop after a callback has already run.
+    // Never replay it automatically; an Input requires explicit user review.
+    if (frameResult === null || isStaleOperation(frameResult)) return superseded;
     if (isWorkerFault(frameResult)) {
       if (frameResult.renderRevision === revision
         && (frameResult.runtimeId === undefined || frameResult.runtimeId === runtimeAtStart)) {
@@ -1112,7 +1131,7 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     } else {
       throw new Error('Client module host returned an invalid run frame');
     }
-  }, [acceptFrame, context, controlAddressable, fault, queueOperation, runtimeEpochAvailable, showWorkerFault, site]);
+  }, [acceptFrame, context, controlAddressable, fault, queueHeldOperation, runtimeEpochAvailable, showWorkerFault, site]);
 
   const visibleFault = fault && (fault.source === 'worker'
     ? fault.runtimeEpoch !== null && fault.runtimeEpoch === runtimeEpoch

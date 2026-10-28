@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'mod-ui-client-electron.mjs');
 
-test('Electron renders Native Client input and Select held events while keeping Markdown links ordinary', { timeout: 45_000 }, async () => {
+test('Electron renders Native Client input and Select held events while keeping Markdown links ordinary', { timeout: 90_000 }, async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-mod-ui-client-vite-'));
   const fixtureBuildDir = mkdtempSync(join(tmpdir(), 'lingxi-mod-ui-client-build-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-mod-ui-client-electron-'));
@@ -94,6 +94,33 @@ test('Electron renders Native Client input and Select held events while keeping 
           }
           if (!id.endsWith('/modUiAbovePrompt.tsx')) return null;
           let result = source;
+          if (process.env.LINGXI_TEST_RESOLVE_HANDLE_EARLY === '1') {
+            const queuedHandle = `    const run = operationTail.current.catch(() => undefined).then(() => {
+      const operation = buildOperation();
+      return operation ? context.host.operation(context.site.sessionId, operation) : null;
+    });`;
+            assert.ok(result.includes(queuedHandle), 'negative control must resolve the held handle before the queue');
+            result = result.replace(queuedHandle, `    const operation = buildOperation();
+    const run = operationTail.current.catch(() => undefined).then(() =>
+      operation ? context.host.operation(context.site.sessionId, operation) : null);`);
+          }
+          if (process.env.LINGXI_TEST_DROP_NOOP_WARNING === '1') {
+            const guard = 'if (frameResult === null || isStaleOperation(frameResult)) return superseded;';
+            assert.ok(result.includes(guard), 'negative control must discard an uncertain noop');
+            result = result.replace(guard, 'if (frameResult === null || isStaleOperation(frameResult)) return;');
+          }
+          if (process.env.LINGXI_TEST_THROW_UNKNOWN_INPUT === '1') {
+            const guard = "if (request.event.type === 'input') return nativeInputSuperseded;";
+            assert.ok(result.includes(guard), 'negative control must lose the uncertain input on an operation error');
+            result = result.replace(guard, "if (request.event.type === 'input') throw error;");
+          }
+          if (process.env.LINGXI_TEST_DISABLE_QUEUED_OWNER_FENCE === '1') {
+            const guard = `      if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
+        || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)
+        || failedRuntimeEpochRef.current === runtimeEpochRef.current || failedRuntimeIdRef.current === runtimeAtStart) return null;`;
+            assert.ok(result.includes(guard), 'negative control must remove queued owner checks');
+            result = result.replace(guard, '');
+          }
           const parentCommit = `      setParentFrame({
         sessionId,
         revision,
@@ -119,14 +146,17 @@ test('Electron renders Native Client input and Select held events while keeping 
             result = result.replace(guardedFault, `    if (!context || currentRevisionRef.current !== revision || context.site.committedRevision !== revision) return;`);
             const guardedRun = `    let frameResult;
     try {
-      frameResult = await queueOperation(operation);
+      frameResult = await queueHeldOperation(buildOperation);
     } catch (error) {
       if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
         || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;
+      // A transport or protocol failure can arrive after the callback ran.
+      // Preserve the Input and require an explicit decision before retrying.
+      if (request.event.type === 'input') return nativeInputSuperseded;
       throw error;
     }`;
             assert.ok(result.includes(guardedRun), 'negative control must remove stale run rejection validation');
-            result = result.replace(guardedRun, '    const frameResult = await queueOperation(operation);');
+            result = result.replace(guardedRun, '    const frameResult = await queueHeldOperation(buildOperation);');
           }
           if (process.env.LINGXI_TEST_DISABLE_SUPERSEDED_MARKER === '1') {
             const marker = "const superseded = request.event.type === 'input' ? nativeInputSuperseded : undefined;";
@@ -234,7 +264,7 @@ test('Electron renders Native Client input and Select held events while keeping 
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
         rejectResult(new Error(`Electron Mod UI Client fixture timed out\n${errors.join('')}`));
-      }, 35_000);
+      }, 75_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);

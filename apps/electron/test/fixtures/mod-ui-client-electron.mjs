@@ -8,6 +8,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
   await app.whenReady();
+  const milestone = (name) => process.stderr.write(`Mod UI fixture: ${name}\n`);
   const window = new BrowserWindow({ show: false, width: 900, height: 600, webPreferences: { sandbox: true } });
   try {
     await window.loadURL(url);
@@ -506,6 +507,7 @@ async function main() {
       return lateRenders.length > 0 && lateRenders.every((call) => call.returnedRevision !== undefined && lateUnmounts.has(call.returnedRevision));
     })()`);
 
+    milestone('initial surfaces complete; starting rapid input');
     await run(`window.__modUiClientFixture.holdRapidPostAt(1); window.__modUiClientFixture.holdRapidPostAt(2); window.__modUiClientFixture.startRapidInputScenario('identity')`);
     await wait(`Boolean(document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')) && Boolean(document.querySelector('.beta-rich-prompt'))`);
     await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').focus()`);
@@ -583,7 +585,25 @@ async function main() {
       await wait(`window.__retryClickTrusted`);
     };
     const rapidTarget = 'packaged-host-cua-valuexy';
-    const trustedRapidValues = await sendText(rapidTarget);
+    // A resize has already replaced the worker's held handles but its frame
+    // response is queued ahead of this input. The event must resolve its
+    // handle only when the resize response has committed to the queue.
+    await run(`(() => { window.__modUiClientFixture.holdNextRapidResize();
+      const surface = document.querySelector('[data-client="rapid-input"]');
+      surface.style.width = Math.max(100, Math.floor(surface.getBoundingClientRect().width) - 120) + 'px'; })()`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidResizeHeld`);
+    const trustedRapidValues = await sendText(rapidTarget[0]);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().controlRequests.length === 1`);
+    await run(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    assert.equal((await run(`window.__modUiClientFixture.rapidInputSnapshot()`)).runHeld.length, 0,
+      'the held callback must wait behind the in-flight resize');
+    await run(`window.__modUiClientFixture.releaseRapidResize()`);
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+      return s.rapidPostOrdinal === 1 || s.rapidRejectedHandles > 0; })()`);
+    const firstQueuedInput = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(firstQueuedInput.rapidRejectedHandles, 0, 'an older held handle must not be sent after the newer resize frame');
+    assert.deepEqual(firstQueuedInput.rapidInputCallbacks, [{ kind: 'change', value: rapidTarget[0] }]);
+    trustedRapidValues.push(...await sendText(rapidTarget.slice(1)));
     assert.deepEqual(trustedRapidValues, [...rapidTarget].map((_, index) => rapidTarget.slice(0, index + 1)),
       'each trusted input event must reach React with its own prefix');
     await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === '${rapidTarget}' && window.__modUiClientFixture.rapidInputSnapshot().rapidPostOrdinal === 1`, 'rapid local edits while first Host post is delayed');
@@ -643,6 +663,31 @@ async function main() {
     assert.equal(rapidInputRegression.clientFocused, true);
     assert.equal(rapidInputRegression.promptText, '');
     assert.equal(rapidInputRegression.mainPromptSubmitCount, 0);
+    milestone('rapid input and queued-handle race complete');
+
+    // If the reached element disappears while an earlier resize occupies the
+    // operation queue, the retired handle must never target another node.
+    await run(`window.__modUiClientFixture.emitRapidExternalValue('')`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`);
+    const beforeRemovedTarget = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    await run(`(() => { window.__modUiClientFixture.holdNextRapidResize();
+      const surface = document.querySelector('[data-client="rapid-input"]');
+      surface.style.width = Math.max(100, Math.floor(surface.getBoundingClientRect().width) - 80) + 'px'; })()`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidResizeHeld`);
+    await sendText('r');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().controlRequests.length === ${beforeRemovedTarget.controlRequests.length + 1}`);
+    await run(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    await run(`window.__modUiClientFixture.removeRapidInput()`);
+    await wait(`!document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')`);
+    await run(`window.__modUiClientFixture.releaseRapidResize(); new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    const afterRemovedTarget = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(afterRemovedTarget.runHeld.length, beforeRemovedTarget.runHeld.length,
+      'a removed target must not dispatch a retired or unrelated handle');
+    assert.deepEqual(afterRemovedTarget.rapidInputCallbacks, beforeRemovedTarget.rapidInputCallbacks);
+    await run(`window.__modUiClientFixture.restoreRapidInput('')`);
+    await wait(`Boolean(document.querySelector('[data-client="rapid-input"] .mod-ui-client-input'))`);
+    await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').focus()`);
+    milestone('removed target race complete');
 
     let callbackCount = rapidInputRegression.rapidInputCallbacks.length;
     await run(`window.__modUiClientFixture.setRapidInputMode('uppercase'); window.__modUiClientFixture.emitRapidExternalValue('')`);
@@ -688,9 +733,60 @@ async function main() {
     await run(`window.__modUiClientFixture.setRapidInputMode('identity'); window.__modUiClientFixture.emitRapidExternalValue(''); window.__modUiClientFixture.ignoreNextRapidRunAsStale()`);
     await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`);
     await sendText('z');
-    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidInputCallbacks.length === ${callbackCount} && document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`, 'stale dispatch releases the pending edit');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().retryLabel === 'Retry change'`);
+    const staleChange = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(staleChange.value, 'z', 'a noop must preserve the draft for explicit retry');
+    assert.equal(staleChange.rapidInputCallbacks.length, callbackCount, 'a noop must not be retried automatically');
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await run(`window.__modUiClientFixture.ignoreNextRapidRunAsStale()`);
+      const beforeAttempt = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+      await retryUnconfirmed('Retry change');
+      await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot();
+        return s.runHeld.length === ${beforeAttempt.runHeld.length + 1}
+          && document.querySelector('[data-client="rapid-input"] .mod-ui-client-input-retry')?.getAttribute('aria-busy') !== 'true'; })()`);
+      const afterAttempt = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+      assert.equal(afterAttempt.retryLabel, 'Retry change', 'each noop must stay unconfirmed');
+      assert.equal(afterAttempt.value, 'z');
+      assert.equal(afterAttempt.rapidInputCallbacks.length, callbackCount);
+    }
+    await retryUnconfirmed('Retry change');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().unconfirmedNotice === null`);
+    assert.deepEqual((await run(`window.__modUiClientFixture.rapidInputSnapshot()`)).rapidInputCallbacks.at(-1),
+      { kind: 'change', value: 'z' });
+    callbackCount += 1;
     await run(`window.__modUiClientFixture.emitRapidExternalValue('external-after-stale')`);
     await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === 'external-after-stale'`, 'external props apply after a stale dispatch');
+
+    // Older Hosts may return a noop after accepting a callback. A timeout can
+    // do the same. Neither outcome permits an automatic second invocation.
+    for (const outcome of ['old-noop', 'timeout-after-acceptance']) {
+      await run(`window.__modUiClientFixture.emitRapidExternalValue('')`);
+      await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`);
+      const beforeUnknown = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+      await sendText('o');
+      await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidOnInputCallbacks.length === ${beforeUnknown.rapidOnInputCallbacks.length + 1}`);
+      await run(outcome === 'old-noop' ? `window.__modUiClientFixture.oldHostNoopAfterNextSubmit()`
+        : `window.__modUiClientFixture.failAfterNextSubmit()`);
+      sendEnter();
+      await wait(`window.__modUiClientFixture.rapidInputSnapshot().retryLabel === 'Retry submit'`);
+      const unknown = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+      assert.equal(unknown.value, 'o');
+      assert.equal(unknown.originalSubmitValue, '"o"');
+      assert.match(unknown.unconfirmedNotice, /may already have run/i);
+      assert.equal(unknown.rapidOnSubmitCallbacks.length, beforeUnknown.rapidOnSubmitCallbacks.length + 1);
+      await delay(100);
+      assert.equal((await run(`window.__modUiClientFixture.rapidInputSnapshot()`)).runHeld.length, unknown.runHeld.length,
+        `${outcome} must not automatically replay an accepted submit`);
+      await assertUnconfirmedEnterBlocked();
+      await retryUnconfirmed('Retry submit');
+      await wait(`window.__modUiClientFixture.rapidInputSnapshot().unconfirmedNotice === null`);
+      const explicitRetry = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+      assert.equal(explicitRetry.rapidOnSubmitCallbacks.length, beforeUnknown.rapidOnSubmitCallbacks.length + 2,
+        'a retry occurs only after the user explicitly accepts the warning');
+      assert.deepEqual(explicitRetry.rapidInputCallbacks.at(-1), { kind: 'submit', value: 'o' });
+      callbackCount += 3;
+    }
+    milestone('noop, explicit retries, and ambiguous accepted results complete');
 
     // Inject a newer host frame after the old runHeld frame is accepted but
     // before its acknowledgement is consumed by the Input component.
@@ -764,6 +860,7 @@ async function main() {
     assert.equal(revisionRetry.runHeld.at(-1).revision, 201, 'an explicit retry must reach the new revision');
     assert.equal(revisionRetry.value, 'qr');
     assert.equal(revisionRetry.clientFocused, true, 'a completed retry must return focus to the input');
+    milestone('revision change and retry complete');
 
     // Advance the Host revision while deliberately holding React's parent
     // commit. A late control result in this window must not roll back the
@@ -958,6 +1055,7 @@ async function main() {
     assert.equal(completedRetrySubmit.value,
       testUnconfirmedEdit ? newerDraft : process.env.LINGXI_TEST_SKIP_OLD_ACK_RACE === '1' ? retryValue : 'newer-before-submit-ack',
       'the latest frame must not erase a separate newer draft');
+    milestone('uncertain submit and newer draft complete');
 
     // A submit can be older than a change already queued behind it. Losing
     // the older pending event at a revision boundary would offer Retry change
@@ -1060,6 +1158,28 @@ async function main() {
     const afterOwnerChange = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
     assert.equal(afterOwnerChange.runHeld.length, beforeOwnerChange.runHeld.length,
       'a late Native control result cannot start runHeld for a removed ParentSite');
+    await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').focus()`);
+
+    // This time Native has reached the target and runHeld is waiting behind a
+    // resize. Replacing the ParentSite must invalidate it before execution.
+    const beforeQueuedOwnerChange = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    await run(`(() => { window.__modUiClientFixture.holdNextRapidResize();
+      const surface = document.querySelector('[data-client="rapid-input"]');
+      surface.style.width = Math.max(100, Math.floor(surface.getBoundingClientRect().width) - 60) + 'px'; })()`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidResizeHeld`);
+    await sendText('u');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().controlRequests.length === ${beforeQueuedOwnerChange.controlRequests.length + 1}`);
+    await run(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    await run(`window.__modUiClientFixture.replaceRapidSite('rapid-input-queued-replacement')`);
+    await run(`window.__modUiClientFixture.releaseRapidResize()`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.readOnly === false
+      && window.__modUiClientFixture.calls.some(call => call.kind === 'operation' && call.request.type === 'draw_commit'
+        && call.request.instance_id === 'rapid-input-queued-replacement' && call.returnedRevision === ${beforeQueuedOwnerChange.rapidRevision})`);
+    await run(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    const afterQueuedOwnerChange = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(afterQueuedOwnerChange.runHeld.length, beforeQueuedOwnerChange.runHeld.length,
+      'a queued callback must not run after its ParentSite is replaced');
+    milestone('queued owner replacement complete');
     await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').focus()`);
 
     // A newer sequence from a different live runtime must never be accepted

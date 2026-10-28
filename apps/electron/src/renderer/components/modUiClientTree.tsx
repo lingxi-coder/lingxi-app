@@ -34,22 +34,30 @@ export type ModUiClientSurfaceEvent = NativeUiClientPressEventDto;
 export type NativeUiClientPressRequest = Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>;
 
 const nativeInputAckBrand = Symbol('native-input-ack');
-type NativeInputAck = { readonly [nativeInputAckBrand]: true; readonly value?: string };
+type NativeInputAck = {
+  readonly [nativeInputAckBrand]: true;
+  readonly value?: string;
+  readonly latestValue?: () => string | undefined | null;
+};
 
 /** Internal success result for Input dispatches; this never crosses the bridge. */
-export function createNativeInputAck(value: string | undefined): NativeInputAck {
-  return value === undefined
-    ? { [nativeInputAckBrand]: true }
-    : { [nativeInputAckBrand]: true, value };
+export function createNativeInputAck(value: string | undefined, latestValue?: () => string | undefined | null): NativeInputAck {
+  return {
+    [nativeInputAckBrand]: true,
+    ...(value === undefined ? {} : { value }),
+    ...(latestValue === undefined ? {} : { latestValue }),
+  };
 }
 
 /** Read only acknowledgements created by the local Host adapter. */
 export function readNativeInputAck(result: unknown): string | undefined | null {
   if (typeof result !== 'object' || result === null) return null;
-  const candidate = result as { [nativeInputAckBrand]?: unknown; value?: unknown };
+  const candidate = result as { [nativeInputAckBrand]?: unknown; value?: unknown; latestValue?: unknown };
   if (candidate[nativeInputAckBrand] !== true
-    || (candidate.value !== undefined && typeof candidate.value !== 'string')) return null;
-  return candidate.value as string | undefined;
+    || (candidate.value !== undefined && typeof candidate.value !== 'string')
+    || (candidate.latestValue !== undefined && typeof candidate.latestValue !== 'function')) return null;
+  const value = typeof candidate.latestValue === 'function' ? candidate.latestValue() : candidate.value;
+  return value === undefined || typeof value === 'string' ? value : null;
 }
 
 export interface ModUiClientPressRef {
@@ -140,6 +148,8 @@ export type ModUiSurfaceNode =
 
 export interface ModUiClientTreeProps {
   tree: unknown;
+  /** Changes whenever the Host accepts a new authoritative Client frame. */
+  inputFrameVersion?: string | number;
   site: ModUiRenderSite;
   client: ModUiClientIdentity;
   /** Native ui_client_press request dispatcher. Runtime policy/VM handoff stays outside React. */
@@ -494,9 +504,9 @@ class ClientSurfaceErrorBoundary extends Component<{
 }
 
 /** React renderer for the bounded JSON tree returned by the Harness Node VM. It never imports or evaluates Mod source. */
-export const ModUiClientTree = memo(function ModUiClientTree({ tree, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true }: ModUiClientTreeProps) {
+export const ModUiClientTree = memo(function ModUiClientTree({ tree, inputFrameVersion, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true }: ModUiClientTreeProps) {
   useI18n();
-  const body = React.createElement(ModUiClientTreeBody, { tree, site, client, onPress, onRunFault, interactionsEnabled });
+  const body = React.createElement(ModUiClientTreeBody, { tree, inputFrameVersion, site, client, onPress, onRunFault, interactionsEnabled });
   return React.createElement(ClientSurfaceErrorBoundary, {
     key: modUiClientSurfaceIdentityKey(site, client),
     onFault: onRenderFault,
@@ -504,7 +514,7 @@ export const ModUiClientTree = memo(function ModUiClientTree({ tree, site, clien
   });
 });
 
-const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, client, onPress, onRunFault, interactionsEnabled = true }: Omit<ModUiClientTreeProps, 'onRenderFault'>) {
+const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, inputFrameVersion, site, client, onPress, onRunFault, interactionsEnabled = true }: Omit<ModUiClientTreeProps, 'onRenderFault'>) {
   const parsed = parseModUiClientTree(tree, client.plugin);
   const lifecycle = useRef(0);
   const onPressRef = useRef(onPress);
@@ -538,12 +548,13 @@ const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, clie
   }, [site.component, site.instanceId, client.plugin, client.key, client.module, interactionsEnabled]);
 
   return <div className="mod-ui-client-surface" data-mod-client={client.key} data-mod-plugin={client.plugin} data-mod-module={client.module}>
-    {typeof parsed === 'string' ? parsed : <SurfaceNode node={parsed} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />}
+    {typeof parsed === 'string' ? parsed : <SurfaceNode node={parsed} inputFrameVersion={inputFrameVersion} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />}
   </div>;
 });
 
-const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnabled }: {
+const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, dispatch, interactionsEnabled }: {
   node: ModUiSurfaceNode;
+  inputFrameVersion?: string | number;
   dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown>;
   interactionsEnabled: boolean;
 }): ReactElement {
@@ -551,7 +562,7 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
   useI18n();
   const children = node.children?.map((child, index) => typeof child === 'string'
     ? child
-    : <SurfaceNode key={childKey(child, index)} node={child} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />);
+    : <SurfaceNode key={childKey(child, index)} node={child} inputFrameVersion={inputFrameVersion} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />);
   const style = node.type === 'Box' ? modUiBoxStyle(node.props)
     : node.type === 'Text' ? modUiTextStyle(node.props) : undefined;
 
@@ -575,7 +586,7 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
       return <button type="button" className="mod-ui-client-button" style={buttonStyle} autoFocus={autoFocus} disabled={!interactionsEnabled} aria-keyshortcuts={hotkey} aria-label={label} data-action={action} data-role={role} onClick={() => dispatch(node.press, key, { type: 'press' })}>{children?.length ? children : label}</button>;
     }
     case 'Input':
-      return <SurfaceInput node={node} dispatch={dispatch} disabled={!interactionsEnabled} />;
+      return <SurfaceInput node={node} inputFrameVersion={inputFrameVersion} dispatch={dispatch} disabled={!interactionsEnabled} />;
     case 'Select':
       return <SurfaceSelect node={node} dispatch={dispatch} disabled={!interactionsEnabled} />;
     case 'Link': {
@@ -597,8 +608,9 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
   }
 });
 
-const SurfaceInput = memo(function SurfaceInput({ node, dispatch, disabled }: {
+const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, dispatch, disabled }: {
   node: Extract<ModUiSurfaceNode, { type: 'Input' }>;
+  inputFrameVersion?: string | number;
   dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown>;
   disabled: boolean;
 }) {
@@ -610,10 +622,12 @@ const SurfaceInput = memo(function SurfaceInput({ node, dispatch, disabled }: {
   const editSequence = useRef(0);
   const localEditRef = useRef<{ sequence: number } | null>(null);
   valueRef.current = value;
+  // A newer frame can return to the same value before React commits the
+  // intermediate frames. Its version still makes that value authoritative.
   useEffect(() => {
     if (localEditRef.current || value === undefined) return;
     setDraft(value);
-  }, [key, value]);
+  }, [key, value, inputFrameVersion]);
   const dispatchInput = useCallback((kind: 'change' | 'submit', nextValue: string) => {
     const edit = { sequence: ++editSequence.current };
     localEditRef.current = edit;

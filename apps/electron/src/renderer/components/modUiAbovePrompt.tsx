@@ -730,7 +730,6 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
   const previousClientStateTokenRef = useRef<string | null>(clientStateToken);
   const runtimeEpochAvailable = runtimeEpoch !== null;
   currentRevisionRef.current = site?.renderRevision ?? null;
-  frameRef.current = frame;
   const lastHostRef = useRef<ModUiClientHostApi | null>(context?.host ?? null);
   const lastSessionIdRef = useRef<string | null>(context?.site.sessionId ?? null);
   if (context) {
@@ -946,7 +945,10 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
             void queueOperation(cleanup).catch(() => undefined);
             return;
           }
-          if (runtimeIdRef.current !== response.runtimeId) latestFrameSequenceRef.current = 0;
+          if (runtimeIdRef.current !== response.runtimeId) {
+            latestFrameSequenceRef.current = 0;
+            frameRef.current = null;
+          }
           runtimeIdRef.current = response.runtimeId;
           mountedRevisionRef.current = revision;
           previousPropsSignature.current = propsSignature;
@@ -1067,7 +1069,16 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
       // settled. Its Input value is authoritative even when it transforms or
       // clears the value that Native reached. An omitted value means the
       // Input is uncontrolled and the local draft should be preserved.
-      return createNativeInputAck(inputValueForElement(frameResult.tree, request.element, descriptor.plugin));
+      const acknowledgedValue = inputValueForElement(frameResult.tree, request.element, descriptor.plugin);
+      return createNativeInputAck(acknowledgedValue, () => {
+        if (runtimeIdRef.current !== runtimeAtStart || operationGeneration.current !== generation
+          || currentRevisionRef.current !== revision) return null;
+        const latest = frameRef.current;
+        if (latest?.renderRevision === revision && latest.frameSequence > frameResult.frameSequence) {
+          return inputValueForElement(latest.tree, request.element, descriptor.plugin);
+        }
+        return acknowledgedValue;
+      });
     } else {
       throw new Error('Client module host returned an invalid run frame');
     }
@@ -1087,6 +1098,7 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     {visibleFault || missingRuntimeEpoch ? <div className="mod-ui-client-fallback" role="status">{tr("desktop_ui_mod_unavailable")}</div>
       : frame && frame.renderRevision === site?.renderRevision ? <ModUiClientTree
         tree={frame.tree}
+        inputFrameVersion={`${runtimeId}:${frame.renderRevision}:${frame.frameSequence}`}
         site={{ component: site?.component ?? 'AbovePrompt', instanceId: site?.instanceId ?? '' }}
         client={descriptor}
         onPress={onPress}

@@ -1,8 +1,10 @@
 import { tr } from '../i18n/locale';
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
 import { scheduledTaskFromJob, type ScheduledCronJob } from '../bridge/scheduledTaskDraft';
 import { Icon } from './Icon';
+
+const useDialogLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
 export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, onConfirm, onRetry }: {
   title: string; jobs: ScheduledCronJob[]; loading: boolean; busy: boolean; error: string;
@@ -15,7 +17,10 @@ export function ArchiveChatDialog({ title, jobs, loading, busy, error, onClose, 
     dialog.current?.querySelector<HTMLButtonElement>('button')?.focus();
     return () => opener?.focus();
   }, []);
-  useEffect(() => { if (busy) dialog.current?.focus(); }, [busy]);
+  // Disabling the focused button can send focus to the document body. Move
+  // focus in the same commit, before a delayed passive effect or another
+  // keyboard event can escape the modal.
+  useDialogLayoutEffect(() => { if (busy) dialog.current?.focus(); }, [busy]);
   return <DesktopDialog ref={dialog} tabIndex={-1} title={jobs.length ? tr('desktop_archive_pause_title') : tr('desktop_archive_title')}
     ariaLabel={tr('desktop_archive_chat')} icon="archive" tone={jobs.length ? 'danger' : 'default'}
     onEscape={() => { if (!busy) onClose(); }} onKeyDown={(event) => {

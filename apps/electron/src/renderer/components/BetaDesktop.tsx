@@ -2994,9 +2994,29 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   };
 
   const focusPrompt = (range?: Range | null) => {
+    const editor = input.current;
+    if (!editor) return;
+    // A backgrounded window may defer this frame until after another edit,
+    // cursor move, or session switch. A live Range can also move when its
+    // original text nodes are removed, so retain the selection endpoints.
+    const session = draftSessionId.current;
+    const generation = imageDraftGeneration.current;
+    const revision = composerDraftRevision.current;
+    const focused = document.activeElement;
+    const selection = window.getSelection();
+    const selectionAtRequest = focused === editor && selection ? {
+      anchorNode: selection.anchorNode, anchorOffset: selection.anchorOffset,
+      focusNode: selection.focusNode, focusOffset: selection.focusOffset,
+    } : null;
     window.requestAnimationFrame(() => {
-      const editor = input.current;
-      if (!editor) return;
+      if (input.current !== editor || draftSessionId.current !== session
+        || imageDraftGeneration.current !== generation || composerDraftRevision.current !== revision) return;
+      if (selectionAtRequest) {
+        const current = window.getSelection();
+        if (document.activeElement !== editor || !current
+          || current.anchorNode !== selectionAtRequest.anchorNode || current.anchorOffset !== selectionAtRequest.anchorOffset
+          || current.focusNode !== selectionAtRequest.focusNode || current.focusOffset !== selectionAtRequest.focusOffset) return;
+      } else if (document.activeElement !== focused && document.activeElement !== document.body) return;
       editor.focus();
       applyEditorSelection(range ?? savedEditorSelection.current ?? editorSelection(editor));
     });

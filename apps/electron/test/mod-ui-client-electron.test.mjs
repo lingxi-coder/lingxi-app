@@ -27,7 +27,24 @@ test('Electron renders Native Client input and Select held events while keeping 
       cacheDir: viteCacheDir,
       configFile: false,
       logLevel: 'error',
-      plugins: [react()],
+      plugins: [{
+        name: 'mod-ui-ack-negative-control',
+        enforce: 'pre',
+        transform(source, id) {
+          if (process.env.LINGXI_TEST_DISABLE_ACK_FRESHNESS !== '1' || !id.endsWith('/modUiAbovePrompt.tsx')) return null;
+          const current = `return createNativeInputAck(acknowledgedValue, () => {
+        if (runtimeIdRef.current !== runtimeAtStart || operationGeneration.current !== generation
+          || currentRevisionRef.current !== revision) return null;
+        const latest = frameRef.current;
+        if (latest?.renderRevision === revision && latest.frameSequence > frameResult.frameSequence) {
+          return inputValueForElement(latest.tree, request.element, descriptor.plugin);
+        }
+        return acknowledgedValue;
+      });`;
+          assert.ok(source.includes(current), 'negative control must remove the Host acknowledgement freshness check');
+          return source.replace(current, 'return createNativeInputAck(acknowledgedValue);');
+        },
+      }, react()],
       resolve: {
         alias: { '@renderer': resolve(electronRoot, 'src/renderer') },
         dedupe: ['react', 'react-dom'],

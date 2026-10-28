@@ -1,0 +1,39 @@
+name: Electron interaction diagnostics
+on:
+  push:
+    branches: [codex/media-electron-interactions-9b8e]
+jobs:
+  interactions:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Install Xvfb
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Install and build shared SDK
+        working-directory: packages/bridge-client
+        run: |
+          npm ci
+          npm run build
+      - name: Install Desktop dependencies
+        working-directory: apps/electron
+        run: npm ci
+      - name: Run exact Electron interactions
+        working-directory: apps/electron
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests=(test/mod-ui-client-electron.test.mjs test/mod-ui-client-tree.test.ts test/archive-chat-interaction.test.mjs test/slash-argument-hint-interaction.test.mjs)
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            xvfb-run --auto-servernum node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 "${tests[@]}"
+          else
+            node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 "${tests[@]}"
+          fi

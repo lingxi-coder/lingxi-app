@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 import type { AllowedClientCommand } from '../../src/shared/clientCommands.js';
 import type {
   NativeUiControlRequest,
@@ -81,6 +82,7 @@ interface FixtureApi {
   ignoreNextRapidRunAsStale(): void;
   emitRapidExternalValue(value: string | undefined): void;
   rapidInputSnapshot(): unknown;
+  raceNextRapidAck(value: string): void;
 }
 
 type RapidInputMode = 'identity' | 'uppercase' | 'clear-on-submit' | 'uncontrolled';
@@ -144,6 +146,8 @@ const rapidInputCallbacks: Array<{ kind: string; value: string }> = [];
 const rapidButtonCallbacks: string[] = [];
 const rapidBackgroundPending: Array<{ ordinal: number; value: string | undefined }> = [];
 let rapidIgnoreNextRunAsStale = false;
+let rapidNextAckExternalValue: string | undefined;
+let rapidAckRaceFired = false;
 const statusMountCountsByEpoch = new Map<number, number>();
 let asyncFaultMountCount = 0;
 let nextLateRevision = 100;
@@ -471,6 +475,25 @@ const host: ModUiClientHostApi = {
         call.handled = false;
       }
       const frame = makeRuntimeFrame(request.runtimeId, request.render_revision, rapidSurfaceTree());
+      if (kind === 'input' && rapidNextAckExternalValue !== undefined) {
+        const nextValue = rapidNextAckExternalValue;
+        rapidNextAckExternalValue = undefined;
+        const tree = frame.tree;
+        let injected = false;
+        Object.defineProperty(frame, 'tree', {
+          enumerable: true,
+          get() {
+            if (!injected) {
+              injected = true;
+              queueMicrotask(() => {
+                flushSync(() => emitRapidBackgroundFrame(nextValue));
+                rapidAckRaceFired = true;
+              });
+            }
+            return tree;
+          },
+        });
+      }
       call.returnedRevision = frame.renderRevision;
       call.returnedFrameSequence = frame.frameSequence;
       return frame as UiClientOperationResponseFor<T>;
@@ -553,6 +576,7 @@ function Fixture() {
 
 window.__modUiClientFixture = {
   calls,
+  raceNextRapidAck(value) { rapidAckRaceFired = false; rapidNextAckExternalValue = value; },
   startRapidInputScenario(mode = 'identity') { rapidInputMode = mode; setRapidInputEnabled(true); },
   setRapidInputMode(mode) { rapidInputMode = mode; },
   holdRapidPostAt(ordinal) { rapidHeldPostOrdinals.add(ordinal); },
@@ -572,6 +596,7 @@ window.__modUiClientFixture = {
       mainPromptSubmitCount,
       rapidControlOrdinal,
       rapidPostOrdinal,
+      rapidAckRaceFired,
       rapidInputValue,
       rapidPropValue,
       rapidBackgroundPending: [...rapidBackgroundPending],

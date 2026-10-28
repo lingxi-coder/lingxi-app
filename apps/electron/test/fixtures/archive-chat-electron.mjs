@@ -45,7 +45,25 @@ async function main() {
     await wait(`!${dialog}`);
     result.escapeRestored = await run('document.activeElement === document.querySelector("#opener")');
     await open();
+    // Observe the actual disabled-attribute commit, before a later passive
+    // React effect or test-side delay can move focus back into the dialog.
+    await run(`(() => {
+      const target = ${dialog};
+      window.__busyFocusAtDisable = [];
+      window.__busyFocusObserver = new MutationObserver(() => {
+        const buttons = [...target.querySelectorAll('button')];
+        if (buttons.length && buttons.every(button => button.disabled)) {
+          window.__busyFocusAtDisable.push({
+            contained: document.activeElement === target,
+            active: document.activeElement?.outerHTML?.slice(0, 180) ?? null,
+          });
+        }
+      });
+      window.__busyFocusObserver.observe(target, { subtree: true, attributes: true, attributeFilter: ['disabled'] });
+    })()`);
     await configure({ busy: true });
+    result.busyFocusAtDisable = await run(`window.__busyFocusAtDisable`);
+    await run(`window.__busyFocusObserver.disconnect()`);
     result.busyFocusContained = await run(`document.activeElement === ${dialog}`);
     result.busyTabPrevented = await run(`!${dialog}.dispatchEvent(new KeyboardEvent('keydown', {key:'Tab', bubbles:true, cancelable:true}))`);
     result.busyAllDisabled = await run(`[...${dialog}.querySelectorAll('button')].every(button => button.disabled)`);

@@ -98,6 +98,7 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
         const [revision, setRevision] = React.useState(1);
         const [siteId, setSiteId] = React.useState('site-one');
         const [module, setModule] = React.useState('surface.tsx');
+        const [inputFrameVersion, setInputFrameVersion] = React.useState(1);
         const capturedInput = React.useRef(null);
         const adapterCalls = React.useRef([]);
         const identityQueueStart = React.useRef(0);
@@ -158,11 +159,12 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
             current.dispatchEvent(new Event('input', { bubbles: true }));
           },
           bumpParentRevision() { setRevision((current) => current + 1); },
+          reemitControlledValue() { setInputFrameVersion((current) => current + 1); },
           changeSite() { setSiteId('site-two'); },
           changeClient() { setModule('surface-two.tsx'); },
         };
         return <Theme.Provider value={tokens(false)}>
-          <ModUiClientTree tree={tree} site={site} client={client} onPress={onPress} />
+          <ModUiClientTree tree={tree} inputFrameVersion={inputFrameVersion} site={site} client={client} onPress={onPress} />
         </Theme.Provider>;
       }
 
@@ -194,6 +196,13 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
           await wait('window.__modUiClientRevisionRegression.snapshot().revision === 2');
           const parentRevision = await run('window.__modUiClientRevisionRegression.snapshot()');
 
+          // The Host can commit a later frame whose controlled value equals
+          // the previously committed prop after intermediate frames were
+          // batched away. The new frame still supersedes the local draft.
+          await run('window.__modUiClientRevisionRegression.reemitControlledValue()');
+          await wait("window.__modUiClientRevisionRegression.snapshot().value === 'seed'");
+          const repeatedControlledValue = await run('window.__modUiClientRevisionRegression.snapshot()');
+
           await run('window.__modUiClientRevisionRegression.captureInput(); window.__modUiClientRevisionRegression.changeSite()');
           await wait("window.__modUiClientRevisionRegression.snapshot().siteId === 'site-two'");
           const siteChange = await run('window.__modUiClientRevisionRegression.snapshot()');
@@ -207,7 +216,7 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
           const clientChange = await run('window.__modUiClientRevisionRegression.snapshot()');
           await run('window.__modUiClientRevisionRegression.releaseFirstAdapter(); new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
           const identityQueue = await run('window.__modUiClientRevisionRegression.identityQueueSnapshot()');
-          console.log(JSON.stringify({ parentRevision, siteChange, clientChange, identityQueue }));
+          console.log(JSON.stringify({ parentRevision, repeatedControlledValue, siteChange, clientChange, identityQueue }));
         } finally {
           window.destroy();
           await app.quit();
@@ -222,7 +231,16 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
       cacheDir: join(tempRoot, 'vite-cache'),
       configFile: false,
       logLevel: 'error',
-      plugins: [reactPlugin()],
+      plugins: [{
+        name: 'input-frame-negative-control',
+        enforce: 'pre',
+        transform(source, id) {
+          if (process.env.LINGXI_TEST_DISABLE_INPUT_FRAME !== '1' || !id.endsWith('/modUiClientTree.tsx')) return null;
+          const frameDependency = '}, [key, value, inputFrameVersion]);';
+          assert.ok(source.includes(frameDependency), 'negative control must remove the frame sequence dependency');
+          return source.replace(frameDependency, '}, [key, value]);');
+        },
+      }, reactPlugin()],
       resolve: {
         alias: [
           { find: 'react-dom/client', replacement: resolve(electronRoot, 'node_modules/react-dom/client.js') },
@@ -247,7 +265,7 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
     });
     child.stdout.on('data', (chunk: Buffer | string) => output.push(String(chunk)));
     child.stderr.on('data', (chunk: Buffer | string) => errors.push(String(chunk)));
-    const result = await new Promise<{ parentRevision: { revision: number; siteId: string; module: string; value: string; focused: boolean; sameNode: boolean }; siteChange: { revision: number; siteId: string; module: string; value: string; focused: boolean; sameNode: boolean }; clientChange: { revision: number; siteId: string; module: string; value: string; focused: boolean; sameNode: boolean }; identityQueue: { calls: Array<{ module: string }>; firstAdapterPending: boolean } }>((resolveResult, rejectResult) => {
+    const result = await new Promise<{ parentRevision: { revision: number; siteId: string; module: string; value: string; focused: boolean; sameNode: boolean }; repeatedControlledValue: { revision: number; siteId: string; module: string; value: string; focused: boolean; sameNode: boolean }; siteChange: { revision: number; siteId: string; module: string; value: string; focused: boolean; sameNode: boolean }; clientChange: { revision: number; siteId: string; module: string; value: string; focused: boolean; sameNode: boolean }; identityQueue: { calls: Array<{ module: string }>; firstAdapterPending: boolean } }>((resolveResult, rejectResult) => {
       const timeout = setTimeout(() => {
         child?.kill('SIGTERM');
         rejectResult(new Error(`Electron Client revision fixture timed out\n${errors.join('')}`));
@@ -267,6 +285,9 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
 
     assert.deepEqual(result.parentRevision, {
       revision: 2, siteId: 'site-one', module: 'surface.tsx', value: 'revision-draft', focused: true, sameNode: true,
+    });
+    assert.deepEqual(result.repeatedControlledValue, {
+      revision: 2, siteId: 'site-one', module: 'surface.tsx', value: 'seed', focused: true, sameNode: true,
     });
     assert.deepEqual(result.siteChange, {
       revision: 2, siteId: 'site-two', module: 'surface.tsx', value: 'seed', focused: false, sameNode: false,

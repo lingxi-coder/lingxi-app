@@ -1,7 +1,7 @@
 name: macOS staged media strip diagnostic
 on:
   push:
-    branches: [codex/media-macos-strip-diagnostic-20261028]
+    branches: [codex/media-macos-strip-diagnostic-v3-20261028]
 jobs:
   staged-media:
     strategy:
@@ -24,11 +24,16 @@ jobs:
           npm run build
       - name: Install Desktop dependencies
         working-directory: apps/electron
-        run: npm ci
+        run: |
+          npm ci
+          node node_modules/electron/install.js
+          test -f node_modules/electron/dist/Electron.app/Contents/MacOS/Electron
       - name: Test macOS packaging
+        id: packaging
         working-directory: apps/electron
         run: node --test test/gstreamer-macos.test.mjs test/packaging.test.mjs
       - name: Stage and exercise real SDK media runtime
+        if: ${{ !cancelled() && steps.packaging.outcome != 'skipped' }}
         working-directory: apps/electron
         shell: bash
         run: |

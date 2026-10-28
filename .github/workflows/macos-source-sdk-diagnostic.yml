@@ -1,0 +1,113 @@
+name: macOS Cerbero source SDK diagnostic
+on:
+  push:
+    branches: [codex/media-macos-source-sdk-diagnostic-20261028]
+jobs:
+  source-sdk:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: GStreamer/cerbero
+          ref: 6fab30afc5d71596a72f878727232da3d4bcf44d
+          path: upstream-cerbero
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Configure isolated fixed-prefix upstream build
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/opt/lingxi-cerbero-ci
+          test ! -e "$root"
+          available_kb=$(df -Pk /opt | awk 'NR==2 {print $4}')
+          if [ "$available_kb" -lt 12582912 ]; then echo 'insufficient hosted runner space for source SDK' >&2; exit 1; fi
+          sudo mkdir "$root"
+          sudo chown "$(id -u):$(id -g)" "$root"
+          printf "home_dir = '%s'\n" "$root" > "$RUNNER_TEMP/lingxi-cerbero.cbc"
+          case "$(uname -m)" in
+            arm64) target=arm64 ;;
+            x86_64) target=x86-64 ;;
+            *) echo 'unsupported runner architecture' >&2; exit 1 ;;
+          esac
+          echo "CERBERO_CONFIG=config/cross-macos-$target.cbc" >> "$GITHUB_ENV"
+          echo "CERBERO_BUILD_ROOT=$root" >> "$GITHUB_ENV"
+      - name: Bootstrap pinned upstream Cerbero
+        working-directory: upstream-cerbero
+        run: ./cerbero-uninstalled --non-interactive -c "$CERBERO_CONFIG" -c "$RUNNER_TEMP/lingxi-cerbero.cbc" -v norust bootstrap
+      - name: Build GStreamer and required audio-video plugin recipes
+        working-directory: upstream-cerbero
+        run: ./cerbero-uninstalled --non-interactive -c "$CERBERO_CONFIG" -c "$RUNNER_TEMP/lingxi-cerbero.cbc" -v norust build --jobs 2 gst-plugins-base-1.0 gst-plugins-good-1.0
+      - name: Export exactly one built SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib
+          root=pathlib.Path(os.environ['CERBERO_BUILD_ROOT'])
+          found=list(root.glob('dist/*/lib/pkgconfig/gstreamer-1.0.pc'))
+          if len(found)!=1: raise SystemExit(f'expected exactly one built GStreamer SDK, found {len(found)}')
+          sdk=found[0].parent.parent.parent
+          with open(os.environ['GITHUB_ENV'],'a') as f:
+              f.write(f'LINGXI_GSTREAMER_SDK_MACOS={sdk}\nPKG_CONFIG_LIBDIR={sdk}/lib/pkgconfig\nPKG_CONFIG_PATH=\n')
+          with open(os.environ['GITHUB_PATH'],'a') as f: f.write(f'{root}/build-tools/bin\n')
+          PY
+      - name: Verify upstream SDK version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(pkg-config --modversion gstreamer-1.0)" = 1.28.8
+      - name: Install shared SDK
+        working-directory: packages/bridge-client
+        run: |
+          npm ci
+          npm run build
+      - name: Install Desktop dependencies
+        working-directory: apps/electron
+        run: |
+          npm ci
+          node node_modules/electron/install.js
+      - name: Exercise packaged media and unchanged content scan
+        working-directory: apps/electron
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { stageMacGStreamerRuntime, signMacGStreamerRuntime, verifyMacGStreamerRuntime } from './scripts/gstreamer-macos.mjs';
+          import { runPackagedMacMediaProbe } from './scripts/packaged-sidecar-smoke.mjs';
+          import { scanTreeForForbiddenContent } from './scripts/package-support.mjs';
+          const work = join(realpathSync(process.env.RUNNER_TEMP), 'cerbero-media-diagnostic');
+          const sdk = realpathSync(process.env.LINGXI_GSTREAMER_SDK_MACOS);
+          const app = join(work, 'Fixture.app');
+          const frameworks = join(app, 'Contents', 'Frameworks');
+          const resources = join(app, 'Contents', 'Resources');
+          const staged = join(resources, 'bin', 'bridge-server');
+          mkdirSync(frameworks, { recursive: true });
+          for (const name of ['home', 'tmp', 'appdata', 'localappdata']) mkdirSync(join(work, name), { recursive: true });
+          const source = join(work, 'source-probe');
+          const arch = process.arch === 'x64' ? 'x86_64' : 'arm64';
+          const flags = execFileSync('pkg-config', ['--cflags', '--libs', 'gstreamer-1.0'], { encoding: 'utf8' }).trim().split(/\s+/);
+          execFileSync('/usr/bin/clang', ['-arch', arch, '-Wl,-headerpad_max_install_names', `-Wl,-rpath,${join(sdk, 'lib')}`, './scripts/packaged-macos-media-probe.c', ...flags, '-o', source], { stdio: 'inherit' });
+          const prepared = stageMacGStreamerRuntime(source, staged, frameworks, arch, work);
+          if (!prepared.bundled) throw new Error('expected source SDK to be bundled');
+          signMacGStreamerRuntime(frameworks);
+          execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', staged], { stdio: 'inherit' });
+          verifyMacGStreamerRuntime(frameworks, staged, { expectedArch: arch, appRoot: app });
+          runPackagedMacMediaProbe(resources, work, process.arch);
+          console.log('source SDK production packaged-media probe passed');
+          const buildPrefix = Buffer.from(process.env.CERBERO_BUILD_ROOT);
+          const retained = ['GStreamerLibraries', 'GStreamerPlugins'].flatMap(dir => readdirSync(join(frameworks, dir)).filter(name => readFileSync(join(frameworks, dir, name)).includes(buildPrefix)).map(name => `${dir}/${name}`));
+          console.log(`staged binaries containing source build prefix: ${retained.length}`);
+          scanTreeForForbiddenContent(app);
+          console.log('unchanged package content scan passed');
+          if (retained.length) throw new Error('source SDK retains build-prefix strings; runtime relocation requires review');
+          JS

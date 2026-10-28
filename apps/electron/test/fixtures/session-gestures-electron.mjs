@@ -240,7 +240,42 @@ async function main() {
     await wait(`window.sessionGesturesFixture.sessions.find(session => session.uuid === 'gamma')?.modified_rfc3339 === '2026-09-23T00:00:00Z'`);
     assert.equal(await run(`window.sessionGesturesFixture.sessions.find(session => session.uuid === 'gamma').modified_rfc3339`), '2026-09-23T00:00:00Z', 'drag updates session timestamp');
     assert.deepEqual(await opened(), ['alpha'], 'drag does not open a session');
-    await click('gamma');
+    inputPhase = 'immediate gamma click after drag';
+    await run(`(() => {
+      window.fixtureAfterDragClick = [];
+      for (const type of ['pointerdown', 'pointerup', 'click']) document.addEventListener(type, event => {
+        const target = event.target instanceof Element ? event.target.closest('[data-session-id]') : null;
+        window.fixtureAfterDragClick.push({ type: event.type, trusted: event.isTrusted, sessionId: target?.dataset.sessionId ?? null });
+      }, { capture: true, once: true });
+    })()`);
+    // Measure and hit-test in the same renderer turn. A sortable row can move
+    // between separate geometry calls while the drop animation is running.
+    const postDragPointExpression = `(() => {
+      const button = ${selector('gamma')};
+      if (!button) return null;
+      const rect = button.getBoundingClientRect();
+      const point = { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+      return document.elementFromPoint(point.x, point.y)?.closest('[data-session-id]') === button ? point : null;
+    })()`;
+    let postDragPoint = null;
+    const postDragDeadline = Date.now() + 6000;
+    while (!postDragPoint && Date.now() < postDragDeadline) {
+      postDragPoint = await run(postDragPointExpression);
+      if (!postDragPoint) await delay(20);
+    }
+    if (!postDragPoint) throw new Error(`Timed out finding post-drag gamma click target\ndiagnostics=${JSON.stringify(await diagnosticSnapshot())}`);
+    // Do not pause between choosing the target and sending the click: the row
+    // can move during that pause. Keep the real native pointer events and
+    // verify their delivered targets below.
+    sendInput('mouseMove', postDragPoint);
+    sendInput('mouseDown', postDragPoint, { button: 'left', clickCount: 1 });
+    sendInput('mouseUp', postDragPoint, { button: 'left', clickCount: 1 });
+    await wait('window.fixtureAfterDragClick.length === 3');
+    assert.deepEqual(await run('window.fixtureAfterDragClick'), [
+      { type: 'pointerdown', trusted: true, sessionId: 'gamma' },
+      { type: 'pointerup', trusted: true, sessionId: 'gamma' },
+      { type: 'click', trusted: true, sessionId: 'gamma' },
+    ], 'post-drag click uses trusted pointer events on gamma');
     assert.deepEqual(await opened(), ['alpha', 'gamma'], 'click works immediately after drag');
     await focusForInput('gamma same-row drag');
     // The first drag animates rows into their new positions. Their visible

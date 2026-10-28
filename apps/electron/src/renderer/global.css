@@ -15,6 +15,7 @@
 @import './components/settings/pages/Hooks.css';
 @import './components/ErrorBanner.css';
 @import './components/settings/pages/Notifications.css';
+@import './components/DesktopUpdateReminder.css';
 
 :root {
   --conversation-width: 820px;

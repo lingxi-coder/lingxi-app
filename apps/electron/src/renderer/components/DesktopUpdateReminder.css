@@ -1,0 +1,73 @@
+.desktop-update-reminder { position: relative; flex: 0 0 auto; margin-top: 8px; }
+.desktop-update-trigger {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: #347fff;
+  color: #fff;
+  cursor: pointer;
+  transition: background-color 130ms ease, scale 130ms ease;
+}
+.desktop-update-trigger:hover { background: #246ee8; }
+.desktop-update-trigger:active { scale: .96; }
+.desktop-update-reminder button:focus-visible { outline: 2px solid #347fff; outline-offset: 3px; }
+.desktop-update-trigger:focus-visible { outline-color: var(--update-text); }
+.desktop-update-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.desktop-update-popover {
+  position: absolute;
+  z-index: 20;
+  bottom: 0;
+  left: calc(100% + 12px);
+  width: 300px;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--update-window);
+  color: var(--update-text);
+  box-shadow: 0 0 0 .5px var(--update-border), 0 8px 28px rgba(0, 0, 0, .18);
+}
+.desktop-update-popover h2 { padding-right: 28px; font-size: 15px; font-weight: 650; }
+.desktop-update-popover p { margin-top: 8px; color: var(--update-text-2); line-height: 1.6; text-wrap: pretty; }
+.desktop-update-popover .desktop-update-version { color: var(--update-text); font-size: 13px; font-weight: 550; font-variant-numeric: tabular-nums; }
+.desktop-update-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--update-text-2);
+  cursor: pointer;
+}
+.desktop-update-close:hover { background: var(--update-hover); }
+.desktop-update-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.desktop-update-actions button {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--update-hover);
+  color: var(--update-text);
+  font: inherit;
+  cursor: pointer;
+}
+.desktop-update-actions .desktop-update-download { background: #347fff; color: #fff; }
+.desktop-update-actions button:disabled { opacity: .6; cursor: default; }
+.desktop-update-popover .desktop-update-error { color: var(--update-danger); }
+@media (prefers-reduced-motion: reduce) {
+  .desktop-update-trigger { transition: none; }
+}

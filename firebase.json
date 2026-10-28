@@ -57,6 +57,12 @@
     ],
     "headers": [
       {
+        "source": "/desktop-updates.json",
+        "headers": [
+          { "key": "Cache-Control", "value": "public,max-age=300" }
+        ]
+      },
+      {
         "source": "**",
         "headers": [
           {

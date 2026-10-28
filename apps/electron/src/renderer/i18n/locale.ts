@@ -12,6 +12,7 @@ import { settingsCatalog } from './settingsCatalog';
 import { shellCatalog } from './shellCatalog';
 import { uiCatalog } from './uiCatalog';
 import { voiceSettingsCatalog } from './voiceSettingsCatalog';
+import { updateCatalog } from './updateCatalog';
 import hans from '../../../../../resources/translations/zh-Hans.json';
 import hant from '../../../../../resources/translations/zh-Hant.json';
 import en from '../../../../../resources/translations/en.json';
@@ -23,7 +24,7 @@ export type DesktopLocale = typeof DESKTOP_LOCALES[number];
 export type LanguagePreference = DesktopLocale | '';
 export const LANGUAGE_STORAGE_KEY = 'lingxi.desktop.language';
 const catalogs: Record<DesktopLocale, Record<string, unknown>> = { 'zh-Hans': hans, 'zh-Hant': hant, en, ja, ko };
-const extraCatalog = { ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...voiceSettingsCatalog };
+const extraCatalog = { ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...voiceSettingsCatalog, ...updateCatalog };
 
 export function matchLocale(tag: string): DesktopLocale | null {
   const parts = tag.replace(/_/g, '-').toLowerCase().split('-');

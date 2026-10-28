@@ -105,6 +105,7 @@ import { RenameSessionDialog } from './RenameSessionDialog';
 import type { ScheduledCronJob } from '../bridge/scheduledTaskDraft';
 import { Icon } from './Icon';
 import { GitChangesButton } from './GitReview';
+import { DesktopUpdateReminder } from './DesktopUpdateReminder';
 import { commandPaletteColor } from './commandPaletteIcons';
 import { CommandIcon } from './CommandIdentity';
 import { parseSlashCommandPrefix } from './slashCommandMessage';
@@ -815,6 +816,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         <span className="desktop-rail-divider" aria-hidden="true" />
         <GitChangesButton active={changes} />
         <button type="button" className="desktop-rail-button desktop-rail-settings" aria-label={tr('settings_title_main')} title={tr('settings_title_main')} onClick={onOpenSettings}><Icon name="cog" size={20} stroke={1.7} /></button>
+        <DesktopUpdateReminder />
       </nav>
     <div className="desktop-surface">
     <aside

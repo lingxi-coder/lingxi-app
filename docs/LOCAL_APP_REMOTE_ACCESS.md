@@ -68,6 +68,11 @@ Backend forwarding headers come from the validated browser session origin.
 Absolute redirects to the registered service's loopback address are rewritten
 to that origin, retaining a named-service prefix where applicable. Intentional
 external redirects and other local ports are not proxied or rewritten.
+Root-relative redirects from named services also retain their service prefix.
+Their cookies use the corresponding `/__services/<name>` path, including a
+mapped default path. A named service cannot set `__Host-` cookies, whose required
+root path would break service scoping. Top-level application cookies retain
+normal browser semantics.
 
 The browser adapter provides `localApp.info`, the existing AG-UI Agent surface,
 service URL helpers and browser file selection. Native process execution, native
@@ -101,6 +106,10 @@ Supported compressed backend responses carry headers for their decoded body.
 Range requests ask the backend for identity encoding; a backend that ignores
 this and sends a compressed partial response receives a 502 response, since its
 encoded byte offsets cannot be preserved after automatic decompression.
+HTML partial responses are forwarded without script injection. Full HTML
+injection removes validators/digests for the unmodified upstream body. HEAD
+retains a correct length for unchanged representations and omits upstream
+lengths for injected HTML or decoded compression.
 
 Trusted optional ICE configuration is provided as JSON in
 `LINGXI_LOCAL_APP_ICE_SERVERS`, for example an array containing a STUN entry and
@@ -171,6 +180,11 @@ Then enable Remote Control, pair the phone/browser, and enable **Allow access
 from paired devices** on the desired Desktop application. On Mobile or Web,
 open the connected computer's Apps catalog, refresh and select the app. Sharing
 can be withdrawn from Desktop independently of background execution.
+The remote catalog supports up to 256 shared applications. Enabling another
+share at the limit gives an explicit error; deleting applications releases
+their slots. Per-app and per-device withdrawal affects only its own grants.
+An unsuccessful new opening clears its new ticket while preserving browser
+sessions already in use during ordinary signaling loss.
 
 For local browser tests only, an `http://{appId}-{sessionId}.localhost:<port>`
 origin is accepted. Production remote clients require HTTPS. Browser access

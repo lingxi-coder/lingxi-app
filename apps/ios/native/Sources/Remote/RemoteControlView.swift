@@ -175,6 +175,7 @@ private struct RemoteAppsSection: View {
     @State private var error: String?
     @State private var browser: LocalAppBrowserTicket?
     @State private var request: UInt64 = 0
+    @State private var listRequest: UInt64 = 0
 
     var body: some View {
         Section {
@@ -224,15 +225,16 @@ private struct RemoteAppsSection: View {
     }
 
     private func refresh() async {
-        request &+= 1
+        listRequest &+= 1
         let mine = request
+        let list = listRequest
         loading = true; error = nil
         do {
             let result = try await manager.listApps(hostID: hostID)
-            guard !Task.isCancelled, mine == request else { return }
+            guard !Task.isCancelled, mine == request, list == listRequest else { return }
             apps = result; loading = false
         } catch {
-            guard !Task.isCancelled, mine == request else { return }
+            guard !Task.isCancelled, mine == request, list == listRequest else { return }
             apps = []; loading = false; self.error = String(localized: "remote_apps_load_error")
         }
     }

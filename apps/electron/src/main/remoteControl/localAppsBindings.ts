@@ -3,14 +3,14 @@ import type { LocalAppHost } from '../local-apps/host.js';
 import type { RemoteViewer } from './gateway.js';
 import type { RemoteLocalAppsDelegate } from './localAppsGateway.js';
 
-type Host = Pick<LocalAppHost, 'remoteList' | 'remoteOpen' | 'remoteRevokeOwner' | 'remoteRevokeAll'>;
+type Host = Pick<LocalAppHost, 'remoteList' | 'remoteOpen' | 'remoteRevokeTicket' | 'remoteRevokeAll'>;
 export interface RemoteLocalAppsBindings {
   host(): Host | null;
   accountUid(): string | undefined;
   hostId(): string | undefined;
   active(): boolean;
   /** Advances whenever account, policy or device approval changes. */
-  generation(): number;
+  generation(viewer: RemoteViewer): number | string;
   approvedDevice(deviceId: string): boolean;
 }
 const clean = (value: string, max: number): string => value.replace(/[\u0000-\u001f\u007f]/gu, '').slice(0, max);
@@ -28,19 +28,19 @@ export function createRemoteLocalAppsDelegate(bindings: RemoteLocalAppsBindings)
   return {
     async list(viewer): Promise<RemoteLocalApp[]> {
       const host = scoped(viewer);
-      const generation = bindings.generation();
+      const generation = bindings.generation(viewer);
       const rows = await host.remoteList();
-      if (generation !== bindings.generation()) throw new RemoteRpcError('not_approved', 'remote app access changed');
+      if (generation !== bindings.generation(viewer)) throw new RemoteRpcError('not_approved', 'remote app access changed');
       scoped(viewer, host);
       return rows.map(row => ({ app_id: row.id, name: clean(row.name, 256) || 'App', summary: clean(row.summary, 4096),
         revision: row.revision, phase: row.phase, background: row.background, execution_host: 'desktop', remote_enabled: true }));
     },
     async open(viewer, appId) {
       const host = scoped(viewer);
-      const generation = bindings.generation();
+      const generation = bindings.generation(viewer);
       const owner = { accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id };
       const result = await host.remoteOpen(appId, owner);
-      try { if (generation !== bindings.generation()) throw new RemoteRpcError('not_approved', 'remote app access changed'); scoped(viewer, host); } catch (error) { host.remoteRevokeOwner(owner); throw error; }
+      try { if (generation !== bindings.generation(viewer)) throw new RemoteRpcError('not_approved', 'remote app access changed'); scoped(viewer, host); } catch (error) { host.remoteRevokeTicket(result.url); throw error; }
       return result;
     },
     viewerClosed() {}, // External browser sessions survive control transport loss.

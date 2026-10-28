@@ -4,7 +4,6 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { runInNewContext } from 'node:vm';
 import { build } from 'esbuild';
 import { createServer } from 'node:http';
 
@@ -16,18 +15,27 @@ const model = { providerId:'p', modelId:'m', label:'Model', canSelect:true, supp
 
 async function fixture(t: { after(fn: () => Promise<void>): void }, launchTimeoutMs?: number) {
   const root = await fs.mkdtemp(join(tmpdir(),'remote-app-host-'));
-  let windowCount = 0, running = false, revision = 1, runId = 'run-one', liveSession = false, honorAbort = true;
+  let windowCount = 0, running = false, revision = 1, runId = 'run-one', liveSession = false, honorAbort = true, ended = 0;
   let startHook = async (_signal?: AbortSignal) => {};
-  const electron = { BrowserWindow: class { constructor() { windowCount++; } }, ipcMain:{removeHandler(){}}, dialog:{showMessageBox:async()=>({response:1})} };
+  const electron = { BrowserWindow: class {
+    private closed?:()=>void;private destroyed=false;
+    webContents={id:17,on(){},setWindowOpenHandler(){}};
+    constructor(){windowCount++;}isDestroyed(){return this.destroyed;}on(name:string,fn:()=>void){if(name==='closed')this.closed=fn;}
+    destroy(){this.destroyed=true;this.closed?.();}async loadURL(){throw new Error('load failed');}show(){}focus(){}
+  }, ipcMain:{removeHandler(){}}, session:{fromPartition:()=>({flushStorageData(){}})}, dialog:{showMessageBox:async()=>({response:1})} };
   const module = { exports: {} };
   const hostSetTimeout = (fn: () => void, ms: number) => {
     const timer = setTimeout(fn, ms === 900_000 && launchTimeoutMs !== undefined ? launchTimeoutMs : ms);
     if (ms === 900_000 && launchTimeoutMs !== undefined) timer.unref = () => timer;
     return timer;
   };
-  runInNewContext((await bundledHost).outputFiles[0]!.text, { module, exports:module.exports, require:(name:string)=>name === 'electron' ? electron : require(name), Buffer,process,console,structuredClone,URL,Request,Response,Headers,fetch,AbortController,AbortSignal,setTimeout:hostSetTimeout,clearTimeout });
+  // Keep Node fetch, streams and promise async contexts in the same realm as
+  // node:test. A separate vm realm can trip Node's native async_id assertion
+  // when real HTTP responses settle while a test is tearing down.
+  const load = new Function('module','exports','require','setTimeout','clearTimeout',(await bundledHost).outputFiles[0]!.text);
+  load(module,module.exports,(name:string)=>name === 'electron' ? electron : require(name),hostSetTimeout,clearTimeout);
   const LocalAppHost = (module.exports as any).LocalAppHost;
-  const host = new LocalAppHost({core:{onDisconnected(){}},configHome:root,preload:'/unused',mainWindow:()=>undefined,edit:async()=>{},agentCatalog:async()=>({models:[model],tools:[],skills:[]})});
+  const host = new LocalAppHost({core:{onDisconnected(){}},configHome:root,onRemoteAccessEnded:()=>{ended++;},preload:'/unused',mainWindow:()=>undefined,edit:async()=>{},agentCatalog:async()=>({models:[model],tools:[],skills:[]})});
   const row:any = {id,name:'Remote app',summary:'',revision:1,currentRevision:1,releaseDigest:'d'.repeat(64),background:false,grants:['agent'],phase:'stopped',manifest:{schema:2,targets:[],name:'Remote app',entry:{type:'static',path:'index.html'},capabilities:['agent'],agent:{tools:[],skills:[]}},agent:{enabled:true,model,tools:[],skills:[],background:false,maxTurns:5,timeoutMs:10000}};
   const store:any = {root, get:async()=>structuredClone(row), getRevision:async()=>structuredClone(row), list:async()=>[structuredClone(row)], save:async(value:any)=>{Object.assign(row,structuredClone(value));}, assertTarget:async()=>{}, revisionPath:()=>root, core:{request:async()=>({digest:row.releaseDigest,files:[]})}, publish:async()=>{row.revision++;row.currentRevision=row.revision;return structuredClone(row);} };
   host.store = store;
@@ -37,11 +45,11 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, launchTimeou
     start:async(_id:string,_repair:boolean,signal?:AbortSignal)=>{await startHook(signal);if(honorAbort)signal?.throwIfAborted(); running=true;revision=row.revision;}, stop:async()=>{running=false;},exclusive:async(_id:string,fn:()=>Promise<unknown>)=>fn()};
   host.runtime=runtime;
   const gateway:any = {open:async(run:any,requestedOwner:any)=>{assert.equal(requestedOwner.deviceId,owner.deviceId); liveSession=true;return {app_id:run.appId,revision:run.revision,url:`https://${id}-${'1'.repeat(20)}.apps.example.com/__lingxi_remote_bootstrap#ticket`,expires_at:Date.now()+60000};},
-    hasAccess:()=>liveSession,hasRun:(_id:string,run:string)=>liveSession && run===runId,hasSession:(_id:string,run:string,session:string)=>liveSession && run===runId && session==='s'.repeat(43),revokeApp:()=>{liveSession=false;},revokeOwner:()=>{liveSession=false;},revokeAll:()=>{liveSession=false;},dispose:async()=>{liveSession=false;}};
+    hasAccess:()=>liveSession,hasRun:(_id:string,run:string)=>liveSession && run===runId,hasSession:(_id:string,run:string,session:string)=>liveSession && run===runId && session==='s'.repeat(43),revokeApp:(revoked:string)=>{if(revoked===id)liveSession=false;},revokeOwner:(revoked:any)=>{if(revoked.deviceId===owner.deviceId)liveSession=false;},revokeAll:()=>{liveSession=false;},dispose:async()=>{liveSession=false;}};
   host.remoteGateway=gateway;
   host.setAgentBroker({cancelApp:async()=>{},dispose:async()=>{}});
   t.after(async()=>{ if (host.changeTimer) clearTimeout(host.changeTimer); await fs.rm(root,{recursive:true,force:true}); });
-  return {host,row,store,runtime,get windowCount(){return windowCount;},setStartHook:(fn:(signal?:AbortSignal)=>Promise<void>)=>{startHook=fn;},ignoreStartAbort:()=>{honorAbort=false;},setRun:(value:boolean)=>{running=value;}, get liveSession(){return liveSession;}};
+  return {host,row,store,runtime,get windowCount(){return windowCount;},get ended(){return ended;},setStartHook:(fn:(signal?:AbortSignal)=>Promise<void>)=>{startHook=fn;},ignoreStartAbort:()=>{honorAbort=false;},setRun:(value:boolean)=>{running=value;}, get liveSession(){return liveSession;}};
 }
 
 test('remote access IPC defaults off, persists trusted opt-in, and launches headlessly', async t => {
@@ -91,8 +99,8 @@ test('headless Agent access requires a live browser session and its current run'
 test('revoking a browser session cancels its Agent task even while another session remains live', async t => {
   const f=await fixture(t);await f.host.request({action:'remote-access',id,enabled:true});await f.host.remoteOpen(id,owner);
   const cancelled:string[]=[];
-  f.host.setAgentBroker({run:async()=>({runId:'agent-run'}),cancelRemoteSession:async(owner:any)=>{cancelled.push(owner.remoteSessionId);}});
   const controller=new AbortController();
+  f.host.setAgentBroker({run:async(_owner:any,_input:any,signal:AbortSignal)=>{assert.equal(signal,controller.signal);return {runId:'agent-run'};},cancelRemoteSession:async(owner:any)=>{cancelled.push(owner.remoteSessionId);}});
   const result=await f.host.remoteInvoke({appId:id,revision:1,runId:'run-one'},'agent.tasks.start',{input:{}},controller.signal,'s'.repeat(43));
   assert.equal(result.runId,'agent-run'); controller.abort();
   await new Promise(resolve=>setTimeout(resolve,0));
@@ -106,6 +114,18 @@ test('Agent task admitted after browser revocation is immediately cancelled', as
   const controller=new AbortController();
   const pending=f.host.remoteInvoke({appId:id,revision:1,runId:'run-one'},'agent.tasks.start',{input:{}},controller.signal,'s'.repeat(43));
   await enteredPromise;controller.abort();release();await pending;assert.deepEqual(cancelled,['s'.repeat(43)]);
+});
+
+test('remote Agent mutations receive the browser session cancellation signal', async t => {
+  const f=await fixture(t);await f.host.request({action:'remote-access',id,enabled:true});await f.host.remoteOpen(id,owner);
+  const controller=new AbortController(), seen:string[]=[];
+  const check=(name:string)=>(...args:any[])=>{assert.equal(args.at(-1),controller.signal);seen.push(name);return name==='sendChat'?{runId:'chat-run'}:undefined;};
+  f.host.setAgentBroker({cancel:check('cancel'),createChat:check('createChat'),archiveChat:check('archiveChat'),deleteChat:check('deleteChat'),sendChat:check('sendChat'),cancelChat:check('cancelChat'),cancelRemoteSession:async()=>{}});
+  const run={appId:id,revision:1,runId:'run-one'}, session='s'.repeat(43);
+  for(const method of ['agent.tasks.cancel','agent.chats.create','agent.chats.archive','agent.chats.delete','agent.chats.send','agent.chats.cancel']) {
+    await f.host.remoteInvoke(run,method,{runId:'task',chatId:'chat',input:{}},controller.signal,session);
+  }
+  assert.deepEqual(seen,['cancel','createChat','archiveChat','deleteChat','sendChat','cancelChat']);
 });
 
 test('remote browser access keeps the host alive and its unused headless run stops', async t => {
@@ -144,6 +164,71 @@ test('foreground browser access survives disabling independent background and Ag
   await f.host.request({action:'agent-settings',id,settings:{...f.row.agent,enabled:false}});
   assert.equal(f.runtime.phase(),'running');assert.equal(f.liveSession,true);
   assert.equal(f.row.grants.includes('agent'),false);
+});
+
+test('sharing rejects a 257th app without breaking the existing catalog settings', async t => {
+  const f=await fixture(t);const enabled=Array.from({length:256},(_,i)=>`a${i.toString(16).padStart(32,'0')}`);
+  f.store.list=async()=>[f.row,...enabled.map(id=>({...f.row,id}))];
+  await fs.writeFile(f.host.remoteSettingsPath,JSON.stringify({version:1,enabled}));
+  await assert.rejects(f.host.setRemoteAccess(id,true),/256/);assert.equal(Object.keys(await f.host.remoteSettings()).length,256);
+  await f.host.setRemoteAccess(enabled[0],false);await f.host.setRemoteAccess(id,true);assert.equal((await f.host.remoteSettings())[id],true);
+});
+
+test('deleted apps do not consume sharing slots', async t => {
+  const f=await fixture(t);const enabled=Array.from({length:256},(_,i)=>`a${i.toString(16).padStart(32,'0')}`);
+  await fs.writeFile(f.host.remoteSettingsPath,JSON.stringify({version:1,enabled}));
+  await f.host.setRemoteAccess(id,true);assert.deepEqual(Object.keys(await f.host.remoteSettings()),[id]);
+  f.runtime.remove=async()=>{f.setRun(false);};await f.host.request({action:'remove',id});assert.equal((await f.host.remoteSettings())[id],undefined);
+});
+
+test('a rejected cleanup does not poison the next queued cleanup', async t => {
+  const f=await fixture(t);let reject!:(reason:Error)=>void;let called=false;
+  const first=f.host.queueRunCleanup(id,()=>new Promise<void>((_resolve,fail)=>{reject=fail;}));
+  const failed=assert.rejects(first,/cleanup failed/);const next=f.host.queueRunCleanup(id,async()=>{called=true;});
+  await new Promise(resolve=>setTimeout(resolve,0));reject(new Error('cleanup failed'));await failed;await next;assert.equal(called,true);
+});
+
+test('revoking another device does not abort this devices pending launch or existing session', async t => {
+  const f=await fixture(t);await f.host.setRemoteAccess(id,true);await f.host.remoteOpen(id,owner);
+  let release!:()=>void,entered!:()=>void;const started=new Promise<void>(resolve=>{entered=resolve;});
+  f.setStartHook(()=>new Promise<void>(resolve=>{release=resolve;entered();}));
+  const pending=f.host.remoteOpen(id,owner);await started;f.host.remoteRevokeOwner({...owner,deviceId:'other-phone'});assert.equal(f.liveSession,true);
+  release();assert.equal((await pending).app_id,id);assert.equal(f.liveSession,true);
+});
+
+test('disabling or deleting another app does not cancel this apps pending launch', async t => {
+  for(const action of ['disable','remove']){
+    const f=await fixture(t),other=`a${'2'.repeat(32)}`;
+    f.store.get=async(requested:string)=>structuredClone({...f.row,id:requested});f.store.list=async()=>[f.row,{...f.row,id:other}];f.runtime.remove=async()=>{};
+    await f.host.setRemoteAccess(id,true);let release!:()=>void,entered!:()=>void;const started=new Promise<void>(resolve=>{entered=resolve;});
+    f.setStartHook(()=>new Promise<void>(resolve=>{release=resolve;entered();}));const pending=f.host.remoteOpen(id,owner);await started;
+    if(action==='remove')await f.host.request({action:'remove',id:other});else await f.host.setRemoteAccess(other,false);
+    release();assert.equal((await pending).app_id,id);assert.equal(f.liveSession,true);
+  }
+});
+
+test('closing Desktop while remote startup is pending preserves the shared run', async t => {
+  const f=await fixture(t);await f.host.setRemoteAccess(id,true);f.setRun(true);
+  let release!:()=>void,entered!:()=>void;const started=new Promise<void>(resolve=>{entered=resolve;});let cancelled=0;
+  f.host.setAgentBroker({cancelApp:async()=>{cancelled++;}});f.setStartHook(()=>new Promise<void>(resolve=>{release=resolve;entered();}));
+  const pending=f.host.remoteOpen(id,owner);await started;
+  await f.host.queueRunCleanup(id,()=>f.host.desktopWindowClosed(id,'run-one',1));assert.equal(cancelled,0);assert.equal(f.runtime.phase(),'running');
+  release();await pending;assert.equal(f.liveSession,true);
+});
+
+test('failed Desktop cache setup and navigation preserve an existing browser run', async t => {
+  for(const beforeWindow of [true,false]){
+    const f=await fixture(t);await f.host.setRemoteAccess(id,true);await f.host.remoteOpen(id,owner);
+    f.host.configureSession=async()=>{if(beforeWindow)throw new Error('cache failed');};f.host.clearCodeCache=async()=>{};
+    await assert.rejects(f.host.open(id),beforeWindow?/cache failed/:/load failed/);
+    assert.equal(f.runtime.phase(),'running');assert.equal(f.liveSession,true);
+  }
+});
+
+test('cleanup notifies the app idle checker after the last remote run stops', async t => {
+  const f=await fixture(t);await f.host.setRemoteAccess(id,true);await f.host.remoteOpen(id,owner);
+  const before=f.ended;f.host.remoteRevokeOwner(owner);await f.host.remoteAccessEnded(id,'run-one');
+  assert.equal(f.runtime.phase(),'stopped');assert.ok(f.ended>before);
 });
 
 test('a failed remote opening releases a formerly background-only run', async t => {
@@ -208,5 +293,26 @@ test('remote host proxies login cookies, trusted forwarding headers and only loc
     const stream = new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new TextEncoder().encode('streamed'));controller.close();}});
     const streamed=await f.host.remoteResource(run,new Request(origin+'/stream',{method:'POST',body:stream,duplex:'half'} as RequestInit));
     assert.equal(streamed.status,302);assert.equal(received.at(-1)!.body,'streamed');
+  } finally {await f.host.services.dispose();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
+test('named service root redirects stay within service and HTML ranges remain unmodified', async t => {
+  const f=await fixture(t);
+  const server=createServer((req,res)=>{
+    if(req.url==='/login') return void res.writeHead(302,{location:'/account?tab=one#top'}).end();
+    if(req.url==='/partial') return void res.writeHead(206,{'content-type':'text/html','content-range':'bytes 0-4/10','etag':'"version"'}).end('<html');
+    res.writeHead(200,{'content-type':'text/html','content-length':'10','etag':'"original"','content-digest':'original-digest'}).end('<html></h>');
+  });
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const port=(server.address() as {port:number}).port;
+  f.row.manifest.entry={type:'server',process:'api'};f.runtime.workspace=()=>'/unused';f.runtime.service=()=>({port});
+  try {
+    await f.host.request({action:'remote-access',id,enabled:true});await f.host.remoteOpen(id,owner);
+    const run={appId:id,revision:1,runId:'run-one'},origin=`https://${id}-${'1'.repeat(20)}.apps.example.com`;
+    const redirected=await f.host.remoteResource(run,new Request(origin+'/__services/api/login'));
+    const partial=await f.host.remoteResource(run,new Request(origin+'/partial',{headers:{range:'bytes=0-4'}}));
+    const head=await f.host.remoteResource(run,new Request(origin+'/',{method:'HEAD'}));
+    const full=await f.host.remoteResource(run,new Request(origin+'/'));
+    assert.match(await full.text(),/__lingxi_local_app_sdk/);assert.equal(full.headers.get('etag'),null);assert.equal(full.headers.get('content-digest'),null);assert.equal(head.headers.get('etag'),null);assert.equal(partial.headers.get('etag'),'"version"');
+    assert.deepEqual({location:redirected.headers.get('location'),status:partial.status,range:partial.headers.get('content-range'),body:await partial.text(),headLength:head.headers.get('content-length')},{location:origin+'/__services/api/account?tab=one#top',status:206,range:'bytes 0-4/10',body:'<html',headLength:null});
   } finally {await f.host.services.dispose();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });

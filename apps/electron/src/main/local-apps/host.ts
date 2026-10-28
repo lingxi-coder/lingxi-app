@@ -410,6 +410,7 @@ function mediaTypeForPath(path: string): string { return FILE_TYPES[path.slice(p
 
 export interface LocalAppHostOptions extends RuntimeOptions {
   configHome: string;
+  onRemoteAccessEnded?: () => void;
   core: LocalAppCoreTransport;
   accountToken?: () => Promise<string>;
   accountId?: () => string | undefined;
@@ -456,7 +457,9 @@ export class LocalAppHost {
   private remoteSettingsTail: Promise<void> = Promise.resolve();
   private readonly remoteDisabled = new Set<string>();
   private remoteEpoch = 0;
+  private readonly remoteAppEpochs = new Map<string, number>();
   private readonly remoteOpening = new Map<string, Set<AbortController>>();
+  private readonly remoteOpeningOwners = new WeakMap<AbortController, string>();
   private readonly remoteManagedRuns = new Map<string, string>();
   private readonly remoteCleaning = new Map<string, Promise<void>>();
   private readonly token = randomBytes(32).toString('hex');
@@ -796,9 +799,12 @@ export class LocalAppHost {
     let release!: () => void; this.remoteSettingsTail = new Promise<void>(resolve => { release = resolve; });
     await previous;
     try {
-      if (!enabled) { this.invalidateRemoteOpenings(); this.remoteDisabled.add(id); this.remoteGateway?.revokeApp(id); }
+      if (!enabled) { this.invalidateRemoteOpenings(id); this.remoteDisabled.add(id); this.remoteGateway?.revokeApp(id); }
       await this.store.get(id);
       const settings = await this.remoteSettings();
+      const installed = new Set((await this.store.list()).map(row => row.id));
+      for (const shared of Object.keys(settings)) if (!installed.has(shared)) delete settings[shared];
+      if (enabled && !settings[id] && Object.keys(settings).length >= 256) throw new Error('At most 256 applications can be shared. Disable sharing for another application first.');
       if (enabled) settings[id] = true; else delete settings[id];
       await atomicJson(this.remoteSettingsPath, { version: 1, enabled: Object.keys(settings).sort() });
       if (enabled) this.remoteDisabled.delete(id);
@@ -849,6 +855,7 @@ export class LocalAppHost {
   async remoteOpen(id: string, owner: RemoteOwner): Promise<{ app_id: string; revision: number; url: string; expires_at: number }> {
     const controller = new AbortController();
     const openings = this.remoteOpening.get(id) ?? new Set<AbortController>();
+    this.remoteOpeningOwners.set(controller, JSON.stringify([owner.accountUid, owner.deviceId, owner.hostId]));
     openings.add(controller); this.remoteOpening.set(id, openings);
     // Allow first-launch installation and trusted permission prompts, but never
     // leave abandoned startup work running indefinitely after the client times out.
@@ -869,7 +876,9 @@ export class LocalAppHost {
   private async remoteOpenOnce(id: string, owner: RemoteOwner, signal: AbortSignal): Promise<{ app_id: string; revision: number; url: string; expires_at: number }> {
     signal.throwIfAborted();
     const epoch = this.remoteEpoch;
-    appId(id); if (this.remoteDisabled.has(id) || !(await this.remoteSettings())[id] || this.remoteDisabled.has(id) || epoch !== this.remoteEpoch) throw new Error('Remote access is not enabled for this application');
+    const appEpoch = this.remoteAppEpochs.get(id) ?? 0;
+    const changed = () => epoch !== this.remoteEpoch || appEpoch !== (this.remoteAppEpochs.get(id) ?? 0);
+    appId(id); if (this.remoteDisabled.has(id) || !(await this.remoteSettings())[id] || this.remoteDisabled.has(id) || changed()) throw new Error('Remote access is not enabled for this application');
     const gateway = this.gateway();
     const cleaning = this.remoteCleaning.get(id);
     if (cleaning) await withAbort(cleaning, signal);
@@ -880,23 +889,25 @@ export class LocalAppHost {
     await this.store.assertTarget(row);
     await this.authorize(id, signal, row.revision);
     const agentEpoch = this.agentEpochs.get(id);
-    if (epoch !== this.remoteEpoch) throw new Error('Remote access changed');
+    if (changed()) throw new Error('Remote access changed');
     await this.runtime.start(id, false, signal, this.runtime.revision(id) !== undefined && this.runtime.revision(id) !== row.revision, row.revision);
     const startedRun = this.runtime.invocationId(id); if (startedRun) this.remoteManagedRuns.set(id, startedRun);
     if (this.agentEpochs.get(id) === agentEpoch) this.blockedAgentApps.delete(id);
     signal.throwIfAborted();
-    if (epoch !== this.remoteEpoch) throw new Error('Remote access changed');
+    if (changed()) throw new Error('Remote access changed');
     this.launchGrants.set(id, (await this.store.getRevision(id, row.revision)).grants.filter(cap => this.runtime.manifest(id)?.capabilities?.includes(cap)));
     const revision = this.runtime.revision(id), runId = this.runtime.invocationId(id);
     if (!revision || !runId) throw new Error('Application run is unavailable');
     signal.throwIfAborted();
-    if (epoch !== this.remoteEpoch) throw new Error('Remote access changed');
+    if (changed()) throw new Error('Remote access changed');
     return gateway.open({ appId: id, revision, runId }, owner, signal);
   }
   private remoteAccessEnded(id: string, runId: string): Promise<void> {
-    const previous = this.remoteCleaning.get(id);
-    if (previous) return previous.then(() => this.remoteAccessEnded(id, runId));
-    const cleanup = Promise.resolve().then(() => this.cleanRemoteRun(id, runId)).finally(() => {
+    return this.queueRunCleanup(id, () => this.cleanRemoteRun(id, runId)).finally(() => this.options.onRemoteAccessEnded?.());
+  }
+  private queueRunCleanup(id: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.remoteCleaning.get(id) ?? Promise.resolve();
+    const cleanup = previous.catch(() => undefined).then(operation).finally(() => {
       if (this.remoteCleaning.get(id) === cleanup) this.remoteCleaning.delete(id);
     });
     this.remoteCleaning.set(id, cleanup); return cleanup;
@@ -912,11 +923,18 @@ export class LocalAppHost {
       if (stillUnused()) { await this.runtime.stop(id); if (this.remoteManagedRuns.get(id) === runId) this.remoteManagedRuns.delete(id); }
     } catch { /* Run may already be stopping or removed. */ }
   }
-  private invalidateRemoteOpenings(): void {
-    this.remoteEpoch++;
-    for (const openings of this.remoteOpening.values()) for (const controller of openings) controller.abort(new Error('Remote access changed'));
+  private invalidateRemoteOpenings(id?: string): void {
+    if (id === undefined) { this.remoteEpoch++; this.remoteAppEpochs.clear(); }
+    else this.remoteAppEpochs.set(id, (this.remoteAppEpochs.get(id) ?? 0) + 1);
+    const groups = id === undefined ? this.remoteOpening.values() : [this.remoteOpening.get(id) ?? []];
+    for (const openings of groups) for (const controller of openings) controller.abort(new Error('Remote access changed'));
   }
-  remoteRevokeOwner(owner: RemoteOwner): void { this.invalidateRemoteOpenings(); this.remoteGateway?.revokeOwner(owner); }
+  remoteRevokeOwner(owner: RemoteOwner): void {
+    const key = JSON.stringify([owner.accountUid, owner.deviceId, owner.hostId]);
+    for (const openings of this.remoteOpening.values()) for (const controller of openings) if (this.remoteOpeningOwners.get(controller) === key) controller.abort(new Error('Remote access changed'));
+    this.remoteGateway?.revokeOwner(owner);
+  }
+  remoteRevokeTicket(url: string): void { this.remoteGateway?.revokeTicket(url); }
   remoteRevokeAll(): void { this.invalidateRemoteOpenings(); this.remoteGateway?.revokeAll(); }
   async remoteResource(run: RemoteRun, request: Request): Promise<Response> {
     if (!await this.remoteCurrent(run)) return new Response('Session expired', { status: 410 });
@@ -952,6 +970,10 @@ export class LocalAppHost {
     }
     const headers = new Headers(response.headers);
     const location = headers.get('location');
+    if (remoteService?.prefix && location?.startsWith('/') && !location.startsWith('//')) {
+      const target = new URL(location, url.origin);
+      headers.set('location', `${url.origin}${remoteService.prefix}${target.pathname}${target.search}${target.hash}`);
+    }
     if (remoteService && location && /^http:\/\/(?:127\.0\.0\.1|localhost):[0-9]+(?=[/?#]|$)/i.test(location)) {
       try {
         const target = new URL(location);
@@ -961,9 +983,14 @@ export class LocalAppHost {
       } catch { /* Preserve malformed or external redirects unchanged. */ }
     }
     let body: BodyInit | null = response.body;
+    const injectedHtml = response.status !== 206 && headers.get('content-type')?.toLowerCase().includes('text/html');
+    if (injectedHtml) for (const name of ['etag', 'content-md5', 'digest', 'content-digest', 'repr-digest']) headers.delete(name);
     if (request.method === 'HEAD' || [204, 205, 304].includes(response.status)) {
       await response.body?.cancel(); body = null;
-    } else if (headers.get('content-type')?.toLowerCase().includes('text/html') && response.body) {
+      // The normal HTML representation is injected, so the upstream length
+      // is not the length a GET would return.
+      if (request.method === 'HEAD' && injectedHtml) headers.delete('content-length');
+    } else if (injectedHtml && response.body) {
       body = injectLocalAppScripts(await this.remoteHtml(response.body, request.signal), id, url.pathname); headers.delete('content-length'); headers.delete('content-encoding');
     }
     headers.set('content-security-policy', "default-src 'self' data: blob: https: http: ws: wss:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https: http:; style-src 'self' 'unsafe-inline' https: http:; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'");
@@ -1007,19 +1034,19 @@ export class LocalAppHost {
       if (signal.aborted) await broker.cancelRemoteSession(owner).catch(() => undefined);
       return result;
     };
-    if (method === 'agent.tasks.start') return start(broker.run(owner, args.input));
+    if (method === 'agent.tasks.start') return start(broker.run(owner, args.input, signal));
     if (method === 'agent.tasks.get') return broker.get(owner, String(args.runId));
     if (method === 'agent.tasks.list') return broker.list(owner, args);
     if (method === 'agent.tasks.events') return broker.events(owner, String(args.runId), args.afterSequence as number | undefined);
-    if (method === 'agent.tasks.cancel') return broker.cancel(owner, String(args.runId));
-    if (method === 'agent.chats.create') return broker.createChat(owner, args);
+    if (method === 'agent.tasks.cancel') return broker.cancel(owner, String(args.runId), signal);
+    if (method === 'agent.chats.create') return broker.createChat(owner, args, signal);
     if (method === 'agent.chats.get') return broker.getChat(owner, String(args.chatId));
     if (method === 'agent.chats.list') return broker.listChats(owner, args);
-    if (method === 'agent.chats.archive') return broker.archiveChat(owner, String(args.chatId));
-    if (method === 'agent.chats.delete') return broker.deleteChat(owner, String(args.chatId));
+    if (method === 'agent.chats.archive') return broker.archiveChat(owner, String(args.chatId), signal);
+    if (method === 'agent.chats.delete') return broker.deleteChat(owner, String(args.chatId), signal);
     if (method === 'agent.chats.history') return broker.chatHistory(owner, String(args.chatId), args);
-    if (method === 'agent.chats.send') return start(broker.sendChat(owner, String(args.chatId), args.input));
-    if (method === 'agent.chats.cancel') return broker.cancelChat(owner, String(args.chatId));
+    if (method === 'agent.chats.send') return start(broker.sendChat(owner, String(args.chatId), args.input, signal));
+    if (method === 'agent.chats.cancel') return broker.cancelChat(owner, String(args.chatId), signal);
     throw new Error('Unknown application Agent API');
   }
   private async editAuthoring(row: DesktopLocalApp): Promise<void> {
@@ -1077,7 +1104,7 @@ export class LocalAppHost {
       if (typeof input.remoteId !== 'string') throw new Error('Choose a market application');
       const existing = input.id ? await this.store.get(appId(input.id)) : undefined;
       if (existing && existing.revision !== input.expectedRevision) throw new Error('Application changed; refresh before updating');
-      const row = await this.market.install(input.remoteId, existing); if (existing) { this.invalidateRemoteOpenings(); this.remoteGateway?.revokeApp(existing.id); } this.changed(); return row;
+      const row = await this.market.install(input.remoteId, existing); if (existing) { this.invalidateRemoteOpenings(existing.id); this.remoteGateway?.revokeApp(existing.id); } this.changed(); return row;
     }
     if (action === 'list') return { action, apps: await this.list() };
     if (action === 'prepareAuthoring') {
@@ -1147,7 +1174,7 @@ export class LocalAppHost {
         }
         return published;
       });
-      this.invalidateRemoteOpenings(); this.remoteGateway?.revokeApp(row.id);
+      this.invalidateRemoteOpenings(row.id); this.remoteGateway?.revokeApp(row.id);
       this.changed();
       return { action, id: row.id, revision: row.revision, name: row.name, summary: row.summary, runtime: 'desktop', warnings: [], opensFrom: 'chat card or Apps library' };
     }
@@ -1162,7 +1189,7 @@ export class LocalAppHost {
     if (action === 'versions') return this.store.core.request({ op: 'releases', appId: id });
     if (action === 'useVersion') {
       if (!Number.isSafeInteger(input.revision) || Number(input.revision) < 1 || !Number.isSafeInteger(input.expectedCurrentRevision) || Number(input.expectedCurrentRevision) < 1) throw new Error('Choose a version from the current release list');
-      this.invalidateRemoteOpenings(); this.remoteGateway?.revokeApp(id);
+      this.invalidateRemoteOpenings(id); this.remoteGateway?.revokeApp(id);
       await this.cancelOpening(id);
       await this.open(id, false, true, signal, Number(input.revision), Number(input.expectedCurrentRevision));
       this.changed(); return;
@@ -1255,7 +1282,7 @@ export class LocalAppHost {
     }
     if (action === 'open' || action === 'start') { await this.open(id, false, false, signal); return { action, id, phase: this.runtime.status(await this.store.get(id)).phase }; }
     if (action === 'stop') {
-      this.invalidateRemoteOpenings(); this.remoteGateway?.revokeApp(id);
+      this.invalidateRemoteOpenings(id); this.remoteGateway?.revokeApp(id);
       const opening = this.cancelOpening(id);
       await this.cancelAgentApp(id, 'Application stopped');
       await this.runtime.stop(id);
@@ -1270,7 +1297,7 @@ export class LocalAppHost {
       await this.runtime.exclusive(id, async () => { const row = await this.store.get(id); row.background = input.enabled as boolean; await this.store.save(row); });
       if (!input.enabled && !this.windows.has(id) && !this.opening.has(id) && !this.retainRemoteRun(id)) await this.runtime.stop(id);
     } else if (action === 'revoke') {
-      this.invalidateRemoteOpenings(); this.remoteGateway?.revokeApp(id);
+      this.invalidateRemoteOpenings(id); this.remoteGateway?.revokeApp(id);
       const opening = this.cancelOpening(id);
       this.launchGrants.delete(id);
       await this.cancelAgentApp(id, 'Application permissions revoked');
@@ -1283,6 +1310,7 @@ export class LocalAppHost {
       const options = { type: 'question' as const, message: nativeTr('native_delete_app', (await this.store.get(id)).name), detail: nativeTr('native_delete_app_detail'), buttons: [nativeTr('common_cancel'), nativeTr('common_delete')], defaultId: 0, cancelId: 0 };
       const choice = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
       if (choice.response !== 1) return;
+      await this.setRemoteAccess(id, false);
       const opening = this.cancelOpening(id);
       await this.cancelAgentApp(id, 'Application deleted');
       this.windows.get(id)?.destroy();
@@ -1355,7 +1383,7 @@ export class LocalAppHost {
       if (!this.shuttingDown && ['running', 'starting', 'installing', 'building'].includes(this.runtime.phase(id))) {
         const ownsNewRun = this.runtime.invocationId(id) !== previousInvocation;
         const orphanedForeground = !this.windows.has(id) && !(await this.store.get(id)).background;
-        if (ownsNewRun || orphanedForeground) await this.runtime.stop(id);
+        if ((ownsNewRun || orphanedForeground) && !this.retainRemoteRun(id)) await this.runtime.stop(id);
       }
       throw error;
     }).finally(() => {
@@ -1414,17 +1442,19 @@ export class LocalAppHost {
       const closingInvocation = this.runtime.invocationId(id), closingRevision = this.runtime.revision(id);
       this.navigationEpoch.delete(contentsId);
       if (this.windows.get(id) === window) this.windows.delete(id);
-      if (!this.shuttingDown) void this.store.get(id).then(async row => {
-        if (this.windows.has(id) || this.opening.has(id)) return;
-        if (closingInvocation && this.remoteGateway?.hasRun(id, closingInvocation)) return;
-        const agentBackground = row.agent?.enabled && row.agent.background;
-        if (agentBackground && closingInvocation && closingRevision && this.runtime.invocationId(id) === closingInvocation) this.backgroundAgentOwners.set(id, { revision: closingRevision, invocationId: closingInvocation });
-        else await this.cancelAgentApp(id, 'Application window closed');
-        if (!row.background && !this.windows.has(id) && !this.opening.has(id)) await this.runtime.stop(id);
-      }).catch(() => undefined);
+      if (!this.shuttingDown && closingInvocation) void this.queueRunCleanup(id, () => this.desktopWindowClosed(id, closingInvocation, closingRevision)).catch(() => undefined);
     });
     try { await window.loadURL(entryUrl); assertRunning(); window.show(); }
-    catch (error) { window.destroy(); await this.runtime.stop(id); throw error; }
+    catch (error) { window.destroy(); if (!this.retainRemoteRun(id)) await this.runtime.stop(id); throw error; }
+  }
+  private async desktopWindowClosed(id: string, invocation: string, revision?: number): Promise<void> {
+    const unused = () => !this.shuttingDown && this.runtime.invocationId(id) === invocation && !this.windows.has(id) && !this.opening.has(id) && !this.retainRemoteRun(id);
+    const row = await this.store.get(id);
+    if (!unused()) return;
+    if (row.agent?.enabled && row.agent.background && revision) this.backgroundAgentOwners.set(id, { revision, invocationId: invocation });
+    else await this.cancelAgentApp(id, 'Application window closed');
+    const current = await this.store.get(id);
+    if (!current.background && unused()) await this.runtime.stop(id);
   }
   private async external(raw: string): Promise<void> { try { const url = new URL(raw); if (['https:', 'http:', 'mailto:'].includes(url.protocol)) await shell.openExternal(url.toString()); } catch { /* invalid URL */ } }
   private async clearCodeCache(id: string): Promise<void> {

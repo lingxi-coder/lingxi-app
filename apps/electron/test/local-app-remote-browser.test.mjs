@@ -37,6 +37,11 @@ test('real browser: remote gateway bootstrap, SDK, app cookies, isolation and re
       if (path === '/__lingxi_local_app_sdk.js') return new Response(REMOTE_LOCAL_APP_SDK, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
       if (path === '/set-cookie') return new Response('ok', { headers: { 'set-cookie': 'app_session=original; Path=/; SameSite=Strict' } });
       if (path === '/inspect') return Response.json({ cookie: request.headers.get('cookie') }, { headers: { 'set-cookie': 'app_session=changed; Path=/; SameSite=Strict' } });
+      if (/^\/__services\/(api|other)\/login$/.test(path)) {
+        const name = path.split('/')[2];
+        return new Response('ok', { headers: { 'set-cookie': `service_session=${name}; Path=/; HttpOnly; SameSite=Strict` } });
+      }
+      if (/^\/__services\/(api|other)\/inspect$/.test(path)) return Response.json({ cookie: request.headers.get('cookie') });
       if (path === '/events') return new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('first')); } }), { headers: { 'content-type': 'text/plain' } });
       return new Response('missing', { status: 404 });
     },
@@ -73,6 +78,16 @@ test('real browser: remote gateway bootstrap, SDK, app cookies, isolation and re
     const ordinary = await page.evaluate(async () => (await fetch('/inspect')).json());
     // Do not print a cookie header if gateway isolation regresses.
     assert.equal(ordinary.cookie === 'app_session=original', true);
+    const serviceCookies = await page.evaluate(async () => {
+      await fetch('/__services/api/login'); await fetch('/__services/other/login');
+      const api = await (await fetch('/__services/api/inspect')).json();
+      const other = await (await fetch('/__services/other/inspect')).json();
+      return {api:api.cookie, other:other.cookie};
+    });
+    assert.equal(serviceCookies.api.includes('service_session=api'), true);
+    assert.equal(serviceCookies.api.includes('service_session=other'), false);
+    assert.equal(serviceCookies.other.includes('service_session=other'), true);
+    assert.equal(serviceCookies.other.includes('service_session=api'), false);
     const otherOrigin = `http://${otherId}-${'a'.repeat(20)}.localhost:${port}`;
     const isolated = await browser.newContext();
     await isolated.addCookies([{ name: auth.name, value: auth.value, url: otherOrigin, httpOnly: true, sameSite: 'Strict' }]);

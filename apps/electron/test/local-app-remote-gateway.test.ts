@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import { LocalAppRemoteGateway, type RemoteGatewayAdapter } from '../src/main/local-apps/remoteGateway.js';
 import { LocalAppServiceBroker } from '../src/main/local-apps/serviceBroker.js';
+import { createRemoteLocalAppsDelegate } from '../src/main/remoteControl/localAppsBindings.js';
 
 const id = `a${'1'.repeat(32)}`, other = `a${'2'.repeat(32)}`;
 const owner = { accountUid: 'account', deviceId: 'phone', hostId: 'desktop' };
@@ -105,6 +106,53 @@ test('revocation wins races with ticket redemption and ticket creation', async (
     let calls = 0; adapter.current = async () => { if (++calls === 1) { openEntered(); await new Promise<void>(resolve=>{continueOpen=resolve;}); } return true; };
     const creating = gateway.open({appId:id,revision:1,runId:'run'},owner); await waiting; gateway.revokeOwner(owner); continueOpen(); await assert.rejects(creating);
   } finally { await gateway.dispose(); }
+});
+
+test('revoking another owner does not cancel a pending grant', async () => {
+  const {port,gateway,adapter}=await setup();
+  const run={appId:id,revision:1,runId:'run'}, otherOwner={...owner,deviceId:'other'};
+  try {
+    const existing=await session(gateway,port);
+    let entered!:()=>void,release!:()=>void;const waiting=new Promise<void>(resolve=>{entered=resolve;});
+    adapter.current=async()=>{entered();await new Promise<void>(resolve=>{release=resolve;});return true;};
+    const pending=gateway.open(run,owner);await waiting;gateway.revokeOwner(otherOwner);release();
+    adapter.current=async()=>true;
+    const next=await pending;assert.notEqual(next.url,existing.opened.url);assert.equal((await request(port,existing.host,'/',{cookie:existing.cookie})).status,200);
+    let enterAgain!:()=>void,releaseAgain!:()=>void;const waitingAgain=new Promise<void>(resolve=>{enterAgain=resolve;});
+    adapter.current=async()=>{enterAgain();await new Promise<void>(resolve=>{releaseAgain=resolve;});return true;};
+    const revoked=gateway.open(run,owner);await waitingAgain;gateway.revokeOwner(owner);releaseAgain();
+    await assert.rejects(revoked);assert.equal(gateway.hasAccess(),false);
+  } finally {await gateway.dispose();}
+});
+
+test('revoking a single unredeemed ticket preserves existing sessions and other tickets', async () => {
+  const {port,gateway}=await setup();
+  try {
+    const s=await session(gateway,port), run={appId:id,revision:1,runId:'run'};
+    const revoked=await gateway.open(run,owner), kept=await gateway.open(run,owner);
+    const ticket=new URL(revoked.url), other=new URL(kept.url);
+    gateway.revokeTicket(`https://wrong.example${ticket.pathname}${ticket.hash}`);
+    assert.equal((gateway as any).tickets.has(ticket.hash.slice(1)),true);
+    assert.equal((await request(port,ticket.host,'/__lingxi_remote_bootstrap',{method:'POST',origin:ticket.origin,body:JSON.stringify({ticket:other.hash.slice(1)})})).status,403);
+    gateway.revokeTicket(revoked.url);
+    assert.equal((await request(port,ticket.host,'/__lingxi_remote_bootstrap',{method:'POST',origin:ticket.origin,body:JSON.stringify({ticket:ticket.hash.slice(1)})})).status,403);
+    assert.equal((await request(port,other.host,'/__lingxi_remote_bootstrap',{method:'POST',origin:other.origin,body:JSON.stringify({ticket:other.hash.slice(1)})})).status,204);
+    assert.equal((await request(port,s.host,'/',{cookie:s.cookie})).status,200);
+  } finally {await gateway.dispose();}
+});
+
+test('transport loss while opening invalidates its ticket but keeps an existing browser session', async () => {
+  const {port,gateway}=await setup();let active=true, created='';
+  const run={appId:id,revision:1,runId:'run'};
+  try {
+    const existing=await session(gateway,port);
+    const host={remoteList:async()=>[],remoteOpen:async()=>{const result=await gateway.open(run,owner);created=result.url;active=false;return result;},remoteRevokeTicket:(url:string)=>gateway.revokeTicket(url),remoteRevokeAll:()=>gateway.revokeAll()};
+    const delegate=createRemoteLocalAppsDelegate({host:()=>host,accountUid:()=>owner.accountUid,hostId:()=>owner.hostId,active:()=>active,generation:()=>0,approvedDevice:()=>true});
+    await assert.rejects(delegate.open({account_uid:owner.accountUid,host_id:owner.hostId,device_id:owner.deviceId,conn_id:'c',device_name:'phone',platform:'ios'},id),/no longer approved/);
+    const url=new URL(created);
+    assert.equal((await request(port,url.host,'/__lingxi_remote_bootstrap',{method:'POST',origin:url.origin,body:JSON.stringify({ticket:url.hash.slice(1)})})).status,403);
+    assert.equal((await request(port,existing.host,'/',{cookie:existing.cookie})).status,200);
+  } finally {await gateway.dispose();}
 });
 
 test('backend cookies stay app-scoped and omit preserves host authentication', async () => {
@@ -298,4 +346,26 @@ test('compressed backend assets are forwarded with headers matching decoded byte
       });req.on('error',reject);req.end();
     });
   } finally {await gateway.dispose();await broker.dispose();backend.closeAllConnections();await new Promise<void>(resolve=>backend.close(()=>resolve()));}
+});
+
+test('named service cookies use service paths and HEAD preserves representation length', async () => {
+  const {port,gateway,adapter}=await setup();
+  adapter.resource=async(_run,req)=>{
+    if(req.method==='HEAD') return new Response(null,{headers:{'content-length':'123','content-type':'application/octet-stream'}});
+    const headers=new Headers();
+    headers.append('set-cookie','explicit=one; Path=/api; HttpOnly');
+    headers.append('set-cookie','default=two; HttpOnly');
+    headers.append('set-cookie','root=three; Path=/');
+    headers.append('set-cookie','__Host-other=four; Path=/; Secure');
+    return new Response('ok',{headers});
+  };
+  try {
+    const s=await session(gateway,port);
+    const response=async(path:string,method='GET')=>new Promise<import('node:http').IncomingMessage>((resolve,reject)=>{
+      const req=httpRequest({hostname:'127.0.0.1',port,path,method,headers:{host:s.host,cookie:s.cookie}},resolve);req.on('error',reject);req.end();
+    });
+    const cookies=await response('/__services/api/api/login');cookies.resume();
+    const head=await response('/file','HEAD');head.resume();
+    assert.deepEqual({cookies:cookies.headers['set-cookie'],length:head.headers['content-length']},{cookies:['explicit=one; HttpOnly; Path=/__services/api/api','default=two; HttpOnly; Path=/__services/api/api','root=three; Path=/__services/api'],length:'123'});
+  } finally {await gateway.dispose();}
 });

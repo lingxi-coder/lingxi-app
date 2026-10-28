@@ -74,7 +74,7 @@ test('WebSocket gateway validates origin and revokes an already upgraded binary 
   await assert.rejects(broker.socketUrl('app', 'one', 'api', 1234, '/', 'lingxi-app://app'), /ended/);
 });
 
-test('decoded compressed service bodies carry matching headers, while HEAD and unknown encodings retain metadata', async t => {
+test('decoded compressed service bodies and HEAD carry matching metadata, while unknown encodings retain it', async t => {
   const {gzipSync, brotliCompressSync} = await import('node:zlib');
   const text = 'compressed asset';
   const server = createServer((req,res) => {
@@ -92,7 +92,7 @@ test('decoded compressed service bodies carry matching headers, while HEAD and u
     assert.equal(await result.text(),text);
   }
   const head = await broker.fetch('app','run','api',port,'/gzip',new Request('http://app/gzip',{method:'HEAD'}));
-  assert.equal(head.headers.get('content-encoding'),'gzip'); assert.ok(head.headers.get('content-length'));
+  for (const name of ['content-encoding','content-length','content-md5','digest','etag']) assert.equal(head.headers.get(name),null);
   const unknown = await broker.fetch('app','run','api',port,'/unknown',new Request('http://app/unknown'));
   assert.equal(unknown.headers.get('content-encoding'),'custom'); assert.equal(await unknown.text(),text);
 });

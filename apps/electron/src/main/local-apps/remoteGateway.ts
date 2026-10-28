@@ -6,6 +6,7 @@ export interface RemoteOwner { accountUid: string; deviceId: string; hostId: str
 export interface RemoteRun { appId: string; revision: number; runId: string }
 interface Session extends RemoteRun { readonly origin: string; owner: RemoteOwner; expires: number; controller: AbortController; sockets: Set<Duplex>; sessionId: string; timer?: ReturnType<typeof setTimeout>; active: number }
 interface Ticket { session: Session; expires: number; timer: ReturnType<typeof setTimeout> }
+interface PendingGrant extends RemoteRun { owner: RemoteOwner; revoked: boolean }
 export interface RemoteGatewayAdapter {
   current(run: RemoteRun): Promise<boolean>;
   resource(run: RemoteRun, request: Request): Promise<Response>;
@@ -31,7 +32,7 @@ export class LocalAppRemoteGateway {
   private listening?: Promise<void>;
   private readonly sessions = new Map<string, Session>();
   private readonly tickets = new Map<string, Ticket>();
-  private generation = 0;
+  private readonly pendingGrants = new Set<PendingGrant>();
   private bufferedBytes = 0;
   private readonly template: string;
   private readonly port: number;
@@ -76,24 +77,29 @@ export class LocalAppRemoteGateway {
   }
   async open(run: RemoteRun, owner: RemoteOwner, signal?: AbortSignal): Promise<{ app_id: string; revision: number; url: string; expires_at: number }> {
     signal?.throwIfAborted();
-    const generation = this.generation;
-    if (!owner.accountUid || !owner.deviceId || !owner.hostId || !await this.adapter.current(run)) throw new Error('Application run is unavailable');
-    signal?.throwIfAborted();
-    this.sweep(); if (this.sessions.size + this.tickets.size >= 256) throw new Error('Too many remote sessions');
-    await this.listen();
-    signal?.throwIfAborted();
-    if (!await this.adapter.current(run) || this.generation !== generation) throw new Error('Application run is unavailable');
-    signal?.throwIfAborted();
-    this.sweep(); if (this.sessions.size + this.tickets.size >= 256) throw new Error('Too many remote sessions');
-    const expires = Date.now() + SESSION_LIFETIME;
-    let origin: string;
-    do { origin = this.origin(run.appId, randomBytes(10).toString('hex')); }
-    while ([...this.sessions.values(), ...[...this.tickets.values()].map(ticket => ticket.session)].some(session => session.origin === origin));
-    const session: Session = { ...run, origin, owner: { ...owner }, expires, controller: new AbortController(), sockets: new Set(), sessionId: secret(), active: 0 };
-    const ticket = secret(), ticketExpires = Date.now() + TICKET_LIFETIME;
-    const timer = setTimeout(() => { if (this.tickets.delete(ticket)) { this.abort(session); this.notifyEnded(session); } }, TICKET_LIFETIME); timer.unref();
-    this.tickets.set(ticket, { session, expires: ticketExpires, timer });
-    return { app_id: run.appId, revision: run.revision, url: `${session.origin}/__lingxi_remote_bootstrap#${ticket}`, expires_at: ticketExpires };
+    const pending: PendingGrant = { ...run, owner: { ...owner }, revoked: false };
+    this.pendingGrants.add(pending);
+    try {
+      if (!pending.owner.accountUid || !pending.owner.deviceId || !pending.owner.hostId || !await this.adapter.current(pending) || pending.revoked) throw new Error('Application run is unavailable');
+      signal?.throwIfAborted();
+      this.sweep(); if (pending.revoked) throw new Error('Application run is unavailable');
+      if (this.sessions.size + this.tickets.size >= 256) throw new Error('Too many remote sessions');
+      await this.listen();
+      signal?.throwIfAborted();
+      if (!await this.adapter.current(pending) || pending.revoked) throw new Error('Application run is unavailable');
+      signal?.throwIfAborted();
+      this.sweep(); if (pending.revoked) throw new Error('Application run is unavailable');
+      if (this.sessions.size + this.tickets.size >= 256) throw new Error('Too many remote sessions');
+      const expires = Date.now() + SESSION_LIFETIME;
+      let origin: string;
+      do { origin = this.origin(pending.appId, randomBytes(10).toString('hex')); }
+      while ([...this.sessions.values(), ...[...this.tickets.values()].map(ticket => ticket.session)].some(session => session.origin === origin));
+      const session: Session = { appId: pending.appId, revision: pending.revision, runId: pending.runId, origin, owner: pending.owner, expires, controller: new AbortController(), sockets: new Set(), sessionId: secret(), active: 0 };
+      const ticket = secret(), ticketExpires = Date.now() + TICKET_LIFETIME;
+      const timer = setTimeout(() => { if (this.tickets.delete(ticket)) { this.abort(session); this.notifyEnded(session); } }, TICKET_LIFETIME); timer.unref();
+      this.tickets.set(ticket, { session, expires: ticketExpires, timer });
+      return { app_id: pending.appId, revision: pending.revision, url: `${session.origin}/__lingxi_remote_bootstrap#${ticket}`, expires_at: ticketExpires };
+    } finally { this.pendingGrants.delete(pending); }
   }
   hasAccess(): boolean { this.sweep(); return this.sessions.size > 0 || this.tickets.size > 0; }
   hasRun(appId: string, runId: string): boolean {
@@ -107,8 +113,17 @@ export class LocalAppRemoteGateway {
   revokeOwner(owner: RemoteOwner): void { const key = ownerKey(owner); this.revoke(s => ownerKey(s.owner) === key); }
   revokeApp(appId: string, runId?: string): void { this.revoke(s => s.appId === appId && (!runId || s.runId === runId)); }
   revokeAll(): void { this.revoke(() => true); }
-  private revoke(match: (session: Session) => boolean): void {
-    this.generation++;
+  revokeTicket(launchUrl: string): void {
+    try {
+      const url = new URL(launchUrl);
+      if (url.pathname !== '/__lingxi_remote_bootstrap' || url.search || !url.hash) return;
+      const key = url.hash.slice(1), ticket = this.tickets.get(key);
+      if (!ticket || url.origin !== ticket.session.origin) return;
+      this.tickets.delete(key); clearTimeout(ticket.timer); this.abort(ticket.session); this.notifyEnded(ticket.session);
+    } catch { /* A malformed or stale launch URL cannot identify a ticket. */ }
+  }
+  private revoke(match: (session: RemoteRun & { owner: RemoteOwner }) => boolean): void {
+    for (const pending of this.pendingGrants) if (match(pending)) pending.revoked = true;
     const ended: Session[] = [];
     for (const [key, item] of this.tickets) if (match(item.session)) { clearTimeout(item.timer); this.abort(item.session); this.tickets.delete(key); ended.push(item.session); }
     for (const [key, item] of this.sessions) if (match(item)) { this.abort(item); this.sessions.delete(key); ended.push(item); }
@@ -232,13 +247,32 @@ export class LocalAppRemoteGateway {
         if (bufferedControl) { requestSignal.removeEventListener('abort', bufferedControl.release); bufferedControl.release(); }
       }
       if (session.controller.signal.aborted || !await this.adapter.current(session)) throw new Error('Session expired');
-      const output: Record<string, string | string[]> = {}; response.headers.forEach((value, key) => { if (!['set-cookie', 'content-length', 'connection', 'transfer-encoding'].includes(key)) output[key] = value; });
+      const output: Record<string, string | string[]> = {}; response.headers.forEach((value, key) => { if (!['set-cookie', 'connection', 'transfer-encoding'].includes(key) && (key !== 'content-length' || req.method === 'HEAD')) output[key] = value; });
+      const requestPath = new URL(session.origin + path).pathname;
+      const service = /^\/__services\/([\w-]+)(\/.*)?$/.exec(requestPath);
       const cookies = response.headers.getSetCookie().flatMap(cookie => {
         const parts = cookie.split(';').map(part => part.trim());
         const name = parts[0]?.split('=', 1)[0];
         if (!name || name === COOKIE || name === DEV_COOKIE || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) return [];
         // A backend cannot set cookies for sibling app origins.
-        return [parts.filter(part => !/^domain\s*=/i.test(part)).join('; ')];
+        const filtered = parts.filter(part => !/^domain\s*=/i.test(part));
+        if (service) {
+          // __Host- cookies require Path=/ and cannot be scoped to one service.
+          if (name.startsWith('__Host-')) return [];
+          const backendPath = service[2] ?? '/';
+          const slash = backendPath.lastIndexOf('/');
+          let cookiePath = slash <= 0 ? '/' : backendPath.slice(0, slash);
+          for (const part of filtered.slice(1)) {
+            const match = /^path\s*=\s*(.*)$/i.exec(part);
+            if (match?.[1]?.startsWith('/') && !/[\\\x00-\x1f\x7f]/.test(match[1])) cookiePath = match[1];
+          }
+          const prefix = `/__services/${service[1]}`;
+          const scopedPath = prefix + (cookiePath === '/' ? '' : cookiePath);
+          const withoutPaths = filtered.filter((part, index) => index === 0 || !/^path\s*=/i.test(part));
+          withoutPaths.push(`Path=${scopedPath}`);
+          return [withoutPaths.join('; ')];
+        }
+        return [filtered.join('; ')];
       });
       if (cookies.length && req.headers['x-lingxi-local-app-credentials'] !== 'omit') output['set-cookie'] = cookies;
       output['cache-control'] = 'no-store'; output['x-content-type-options'] = 'nosniff';

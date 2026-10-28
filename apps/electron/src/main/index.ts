@@ -632,8 +632,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   });
   remoteGateway = gateway;
   let remoteAccessGeneration = 0;
+  const remoteOwnerGenerations = new Map<string, number>();
+  const remoteOwnerKey = (owner: { accountUid: string; deviceId: string; hostId: string }) => JSON.stringify([owner.accountUid, owner.deviceId, owner.hostId]);
   const revokeRemoteAppAccess = (): void => {
     remoteAccessGeneration++;
+    remoteOwnerGenerations.clear();
     localApps?.remoteRevokeAll();
   };
   let remoteAccountUid = account.snapshot().user?.uid;
@@ -646,14 +649,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     accountUid: () => account.snapshot().user?.uid,
     hostId: () => remoteControl?.status().host_id,
     active: () => remoteControl?.status().state === 'online' && policy.allows(),
-    generation: () => remoteAccessGeneration,
+    generation: viewer => `${remoteAccessGeneration}:${remoteOwnerGenerations.get(remoteOwnerKey({ accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id })) ?? 0}`,
     approvedDevice: deviceId => remoteControl?.listDevices().some(device => device.device_id === deviceId) ?? false,
   }));
   remoteControl = createRemoteControl({
     account,
     settings,
     gateway: appsGateway,
-    deviceRevoked: owner => { remoteAccessGeneration++; localApps?.remoteRevokeOwner(owner); },
+    deviceRevoked: owner => { const key = remoteOwnerKey(owner); remoteOwnerGenerations.set(key, (remoteOwnerGenerations.get(key) ?? 0) + 1); localApps?.remoteRevokeOwner(owner); },
     accessStopped: revokeRemoteAppAccess,
     policyAllows: () => policy.allows(),
     credentialBroker,
@@ -752,6 +755,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     });
     localApps = new LocalAppHost({
       configHome: productPaths.configHome,
+      onRemoteAccessEnded: quitIfNothingNeedsTheApp,
       accountToken: () => account.getIdToken(),
       accountId: () => account.snapshot().user?.uid ?? undefined,
       core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.configHome, message => diagnostics.add('warn', 'host', message)),

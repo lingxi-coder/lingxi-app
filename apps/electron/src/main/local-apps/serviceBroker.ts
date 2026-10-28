@@ -65,15 +65,15 @@ export class LocalAppServiceBroker {
     const supported = new Set(['gzip', 'x-gzip', 'deflate', 'br']);
     if (typeof (zlib as { createZstdDecompress?: unknown }).createZstdDecompress === 'function') supported.add('zstd');
     const codings = coding?.toLowerCase().split(',').map(value => value.trim()) ?? [];
-    if (response.body && request.method !== 'HEAD' && codings.length && codings.every(value => supported.has(value))) {
-      if (response.status === 206) {
+    if ((response.body || request.method === 'HEAD') && codings.length && codings.every(value => supported.has(value))) {
+      if (response.body && response.status === 206) {
         // A backend may ignore identity and return a compressed partial body.
         // Fetch decodes it, so its byte offsets cannot be forwarded correctly.
         await response.body.cancel().catch(() => undefined);
         return new Response('Compressed partial responses are unavailable', { status: 502 });
       }
       const decodedHeaders = new Headers(response.headers);
-      for (const name of ['content-encoding', 'content-length', 'content-md5', 'digest', 'etag']) decodedHeaders.delete(name);
+      for (const name of ['content-encoding', 'content-length', 'content-md5', 'digest', 'content-digest', 'repr-digest', 'etag']) decodedHeaders.delete(name);
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers: decodedHeaders });
     }
     return response;

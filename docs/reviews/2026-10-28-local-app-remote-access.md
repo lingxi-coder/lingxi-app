@@ -133,7 +133,7 @@ Agent ownership. The host changes received a further independent review after
 fixes, including a late runtime activation after a launch timeout.
 
 Seventeen findings were fixed: five HIGH and twelve MEDIUM, with no CRITICAL or
-LOW findings. The references below point to the corrected source locations;
+LOW findings. The references below point to the corrected source locations at `8ee542855`;
 the defective implementation was reviewed at `4946747f7`.
 
 | Severity | Location | Issue and correction |
@@ -198,3 +198,56 @@ Receipts: `/private/tmp/lingxi-local-app-review-feature-tests-final.log`,
 `/private/tmp/lingxi-local-app-review-desktop-build.log`. The existing Agent
 regression receipt is
 `/private/tmp/lingxi-local-app-review-agent-regressions-final.log`.
+
+## Second independent review
+
+The user explicitly invoked `code-review` again after the first repair commit.
+The review covered the cumulative feature and then the new repair diff, using
+independent gateway, lifecycle/Agent and client reviewers plus the parent's RTC
+and integration inspection. The built-in reviewer role's configured model was
+unavailable to this account; the review lanes therefore used the user's
+requested GPT-6.1 Terra xhigh. Spec compliance remained the first stage.
+The cumulative reviewed change now spans 85 files, including the guarded
+atomic-write helper and its new regression test.
+
+This round identified and fixed 13 further findings: one HIGH, eleven MEDIUM
+and one LOW. Earlier passing tests did not cover these interactions. The
+references below identify the corrected locations after this round.
+
+| Severity | Location | Defect, impact and correction |
+| --- | --- | --- |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteGateway.ts:252` | Named service Cookie paths were not mapped to `/__services/<name>`, breaking login and colliding across services. Map explicit/default paths, reject incompatible named-service `__Host-` cookies, and verify two services with the same Cookie name in real Chrome. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:985` | Injecting HTML into 206 responses invalidated byte offsets, and transformed full HTML retained upstream validators. Preserve partial HTML exactly and remove stale representation hashes/ETags from injected HTML, including HEAD metadata. |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteGateway.ts:250` | All HEAD lengths were discarded. Preserve lengths for unchanged bodies; omit lengths that describe upstream compressed or uninjected HTML rather than the delivered representation. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:973` | A named service's `Location: /login` escaped into the root application. Preserve the service prefix for root-relative redirects and retain query/fragment. |
+| HIGH | `apps/electron/src/main/local-apps/agentBroker.ts:641`, `apps/electron/src/main/local-apps/store.ts:21` | Browser revocation during a broker lock wait still allowed queued chat deletion/archive/create or task admission; checking only before atomicJson also left a temporary-write-to-rename window. Carry the session signal through mutations, check after queue admission and at destructive/rename dispatch, and clean incomplete task/chat artifacts. Deterministic tests hold locks and temporary writes across revocation. |
+| MEDIUM | `apps/electron/src/main/local-apps/agentBroker.ts:675` | Session cancellation waited behind the global ledger lock before aborting active work. Abort matching controllers synchronously, then persist terminal records through the queue. |
+| MEDIUM | `apps/electron/src/main/index.ts:634`, `apps/electron/src/main/local-apps/host.ts:926` | Device or app withdrawal invalidated other devices/apps' in-flight launches. Track owner generations, target pending controllers/grants by owner/app, and retain global generations only for global withdrawal. Tests cover deleting an unrelated app as well as revoking another device. |
+| MEDIUM | `apps/electron/src/main/remoteControl/localAppsBindings.ts:43` | A transient signaling failure after a new opening revoked every existing browser session of its owner. Revoke only the returned, unredeemed ticket. A real gateway/delegate test proves an old session still works while the rejected new ticket cannot redeem. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:1450` | Desktop window closure could stop a run while remote opening was pending or appeared across an await. Coordinate window cleanup with startup, recheck run use, and keep the next cleanup runnable after a prior failure. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:1386` | Failed Desktop cache/navigation setup stopped an already shared foreground run. Retain runs still used by remote browsers or pending openings on both failure paths. |
+| LOW | `apps/electron/src/main/index.ts:758`, `apps/electron/src/main/local-apps/host.ts:906` | A windowless non-macOS process retained for a browser did not re-evaluate quitting when the last grant expired. Notify the existing idle checker after remote cleanup, which rechecks windows, viewers and background work. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:805` | The 257th shared application made the entire strict catalog invalid. Enforce an explicit trusted 256-share quota, clear shares on confirmed deletion and prune deleted IDs on settings writes so stale entries cannot exhaust slots. |
+| MEDIUM | `apps/ios/native/Sources/Remote/RemoteControlView.swift:178` | Refreshing the catalog invalidated an ongoing launch silently. Use an independent list sequence while retaining view-lifetime invalidation for both operations. |
+
+Follow-up checks also corrected interactions introduced during repair: rejected
+cleanup chains now recover, app deletion invalidates only that app's startup,
+and atomic writes check cancellation immediately before rename. The HTTP host
+test fixture now runs in Node's own realm, retaining the Electron stub without
+the cross-VM native `execution_async_id` assertion seen in exploratory runs.
+
+Final feature/peer/browser/atomic/store regressions: **126 passed, 0 failed or
+skipped**. Existing Agent/authoring regressions: **56 passed, 0 failed or skipped**.
+The final regression receipts are
+`/private/tmp/lingxi-local-app-review-round2-final.log` (feature/peer/browser,
+atomic-write and store tests),
+`/private/tmp/lingxi-local-app-review-round2-agent.log` (56 existing Agent and
+authoring tests), and `/private/tmp/lingxi-local-app-review-round2-build.log`
+(Desktop production JS build). Node/renderer typechecks, Swift frontend parsing
+and AST syntax checks of 45 changed TS/TSX files also passed. Native package,
+device, actual public tunnel and real TURN acceptance remain open as documented
+above; no matching Mobile binary generation was performed by this review.
+
+Recommendation remains **COMMENT** pending those platform acceptance gates.
+Within the reviewed source and covered regression scenarios, no confirmed
+findings remain unaddressed. This does not claim exhaustive absence of defects.

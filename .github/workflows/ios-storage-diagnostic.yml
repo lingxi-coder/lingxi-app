@@ -1,0 +1,144 @@
+name: iOS storage diagnostic
+on:
+  push:
+    branches: [codex/media-ios-storage-9b8e]
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+jobs:
+  # Mobile Linux is fail-closed. The repository variable stays `0` while the
+  # GPL runtime grants are absent; setting it to `1` makes this job require the
+  # signed authorization manifest, SBOM, license inventory, executable
+  # allowlist, and store-policy scan before either mobile build can proceed.
+  mobile-linux-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - uses: dtolnay/rust-toolchain@1.94.0
+
+      - name: Install source policy scan dependencies
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Validate mobile Linux authorization, rootfs, and store policy
+        run: bash scripts/mobile-linux/smoke.sh
+
+      - name: Test mobile Linux rootfs tooling
+        run: bash scripts/tests/test-rootfs-tooling.sh
+
+      - name: Test Android rootfs CI wiring
+        run: python3 apps/android/native/scripts/test-ci-rootfs-evidence.py
+
+  ios:
+    # The Local App Agent intent uses iOS 27's extended background runtime.
+    runs-on: xcode-27
+    needs: mobile-linux-policy
+    env:
+      LINGXI_MOBILE_LINUX_ENABLED: ${{ vars.LINGXI_MOBILE_LINUX_ENABLED || '0' }}
+      LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256: ${{ vars.LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256 || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the iOS SDK
+        run: |
+          xcodebuild -version
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          echo "iOS simulator SDK: $sdk_version"
+          if [[ "${sdk_version%%.*}" -lt 27 ]]; then
+            echo 'The Local App Agent intent requires the iOS 27 SDK or newer.' >&2
+            exit 1
+          fi
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Test iOS CI storage guard
+        run: python3 scripts/tests/test_ios_ci_storage.py
+
+      # The three iOS rust targets the XCFramework is assembled from: device,
+      # Apple-silicon simulator, and Intel simulator.
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      # xcodegen materializes apps/ios/native/project.yml into an .xcodeproj.
+      - name: Install Xcode project and native build tools
+        run: |
+          brew install xcodegen meson ninja llvm lld libarchive
+          echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Install the pinned GStreamer iOS XCFramework
+        run: python3 scripts/ci/gstreamer_sdk.py ios --root "$RUNNER_TEMP/gstreamer-sdk/ios"
+
+      - name: Build native support and verified release rootfs
+        run: |
+          python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
+          archive_name="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["archive"]["filename"])' "$RUNNER_TEMP/sdk-rootfs/arm64-v8a/rootfs-manifest.json")"
+          bash apps/ios/native/scripts/build-linux-runtime.sh \
+            --rootfs-archive "$RUNNER_TEMP/sdk-rootfs/arm64-v8a/$archive_name"
+          bash apps/ios/native/scripts/install-sherpa-runtime.sh
+
+      # UniFFI first builds the host static library to read binding metadata.
+      # That macOS build needs the macOS SDK, independently of the iOS slices.
+      - name: Install the pinned macOS GStreamer SDK for host bindings
+        run: python3 scripts/ci/gstreamer_sdk.py macos --root "$RUNNER_TEMP/gstreamer-sdk/macos"
+
+      # Cargo's three release slices and the host bindgen build are scratch
+      # inputs to the XCFramework, not inputs to the later Xcode test.
+      - name: Allocate private iOS build storage
+        id: ios-storage
+        run: |
+          target_dir="$(python3 scripts/ci/ios_ci_storage.py prepare)"
+          printf 'target=%s\n' "$target_dir" >> "$GITHUB_OUTPUT"
+
+      # Build the gitignored Generated/ Swift bindings + the
+      # LingxiCodeFFI.xcframework that the Xcode project links against.
+      - name: Build XCFramework + Swift bindings
+        env:
+          LINGXI_REUSE_STAGED_LINUX_RUNTIME: "1"
+          CARGO_TARGET_DIR: ${{ steps.ios-storage.outputs.target }}
+          LINGXI_XCFRAMEWORK_BUILD_DIR: ${{ steps.ios-storage.outputs.target }}/xcframework-work
+        run: bash apps/ios/native/scripts/build-xcframework.sh
+
+      - name: Release verified iOS build intermediates
+        env:
+          IOS_CI_TARGET: ${{ steps.ios-storage.outputs.target }}
+        run: python3 scripts/ci/ios_ci_storage.py release "$IOS_CI_TARGET"
+
+      - name: Generate Xcode project
+        working-directory: apps/ios/native
+        run: xcodegen generate
+
+      # Select an available iPhone on the newest installed iOS runtime. Use its
+      # UDID, so the chosen device and runtime cannot be mismatched.
+      - name: Resolve a booted-capable simulator
+        id: sim
+        run: |
+          simulator="$(xcrun simctl list devices available --json | jq -er '
+            [.devices | to_entries[]
+             | select(.key | startswith("com.apple.CoreSimulator.SimRuntime.iOS-"))
+             | .key as $runtime | .value[]
+             | select(.isAvailable and (.name | startswith("iPhone")))
+             | {name, udid, version: ($runtime | ltrimstr("com.apple.CoreSimulator.SimRuntime.iOS-") | split("-") | map(tonumber))}]
+            | sort_by(.version) | last | select(.version[0] >= 27) | "\(.udid)\t\(.name)"')"
+          IFS=$'\t' read -r id name <<< "$simulator"
+          echo "Using simulator: ${name} (${id})"
+          echo "id=${id}" >> "$GITHUB_OUTPUT"
+
+      # Run EngineRoundtripTests on the simulator under the LingxiCode scheme.
+      - name: xcodebuild test (simulator round-trip)
+        working-directory: apps/ios/native
+        run: |
+          xcodebuild test \
+            -scheme LingxiCode \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}"
+
+      - name: Report iOS runner storage
+        if: always() && steps.ios-storage.outcome == 'success'
+        env:
+          IOS_CI_TARGET: ${{ steps.ios-storage.outputs.target }}
+        run: python3 scripts/ci/ios_ci_storage.py report "$IOS_CI_TARGET"

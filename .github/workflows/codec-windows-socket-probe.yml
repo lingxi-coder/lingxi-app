@@ -1,0 +1,34 @@
+name: codec-windows-socket-probe
+
+on:
+  push:
+    branches: [codex/codec-windows-socket-probe-20261028]
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: '1.94.0'
+
+jobs:
+  windows-socket-probe:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Enable Windows long paths and Git symlinks
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          git config --global core.symlinks true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Probe pending TCP reads and peer FIN on Windows
+        shell: pwsh
+        run: |
+          rustc --version
+          rustc --edition=2024 scripts/ci/probe_codec_socket_shutdown.rs -o "$env:RUNNER_TEMP/codec-socket-probe.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/codec-socket-probe.exe" --controls
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/codec-socket-probe.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

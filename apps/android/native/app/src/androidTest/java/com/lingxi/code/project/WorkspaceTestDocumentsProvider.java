@@ -38,11 +38,7 @@ public class WorkspaceTestDocumentsProvider extends DocumentsProvider {
         throw new IllegalStateException("Test instrumentation target is missing");
     }
     private File root() { File root = new File(getContext().getFilesDir(), "workspace-fixtures"); root.mkdirs(); return root; }
-    @Override public boolean onCreate() {
-        getContext().grantUriPermission(targetPackage(getContext()), DocumentsContract.buildTreeDocumentUri(authority(getContext()), "root"),
-            Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-        return true;
-    }
+    @Override public boolean onCreate() { return true; }
     private File file(String id) {
         try {
             File base = root().getCanonicalFile(); File file = id.equals("root") ? base : new File(base, id).getCanonicalFile();
@@ -79,7 +75,16 @@ public class WorkspaceTestDocumentsProvider extends DocumentsProvider {
         return id(target);
     }
     @Override public String renameDocument(String old, String name) throws FileNotFoundException { validName(name); File source = file(old); File target = new File(source.getParentFile(), name); if (target.exists() || !source.renameTo(target)) throw new FileNotFoundException(name); return id(target); }
-    private void remove(File file) throws FileNotFoundException { File[] children = file.listFiles(); if (children != null) for (File child : children) remove(child); if (!file.delete()) throw new FileNotFoundException(file.toString()); }
+    private void remove(File file) throws FileNotFoundException {
+        String documentId = id(file);
+        boolean directory = file.isDirectory();
+        File[] children = file.listFiles();
+        if (children != null) for (File child : children) remove(child);
+        if (!file.delete()) throw new FileNotFoundException(file.toString());
+        if (directory) getContext().revokeUriPermission(targetPackage(getContext()),
+            DocumentsContract.buildTreeDocumentUri(authority(getContext()), documentId),
+            Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+    }
     @Override public void deleteDocument(String id) throws FileNotFoundException { if (id.equals("root")) throw new IllegalArgumentException(); remove(file(id)); }
     @Override public boolean isChildDocument(String parent, String child) { return file(child).toPath().startsWith(file(parent).toPath()); }
 }

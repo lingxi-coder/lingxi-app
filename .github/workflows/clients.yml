@@ -178,6 +178,7 @@ jobs:
         working-directory: apps/android/native
         run: |
           ./gradlew \
+            -PlingxiRootfsEvidenceDir="$RUNNER_TEMP/sdk-rootfs" \
             :app:testPlayDebugUnitTest :app:testDirectDebugUnitTest \
             :app:assemblePlayDebug :app:assembleDirectDebug \
             :app:assemblePlayDebugAndroidTest :app:assembleDirectDebugAndroidTest
@@ -266,7 +267,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           working-directory: apps/android/native
-          script: ./gradlew :app:connectedPlayDebugAndroidTest
+          script: ./gradlew -PlingxiRootfsEvidenceDir="$RUNNER_TEMP/sdk-rootfs" :app:connectedPlayDebugAndroidTest
 
   # ---------------------------------------------------------------------------
   # 4. ios — XCFramework build + Xcode simulator engine round-trip (macOS).

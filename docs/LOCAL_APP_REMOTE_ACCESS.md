@@ -211,6 +211,18 @@ resource quotas, monitoring and regional network acceptance belong to deployment
 The generator writes new files with mode 0600 and refuses to overwrite files.
 It does not start a relay, download frp or read credential file contents.
 
+Each Desktop needs its own wildcard route. The generated proxy name is derived
+from that route so different Desktops can use the same relay without conflicting
+proxy names. frpc connects outbound to the relay and forwards to the gateway on
+`127.0.0.1`; neither the Desktop's LAN address nor its public IP is configured
+as the destination. After a network change interrupts the connection, frpc
+[reconnects and registers the route again](https://github.com/fatedier/frp/blob/v0.71.1/client/service.go#L265-L360)
+when the relay is reachable. The stable
+public route and the relay's DNS and certificate must remain valid. The generator
+sets `loginFailExit = false` for initial login retries, but does not launch or
+supervise frpc; deployment must restart that process if it exits and monitor the
+relay connection. Existing transfers can fail during an interruption.
+
 Then enable Remote Control, pair the phone/browser, and enable **Allow access
 from paired devices** on the desired Desktop application. On Mobile or Web,
 open the connected computer's Apps catalog, refresh and select the app. Sharing

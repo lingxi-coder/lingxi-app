@@ -1744,9 +1744,11 @@ export class LocalAppHost {
     throw new Error('Unknown application API');
   }
   private async fileGrants(id: string): Promise<Record<string, string>> { try { return JSON.parse(await fs.readFile(join(this.store.directory(id), 'file-grants.json'), 'utf8')); } catch { return {}; } }
+  hasRemoteAccess(): boolean { return this.remoteOpening.size > 0 || !!this.remoteGateway?.hasAccess(); }
   async hasBackgroundApps(): Promise<boolean> {
-    if (this.remoteOpening.size || this.remoteGateway?.hasAccess()) return true;
-    return (await this.list()).some(row => (row.background && ['running', 'installing', 'building', 'starting'].includes(row.phase))
+    if (this.hasRemoteAccess()) return true;
+    const rows = await this.list();
+    return this.hasRemoteAccess() || rows.some(row => (row.background && ['running', 'installing', 'building', 'starting'].includes(row.phase))
       || (row.agent?.enabled && row.agent.background && this.agentBroker?.hasActiveApp(row.id)));
   }
   private retainRemoteRun(id: string): boolean {

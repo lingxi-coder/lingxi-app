@@ -20,11 +20,12 @@ final class RemoteAppLaunchURLTests: XCTestCase {
         XCTAssertNotEqual(pending, epoch.value, "a delayed open reply must be rejected while forget is suspended")
         XCTAssertFalse(epoch.permits(hostID: "current"), "new requests cannot use the stale ready state")
         XCTAssertTrue(epoch.permits(hostID: "other"))
+        epoch.observe(hostID: "current", ready: false)
+        epoch.observe(hostID: "current", ready: true)
+        XCTAssertFalse(epoch.permits(hostID: "current"), "reconnection must not unblock an unfinished forget")
         guard let finishForget else { forget.cancel(); return }
         finishForget.resume()
         await forget.value
-        XCTAssertFalse(epoch.permits(hostID: "current"), "wait for the disconnected state callback")
-        epoch.observe(hostID: "current", ready: false)
         XCTAssertTrue(epoch.permits(hostID: "current"), "a later connection can admit new requests")
 
         let stillCurrent = epoch.value
@@ -34,6 +35,54 @@ final class RemoteAppLaunchURLTests: XCTestCase {
         await epoch.forget(hostID: "current", currentHostID: "current") { }
         epoch.reset()
         XCTAssertTrue(epoch.permits(hostID: "current"), "a replacement account or client must not inherit the block")
+    }
+
+    @MainActor
+    func testConcurrentForgetsAndResetKeepTheirOwnBarriers() async {
+        let epoch = RemoteAppRequestEpoch()
+        var completions: [CheckedContinuation<Void, Never>] = []
+        let started = expectation(description: "both forgets entered")
+        started.expectedFulfillmentCount = 2
+        func start() -> Task<Void, Never> {
+            Task {
+                await epoch.forget(hostID: "current", currentHostID: "current") {
+                    await withCheckedContinuation { continuation in
+                        completions.append(continuation)
+                        started.fulfill()
+                    }
+                }
+            }
+        }
+        let first = start(), second = start()
+        await fulfillment(of: [started], timeout: 1)
+        epoch.observe(hostID: "current", ready: false)
+        completions[0].resume(); await Task.yield()
+        XCTAssertFalse(epoch.permits(hostID: "current"))
+        epoch.reset()
+        await epoch.forget(hostID: "current", currentHostID: "current") { }
+        completions[1].resume(); await first.value; await second.value
+        XCTAssertFalse(epoch.permits(hostID: "current"), "old completion must not remove a replacement barrier")
+        epoch.observe(hostID: "current", ready: false)
+        XCTAssertTrue(epoch.permits(hostID: "current"))
+    }
+
+    @MainActor
+    func testNewForgetAfterReconnectWaitsForItsOwnDeparture() async {
+        let epoch = RemoteAppRequestEpoch()
+        var firstGate: CheckedContinuation<Void, Never>?
+        let first = Task {
+            await epoch.forget(hostID: "current", currentHostID: "current") {
+                await withCheckedContinuation { firstGate = $0 }
+            }
+        }
+        while firstGate == nil { await Task.yield() }
+        epoch.observe(hostID: "current", ready: false)
+        epoch.observe(hostID: "current", ready: true)
+        await epoch.forget(hostID: "current", currentHostID: "current") { }
+        firstGate!.resume(); await first.value
+        XCTAssertFalse(epoch.permits(hostID: "current"))
+        epoch.observe(hostID: "current", ready: false)
+        XCTAssertTrue(epoch.permits(hostID: "current"))
     }
 
     func testPresentedBrowserSurvivesConnectionLossAndStaleLaunchDoesNotReplaceIt() {

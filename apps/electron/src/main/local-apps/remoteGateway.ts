@@ -196,11 +196,13 @@ export class LocalAppRemoteGateway {
           if (ticket !== route || ticket.expires <= Date.now() || controller.signal.aborted || res.destroyed) { if (!res.destroyed) res.writeHead(403).end(); return; }
           const aborted = new Promise<false>(resolve => controller.signal.addEventListener('abort', () => resolve(false), { once: true }));
           if (!await Promise.race([this.adapter.current(ticket.session), aborted]) || controller.signal.aborted || res.destroyed || ticket.expires <= Date.now() || this.tickets.get(value.ticket as string) !== ticket) { if (!res.destroyed) res.writeHead(403).end(); return; }
+          const remaining = ticket.session.expires - Date.now();
+          if (remaining <= 0) { res.writeHead(403).end(); return; }
           this.tickets.delete(value.ticket as string); clearTimeout(ticket.timer);
           const token = secret(); this.sessions.set(token, ticket.session);
-          ticket.session.timer = setTimeout(() => { this.abort(ticket.session); this.sessions.delete(token); this.notifyEnded(ticket.session); }, SESSION_LIFETIME); ticket.session.timer.unref();
+          ticket.session.timer = setTimeout(() => { this.abort(ticket.session); this.sessions.delete(token); this.notifyEnded(ticket.session); }, remaining); ticket.session.timer.unref();
           const secure = ticket.session.origin.startsWith('https:');
-          res.writeHead(204, { 'set-cookie': `${secure ? COOKIE : DEV_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}; Max-Age=${Math.floor(SESSION_LIFETIME / 1000)}`, 'cache-control': 'no-store' }).end(); return;
+          res.writeHead(204, { 'set-cookie': `${secure ? COOKIE : DEV_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}; Max-Age=${Math.floor(remaining / 1000)}`, 'cache-control': 'no-store' }).end(); return;
         } finally {
           clearTimeout(timer); req.removeListener('aborted', abort); res.removeListener('close', abort);
           route.session.controller.signal.removeEventListener('abort', abort); this.pendingBootstraps.delete(route);
@@ -330,7 +332,11 @@ export class LocalAppRemoteGateway {
   }
   private async upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     try {
-      const session = this.cookie(req), path = req.url ?? '/', match = /^\/__services\/([\w-]+)(\/[^#]*)?$/.exec(path);
+      const session = this.cookie(req), path = req.url ?? '/';
+      const queryIndex = path.indexOf('?');
+      const pathname = queryIndex < 0 ? path : path.slice(0, queryIndex);
+      const search = queryIndex < 0 ? '' : path.slice(queryIndex);
+      const match = /^\/__services\/([\w-]+)(\/[^#]*)?$/.exec(pathname);
       if (!session || session.controller.signal.aborted || session.upgrades >= 32 || socket.destroyed || !path.startsWith('/') || path.startsWith('//') || path.startsWith('/__lingxi_') || req.headers.origin !== session.origin || /[\\\r\n\0#]/.test(path)) { socket.destroy(); return; }
       // Count browser connections, including pending upgrades; upstream peers do not consume another slot.
       session.upgrades++; session.sockets.add(socket);
@@ -356,7 +362,7 @@ export class LocalAppRemoteGateway {
       for (const key of Object.keys(headers)) if (key === 'forwarded' || key === 'x-real-ip' || key.startsWith('x-forwarded-')) delete headers[key];
       const origin = new URL(session.origin);
       headers['x-forwarded-host'] = origin.host; headers['x-forwarded-proto'] = origin.protocol.slice(0, -1);
-      upstream = httpRequest({ host: '127.0.0.1', port, path: match ? match[2] ?? '/' : path, headers });
+      upstream = httpRequest({ host: '127.0.0.1', port, path: match ? (match[2] ?? '/') + search : path, headers });
       upstream.once('upgrade', (response, peer, remainder) => {
         if (session.controller.signal.aborted || socket.destroyed) { peer.destroy(); socket.destroy(); return; }
         session.sockets.add(peer); peer.once('close', () => { session.sockets.delete(peer); socket.destroy(); }); peer.on('error', () => peer.destroy());

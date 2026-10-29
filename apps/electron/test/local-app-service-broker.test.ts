@@ -52,7 +52,7 @@ test('service proxy replaces renderer cookies with host-selected cookies and ret
 
 test('WebSocket gateway validates origin and revokes an already upgraded binary stream', async t => {
   const backend = createServer();
-  const backendSockets = new Set<import('node:net').Socket>();
+  const backendSockets = new Set<import('node:stream').Duplex>();
   backend.on('upgrade', (req, socket) => {
     backendSockets.add(socket); socket.once('close', () => backendSockets.delete(socket));
     const key = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');

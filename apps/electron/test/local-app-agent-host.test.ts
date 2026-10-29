@@ -336,8 +336,8 @@ test('preload exposes only host-scoped AG-UI resource methods without event stre
   assert.deepEqual(Object.keys(bridge.agent.tasks).sort(), ['cancel', 'events', 'get', 'list', 'start']);
   await bridge.agent.tasks.events({ runId: 'run-1', afterSequence: 3 });
   assert.equal(requests.length, 1);
-  assert.equal(requests[0][1].method, 'agent.tasks.events');
-  assert.equal(requests[0][1].args.runId, 'run-1');
+  assert.ok(Array.isArray(requests[0]));
+  assert.deepEqual(JSON.parse(JSON.stringify(requests[0][1])), { method: 'agent.tasks.events', args: { runId: 'run-1', afterSequence: 3 } });
   assert.ok(!('subscribe' in bridge.agent.tasks));
 });
 

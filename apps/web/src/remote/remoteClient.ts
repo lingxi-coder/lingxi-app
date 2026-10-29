@@ -25,7 +25,7 @@ import {
 import { emptyTranscript, TranscriptBuilder, type Transcript } from './sessionModel';
 import { displayText } from './text';
 import type { ViewerConnection } from './viewerConnection';
-import { isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS } from './reuse';
+import { isPermissionModeId, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS } from './reuse';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Session state
@@ -368,7 +368,7 @@ export class SessionController {
       else if (event.type === 'conversation_controls_changed') change.controls = event.controls;
       else if (event.type === 'model_changed' && this.current.controls) {
         change.controls = { ...this.current.controls, qualified_model: event.model };
-      } else if (event.type === 'permission_mode_changed' && this.current.controls) {
+      } else if (event.type === 'permission_mode_changed' && this.current.controls && isPermissionModeId(event.mode)) {
         const permission = this.current.controls.permission;
         change.controls = { ...this.current.controls, permission: { ...permission, requested: event.mode, effective: event.mode } };
       }

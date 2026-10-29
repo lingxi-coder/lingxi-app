@@ -13,8 +13,19 @@ test('renders Desktop-terminated TLS with wildcard routes, preserved Host, file 
   assert.match(result.toml, /auth\.tokenSource\.file\.path = "\/private\/token"/);
   assert.match(result.toml, /localAddr = "127.0.0.1:17980"/);
   assert.match(result.toml, /type = "https2http"/);
+  assert.match(result.toml, /^loginFailExit = false$/m);
+  assert.doesNotMatch(result.toml, /connectServerLocalIP/);
   assert.doesNotMatch(result.toml, /hostHeaderRewrite|insecureSkipVerify|auth\.token\s*=/);
   assert.deepEqual(result.desktopEnvironment, { LINGXI_LOCAL_APP_REMOTE_ORIGIN: input.originTemplate, LINGXI_LOCAL_APP_GATEWAY_PORT: '17980' });
+});
+
+test('different Desktop routes receive stable distinct proxy names on a shared relay', () => {
+  const proxyName = config => /^name = "([^"]+)"$/m.exec(renderLocalAppTunnel(config).toml)?.[1];
+  const first = proxyName(input);
+  const second = proxyName({ ...input, originTemplate: 'https://{appId}-{sessionId}.desktop-two.apps.example.com' });
+  assert.match(first, /^local-apps-[a-f0-9]{32}$/);
+  assert.equal(first, proxyName(input));
+  assert.notEqual(first, second);
 });
 
 test('refuses shared origins, unsafe hosts, missing verification and malformed port/path inputs', () => {

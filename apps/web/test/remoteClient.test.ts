@@ -92,8 +92,25 @@ async function open(h: Harness): Promise<{ client: RemoteClient; controller: Ses
   const connection = h.connect();
   const client = new RemoteClient(connection, { clock: h.clock });
   const script = new SessionScript(h);
-  connection.start();
-  await h.until(connection, 'ready');
+  // Authentication uses real WebCrypto. Advancing fake protocol deadlines on
+  // every event-loop turn can time it out while the crypto worker is still busy.
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => finish(new Error('timed out waiting for connection readiness')), 5_000);
+    const off = connection.subscribe((state) => {
+      if (state.phase === 'ready') finish();
+      else if (state.phase === 'failed') finish(new Error(`connection failed: ${JSON.stringify(state.failure)}`));
+    });
+    function finish(error?: Error): void {
+      clearTimeout(timeout);
+      off();
+      if (error) {
+        client.dispose();
+        connection.stop();
+        reject(error);
+      } else resolve();
+    }
+    connection.start();
+  });
   const controller = client.session(SESSION);
   return { client, controller, script, conn: () => [...h.host.connections.values()].at(-1)! };
 }

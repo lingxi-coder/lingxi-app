@@ -306,6 +306,15 @@ export class SessionRuntime {
     complete(): void;
     fail(error: Error): void;
   } | undefined;
+  private readonly queuedSessionModeSwitches: Array<{
+    mode: RuntimeSessionMode;
+    persist: boolean;
+    saveSelection?: () => void;
+    client: BridgeClient;
+    generation: number;
+    resolve(): void;
+    reject(error: Error): void;
+  }> = [];
   private pendingDraftModeSnapshot: {
     generation: number;
     complete(event: Extract<ClientEvent, { type: 'session_mode_changed' }>): void;
@@ -322,40 +331,66 @@ export class SessionRuntime {
   }
 
   private applySessionMode(mode: RuntimeSessionMode, persist: boolean, reservedSelection?: () => void): Promise<void> {
-    if (this.pendingSessionModeSwitch) return Promise.reject(new Error('A conversation mode change is already in progress.'));
     const client = this.requireClient();
     const saveSelection = persist ? reservedSelection ?? this.opts.onSessionModeSelectionStarted?.(mode) : undefined;
     return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => pending.fail(new Error('Conversation mode change timed out.')), 10_000);
-      timer.unref();
-      const finish = (error?: Error) => {
-        if (this.pendingSessionModeSwitch !== pending) return;
-        this.pendingSessionModeSwitch = undefined;
-        clearTimeout(timer);
-        this.notifyActivityChanged();
-        if (error) reject(error); else resolve();
-      };
-      const pending = {
-        mode,
-        complete: () => {
-          try {
-            if (persist) {
-              if (this.draftSessionMode !== undefined) this.draftSessionMode = mode;
-              if (saveSelection) saveSelection();
-              else this.opts.onSessionModeSelected?.(mode);
-            }
-            finish();
-          } catch (error) {
-            finish(new Error(`Could not save conversation mode: ${sanitizeDiagnostic(error)}`));
-          }
-        },
-        fail: (error: Error) => finish(error),
-      };
-      this.pendingSessionModeSwitch = pending;
+      this.queuedSessionModeSwitches.push({ mode, persist, saveSelection, client, generation: this.generation, resolve, reject });
       this.notifyActivityChanged();
-      try { client.sendCommand({ type: 'set_session_mode', mode }); }
-      catch (error) { pending.fail(error instanceof Error ? error : new Error(String(error))); }
+      this.startNextSessionModeSwitch();
     });
+  }
+
+  private rejectQueuedSessionModeSwitches(error: Error): void {
+    for (const queued of this.queuedSessionModeSwitches.splice(0)) queued.reject(error);
+  }
+
+  private startNextSessionModeSwitch(): void {
+    if (this.pendingSessionModeSwitch) return;
+    const next = this.queuedSessionModeSwitches.shift();
+    if (!next) return;
+    if (this.disposed || this.generation !== next.generation || this.client !== next.client) {
+      next.reject(new Error('Conversation mode change was interrupted.'));
+      queueMicrotask(() => this.startNextSessionModeSwitch());
+      this.notifyActivityChanged();
+      return;
+    }
+    const { mode, persist, saveSelection, client, resolve, reject } = next;
+    const timer = setTimeout(() => {
+      // A timeout does not establish whether the engine committed. Do not
+      // submit later choices until the caller can reconcile the connection.
+      this.rejectQueuedSessionModeSwitches(new Error('Conversation mode change was interrupted after a timeout.'));
+      pending.fail(new Error('Conversation mode change timed out.'));
+    }, 10_000);
+    timer.unref();
+    const finish = (error?: Error) => {
+      if (this.pendingSessionModeSwitch !== pending) return;
+      this.pendingSessionModeSwitch = undefined;
+      clearTimeout(timer);
+      if (error) reject(error); else resolve();
+      // Keep later requests queued until this event has finished publication.
+      queueMicrotask(() => this.startNextSessionModeSwitch());
+      this.notifyActivityChanged();
+    };
+    const pending = {
+      mode,
+      complete: () => {
+        try {
+          if (persist) {
+            if (this.draftSessionMode !== undefined) this.draftSessionMode = mode;
+            if (saveSelection) saveSelection();
+            else this.opts.onSessionModeSelected?.(mode);
+          }
+          finish();
+        } catch (error) {
+          finish(new Error(`Could not save conversation mode: ${sanitizeDiagnostic(error)}`));
+        }
+      },
+      fail: (error: Error) => finish(error),
+    };
+    this.pendingSessionModeSwitch = pending;
+    this.notifyActivityChanged();
+    try { client.sendCommand({ type: 'set_session_mode', mode }); }
+    catch (error) { pending.fail(error instanceof Error ? error : new Error(String(error))); }
   }
 
   private pendingFastModeSwitch: {
@@ -961,7 +996,7 @@ export class SessionRuntime {
   }
 
   get hasActiveWork(): boolean {
-    return this.resumeOperationInProgress || this.changingWorkspace || this.pendingSessionModeSwitch !== undefined || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
+    return this.resumeOperationInProgress || this.changingWorkspace || this.pendingSessionModeSwitch !== undefined || this.queuedSessionModeSwitches.length > 0 || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
   }
 
   private currentResumeOwner(): PendingSessionResume | null {
@@ -2808,7 +2843,7 @@ export class SessionRuntime {
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another prompt.');
-    if (this.draftModeRestorationRequired || this.pendingSessionModeSwitch) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
+    if (this.draftModeRestorationRequired || this.pendingSessionModeSwitch || this.queuedSessionModeSwitches.length > 0) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
     if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
@@ -2852,7 +2887,7 @@ export class SessionRuntime {
     visualizationContext?: VisualizationReference,
     source?: PromptSource,
   ): void {
-    if (this.draftModeRestorationRequired || this.pendingSessionModeSwitch) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
+    if (this.draftModeRestorationRequired || this.pendingSessionModeSwitch || this.queuedSessionModeSwitches.length > 0) throw new Error('Wait for the conversation mode to be ready before sending a prompt.');
     const needsIdentityCommit = !this.sessionIdentityCommitted;
     const traceContext = this.telemetryRevoked ? undefined : this.telemetry?.beginTurn(turnId);
     try {
@@ -3056,7 +3091,7 @@ export class SessionRuntime {
     if (this.archiving) throw new Error('This chat is being archived.');
     const validated = validateClientCommand(command, this.activeWorkspace);
     if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a command.');
-    if (validated.type === 'run_slash_command' && this.pendingSessionModeSwitch) throw new Error('Wait for the conversation mode to be ready before sending a command.');
+    if (validated.type === 'run_slash_command' && (this.pendingSessionModeSwitch || this.queuedSessionModeSwitches.length > 0)) throw new Error('Wait for the conversation mode to be ready before sending a command.');
     if (validated.type.startsWith('side_chat_')) {
       const client = this.requireClient();
       if (validated.type === 'side_chat_create') this.pendingSideCreates.add(validated.request_id);
@@ -3662,6 +3697,7 @@ export class SessionRuntime {
     if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
       this.telemetry?.interrupt(next.status === 'error' ? 'error' : 'interrupted');
       this.disconnectedForegroundPending ||= this.activeTurn || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
+      this.rejectQueuedSessionModeSwitches(new Error('Conversation mode change was interrupted.'));
       this.pendingSessionModeSwitch?.fail(new Error('Conversation mode change was interrupted.'));
       this.pendingDraftModeSnapshot?.fail(new Error('Draft mode restoration was interrupted.'));
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
@@ -3712,6 +3748,7 @@ export class SessionRuntime {
     for (const pending of this.pendingRunBindings.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled execution interrupted.')); }
     this.pendingRunBindings.clear();
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
+    this.rejectQueuedSessionModeSwitches(new Error('Conversation mode change was interrupted.'));
     this.pendingSessionModeSwitch?.fail(new Error('Conversation mode change was interrupted.'));
     this.pendingDraftModeSnapshot?.fail(new Error('Draft mode restoration was interrupted.'));
     this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));

@@ -379,7 +379,7 @@ fun Composer(
                             modifier = Modifier
                                 .size(48.dp)
                                 .clip(CircleShape)
-                                .background(t.accent)
+                                .background(if (enabled) t.accent else t.accent.copy(alpha = 0.45f))
                                 .clickable(enabled = enabled) {
                                     if (modelSetupRequired) onOpenModelSettings() else onSend()
                                 }

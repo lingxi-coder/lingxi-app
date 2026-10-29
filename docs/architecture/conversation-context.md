@@ -6,17 +6,23 @@ Chat and Code select behavior in the shared Harness. Chat supports research, wri
 
 The original transcript, effective host state and prepared model projection are separate records. `set_session_mode` selects a profile on the existing conversation. The runtime persists a versioned `session-mode` metadata record before publishing the selection. An idle conversation applies it immediately; an admitted query retains its profile until the next outer query. Switching modes never cancels, restarts or interrupts the running turn loop. Internal provider retries and tool continuations stay within that query.
 
+Streaming admission is acknowledged only after storage recovery and durable profile admission finish. Acquiring the turn gate alone does not consume the caller's input. Selections before that admission point may determine the upcoming query; selections after it remain pending for the following query. Failed or cancelled admission retains the caller's unsent input, while already-executed direct Bash results still settle durably.
+
 `session_mode_changed` reports the canonical session UUID, active `mode`, optional `pending_mode`, and selection `revision`. A revision can advance from pending to applied without changing its number. Clients reject lower revisions and delayed pending echoes after an applied event. Selecting the active mode cancels a pending selection. `profileEpoch` changes only when effective instruction scope changes, so canceling an unapplied selection preserves the active task.
 
 The mode menu describes both profiles, checks the active profile and labels a pending selection as applying to the next turn. Native new-conversation submission waits for the applied event before admitting its first message. Restoring a conversation does not rewrite the device's explicit-selection preference.
 
 Session switches and profile persistence share an administrative transition guard. Metadata writes validate the captured session identity. Versioned mode records sync before acknowledgement, and a failed sync rolls back the append under the transcript transaction. A failed selection leaves effective state unchanged. Once a profile transaction starts, its owned task finishes persistence and publication even if its caller stops waiting; admission also retains the turn gate until that transaction settles.
 
+The mobile host acquires its session-transition guard before detaching a selection from the native caller. Cancelling a caller that is still waiting for that guard leaves no delayed selection behind. After the guard is granted, the owned transaction retains it through completion, so a replacement UI cannot overtake it or redirect it to another conversation.
+
 Interrupted queries restore their admitted profile and epoch before deferred tool recovery or startup hooks. The next query durably applies a pending selection before expiring old instructions. If an unresolved native-computer receipt still needs its original continuation, the runtime retains that profile and reports why the selection cannot yet apply. Once settled, old provider continuation markers cannot cross a profile epoch; ordinary tool history remains available.
 
 Native-computer projection distinguishes receipt epochs: the current epoch keeps its typed provider continuation, while earlier epochs contribute ordinary evidence. A durable abandonment decision remains authoritative after compaction. When its retained rows are not a contiguous parent chain, the compact boundary records their exact membership so cold recovery cannot reintroduce discarded intermediate history. Its summary is synced as an isolated staged row before publishing the boundary; an uncommitted stage leaves the previous main history recoverable.
 
 New conversations use the last mode explicitly selected on that device. Opening an existing conversation restores its own profile without changing that preference. Draft text belongs to its conversation owner: reopening a different owner restores that owner's draft instead of copying the outgoing text. Empty desktop drafts persist their confirmed profile and revision, and pending selections keep their runtime active. Cross-runtime defaults follow explicit selection order, independent of acknowledgement order. Forking remains a separate action. Scheduled/background owners restore their saved context and retain their original permission and resource scope.
+
+Desktop serializes consecutive selections in one conversation and keeps the runtime pinned between acknowledgements, so choosing the active mode can cancel an earlier pending choice. Native composers keep drafts and attachments editable while the latest mode submission is outstanding or needs retry. They admit subsequent input after the selection is acknowledged, including a busy conversation's pending selection; they do not wait for that selection to become the active query profile.
 
 An Android UI takeover retains its confirmed conversation projection together with the corresponding durable replay cursor. It attaches to the existing executor instead of resuming or cancelling its turn. The composer remains gated until that attachment is confirmed. A truncated replay reports the missing history while preserving the live owner's execution state.
 
@@ -96,4 +102,20 @@ The 2026-10-28 review corrections were validated in the isolated worktrees. Thes
 
 Mode-switch tests let the original turn finish naturally: its tool continuation and subsequent model request retain the original profile, and the next outer query admits the new selection. Agent hard-abort tests exercise both normal deallocation and cleanup after dropping its caller; the accepted Skill write completes before abort. They also reconstruct the registry from the written agent row, which is not a complete agent cold-start acceptance test.
 
-Product dependency checks resolve all 79 owned runtime packages to Harness commit `43e626d84dde751d57ac5b67a8653cda979c01bf`. The temporary development patch is removed; all three protocol fixture mirrors match that immutable source. `cargo check --offline --locked --tests` passed for Bridge, CLI, iOS FFI, Android FFI, audio-provider and remote-control-client. Native device and signed-package limits described above still apply.
+At the initial correction checkpoint, dependency checks resolved all 79 owned runtime packages to Harness commit `43e626d84dde751d57ac5b67a8653cda979c01bf`. The temporary development patch was removed and all three protocol fixture mirrors matched that immutable source. `cargo check --offline --locked --tests` passed for Bridge, CLI, iOS FFI, Android FFI, audio-provider and remote-control-client. Native device and signed-package limits described above still apply.
+
+## Follow-up admission verification
+
+The 2026-10-29 follow-up closes the interval between taking the turn gate and publishing the admitted profile, serializes overlapping desktop choices, and preserves native drafts until mode submission succeeds. Invalidated goal-only retries are checked without consuming valid retries before a profile transaction: a discarded retry cannot expire the current Skill epoch, and failed profile persistence leaves a valid retry available.
+
+| Check | Result |
+| --- | --- |
+| Profile recovery / goal retries / cancellation waiting / admission callbacks | 16 / 10 / 4 / 5 passed; groups overlap |
+| Mobile host mode ownership and control bypasses | 8 passed with desktop and UniFFI features, including both exported submission entries |
+| Electron mode, model preference, Bridge, command readiness and workspace runtime | 184 passed; main-process type checking and production build passed |
+| Android mode submission, session state, retained takeover and related JVM regressions | 282 passed across 10 classes; Kotlin/Java compilation passed |
+| iOS standalone readiness policy / asynchronous source-method probes | 5 / 5 passed; probes use extracted production methods with stub dependencies |
+
+The native mode-before-send probes fail against the earlier implementation and pass with the submission gate. Android also reproduces and covers synchronous observer reentry during a session switch. The iOS sources and six added integration cases parse successfully; the full integration suite, simulator, physical devices and signed packages remain unverified in this environment. The source-method probes do not establish complete iOS runtime acceptance.
+
+The follow-up App pin is Harness commit `922a96843b5df7668333eed63952eefe19210b87`. All 79 owned runtime packages resolve to that immutable source; no local Cargo patch is used. Locked offline metadata resolves successfully, and protocol checks pass for 847 native client sources and all three fixture mirrors. The mobile host tests preserve the existing UniFFI submission signatures and cover both entries with cancellation before the host lock, cancellation after durable work begins, a different subsequent selection, a new session, and a small-stack foreign executor.

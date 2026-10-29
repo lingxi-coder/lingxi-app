@@ -232,6 +232,23 @@ struct ChatView: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 4)
                 }
+                if !convo.awaitingNewSessionMode, let mode = convo.requestedSessionMode {
+                    Group {
+                        if convo.sessionModeSubmissionFailed {
+                            Button(String(localized: "session_mode_retry")) {
+                                onSelectSessionMode(mode)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Text(String(localized: "session_mode_setting"))
+                        }
+                    }
+                        .font(.caption)
+                        .foregroundStyle(t.text3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 4)
+                }
                 Group {
                     Composer(model: $convo.model,
                          // SHIP-BLOCKER #2: drive the picker off the engine's real
@@ -295,6 +312,7 @@ struct ChatView: View {
                          isCancelling: convo.isCancelling,
                          sendEnabled: !convo.sessionTransitionPending
                              && !convo.awaitingNewSessionMode
+                             && convo.requestedSessionMode == nil
                              && !convo.slashCommandPending
                              && voiceInteraction.mode != .flow,
                          onStop: stop,

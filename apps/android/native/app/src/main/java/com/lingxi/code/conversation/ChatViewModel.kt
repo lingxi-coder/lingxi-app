@@ -115,6 +115,8 @@ class ChatViewModel(
     private var bufferedModeUpdate: SessionModeSnapshot? = null
     private var modeOwnerSessionId: String? = null
     private val modeRequestMutex = Mutex()
+    private class ModeSubmissionGate(val owner: ConversationSource, val sessionToken: Long)
+    private var modeSubmissionGate: ModeSubmissionGate? = null
     internal val sideChats = SideChatManager(viewModelScope)
 
     internal val supportsSideChats: Boolean get() = source is EngineConversationSource
@@ -409,6 +411,7 @@ class ChatViewModel(
         modeConfirmation = null
         newSessionModeJob = null
         requiredNewSessionMode = null
+        modeSubmissionGate = null
     }
 
     init {
@@ -2258,12 +2261,18 @@ class ChatViewModel(
                 retainedAttachSubmissionPending = true
                 retainedAttachSnapshotSeen = false
             }
+            // A destroyed UI cannot observe whether its foreign mode call
+            // settled. Keep an uncertain or failed choice gated until retried
+            // by this owner; the existing turn remains attached independently.
+            val needsModeRetry = retained.state.modeSubmissionState != null
+            modeSubmissionGate = if (needsModeRetry) ModeSubmissionGate(source, sessionToken) else null
             setNavigationOwner(restored.sessionId, _sourceScope.value)
             _state.value = retained.state.copy(
                 session = SessionRef(restored.sessionId, title),
                 sessionMode = restored.mode,
                 sessionTransitioning = false,
                 sessionReady = activeTurnId == null,
+                modeSubmissionState = if (needsModeRetry) ModeSubmissionState.Failed else null,
                 agentRun = retained.state.agentRun?.let { if (it.turnId == retained.turnToken) it.copy(turnId = token) else it },
                 agentRunsByMessageId = retained.state.agentRunsByMessageId.mapValues { (_, run) ->
                     if (run.turnId == retained.turnToken) run.copy(turnId = token) else run
@@ -2374,16 +2383,36 @@ class ChatViewModel(
         }
         val owner = source
         val requestedSessionToken = sessionToken
+        // Register before launching: a send from the next UI action must not
+        // overtake a mode transaction whose coroutine has yet to start.
+        val gate = ModeSubmissionGate(owner, requestedSessionToken)
+        modeSubmissionGate = gate
+        _state.update { it.copy(modeSubmissionState = ModeSubmissionState.Pending) }
         viewModelScope.launch {
-            modeRequestMutex.withLock {
-                if (source !== owner || sessionToken != requestedSessionToken || _state.value.sessionTransitioning) return@withLock
-                try {
+            try {
+                modeRequestMutex.withLock {
+                    if (source !== owner || sessionToken != requestedSessionToken || _state.value.sessionTransitioning) return@withLock
                     owner.submitClientCommand(ClientCommand.SetSessionMode(mode.toDto()))
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Exception) {
+                }
+                // The command acknowledgement follows durable selection. A busy
+                // turn can keep its old profile until its next outer query, so
+                // waiting for an applied event here would deadlock admission.
+                if (modeSubmissionGate === gate) {
+                    modeSubmissionGate = null
+                    _state.update { it.copy(modeSubmissionState = null) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (modeSubmissionGate === gate) {
                     if (source === owner && sessionToken == requestedSessionToken && !_state.value.sessionTransitioning) {
+                        // Keep the gate closed after failure. The composer remains
+                        // editable until the user successfully retries a selection.
+                        _state.update { it.copy(modeSubmissionState = ModeSubmissionState.Failed) }
                         reportHostError(error.message.orEmpty())
+                    } else {
+                        modeSubmissionGate = null
+                        _state.update { it.copy(modeSubmissionState = null) }
                     }
                 }
             }
@@ -2655,6 +2684,7 @@ class ChatViewModel(
                 session = target,
                 awaitingNewSessionMode = false,
                 newSessionModeFailed = false,
+                modeSubmissionState = null,
                 promptSuggestion = null, promptSuggestionUuid = null,
                 messages = emptyList(),
                 visualizationChip = null,
@@ -2832,7 +2862,9 @@ class ChatViewModel(
      */
     /** Synchronous composer admission keeps rejected side commands editable. */
     fun admitComposerSend(text: String, hasImages: Boolean): Boolean {
-        if (!_state.value.sessionReady || _state.value.sessionTransitioning) return false
+        val current = _state.value
+        if (!current.sessionReady || current.sessionTransitioning || current.modeSubmissionState != null) return false
+        if (modeSubmissionGate?.let { it.owner === source && it.sessionToken == sessionToken } == true) return false
         if (source is ExternalTurnConversationSource) return true
         val rejection = sideChatSendRejection(text, hasImages, source is SideChatSource) ?: return true
         reportHostError(when (rejection) {
@@ -3674,6 +3706,7 @@ class ChatViewModel(
                 val laterUserRows = current.messages.filter { it.role == Role.User && it.id !in savedIds }
                 captured.copy(state = captured.state.copy(
                     messages = captured.state.messages + laterUserRows,
+                    modeSubmissionState = current.modeSubmissionState,
                     expandedToolCalls = current.expandedToolCalls,
                     activeBackgroundTaskIds = current.activeBackgroundTaskIds,
                     backgroundTasks = current.backgroundTasks,

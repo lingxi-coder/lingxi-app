@@ -55,6 +55,19 @@ visionDelegationEnabled: true)
             ClientTextDto(codeUnits: Array(value.utf16))
         }
 
+        private func existingSource() -> EngineConversationSource {
+            let source = makeSource()
+            source.expectSessionResumeForTesting(uuid())
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [
+                MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: sourceText("history"))])
+            ]))
+            return source
+        }
+
+        private func waitForModeSubmission(_ source: EngineConversationSource) async {
+            for _ in 0..<100 where source.model.requestedSessionMode != nil { await Task.yield() }
+        }
+
         func testModeSwitchKeepsSessionAndTranscriptAndRejectsStaleEvents() {
             let source = makeSource()
             source.expectSessionResumeForTesting(uuid())
@@ -98,6 +111,199 @@ visionDelegationEnabled: true)
             await fulfillment(of: [submitted], timeout: 1)
             XCTAssertEqual(source.model.activeSessionId, uuid())
             XCTAssertTrue(source.model.streaming)
+        }
+
+        func testExistingSessionKeepsPromptUntilModeCommandAcknowledges() async {
+            let source = existingSource()
+            let started = expectation(description: "mode submission started")
+            let sent = expectation(description: "prompt submitted")
+            var release: CheckedContinuation<Void, Never>?
+            var order: [String] = []
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case .setSessionMode(mode: .chat):
+                    order.append("mode-started")
+                    started.fulfill()
+                    await withCheckedContinuation { release = $0 }
+                    order.append("mode-acknowledged")
+                case .sendPrompt:
+                    order.append("prompt")
+                    sent.fulfill()
+                default: break
+                }
+            }
+
+            source.setSessionMode(.chat)
+            await fulfillment(of: [started], timeout: 1)
+            XCTAssertEqual(source.model.requestedSessionMode, .chat)
+            XCTAssertNil(source.send("keep this draft"))
+            XCTAssertEqual(source.model.messages.map(\.text), ["history"])
+            release?.resume()
+            await waitForModeSubmission(source)
+            XCTAssertNil(source.model.requestedSessionMode)
+            XCTAssertNotNil(source.send("keep this draft"))
+            await fulfillment(of: [sent], timeout: 1)
+            XCTAssertEqual(order, ["mode-started", "mode-acknowledged", "prompt"])
+        }
+
+        func testBusyModeAcknowledgementAllowsQueuedPromptWithoutAppliedEvent() async {
+            let source = existingSource()
+            source.beginTurnForTesting(sessionId: uuid())
+            let activeToken = source.model.activeTurnToken
+            let started = expectation(description: "mode submission started")
+            let queued = expectation(description: "queued prompt submitted")
+            var release: CheckedContinuation<Void, Never>?
+            var commands: [String] = []
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case .setSessionMode(mode: .chat):
+                    commands.append("mode")
+                    started.fulfill()
+                    await withCheckedContinuation { release = $0 }
+                case .sendPrompt:
+                    commands.append("prompt")
+                    queued.fulfill()
+                case .cancel:
+                    commands.append("cancel")
+                default: break
+                }
+            }
+
+            source.setSessionMode(.chat)
+            await fulfillment(of: [started], timeout: 1)
+            XCTAssertNil(source.send("queued"))
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertEqual(source.model.activeTurnToken, activeToken)
+            XCTAssertEqual(source.model.messages.map(\.text), ["history"])
+            release?.resume()
+            await waitForModeSubmission(source)
+            // No SessionModeChanged event is required: while a turn is live,
+            // the selection is pending until a later outer turn.
+            XCTAssertEqual(source.send("queued"), activeToken)
+            await fulfillment(of: [queued], timeout: 1)
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertEqual(source.model.activeTurnToken, activeToken)
+            XCTAssertEqual(commands, ["mode", "prompt"])
+        }
+
+        func testModeSelectionGatesSlashCommandUntilAcknowledgement() async {
+            let source = existingSource()
+            source.model.slashCommandsLoaded = true
+            source.model.slashCommands = [ConversationSlashCommand(
+                name: "status", description: "", aliases: [], argumentHint: nil,
+                menuDescription: nil, source: "builtin", hidden: false
+            )]
+            let started = expectation(description: "mode submission started")
+            let sent = expectation(description: "slash submitted")
+            var release: CheckedContinuation<Void, Never>?
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case .setSessionMode(mode: .chat):
+                    started.fulfill()
+                    await withCheckedContinuation { release = $0 }
+                case .runSlashCommand:
+                    sent.fulfill()
+                default: break
+                }
+            }
+
+            source.setSessionMode(.chat)
+            await fulfillment(of: [started], timeout: 1)
+            XCTAssertNil(source.send("/status"))
+            XCTAssertFalse(source.model.slashCommandPending)
+            XCTAssertEqual(source.model.messages.map(\.text), ["history"])
+            release?.resume()
+            await waitForModeSubmission(source)
+            XCTAssertNotNil(source.send("/status"))
+            await fulfillment(of: [sent], timeout: 1)
+        }
+
+        func testFailedExistingModeSelectionKeepsInputForRetry() async {
+            let source = existingSource()
+            let failed = expectation(description: "mode failed")
+            let retried = expectation(description: "mode retry acknowledged")
+            var attempts = 0
+            source.setCommandSubmitterForTesting { command in
+                guard case .setSessionMode(mode: .chat) = command else { return }
+                attempts += 1
+                if attempts == 1 {
+                    failed.fulfill()
+                    throw NSError(domain: "mode-test", code: 1)
+                }
+                retried.fulfill()
+            }
+
+            source.setSessionMode(.chat)
+            await fulfillment(of: [failed], timeout: 1)
+            for _ in 0..<100 where !source.model.sessionModeSubmissionFailed { await Task.yield() }
+            XCTAssertTrue(source.model.sessionModeSubmissionFailed)
+            XCTAssertEqual(source.model.requestedSessionMode, .chat)
+            XCTAssertNotNil(source.model.error)
+            XCTAssertNil(source.send("keep this draft"))
+            XCTAssertEqual(source.model.messages.map(\.text), ["history"])
+            source.setSessionMode(.chat)
+            await fulfillment(of: [retried], timeout: 1)
+            await waitForModeSubmission(source)
+            XCTAssertNil(source.model.requestedSessionMode)
+            XCTAssertFalse(source.model.sessionModeSubmissionFailed)
+            XCTAssertNotNil(source.send("keep this draft"))
+        }
+
+        func testOldModeAcknowledgementDoesNotUnlockNewSessionRequest() async {
+            let source = existingSource()
+            let oldStarted = expectation(description: "old mode started")
+            let currentStarted = expectation(description: "current mode started")
+            var releaseOld: CheckedContinuation<Void, Never>?
+            var releaseCurrent: CheckedContinuation<Void, Never>?
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case .setSessionMode(mode: .chat):
+                    oldStarted.fulfill()
+                    await withCheckedContinuation { releaseOld = $0 }
+                case .setSessionMode(mode: .code):
+                    currentStarted.fulfill()
+                    await withCheckedContinuation { releaseCurrent = $0 }
+                default: break
+                }
+            }
+            source.setSessionMode(.chat)
+            await fulfillment(of: [oldStarted], timeout: 1)
+            source.expectSessionResumeForTesting("new-session")
+            source.applyForTesting(.sessionResumed(sessionId: "new-session", mode: .chat, messages: [
+                MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: sourceText("new history"))])
+            ]))
+            source.setSessionMode(.code)
+            releaseOld?.resume()
+            await fulfillment(of: [currentStarted], timeout: 1)
+            XCTAssertEqual(source.model.activeSessionId, "new-session")
+            XCTAssertEqual(source.model.requestedSessionMode, .code)
+            XCTAssertNil(source.send("new draft"))
+            releaseCurrent?.resume()
+            await waitForModeSubmission(source)
+            XCTAssertNotNil(source.send("new draft"))
+        }
+
+        func testUnexpectedNewSessionClearsAbandonedModeReadiness() async {
+            let source = makeSource()
+            source.applyForTesting(.sessionStarted(sessionId: "old-session", mode: .code))
+            let started = expectation(description: "old mode request started")
+            var release: CheckedContinuation<Void, Never>?
+            source.setCommandSubmitterForTesting { command in
+                guard case .setSessionMode(mode: .chat) = command else { return }
+                started.fulfill()
+                await withCheckedContinuation { release = $0 }
+            }
+
+            source.setSessionMode(.chat)
+            await fulfillment(of: [started], timeout: 1)
+            XCTAssertTrue(source.model.awaitingNewSessionMode)
+            source.applyForTesting(.sessionStarted(sessionId: "new-session", mode: .code))
+            XCTAssertEqual(source.model.activeSessionId, "new-session")
+            XCTAssertFalse(source.model.awaitingNewSessionMode)
+            XCTAssertNil(source.model.requestedSessionMode)
+            release?.resume()
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertNotNil(source.send("new draft"))
         }
 
         func testNewSessionUsesExplicitDefaultWithoutReplacingTheSource() async {

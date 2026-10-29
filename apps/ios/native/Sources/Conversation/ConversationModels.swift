@@ -532,6 +532,10 @@ final class ConversationModel: ObservableObject {
     @Published var sessionMode: SessionMode = .code
     @Published var sessionModeKnown = true
     @Published var pendingSessionMode: SessionMode?
+    /// The latest selection remains here until its command is acknowledged.
+    /// A failed selection stays retryable without consuming the composer's draft.
+    @Published var requestedSessionMode: SessionMode?
+    @Published var sessionModeSubmissionFailed = false
     /// A new session cannot send until its requested initial mode is confirmed.
     @Published var awaitingNewSessionMode = false
     @Published var newSessionModeFailed = false

@@ -49,6 +49,91 @@ test('mode commands persist the device preference only after the same session co
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('overlapping mode choices serialize without interrupting the running turn', async () => {
+  const commands: unknown[] = [];
+  const client = Object.assign(new EventEmitter(), {
+    sendCommand: (command: unknown) => commands.push(command),
+    cancel: () => commands.push('cancel'),
+  });
+  let preference: Mode = 'code';
+  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    onSessionModeSelected: mode => { preference = mode; } });
+  Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true, activeTurn: true });
+  (runtime as any).wireClient(client, 0);
+
+  const chat = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
+  const code = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
+  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
+  assert.throws(() => runtime.sendPrompt('next'), /conversation mode/);
+  assert.equal(runtime.turnActive, true);
+
+  client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', pending_mode: 'chat', revision: 1 });
+  assert.equal(runtime.hasActiveWork, true, 'the queued choice pins the runtime between acknowledgements');
+  assert.throws(() => runtime.sendPrompt('next'), /conversation mode/);
+  await chat;
+  await tick();
+  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }, { type: 'set_session_mode', mode: 'code' }]);
+  client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', revision: 2 });
+  await code;
+  client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', pending_mode: 'chat', revision: 1 });
+  assert.equal(preference, 'code');
+  assert.equal(runtime.sessionMode, 'code');
+  assert.deepEqual(runtime.replaySnapshot().map(({ event }) => event), [
+    { type: 'session_mode_changed', session_id: sessionId, mode: 'code', revision: 2 },
+  ]);
+  assert.equal(runtime.turnActive, true);
+  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }, { type: 'set_session_mode', mode: 'code' }]);
+  client.emit('event', { type: 'text_delta', text: 'The original turn continues.' });
+  assert.equal(runtime.turnActive, true);
+  client.emit('event', { type: 'turn_ended', outcome: 'end_turn', stop_reason: 'end_turn',
+    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '$0' } });
+  assert.equal(runtime.turnActive, false, 'the original turn reaches its own terminal event');
+});
+
+test('a failed mode choice rejects its caller and does not discard the next choice', async () => {
+  const commands: unknown[] = [];
+  const client = Object.assign(new EventEmitter(), { sendCommand: (command: unknown) => commands.push(command) });
+  let preference: Mode = 'code';
+  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    onSessionModeSelected: mode => { preference = mode; } });
+  Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
+  (runtime as any).wireClient(client, 0);
+
+  const failed = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
+  const latest = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
+  const failedAssertion = assert.rejects(failed, /disk error/);
+  client.emit('event', { type: 'error', kind: { type: 'internal' }, message: 'set_session_mode failed: disk error' });
+  assert.equal(runtime.hasActiveWork, true, 'a queued choice remains active after the preceding failure');
+  assert.throws(() => runtime.sendPrompt('next'), /conversation mode/);
+  await failedAssertion;
+  await tick();
+  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }, { type: 'set_session_mode', mode: 'code' }]);
+  client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'code', revision: 0 });
+  await latest;
+  assert.equal(preference, 'code');
+});
+
+test('connection loss rejects both active and queued mode choices without sending the queued command', async () => {
+  const commands: unknown[] = [];
+  const client = Object.assign(new EventEmitter(), { sendCommand: (command: unknown) => commands.push(command) });
+  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
+  (runtime as any).wireClient(client, 0);
+
+  const first = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
+  const second = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
+  const firstAssertion = assert.rejects(first, /interrupted/);
+  const secondAssertion = assert.rejects(second, /interrupted/);
+  (runtime as any).setState({ status: 'disconnected' });
+  await Promise.all([firstAssertion, secondAssertion]);
+  await tick();
+  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
+  assert.equal(runtime.hasActiveWork, false);
+});
+
 test('desktop command validation restricts the mode vocabulary and rejects extra fields', () => {
   assert.deepEqual(validateClientCommand({ type: 'set_session_mode', mode: 'chat' }), { type: 'set_session_mode', mode: 'chat' });
   assert.throws(() => validateClientCommand({ type: 'set_session_mode', mode: 'admin' }));
@@ -274,6 +359,37 @@ test('last explicit device mode follows selection order across runtimes and igno
     ack(ac, aRef, 'chat', 2);
     await earlierSuccess;
     assert.equal(preference, 'chat', 'a failed later intent does not suppress an earlier successful one');
+  } finally { await manager.dispose(); }
+});
+
+test('a queued choice keeps its admission order against a later choice in another runtime', async () => {
+  let preference: Mode = 'code';
+  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    onSessionModeSelected: mode => { preference = mode; } });
+  const aRef = { projectPath: '/a', sessionId };
+  const bRef = { projectPath: '/b', sessionId: '22222222-3333-4444-8555-666666666666' };
+  const a = await manager.ensure(aRef, false);
+  const b = await manager.ensure(bRef, false);
+  function connect(runtime: SessionRuntime) {
+    const client = Object.assign(new EventEmitter(), { sendCommand: () => undefined, close: () => undefined });
+    Object.assign(runtime, { activeWorkspace: runtime.projectPath, activeWorkspaceTrusted: true });
+    (runtime as any).wireClient(client, 0);
+    (runtime as any).setState({ status: 'connected' });
+    return client;
+  }
+  const ac = connect(a), bc = connect(b);
+  try {
+    const first = a.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
+    const queued = a.dispatchCommand({ type: 'set_session_mode', mode: 'code' });
+    const latest = b.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
+    bc.emit('event', { type: 'session_mode_changed', session_id: bRef.sessionId, mode: 'chat', revision: 1 });
+    await latest;
+    ac.emit('event', { type: 'session_mode_changed', session_id: aRef.sessionId, mode: 'chat', revision: 1 });
+    await first;
+    await tick();
+    ac.emit('event', { type: 'session_mode_changed', session_id: aRef.sessionId, mode: 'code', revision: 2 });
+    await queued;
+    assert.equal(preference, 'chat', 'a delayed acknowledgement cannot replace the later cross-runtime choice');
   } finally { await manager.dispose(); }
 });
 

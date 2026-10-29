@@ -489,9 +489,12 @@ fun ChatScreen(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 )
             }
-            if (state.awaitingNewSessionMode) {
+            if (state.awaitingNewSessionMode || state.modeSubmissionState != null) {
                 Text(
-                    text = stringResource(if (state.newSessionModeFailed) R.string.session_mode_retry else R.string.session_mode_setting),
+                    text = stringResource(
+                        if (state.newSessionModeFailed || state.modeSubmissionState == ModeSubmissionState.Failed)
+                            R.string.session_mode_retry else R.string.session_mode_setting,
+                    ),
                     color = t.text3,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 )
@@ -517,7 +520,7 @@ fun ChatScreen(
                 onSend = {
                     if (modelSetupRequired) {
                         onOpenModelSettings()
-                    } else if (state.sessionReady && !state.sessionTransitioning) {
+                    } else if (state.sessionReady && !state.sessionTransitioning && state.modeSubmissionState == null) {
                         sendComposerIfAdmitted(
                             admitted = onSendPreflight(draft, attachment),
                             send = { onSendWithAttachment(draft, attachment) },
@@ -544,7 +547,7 @@ fun ChatScreen(
                 isStreaming = state.isStreaming && sideChatInput(draft) == null,
                 showDiscardRecovery = state.durableRecoveryBlocked,
                 enabled = (sideChatInput(draft) != null || !state.durableRecoveryBlocked) &&
-                    (modelSetupRequired || (state.sessionReady && !state.sessionTransitioning)),
+                    (modelSetupRequired || (state.sessionReady && !state.sessionTransitioning && state.modeSubmissionState == null)),
                 // Loading preserves the live editor's selection and IME composition.
                 inputEnabled = !state.durableRecoveryBlocked,
                 modelSetupRequired = modelSetupRequired,

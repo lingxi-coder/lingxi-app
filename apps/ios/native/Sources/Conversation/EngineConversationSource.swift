@@ -40,6 +40,7 @@ final class EngineConversationSource: ConversationSource {
     private var bufferedModeEvent: (sessionID: String, mode: SessionMode, pending: SessionMode?, revision: UInt64)?
     private var modeOwnerSessionID = ""
     private var modeRequestTask: Task<Void, Never>?
+    private var modeRequestSequence: UInt64 = 0
     private var pendingNewConversationMode: SessionMode?
     private var newSessionModeReadiness = NewSessionModeReadiness()
 
@@ -579,6 +580,8 @@ final class EngineConversationSource: ConversationSource {
         _ transition: PendingSessionTransition
     ) -> UInt64 {
         newSessionModeReadiness.reset()
+        model.requestedSessionMode = nil
+        model.sessionModeSubmissionFailed = false
         model.awaitingNewSessionMode = false
         model.newSessionModeFailed = false
         model.requestedNewSessionMode = nil
@@ -678,6 +681,12 @@ final class EngineConversationSource: ConversationSource {
             }
         }
         sessionEpoch &+= 1
+        newSessionModeReadiness.reset()
+        model.requestedSessionMode = nil
+        model.sessionModeSubmissionFailed = false
+        model.awaitingNewSessionMode = false
+        model.newSessionModeFailed = false
+        model.requestedNewSessionMode = nil
         streamingIndex = nil
         streamingItemIndex = nil
         currentResponseMessageIDs = []
@@ -1200,14 +1209,16 @@ final class EngineConversationSource: ConversationSource {
         onSideSubmissionFailure = nil
     }
 
-    private func submitCommand(_ command: ClientCommand) async throws {
+    private func submitCommand(_ command: ClientCommand, expectedSessionEpoch: UInt64? = nil) async throws {
         try Task.checkCancellation()
+        if let expectedSessionEpoch, sessionEpoch != expectedSessionEpoch { throw CancellationError() }
         if let testCommandSubmitter {
             try await testCommandSubmitter(command)
             return
         }
         let handle = try await ensureHandle()
         try Task.checkCancellation()
+        if let expectedSessionEpoch, sessionEpoch != expectedSessionEpoch { throw CancellationError() }
         do {
             if let sideID {
                 guard !sideEnded else { throw CancellationError() }
@@ -1463,6 +1474,7 @@ final class EngineConversationSource: ConversationSource {
             !model.slashCommandPending,
             !model.sessionTransitionPending,
             !model.awaitingNewSessionMode,
+            model.requestedSessionMode == nil,
             pauseAcknowledgements.isEmpty,
             unresolvedRecoveryTurnID == nil,
             !model.isSelectedAgentReadOnly
@@ -4542,10 +4554,6 @@ final class EngineConversationSource: ConversationSource {
             modeOwnerSessionID = ""
             model.sessionModeRevision = nil
             model.pendingSessionMode = nil
-            newSessionModeReadiness.reset()
-            model.awaitingNewSessionMode = false
-            model.newSessionModeFailed = false
-            model.requestedNewSessionMode = nil
             hasConfirmedSessionState = false
             model.clearAgentState()
             model.backgroundTasks = []
@@ -5761,6 +5769,10 @@ final class EngineConversationSource: ConversationSource {
 
     func setSessionMode(_ mode: SessionMode) {
         guard !isSideChat, !isRemoteProjection, !model.sessionTransitionPending else { return }
+        modeRequestSequence &+= 1
+        let requestSequence = modeRequestSequence
+        model.requestedSessionMode = mode
+        model.sessionModeSubmissionFailed = false
         var requiredRequestID: UInt64?
         if (model.isNew || (!hasConfirmedSessionState && model.activeSessionId.isEmpty)),
            !model.streaming, model.messages.isEmpty {
@@ -5779,11 +5791,15 @@ final class EngineConversationSource: ConversationSource {
                 guard self.newSessionModeReadiness.beginSubmission(requiredRequestID, epoch: requestedEpoch) else { return }
             }
             do {
-                try await self.submitCommand(.setSessionMode(mode: mode.dto))
+                try await self.submitCommand(.setSessionMode(mode: mode.dto), expectedSessionEpoch: requestedEpoch)
                 guard self.sessionEpoch == requestedEpoch, !self.model.sessionTransitionPending else { return }
                 if let requiredRequestID {
                     self.newSessionModeReadiness.submitted(requiredRequestID)
                     self.completeRequiredNewSessionModeIfReady()
+                }
+                if self.modeRequestSequence == requestSequence {
+                    self.model.requestedSessionMode = nil
+                    self.model.sessionModeSubmissionFailed = false
                 }
             } catch {
                 guard self.sessionEpoch == requestedEpoch, !self.model.sessionTransitionPending else { return }
@@ -5791,7 +5807,8 @@ final class EngineConversationSource: ConversationSource {
                 if requiredRequestID != nil && isCurrentRequest {
                     self.model.newSessionModeFailed = true
                 }
-                if isCurrentRequest {
+                if isCurrentRequest && self.modeRequestSequence == requestSequence {
+                    self.model.sessionModeSubmissionFailed = true
                     self.model.error = ConversationError(kind: .host, message: error.localizedDescription)
                 }
             }

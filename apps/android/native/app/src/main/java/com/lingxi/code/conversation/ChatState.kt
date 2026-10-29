@@ -136,6 +136,8 @@ data class ChatState(
     val sessionModeRevision: ULong? = null,
     val awaitingNewSessionMode: Boolean = false,
     val newSessionModeFailed: Boolean = false,
+    /** Selection for an existing session must settle before another prompt. */
+    val modeSubmissionState: ModeSubmissionState? = null,
 ) {
     /** True while a turn is in flight or a live executor is waiting for input. */
     val isStreaming: Boolean get() = streaming || liveTurnWaitingForUser
@@ -151,6 +153,8 @@ data class ChatState(
             agentRunsByMessageId.values.any { it.activeWorkers > 0 } ||
             agentRun?.tools?.any { it.status == AgentToolStatus.Running } == true
 }
+
+enum class ModeSubmissionState { Pending, Failed }
 
 /**
  * A user-facing turn error rendered as the dismissible banner. [message] is the

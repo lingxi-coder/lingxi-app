@@ -2,7 +2,9 @@ package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ErrorKindDto
+import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.MessageBlockDto
 import com.lingxi.code.bindings.client.MessageDto
 import com.lingxi.code.bindings.client.SessionModeDto
@@ -28,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.resetMain
@@ -239,6 +242,250 @@ class SessionStateTest {
         assertTrue(vm.state.value.streaming)
         assertTrue(source.commands.contains(ClientCommand.SetSessionMode(SessionModeDto.CHAT)))
         replies.emit(ReplyEvent.End)
+    }
+
+    @Test
+    fun followUpWaitsForModeSubmissionWithoutInterruptingTheActiveTurn() = runTest(dispatcher) {
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val modeAck = CompletableDeferred<Unit>()
+        val replies = MutableSharedFlow<ReplyEvent>()
+        source.replies = replies
+        source.commandHandler = { if (it is ClientCommand.SetSessionMode) modeAck.await() }
+        val saved = androidx.lifecycle.SavedStateHandle()
+        val vm = ChatViewModel(source, saved)
+        vm.applyActivatedSession(ActivatedSession("live", listOf(Message(role = com.lingxi.code.model.Role.User, text = "previous")),
+            SessionActivationKind.Resumed, SessionMode.Code))
+        vm.send("first")
+        vm.setSessionMode(SessionMode.Chat)
+        vm.onDraftChanged("follow-up")
+        assertTrue(vm.state.value.sessionReady)
+        assertEquals(ModeSubmissionState.Pending, vm.state.value.modeSubmissionState)
+
+        var draft = "follow-up"
+        var attachmentPresent = true
+        sendComposerIfAdmitted(
+            admitted = vm.admitComposerSend(draft, attachmentPresent),
+            send = { vm.send(draft) },
+            clearDraft = { draft = "" },
+            removeAttachment = { attachmentPresent = false },
+            followTail = {},
+        )
+        vm.send("follow-up") // also protect direct callers of send()
+        assertEquals("follow-up", draft)
+        assertTrue(attachmentPresent)
+        assertEquals("follow-up", vm.restoredDraft)
+        assertEquals(listOf("first"), source.submittedPrompts)
+        assertTrue(source.commands.none { it is ClientCommand.SendPrompt })
+        assertTrue(vm.state.value.streaming)
+        assertEquals(0, source.cancelCalls)
+
+        modeAck.complete(Unit)
+        // A busy selection need not emit an applied event before the next send.
+        assertNull(vm.state.value.modeSubmissionState)
+        assertTrue(vm.admitComposerSend(draft, attachmentPresent))
+        vm.send(draft)
+        assertEquals(1, source.commands.filterIsInstance<ClientCommand.SendPrompt>().size)
+        assertTrue(vm.state.value.streaming)
+        assertEquals(0, source.cancelCalls)
+        replies.emit(ReplyEvent.End)
+    }
+
+    @Test
+    fun slashAndOrdinaryPromptsCannotPassAnUnacknowledgedModeSelection() = runTest(dispatcher) {
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val modeAck = CompletableDeferred<Unit>()
+        source.commandHandler = { if (it is ClientCommand.SetSessionMode) modeAck.await() }
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("saved", listOf(Message(role = com.lingxi.code.model.Role.User, text = "previous")),
+            SessionActivationKind.Resumed, SessionMode.Code))
+        vm.setSessionMode(SessionMode.Chat)
+        vm.send("/skill")
+        vm.send("ordinary")
+        assertTrue(source.submittedSlashes.isEmpty())
+        assertTrue(source.submittedPrompts.isEmpty())
+        assertFalse(vm.state.value.streaming)
+
+        modeAck.complete(Unit)
+        vm.send("/skill")
+        assertEquals(1, source.submittedSlashes.size)
+        assertTrue(source.submittedPrompts.isEmpty())
+    }
+
+    @Test
+    fun modeFailureKeepsDraftBlockedUntilASuccessfulRetry() = runTest(dispatcher) {
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val modeAck = CompletableDeferred<Unit>()
+        source.commandHandler = {
+            if (it is ClientCommand.SetSessionMode) {
+                modeAck.await()
+                error("mode persistence failed")
+            }
+        }
+        val saved = androidx.lifecycle.SavedStateHandle()
+        val vm = ChatViewModel(source, saved)
+        vm.applyActivatedSession(ActivatedSession("saved", listOf(Message(role = com.lingxi.code.model.Role.User, text = "previous")),
+            SessionActivationKind.Resumed, SessionMode.Code))
+        vm.onDraftChanged("kept draft")
+        vm.setSessionMode(SessionMode.Chat)
+        modeAck.complete(Unit)
+        assertEquals("mode persistence failed", vm.state.value.error?.message)
+        assertTrue(vm.state.value.sessionReady)
+        assertEquals(ModeSubmissionState.Failed, vm.state.value.modeSubmissionState)
+        assertFalse(vm.admitComposerSend("kept draft", false))
+        vm.send("kept draft")
+        assertTrue(source.submittedPrompts.isEmpty())
+        assertEquals("kept draft", vm.restoredDraft)
+
+        source.commandHandler = {}
+        vm.setSessionMode(SessionMode.Chat)
+        assertNull(vm.state.value.modeSubmissionState)
+        assertTrue(vm.admitComposerSend("kept draft", false))
+        vm.send("kept draft")
+        assertEquals(listOf("kept draft"), source.submittedPrompts)
+    }
+
+    @Test
+    fun rapidModeSelectionsGateTheComposerUntilTheLatestAcknowledgement() = runTest(dispatcher) {
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val firstAck = CompletableDeferred<Unit>()
+        val secondAck = CompletableDeferred<Unit>()
+        source.commandHandler = {
+            if (it is ClientCommand.SetSessionMode) {
+                if (it.mode == SessionModeDto.CHAT) firstAck.await() else secondAck.await()
+            }
+        }
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("saved", listOf(Message(role = com.lingxi.code.model.Role.User, text = "previous")),
+            SessionActivationKind.Resumed, SessionMode.Code))
+        vm.setSessionMode(SessionMode.Chat)
+        vm.setSessionMode(SessionMode.Code)
+        firstAck.complete(Unit)
+        assertEquals(listOf(SessionModeDto.CHAT, SessionModeDto.CODE),
+            source.commands.filterIsInstance<ClientCommand.SetSessionMode>().map { it.mode })
+        assertFalse(vm.admitComposerSend("after both", false))
+        assertEquals(ModeSubmissionState.Pending, vm.state.value.modeSubmissionState)
+        vm.send("after both")
+        assertTrue(source.submittedPrompts.isEmpty())
+        secondAck.complete(Unit)
+        assertTrue(vm.admitComposerSend("after both", false))
+        vm.send("after both")
+        assertEquals(listOf("after both"), source.submittedPrompts)
+    }
+
+    @Test
+    fun modeSelectionBlocksSendBeforeItsCoroutineStarts() = runTest(dispatcher) {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val modeAck = CompletableDeferred<Unit>()
+        source.commandHandler = { if (it is ClientCommand.SetSessionMode) modeAck.await() }
+        val vm = ChatViewModel(source)
+        runCurrent()
+        vm.applyActivatedSession(ActivatedSession("saved", listOf(Message(role = com.lingxi.code.model.Role.User, text = "previous")),
+            SessionActivationKind.Resumed, SessionMode.Code))
+        vm.setSessionMode(SessionMode.Chat)
+        assertFalse(vm.admitComposerSend("too soon", false))
+        vm.send("too soon")
+        runCurrent()
+        assertTrue(source.submittedPrompts.isEmpty())
+        modeAck.complete(Unit)
+        runCurrent()
+        assertTrue(vm.admitComposerSend("after ack", false))
+        vm.send("after ack")
+        runCurrent()
+        assertEquals(listOf("after ack"), source.submittedPrompts)
+    }
+
+    @Test
+    fun oldModeFailureDoesNotGateOrReportAnErrorInTheNextSession() = runTest(dispatcher) {
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val modeAck = CompletableDeferred<Unit>()
+        source.commandHandler = {
+            if (it is ClientCommand.SetSessionMode) {
+                modeAck.await()
+                error("old session failed")
+            }
+        }
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("old", listOf(Message(role = com.lingxi.code.model.Role.User, text = "previous")),
+            SessionActivationKind.Resumed, SessionMode.Code))
+        vm.setSessionMode(SessionMode.Chat)
+        vm.startNewSession()
+        assertEquals(0, source.newSessionCalls)
+        modeAck.complete(Unit)
+        assertEquals(1, source.newSessionCalls)
+        vm.applyActivatedSession(ActivatedSession("new-id", emptyList(), SessionActivationKind.Started, SessionMode.Code))
+        assertNull(vm.state.value.error)
+        assertNull(vm.state.value.modeSubmissionState)
+        assertTrue(vm.admitComposerSend("new prompt", false))
+        vm.send("new prompt")
+        assertEquals(listOf("new prompt"), source.submittedPrompts)
+    }
+
+    @Test
+    fun transitionNeverExposesAnUngatedOldSessionToReentrantObservers() = runTest(dispatcher) {
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val modeAck = CompletableDeferred<Unit>()
+        source.commandHandler = { if (it is ClientCommand.SetSessionMode) modeAck.await() }
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("old", listOf(Message(role = com.lingxi.code.model.Role.User, text = "previous")),
+            SessionActivationKind.Resumed, SessionMode.Code))
+        vm.setSessionMode(SessionMode.Chat)
+        var observedGap = false
+        val observer = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            vm.state.collect { state ->
+                if (state.session.id == "old" && state.sessionReady && !state.sessionTransitioning &&
+                    state.modeSubmissionState == null && !observedGap) {
+                    observedGap = true
+                    vm.send("must not reach the old session")
+                }
+            }
+        }
+        vm.startNewSession()
+        assertFalse(observedGap)
+        assertTrue(source.submittedPrompts.isEmpty())
+        observer.cancel()
+        modeAck.complete(Unit)
+    }
+
+    @Test
+    fun retainedOwnerRequiresRetryForAnUnsettledOrFailedModeSelection() = runTest(dispatcher) {
+        for (failed in listOf(false, true)) {
+            val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+            val modeAck = CompletableDeferred<Unit>()
+            source.replies = MutableSharedFlow()
+            source.commandHandler = {
+                if (it is ClientCommand.SetSessionMode) {
+                    modeAck.await()
+                    error("mode failed")
+                }
+            }
+            val retention = object : ConversationBackgroundExecution {
+                override fun setTurnActive(active: Boolean) = Unit
+                override fun retainAfterUiDestroyed(source: ConversationSource, snapshot: ConversationBackgroundSnapshot) = true
+            }
+            val old = ChatViewModel(source, backgroundExecution = retention)
+            val store = androidx.lifecycle.ViewModelStore().apply { put("chat", old) }
+            old.applyActivatedSession(ActivatedSession("live", listOf(Message(role = com.lingxi.code.model.Role.User, text = "previous")),
+                SessionActivationKind.Resumed, SessionMode.Code))
+            old.send("running")
+            old.setSessionMode(SessionMode.Chat)
+            if (failed) modeAck.complete(Unit)
+            store.clear()
+            val retained = requireNotNull(source.retainedProjection)
+            assertEquals(if (failed) ModeSubmissionState.Failed else ModeSubmissionState.Pending, retained.state.modeSubmissionState)
+            assertEquals(0, source.cancelCalls)
+
+            source.commandHandler = {}
+            val recreated = ChatViewModel(source)
+            recreated.applyActivatedSession(ActivatedSession("live", emptyList(), SessionActivationKind.Resumed,
+                SessionMode.Code, retainedProjection = retained.copy(turnId = null)))
+            assertEquals(ModeSubmissionState.Failed, recreated.state.value.modeSubmissionState)
+            assertFalse(recreated.admitComposerSend("follow-up", false))
+            recreated.setSessionMode(SessionMode.Chat)
+            assertNull(recreated.state.value.modeSubmissionState)
+            assertTrue(recreated.admitComposerSend("follow-up", false))
+            assertEquals(0, source.cancelCalls)
+        }
     }
 
     @Test
@@ -636,23 +883,30 @@ class SessionStateTest {
         private val sessions: MutableStateFlow<EngineSessionState>,
         private val activated: MutableStateFlow<ActivatedSession?> = MutableStateFlow(null),
         private val mode: MutableStateFlow<SessionModeSnapshot?> = MutableStateFlow(null),
-    ) : ConversationSource {
+    ) : ConversationSource, SlashCommandConversationSource {
         val resumeCalls = mutableListOf<String>()
         val commands = mutableListOf<ClientCommand>()
         val submittedPrompts = mutableListOf<String>()
+        val submittedSlashes = mutableListOf<ClientTextDto>()
         var commandHandler: suspend (ClientCommand) -> Unit = {}
         var replies: Flow<ReplyEvent> = emptyFlow()
         var newSessionCalls = 0
         var refreshCalls = 0
         var cancelCalls = 0
+        var retainedProjection: RetainedConversationTranscript? = null
         override fun initialMessages(): List<Message> = emptyList()
         override fun submit(text: String): Flow<ReplyEvent> {
             submittedPrompts += text
             return replies
         }
+        override fun submitSlashCommand(raw: ClientTextDto, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> {
+            submittedSlashes += raw
+            return replies
+        }
         override val sessionState: StateFlow<EngineSessionState> = sessions.asStateFlow()
         override val activeSessionState: StateFlow<ActivatedSession?> = activated.asStateFlow()
         override val sessionModeState: StateFlow<SessionModeSnapshot?> = mode.asStateFlow()
+        override fun retainUiTranscript(snapshot: RetainedConversationTranscript) { retainedProjection = snapshot }
         override suspend fun refreshSessions() { refreshCalls++ }
         override suspend fun submitClientCommand(command: ClientCommand) { commands += command; commandHandler(command) }
         override suspend fun resumeSession(uuid: String) { resumeCalls += uuid }

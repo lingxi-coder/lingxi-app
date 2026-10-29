@@ -1,12 +1,12 @@
 # Desktop Bot takeover — 2026-10-28
 
-Status (resumed 2026-10-29): Android arm64 JNI, matching real bindings, full verified PlayDebug APK, 1,244 unit tests and 17 Galaxy S25 Bot UI tests pass. iOS arm64 native library/XCFramework and matching device-archive-generated Swift bindings pass. FullDebug app/tests compile/sign, iPhone update installation and 20 Remote/Bot device unit tests pass. Desktop Flare signed package passes static verification and full runtime smoke, and the real UI Ask-mode regression is fixed and verified. Three-platform actual conversation acceptance remains pending account/device/model prerequisites. Nothing was pushed.
+Status (resumed 2026-10-29): both phone native libraries, matching real FFI bindings and complete device packages are built. Android: 1,244 units and 17 Galaxy Bot UI tests pass. iPhone: complete Flare app/test signing, update install and 20 focused Remote/Bot units pass. Latest Desktop Flare static/runtime verification passes. **Real GPT-6 Luna assistant replies now pass on Desktop, Galaxy and iPhone**, with both phone threads observed on Desktop. Galaxy cold start, question/answer synchronization and Bot remote off/on pass. iPhone Back/reopen passes, but cold-start remote reopen remains incomplete after a system alert and device disconnection; its remote composer reports Auto while Desktop shows Ask for the same thread, requiring diagnosis and a verified fix. **Full three-platform acceptance is not complete.** Nothing was pushed.
 
 ## Source integration
 
 - Worktree: `/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app`, branch `claude/desktop-bot`.
 - Rebased the 13 Bot commits onto fetched main `8f193300b`, then onto concurrently published main `daffddd21e77e53e9381a215d05856b1ac6b2462`. Rebased head: `4d74c78f0`.
-- Follow-up source fixes and opt-in device acceptance test are saved locally in `9a1c75f32`; no push.
+- Follow-up source fixes and opt-in device acceptance test are saved locally in `9a1c75f32`; the expired-account login repair is in `82e718fbf`. No push.
 - Preserved the original head at `codex/desktop-bot-before-main-20261028-f65fd4390`.
 - Ported the Bot FFI implementation and tests into `packages/mobile-ffi/src/remote.rs` and its shared tests. Platform-specific callbacks and forwarding exports remain in the thin iOS/Android wrappers.
 - Kept main's Changes navigation, update reminders and Local Apps alongside the Bot interfaces. Android uses one LazyColumn with a Local Apps slot and the Bot/session rows.
@@ -37,6 +37,11 @@ Status (resumed 2026-10-29): Android arm64 JNI, matching real bindings, full ver
 | FullDebug app + unit/UI test bundle compile/sign | Pass, Flare team `AZ4AX7J833`, actual device FFI |
 | iPhone 11 update install | Pass for `com.lingxi.code.full`; no uninstall/reset |
 | iPhone Remote/Bot focused unit tests | 20 pass on physical iPhone |
+| Desktop expired-account login | 67 focused account/remote tests + Node/renderer typecheck pass; real Electron mouse/keyboard fixture passes |
+| Actual Desktop/Android/iPhone Luna conversation | All three real assistant markers pass; phone threads observed on Desktop |
+| Galaxy real remote lifecycle | Cold start/reconnect, question A + Desktop sync, Bot off/on and blocked Send pass |
+| iPhone real remote lifecycle | Back/reopen passes; cold-start reopen incomplete after device disconnect |
+| iPhone UI automation | XCTest exits74 before methods. Mobile MCP later recovered and completed actual echo/Back; physical connection remains intermittent |
 
 The first sandboxed runs could not listen on loopback; those suites were rerun successfully in the normal host environment. Python-based protocol tests require Python 3.11+; the successful run used Homebrew Python 3.13. Full Web site documentation tests were not rerun; the 169 passing tests cover the affected Remote paths.
 
@@ -64,19 +69,34 @@ The first sandboxed runs could not listen on loopback; those suites were rerun s
 
 ## Remaining acceptance
 
-1. Device-only Rust/XCFramework and matching Swift generation are complete. Voice frameworks were independently cloned and hash-verified; see `ios-voice-input-provenance.json`.
-2. FullDebug compile/sign and iPhone update installation are complete; all 13 `RemoteBotsTests` and 7 `RemoteControlTests` pass on the physical iPhone. Actual Bot conversation UI testing awaits the fresh Desktop host. The opt-in UI test is compiled, not yet run.
-3. Current-source portable Desktop release bridge built successfully in 14m 50s. The Flare wrapper completed signing, static verification and full runtime smoke, including a second full package after the real UI permission fix. The original idle development Broker was restored with unchanged pre-run plist/program hashes. The final ZIP SHA256 is `898c053c1e40cc2a99ee5f8a9d3648d489a169e39a2877dbb3c6ab2161392a1d`; details in `desktop-signed-package.json`. Disk free after build: 5.307 GiB. Gatekeeper transfer UI and Developer ID notarization are not established by this development package.
-4. Complete actual Desktop/Android/iOS pairing and Bot list, thread creation, send, permissions/questions, cancel, reconnect, switch-off and notification routing. Prefer user-authorized GPT 6.1 Terra or Luna if present in the configured catalog; record the actual model. Passing Compose fixtures does not establish real RC/Bot conversation acceptance.
-5. Web automated tests and build pass; real-browser Bot use remains open.
+1. **iPhone cold-start remote history and permission display remain open.** Terra used Mobile MCP to send a real Luna echo and return/reopen the same thread. After terminate/launch, a pre-existing local-session resume error appeared; while reconnecting through Remote Control, an unrelated cellular-plan system dialog appeared and device automation disconnected. This establishes neither successful cold remote restoration nor a Bot failure. `ios-terra-live.json` and screenshots preserve the result.
+2. iOS unique remote `composer.controls` AX reports **Auto**, while Desktop displays **Ask** in that exact session. No mode was changed and the iOS echo used no tools. Current Swift source applies authoritative controls when present; initial model fields are Auto and missing controls retain existing state. The actual controls/event sequence was not captured, so initial/missing controls and ordering are hypotheses. Reproduce on a stable device, fix the owning layer and validate a new signed app. See `ios-permission-mode-discrepancy.json`.
+3. Real phone **AskUserQuestion** and its Desktop synchronization pass. The safe `printf` completed without an approval prompt, so live allow-once/deny remains unexercised. The full permission fixture/unit checks remain distinct from this real-device gap.
+4. Stop was delivered from Galaxy: the persisted transcript records an interruption, but the shell task was moved to the background and later emitted its marker. This is turn interruption evidence, not process termination. A short count finished too quickly to prove streaming cancellation. The test did not change permissions. `android-terra-live.json` records the exact boundary.
+5. User explicitly selected `openai-chatgpt/gpt-6-luna` for the Bot. The later GPT-6.1 Terra request referred to the automation agent. Eight explicit test prompts reached the model sessions across the three clients; this is not a provider/billing request count.
+6. Latest ZIP SHA256 `5dead773b7384823a13786ad0b2aac6200c505cd21226167c6ae0d7c7dcf6ce3` includes source login fix `82e718fbf`; Flare static and complete runtime smoke pass, original idle development Broker restored unchanged. Gatekeeper transfer UI and Developer ID notarization are not established by this development package.
+7. Web tests/build pass; real-browser Bot use, live approval/denial and background notification routing remain open. Existing known host pins/approved-device connectivity were verified; a new pairing-code comparison was not witnessed.
 
-Devices used: user-selected Galaxy S25 (Android 16); connected iPhone 11 (iOS 27.0.1) with restored CoreDevice connectivity. No simulator was booted. No app was uninstalled and no application data or credentials were cleared. No push.
+Devices: Galaxy S25 (Android16) and iPhone11 (iOS27.0.1). No simulator boot, uninstall, app-data clearing or credential/identity reset. Galaxy's temporary screen timeout is restored to its original600000ms. A final cleanup removed only this task's iOS precompiled SDK caches (248.7MiB), leaving4.311GiB free at the check; hashes of retained FFI/native inputs stayed equal. No heavy build remains active. No push.
 
 ## Actual signed Desktop UI follow-up
 
-- Created a dedicated acceptance Bot through normal UI in this task's isolated data directory, without creating a project or touching existing project data. No model request has been sent.
+- Created dedicated acceptance Bots through normal UI in this task's isolated data directory, without creating a project or touching existing project data. The actual Luna Bot is `EUBRZpYAmFWbeIY_voKKPw`; the earlier empty draft Bot remains preserved.
 - The UI originally displayed Ask for approval but serialized it as an unset mode. Since the current engine default is Auto, a new Bot chat actually entered Auto. Fixed the form to preserve explicit `default` separately from unset mode, default new Bot drafts to explicit Ask, and show App default for an unset mode. Existing unset configurations remain unset. Two additional Bot strings are provided in all five locales.
 - 45 relevant tests and complete Electron Node/renderer typecheck pass. The new signed package shows an existing unset mode as App default; selecting Ask persists `permission_mode: default`, generates `permissions.defaultMode: default`, and a new Bot chat actually shows Ask. See `desktop-permission-actual-ui.json` and `desktop-ask-verified.png`.
 - The i18n pairing gate remains red. Running the same checker against an extracted HEAD snapshot and this working tree produced byte-identical diagnostics (`i18n-comparison.json`); no central/generated translation catalogs were changed by this fix.
-- The current connected model catalog has GPT-6 Luna and GPT-5.6 Terra, but no GPT-6.1 Terra/Luna. An explicit model-choice question is pending; no automatic substitution or Sol prompt was used.
-- Desktop currently shows signed out and Remote Control is off despite its stored enable switch. The normal system-browser Google sign-in flow was opened for the user to log in with the same account as the phones; it timed out without completing, so retry from the Desktop Account page is required. Galaxy was observed locked; unlock requested. Actual pairing, assistant streaming, remote human actions and cold-launch conversation restoration are not yet verified.
+- The connected catalog still lacks GPT-6.1 Terra/Luna. The user selected GPT-6 Luna, and real Desktop/Galaxy assistant responses passed using that exact model. No Sol prompt was sent. GPT-6.1 Terra is now the explicitly requested automation agent for iPhone.
+- Repaired the reported unclickable/expired login: terminal account invalidation publishes `sessionExpired`, a nonsecret expiry marker survives restart, and the renderer presents only the full-screen sign-in until authentication succeeds. Hidden application state stays mounted so drafts survive. The native Electron fixture verifies mouse click, keyboard focus, retry after timeout, ignored late replies and draft retention. Main transient-network failures retain recoverable sessions.
+- Full signed-package verification passes with the login source now committed as `82e718fbf`; the actual signed app restores the valid existing account and Remote Control online state after cold launch. The expired UI path is verified in an isolated real Electron fixture; real credentials were not deliberately invalidated.
+- One broader prompt-focus fixture trial failed because its driver queries a Chinese flow-mode label while the fixture selects English. The owning files are byte-identical to HEAD and do not import the changed login components. `account-login-validation.json` preserves this limitation; the focused 67-test login/remote suite passes.
+- Actual Desktop reply: `BOT_E2E_DESKTOP_LUNA_20261028`. Actual Galaxy reply: `BOT_E2E_ANDROID_LUNA_20261029`. Galaxy returned to the Bot page and reopened its persisted thread; Desktop opened the same thread and observed the assistant text. Signed Desktop cold launch also reopened that Android history.
+
+## Actual phone follow-up with Terra
+
+- User explicitly requested GPT-6.1 Terra to operate automation. A single Terra test agent drove Galaxy and then iPhone serially through Mobile MCP.
+- Galaxy session `0c61fba0-cc2d-4957-a2d9-7059a3842f23` survived terminate/launch and reconnection. Question A returned `BOT_QUESTION_ANDROID_A`, also visible on Desktop. Recovery returned `BOT_RECOVERY_ANDROID_OK`.
+- Disabling only the dedicated Bot removed its phone entry. The existing thread kept its local history/draft, but its Send parent was disabled. The denied-path marker never reached the persisted session. The temporary draft was cleared before reenable; after reenable the same history and empty composer returned. The Bot is left remote-enabled with Luna and explicit Ask.
+- iPhone session `7855bf54-2a84-470d-9de2-4e615d2c6a6e` returned actual assistant `BOT_E2E_IOS_LUNA_20261029`; Back/reopen passed. Desktop observed the same user/assistant pair, origin iPhone, Luna and Ask. The iOS permission label and cold-start limitations above prevent full acceptance.
+- Desktop renderer was inspected at1320×860 and900×600. At900×600 there was no horizontal document overflow and the composer stayed inside the viewport. Screenshots retain the actual device/state evidence.
+
+Final checkpoint: 2026-10-29T08:34:11.944839+00:00; available disk 6.104GiB. Desktop account remains signed in, Remote Control online, dedicated Bot remote enabled with Luna/default. Latest Mobile MCP inventory lists Galaxy only, while the host still observes an approved iPhone WebRTC connection; device automation reachability and product transport are distinct.

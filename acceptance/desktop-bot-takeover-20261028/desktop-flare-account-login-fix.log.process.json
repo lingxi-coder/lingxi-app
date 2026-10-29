@@ -1,0 +1,14 @@
+{
+  "pid": 64228,
+  "command": [
+    "/opt/homebrew/bin/python3.13",
+    "../build/verify-desktop-with-idle-broker.py",
+    "--rebuild"
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app",
+  "floor_gib": 4,
+  "started_at": 1793256692.591425,
+  "exit_code": 0,
+  "stopped_for_disk": false,
+  "free_gib": 6.168
+}

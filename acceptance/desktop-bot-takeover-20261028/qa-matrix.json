@@ -13,7 +13,8 @@
       ],
       "functional": "Create through normal UI; send prompt; observe actual assistant reply and selected model",
       "visual": "As-launched window, Bot list/card, Bot detail and active conversation; smaller supported window",
-      "state": "pending"
+      "state": "passed",
+      "evidence": "live-bot-evidence.json; desktop-luna-real-reply.png"
     },
     {
       "id": "pairing",
@@ -24,7 +25,8 @@
       ],
       "functional": "Enable host and approve only the known Galaxy S25/iPhone; both load the same dedicated Bot",
       "visual": "Desktop host/device status and each phone host/Bot list",
-      "state": "pending"
+      "state": "owner_connections_passed",
+      "evidence": "Both known approved phones connected by direct WebRTC to fresh signed host. New code comparison was not witnessed."
     },
     {
       "id": "android-live",
@@ -38,7 +40,8 @@
       ],
       "functional": "Create/send/reopen a Bot chat on Galaxy; Desktop observes the same thread and reply",
       "visual": "Local Apps then Bots then sessions heading; ready/running/idle states",
-      "state": "pending"
+      "state": "passed",
+      "evidence": "android-terra-live.json: actual echo, Back/reopen, cold restart reconnect and shared Desktop history"
     },
     {
       "id": "ios-live",
@@ -51,9 +54,9 @@
         "system Back",
         "existing thread"
       ],
-      "functional": "Run opt-in RemoteBotsDeviceAcceptanceUITests against the fresh host and configured model; actual assistant marker must arrive and remain after cold launch",
-      "visual": "Saved XCTest screenshot of dedicated real Bot assistant response",
-      "state": "pending"
+      "functional": "Mobile MCP with Terra completed actual Luna echo and Back/reopen; Desktop observed same thread. Cold start displayed unrelated local resume error, then system alert and device disconnect blocked remote reopen.",
+      "visual": "ios-terra-echo.png shows actual assistant; iOS composer AX Auto conflicts with Desktop Ask; follow-up recorded.",
+      "state": "core_passed_lifecycle_incomplete"
     },
     {
       "id": "human-action",
@@ -65,7 +68,8 @@
       ],
       "functional": "Ask configured model to request a safe workspace action and an explicit user question; act from phone; observe pending state and completion on Desktop",
       "visual": "Pending action, question choices/answer, resolved Bot status",
-      "state": "pending"
+      "state": "question_passed_approval_prompt_uncovered",
+      "evidence": "Real phone AskUserQuestion A/answer/final marker synchronized with Desktop. Safe printf completed automatically; approval/denial prompt not exercised."
     },
     {
       "id": "cancel-reconnect",
@@ -79,7 +83,8 @@
       "functional": "Cancel only a dedicated test turn; background/reopen viewer and cycle host availability; send a follow-up after recovery",
       "visual": "Running/stop, offline/reconnecting, ready/idle restored",
       "exploratory": true,
-      "state": "pending"
+      "state": "partial",
+      "evidence": "Android cold reconnect and recovery echo pass. Stop interrupts turn; shell becomes background task and completes. Process kill not established; iPhone cold reconnect incomplete."
     },
     {
       "id": "bot-revocation",
@@ -91,14 +96,16 @@
       "functional": "Disable only the dedicated Bot; viewer loses Bot access; reenable and reopen persisted conversation",
       "visual": "Unavailable state, removed/reappearing Bot row, preserved chat",
       "exploratory": true,
-      "state": "pending"
+      "state": "passed",
+      "evidence": "Dedicated Bot disappears when off; opened thread Send disabled, test prompt never persisted, draft cleared. Reenable restores history and empty composer."
     },
     {
       "id": "visual",
       "claim": "Relevant Bot controls and conversation remain usable at actual device/window sizes",
       "functional": "Viewport and region bounds after relevant interactions; short exploratory normal-input pass",
       "visual": "Inspect desktop initial/smaller window, Bot list/detail/chat and phone list/chat/action states for clipping, occlusion, text contrast and stable layout",
-      "state": "pending"
+      "state": "partial",
+      "evidence": "Desktop1320x860 and renderer900x600 inspected; no horizontal overflow and composer within viewport. Android real screens inspected. iOS echo visible but permission label discrepancy unresolved."
     }
   ],
   "already_verified": {
@@ -111,11 +118,11 @@
     "desktop_flare_static_runtime": "pass",
     "desktop_actual_ask_permission": "pass"
   },
-  "real_model": null,
+  "real_model": "Bot model openai-chatgpt/gpt-6-luna as explicitly selected. User-requested GPT-6.1 Terra is the automation agent.",
   "three_platform_e2e_complete": false,
   "blockers": [
-    "Desktop account signed out; user normal-browser sign-in requested",
-    "Galaxy S25 locked; user unlock requested",
-    "GPT-6.1 Terra/Luna unavailable in current product catalog; waiting for model choice"
-  ]
+    "iPhone physical automation connection is intermittent; remote cold-start reopen not completed",
+    "iOS remote composer AX shows Auto while Desktop same-thread controls show Ask; root cause not yet established"
+  ],
+  "core_conversation_all_three_passed": true
 }

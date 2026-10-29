@@ -1,0 +1,66 @@
+{
+  "observedAtUtc": "2026-10-29T08:10:16Z",
+  "device": "Galaxy S25",
+  "app": "com.lingxi.code.debug",
+  "bot": "Desktop Bot Luna Acceptance",
+  "model": "openai-chatgpt/gpt-6-luna",
+  "mode": "Default Ask",
+  "coldStartThreadRecovery": {
+    "result": "passed",
+    "assistantMarker": "BOT_E2E_ANDROID_LUNA_20261029",
+    "evidence": "Original thread and assistant marker displayed after app cold start and reconnection to paired host."
+  },
+  "askUserQuestion": {
+    "result": "passed",
+    "question": "Which acceptance marker do you choose?",
+    "answer": "A",
+    "assistantMarker": "BOT_QUESTION_ANDROID_A",
+    "desktopObservation": "Desktop showed the same pending question and choices; after phone submission Desktop showed A and the final marker."
+  },
+  "permission": {
+    "result": "prompt_not_exercised",
+    "command": "printf 'BOT_PERMISSION_ANDROID_OK\\n'",
+    "stdout": "BOT_PERMISSION_ANDROID_OK",
+    "observation": "Shell completed directly without a permission prompt; no policy was changed. stderr included a sandbox deny for zsh sysctl-read kern.iossupportversion."
+  },
+  "cancelCounting": {
+    "result": "inconclusive",
+    "observation": "Stop was clicked after the control appeared, but the full 1-200 response was visible; cannot establish mid-stream cancellation."
+  },
+  "recoveryEcho": {
+    "result": "passed",
+    "assistantMarker": "BOT_RECOVERY_ANDROID_OK"
+  },
+  "cancelShell": {
+    "result": "turn_interrupted_background_command_completed",
+    "command": "sleep 20; printf 'BOT_CANCEL_SHOULD_NOT_FINISH\\n'",
+    "observation": "Phone showed Shell running and Stop; after Stop the composer returned idle. Desktop persisted session recorded Bash started 08:09:25.342, background task returned 08:09:34.285, and request interrupted for tool use at 08:09:34.294. The background output file later contained BOT_CANCEL_SHOULD_NOT_FINISH. Stop interrupted the turn but did not terminate the background shell command."
+  },
+  "addedPrompts": 5,
+  "additionalPromptAuthorization": "One extra bounded sleep cancellation request authorized by test coordinator after the original four.",
+  "remoteOff": {
+    "thread": "Previously open thread still displayed history and an EditText after Desktop saved remote off. No send attempted; backend rejection is untested.",
+    "navigation": "Returning to Bot displayed unavailable message; returning to host showed no Bot section.",
+    "screenshots": [
+      "android-terra-remote-off-thread.png",
+      "android-terra-remote-off-host.png"
+    ]
+  },
+  "remoteRestore": {
+    "result": "passed",
+    "observation": "Bot reappeared in host list and the original Android thread reopened with history."
+  },
+  "remoteOffSend": {
+    "result": "client_send_disabled",
+    "observation": "Draft accepted in still-open thread, send control parent was disabled; tapping did not remove draft or create visible user message or generating state. Host-side rejection was not exercised.",
+    "screenshot": "android-terra-off-send-disabled.png",
+    "persistentSessionObservation": "Desktop read-only inspection found no off-test user marker in persisted session.",
+    "draft": "Cleared through phone UI before remote was restored."
+  },
+  "finalRemoteRestore": {
+    "observation": "Existing thread showed Bot name and history, empty composer and GPT-6 Luna / Default after remote restored. No new prompt sent."
+  },
+  "finalDeviceDiscovery": {
+    "iphone": "Mobile MCP listed iPhone 11 online again; UI automation not retried or verified."
+  }
+}

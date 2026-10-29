@@ -13,7 +13,11 @@
     "mobile_ffi": 70,
     "android_device_bot_ui": 17,
     "ios_device_remote_unit": 20,
-    "electron_permission_regression": 45
+    "electron_permission_regression": 45,
+    "electron_login_and_remote_regression": 67,
+    "actual_platform_conversations": 3,
+    "actual_android_question_and_desktop_sync": true,
+    "actual_android_remote_revocation_and_restore": true
   },
   "generated_bindings": [
     {
@@ -49,17 +53,9 @@
   ],
   "native_libraries_for_devices_rebuilt": true,
   "device_e2e_completed": false,
-  "stop_reason": null,
-  "source_head": "56a7d4038209887eb3c296f86d9cedc30e70d999",
-  "source_changes_under_validation": [
-    "apps/android/native/app/src/main/java/com/lingxi/code/remote/RemoteScreens.kt",
-    "apps/ios/native/UITests/RemoteBotsDeviceAcceptanceUITests.swift",
-    "apps/electron/src/renderer/bridge/botForm.ts",
-    "apps/electron/src/renderer/components/BotFields.tsx",
-    "apps/electron/src/renderer/i18n/botsCatalog.ts",
-    "apps/electron/test/bot-form.test.ts",
-    "apps/electron/test/bots-render.test.ts"
-  ],
+  "stop_reason": "iPhone automation/device connection repeatedly disconnects; cold-start restore and permission-label discrepancy need follow-up.",
+  "source_head": "82e718fbf",
+  "source_changes_under_validation": [],
   "android_device": {
     "device": "Galaxy S25 / Android 16",
     "abi": "arm64-v8a",
@@ -82,14 +78,16 @@
       "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/outputs/apk/androidTest/play/debug/app-play-debug-androidTest.apk": "b9f980b9081a37fec8f4b49273c792396037b2b751abb62621bcaab9c7b7bd1d"
     },
     "first_instrumentation_run": "Started while screen was locked; one test failed before user unlocked; stopped only own test app and reran entire suite with 17 pass.",
-    "source_heading_fix": "Sessions header now follows Bots, after Local Apps."
+    "source_heading_fix": "Sessions header now follows Bots, after Local Apps.",
+    "real_remote_evidence": "android-terra-live.json",
+    "original_timeout_restored": true
   },
   "platform_native_status": {
     "android": "Fresh arm64 JNI and binding/APK pair built, installed and UI-tested",
     "ios": "Fresh current arm64 FFI/bindings, FullDebug app+tests compile/sign, update install, 20 focused Remote/Bot device unit tests pass",
-    "desktop": "Fresh source bridge and Flare signed package pass static/runtime verification; real Ask-mode UI regression verified"
+    "desktop": "Fresh source bridge and Flare signed package static/runtime pass; explicit Ask and interactive full-screen expired login verified"
   },
-  "current_stage": "Actual three-platform acceptance awaiting Desktop sign-in, Galaxy unlock, and user choice of available model",
+  "current_stage": "All three real Luna echo conversations pass; Android recovery/question/revocation pass. iPhone cold-start reopen incomplete due to device disconnection; remote permission label mismatch remains.",
   "ios_sdk_provenance": "ios-gstreamer-input-provenance.json",
   "ios_device_library_pair": "ios-device-binding-library-pair.json",
   "ios_device": {
@@ -100,7 +98,12 @@
     "installed_as_update": true,
     "focused_unit_tests": 20,
     "bot_device_ui_test_compiled": true,
-    "real_remote_conversation_e2e": "pending Desktop host"
+    "real_remote_conversation_e2e": "Actual reply, same-thread Desktop observation and Back/reopen pass; full lifecycle incomplete",
+    "driver_diagnostic": "ios-runtime-driver-diagnostic.json",
+    "session": "7855bf54-2a84-470d-9de2-4e615d2c6a6e",
+    "cold_launch_remote_reopen": "incomplete: system alert then device loss",
+    "permission_mode_display": "Auto in iOS remote composer; Ask in Desktop same thread; no mode changed",
+    "live_evidence": "ios-terra-live.json"
   },
   "desktop_package": "desktop-signed-package.json",
   "desktop_actual_ui": "desktop-permission-actual-ui.json",
@@ -109,5 +112,19 @@
     "unchanged_from_head": true,
     "proof": "i18n-comparison.json"
   },
-  "tested_source_fix_commit": "9a1c75f32"
+  "tested_source_fix_commit": "82e718fbf",
+  "real_model": "openai-chatgpt/gpt-6-luna",
+  "live_evidence": "live-bot-evidence.json",
+  "committed_fixes": {
+    "main_integration": "56a7d4038",
+    "explicit_ask_and_device_preparation": "9a1c75f32",
+    "expired_account_login": "82e718fbf"
+  },
+  "core_conversation_all_three_passed": true,
+  "automation_agent": "gpt-6.1-terra",
+  "cleanup_final": "cleanup-ios-precompile-20261029.json",
+  "checkpoint_utc": "2026-10-29T08:34:11.944839+00:00",
+  "free_gib_at_checkpoint": 6.104,
+  "final_desktop_state": "final-desktop-state.json",
+  "android_timeout_restore": "android-timeout-restored-final.json"
 }

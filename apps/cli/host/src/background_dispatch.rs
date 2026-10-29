@@ -274,7 +274,7 @@ pub async fn dispatch_background(
             &source_id.to_string(),
             &target_id.to_string(),
             argv.fork_session,
-        ) {
+        ).await {
             Ok(path) => path,
             Err(e) => {
                 eprintln!("lingxi-cli: could not prepare resume transcript: {e}");
@@ -775,7 +775,7 @@ fn locate_session_transcript(
 /// Resolve the source transcript before considering the target id. A fork
 /// receives its own durable transcript copy so subsequent target-session turns
 /// append to a complete history; an in-place resume keeps the exact source.
-fn prepare_resume_transcript(
+async fn prepare_resume_transcript(
     config_home: &Path,
     cwd: &str,
     source_session_id: &str,
@@ -783,41 +783,19 @@ fn prepare_resume_transcript(
     fork: bool,
 ) -> std::io::Result<PathBuf> {
     let source = locate_session_transcript(config_home, cwd, source_session_id)?;
-    if !fork || source_session_id == target_session_id {
+    if !fork {
         return Ok(source);
     }
-
-    let target = session::jsonl::path::session_path(config_home, cwd, target_session_id);
-    let parent = target.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "fork transcript has no parent directory",
-        )
-    })?;
-    std::fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(
-        ".{target_session_id}.fork.{}.{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    let result = (|| {
-        let mut input = std::fs::File::open(&source)?;
-        let mut output = platform_pty::create_current_user_private_file(&tmp)?;
-        std::io::copy(&mut input, &mut output)?;
-        use std::io::Write as _;
-        output.flush()?;
-        output.sync_all()?;
-        drop(output);
-        // Atomic no-replace publication: hard_link fails if an explicit target
-        // session id already exists, unlike Unix rename which would overwrite.
-        std::fs::hard_link(&tmp, &target)?;
-        let _ = std::fs::remove_file(&tmp);
-        validate_transcript_path(config_home, &target)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    if source_session_id == target_session_id {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "branch target must differ from the source session"));
     }
-    result
+
+    let source_id = uuid::Uuid::parse_str(source_session_id)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let target_id = uuid::Uuid::parse_str(target_session_id)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    crate::run::create_independent_cli_branch(config_home, cwd, source_id, target_id, Some(&source), None)
+        .await.map(|(path, _)| path).map_err(std::io::Error::other)
 }
 
 fn validate_transcript_path(config_home: &Path, path: &Path) -> std::io::Result<PathBuf> {
@@ -1281,8 +1259,31 @@ mod tests {
         assert_eq!(spawner.spawns.len(), 1);
     }
 
-    #[test]
-    fn fork_dispatch_keeps_source_transcript_separate_from_target_session() {
+    #[tokio::test]
+    async fn background_fork_uses_the_exact_selected_worktree_transcript() {
+        let home = tmpdir();
+        let source_id = uuid::Uuid::new_v4().to_string();
+        let target_id = uuid::Uuid::new_v4().to_string();
+        let target_cwd = "/tmp/current-worktree";
+        let selected = session::jsonl::path::session_path(&home, target_cwd, &source_id);
+        let other = session::jsonl::path::session_path(&home, "/tmp/other-worktree", &source_id);
+        for (path, cwd, content) in [(&selected, target_cwd, "selected source"), (&other, "/tmp/other-worktree", "other source")] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let row = serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(),
+                "parentUuid":null, "sessionId":source_id, "cwd":cwd,
+                "message":{"role":"user", "content":content}});
+            std::fs::write(path, format!("{row}\n")).unwrap();
+        }
+        filetime::set_file_mtime(&other, filetime::FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
+        let branch = prepare_resume_transcript(&home, target_cwd, &source_id, &target_id, true)
+            .await.expect("branch selected source");
+        let content = std::fs::read_to_string(branch).unwrap();
+        assert!(content.contains("selected source"));
+        assert!(!content.contains("other source"));
+    }
+
+    #[tokio::test]
+    async fn fork_dispatch_keeps_source_transcript_separate_from_target_session() {
         let home = tmpdir();
         let mut spawner = CaptureSpawner::default();
         let lockp = FakeLockProbe {
@@ -1295,17 +1296,19 @@ mod tests {
         std::fs::write(
             &source,
             format!(
-                "{{\"type\":\"user\",\"sessionId\":\"{source_id}\",\"cwd\":\"/tmp/source\"}}\n"
+                "{{\"type\":\"user\",\"uuid\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"parentUuid\":null,\"sessionId\":\"{source_id}\",\"cwd\":\"/tmp/source\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}}}}\n"
             ),
         )
         .unwrap();
-        let target = prepare_resume_transcript(&home, "/tmp/target", source_id, target_id, true)
+        let original = std::fs::read_to_string(&source).unwrap();
+        let target = prepare_resume_transcript(&home, "/tmp/target", source_id, target_id, true).await
             .expect("fork should copy from source before resolving the target");
         assert_ne!(std::fs::canonicalize(&source).unwrap(), target);
-        assert_eq!(
-            std::fs::read_to_string(&target).unwrap(),
-            std::fs::read_to_string(&source).unwrap()
-        );
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+        let branch = std::fs::read_to_string(&target).unwrap();
+        let profile = session::JsonlWriter::session_mode_transition_from_source(&branch, target_id).unwrap();
+        assert!(profile.active_epoch > 0);
+        assert!(branch.contains(target_id));
         let context = ForkLaunchContext {
             transcript_path: Some(target.display().to_string()),
             options: Some(BackgroundLaunchOptions {

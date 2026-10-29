@@ -2,6 +2,7 @@ package com.lingxi.code.project
 
 import android.content.Context
 import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.canonicalSessionId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -10,8 +11,8 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * Small durable per-scope conversation state — the last-active session id and
- * the unsent composer draft, keyed by [com.lingxi.code.model.ConversationScope]
+ * Small durable conversation state — the last-active session id and unsent
+ * composer drafts, keyed by [com.lingxi.code.model.ConversationScope]
  * persistence keys (`global` / `project.<id>` / `app.<id>`), plus which scope
  * was active last. JSON in app-private files with the same atomic
  * write-validate-rename discipline as [ProjectRepository] (shared
@@ -19,7 +20,7 @@ import java.io.File
  *
  * The legacy Project/global last-active fields stay with [ProjectRepository]
  * for Code compatibility. This store is authoritative for mode-scoped active
- * sessions and drafts across every workspace, and for the active workspace.
+ * sessions across every workspace, drafts per conversation, and the active workspace.
  *
  * All suspend entry points hop to [Dispatchers.IO] and serialize on one mutex,
  * so callers may invoke them from the main thread (e.g. per-keystroke draft
@@ -31,11 +32,14 @@ class ScopeStateStore internal constructor(
 ) {
     constructor(context: Context) : this(File(context.filesDir, SCOPE_STATE_FILE))
 
-    private val mutex = Mutex()
+    // Screens recreate this store, but all instances write the same app file.
+    private val mutex = stateMutex
 
     data class ScopeState(
         val lastActiveSessionId: String? = null,
         val draft: String = "",
+        /** Owner of a draft saved by the former mode-scoped layout. */
+        val draftSessionId: String? = null,
     )
 
     data class WorkspacePresentationState(
@@ -57,6 +61,33 @@ class ScopeStateStore internal constructor(
 
     suspend fun read(scopeKey: String): ScopeState? = withContext(Dispatchers.IO) {
         mutex.withLock { load().scopes[scopeKey] }
+    }
+
+    /** A mode switch keeps the same draft; another conversation has its own. */
+    suspend fun readConversationDraft(scopeKey: String, sessionId: String, mode: SessionMode): String? = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val snapshot = load()
+            val owner = canonicalSessionId(sessionId)
+            snapshot.conversationDrafts[conversationDraftKey(scopeKey, owner)] ?: run {
+                // Older scope slots did not record a separate draft owner. The
+                // decoder captures their last-active owner once; changing the
+                // active session must never reassign that draft to a new owner.
+                listOf(mode, if (mode == SessionMode.Code) SessionMode.Chat else SessionMode.Code)
+                    .firstNotNullOfOrNull { candidate ->
+                        snapshot.scopes["$scopeKey#${candidate.wireKey}"]
+                            ?.takeIf { it.draftSessionId?.let(::canonicalSessionId) == owner }
+                            ?.draft
+                    }
+            }
+        }
+    }
+
+    suspend fun persistConversationDraft(scopeKey: String, sessionId: String, draft: String) {
+        require(sessionId.isNotBlank() && sessionId != "new")
+        mutate { snapshot ->
+            snapshot.copy(conversationDrafts = snapshot.conversationDrafts +
+                (conversationDraftKey(scopeKey, canonicalSessionId(sessionId)) to draft))
+        }
     }
 
     suspend fun readWorkspacePresentation(): Map<String, WorkspacePresentationState> = withContext(Dispatchers.IO) {
@@ -97,7 +128,7 @@ class ScopeStateStore internal constructor(
     suspend fun persistDraft(scopeKey: String, draft: String) {
         mutate { snapshot ->
             val current = snapshot.scopes[scopeKey] ?: ScopeState()
-            snapshot.copy(scopes = snapshot.scopes + (scopeKey to current.copy(draft = draft)))
+            snapshot.copy(scopes = snapshot.scopes + (scopeKey to current.copy(draft = draft, draftSessionId = current.lastActiveSessionId)))
         }
     }
 
@@ -145,6 +176,7 @@ class ScopeStateStore internal constructor(
         val activeMode: SessionMode = SessionMode.Code,
         val selectedMode: SessionMode? = null,
         val scopes: Map<String, ScopeState> = emptyMap(),
+        val conversationDrafts: Map<String, String> = emptyMap(),
         val workspacePresentation: Map<String, WorkspacePresentationState> = emptyMap(),
         val pinnedSessions: Map<String, Long> = emptyMap(),
         val cronResultsSeenAtEpochMillis: Long = 0L,
@@ -180,11 +212,15 @@ class ScopeStateStore internal constructor(
                         key,
                         JSONObject()
                             .put("lastActiveSessionId", state.lastActiveSessionId)
-                            .put("draft", state.draft),
+                            .put("draft", state.draft)
+                            .put("draftSessionId", state.draftSessionId ?: JSONObject.NULL),
                     )
                 }
             },
         )
+        .put("conversationDrafts", JSONObject().also { drafts ->
+            snapshot.conversationDrafts.forEach { (key, value) -> drafts.put(key, value) }
+        })
         .put(
             "workspacePresentation",
             JSONObject().also { prefs ->
@@ -214,18 +250,23 @@ class ScopeStateStore internal constructor(
         val scopes = buildMap {
             scopesJson.keys().forEach { key ->
                 val entry = scopesJson.getJSONObject(key)
+                val lastSessionId = if (entry.isNull("lastActiveSessionId")) null
+                    else entry.optString("lastActiveSessionId").takeIf { it.isNotBlank() }
                 put(
                     key,
                     ScopeState(
-                        lastActiveSessionId = if (entry.isNull("lastActiveSessionId")) {
-                            null
-                        } else {
-                            entry.optString("lastActiveSessionId").takeIf { it.isNotBlank() }
-                        },
+                        lastActiveSessionId = lastSessionId,
                         draft = entry.optString("draft"),
+                        draftSessionId = if (entry.has("draftSessionId")) {
+                            if (entry.isNull("draftSessionId")) null else entry.optString("draftSessionId").takeIf { it.isNotBlank() }
+                        } else lastSessionId,
                     ),
                 )
             }
+        }
+        val draftsJson = json.optJSONObject("conversationDrafts") ?: JSONObject()
+        val conversationDrafts = buildMap {
+            draftsJson.keys().forEach { key -> put(key, draftsJson.getString(key)) }
         }
         val workspacePresentationJson = json.optJSONObject("workspacePresentation") ?: JSONObject()
         val workspacePresentation = buildMap {
@@ -266,6 +307,7 @@ class ScopeStateStore internal constructor(
                 else -> null
             },
             scopes = scopes,
+            conversationDrafts = conversationDrafts,
             workspacePresentation = workspacePresentation,
             pinnedSessions = pinnedSessions,
             cronResultsSeenAtEpochMillis = json.optLong("cronResultsSeenAtEpochMillis", 0L),
@@ -274,5 +316,7 @@ class ScopeStateStore internal constructor(
 
     companion object {
         internal const val SCOPE_STATE_FILE = "scope-state.json"
+        private val stateMutex = Mutex()
+        private fun conversationDraftKey(scopeKey: String, sessionId: String) = "$scopeKey#session:$sessionId"
     }
 }

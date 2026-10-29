@@ -332,6 +332,22 @@ struct PendingBackgrounding {
     requested_at: Instant,
 }
 
+/// Input still owned by the composer until the runtime admits its outer turn.
+struct RecoveredPrompt {
+    text: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    images: Vec<std::path::PathBuf>,
+    owns_unstarted_turn: bool,
+    sequence: u64,
+}
+
+/// A composer draft retained while its owning session is not mounted.
+#[derive(Clone, Debug)]
+pub struct SwitchDraft {
+    pub row_token: Option<String>,
+    pub text: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    pub images: Vec<std::path::PathBuf>,
+}
+
 #[derive(Clone)]
 enum FocusRefreshKind {
     None,
@@ -417,6 +433,7 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::RawUtilization { .. }
         | TurnEvent::CommandCatalogRefreshed { .. }
         | TurnEvent::SlashImagesResolved { .. }
+        | TurnEvent::PromptAdmissionResolved { .. }
         | TurnEvent::MultiAgent(_)
         | TurnEvent::HookProgressStarted { .. }
         | TurnEvent::HookProgressFinished { .. }
@@ -460,6 +477,9 @@ pub struct ChatWidget {
     slash_image_restore_scope: uuid::Uuid,
     /// Dispatch identities awaiting an image result, bound to their session scope.
     pending_slash_image_restores: std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
+    pending_prompt_restores: std::collections::HashMap<String, RecoveredPrompt>,
+    recovered_prompts: VecDeque<RecoveredPrompt>,
+    next_prompt_sequence: u64,
     queued_prompt_owners: Vec<CancellationToken>,
     /// Whether turn-scoped bridge events still have a live owner. This remains
     /// true while cancellation is waiting for Block tools, and flips only at
@@ -751,6 +771,9 @@ impl ChatWidget {
             pending_slash_dispatches: Vec::new(),
             slash_image_restore_scope: uuid::Uuid::new_v4(),
             pending_slash_image_restores: std::collections::HashMap::new(),
+            pending_prompt_restores: std::collections::HashMap::new(),
+            recovered_prompts: VecDeque::new(),
+            next_prompt_sequence: 0,
             queued_prompt_owners: Vec::new(),
             accepts_turn_events: false,
             session_clear_pending: false,
@@ -989,7 +1012,8 @@ impl ChatWidget {
                         area.width,
                         crate::terminal::hyperlinks_supported(),
                         live_cwd.as_deref().or(snapshot_cwd),
-                    ).len(),
+                    )
+                    .len(),
                 ),
             )
             .map(str::to_owned)
@@ -1176,15 +1200,31 @@ impl ChatWidget {
     /// handling (active view, completion, vim, composer), execute the
     /// returned intent, then surface the next queued permission if the key
     /// resolved the open prompt.
-    pub fn restore_link_draft(&mut self, text: &str) { self.bottom_pane.restore_composer_text(text); }
-    pub fn anchor_message(&mut self, uuid: String) { self.message_anchor = Some(uuid); self.history_offset = 0; self.brief_transcript = false; }
+    pub fn restore_link_draft(&mut self, text: &str) {
+        self.bottom_pane.restore_composer_text(text);
+    }
+    pub fn anchor_message(&mut self, uuid: String) {
+        self.message_anchor = Some(uuid);
+        self.history_offset = 0;
+        self.brief_transcript = false;
+    }
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatOutcome {
         if self.message_anchor.is_some() {
             match key.code {
-                crossterm::event::KeyCode::PageUp => { self.history_offset -= 10; return ChatOutcome::Continue; }
-                crossterm::event::KeyCode::PageDown => { self.history_offset += 10; return ChatOutcome::Continue; }
-                crossterm::event::KeyCode::End => { self.message_anchor = None; self.history_offset = 0; return ChatOutcome::Continue; }
-                _ => ()
+                crossterm::event::KeyCode::PageUp => {
+                    self.history_offset -= 10;
+                    return ChatOutcome::Continue;
+                }
+                crossterm::event::KeyCode::PageDown => {
+                    self.history_offset += 10;
+                    return ChatOutcome::Continue;
+                }
+                crossterm::event::KeyCode::End => {
+                    self.message_anchor = None;
+                    self.history_offset = 0;
+                    return ChatOutcome::Continue;
+                }
+                _ => (),
             }
         }
         if self.session_clear_pending {
@@ -1610,6 +1650,26 @@ impl ChatWidget {
                 if scope == Some(self.slash_image_restore_scope) {
                     if let Some(image_paths) = image_paths {
                         self.restore_pending_images(image_paths);
+                    }
+                }
+            }
+            TurnEvent::PromptAdmissionResolved {
+                row_token,
+                admitted,
+            } => {
+                if let Some(prompt) = self.pending_prompt_restores.remove(&row_token) {
+                    if !admitted {
+                        if prompt.owns_unstarted_turn && self.turn_started_at.is_none() {
+                            self.current_turn = None;
+                            self.accepts_turn_events = false;
+                        }
+                        self.transcript.remove_unadmitted_user_row(&row_token);
+                        self.recovered_prompts.push_back(prompt);
+                        self.restore_recovered_prompt_if_available();
+                        let _ = self.show_system_text(
+                            "Prompt was not admitted; its draft and attachments are retained.",
+                            true,
+                        );
                     }
                 }
             }
@@ -2285,6 +2345,7 @@ impl ChatWidget {
                 self.bottom_pane.set_mod_status(plugin, text);
             }
             TurnEvent::TranscriptRowIdentity { row_token, uuid } => {
+                self.pending_prompt_restores.remove(&row_token);
                 self.transcript.identify_user_row(&row_token, uuid);
             }
             TurnEvent::AssistantTranscriptRowUuids { message_id, uuids } => {
@@ -2974,6 +3035,7 @@ impl ChatWidget {
     /// scrollback until finalized), then the pane (status line + composer
     /// + overlays) pinned at the bottom.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
+        self.restore_recovered_prompt_if_available();
         self.bottom_pane.set_task_running(self.pane_status());
         let tail = self.live_tail(area.width);
         let (tail_area, pane_area) = self.split_area(area, line_count(&tail));
@@ -3102,11 +3164,24 @@ impl ChatWidget {
         let hyperlink_cwd = live_hyperlink_cwd.as_deref().or(snapshot_hyperlink_cwd);
         let history =
             self.fullscreen_history_lines(history_area.width, hyperlinks_enabled, hyperlink_cwd);
-        let skip = self.anchored_history_start(
-            history_area.width, hyperlinks_enabled, hyperlink_cwd, history.len(),
+        let skip = self
+            .anchored_history_start(
+                history_area.width,
+                hyperlinks_enabled,
+                hyperlink_cwd,
+                history.len(),
         )
-            .unwrap_or_else(|| history.len().saturating_sub(usize::from(history_area.height)));
-        for (row, line) in history.iter().skip(skip).take(usize::from(history_area.height)).enumerate() {
+            .unwrap_or_else(|| {
+                history
+                    .len()
+                    .saturating_sub(usize::from(history_area.height))
+            });
+        for (row, line) in history
+            .iter()
+            .skip(skip)
+            .take(usize::from(history_area.height))
+            .enumerate()
+        {
             let row_area = Rect::new(
                 history_area.x,
                 history_area.y + u16::try_from(row).unwrap_or(u16::MAX),
@@ -3142,12 +3217,22 @@ impl ChatWidget {
         cwd: Option<&std::path::Path>,
         history_len: usize,
     ) -> Option<usize> {
-        self.message_anchor.as_ref()
-            .and_then(|uuid| self.transcript.message_line_offset(
-                uuid, width, &self.theme, hyperlinks_enabled, cwd,
-            ))
-            .map(|offset| offset.saturating_add_signed(self.history_offset)
-                .min(history_len.saturating_sub(1)))
+        self.message_anchor
+            .as_ref()
+            .and_then(|uuid| {
+                self.transcript.message_line_offset(
+                    uuid,
+                    width,
+                    &self.theme,
+                    hyperlinks_enabled,
+                    cwd,
+                )
+            })
+            .map(|offset| {
+                offset
+                    .saturating_add_signed(self.history_offset)
+                    .min(history_len.saturating_sub(1))
+            })
     }
 
     fn fullscreen_history_lines(
@@ -4693,6 +4778,8 @@ impl ChatWidget {
         // The queued-image cells just vanished from the screen; keeping the
         // paths would silently attach them to a later unrelated message.
         self.pending_images.clear();
+        self.pending_prompt_restores.clear();
+        self.recovered_prompts.clear();
         self.bottom_pane.set_attached_image_labels(Vec::new());
         // (parity 2.1.212) `/clear` resets the session cost counter — claude-code's
         // clearConversation calls resetCostState. Drop the cached status-row cost
@@ -4894,14 +4981,26 @@ impl ChatWidget {
         };
         let row_token = uuid::Uuid::new_v4().to_string();
         self.transcript.push_message(RenderedMessage::UserText {
-            body: invocation,
+            body: invocation.clone(),
             timestamp: 0,
         });
         self.transcript.track_latest_user_row(row_token.clone());
         self.sync_focus_projection();
         self.current_turn = Some(cancellation.clone());
         self.accepts_turn_events = true;
-        ChatOutcome::Submit(content, row_token, self.take_pending_images(), cancellation)
+        let images = self.take_pending_images();
+        let sequence = self.next_prompt_sequence;
+        self.next_prompt_sequence = self.next_prompt_sequence.saturating_add(1);
+        self.pending_prompt_restores.insert(
+            row_token.clone(),
+            RecoveredPrompt {
+                text: invocation.into(),
+                images: images.clone(),
+                owns_unstarted_turn: true,
+                sequence,
+            },
+        );
+        ChatOutcome::Submit(content, row_token, images, cancellation)
     }
 
     /// Render read-only command output into the transcript as a `system`
@@ -5090,7 +5189,7 @@ impl ChatWidget {
     /// "Visualize current context usage as a colored grid"). Reads the model +
     /// categorized context-window snapshot via the throwaway `block_on` bridge
     /// and renders it as a colored square grid.
-    pub(crate) fn cmd_context(&mut self, _args: &str) -> ChatOutcome {
+    pub(crate) fn cmd_context(&mut self, args: &str) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/context is unavailable (no engine handle wired)", true);
         };
@@ -5101,6 +5200,29 @@ impl ChatWidget {
             Ok(runtime) => runtime,
             Err(err) => return self.show_system_text(&format!("/context failed: {err}"), true),
         };
+        if args.trim() == "manifest" {
+            return match runtime.block_on(async {
+                serde_json::to_string_pretty(&handle.context_manifest().await)
+                    .map_err(|error| error.to_string())
+            }) {
+                Ok(manifest) => {
+                    let lines = manifest
+                        .lines()
+                        .map(|line| ratatui::text::Line::from(line.to_owned()))
+                        .collect();
+                    self.bottom_pane.show_view(Box::new(ScreenView::new(
+                        "Context manifest",
+                        lines,
+                        "esc to close · ↑/↓ scroll",
+                    )));
+                    ChatOutcome::Continue
+                }
+                Err(error) => self.show_system_text(&format!("/context failed: {error}"), true),
+            };
+        }
+        if !args.trim().is_empty() {
+            return self.show_system_text("Usage: /context [manifest]", true);
+        }
         let (model, usage) = runtime.block_on(async {
             let snap = handle.get_status_snapshot().await;
             let usage = handle.context_usage_snapshot().await;
@@ -5578,7 +5700,10 @@ impl ChatWidget {
             return self.show_system_text("Compaction already in progress", true);
         }
         if self.current_turn.is_some()
-            || self.pending_slash_dispatches.iter().any(PendingSlashDispatch::is_pending)
+            || self
+                .pending_slash_dispatches
+                .iter()
+                .any(PendingSlashDispatch::is_pending)
         {
             self.bottom_pane.set_command_alert(
                 "Compact is disabled while a chat is in progress".into(),
@@ -6229,6 +6354,20 @@ impl ChatWidget {
         if self.session_clear_pending {
             return ChatOutcome::Continue;
         }
+        if (self.current_turn.is_some()
+            || self
+                .pending_slash_dispatches
+                .iter()
+                .any(PendingSlashDispatch::is_pending))
+            && !self.pending_images.is_empty()
+        {
+            self.bottom_pane
+                .restore_composer_source_units(&text.string_units("").unwrap_or_default());
+            return self.show_system_text(
+                "Wait for the current turn before submitting attached images.",
+                false,
+            );
+        }
         let row_token = uuid::Uuid::new_v4().to_string();
         self.transcript.push_message(RenderedMessage::UserText {
             body: text.string_at("").unwrap_or_default().to_owned(),
@@ -6250,12 +6389,80 @@ impl ChatWidget {
             self.queued_prompt_owners
                 .retain(|owner| !owner.is_cancelled());
             self.queued_prompt_owners.push(owner.clone());
-            return ChatOutcome::QueuePrompt(text, row_token, self.take_pending_images(), owner);
+            let images = self.take_pending_images();
+            let sequence = self.next_prompt_sequence;
+            self.next_prompt_sequence = self.next_prompt_sequence.saturating_add(1);
+            self.pending_prompt_restores.insert(
+                row_token.clone(),
+                RecoveredPrompt {
+                    text: text.clone(),
+                    images: images.clone(),
+                    owns_unstarted_turn: false,
+                    sequence,
+                },
+            );
+            return ChatOutcome::QueuePrompt(text, row_token, images, owner);
         }
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
         self.accepts_turn_events = true;
-        ChatOutcome::Submit(text, row_token, self.take_pending_images(), token)
+        let images = self.take_pending_images();
+        let sequence = self.next_prompt_sequence;
+        self.next_prompt_sequence = self.next_prompt_sequence.saturating_add(1);
+        self.pending_prompt_restores.insert(
+            row_token.clone(),
+            RecoveredPrompt {
+                text: text.clone(),
+                images: images.clone(),
+                owns_unstarted_turn: true,
+                sequence,
+            },
+        );
+        ChatOutcome::Submit(text, row_token, images, token)
+    }
+
+    fn restore_recovered_prompt_if_available(&mut self) {
+        if !self.bottom_pane.composer().source_units().is_empty() || !self.pending_images.is_empty() {
+            return;
+        }
+        if let Some(prompt) = self.recovered_prompts.pop_front() {
+            self.bottom_pane
+                .restore_composer_source_units(&prompt.text.string_units("").unwrap_or_default());
+            self.restore_pending_images(prompt.images);
+        }
+    }
+
+    /// Snapshot drafts before the old widget is unmounted. The host resolves
+    /// pending row tokens against the final admission result before retaining.
+    pub fn switch_drafts(&self) -> Vec<SwitchDraft> {
+        let mut drafts = Vec::new();
+        let units = self.bottom_pane.composer().source_units();
+        if !units.is_empty() || !self.pending_images.is_empty() {
+            if let Ok(text) = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&units), units,
+            ) {
+                drafts.push(SwitchDraft { row_token: None, text, images: self.pending_images.clone() });
+            }
+        }
+        drafts.extend(self.recovered_prompts.iter().map(|draft| SwitchDraft {
+            row_token: None, text: draft.text.clone(), images: draft.images.clone(),
+        }));
+        let mut pending: Vec<_> = self.pending_prompt_restores.iter().collect();
+        pending.sort_by_key(|(_, draft)| draft.sequence);
+        drafts.extend(pending.into_iter().map(|(row_token, draft)| SwitchDraft {
+            row_token: Some(row_token.clone()), text: draft.text.clone(), images: draft.images.clone(),
+        }));
+        drafts
+    }
+
+    /// Restore only drafts belonging to the newly mounted owner; never submit them.
+    pub fn restore_switch_drafts(&mut self, drafts: Vec<SwitchDraft>) {
+        for draft in drafts {
+            self.recovered_prompts.push_back(RecoveredPrompt {
+                text: draft.text, images: draft.images, owns_unstarted_turn: false, sequence: 0,
+            });
+        }
+        self.restore_recovered_prompt_if_available();
     }
 
     /// Execute a command effect a view requested via
@@ -9201,6 +9408,97 @@ mod tests {
     }
 
     #[test]
+    fn unadmitted_prompt_retains_exact_source_and_does_not_overwrite_new_draft() {
+        let mut widget = widget();
+        let units = vec![b'a' as u16, 0xd800, b'b' as u16];
+        let prompt = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&units), units.clone(),
+        ).unwrap();
+        let image = std::path::PathBuf::from("/tmp/recover-image.png");
+        widget.pending_images.push(image.clone());
+        let ChatOutcome::Submit(_, row_token, _, _) = widget.submit_prompt(prompt) else { panic!("submit") };
+        widget.bottom_pane.restore_composer_text("newer draft");
+        widget.apply_turn_event(TurnEvent::PromptAdmissionResolved { row_token, admitted: false });
+        assert_eq!(widget.bottom_pane.composer().text(), "newer draft");
+        assert!(widget.pending_images.is_empty());
+        assert_eq!(widget.recovered_prompts.len(), 1);
+        widget.bottom_pane.restore_composer_text("");
+        widget.restore_recovered_prompt_if_available();
+        assert_eq!(widget.bottom_pane.composer().source_units(), units);
+        assert_eq!(widget.pending_images, vec![image]);
+        assert!(!widget.turn_running());
+    }
+
+    #[test]
+    fn rejecting_queued_prompt_does_not_clear_an_unstarted_foreground_turn() {
+        let mut widget = widget();
+        let ChatOutcome::Submit(_, _, _, foreground) = widget.submit_prompt("first".into()) else {
+            panic!("foreground submit");
+        };
+        let ChatOutcome::QueuePrompt(_, queued_row, _, _) = widget.submit_prompt("second".into()) else {
+            panic!("queued submit");
+        };
+        widget.apply_turn_event(TurnEvent::PromptAdmissionResolved {
+            row_token: queued_row,
+            admitted: false,
+        });
+        assert!(widget.turn_running());
+        assert!(!foreground.is_cancelled());
+        assert_eq!(widget.bottom_pane.composer().text(), "second");
+    }
+
+    #[test]
+    fn rejected_prompt_does_not_overwrite_whitespace_draft() {
+        let mut widget = widget();
+        let ChatOutcome::Submit(_, row_token, _, _) = widget.submit_prompt("first".into()) else {
+            panic!("foreground submit");
+        };
+        widget.bottom_pane.restore_composer_text("  \n ");
+        widget.apply_turn_event(TurnEvent::PromptAdmissionResolved { row_token, admitted: false });
+        assert_eq!(widget.bottom_pane.composer().text(), "  \n ");
+        assert_eq!(widget.recovered_prompts.len(), 1);
+    }
+
+    #[test]
+    fn switch_drafts_restore_without_sending_or_losing_newer_input() {
+        let mut original = widget();
+        let ChatOutcome::Submit(_, row_token, _, _) = original.submit_prompt("older".into()) else {
+            panic!("submit");
+        };
+        original.bottom_pane.restore_composer_text("  \n ");
+        original.pending_images.push("/tmp/draft.png".into());
+        let drafts = original.switch_drafts();
+        assert_eq!(drafts.len(), 2);
+        assert_eq!(drafts[1].row_token.as_deref(), Some(row_token.as_str()));
+        let mut reopened = widget();
+        reopened.restore_switch_drafts(drafts);
+        assert_eq!(reopened.bottom_pane.composer().text(), "  \n ");
+        assert_eq!(reopened.pending_images, vec![std::path::PathBuf::from("/tmp/draft.png")]);
+        assert!(!reopened.turn_running());
+        reopened.bottom_pane.restore_composer_text("");
+        reopened.pending_images.clear();
+        reopened.restore_recovered_prompt_if_available();
+        assert_eq!(reopened.bottom_pane.composer().text(), "older");
+    }
+
+    #[test]
+    fn context_manifest_opens_a_diagnostic_view() {
+        let (mut widget, _) = widget_with_orchestrator();
+        assert!(matches!(widget.cmd_context("manifest"), ChatOutcome::Continue));
+        assert!(widget.bottom_pane.has_active_view());
+    }
+
+    #[test]
+    fn images_submitted_during_a_turn_remain_in_the_composer() {
+        let mut widget = widget();
+        widget.current_turn = Some(CancellationToken::new());
+        widget.pending_images.push(std::path::PathBuf::from("/tmp/image.png"));
+        assert!(matches!(widget.submit_prompt("follow up".into()), ChatOutcome::Continue));
+        assert_eq!(widget.bottom_pane.composer().text(), "follow up");
+        assert_eq!(widget.pending_images.len(), 1);
+    }
+
+    #[test]
     fn background_exit_returns_the_durable_receipt_to_the_host() {
         let (mut view, _mock) = widget_with_orchestrator();
         match view.run_command(CommandAction::BackgroundAndExit) {
@@ -9438,7 +9736,10 @@ mod tests {
             ChatOutcome::Submit(_, _, _, _)
         ));
         let transcript_len = cells(&widget).len();
-        assert!(matches!(widget.handle_slash("/compact preserve decisions".into()), Some(ChatOutcome::Continue)));
+        assert!(matches!(
+            widget.handle_slash("/compact preserve decisions".into()),
+            Some(ChatOutcome::Continue)
+        ));
         assert_eq!(cells(&widget).len(), transcript_len);
         assert!(!widget.current_turn.as_ref().unwrap().is_cancelled());
         assert!(widget.queued_compact.is_none());

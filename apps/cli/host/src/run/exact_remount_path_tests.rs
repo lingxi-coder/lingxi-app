@@ -5,6 +5,7 @@ use std::path::Path;
 
 fn state(path: PathBuf, persistent: bool) -> crate::mode::RemountState {
     crate::mode::RemountState {
+        draft_store: Default::default(),
         transcript_path: Some(path),
         transcript_persistent: persistent,
         model: None,
@@ -183,21 +184,17 @@ async fn duplicate_uuid_keeps_exact_source_through_remount_branch_and_rewind() {
     assert!(claim_mounted_transcript(&home, session_id, Some(&invalid)).is_err());
     let read_only = state(selected.clone(), false);
     assert!(claim_mounted_transcript(&home, session_id, Some(&read_only)).is_err());
+    assert!(branch_mounted_cli(&home, &b.to_string_lossy(), session_id, Some(&read_only), None)
+        .await.is_err());
 
     let (path, claim) = claim_mounted_transcript(&home, session_id, Some(&mounted)).unwrap();
     assert!(claim_mounted_transcript(&home, session_id, Some(&mounted)).is_err());
-    let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(b.clone()));
-    let branch = session::branch::create_branch_from_path(
-        &home,
-        &b.to_string_lossy(),
-        session_id,
-        &path,
-        None,
-        fs,
-    )
-    .await
-    .unwrap();
     drop(claim);
+    assert_eq!(path, selected);
+    let branch = branch_mounted_cli(
+        &home, &b.to_string_lossy(), session_id, Some(&mounted), Some("Named work"),
+    ).await.unwrap();
+    assert!(branch.title.starts_with("Named work"));
     let branch_path = session::jsonl::session_path(
         &home,
         &b.to_string_lossy(),
@@ -206,6 +203,11 @@ async fn duplicate_uuid_keeps_exact_source_through_remount_branch_and_rewind() {
     let branch_text = std::fs::read_to_string(branch_path).unwrap();
     assert!(branch_text.contains("source A"));
     assert!(!branch_text.contains("source B"));
+    let profile = session::JsonlWriter::session_mode_transition_from_source(
+        &branch_text, &branch.new_session_id.to_string(),
+    ).unwrap();
+    assert_eq!(profile.active, lingxi_core::host::session_context::ConversationMode::Code);
+    assert!(profile.active_epoch > 4);
     assert_eq!(std::fs::read(&selected).unwrap(), selected_before);
     assert_eq!(std::fs::read(&other).unwrap(), other_before);
 
@@ -239,4 +241,28 @@ async fn duplicate_uuid_keeps_exact_source_through_remount_branch_and_rewind() {
         .unwrap()
         .contains("A later turn"));
     assert_eq!(std::fs::read(&other).unwrap(), other_before);
+}
+
+#[tokio::test]
+async fn mounted_branch_refuses_unfinished_tools_before_publishing() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("worktree");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let home = temp.path().join("config");
+    let session_id = uuid::Uuid::new_v4();
+    let source = transcript(&home, &cwd, session_id, "source", "2026-10-28T00:00:00.000Z", "chat");
+    let pending = serde_json::json!({
+        "type":"attachment", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+        "sessionId":session_id, "cwd":cwd, "message":null, "attachment":{
+            "type":"hook_deferred_tool", "toolUseID":"pending", "toolName":"Write",
+            "toolInput":{"file_path":"/tmp/not-written", "content":"pending"}}
+    });
+    writeln!(std::fs::OpenOptions::new().append(true).open(&source).unwrap(), "{pending}").unwrap();
+    let before = std::fs::read(&source).unwrap();
+    let mounted = state(source.clone(), true);
+    let error = branch_mounted_cli(&home, &cwd.to_string_lossy(), session_id, Some(&mounted), Some("blocked"))
+        .await.unwrap_err();
+    assert!(error.contains("resume the original conversation first"));
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read_dir(source.parent().unwrap()).unwrap().count(), 1);
 }

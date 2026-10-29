@@ -755,6 +755,7 @@ pub async fn run_pty_session(cli: &PtySessionCli) -> i32 {
                 Vec::new(),
                 initial_prompt,
                 launch.handoff.clone(),
+                None,
             )
             .await
         }

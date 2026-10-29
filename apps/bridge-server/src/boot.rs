@@ -44,7 +44,8 @@ use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
 use harness_runtime::desktop::{DesktopAudio, DesktopConfig, DesktopRuntime};
 use lingxi_core::host::{
-    CredentialStoragePolicy, OrchestratorHandle, OutputStream, SlashCommandDispatcher,
+    session_context::ConversationMode, CredentialStoragePolicy, OrchestratorHandle, OutputStream,
+    SlashCommandDispatcher,
 };
 
 use crate::audio_bridge::{new_audio_bridge, AudioBridge};
@@ -93,6 +94,8 @@ pub struct BridgeArgs {
     pub session_transcript_path: Option<PathBuf>,
     /// Restore an owned, unsent desktop draft from its canonical metadata source.
     pub restore_draft: bool,
+    /// Device default for an uninitialized draft, applied before startup hooks.
+    pub initial_conversation_mode: Option<ConversationMode>,
     /// `--list-sessions-json`: read the session catalog and exit without building an engine.
     pub list_sessions_json: bool,
     /// Read the merged workspace environment without building an engine.
@@ -257,6 +260,15 @@ impl BridgeArgs {
                     out.session_transcript_path = Some(path);
                 }
                 "--restore-draft" => out.restore_draft = true,
+                "--initial-conversation-mode" => {
+                    let value = it
+                        .next()
+                        .ok_or("--initial-conversation-mode requires chat or code")?;
+                    out.initial_conversation_mode = Some(
+                        ConversationMode::from_str(value.as_ref())
+                            .ok_or("--initial-conversation-mode requires chat or code")?,
+                    );
+                }
                 "--model" => {
                     let v = it
                         .next()
@@ -346,6 +358,9 @@ impl BridgeArgs {
             return Err(
                 "--restore-draft requires a runtime session UUID and no selected transcript".into(),
             );
+        }
+        if out.initial_conversation_mode.is_some() && !out.restore_draft {
+            return Err("--initial-conversation-mode requires --restore-draft".into());
         }
         if let Some(path) = &out.session_transcript_path {
             let id = out
@@ -876,6 +891,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         __desktop_config.ask_user_question_timeout_override = args.ask_user_question_timeout;
         __desktop_config.composition = None;
         __desktop_config.defer_session_start = false;
+        __desktop_config.initial_conversation_mode = args.initial_conversation_mode;
         // The desktop opens a session while its startup MCP servers connect;
         // `spawn_mcp_startup_publisher` re-publishes the listings as each
         // settles.
@@ -3002,6 +3018,60 @@ mod tests {
             &format!("/tmp/{id}.jsonl")
         ])
         .is_err());
+    }
+
+    #[test]
+    fn initial_conversation_mode_is_a_private_owned_draft_argument() {
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        for (value, expected) in [
+            ("chat", ConversationMode::Chat),
+            ("code", ConversationMode::Code),
+        ] {
+            let parsed = BridgeArgs::parse([
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                value,
+            ])
+            .unwrap();
+            assert_eq!(parsed.initial_conversation_mode, Some(expected));
+            assert_eq!(
+                resolve_desktop_config(&parsed).initial_conversation_mode,
+                Some(expected)
+            );
+        }
+        for flags in [
+            vec!["--initial-conversation-mode", "chat"],
+            vec!["--session-id", id, "--initial-conversation-mode", "chat"],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "invalid",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--restore-draft",
+                "--initial-conversation-mode",
+                "chat",
+                "--list-sessions-json",
+            ],
+        ] {
+            assert!(BridgeArgs::parse(flags).is_err());
+        }
+        assert_eq!(
+            resolve_desktop_config(&BridgeArgs::default()).initial_conversation_mode,
+            None
+        );
     }
 
     #[tokio::test]

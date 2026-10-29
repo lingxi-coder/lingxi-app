@@ -9,32 +9,6 @@ final class ProjectScopedPreferencesTests: XCTestCase {
                                                 currentMode: .code, targetMode: .chat, startsNew: false, resumesSession: true))
     }
 
-    func testModeDraftRestorationPreservesBothOwnersInOneWorkspace() {
-        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let preferences = ProjectScopedPreferences(defaults: defaults)
-        let scope = ConversationScope.project("shared")
-        preferences.setDraft("chat session draft", scope: scope, mode: .chat)
-        preferences.setDraft("old code draft", scope: scope, mode: .code)
-
-        let restored = preferences.draftForModeChange(
-            "current code session draft", scope: scope, from: .code, to: .chat,
-            ownerSessionID: "chat-session", restoringSessionID: "chat-session"
-        )
-        XCTAssertEqual(restored.draft, "chat session draft")
-        XCTAssertTrue(restored.didRestoreOwner)
-        XCTAssertEqual(preferences.draft(scope: scope, mode: .code), "current code session draft")
-        XCTAssertEqual(preferences.draft(scope: scope, mode: .chat), "chat session draft")
-
-        let carried = preferences.draftForModeChange(
-            "edited chat draft", scope: scope, from: .chat, to: .code,
-            ownerSessionID: "chat-session", restoringSessionID: nil
-        )
-        XCTAssertEqual(carried.draft, "edited chat draft")
-        XCTAssertFalse(carried.didRestoreOwner)
-        XCTAssertEqual(preferences.draft(scope: scope, mode: .code), "edited chat draft")
-    }
     func testLastModeDefaultsToCodeAndPersistsTheSelection() {
         let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

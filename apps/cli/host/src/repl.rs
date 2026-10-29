@@ -381,6 +381,26 @@ fn session_end_reason(ended_via: &str) -> &'static str {
 /// REPL entry point.  Builds the runtime, runs the prompt loop, emits
 /// `tengu_repl_session_started` / `tengu_repl_session_ended` telemetry.
 pub async fn run_repl(argv: &Argv) -> i32 {
+    run_repl_with_resume(argv, None, None).await
+}
+
+pub(crate) async fn run_repl_resumed(argv: &Argv, session_id: uuid::Uuid) -> i32 {
+    run_repl_with_resume(argv, Some(session_id), None).await
+}
+
+pub(crate) async fn run_repl_resumed_with_stdin(
+    argv: &Argv,
+    session_id: uuid::Uuid,
+    reader: BufReader<Stdin>,
+) -> i32 {
+    run_repl_with_resume(argv, Some(session_id), Some(reader)).await
+}
+
+async fn run_repl_with_resume(
+    argv: &Argv,
+    resume_session_id: Option<uuid::Uuid>,
+    existing_stdin: Option<BufReader<Stdin>>,
+) -> i32 {
     // Build the output sink first — it is constructor-injected into the
     // orchestrator via `build_runtime`.
     let sink: Arc<dyn OutputSink> = if argv.json {
@@ -409,7 +429,9 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     // `InteractivePromptingGate`. A single buffer means type-ahead bytes are
     // never stranded behind a second `BufReader`, and only one
     // `tokio::io::stdin()` exists (no double blocking-reader-thread race).
-    let stdin_reader: Arc<Mutex<BufReader<Stdin>>> = Arc::new(Mutex::new(BufReader::new(stdin())));
+    let stdin_reader: Arc<Mutex<BufReader<Stdin>>> = Arc::new(Mutex::new(
+        existing_stdin.unwrap_or_else(|| BufReader::new(stdin())),
+    ));
 
     // (trust dialog) Startup trust GATE — parity `screens/REPL.tsx` +
     // `components/TrustDialog/TrustDialog.tsx`: before ANY tool/hook/plugin can
@@ -445,23 +467,35 @@ pub async fn run_repl(argv: &Argv) -> i32 {
 
     // Interactive (TTY, non-print) REPL injects the y/n permission gate sharing
     // the stdin reader; the piped/CI path stays byte-identical (no gate).
-    let runtime = if should_prompt_interactively(std::io::stdin().is_terminal(), argv.print) {
-        // Resolve config ONCE so the injected gate and the engine build from the
-        // SAME cfg (mirrors `build_runtime_for_tui`).
-        let mut cfg = crate::init::resolve_desktop_config(argv, permission_mode);
+    let mut cfg = crate::init::resolve_desktop_config(argv, permission_mode);
+    let captured = if let Some(session_id) = resume_session_id {
+        cfg.session_id_override = Some(session_id.to_string());
+        cfg.permission_mode_cli_explicit = argv.permission_mode.is_some()
+            || argv.dangerously_skip_permissions
+            || crate::permission_mode_preference::load(argv).is_some();
+        match crate::init::capture_tui_resume(&mut cfg, session_id).await {
+            Ok(captured) => {
+                if cfg.initial_effort.is_none() {
+                    cfg.initial_effort = orchestrator::runtime_metadata_from_messages(&captured.messages).effort;
+                }
+                Some(captured)
+            },
+            Err(error) => {
+                eprintln!("lingxi-cli: resume capture failed: {error}");
+                return exit_codes::RUNTIME_ERROR;
+            }
+        }
+    } else {
+        None
+    };
+    if should_prompt_interactively(std::io::stdin().is_terminal(), argv.print) {
         let shared: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>> = stdin_reader.clone();
         let gate =
             permission::InteractivePromptingGate::new(shared, Arc::new(Mutex::new(stderr())));
         cfg.injected_permission_gate =
             Some(Arc::new(gate) as Arc<dyn permission::gate::PermissionGate>);
-        let result = crate::init::build_cli_runtime_from_config(cfg, adapter, argv).await;
-        if let Ok(runtime) = result.as_ref() {
-            crate::init::auto_connect_ide_if_requested(argv, runtime).await;
-        }
-        result
-    } else {
-        crate::init::build_runtime(argv, adapter, permission_mode).await
-    };
+    }
+    let runtime = crate::init::build_cli_runtime_from_config(cfg, adapter, argv).await;
     let runtime = match runtime {
         Ok(r) => r,
         Err(e) => {
@@ -469,6 +503,22 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             return exit_codes::RUNTIME_ERROR;
         }
     };
+    crate::init::auto_connect_ide_if_requested(argv, &runtime).await;
+    if let Some(captured) = captured {
+        if let Err(error) = orchestrator::replay_deferred_tools_after_resume(
+            &runtime.orchestrator,
+            orchestrator::deferred_tool_replays_from_messages(&captured.entries),
+        ).await {
+            eprintln!("lingxi-cli: resume deferred tools failed: {error}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+        if let Err(error) = runtime.orchestrator.set_conversation_mode(
+            lingxi_core::host::session_context::ConversationMode::Code,
+        ).await {
+            eprintln!("lingxi-cli: cannot resume in Code mode: {error}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    }
 
     // Retrieve the session id for telemetry via the OrchestratorHandle trait.
     let handle: Arc<dyn OrchestratorHandle> = runtime.orchestrator.clone();

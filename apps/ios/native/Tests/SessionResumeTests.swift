@@ -1465,6 +1465,32 @@ visionDelegationEnabled: true)
             XCTAssertEqual(source.model.sessionRefreshRevision, 1)
         }
 
+        func testMissingResumeReplacementAppliesLastExplicitModeBeforeFirstPrompt() async {
+            let source = makeSource()
+            source.setSessionRestoreFallbackMode(.chat)
+            let modeSubmitted = expectation(description: "replacement mode submitted")
+            source.setCommandSubmitterForTesting { command in
+                switch command {
+                case .resumeSession:
+                    throw ClientError.NotFound(message: "Session missing-session was not found.")
+                case .newSession:
+                    source.applyForTesting(.sessionStarted(sessionId: self.uuid(), mode: .code))
+                case .setSessionMode(mode: .chat):
+                    modeSubmitted.fulfill()
+                default:
+                    break
+                }
+            }
+            source.resumeSession("missing-session")
+            await fulfillment(of: [modeSubmitted], timeout: 1)
+            XCTAssertTrue(source.model.awaitingNewSessionMode)
+            XCTAssertNil(source.send("first prompt"))
+            source.applyForTesting(.sessionModeChanged(sessionId: uuid(), mode: .chat, pendingMode: nil, revision: 1))
+            for _ in 0..<50 where source.model.awaitingNewSessionMode { await Task.yield() }
+            XCTAssertFalse(source.model.awaitingNewSessionMode)
+            XCTAssertNotNil(source.send("first prompt"))
+        }
+
         func testNonMissingResumeFailureRemainsVisible() async {
             let source = makeSource()
             let recorder = SessionTransitionRecorder(failure: .generic)
@@ -2077,6 +2103,18 @@ visionDelegationEnabled: true)
             })
 
             try await source.prepare()
+            await fulfillment(of: [constructed], timeout: 1)
+        }
+
+        func testModeSelectedBeforeLazyBuildIsPassedToEngineStartup() async {
+            let constructed = expectation(description: "engine received selected startup mode")
+            let source = makeSource(handleBuilder: { config, _, _, _ in
+                XCTAssertEqual(config.sessionMode, .chat)
+                constructed.fulfill()
+                throw EngineBuildTestError.bootstrapFailed
+            })
+
+            source.setSessionMode(.chat)
             await fulfillment(of: [constructed], timeout: 1)
         }
 

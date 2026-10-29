@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -45,6 +46,13 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
+import java.io.File
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The OUT-OF-BAND SESSION-state path that drives the drawer from the engine's
@@ -64,6 +72,88 @@ import org.junit.Test
 class SessionStateTest {
 
     private val dispatcher = UnconfinedTestDispatcher()
+    @get:Rule val temp = TemporaryFolder()
+
+    @Test
+    fun selectedModeWritesSurviveUiRecreationAndRestoreInSelectionOrder() = runTest(dispatcher) {
+        val file = File(temp.root, "scope-state.json")
+        val firstWriteStarted = CompletableDeferred<Unit>()
+        val releaseFirstWrite = CountDownLatch(1)
+        val writes = Collections.synchronizedList(mutableListOf<String>())
+        val count = AtomicInteger()
+        val store = com.lingxi.code.project.ScopeStateStore(file, com.lingxi.code.project.ProjectAtomicWriter { target, text, validate ->
+            if (count.getAndIncrement() == 0) {
+                firstWriteStarted.complete(Unit)
+                check(releaseFirstWrite.await(5, TimeUnit.SECONDS))
+            }
+            validate(text)
+            target.writeText(text)
+            writes += org.json.JSONObject(text).getString("selectedMode")
+        })
+        val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState.loading())))
+        vm.rememberModeSelection(store, SessionMode.Chat)
+        try {
+            firstWriteStarted.await()
+            vm.rememberModeSelection(store, SessionMode.Code)
+            // A recreated screen constructs a new store, but waits for the
+            // retained ViewModel's earlier selection writes before restoring.
+            val restored = async { vm.readSelectedMode(com.lingxi.code.project.ScopeStateStore(file)) }
+            assertFalse(restored.isCompleted)
+            releaseFirstWrite.countDown()
+            assertEquals(SessionMode.Code, restored.await())
+            assertEquals(listOf("chat", "code"), writes.toList())
+        } finally {
+            releaseFirstWrite.countDown()
+        }
+    }
+
+    @Test
+    fun conversationDraftWritesSurviveUiRecreationAndRestoreTheLatestEdit() = runTest(dispatcher) {
+        val file = File(temp.root, "drafts.json")
+        val firstWriteStarted = CompletableDeferred<Unit>()
+        val releaseFirstWrite = CountDownLatch(1)
+        val count = AtomicInteger()
+        val store = com.lingxi.code.project.ScopeStateStore(file, com.lingxi.code.project.ProjectAtomicWriter { target, text, validate ->
+            if (count.getAndIncrement() == 0) {
+                firstWriteStarted.complete(Unit)
+                check(releaseFirstWrite.await(5, TimeUnit.SECONDS))
+            }
+            validate(text)
+            target.writeText(text)
+        })
+        val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState.loading())))
+        vm.persistConversationDraft(store, ConversationScope.Global, "owner", "first")
+        try {
+            firstWriteStarted.await()
+            vm.persistConversationDraft(store, ConversationScope.Global, "owner", "latest")
+            val restored = async {
+                vm.awaitConversationDraftWrites()
+                com.lingxi.code.project.ScopeStateStore(file).readConversationDraft("global", "owner", SessionMode.Chat)
+            }
+            assertFalse(restored.isCompleted)
+            releaseFirstWrite.countDown()
+            assertEquals("latest", restored.await())
+        } finally {
+            releaseFirstWrite.countDown()
+        }
+    }
+
+    @Test
+    fun restoredSavedDraftIsAvailableOnlyToItsConversationOwner() {
+        val saved = androidx.lifecycle.SavedStateHandle(mapOf(
+            ChatViewModel.KEY_SESSION_ID to "saved",
+            ChatViewModel.KEY_SESSION_SCOPE to "global",
+            ChatViewModel.KEY_SESSION_TITLE to "Saved",
+            ChatViewModel.KEY_DRAFT to "unsent",
+        ))
+        val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState.loading())), saved)
+        assertEquals("unsent", vm.restoredDraftFor(ConversationScope.Global, "saved"))
+        assertNull(vm.restoredDraftFor(ConversationScope.Global, "other"))
+        assertNull(vm.restoredDraftFor(ConversationScope.Project("other"), "saved"))
+        vm.onDraftChanged("new draft", ConversationScope.Global, "new")
+        assertEquals("new draft", vm.restoredDraftFor(ConversationScope.Global, "new"))
+        assertNull(vm.restoredDraftFor(ConversationScope.Global, "saved"))
+    }
 
     @Test
     fun modeEventsKeepHistoryAndIgnoreDelayedPendingAndOtherSessions() = runTest(dispatcher) {

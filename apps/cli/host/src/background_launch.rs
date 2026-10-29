@@ -95,6 +95,8 @@ impl Default for TerminalSize {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct BackgroundLaunchOptions {
+    /// A live fork carries an already-admitted conversation scope.
+    pub(crate) preserve_admitted_context: bool,
     pub model: Option<String>,
     pub fallback_model: Option<String>,
     pub max_turns: Option<u32>,
@@ -162,6 +164,7 @@ impl BackgroundLaunchOptions {
     #[must_use]
     pub fn from_argv(argv: &Argv) -> Self {
         Self {
+            preserve_admitted_context: false,
             model: argv.model.clone(),
             fallback_model: argv.fallback_model.clone(),
             max_turns: argv.max_turns,

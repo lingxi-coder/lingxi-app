@@ -178,6 +178,9 @@ impl CliBgSessionForker {
         // Capture current permissions and the live tool cwd at the dispatch
         // boundary; /cd and mode changes never mutate the process cwd/argv.
         let (cwd_pb, mut launch_context) = self.launch_identity()?;
+        if let Some(options) = &mut launch_context.options {
+            options.preserve_admitted_context = true;
+        }
         let cwd = cwd_pb.display().to_string();
 
         // 1. Mint the new background session id.
@@ -526,6 +529,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            let mut worker_options = before.options.clone().unwrap();
+            worker_options.preserve_admitted_context = true;
+            let worker_options: crate::background_launch::BackgroundLaunchOptions =
+                serde_json::from_str(&serde_json::to_string(&worker_options).unwrap()).unwrap();
+            crate::run::apply_cli_resume_profile(&resumed, Some(&worker_options)).await.unwrap();
             // This is the state desktop assembly exposes before SessionStart.
             let restored = resumed.conversation_mode().await;
             assert_eq!(
@@ -552,6 +560,28 @@ mod tests {
             assert!(ids.contains(&current_id), "current skill is retained");
             assert!(!ids.contains(&excluded_attachment_id));
             assert!(ids.contains(&visible_attachment_id));
+            drop(state);
+            drop(session);
+            drop(resumed);
+
+            // Exercise the worker's actual runtime assembly and its mounted
+            // profile boundary with the same serialized launch options.
+            cfg.session_id_override = Some(session_id.to_string());
+            cfg.initial_conversation_mode = Some(ConversationMode::Code);
+            cfg.native_settings_agent_context =
+                lingxi_core::host::NativeSettingsAgentContext::Subagent { is_main_session: true };
+            let runtime = crate::init::build_runtime_from_config(
+                cfg,
+                Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            ).await.unwrap();
+            crate::run::apply_cli_resume_profile(runtime.orchestrator.as_ref(), Some(&worker_options))
+                .await.unwrap();
+            assert_eq!(runtime.orchestrator.conversation_mode().await.active, mode);
+            let mounted = runtime.orchestrator.session();
+            assert!(mounted.lock().await.model_context_history().iter().any(|row| row.id() == current_id));
+            drop(mounted);
+            let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
+            assert!(shutdown.complete, "{:?}", shutdown.errors);
         }
 
         let after = forker.launch_context(permission::PermissionMode::Plan);

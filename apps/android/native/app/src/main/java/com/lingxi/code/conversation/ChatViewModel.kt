@@ -115,8 +115,61 @@ class ChatViewModel(
     private var bufferedModeUpdate: SessionModeSnapshot? = null
     private var modeOwnerSessionId: String? = null
     private val modeRequestMutex = Mutex()
+    private var selectedModeWrite: Job? = null
+    private var conversationDraftWrite: Job? = null
     private class ModeSubmissionGate(val owner: ConversationSource, val sessionToken: Long)
     private var modeSubmissionGate: ModeSubmissionGate? = null
+
+    /** Persist explicit device defaults in selection order across UI recreation. */
+    internal fun rememberModeSelection(store: com.lingxi.code.project.ScopeStateStore, mode: SessionMode) {
+        val previous = selectedModeWrite
+        selectedModeWrite = viewModelScope.launch {
+            previous?.join()
+            try {
+                store.persistSelectedMode(mode)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportHostError(error.message.orEmpty())
+            }
+        }
+    }
+
+    internal suspend fun readSelectedMode(store: com.lingxi.code.project.ScopeStateStore): SessionMode? {
+        while (true) {
+            val pending = selectedModeWrite
+            pending?.join()
+            if (pending === selectedModeWrite) return store.readSelectedMode()
+        }
+    }
+
+    /** Keep draft writes ordered even when their composing screen is recreated. */
+    internal fun persistConversationDraft(
+        store: com.lingxi.code.project.ScopeStateStore,
+        ownerScope: ConversationScope,
+        sessionId: String,
+        text: String,
+    ): Job {
+        val previous = conversationDraftWrite
+        return viewModelScope.launch {
+            previous?.join()
+            try {
+                store.persistConversationDraft(ownerScope.persistenceKey(), sessionId, text)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportHostError(error.message.orEmpty())
+            }
+        }.also { conversationDraftWrite = it }
+    }
+
+    internal suspend fun awaitConversationDraftWrites() {
+        while (true) {
+            val pending = conversationDraftWrite
+            pending?.join()
+            if (pending === conversationDraftWrite) return
+        }
+    }
     internal val sideChats = SideChatManager(viewModelScope)
 
     internal val supportsSideChats: Boolean get() = source is EngineConversationSource
@@ -230,9 +283,29 @@ class ChatViewModel(
      */
     val restoredDraft: String get() = savedState?.get<String>(KEY_DRAFT) ?: ""
 
+    /** SavedState's draft is usable only for the navigation owner it restored. */
+    internal fun restoredDraftFor(scope: ConversationScope, sessionId: String): String? {
+        val draftScope = savedState?.get<String>(KEY_DRAFT_SCOPE)?.let(::conversationScopeFromKey)
+        val draftSession = savedState?.get<String>(KEY_DRAFT_SESSION_ID)
+        val ownerMatches = if (draftScope != null && draftSession != null) {
+            draftScope == scope && canonicalSessionId(draftSession) == canonicalSessionId(sessionId)
+        } else {
+            restoredNavigation?.let {
+                it.first == scope && canonicalSessionId(it.second.id) == canonicalSessionId(sessionId)
+            } == true
+        }
+        return restoredDraft.takeIf { ownerMatches }
+    }
+
     /** Mirror the live composer draft into saved state (called as the user types). */
-    fun onDraftChanged(draft: String) {
+    fun onDraftChanged(
+        draft: String,
+        ownerScope: ConversationScope = navigationOwnerScope,
+        ownerSessionId: String = navigationOwnerSessionId,
+    ) {
         savedState?.set(KEY_DRAFT, draft)
+        savedState?.set(KEY_DRAFT_SCOPE, ownerScope.persistenceKey())
+        savedState?.set(KEY_DRAFT_SESSION_ID, canonicalSessionId(ownerSessionId))
     }
 
     /** Collector for the active reply stream. */
@@ -3841,6 +3914,8 @@ class ChatViewModel(
         // SavedStateHandle keys for lightweight process-death navigation state.
         const val LEGACY_KEY_TRANSCRIPT = "chat.transcript" // removed on migration; never decoded
         const val KEY_DRAFT = "chat.draft" // String — unsent composer text
+        const val KEY_DRAFT_SCOPE = "chat.draft.scope"
+        const val KEY_DRAFT_SESSION_ID = "chat.draft.session.id"
         const val KEY_SESSION_ID = "chat.session.id" // String
         const val KEY_SESSION_TITLE = "chat.session.title" // String
         const val KEY_SESSION_SCOPE = "chat.session.scope" // String — workspace identity

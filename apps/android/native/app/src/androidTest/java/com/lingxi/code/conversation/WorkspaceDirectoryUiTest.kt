@@ -32,6 +32,28 @@ class WorkspaceDirectoryUiTest {
     @After fun cleanup() { root.deleteRecursively() }
     private fun text(resource: Int) = context.getString(resource)
 
+    @Test fun pendingModeKeepsTheActiveModeCheckedAndAllowsCancellingIt() {
+        var selected: SessionMode? = null
+        rule.setContent { LingXiTheme(darkTheme = false) {
+            SessionPanel(
+                model = SessionPanelModel(
+                    title = "Conversation", mode = SessionMode.Code, pendingMode = SessionMode.Chat,
+                    workspaceName = "Workspace", modelName = "Model", permissionLabel = null, pinned = false,
+                ),
+                onDismiss = {}, onSelectMode = { selected = it }, onContinueInOtherMode = {},
+                onOpenPermissionSettings = {}, onTogglePinned = {}, onMakeScheduled = {},
+                onOpenTerminal = {}, onArchive = {},
+            )
+        } }
+        rule.onNodeWithText(context.getString(R.string.session_mode_pending, text(R.string.session_mode_chat)))
+            .assertExists()
+        rule.onNodeWithTag(UiTags.SESSION_PANEL_MODE).performClick()
+        rule.onNodeWithTag(UiTags.sessionPanelModeOption("code")).assertIsSelected()
+        rule.onNodeWithTag(UiTags.sessionPanelModeOption("chat")).assertIsNotSelected()
+        rule.onNodeWithTag(UiTags.sessionPanelModeOption("code")).performClick()
+        rule.runOnIdle { assertEquals(SessionMode.Code, selected) }
+    }
+
     @Test fun narrowToolbarAtLargeFontKeepsControlsOnOneRow() {
         rule.setContent {
             CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, fontScale = 2f)) {

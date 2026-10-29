@@ -124,12 +124,13 @@ internal fun SessionPanel(
                     )
                     DropdownMenu(expanded = modeMenuOpen.value, onDismissRequest = { modeMenuOpen.value = false }) {
                         NewChatModes.forEach { candidate ->
-                            val isSelected = candidate == (model.pendingMode ?: model.mode)
+                            val isSelected = candidate == model.mode
                             DropdownMenuItem(
                                 text = { Text("${sessionModeLabel(candidate)} — ${sessionModeDescription(candidate)}") },
                                 onClick = { modeMenuOpen.value = false; onSelectMode(candidate) },
                                 trailingIcon = if (isSelected) {{ LXIcon(LXIconName.Check, size = 16.dp, color = t.text2) }} else null,
-                                modifier = Modifier.semantics { selected = isSelected },
+                                modifier = Modifier.testTag(UiTags.sessionPanelModeOption(candidate.wireKey))
+                                    .semantics { selected = isSelected },
                             )
                         }
                     }

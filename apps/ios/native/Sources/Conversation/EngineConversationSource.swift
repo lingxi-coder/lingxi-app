@@ -42,6 +42,7 @@ final class EngineConversationSource: ConversationSource {
     private var modeRequestTask: Task<Void, Never>?
     private var modeRequestSequence: UInt64 = 0
     private var pendingNewConversationMode: SessionMode?
+    private var sessionRestoreFallbackMode: SessionMode
     private var newSessionModeReadiness = NewSessionModeReadiness()
 
     private let isRemoteProjection: Bool
@@ -214,6 +215,7 @@ final class EngineConversationSource: ConversationSource {
     ) {
         self.isRemoteProjection = remoteProjection
         self.config = config
+        self.sessionRestoreFallbackMode = config.sessionMode
         self.mediaHostComposition = mediaHostComposition
         self.durableTurns = (memoryOnly || remoteProjection) ? nil : DurableConversationTurnClientStore(config: config)
         self.handleBuilder = handleBuilder
@@ -535,6 +537,7 @@ final class EngineConversationSource: ConversationSource {
         model.sessionRestoreRecovery = SessionRestoreRecovery(
             unavailableSessionID: unavailableSessionID
         )
+        pendingNewConversationMode = sessionRestoreFallbackMode
         setPendingSessionTransition(.new)
         resetTranscriptForSessionSwitch(isNew: true)
         do {
@@ -2082,7 +2085,9 @@ final class EngineConversationSource: ConversationSource {
             apiBase: config.apiBase,
             apiKey: config.apiKey,
             model: config.model,
-            sessionMode: config.sessionMode.dto,
+            // A choice made before the lazy constructor starts must be part
+            // of its startup profile, before the host runs startup hooks.
+            sessionMode: (model.requestedSessionMode ?? config.sessionMode).dto,
             visionDelegationEnabled: config.visionDelegationEnabled,
             appSandboxRoot: config.appSandboxRoot,
             projectCwd: config.projectCwd,
@@ -5769,6 +5774,7 @@ final class EngineConversationSource: ConversationSource {
 
     func setSessionMode(_ mode: SessionMode) {
         guard !isSideChat, !isRemoteProjection, !model.sessionTransitionPending else { return }
+        sessionRestoreFallbackMode = mode
         modeRequestSequence &+= 1
         let requestSequence = modeRequestSequence
         model.requestedSessionMode = mode
@@ -5813,6 +5819,10 @@ final class EngineConversationSource: ConversationSource {
                 }
             }
         }
+    }
+
+    func setSessionRestoreFallbackMode(_ mode: SessionMode) {
+        sessionRestoreFallbackMode = mode
     }
 
     func setPermissionMode(_ mode: String) {

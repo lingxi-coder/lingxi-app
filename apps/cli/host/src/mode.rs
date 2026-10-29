@@ -114,6 +114,9 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
                 command.is_main_thread()
                     && !command.is_slash_command()
                     && command.priority == msgqueue::QueuePriority::Next
+                    // Composer submissions retain their owner until the next
+                    // outer admission; peer and meta input still fold mid-turn.
+                    && (command.source != msgqueue::QueueSource::PromptInput || command.is_meta)
             })
             .await;
         #[cfg(test)]
@@ -442,6 +445,15 @@ trait SourceBatchRunner: Send + Sync {
         cancel: CancellationToken,
         on_admitted: Box<dyn FnOnce() + Send + 'static>,
     ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>;
+
+    async fn run_composer_prompt(
+        &self,
+        prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        images: Vec<lingxi_core::types::ImageSource>,
+        cancel: CancellationToken,
+        row_token: String,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>;
 }
 
 #[async_trait::async_trait]
@@ -455,6 +467,91 @@ impl SourceBatchRunner for orchestrator::ConversationOrchestrator {
         self.run_queued_prompt_batch_with_admission(inputs, cancel, on_admitted)
             .await
     }
+
+    async fn run_composer_prompt(
+        &self,
+        prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        images: Vec<lingxi_core::types::ImageSource>,
+        cancel: CancellationToken,
+        row_token: String,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError> {
+        self.run_turn_streaming_with_cancel_image_sources_and_row_token_and_admission(
+            prompt,
+            images,
+            cancel,
+            row_token,
+            on_admitted,
+        )
+        .await
+    }
+}
+
+fn resolve_composer_admission(
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    row_token: String,
+    admitted: bool,
+) {
+    let _ = tx.send(tui::TurnEvent::PromptAdmissionResolved {
+        row_token,
+        admitted,
+    });
+}
+
+async fn run_composer_prompt(
+    runner: &dyn SourceBatchRunner,
+    prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    image_paths: &[std::path::PathBuf],
+    cancel: CancellationToken,
+    row_token: String,
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    admitted_rows: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError> {
+    if cancel.is_cancelled() {
+        resolve_composer_admission(tx, row_token, false);
+        let _ = tx.send(tui::TurnEvent::TurnEnded(lingxi_core::host::TurnOutcome::Cancelled));
+        return Ok(orchestrator::conversation::TurnOutcome::Cancelled);
+    }
+    let images = image_paths
+        .iter()
+        .map(|path| orchestrator::image_input::load_image_source(path))
+        .collect::<Result<Vec<_>, _>>();
+    let images = match images {
+        Ok(images) => images,
+        Err(error) => {
+            resolve_composer_admission(tx, row_token, false);
+            return Err(error);
+        }
+    };
+    let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let admission_flag = admitted.clone();
+    let admission_tx = tx.clone();
+    let admission_row = row_token.clone();
+    let result = runner
+        .run_composer_prompt(
+            prompt,
+            images,
+            cancel,
+            row_token.clone(),
+            Box::new(move || {
+                admission_flag.store(true, std::sync::atomic::Ordering::Release);
+                admitted_rows.lock().unwrap().insert(admission_row.clone());
+                resolve_composer_admission(&admission_tx, admission_row, true);
+            }),
+        )
+        .await;
+    if !admitted.load(std::sync::atomic::Ordering::Acquire) {
+        resolve_composer_admission(tx, row_token, false);
+        if matches!(
+            &result,
+            Ok(orchestrator::conversation::TurnOutcome::Cancelled)
+        ) {
+            let _ = tx.send(tui::TurnEvent::TurnEnded(
+                lingxi_core::host::TurnOutcome::Cancelled,
+            ));
+        }
+    }
+    result
 }
 
 /// Attach the TUI's queued image paths to the real user row of a registry
@@ -617,6 +714,8 @@ struct HostSubmissionOrder {
 #[derive(Default)]
 struct HostPromptQueueState {
     shutdown: CancellationToken,
+    recovery_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>>,
+    admitted_rows: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     loop_host: std::sync::OnceLock<Arc<crate::loop_wakeup::CliLoopHost>>,
     mod_dispatcher: std::sync::OnceLock<Arc<dyn lingxi_core::host::SlashCommandDispatcher>>,
     mod_commands: std::sync::Mutex<
@@ -927,7 +1026,11 @@ async fn retire_cancelled_prompt_ids(
 ) {
     queue.remove(&cancelled, "cancelled prompt owner").await;
     for id in cancelled {
-        state.transcript_row_tokens.lock().unwrap().remove(&id);
+        if let Some(row_token) = state.transcript_row_tokens.lock().unwrap().remove(&id) {
+            if let Some(tx) = state.recovery_tx.get() {
+                resolve_composer_admission(tx, row_token, false);
+            }
+        }
         if let Some((_, _, settle)) = state.mod_prompts.lock().unwrap().remove(&id) {
             let _ = settle.send(Ok(
                 lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
@@ -961,11 +1064,14 @@ async fn dequeue_after_slash_dispatch(
         let cancel =
             owner.map_or_else(|| state.shutdown.child_token(), |owner| owner.child_token());
         if cancel.is_cancelled() {
-            state
+            let row_token = state
                 .transcript_row_tokens
                 .lock()
                 .unwrap()
                 .remove(&command.uuid);
+            if let (Some(row_token), Some(tx)) = (row_token, state.recovery_tx.get()) {
+                resolve_composer_admission(tx, row_token, false);
+            }
             continue;
         }
         return Some((command, cancel));
@@ -988,6 +1094,9 @@ async fn drain_teammate_prompts(
             .unwrap()
             .remove(&command.uuid);
         let Some(text) = command.text_projection().cloned() else {
+            if let Some(row_token) = transcript_row_token {
+                resolve_composer_admission(turn_tx, row_token, false);
+            }
             continue;
         };
         let mod_command = pending_slashes
@@ -1001,6 +1110,9 @@ async fn drain_teammate_prompts(
             .unwrap()
             .remove(&command.uuid);
         if cancel.is_cancelled() {
+            if let Some(row_token) = transcript_row_token {
+                resolve_composer_admission(turn_tx, row_token, false);
+            }
             if let Some((_, settle)) = mod_command {
                 let _ = settle.send(Err("the turn was interrupted before the command ran".into()));
             }
@@ -1142,6 +1254,9 @@ async fn drain_teammate_prompts(
         {
             Ok(resolved) => resolved.flatten(),
             Err(error) => {
+                if let Some(row_token) = transcript_row_token {
+                    resolve_composer_admission(turn_tx, row_token, false);
+                }
                 let _ = turn_tx.send(tui::TurnEvent::SystemNotice {
                     body: error.to_string().into(),
                     is_error: true,
@@ -1205,21 +1320,29 @@ async fn drain_teammate_prompts(
                     .map(|_| ())
                     .map_err(|error| error.to_string())
                 } else if let Some(row_token) = transcript_row_token {
-                    orchestrator::native_user_message_source::with_source(
-                        native_source,
-                        orchestrator::mod_prompt_origin::with_origin(
-                            origin,
-                            orchestrator.run_queued_turn_streaming_with_row_token(
-                                &text,
-                                cancel,
-                                in_human_turn,
-                                row_token,
+                    if let Some(runner) = source_batch_runner {
+                        orchestrator::native_user_message_source::with_source(
+                            native_source,
+                            orchestrator::mod_prompt_origin::with_origin(
+                                origin,
+                                run_composer_prompt(
+                                    runner,
+                                    text.clone(),
+                                    &[],
+                                    cancel,
+                                    row_token,
+                                    turn_tx,
+                                    pending_slashes.admitted_rows.clone(),
+                                ),
                             ),
-                        ),
-                    )
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                    } else {
+                        resolve_composer_admission(turn_tx, row_token, false);
+                        Err("source-preserving composer runner is unavailable".to_string())
+                    }
                 } else {
                     orchestrator::native_user_message_source::with_source(
                         native_source,
@@ -1771,7 +1894,22 @@ pub(crate) fn ensure_live_messaging(
 /// ratatui loop must tear down + rebuild (the JSONL-writer-retarget seam), so we
 /// carry this state IN MEMORY to reproduce the same observable behavior WITHOUT
 /// writing config keys the upstream never had.
+pub(crate) type RemountDraftStore = Arc<std::sync::Mutex<std::collections::HashMap<uuid::Uuid, Vec<tui::chat_widget::SwitchDraft>>>>;
+
+fn save_owner_switch_drafts(
+    store: &RemountDraftStore,
+    owner: uuid::Uuid,
+    mut drafts: Vec<tui::chat_widget::SwitchDraft>,
+    admitted: &std::collections::HashSet<String>,
+) {
+    drafts.retain(|draft| draft.row_token.as_ref().is_none_or(|row| !admitted.contains(row)));
+    for draft in &mut drafts { draft.row_token = None; }
+    let mut store = store.lock().unwrap();
+    if drafts.is_empty() { store.remove(&owner); } else { store.insert(owner, drafts); }
+}
+
 pub(crate) struct RemountState {
+    pub draft_store: RemountDraftStore,
     /// The source selected for the outgoing mount, or its current writer path
     /// after a workspace retarget. Never re-resolve this session by UUID.
     pub transcript_path: Option<std::path::PathBuf>,
@@ -1859,6 +1997,7 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
         resumed_messages,
         initial_prompt,
         None,
+        None,
     )
     .await
 }
@@ -1870,7 +2009,13 @@ pub(crate) async fn run_ratatui_with_initial_state(
     resumed_messages: Vec<tui::RenderedMessage>,
     initial_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
+    draft_store: Option<RemountDraftStore>,
 ) -> RunOutcome {
+    let draft_store = draft_store.unwrap_or_default();
+    let owner_id = tui_build.runtime.orchestrator.current_session_id().await.as_uuid();
+    let switch_drafts = draft_store.lock().unwrap().get(&owner_id).cloned().unwrap_or_default();
+    let switch_drafts_out = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let switch_drafts_output = switch_drafts_out.clone();
     let resume_transcript_path = tui_build.resume_transcript_path.clone();
     let initial_draft = tui_build.initial_draft.clone();
     let message_anchor = tui_build.message_anchor.clone();
@@ -1890,6 +2035,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let prompt_queue = Arc::new(msgqueue::MessageQueueManager::new());
     let teammate_turn_gate = Arc::new(tokio::sync::Mutex::new(()));
     let pending_slashes = Arc::new(HostPromptQueueState::default());
+    let tui_admitted_rows = pending_slashes.admitted_rows.clone();
     let leader_mailbox = tui_build
         .runtime
         .coordinator
@@ -1952,6 +2098,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     };
     let workflow_events = tui_build.workflow_events;
     let turn_tx = tui_build.turn_tx;
+    let _ = pending_slashes.recovery_tx.set(turn_tx.clone());
     // (companyAnnouncements) The merged array, moved out before `tui_build` is
     // consumed further below; selected + rendered into the startup banner.
     let company_announcements = tui_build.company_announcements;
@@ -2370,6 +2517,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             )
             .await
             else {
+                resolve_composer_admission(&tx, row_token, false);
                 return;
             };
             cancel_reason.reset();
@@ -2384,8 +2532,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
             if let Err(e) =
                 with_cli_composer_native_source(orchestrator::mod_prompt_origin::with_origin(
                     serde_json::json!({"kind":"composer"}),
-                    orch.run_turn_streaming_with_images_and_row_token(
-                        &prompt, &images, cancel, row_token,
+                    run_composer_prompt(
+                        source_batch_runner.as_ref(),
+                        prompt,
+                        &images,
+                        cancel,
+                        row_token,
+                        &tx,
+                        pending_slashes.admitted_rows.clone(),
                     ),
                 ))
                 .await
@@ -3623,6 +3777,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let queue = prompt_queue.clone();
         let orch = concrete_orchestrator.clone();
         let source_batch_runner = source_batch_runner.clone();
+        let state = pending_slashes.clone();
         let shutdown = pump_shutdown.clone();
         let drain = tokio::spawn(async move {
             loop {
@@ -3636,7 +3791,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         orch.as_ref(),
                         Some(source_batch_runner.as_ref()),
                         &teammate_turn_tx,
-                        &pending_slashes,
+                        &state,
                     )
                     .await;
                 }
@@ -3662,6 +3817,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
             initial,
             initial_prompt,
             initial_draft,
+            switch_drafts,
+            switch_drafts_output,
+            tui_admitted_rows,
             message_anchor,
             handoff,
             session,
@@ -3781,6 +3939,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
         // the outgoing runtime still owns incomplete shutdown work.
         return RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
     }
+    if matches!(run_result.as_ref(), Ok(Ok(tui::app::AppExit::SwitchSession(_)
+        | tui::app::AppExit::OpenAgentSession(_)
+        | tui::app::AppExit::BranchSession { .. }
+        | tui::app::AppExit::Rewind { .. }))) {
+        let admitted = pending_slashes.admitted_rows.lock().unwrap();
+        let drafts = std::mem::take(&mut *switch_drafts_out.lock().unwrap());
+        save_owner_switch_drafts(&draft_store, owner_id, drafts, &admitted);
+    }
     // Resume parity (claude-code `saveCurrentSessionCosts`, fired on process
     // exit): persist this session's accumulated cost to the project config,
     // keyed by (project, session id), so a later `--resume` of THIS session
@@ -3819,7 +3985,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let status = summary_orch.get_status_snapshot().await;
         let transcript_writer = concrete_orchestrator.session_transcript_writer();
         let transcript_path = match transcript_writer.as_ref() {
-            Some(writer) => crate::init::absolute_resolved_tui_resume_path(writer.active_path()).ok(),
+            Some(writer) => {
+                crate::init::absolute_resolved_tui_resume_path(writer.active_path()).ok()
+            }
             None => resume_transcript_path,
         };
         let user_model_setting = {
@@ -3831,6 +3999,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 .flatten()
         };
         Some(RemountState {
+            draft_store,
             transcript_path,
             transcript_persistent: transcript_writer.is_some(),
             model: Some((status.model, status.model_profile)),
@@ -4794,8 +4963,12 @@ pub(crate) async fn run_permission_action(
                             let transcript = writer.active_path();
                             if let Some(source) = transcript.parent() {
                                 if let Err(error) = session::jsonl::record_session_alias(
-                                    &paths.lingxi_home, source, std::path::Path::new(&path),
-                                ).await {
+                                    &paths.lingxi_home,
+                                    source,
+                                    std::path::Path::new(&path),
+                                )
+                                .await
+                                {
                                     tracing::warn!(%error, "session alias could not be recorded after /add-dir");
                                 }
                             }
@@ -6855,7 +7028,8 @@ mod tests {
         let state = Arc::new(HostPromptQueueState::default());
         let queue = Arc::new(msgqueue::MessageQueueManager::new());
         let owner = CancellationToken::new();
-        let command = tui_prompt_command("must not run".into());
+        let mut command = tui_prompt_command("must not run".into());
+        command.is_meta = true;
         let id = command.uuid.clone();
         let publication = PendingPromptEnqueue::new(&state, &id, owner.clone());
         queue.enqueue(command).await;
@@ -6947,7 +7121,8 @@ mod tests {
         };
         let owner = CancellationToken::new();
         for text in ["A", "A2"] {
-            let command = tui_prompt_command(text.into());
+            let mut command = tui_prompt_command(text.into());
+            command.is_meta = true;
             let publication = PendingPromptEnqueue::new(&state, &command.uuid, owner.clone());
             queue.enqueue(command).await;
             drop(publication);
@@ -6987,9 +7162,11 @@ mod tests {
         };
         let owner = CancellationToken::new();
         let slash = PendingSlashReservation::new(&state);
-        let first = tui_prompt_command("A".into());
+        let mut first = tui_prompt_command("A".into());
+        first.is_meta = true;
         let first_publication = PendingPromptEnqueue::new(&state, &first.uuid, owner.clone());
-        let second = tui_prompt_command("B".into());
+        let mut second = tui_prompt_command("B".into());
+        second.is_meta = true;
         let second_publication = PendingPromptEnqueue::new(&state, &second.uuid, owner.clone());
         queue.enqueue(second).await;
         drop(second_publication);
@@ -7022,7 +7199,8 @@ mod tests {
         };
         let old = CancellationToken::new();
         for (text, owner) in [("old", old.clone()), ("new", CancellationToken::new())] {
-            let command = tui_prompt_command(text.into());
+            let mut command = tui_prompt_command(text.into());
+            command.is_meta = true;
             let publication = PendingPromptEnqueue::new(&state, &command.uuid, owner);
             queue.enqueue(command).await;
             drop(publication);
@@ -7037,6 +7215,32 @@ mod tests {
             Some("new")
         );
         assert!(state.order.lock().unwrap().queued.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_composer_waits_for_outer_admission_and_recovers_on_cancellation() {
+        use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state.recovery_tx.set(tx).unwrap();
+        let owner = CancellationToken::new();
+        let command = tui_prompt_command("draft".into());
+        let id = command.uuid.clone();
+        state.transcript_row_tokens.lock().unwrap().insert(id.clone(), "row".into());
+        let publication = PendingPromptEnqueue::new(&state, &id, owner.clone());
+        queue.enqueue(command).await;
+        drop(publication);
+        let input = TuiMsgQueueInput { queue: queue.clone(), state: state.clone() };
+        assert!(input.take_mid_turn_batch().await.unwrap().is_none());
+        assert!(queue.peek(|command| command.uuid == id).await.is_some());
+        assert!(rx.try_recv().is_err());
+        owner.cancel();
+        discard_cancelled_queued_prompts(&queue, &state).await;
+        assert!(matches!(rx.recv().await, Some(tui::TurnEvent::PromptAdmissionResolved {
+            row_token, admitted: false
+        }) if row_token == "row"));
+        assert!(queue.peek(|command| command.uuid == id).await.is_none());
     }
 
     #[tokio::test]
@@ -7371,7 +7575,10 @@ mod tests {
                 command: "<command-name>/demo</command-name>".into(),
                 body: "Expanded Skill body".into(),
                 hook_messages: Vec::new(),
-                skill: Some(lingxi_core::host::SlashSkillIdentity { name: "demo".into(), path: "/skills/demo".into() }),
+                skill: Some(lingxi_core::host::SlashSkillIdentity {
+                    name: "demo".into(),
+                    path: "/skills/demo".into(),
+                }),
             },
             "/demo".into(),
             &tx,
@@ -7415,7 +7622,10 @@ mod tests {
             "<command-name>/demo</command-name>".into(),
             "Expanded Skill body".into(),
             Vec::new(),
-            Some(lingxi_core::host::SlashSkillIdentity { name: "demo".into(), path: "/skills/demo".into() }),
+            Some(lingxi_core::host::SlashSkillIdentity {
+                name: "demo".into(),
+                path: "/skills/demo".into(),
+            }),
         );
         let error = run_slash_prompt_batch_with_images(
             orch.as_ref(),
@@ -7578,6 +7788,102 @@ mod tests {
         observed_images: Arc<std::sync::atomic::AtomicUsize>,
     }
 
+    struct GatedComposerRunner {
+        reached: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl SourceBatchRunner for GatedComposerRunner {
+        async fn run_prompt_batch(
+            &self,
+            _inputs: Vec<orchestrator::QueuedPromptInput>,
+            _cancel: CancellationToken,
+            _on_admitted: Box<dyn FnOnce() + Send + 'static>,
+        ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError> {
+            panic!("not a batch test")
+        }
+
+        async fn run_composer_prompt(
+            &self,
+            _prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _images: Vec<lingxi_core::types::ImageSource>,
+            _cancel: CancellationToken,
+            _row_token: String,
+            on_admitted: Box<dyn FnOnce() + Send + 'static>,
+        ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError> {
+            self.reached.notify_one();
+            self.release.notified().await;
+            on_admitted();
+            Ok(orchestrator::conversation::TurnOutcome::EndTurn)
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_handback_waits_for_late_admission_and_stays_with_original_owner() {
+        let store: RemountDraftStore = Default::default();
+        let owner = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let admitted = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runner = GatedComposerRunner { reached: reached.clone(), release: release.clone() };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn({
+            let admitted = admitted.clone();
+            async move {
+                run_composer_prompt(&runner, "already admitted".into(), &[], CancellationToken::new(),
+                    "late-row".into(), &tx, admitted).await.unwrap();
+            }
+        });
+        reached.notified().await;
+        let exact = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            "draft �".into(), vec![b'd' as u16, b'r' as u16, b'a' as u16, b'f' as u16, b't' as u16, b' ' as u16, 0xd800],
+        ).unwrap();
+        let drafts = vec![
+            tui::chat_widget::SwitchDraft { row_token: Some("late-row".into()), text: "already admitted".into(), images: vec![] },
+            tui::chat_widget::SwitchDraft { row_token: Some("unadmitted".into()), text: exact.clone(), images: vec!["/tmp/input.png".into()] },
+        ];
+        release.notify_one();
+        handle.await.unwrap();
+        save_owner_switch_drafts(&store, owner, drafts, &admitted.lock().unwrap());
+        assert!(store.lock().unwrap().get(&other).is_none());
+        let reopened = store.lock().unwrap().get(&owner).cloned().unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].text.string_units(""), exact.string_units(""));
+        assert_eq!(reopened[0].images, vec![std::path::PathBuf::from("/tmp/input.png")]);
+        assert!(reopened[0].row_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn composer_ownership_resolves_at_runtime_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("input.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\n").unwrap();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for (admit, fail) in [(false, false), (true, true)] {
+            let runner = AdmissionCallbackBatchRunner {
+                admit, fail_after_admission: fail, observed_images: count.clone(),
+            };
+            let result = run_composer_prompt(
+                &runner, "input".into(), std::slice::from_ref(&image),
+                CancellationToken::new(), "row".into(), &tx, Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            ).await;
+            assert_eq!(result.is_err(), fail);
+            assert!(matches!(rx.recv().await, Some(tui::TurnEvent::PromptAdmissionResolved {
+                row_token, admitted
+            }) if row_token == "row" && admitted == admit));
+            if !admit {
+                assert!(matches!(rx.recv().await, Some(tui::TurnEvent::TurnEnded(
+                    lingxi_core::host::TurnOutcome::Cancelled
+                ))));
+            }
+        }
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(rx.try_recv().is_err());
+    }
+
     #[async_trait::async_trait]
     impl SourceBatchRunner for AdmissionCallbackBatchRunner {
         async fn run_prompt_batch(
@@ -7601,6 +7907,29 @@ mod tests {
                 Ok(orchestrator::conversation::TurnOutcome::Cancelled)
             }
         }
+
+        async fn run_composer_prompt(
+            &self,
+            _prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+            images: Vec<lingxi_core::types::ImageSource>,
+            _cancel: CancellationToken,
+            _row_token: String,
+            on_admitted: Box<dyn FnOnce() + Send + 'static>,
+        ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>
+        {
+            self.observed_images
+                .store(images.len(), std::sync::atomic::Ordering::SeqCst);
+            if self.admit {
+                on_admitted();
+            }
+            if self.fail_after_admission {
+                Err(orchestrator::OrchestratorError::Internal(
+                    "scripted failure after admission".into(),
+                ))
+            } else {
+                Ok(orchestrator::conversation::TurnOutcome::Cancelled)
+            }
+        }
     }
 
     #[tokio::test]
@@ -7612,7 +7941,10 @@ mod tests {
             "<command-name>/demo</command-name>".into(),
             "Expanded Skill body".into(),
             Vec::new(),
-            Some(lingxi_core::host::SlashSkillIdentity { name: "demo".into(), path: "/skills/demo".into() }),
+            Some(lingxi_core::host::SlashSkillIdentity {
+                name: "demo".into(),
+                path: "/skills/demo".into(),
+            }),
         );
         let observed_images = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -7770,7 +8102,10 @@ mod tests {
                 command: "<command-name>/demo</command-name>".into(),
                 body: "Base directory: /skills/demo\n\nExpanded".into(),
                 hook_messages: vec![hook_row.clone()],
-                skill: Some(lingxi_core::host::SlashSkillIdentity { name: "demo".into(), path: "/skills/demo".into() }),
+                skill: Some(lingxi_core::host::SlashSkillIdentity {
+                    name: "demo".into(),
+                    path: "/skills/demo".into(),
+                }),
             },
             "/demo".into(),
             &tx,

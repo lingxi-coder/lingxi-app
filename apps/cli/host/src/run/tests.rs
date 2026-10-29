@@ -106,6 +106,65 @@ fn make_project_dir(lingxi_home: &std::path::Path, cwd: &str) -> std::path::Path
 }
 
 #[tokio::test]
+async fn cli_independent_fork_preserves_source_and_starts_a_new_profile_epoch() {
+    use lingxi_core::host::session_context::ConversationMode;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let cwd = root.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let cwd = cwd.to_string_lossy().to_string();
+    let source = Uuid::new_v4();
+    let target = Uuid::new_v4();
+    let message = Uuid::new_v4();
+    let path = session::jsonl::path::session_path(&home, &cwd, &source.to_string());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let rows = [
+        serde_json::json!({"type":"user", "uuid":message, "parentUuid":null,
+            "sessionId":source, "cwd":cwd, "message":{"role":"user","content":"hello"}}),
+        serde_json::json!({"type":"session-mode", "sessionId":source, "sessionMode":"chat",
+            "contextRevision":7, "profileEpoch":7, "admittedMode":"chat", "admittedEpoch":7, "pending":false}),
+    ];
+    let content = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+    std::fs::write(&path, &content).unwrap();
+    let (target_path, _) = create_independent_cli_branch(&home, &cwd, source, target, None, None).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    let branch = std::fs::read_to_string(target_path).unwrap();
+    let profile = session::JsonlWriter::session_mode_transition_from_source(&branch, &target.to_string()).unwrap();
+    assert_eq!(profile.active, ConversationMode::Code);
+    assert!(profile.active_epoch > 7);
+    let loaded = session::jsonl::route_lines(&branch);
+    assert!(!session::jsonl::build_conversation_chain(&loaded, &target.to_string()).0.is_empty());
+}
+
+#[tokio::test]
+async fn cli_independent_fork_refuses_unfinished_source_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let cwd = root.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let cwd = cwd.to_string_lossy().to_string();
+    let source = Uuid::new_v4();
+    let target = Uuid::new_v4();
+    let message = Uuid::new_v4();
+    let path = session::jsonl::path::session_path(&home, &cwd, &source.to_string());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let rows = [
+        serde_json::json!({"type":"user", "uuid":message, "parentUuid":null,
+            "sessionId":source, "cwd":cwd, "message":{"role":"user","content":"hello"}}),
+        serde_json::json!({"type":"attachment", "uuid":Uuid::new_v4(), "parentUuid":message,
+            "sessionId":source, "cwd":cwd, "message":null, "attachment":{
+                "type":"hook_deferred_tool", "toolUseID":"pending-tool", "toolName":"Write",
+                "toolInput":{"file_path":"/tmp/never-written", "content":"pending"}}}),
+    ];
+    let content = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+    std::fs::write(&path, &content).unwrap();
+    let error = create_independent_cli_branch(&home, &cwd, source, target, None, None).await.unwrap_err();
+    assert!(error.contains("resume the original conversation first"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    assert!(!session::jsonl::path::session_path(&home, &cwd, &target.to_string()).exists());
+}
+
+#[tokio::test]
 async fn load_resume_rows_from_returns_sorted_rows_with_titles_and_counts() {
     let temp = tempfile::TempDir::new().unwrap();
     let lingxi_home = temp.path().join("home");

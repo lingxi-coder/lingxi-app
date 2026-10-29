@@ -46,7 +46,7 @@ Projection excludes retired instruction rows while retaining the original transc
 
 Cold resume passively reconstructs current-epoch activations from trusted row metadata. It does not invoke loaders, shell expansion, setup hooks or an earlier captured request. Stale epochs remain historical. Current profile guidance also identifies earlier profile/Skill directives in summaries as historical context.
 
-CLI resume captures one transcript revision before startup hooks. Background resumes retain the exact validated transcript path and never re-resolve the same UUID to another worktree. With persistence disabled it reads the same profile metadata without claiming a writer lease or modifying the source transcript. Snapshot and resume-formatting reuse is bound to the admitted profile epoch; resuming the same epoch preserves it.
+CLI resume captures one transcript revision before startup hooks. Background resumes retain the exact validated transcript path and never re-resolve the same UUID to another worktree. A source capture may hold a temporary writer claim while reading and validating its snapshot; disabling persistence does not attach a target writer or append to the source transcript. Snapshot and resume-formatting reuse is bound to the admitted profile epoch; resuming the same epoch preserves it.
 
 The same filtered projection is used by prompt hooks, compaction, recap, naming, agent forks and realtime admission. Profile changes invalidate cached side-query parameters and fence pending memory extraction. Prepared realtime requests verify their captured profile and epoch again at admission.
 
@@ -78,7 +78,7 @@ The following checks passed in the isolated implementation worktrees on 2026-10-
 
 Electron production build and main-process type checking passed. Both mobile host FFI libraries compiled and complete bindings were generated. Swift protocol and state probes compiled and ran; they did not invoke FFI. Tests requiring local sockets passed with local socket access after the default sandbox denied binding.
 
-Remaining environment or baseline limits: renderer type checking reports the three existing `LingxiAccount.tsx` errors; the translation-generator baseline retains three existing failures while the new strings match all five shared catalogs. The iOS GStreamer SDK is missing and the host-library probe encountered a LINKEDIT alignment error, so simulator, physical-device and signed-package acceptance are not established.
+At the 2026-10-28 checkpoint, renderer type checking reported three existing `LingxiAccount.tsx` errors, and the translation-generator baseline retained three existing failures while the new strings matched all five shared catalogs. The iOS GStreamer SDK was unavailable at that checkpoint and the host-library probe encountered a LINKEDIT alignment error. Those observations describe that historical build environment, not the current SDK inventory.
 
 ## Review correction verification
 
@@ -119,3 +119,36 @@ The 2026-10-29 follow-up closes the interval between taking the turn gate and pu
 The native mode-before-send probes fail against the earlier implementation and pass with the submission gate. Android also reproduces and covers synchronous observer reentry during a session switch. The iOS sources and six added integration cases parse successfully; the full integration suite, simulator, physical devices and signed packages remain unverified in this environment. The source-method probes do not establish complete iOS runtime acceptance.
 
 The follow-up App pin is Harness commit `922a96843b5df7668333eed63952eefe19210b87`. All 79 owned runtime packages resolve to that immutable source; no local Cargo patch is used. Locked offline metadata resolves successfully, and protocol checks pass for 847 native client sources and all three fixture mirrors. The mobile host tests preserve the existing UniFFI submission signatures and cover both entries with cancellation before the host lock, cancellation after durable work begins, a different subsequent selection, a new session, and a small-stack foreign executor.
+
+## Four-platform integration checkpoint
+
+The selectable mode and per-device default described above apply to Desktop, Android and iOS. Their mode selectors choose Chat or Code on the same conversation, display the admitted mode and any pending selection, and keep the active query running under its admitted profile. A new conversation uses that device's last explicitly selected mode. A restored conversation uses its own durable profile and does not rewrite the device preference.
+
+The CLI has no Chat/Code switch or mode argument. Ordinary fresh, resumed, headless and background CLI work selects Code. On a historical resume, the captured profile and epoch are restored first for the original recovery and resume lifecycle; Code is selected for subsequent outer-query admission when the transition is safe. An unresolved native-computer continuation retains its original profile until it is settled. A live background handoff that continues already-admitted work likewise retains that captured profile and epoch, independently of a pending foreground selection; this does not add a CLI mode switch.
+
+Admission is the runtime's durable query boundary, not enqueueing input or acquiring a turn gate. Until admission succeeds, a cancelled or failed submission remains with its original conversation and can be retried; already-executed direct Bash results still settle durably. Composer draft text is owned by its conversation. A mode change preserves that owner's draft, while switching conversations restores the destination owner's draft without overwriting later edits. Pending or failed submissions retain their attachments for retry. Desktop also rechecks the mode boundary after asynchronous credential preparation before dispatching a slash command or recording a Fusion preparation failure.
+
+Fresh Desktop and mobile hosts supply their initial profile before startup hooks run. Desktop passes the new draft's device preference through a private Bridge launch argument; a captured draft snapshot takes precedence on restoration. The shared runtime persists a fresh non-default profile before invoking SessionStart. Captured historical sessions restore their original profile for their own hooks and recovery before any subsequent Code selection.
+
+An independent CLI branch captures one exact source transcript under its source claim and inspects the authoritative tool and native-computer recovery journal read-only. It neither repairs the source journal nor executes or settles its pending operations. Unfinished deferred tools, unresolved receipts, and invalid or incomplete recovery data prevent the branch and require the original session to be resumed first. A successful branch publishes the captured history and a fresh Code profile epoch together under a separate identity, without replacing the target. With persistence disabled, the branch is rendered in memory rather than published.
+
+The following checks belong to this integration checkpoint and do not include the earlier overlapping suites:
+
+| Check | Result |
+| --- | --- |
+| Desktop mode and host-utility tests | 66 passed; main-process type checking and Electron production build passed |
+| Android focused JVM tests | 119 passed; instrumentation test sources compiled, with no device execution |
+| iOS Swift host state tests | 9 passed on macOS; this does not load the final mobile FFI or establish an iOS app build |
+| Headless recovery, fresh defaults and independent branch ownership | 13 passed |
+| Read-only branch recovery / durable tool projection | 2 / 10 passed |
+| Mobile initial profile, anchored startup recovery, identity cache and fork regressions | 13 passed; includes a 70 KiB hook attachment and startup additional context |
+| Session captured branches / read-only WAL replay | 9 / 1 passed |
+| Native-computer branch preflight / streaming admission callback | 36 / 1 passed |
+| Shared context manifest command | 2 passed |
+| Mobile-only runtime configuration | `cargo check --offline --locked -p harness-runtime --no-default-features --features mobile,uniffi` passed |
+| Immutable dependencies and native protocol ownership | Locked offline metadata passed; 79 runtime packages share the final pin; 847 native sources and three fixture mirrors passed |
+| CLI ownership, fixed-Code defaults, exact-source recovery and TUI regressions | 11 CLI host tests and 7 TUI tests passed against the final pin |
+| Real CLI stdio cold resume | 1 passed: a Chat transcript restores, then `/context manifest` reports the effective Code profile |
+| Bridge initial profile and captured-draft startup | 3 passed against the final pin; both profile restoration and SessionStart ordering are covered |
+
+The App pins all owned Harness dependencies to `5ea8b824141259f2ae92ec5c46a25053e53a24bd`, with no local source patch. CLI, TUI, TUI core and Bridge library test targets compile against this pin. The real CLI stdio resume test passed; complete interactive PTY acceptance has not run. The verified iOS GStreamer device SDK slice is available; the simulator slice remains unavailable. Regenerated mobile FFI, Android APK and the full iOS Xcode build are deferred because the shared host is low on disk space. No simulator, physical-device, signed-package or live-provider acceptance is established by the host checks above.

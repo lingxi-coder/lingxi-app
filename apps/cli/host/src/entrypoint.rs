@@ -825,16 +825,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             resumed_argv.effort = Some(effort);
         }
         let sink = make_sink();
-        let adapter: Arc<dyn lingxi_core::host::OutputStream> =
-            Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
-        let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("lingxi-cli: {e}");
-                return exit_codes::RUNTIME_ERROR;
-            }
-        };
-        return run::run_continue(&resumed_argv, &runtime, sink.as_ref()).await;
+        return run::run_continue(&resumed_argv, sink.as_ref()).await;
     }
 
     // --resume routes through run::run_resume, which itself splits (M7-12):
@@ -847,16 +838,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             resumed_argv.effort = Some(effort);
         }
         let sink = make_sink();
-        let adapter: Arc<dyn lingxi_core::host::OutputStream> =
-            Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
-        let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("lingxi-cli: {e}");
-                return exit_codes::RUNTIME_ERROR;
-            }
-        };
-        return run::run_resume(&resumed_argv, &runtime, sink.as_ref()).await;
+        return run::run_resume(&resumed_argv, sink.as_ref()).await;
     }
 
     // (M4 cc2.1.198) `--from-pr [value]` — the binary opens the SAME resume

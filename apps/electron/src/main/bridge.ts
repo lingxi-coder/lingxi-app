@@ -539,6 +539,7 @@ export class SessionRuntime {
         if (generation !== this.generation || client !== this.client || this.archiving) {
           throw new Error('Model switch was interrupted.');
         }
+        if (slashCommand) this.assertModeReadyForSlashCommand();
         pending.sent = true;
         client.sendCommand(slashCommand ?? { type: 'set_model', model });
       } catch (error) {
@@ -1944,6 +1945,7 @@ export class SessionRuntime {
       bridgeDir,
       sessionTranscriptPath: this.ownedTranscriptPath,
       restoreDraft: this.draftSessionMode !== undefined,
+      initialConversationMode: this.draftWasInitialized ? undefined : this.draftSessionMode,
       additionalDirectories: launch.additionalDirectories,
       promptDirectories: launch.promptDirectories,
       initialProjectRoot: launch.initialProjectRoot,
@@ -3076,6 +3078,12 @@ export class SessionRuntime {
     return response;
   }
 
+  private assertModeReadyForSlashCommand(): void {
+    if (this.draftModeRestorationRequired || this.pendingSessionModeSwitch || this.queuedSessionModeSwitches.length > 0) {
+      throw new Error('Wait for the conversation mode to be ready before sending a command.');
+    }
+  }
+
   /**
    * Validate a renderer command and forward it to the engine. SECURITY:
    * `set_permission_mode: bypassPermissions` is gated behind explicit,
@@ -3091,7 +3099,7 @@ export class SessionRuntime {
     if (this.archiving) throw new Error('This chat is being archived.');
     const validated = validateClientCommand(command, this.activeWorkspace);
     if (this.draftModeRestorationRequired) throw new Error('Wait for the conversation mode to be ready before sending a command.');
-    if (validated.type === 'run_slash_command' && (this.pendingSessionModeSwitch || this.queuedSessionModeSwitches.length > 0)) throw new Error('Wait for the conversation mode to be ready before sending a command.');
+    if (validated.type === 'run_slash_command') this.assertModeReadyForSlashCommand();
     if (validated.type.startsWith('side_chat_')) {
       const client = this.requireClient();
       if (validated.type === 'side_chat_create') this.pendingSideCreates.add(validated.request_id);
@@ -3162,9 +3170,11 @@ export class SessionRuntime {
           // restarts invalidate ownership; they must never publish into a new one.
           if (this.disposed || this.archiving || !this.pendingPromptHydrations.has(token)
             || generation !== this.generation || client !== this.client) throw cause;
+          this.assertModeReadyForSlashCommand();
           this.recordFusionPreparationFailure(validated, cause, source);
           return;
         }
+        this.assertModeReadyForSlashCommand();
         client.sendCommand({ ...validated, raw: pinnedRaw });
         this.commitFusionHistory(validated);
         this.journalSlashCommand(validated, source);
@@ -3202,6 +3212,7 @@ export class SessionRuntime {
     if (validated.type === 'set_fast_mode' && (this.opts.getSavedFastMode || this.opts.onFastModeSelected)) {
       return this.applyFastMode(validated.enabled, true);
     }
+    if (validated.type === 'run_slash_command') this.assertModeReadyForSlashCommand();
     this.requireClient().sendCommand(validated);
     this.commitFusionHistory(validated);
     this.journalSlashCommand(validated, source);

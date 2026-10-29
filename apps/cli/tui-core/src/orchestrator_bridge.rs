@@ -253,6 +253,13 @@ pub enum TurnEvent {
         /// Paths to restore, or `None` once this dispatch owns/consumes them.
         image_paths: Option<Vec<std::path::PathBuf>>,
     },
+    /// Resolve ownership of a composer submission at shared-runtime admission.
+    PromptAdmissionResolved {
+        /// Opaque identity of the visible, not-yet-persisted user row.
+        row_token: String,
+        /// False returns the exact text and attachments to their UI owner.
+        admitted: bool,
+    },
     /// Streaming text chunk from the assistant.
     TextDelta(String),
     /// A completed assistant thinking block (M5 live streaming). The

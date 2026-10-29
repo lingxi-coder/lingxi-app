@@ -164,6 +164,7 @@ struct RootView: View {
     /// A same-source resume replaces the conversation owner. Keep this until
     /// both the destination owner and its authoritative mode are visible.
     @State private var pendingDraftRestoreSessionID: String?
+    @State private var draftOwnerSessionID: String
     @State private var draft: String
     @State private var hasUnsavedConversationMedia = false
     @State private var hasUnsavedTerminalInput = false
@@ -249,7 +250,21 @@ struct RootView: View {
         let activeProject = projects.activeProject
         let initialScope = ConversationScope(projectID: activeProject?.record.id)
         let preferences = ProjectScopedPreferences.forRuntime()
-        let initialMode = preferences.currentMode()
+        let currentMode = preferences.currentMode()
+        var storedSessionID = ConversationModeRestorePolicy.sessionID(
+            mode: currentMode,
+            scoped: preferences.storedActiveSessionID(scope: initialScope, mode: currentMode),
+            projectLastActive: projects.activeProject?.record.lastActiveSessionId,
+            activeDirectory: projects.activeProject?.record.activeDirectory,
+            sessions: projects.activeProject?.sessions ?? []
+        )
+        #if DEBUG
+            // File UI fixtures own an isolated session; never restore a persisted user session over it.
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"] != nil {
+                storedSessionID = ""
+            }
+        #endif
+        let initialMode = preferences.launchMode(restoredSessionID: storedSessionID)
         let initialProjectMountGrants: [String]
         if let activeProject {
             initialProjectMountGrants = (try? MobileUserStorage.projectMountGrantPaths(for: activeProject)) ?? []
@@ -351,25 +366,13 @@ struct RootView: View {
         _sessionPinnedAt = State(initialValue: preferences.sessionPinnedAt())
         _cronResultsSeenAt = State(initialValue: preferences.cronResultsSeenAt())
         _pendingSessionFork = State(initialValue: nil)
-        var storedSessionID = ConversationModeRestorePolicy.sessionID(
-            mode: initialMode,
-            scoped: preferences.storedActiveSessionID(scope: initialScope, mode: initialMode),
-            projectLastActive: projects.activeProject?.record.lastActiveSessionId,
-            activeDirectory: projects.activeProject?.record.activeDirectory,
-            sessions: projects.activeProject?.sessions ?? []
-        )
-        #if DEBUG
-            // File UI fixtures own an isolated session; never restore a persisted user session over it.
-            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"] != nil {
-                storedSessionID = ""
-            }
-        #endif
         _activeSession = State(initialValue: storedSessionID)
         _confirmedSession = State(initialValue: storedSessionID)
+        _draftOwnerSessionID = State(initialValue: storedSessionID)
         _pendingSessionRestoreID = State(initialValue: storedSessionID.isEmpty ? nil : storedSessionID)
         let initialDraft = ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1"
             ? ""
-            : preferences.draft(scope: initialScope, mode: initialMode)
+            : preferences.draft(scope: initialScope, mode: initialMode, ownerSessionID: storedSessionID)
         _draft = State(initialValue: initialDraft)
         let voiceReadinessOverride: (@MainActor () -> VoiceConfigurationReadiness)?
         #if DEBUG
@@ -605,10 +608,13 @@ struct RootView: View {
             }
         let stateLifecycle = backgroundLifecycle
             .onChange(of: draft) { _, value in
-                scopedPreferences.setDraft(value, scope: activeScope, mode: activeMode)
+                // A queued callback from the outgoing owner must not replace
+                // the draft just restored for a different conversation.
+                guard value == draft else { return }
+                scopedPreferences.setDraft(value, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
                 if !source.model.sessionTransitionPending,
                    let pending = source.model.pendingSessionMode, pending != activeMode {
-                    scopedPreferences.setDraft(value, scope: activeScope, mode: pending)
+                    scopedPreferences.setDraft(value, scope: activeScope, mode: pending, ownerSessionID: draftOwnerSessionID)
                 }
             }
             .onChange(of: providerRepository.syncRevision) { _, _ in
@@ -1067,18 +1073,8 @@ struct RootView: View {
             + projectStore.globalSessions.compactMap(\.workspaceDirectory)
     }
 
-    /// Start a fresh conversation in `scope` as `mode`, carrying what has been
-    /// typed. The target (scope, mode) restores its own saved draft on a
-    /// switch, so the carried text is written there first and cleared from the
-    /// place it came from.
+    /// Start a fresh conversation with the current composer contents.
     private func startNewChat(in scope: ConversationScope, mode: SessionMode) {
-        guard scope != activeScope || mode != activeMode else {
-            switchScope(to: scope, mode: mode, startNew: true)
-            return
-        }
-        let carried = draft
-        scopedPreferences.setDraft(carried, scope: scope, mode: mode)
-        scopedPreferences.setDraft("", scope: activeScope, mode: activeMode)
         switchScope(to: scope, mode: mode, startNew: true)
     }
 
@@ -1088,20 +1084,23 @@ struct RootView: View {
         let owner = source.model.activeSessionId
         if let pendingSessionRestoreID, owner != pendingSessionRestoreID { return }
         scopedPreferences.setCurrentMode(mode)
-        let draftTransition = scopedPreferences.draftForModeChange(
+        let restoresOwner = !owner.isEmpty && pendingDraftRestoreSessionID == owner
+        let destinationOwner = owner.isEmpty ? draftOwnerSessionID : owner
+        let nextDraft = scopedPreferences.draftForSessionTransition(
             draft, scope: activeScope, from: activeMode, to: mode,
-            ownerSessionID: owner, restoringSessionID: pendingDraftRestoreSessionID
+            fromOwner: draftOwnerSessionID, toOwner: destinationOwner, restoring: restoresOwner
         )
+        draftOwnerSessionID = destinationOwner
+        if draft != nextDraft { draft = nextDraft }
         if activeMode != mode {
             activeMode = mode
-            if draft != draftTransition.draft { draft = draftTransition.draft }
             source.listSessions()
         }
-        if draftTransition.didRestoreOwner { pendingDraftRestoreSessionID = nil }
+        if restoresOwner { pendingDraftRestoreSessionID = nil }
         let adoptedOwner = owner.isEmpty ? confirmedSession : owner
         scopedPreferences.setActiveSessionID(adoptedOwner, scope: activeScope, mode: mode)
         if let pending {
-            scopedPreferences.setDraft(draft, scope: activeScope, mode: pending)
+            scopedPreferences.setDraft(draft, scope: activeScope, mode: pending, ownerSessionID: draftOwnerSessionID)
             scopedPreferences.setActiveSessionID(adoptedOwner, scope: activeScope, mode: pending)
         }
         triggerPendingForkIfReady(for: confirmedSession)
@@ -1648,7 +1647,7 @@ struct RootView: View {
             navigation.closeSidebar()
             if let resumeSessionID {
                 if resumeSessionID != confirmedSession {
-                    scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode)
+                    scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
                     pendingDraftRestoreSessionID = resumeSessionID
                 } else {
                     pendingDraftRestoreSessionID = nil
@@ -1662,6 +1661,11 @@ struct RootView: View {
                     allowRecoveryRouting: allowRecoveryRouting
                 )
             } else if startNew {
+                scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
+                let freshDraft = draft
+                draftOwnerSessionID = ""
+                draft = freshDraft
+                scopedPreferences.setDraft(freshDraft, scope: scope, mode: targetMode, ownerSessionID: "")
                 pendingDraftRestoreSessionID = nil
                 pendingSessionRestoreID = nil
                 activeSession = ""
@@ -1704,12 +1708,21 @@ struct RootView: View {
                 #endif
                 try await replacement.prepare()
                 try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
+                // The old source remains editable while the replacement is
+                // prepared, so persist its latest draft before changing scope.
+                scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
+                let freshDraft = draft
+                let restoredSession = restoredSessionID(scope: scope, mode: targetMode)
+                let targetOwner = startNew ? "" : (resumeSessionID ?? restoredSession)
                 activeScope = scope
                 activeMode = targetMode
+                draftOwnerSessionID = targetOwner
                 pendingDraftRestoreSessionID = nil
                 scopedPreferences.setCurrentMode(targetMode)
-                draft = scopedPreferences.draft(scope: scope, mode: targetMode)
-                let restoredSession = restoredSessionID(scope: scope, mode: targetMode)
+                draft = startNew ? freshDraft : scopedPreferences.draft(scope: scope, mode: targetMode, ownerSessionID: targetOwner)
+                if startNew {
+                    scopedPreferences.setDraft(draft, scope: scope, mode: targetMode, ownerSessionID: targetOwner)
+                }
                 confirmedSession = restoredSession
                 activeSession = resumeSessionID ?? restoredSession
                 pendingSessionRestoreID = activeSession.isEmpty ? nil : activeSession
@@ -1784,7 +1797,7 @@ struct RootView: View {
         scopedPreferences.setActiveSessionID(sessionID, scope: activeScope, mode: activeMode)
         if let pending = source.model.pendingSessionMode {
             scopedPreferences.setActiveSessionID(sessionID, scope: activeScope, mode: pending)
-            scopedPreferences.setDraft(draft, scope: activeScope, mode: pending)
+            scopedPreferences.setDraft(draft, scope: activeScope, mode: pending, ownerSessionID: draftOwnerSessionID)
         }
         if pendingSessionRestoreID == sessionID {
             pendingSessionRestoreID = nil
@@ -1832,6 +1845,14 @@ struct RootView: View {
         }
         if pendingDraftRestoreSessionID == sessionID { pendingDraftRestoreSessionID = nil }
         pendingSessionRestoreID = nil
+        if draftOwnerSessionID != rollbackSelection {
+            let restoredDraft = scopedPreferences.draftForSessionTransition(
+                draft, scope: activeScope, from: activeMode, to: activeMode,
+                fromOwner: draftOwnerSessionID, toOwner: rollbackSelection, restoring: true
+            )
+            draftOwnerSessionID = rollbackSelection
+            draft = restoredDraft
+        }
         activeSession = rollbackSelection
         if pendingLinkedSessionID == sessionID {
             pendingLinkedSessionID = nil; pendingMessageLink = nil
@@ -1987,10 +2008,11 @@ struct RootView: View {
         )
 
         if activeScope == snapshot.scope, activeMode == snapshot.mode {
-            if draft != snapshot.draft {
+            let snapshotOwner = snapshot.resumeSessionID ?? ""
+            scopedPreferences.setDraft(snapshot.draft, scope: snapshot.scope, mode: snapshot.mode, ownerSessionID: snapshotOwner)
+            if draftOwnerSessionID == snapshotOwner, draft != snapshot.draft {
                 draft = snapshot.draft
             }
-            scopedPreferences.setDraft(snapshot.draft, scope: snapshot.scope, mode: snapshot.mode)
 
             if let resumeSessionID = snapshot.resumeSessionID {
                 let sessionAlreadySelected =
@@ -1998,12 +2020,16 @@ struct RootView: View {
                     || activeSession == resumeSessionID
                     || confirmedSession == resumeSessionID
                 if sessionAlreadySelected {
+                    if draftOwnerSessionID != resumeSessionID {
+                        pendingDraftRestoreSessionID = resumeSessionID
+                    }
                     pendingConversationSelectionRestore = nil
                     return
                 }
                 guard mutationAllowed else { return }
                 pendingConversationSelectionRestore = nil
                 pendingSessionRestoreID = resumeSessionID
+                pendingDraftRestoreSessionID = resumeSessionID
                 activeSession = resumeSessionID
                 requestSessionResume(resumeSessionID, scope: snapshot.scope, using: source)
                 return
@@ -2014,12 +2040,16 @@ struct RootView: View {
                 && activeSession.isEmpty
                 && confirmedSession.isEmpty
             if alreadyAtFreshConversation {
+                draftOwnerSessionID = ""
+                draft = snapshot.draft
                 pendingConversationSelectionRestore = nil
                 return
             }
             guard mutationAllowed else { return }
             pendingConversationSelectionRestore = nil
             pendingSessionRestoreID = nil
+            draftOwnerSessionID = ""
+            draft = snapshot.draft
             activeSession = ""
             confirmedSession = ""
             scopedPreferences.setActiveSessionID("", scope: snapshot.scope, mode: snapshot.mode)
@@ -2078,6 +2108,7 @@ struct RootView: View {
                 emptyTitle = nil
             }
         }
+        conversation.setSessionRestoreFallbackMode(scopedPreferences.lastMode())
         conversation.resumeSession(sessionID, emptySessionTitle: emptyTitle)
     }
 
@@ -2087,7 +2118,7 @@ struct RootView: View {
             hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
             isCancelling: source.model.isCancelling
         ) else { return }
-        scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode)
+        scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
         scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
     }
 
@@ -2409,6 +2440,8 @@ struct RootView: View {
             isCancelling: source.model.isCancelling
         ) else { return false }
         voiceInteraction.handleContextChange()
+        scopedPreferences.setDraft(draft, scope: activeScope, mode: activeMode, ownerSessionID: draftOwnerSessionID)
+        draftOwnerSessionID = ""
         pendingDraftRestoreSessionID = nil
         pendingSessionRestoreID = nil
         activeSession = ""
@@ -2416,6 +2449,7 @@ struct RootView: View {
         let newMode = mode ?? scopedPreferences.lastMode()
         scopedPreferences.setActiveSessionID("", scope: activeScope, mode: newMode)
         draft = draftText
+        scopedPreferences.setDraft(draftText, scope: activeScope, mode: newMode, ownerSessionID: "")
         source.startNewConversation(mode: newMode)
         return true
     }

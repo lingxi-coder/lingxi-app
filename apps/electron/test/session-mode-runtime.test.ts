@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { EventEmitter, once } from 'node:events';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionRuntime } from '../src/main/bridge.js';
@@ -12,6 +12,35 @@ import { validateClientCommand } from '../src/main/validation.js';
 
 const sessionId = '11111111-2222-4333-8444-555555555555';
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('the bridge launch passes the device mode only for an uninitialized draft', { skip: process.platform === 'win32' }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-draft-mode-'));
+  const serverBin = join(root, 'capture-arguments');
+  writeFileSync(serverBin, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n');
+  chmodSync(serverBin, 0o700);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const [mode, initialized] of [['chat', false], ['code', false], ['chat', true], [undefined, false]] as const) {
+    const runtime = new SessionRuntime({ sessionId, projectPath: root, serverBin,
+      launchConfig: () => ({ workspace: root, trusted: true }) }, mode, initialized);
+    try {
+      const child = (runtime as any).spawnServer({ workspace: root, trusted: true }, join(root, 'bridge'));
+      let output = '', errors = '';
+      child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk: Buffer) => { errors += chunk.toString(); });
+      const [code] = await once(child, 'close');
+      assert.equal(code, 0, errors);
+      const args = JSON.parse(output) as string[];
+      const initial = args.indexOf('--initial-conversation-mode');
+      assert.equal(args.includes('--restore-draft'), mode !== undefined);
+      if (mode && !initialized) {
+        assert.ok(initial >= 0);
+        assert.equal(args[initial + 1], mode);
+      } else {
+        assert.equal(initial, -1, 'restored and historical sessions retain their own mode');
+      }
+    } finally { await runtime.dispose(); }
+  }
+});
 
 test('mode commands persist the device preference only after the same session confirms', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lingxi-session-mode-'));
@@ -132,6 +161,114 @@ test('connection loss rejects both active and queued mode choices without sendin
   await tick();
   assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
   assert.equal(runtime.hasActiveWork, false);
+});
+
+test('a Skill or MCP slash command cannot pass a mode selection during credential loading', async t => {
+  for (const raw of ['/review inspect this file', '/mcp__server__prompt summarize']) {
+    await t.test(raw, async () => {
+      const commands: unknown[] = [];
+      const client = Object.assign(new EventEmitter(), {
+        sendCommand: (command: unknown) => commands.push(command),
+        cancel: () => commands.push('cancel'),
+      });
+      const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
+        launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+        resolveOpenAiOAuth: async () => undefined });
+      Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true,
+        selectedModelReference: 'openai-chatgpt/test' });
+      (runtime as any).wireClient(client, 0);
+      let release!: () => void;
+      const credentials = new Promise<void>(resolve => { release = resolve; });
+      (runtime as any).ensureCodexToken = () => credentials;
+
+      const slash = runtime.dispatchCommand({ type: 'run_slash_command', raw, images: [] });
+      const selecting = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
+      release();
+      await assert.rejects(slash, /conversation mode/);
+      assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
+
+      client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'chat', revision: 1 });
+      await selecting;
+      await runtime.dispatchCommand({ type: 'run_slash_command', raw, images: [] });
+      assert.deepEqual(commands, [
+        { type: 'set_session_mode', mode: 'chat' },
+        { type: 'run_slash_command', raw, images: [] },
+      ]);
+    });
+  }
+});
+
+test('Fusion cannot dispatch or record an asynchronous preparation failure while mode selection is outstanding', async t => {
+  for (const failCredentials of [false, true]) {
+    await t.test(failCredentials ? 'credentials fail' : 'credentials succeed', async () => {
+      const commands: any[] = [];
+      let identityCommits = 0;
+      const client = Object.assign(new EventEmitter(), {
+        sendCommand: (command: unknown) => commands.push(command),
+        cancel: () => commands.push('cancel'),
+      });
+      const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
+        launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+        resolveOpenAiOAuth: async () => undefined,
+        onFirstPromptSent: () => { identityCommits++; } });
+      Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
+      (runtime as any).wireClient(client, 0);
+      (runtime as any).resolveFusionStrategy = async () => ({
+        reference: { scope: 'user', id: 'review' }, name: 'Review', revision: 'aabb', config: {},
+      });
+      let finish!: () => void;
+      const credentials = new Promise<void>((resolve, reject) => {
+        finish = () => failCredentials ? reject(new Error('credential unavailable')) : resolve();
+      });
+      (runtime as any).ensureFusionCodexToken = () => credentials;
+      const slash = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion inspect', images: [] });
+      await tick();
+      const selecting = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
+      finish();
+      await assert.rejects(slash, /conversation mode/);
+      assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
+      assert.equal(identityCommits, 0);
+      assert.equal((runtime as any).pendingPromptHydrations.size, 0);
+      client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'chat', revision: 1 });
+      await selecting;
+      (runtime as any).ensureFusionCodexToken = async () => undefined;
+      await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion inspect', images: [] });
+      assert.deepEqual(commands, [
+        { type: 'set_session_mode', mode: 'chat' },
+        { type: 'run_slash_command', raw: '/fusion --strategy-revision aabb inspect', images: [] },
+      ]);
+      assert.equal(identityCommits, 1);
+    });
+  }
+});
+
+test('an asynchronously prepared slash model selection also waits for the mode boundary', async () => {
+  const commands: unknown[] = [];
+  const client = Object.assign(new EventEmitter(), { sendCommand: (command: unknown) => commands.push(command) });
+  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }), onModelSelected: () => undefined });
+  Object.assign(runtime, { activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
+  (runtime as any).wireClient(client, 0);
+  let release!: () => void;
+  const credentials = new Promise<void>(resolve => { release = resolve; });
+  (runtime as any).ensureModelProviderCredential = () => credentials;
+  const slash = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/model example', images: [] });
+  const selecting = runtime.dispatchCommand({ type: 'set_session_mode', mode: 'chat' });
+  release();
+  await assert.rejects(slash, /conversation mode/);
+  assert.deepEqual(commands, [{ type: 'set_session_mode', mode: 'chat' }]);
+  assert.equal((runtime as any).pendingModelSwitch, undefined);
+  client.emit('event', { type: 'session_mode_changed', session_id: sessionId, mode: 'chat', revision: 1 });
+  await selecting;
+  const retry = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/model example', images: [] });
+  await tick();
+  assert.deepEqual(commands, [
+    { type: 'set_session_mode', mode: 'chat' },
+    { type: 'run_slash_command', raw: '/model example', images: [] },
+  ]);
+  client.emit('event', { type: 'slash_command_result', display: 'Switched', is_error: false });
+  client.emit('event', { type: 'model_list', current: 'example', models: ['example'] });
+  await retry;
 });
 
 test('desktop command validation restricts the mode vocabulary and rejects extra fields', () => {

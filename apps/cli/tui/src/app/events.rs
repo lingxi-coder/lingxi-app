@@ -9,10 +9,17 @@ impl<'cb> RataApp<'cb> {
     /// widget's transcript/turn state (the `events_rx` drain path; see
     /// [`crate::chat_widget::ChatWidget::apply_turn_event`]).
     pub(super) fn apply_turn_event(&mut self, event: TurnEvent) {
+        let resolved_row = match &event {
+            TurnEvent::PromptAdmissionResolved { row_token, .. } => Some(row_token.clone()),
+            _ => None,
+        };
         if matches!(&event, TurnEvent::SessionCleared { .. }) {
             self.reset_mod_ui_render_cache();
         }
         self.chat_widget.apply_turn_event(event);
+        if let (Some(rows), Some(row)) = (&self.admitted_rows, resolved_row) {
+            rows.lock().unwrap().remove(&row);
+        }
         if let Some((args, token)) = self.chat_widget.take_ready_compact() {
             (self.callbacks.on_compact)(args, token);
         }

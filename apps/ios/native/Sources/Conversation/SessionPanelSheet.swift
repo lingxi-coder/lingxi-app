@@ -61,7 +61,7 @@ struct SessionPanelSheet: View {
                                 onAction(.setMode(candidate))
                             } label: {
                                 Label(candidate.title + " — " + candidate.modeDescription,
-                                      systemImage: candidate == (pendingMode ?? mode) ? "checkmark" : "circle")
+                                      systemImage: candidate == mode ? "checkmark" : "circle")
                             }
                         }
                     } label: {

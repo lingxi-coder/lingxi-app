@@ -1,20 +1,26 @@
 package com.lingxi.code.project
 
-import com.lingxi.code.draftForModeChange
-import com.lingxi.code.sameDraftOwner
 import com.lingxi.code.shouldPersistActiveSession
+import com.lingxi.code.shouldTransferNewDraft
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.conversationScopeFromKey
 import com.lingxi.code.model.persistenceKey
 import com.lingxi.code.model.sessionStateKey
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class ScopeStateStoreTest {
 
@@ -50,6 +56,37 @@ class ScopeStateStoreTest {
     }
 
     @Test
+    fun `recreated store instances serialize changes to the same file`() = runTest {
+        val file = File(temp.root, "scope-state.json")
+        val firstWriteStarted = CompletableDeferred<Unit>()
+        val releaseFirstWrite = CountDownLatch(1)
+        val first = ScopeStateStore(file, ProjectAtomicWriter { target, text, validate ->
+            firstWriteStarted.complete(Unit)
+            check(releaseFirstWrite.await(5, TimeUnit.SECONDS))
+            validate(text)
+            target.writeText(text)
+        })
+        val second = ScopeStateStore(file)
+        val preference = async { first.persistSelectedMode(SessionMode.Chat) }
+        try {
+            firstWriteStarted.await()
+            val secondStarted = CompletableDeferred<Unit>()
+            val active = async(Dispatchers.IO) {
+                secondStarted.complete(Unit)
+                second.persistActiveMode(SessionMode.Chat)
+            }
+            secondStarted.await()
+            releaseFirstWrite.countDown()
+            preference.await()
+            active.await()
+            assertEquals(SessionMode.Chat, second.readSelectedMode())
+            assertEquals(SessionMode.Chat, second.readActiveMode())
+        } finally {
+            releaseFirstWrite.countDown()
+        }
+    }
+
+    @Test
     fun `last-active session and draft persist per scope across store instances`() = runTest {
         val first = store()
         first.persistActiveScope("app.tracker")
@@ -73,24 +110,48 @@ class ScopeStateStoreTest {
     }
 
     @Test
-    fun `resuming another session loads its mode draft while switching the same owner carries it`() = runTest {
+    fun `drafts follow their session across mode changes and stay isolated within a workspace`() = runTest {
         val store = store()
-        val scope = ConversationScope.Project("notes")
-        val code = scope.sessionStateKey(SessionMode.Code)
-        val chat = scope.sessionStateKey(SessionMode.Chat)
-        store.persistDraft(code, "Code draft")
-        store.persistDraft(chat, "Chat draft")
+        val scope = ConversationScope.Project("notes").persistenceKey()
+        val session = "19587a33-0725-48db-abca-8a2aed345f6b"
+        store.persistConversationDraft(scope, "sess:$session", "first draft")
+        store.persistConversationDraft(scope, "other", "second draft")
+        store.persistConversationDraft(ConversationScope.Global.persistenceKey(), session, "global draft")
 
-        val otherSession = sameDraftOwner(scope, "session-code", scope, "session-chat")
-        assertEquals("Chat draft", draftForModeChange(store, chat, "Code draft", otherSession))
-        assertEquals("Code draft", store.read(code)?.draft)
-        assertEquals("Chat draft", store.read(chat)?.draft)
+        val reopened = store()
+        assertEquals("first draft", reopened.readConversationDraft(scope, session, SessionMode.Code))
+        assertEquals("first draft", reopened.readConversationDraft(scope, session, SessionMode.Chat))
+        assertEquals("second draft", reopened.readConversationDraft(scope, "other", SessionMode.Code))
+        assertEquals("global draft", reopened.readConversationDraft("global", session, SessionMode.Code))
+        assertNull(reopened.readConversationDraft(scope, "never-seen", SessionMode.Code))
+        reopened.persistConversationDraft(scope, session, "")
+        assertEquals("", store().readConversationDraft(scope, session, SessionMode.Chat))
+    }
 
-        val sameSession = sameDraftOwner(scope, "sess:19587a33-0725-48db-abca-8a2aed345f6b", scope,
-            "19587a33-0725-48db-abca-8a2aed345f6b")
-        assertEquals("Code draft", draftForModeChange(store, chat, "Code draft", sameSession))
-        assertEquals("Code draft", store.read(chat)?.draft)
-        assertEquals(false, sameDraftOwner(scope, "session-code", ConversationScope.Global, "session-code"))
+    @Test
+    fun `legacy draft remains with its recorded owner when the active session changes`() = runTest {
+        File(temp.root, "scope-state.json").writeText(
+            """{"version":1,"scopes":{"global#code":{"lastActiveSessionId":"old","draft":"old draft"}}}""",
+        )
+        val store = store()
+        assertEquals("old draft", store.readConversationDraft("global", "old", SessionMode.Code))
+        store.persistLastActiveSession("global#code", "new-owner")
+        assertNull(store.readConversationDraft("global", "new-owner", SessionMode.Code))
+        assertEquals("old draft", store.readConversationDraft("global", "old", SessionMode.Chat))
+        store.persistConversationDraft("global", "new-owner", "new draft")
+        assertEquals("new draft", store().readConversationDraft("global", "new-owner", SessionMode.Code))
+        assertEquals("old draft", store().readConversationDraft("global", "old", SessionMode.Code))
+    }
+
+    @Test
+    fun `a temporary new-chat draft only transfers to its started conversation`() {
+        val global = ConversationScope.Global
+        val project = ConversationScope.Project("notes")
+        assertTrue(shouldTransferNewDraft(global, "new", global, "started", false, true, global))
+        assertFalse(shouldTransferNewDraft(global, "new", global, "resumed-empty", false, true, null))
+        assertFalse(shouldTransferNewDraft(global, "new", global, "resumed", true, true, global))
+        assertFalse(shouldTransferNewDraft(global, "new", project, "started", false, true, global))
+        assertFalse(shouldTransferNewDraft(global, "existing", global, "started", false, true, global))
     }
 
     @Test

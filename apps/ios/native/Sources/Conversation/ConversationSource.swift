@@ -35,6 +35,8 @@ protocol ConversationSource: AnyObject {
     var sessionMode: SessionMode { get }
     /// Request a mode for this same conversation; the engine confirms when it applies.
     func setSessionMode(_ mode: SessionMode)
+    /// Select the device default for a new session created after a missing restore.
+    func setSessionRestoreFallbackMode(_ mode: SessionMode)
     /// Begin a fresh, empty conversation (the "edit / new chat" affordance).
     func startNewConversation()
     func startNewConversation(mode: SessionMode)
@@ -200,6 +202,7 @@ extension ConversationSource {
     func promptSuggestionFeedback(sessionId: String, uuid: String, action: String) {}
     var sessionMode: SessionMode { .code }
     func setSessionMode(_ mode: SessionMode) {}
+    func setSessionRestoreFallbackMode(_ mode: SessionMode) {}
     func startNewConversation(mode: SessionMode) {
         startNewConversation()
         setSessionMode(mode)

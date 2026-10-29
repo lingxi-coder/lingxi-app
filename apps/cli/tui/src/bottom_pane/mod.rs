@@ -1566,6 +1566,11 @@ impl BottomPane {
         self.composer.replace_all(text);
     }
 
+    /// Restore exact source units, including isolated UTF-16 units.
+    pub fn restore_composer_source_units(&mut self, units: &[u16]) {
+        self.composer.replace_all_source_units(units);
+    }
+
     /// The completion popup, when open.
     #[must_use]
     pub fn completion(&self) -> Option<&CompletionView> {

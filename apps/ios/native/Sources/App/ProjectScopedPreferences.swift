@@ -52,6 +52,12 @@ struct ProjectScopedPreferences {
         defaults.set(mode.rawValue, forKey: Self.currentModeKey)
     }
 
+    /// A restored session reports its own mode. A fresh launch instead uses
+    /// the last explicit choice, which restoration must not overwrite.
+    func launchMode(restoredSessionID: String) -> SessionMode {
+        restoredSessionID.isEmpty ? lastMode() : currentMode()
+    }
+
     func draft(scope: ConversationScope) -> String {
         defaults.string(forKey: key("draft", scope: scope)) ?? ""
     }
@@ -68,24 +74,45 @@ struct ProjectScopedPreferences {
         defaults.set(value, forKey: key("draft", scope: scope, mode: mode))
     }
 
-    /// A mode change within one conversation carries its composer contents.
-    /// Resuming another conversation instead restores the destination slot.
-    func draftForModeChange(
+    /// A session owns one draft independently of its current mode. The
+    /// mode-scoped slot is used only before a new session receives its ID.
+    func draft(scope: ConversationScope, mode: SessionMode, ownerSessionID: String) -> String {
+        guard !ownerSessionID.isEmpty else { return draft(scope: scope, mode: mode) }
+        return (defaults.dictionary(forKey: key("session-drafts", scope: scope)) as? [String: String])?[ownerSessionID] ?? ""
+    }
+
+    func setDraft(_ value: String, scope: ConversationScope, mode: SessionMode, ownerSessionID: String) {
+        guard !ownerSessionID.isEmpty else {
+            setDraft(value, scope: scope, mode: mode)
+            return
+        }
+        let draftsKey = key("session-drafts", scope: scope)
+        var drafts = defaults.dictionary(forKey: draftsKey) as? [String: String] ?? [:]
+        drafts[ownerSessionID] = value
+        defaults.set(drafts, forKey: draftsKey)
+    }
+
+    /// Carry a draft across a mode change or the first session ID assignment.
+    /// A restore instead saves the outgoing owner and loads the destination,
+    /// even when both sessions use the same mode.
+    func draftForSessionTransition(
         _ value: String,
         scope: ConversationScope,
         from oldMode: SessionMode,
         to newMode: SessionMode,
-        ownerSessionID: String,
-        restoringSessionID: String?
-    ) -> (draft: String, didRestoreOwner: Bool) {
-        let restoresAnotherOwner = !ownerSessionID.isEmpty && restoringSessionID == ownerSessionID
-        guard oldMode != newMode else { return (value, restoresAnotherOwner) }
-        setDraft(value, scope: scope, mode: oldMode)
-        if !restoresAnotherOwner {
-            setDraft(value, scope: scope, mode: newMode)
-            return (value, false)
+        fromOwner: String,
+        toOwner: String,
+        restoring: Bool
+    ) -> String {
+        setDraft(value, scope: scope, mode: oldMode, ownerSessionID: fromOwner)
+        if restoring {
+            return draft(scope: scope, mode: newMode, ownerSessionID: toOwner)
         }
-        return (draft(scope: scope, mode: newMode), true)
+        setDraft(value, scope: scope, mode: newMode, ownerSessionID: toOwner)
+        if fromOwner.isEmpty && (!toOwner.isEmpty || oldMode != newMode) {
+            setDraft("", scope: scope, mode: oldMode, ownerSessionID: "")
+        }
+        return value
     }
 
     func activeSessionID(scope: ConversationScope) -> String {

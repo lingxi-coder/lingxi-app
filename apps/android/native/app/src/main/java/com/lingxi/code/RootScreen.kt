@@ -257,17 +257,13 @@ internal fun sameDraftOwner(
 ): Boolean = previousScope == scope && previousSessionId != null && sessionId != "new" &&
     canonicalSessionId(previousSessionId) == canonicalSessionId(sessionId)
 
-internal suspend fun draftForModeChange(
-    store: ScopeStateStore,
-    destinationKey: String,
-    currentDraft: String,
-    sameOwner: Boolean,
-): String = if (sameOwner) {
-    store.persistDraft(destinationKey, currentDraft)
-    currentDraft
-} else {
-    store.read(destinationKey)?.draft.orEmpty()
-}
+/** A temporary draft is carried only into the new session that owns it. */
+internal fun shouldTransferNewDraft(
+    previousScope: ConversationScope?, previousSessionId: String?,
+    scope: ConversationScope, sessionId: String, transitioning: Boolean, isNew: Boolean,
+    newDraftScope: ConversationScope?,
+): Boolean = previousScope == scope && previousSessionId == "new" && sessionId != "new" &&
+    !transitioning && isNew && newDraftScope == scope
 
 /**
  * Root composable for the app shell.
@@ -363,6 +359,8 @@ fun RootScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     var activeSessionMode by rememberSaveable { mutableStateOf(SessionMode.Code) }
     var lastSelectedMode by rememberSaveable { mutableStateOf(SessionMode.Code) }
+    // Only a deliberately started session may inherit the temporary new-chat draft.
+    var newDraftScope by remember { mutableStateOf<ConversationScope?>(null) }
     val scopeStore = remember(appContext) { ScopeStateStore(appContext) }
     var restoredModeSessionKey by rememberSaveable { mutableStateOf<String?>(null) }
     var drawerBootstrapComplete by remember { mutableStateOf(false) }
@@ -395,11 +393,13 @@ fun RootScreen(
                     val slotId = scopeStore.read(launchScope.sessionStateKey(activeSessionMode))?.lastActiveSessionId
                         ?.takeUnless { it.isBlank() || it == "new" }
                     val selected = chatViewModel.prepareInitialSessionRestore(slotId?.let { SessionRef(it, "") }, launchScope)
+                    newDraftScope = launchScope.takeIf { selected == null }
                     // This startup target has already been selected. Waiting for
                     // its confirmation must not reopen an older mode-slot owner.
                     restoredModeSessionKey = launchScope.sessionStateKey(activeSessionMode)
                     selected?.id
                 } else chatViewModel.state.value.session.id.takeUnless { it == "new" }
+                if (!initialBinding && launchSessionId == null) newDraftScope = launchScope
                 val ownerMode = com.lingxi.code.conversation.DurableConversationTurnClientStore.ownerModeForSession(
                     appContext, launchWorkspaceKey, launchSessionId,
                 ) ?: activeSessionMode
@@ -489,7 +489,6 @@ fun RootScreen(
     val drawerUi = rememberDrawerUiState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    var selectionWrite by remember { mutableStateOf<Job?>(null) }
 
     // The conversation mode follows the session the user opens or starts; the
     // drawer's Chat/Code chips are only a list filter and never decide it.
@@ -499,17 +498,7 @@ fun RootScreen(
 
     fun rememberModeSelection(mode: SessionMode) {
         lastSelectedMode = mode
-        val previous = selectionWrite
-        selectionWrite = scope.launch {
-            previous?.join()
-            try {
-                scopeStore.persistSelectedMode(mode)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                chatViewModel.reportHostError(error.message.orEmpty())
-            }
-        }
+        chatViewModel.rememberModeSelection(scopeStore, mode)
     }
 
     fun selectSessionMode(mode: SessionMode) {
@@ -609,7 +598,7 @@ fun RootScreen(
     LaunchedEffect(scopeStore) {
         val restoredMode = scopeStore.readActiveMode() ?: SessionMode.Code
         activeSessionMode = restoredMode
-        lastSelectedMode = scopeStore.readSelectedMode() ?: SessionMode.Code
+        lastSelectedMode = chatViewModel.readSelectedMode(scopeStore) ?: SessionMode.Code
         drawerUi.replaceSessionPins(scopeStore.readPinnedSessions())
         // Results that already exist when this first runs are not "new".
         cronResultsSeenAt = scopeStore.readCronResultsSeenAt().takeIf { it > 0L }
@@ -817,78 +806,125 @@ fun RootScreen(
 
     // The composer draft is hoisted here so a voice transcription (the
     // hold-to-talk release) can route its recognized text straight into the
-    // input the user is about to send. ScopeStateStore is authoritative for the
-    // `(workspace, mode)` draft; the legacy SavedStateHandle value is consulted
-    // only once for a Code-mode process restore.
-    var draft by remember { mutableStateOf(chatViewModel.restoredDraft) }
-    LaunchedEffect(chatViewModel) {
-        chatViewModel.sideChats.failedDraft.collect { failed ->
-            if (failed != null && draft.isEmpty()) draft = failed
-        }
-    }
+    // input the user is about to send. Drafts follow the conversation owner,
+    // including when its profile changes, rather than a workspace/mode slot.
+    val initialSavedDraft = remember(chatViewModel) { chatViewModel.restoredDraft }
+    var draft by remember { mutableStateOf("") }
     val conversationSource by chatViewModel.engineSource.collectAsState()
     val visualizationHost = conversationSource.visualizationHost
     var voiceDraftBase by remember { mutableStateOf("") }
 
-    // Which scope's draft the composer is currently showing — guards the
-    // restore effect below against unrelated recompositions.
-    var draftScopeKey by remember { mutableStateOf<String?>(null) }
+    // The currently displayed draft and serialized writes belong to this owner.
     var draftOwnerScope by remember { mutableStateOf<ConversationScope?>(null) }
     var draftOwnerSessionId by remember { mutableStateOf<String?>(null) }
+    var draftRevision by remember { mutableLongStateOf(0L) }
+    var draftLoaded by remember { mutableStateOf(false) }
+    var mayRestoreSavedDraft by remember { mutableStateOf(true) }
+
+    fun queueDraftWrite(ownerScope: ConversationScope?, sessionId: String?, text: String): Job? {
+        if (ownerScope == null || sessionId == null || sessionId == "new") return null
+        return chatViewModel.persistConversationDraft(scopeStore, ownerScope, sessionId, text)
+    }
+
+    fun replaceOwnedDraft(ownerScope: ConversationScope, sessionId: String, text: String) {
+        draftOwnerScope = ownerScope
+        draftOwnerSessionId = canonicalSessionId(sessionId)
+        draftRevision++
+        draftLoaded = true
+        draft = text
+        chatViewModel.onDraftChanged(text, ownerScope, sessionId)
+        queueDraftWrite(ownerScope, sessionId, text)
+    }
+
+    fun queueCurrentDraft(): Job? = if (draftLoaded) queueDraftWrite(draftOwnerScope, draftOwnerSessionId, draft) else null
+
+    fun updateCurrentDraft(text: String) {
+        draft = text
+        draftRevision++
+        draftLoaded = true
+        queueCurrentDraft()
+        val ownerScope = draftOwnerScope
+        val ownerId = draftOwnerSessionId
+        if (ownerScope != null && ownerId != null) chatViewModel.onDraftChanged(text, ownerScope, ownerId)
+    }
+
+    LaunchedEffect(chatViewModel) {
+        chatViewModel.sideChats.failedDraft.collect { failed ->
+            if (failed != null && draft.isEmpty()) updateCurrentDraft(failed)
+        }
+    }
 
     fun startCurrentScopeSession(mode: SessionMode) {
         val previousKey = restoredModeSessionKey
         val previousSessionId = chatViewModel.state.value.session.id
+        queueCurrentDraft()
         restoredModeSessionKey = sourceScope.sessionStateKey(mode)
         chatViewModel.startNewSession(mode)
         if (!chatViewModel.state.value.sessionTransitioning && chatViewModel.state.value.session.id == previousSessionId) {
             restoredModeSessionKey = previousKey
+        } else {
+            val sessionId = chatViewModel.state.value.session.id
+            newDraftScope = sourceScope.takeIf { sessionId == "new" }
+            replaceOwnedDraft(sourceScope, sessionId, "")
         }
     }
 
-    // Mode changes do not replace the source or the current session. Preserve
-    // its draft and owner before updating the mode-scoped presentation keys.
+    // Mode changes do not replace the source, session or its draft.
     LaunchedEffect(drawerBootstrapComplete, state.sessionMode, state.pendingSessionMode, state.session.id, state.sessionReady, state.sessionTransitioning, sourceScope) {
         if (!drawerBootstrapComplete || !state.sessionReady || state.sessionTransitioning) return@LaunchedEffect
         val mode = state.sessionMode ?: return@LaunchedEffect
         val sameOwner = sameDraftOwner(draftOwnerScope, draftOwnerSessionId, sourceScope, state.session.id)
         state.pendingSessionMode?.takeIf { sameOwner }?.let { pending ->
             val key = sourceScope.sessionStateKey(pending)
-            scopeStore.persistDraft(key, draft)
             if (state.session.id != "new") scopeStore.persistLastActiveSession(key, state.session.id)
         }
         if (mode != activeSessionMode) {
             val key = sourceScope.sessionStateKey(mode)
-            draft = draftForModeChange(scopeStore, key, draft, sameOwner)
             if (state.session.id != "new") scopeStore.persistLastActiveSession(key, state.session.id)
-            draftScopeKey = key
             restoredModeSessionKey = key
             activeSessionMode = mode
             chatViewModel.refreshSessions()
         }
-        draftOwnerScope = sourceScope
-        draftOwnerSessionId = state.session.id
     }
 
-    // Swap the visible draft whenever workspace OR mode changes. Keyed on the
-    // durable session-state key so Chat and Code can never overwrite each
-    // other, even inside the same workspace.
-    LaunchedEffect(sourceScope, activeSessionMode) {
-        val key = sourceScope.sessionStateKey(activeSessionMode)
-        if (key == draftScopeKey) return@LaunchedEffect
-        val firstBind = draftScopeKey == null
-        draftScopeKey = key
-        val restored = scopeStore.read(key)?.draft
-            ?: if (firstBind && activeSessionMode == SessionMode.Code) {
-                chatViewModel.restoredDraft
-            } else {
-                ""
+    LaunchedEffect(drawerBootstrapComplete, sourceScope, state.session.id, state.sessionTransitioning, state.isNew) {
+        if (!drawerBootstrapComplete) return@LaunchedEffect
+        val nextId = canonicalSessionId(state.session.id)
+        if (draftOwnerScope == sourceScope && draftOwnerSessionId == nextId) return@LaunchedEffect
+        val oldScope = draftOwnerScope
+        val oldId = draftOwnerSessionId
+        val transferNewDraft = shouldTransferNewDraft(
+            oldScope, oldId, sourceScope, nextId, state.sessionTransitioning, state.isNew, newDraftScope,
+        )
+        if (transferNewDraft) {
+            replaceOwnedDraft(sourceScope, nextId, draft)
+            newDraftScope = null
+            mayRestoreSavedDraft = false
+            return@LaunchedEffect
+        }
+        queueCurrentDraft()
+        val saved = if (mayRestoreSavedDraft && chatViewModel.restoredDraftFor(sourceScope, nextId) != null) initialSavedDraft else null
+        if (nextId != "new") {
+            newDraftScope = null
+            mayRestoreSavedDraft = false
+        }
+        draftOwnerScope = sourceScope
+        draftOwnerSessionId = nextId
+        draftRevision++
+        val revision = draftRevision
+        draftLoaded = nextId == "new"
+        draft = if (nextId == "new") saved.orEmpty() else ""
+        if (nextId == "new") return@LaunchedEffect
+        val owner = sourceScope
+        val mode = state.sessionMode ?: activeSessionMode
+        scope.launch {
+            chatViewModel.awaitConversationDraftWrites()
+            val restored = scopeStore.readConversationDraft(owner.persistenceKey(), nextId, mode) ?: saved.orEmpty()
+            if (draftOwnerScope == owner && draftOwnerSessionId == nextId && draftRevision == revision) {
+                draft = restored
+                draftLoaded = true
+                chatViewModel.onDraftChanged(restored, owner, nextId)
             }
-        // The very first bind after process start must not wipe a draft the
-        // user already restored (remember { } above) — only apply when the
-        // stored value differs and this is a REAL scope change.
-        if (!firstBind || restored.isNotEmpty() || activeSessionMode != SessionMode.Code) {
-            draft = restored
         }
     }
 
@@ -897,10 +933,10 @@ fun RootScreen(
     // running; the final result replaces that same suffix on release.
     val (startVoiceCapture, onVoiceHoldRelease) = rememberVoiceCapture(
         onTranscript = { transcript ->
-            draft = appendVoiceTranscript(voiceDraftBase, transcript)
+            updateCurrentDraft(appendVoiceTranscript(voiceDraftBase, transcript))
         },
         onPartialTranscript = { partial ->
-            draft = appendVoiceTranscript(voiceDraftBase, partial)
+            updateCurrentDraft(appendVoiceTranscript(voiceDraftBase, partial))
         },
         onError = { kind, message ->
             audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.fromError(kind, message)
@@ -1037,7 +1073,14 @@ fun RootScreen(
             onCommitted = {
                 projectStore.publishActive(checkNotNull(persisted))
                 drawerUi.selectSession(destination.id)
-                if (newSession) restoredModeSessionKey = engineScope.sessionStateKey(sessionModeOverride)
+                if (newSession) {
+                    queueCurrentDraft()
+                    newDraftScope = engineScope
+                    replaceOwnedDraft(engineScope, "new", "")
+                    restoredModeSessionKey = engineScope.sessionStateKey(sessionModeOverride)
+                } else {
+                    newDraftScope = null
+                }
             },
         )
     }
@@ -1698,7 +1741,7 @@ fun RootScreen(
                         val targetScope = resolveLinkedScope(link.params["workspace"])
                             ?: error(resources.getString(R.string.deep_link_workspace_missing))
                         if (sourceScope != targetScope) {
-                            scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
+                            queueCurrentDraft()?.join()
                             check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true)) { resources.getString(R.string.deep_link_busy) }
                             return@launch
                         }
@@ -1720,7 +1763,7 @@ fun RootScreen(
                             // The indexed session and current owner determine the mode now.
                             val sameSession = targetScope == sourceScope && canonicalSessionId(state.session.id) == canonicalSessionId(id)
                             val mode = if (sameSession) activeSessionMode else storedMode
-                            scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
+                            queueCurrentDraft()?.join()
                             if (!sameSession) {
                                 check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), SessionRef(id, row?.title ?: scheduled?.prompt.orEmpty().take(120)), false, sessionModeOverride = mode)) { resources.getString(R.string.deep_link_busy) }
                                 setConversationMode(mode)
@@ -1735,19 +1778,16 @@ fun RootScreen(
                         "new" -> {
                             val targetScope = resolveScope() ?: error(resources.getString(R.string.deep_link_workspace_missing))
                             val mode = link.params["mode"]?.let { com.lingxi.code.model.sessionModeFromWireValue(it) } ?: activeSessionMode
-                            val destinationDraft = if (targetScope == sourceScope && mode == activeSessionMode) draft else scopeStore.read(targetScope.sessionStateKey(mode))?.draft.orEmpty()
+                            val destinationDraft = if (targetScope == sourceScope) draft else ""
                             if (destinationDraft.isNotBlank() && approvedDraftLink != link) {
                                 draftLinkReview = link
                                 return@launch
                             }
-                            scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
+                            queueCurrentDraft()?.join()
                             val prompt = link.payload["prompt"] as? String ?: ""
                             check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true, sessionModeOverride = mode)) { resources.getString(R.string.deep_link_busy) }
                             setConversationMode(mode)
-                            scopeStore.persistDraft(targetScope.sessionStateKey(mode), prompt)
-                            draft = prompt
-                            draftScopeKey = targetScope.sessionStateKey(mode)
-                            chatViewModel.onDraftChanged(prompt)
+                            replaceOwnedDraft(targetScope, chatViewModel.state.value.session.id, prompt)
                             approvedDraftLink = null
                         }
                         "import" -> onDeepLinkImportReady(link)
@@ -1931,9 +1971,7 @@ fun RootScreen(
     /**
      * Start a new conversation in [target] in [mode]. A workspace change
      * rebinds the engine; a mode change keeps the current workspace source.
-     * [carryDraft] moves what the
-     * user already typed into the destination's draft slot, which is keyed per
-     * (workspace, mode), so picking a mode on the new-chat page keeps the text.
+     * [carryDraft] moves what the user already typed into the new conversation.
      */
     fun startNewSessionIn(
         target: ConversationScope,
@@ -1944,14 +1982,16 @@ fun RootScreen(
         if (target is ConversationScope.Project && project == null) return
         val carried = draft
         if (sourceMatches(target)) {
+            queueCurrentDraft()
             startCurrentScopeSession(mode)
+            if (carryDraft && chatViewModel.state.value.sessionTransitioning) {
+                replaceOwnedDraft(target, chatViewModel.state.value.session.id, carried)
+            }
             closeDrawer()
             closeProjectPages()
         } else {
             scope.launch {
-                if (carryDraft && carried.isNotEmpty()) {
-                    scopeStore.persistDraft(target.sessionStateKey(mode), carried)
-                }
+                queueCurrentDraft()?.join()
                 if (
                     switchEngineScope(
                         engineScope = target,
@@ -1963,6 +2003,7 @@ fun RootScreen(
                     )
                 ) {
                     setConversationMode(mode)
+                    if (carryDraft) replaceOwnedDraft(target, chatViewModel.state.value.session.id, carried)
                     closeDrawer()
                     closeProjectPages()
                 }
@@ -2016,7 +2057,7 @@ fun RootScreen(
                 val workspaceId = oldBinding?.workspaceId
                     ?.takeIf { boundProject?.record?.id == ownedProject.record.id && oldBinding.sourceDirectory == directory }
                     ?: java.util.UUID.randomUUID().toString()
-                scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
+                queueCurrentDraft()?.join()
                 val authoringScope = ConversationScope.Project(project.record.id)
                 check(switchEngineScope(authoringScope, project,
                     target?.let { SessionRef(it.sessionId, it.title) }, target == null,
@@ -2072,9 +2113,7 @@ fun RootScreen(
                 }
                 if (appId == null) {
                     val prompt = "请在这个源码项目中创建应用：$name。使用 local-app skill 和 LocalApp schema 2，完成后发布到本机应用库。"
-                    val key = ConversationScope.Project(project.record.id).sessionStateKey(mode)
-                    scopeStore.persistDraft(key, prompt)
-                    draft = prompt; draftScopeKey = key; chatViewModel.onDraftChanged(prompt)
+                    replaceOwnedDraft(authoringScope, confirmed.sessionId, prompt)
                 }
                 appsPageOpen = false; marketAppId = null; runtimeAppId = null
                 closeDrawer(); closeProjectPages()
@@ -2372,28 +2411,7 @@ fun RootScreen(
                         )
                     },
                     draft = draft,
-                    onDraftChange = {
-                        draft = it
-                        val active = sourceScope
-                        val mode = activeSessionMode
-                        val pending = state.pendingSessionMode
-                        scope.launch {
-                            scopeStore.persistDraft(
-                                active.sessionStateKey(mode),
-                                it,
-                            )
-                            if (pending != null && pending != mode &&
-                                sameDraftOwner(draftOwnerScope, draftOwnerSessionId, active, state.session.id)) {
-                                scopeStore.persistDraft(active.sessionStateKey(pending), it)
-                            }
-                        }
-                        // Keep only the legacy Code slot mirrored for old
-                        // process-state restores; mode-scoped storage above
-                        // is authoritative for every workspace.
-                        if (activeSessionMode == SessionMode.Code) {
-                            chatViewModel.onDraftChanged(it)
-                        }
-                    },
+                    onDraftChange = ::updateCurrentDraft,
                     onCameraClick = onCameraClick,
                     attachment = attachment,
                     onRemoveAttachment = { attachment = null },

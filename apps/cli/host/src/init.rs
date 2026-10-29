@@ -1074,6 +1074,9 @@ pub(crate) fn resolve_desktop_config_at(
 
     {
         let mut __desktop_config = DesktopConfig::default();
+        __desktop_config.initial_conversation_mode = Some(
+            lingxi_core::host::session_context::ConversationMode::Code,
+        );
         __desktop_config.build_info = build_info;
         __desktop_config.diagnostics = Some(Arc::new(CliDesktopDiagnostics));
         __desktop_config.native_policy_warning_logger =
@@ -2121,6 +2124,16 @@ mod tests {
         use clap::Parser;
         Argv::try_parse_from(std::iter::once("lingxi-cli").chain(args.iter().copied()))
             .expect("parses")
+    }
+
+    #[test]
+    fn cli_config_always_selects_code_profile() {
+        use lingxi_core::host::session_context::ConversationMode;
+        let cwd = tempfile::tempdir().unwrap();
+        let config = resolve_desktop_config_at(
+            &argv_of(&[]), permission::PermissionMode::Default, cwd.path().to_path_buf(),
+        );
+        assert_eq!(config.initial_conversation_mode, Some(ConversationMode::Code));
     }
 
     /// HP-2 (2.1.259) — `--permission-prompts none` must reach

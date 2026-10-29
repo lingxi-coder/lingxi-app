@@ -235,6 +235,7 @@ pub struct RataApp<'cb> {
     /// Streaming turn events from the orchestrator bridge, drained into the
     /// widget at the top of every tick.
     events_rx: UnboundedReceiver<TurnEvent>,
+    admitted_rows: Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     /// Permission requests from the permission bridge, drained into the
     /// widget right after the turn events (the widget serializes prompts).
     permission_rx: Receiver<PermissionExchange>,
@@ -314,6 +315,7 @@ impl<'cb> RataApp<'cb> {
         Self {
             chat_widget: ChatWidget::new(messages, session),
             events_rx,
+            admitted_rows: None,
             permission_rx,
             ask_user_question_rx,
             computer_access_rx,
@@ -873,6 +875,9 @@ pub fn run_app(
     messages: Vec<RenderedMessage>,
     initial_prompt: Option<Utf16JsonProjection>,
     initial_draft: Option<String>,
+    switch_drafts: Vec<crate::chat_widget::SwitchDraft>,
+    switch_drafts_out: std::sync::Arc<std::sync::Mutex<Vec<crate::chat_widget::SwitchDraft>>>,
+    admitted_rows: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     message_anchor: Option<String>,
     background_handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     session: SessionInfo,
@@ -1005,6 +1010,7 @@ pub fn run_app(
             on_rewake_peer: Box::new(on_rewake_peer),
         },
     );
+    app.admitted_rows = Some(admitted_rows);
     if let Some(callback) = loop_interrupt {
         app.chat_widget.set_loop_interrupt(callback);
     }
@@ -1125,6 +1131,7 @@ pub fn run_app(
         }
     }
     if let Some(draft) = initial_draft { app.chat_widget.restore_link_draft(&draft); }
+    app.chat_widget.restore_switch_drafts(switch_drafts);
     if let Some(uuid) = message_anchor { app.chat_widget.anchor_message(uuid); }
     let mut event_driver = CrosstermEventDriver;
     let result = app.run_inner(
@@ -1135,6 +1142,9 @@ pub fn run_app(
     );
     app.chat_widget.set_mod_ui_selection(None);
     app.chat_widget.cancel_active_turn();
+    if matches!(result.as_ref(), Ok(AppExit::SwitchSession(_) | AppExit::OpenAgentSession(_) | AppExit::BranchSession { .. } | AppExit::Rewind { .. })) {
+        *switch_drafts_out.lock().unwrap() = app.chat_widget.switch_drafts();
+    }
     result
 }
 

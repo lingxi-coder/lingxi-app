@@ -1006,6 +1006,9 @@ async fn cold_draft_boot_restores_profile_revision_before_new_selections() {
     let mut cfg = isolated_config(&cwd, &home);
     cfg.session_id_override = Some(id.to_string());
     cfg.restore_draft = true;
+    // Even a stale startup hint cannot replace the pending durable profile.
+    cfg.initial_conversation_mode =
+        Some(lingxi_core::host::session_context::ConversationMode::Code);
     let bound = Box::pin(assemble(cfg)).await.unwrap();
     let lifecycle = bound.session_lifecycle();
     let (endpoint, mut socket) = connect(bound.connection).await;
@@ -1073,6 +1076,67 @@ async fn cold_draft_boot_restores_profile_revision_before_new_selections() {
         transition.selected,
         lingxi_core::host::session_context::ConversationMode::Code
     );
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn fresh_desktop_draft_selects_default_before_session_start_hook() {
+    use lingxi_core::host::{session_context::ConversationMode, OrchestratorHandle};
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("config");
+    let id = uuid::Uuid::new_v4();
+    let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+    let hook_input = cwd.join("session-start-input.json");
+    let observed_transcript = cwd.join("session-start-transcript.jsonl");
+    let hook_output = serde_json::json!({"hookSpecificOutput":{
+        "hookEventName":"SessionStart", "additionalContext":"startup context"
+    }});
+    let settings = serde_json::json!({"hooks":{"SessionStart":[{"hooks":[{
+        "type":"command", "command":format!(
+            "cat > '{}'; if [ -f '{}' ]; then cat '{}' > '{}'; else : > '{}'; fi; printf '%s\\n' '{}'",
+            hook_input.display(), path.display(), path.display(), observed_transcript.display(),
+            observed_transcript.display(), hook_output)
+    }]}]}});
+    let id_string = id.to_string();
+    let args = BridgeArgs::parse([
+        "--session-id",
+        id_string.as_str(),
+        "--restore-draft",
+        "--initial-conversation-mode",
+        "chat",
+    ])
+    .unwrap();
+    let mut cfg = isolated_config(&cwd, &home);
+    cfg.session_id_override = args.session_id.clone();
+    cfg.restore_draft = args.restore_draft;
+    cfg.initial_conversation_mode = resolve_desktop_config(&args).initial_conversation_mode;
+    cfg.flag_settings = Some(serde_json::from_value(settings.clone()).unwrap());
+    cfg.flag_settings_source = Some(settings.to_string());
+
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let mode = bound.runtime.orchestrator.conversation_mode().await;
+    assert_eq!(
+        (mode.active, mode.selected, mode.pending),
+        (ConversationMode::Chat, ConversationMode::Chat, false)
+    );
+    let input: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(hook_input).unwrap()).unwrap();
+    assert_eq!(input["source"], "startup");
+    let at_hook = std::fs::read_to_string(observed_transcript).unwrap();
+    let transition =
+        session::JsonlWriter::session_mode_transition_from_source(&at_hook, &id_string)
+            .expect("the initial mode must be durable before SessionStart executes");
+    assert_eq!(transition.active, ConversationMode::Chat);
+    assert_eq!(transition.selected, ConversationMode::Chat);
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
     socket.close(None).await.unwrap();
     endpoint.shutdown().await;
     let report = lifecycle.shutdown_and_drain().await;

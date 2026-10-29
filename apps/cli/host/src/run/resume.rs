@@ -1,6 +1,5 @@
 use crate::argv::Argv;
 use crate::exit_codes;
-use crate::init::Runtime;
 use harness_runtime::headless::output::OutputSink;
 use lingxi_core::host::{FileSystem, OrchestratorHandle};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -15,6 +14,75 @@ use session::jsonl::loader::{
 use session::jsonl::JsonlMessage;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Capture a source under its writer claim, validate that it has no unfinished
+/// recovery, then atomically publish a separate profile and transcript.
+pub(crate) async fn create_independent_cli_branch(
+    home: &std::path::Path,
+    target_cwd: &str,
+    source_id: uuid::Uuid,
+    target_id: uuid::Uuid,
+    selected_source_path: Option<&std::path::Path>,
+    custom_title: Option<&str>,
+) -> Result<(PathBuf, session::branch::BranchResult), String> {
+    let live = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"));
+    let source_lease = live.claim_session_id(&source_id.to_string(), std::process::id())
+        .map_err(|error| format!("claim source session: {error}"))?.into_shared();
+    let _target_lease = live.claim_session_id(&target_id.to_string(), std::process::id())
+        .map_err(|error| format!("claim branch session: {error}"))?.into_shared();
+    let path = match selected_source_path {
+        Some(path) => path.to_path_buf(),
+        None => session::jsonl::resolve_session_path_across_worktrees(home, target_cwd, source_id)
+            .await.map_err(|error| error.to_string())?,
+    };
+    let path = crate::init::absolute_resolved_tui_resume_path(path).map_err(|error| error.to_string())?;
+    let path = crate::init::validate_exact_tui_resume_path(home, source_id, &path)
+        .map_err(|error| error.to_string())?;
+    let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(PathBuf::from(target_cwd)));
+    let (_, content, loaded) = session::jsonl::load_routed_session_from_path_with_source(
+        &path, source_id, fs.clone(),
+    ).await.map_err(|error| error.to_string())?;
+    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &source_id.to_string());
+    let recovery = harness_runtime::desktop::session_state::capture_branch_recovery(
+        home, source_id, source_lease.clone(),
+    ).await.map_err(|error| format!("resume the original conversation first: {error}"))?;
+    orchestrator::native_computer::validate_independent_branch(
+        source_id, &content, &messages, recovery.as_ref(),
+    ).map_err(|error| format!("resume the original conversation first: {error}"))?;
+    let source_cwd = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
+        .unwrap_or_else(|| target_cwd.to_owned());
+    let result = session::branch::create_branch_from_captured(session::branch::CapturedBranch {
+        lingxi_home: home,
+        source_cwd: &source_cwd,
+        target_cwd,
+        source_session_id: source_id,
+        target_session_id: target_id,
+        source_content: &content,
+        messages: &messages,
+        custom_title,
+        mode: Some(lingxi_core::host::session_context::ConversationMode::Code),
+    }, fs).await.map_err(|error| error.to_string())?;
+    let target = session::jsonl::path::session_path(home, target_cwd, &target_id.to_string());
+    let target = crate::init::validate_exact_tui_resume_path(home, target_id, &target)
+        .map_err(|error| error.to_string())?;
+    Ok((target, result))
+}
+
+async fn initial_resume_target(argv: &Argv, source_id: uuid::Uuid) -> Result<uuid::Uuid, String> {
+    if !argv.fork_session {
+        return Ok(source_id);
+    }
+    let target_id = match argv.session_id.as_deref() {
+        Some(id) => lingxi_core::types::SessionId::parse_prefixed(id)
+            .map(|id| id.as_uuid()).ok_or_else(|| "Invalid branch session ID".to_owned())?,
+        None => uuid::Uuid::new_v4(),
+    };
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    create_independent_cli_branch(
+        &lingxi_home_dir(), &cwd.to_string_lossy(), source_id, target_id, None, None,
+    ).await?;
+    Ok(target_id)
+}
 
 /// Where a `--resume` invocation should be handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,9 +115,9 @@ pub fn resume_route(argv: &Argv, is_tty: bool) -> ResumeRoute {
 /// an empty arg under a full TTY opens the iocraft Resume screen, and an empty
 /// arg under `--no-tui` / a non-TTY falls back to the unchanged M5-08 stdio
 /// picker.
-pub async fn run_resume(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
+pub async fn run_resume(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     match resume_route(argv, crate::mode::is_full_tty()) {
-        ResumeRoute::LoadById => run_resume_by_id(argv, runtime, sink).await,
+        ResumeRoute::LoadById => run_resume_by_id(argv, sink).await,
         ResumeRoute::IocraftScreen => run_resume_iocraft(argv, sink).await,
         ResumeRoute::StdioPicker => run_resume_stdio_picker(argv, sink).await,
     }
@@ -147,7 +215,7 @@ pub(super) fn parse_pr_value(raw: &str) -> Option<u64> {
 ///     prior conversation replayed (M5-13 — [`mount_resumed_tui`]);
 ///   - else (`--no-tui` / non-TTY, no prompt) → keep the stdio fallback:
 ///     surface "Resumed session {id}" + the not-yet-wired stdio REPL notice.
-pub(super) async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
+pub(super) async fn run_resume_by_id(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     // `t.resume.trim()` — the oracle trims before deciding id-vs-title.
     let arg = argv.resume.as_deref().unwrap_or("").trim();
     let session_id = match resolve_session_id(arg) {
@@ -168,7 +236,7 @@ pub(super) async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn 
             }
         },
     };
-    resume_resolved_session(argv, runtime, sink, session_id).await
+    resume_resolved_session(argv, sink, session_id).await
 }
 
 /// Resolve `--resume <title>` to a session id — the `!s && i` arm of the
@@ -289,7 +357,7 @@ pub(super) async fn load_resume_rows_all() -> Result<Vec<SessionMetadata>, Loade
 /// resumable conversation, error with the byte-exact `No conversation found to
 /// continue` and exit non-zero (TS `exitWithError`). Once a session is picked the
 /// dispatch is identical to `--resume <uuid>` (prompt one-shot / TUI / stdio).
-pub async fn run_continue(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
+pub async fn run_continue(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     // Newest-first rows over the cwd's project dir (same loader the picker uses);
     // `EmptyDirectory` (or an empty list) ⇒ nothing to continue.
     let rows = match load_resume_rows().await {
@@ -309,7 +377,7 @@ pub async fn run_continue(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
             .await;
         return exit_codes::RUNTIME_ERROR;
     };
-    resume_resolved_session(argv, runtime, sink, first.uuid).await
+    resume_resolved_session(argv, sink, first.uuid).await
 }
 
 /// Shared post-resolution resume dispatch for both `--resume <uuid>` and
@@ -317,10 +385,16 @@ pub async fn run_continue(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
 /// (prompt one-shot → TUI mount → stdio fallback).
 pub(super) async fn resume_resolved_session(
     argv: &Argv,
-    _runtime: &Runtime,
     sink: &dyn OutputSink,
     session_id: uuid::Uuid,
 ) -> i32 {
+    let session_id = match initial_resume_target(argv, session_id).await {
+        Ok(id) => id,
+        Err(error) => {
+            sink.error("runtime", &error).await;
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
     // SESSION.4 parity: a resume for a session that does NOT exist on disk must
     // NOT report success. TS (claude-code/src/main.tsx:3675-3681) calls
     // `loadConversationForResume(sessionId)` and, when it yields nothing, exits
@@ -354,8 +428,7 @@ pub(super) async fn resume_resolved_session(
     }
 
     sink.text(&format!("Resumed session {session_id}\n")).await;
-    eprintln!("lingxi-cli: resumed; stdio REPL not yet wired (M5-13)");
-    exit_codes::NOT_IMPLEMENTED
+    crate::repl::run_repl_resumed(argv, session_id).await
 }
 
 /// (M5-13) Mount the live TUI for a resumed `--resume <uuid>` session, seeded
@@ -467,10 +540,10 @@ pub(super) async fn mount_resumed_tui_inner(
                 return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
             }
         };
-    let (messages, entries) = if let Some(captured) = tui_build.captured_resume.take() {
+    let entries = if let Some(captured) = tui_build.captured_resume.take() {
         // Assembly mounted this exact claimed revision before startup hooks;
         // reuse it for the UI and deferred replay without overwriting hook rows.
-        (captured.messages, captured.entries)
+        captured.entries
     } else {
         // A caller without a captured boot source uses the in-hand messages.
         let effective_permission_mode = match seed_orchestrator_session(
@@ -502,7 +575,7 @@ pub(super) async fn mount_resumed_tui_inner(
             .orchestrator
             .restore_resume_prompt_metadata(&entries)
             .await;
-        (messages, entries)
+        entries
     };
     if let Err(error) = orchestrator::replay_deferred_tools_after_resume(
         &tui_build.runtime.orchestrator,
@@ -511,6 +584,12 @@ pub(super) async fn mount_resumed_tui_inner(
     .await
     {
         eprintln!("lingxi-cli: resume deferred tools failed: {error}");
+        return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+    }
+    if let Err(error) = apply_cli_resume_profile(
+        tui_build.runtime.orchestrator.as_ref(), shell_launch.map(|launch| &launch.options),
+    ).await {
+        eprintln!("lingxi-cli: cannot resume in Code mode: {error}");
         return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
     }
     // COST seed on resume: the durable ledger owns this. Every host now has a
@@ -527,7 +606,9 @@ pub(super) async fn mount_resumed_tui_inner(
     // `session.models` the freshly-read status snapshot builds (display follows);
     // fast/plan are read live by the turn loop, no cached display to seed.
     let mut boot_notice = None;
+    let mut draft_store = None;
     if let Some(state) = carried_state {
+        draft_store = Some(state.draft_store.clone());
         let orch = &tui_build.runtime.orchestrator;
         if let Some((model, profile)) = state.model {
             let _ = orch.switch_model(&model, profile.as_deref()).await;
@@ -598,8 +679,22 @@ pub(super) async fn mount_resumed_tui_inner(
         resumed_messages,
         initial_prompt,
         handoff,
+        draft_store,
     )
     .await
+}
+
+/// A live worker continues its captured scope; a cold CLI resume selects Code.
+pub(crate) async fn apply_cli_resume_profile(
+    handle: &dyn OrchestratorHandle,
+    background_options: Option<&crate::background_launch::BackgroundLaunchOptions>,
+) -> Result<(), lingxi_core::host::HandleError> {
+    if !background_options.is_some_and(|options| options.preserve_admitted_context) {
+        handle.set_conversation_mode(
+            lingxi_core::host::session_context::ConversationMode::Code,
+        ).await?;
+    }
+    Ok(())
 }
 
 /// Recover the source session stamped by `session::branch::create_branch`.
@@ -696,11 +791,11 @@ async fn remount_source_from(
     target: uuid::Uuid,
 ) -> Result<RemountSource, LoaderError> {
     let path = if current == Some(target) {
-        state.and_then(|state| state.transcript_path.clone()).ok_or_else(|| {
-            LoaderError::Io {
+        state
+            .and_then(|state| state.transcript_path.clone())
+            .ok_or_else(|| LoaderError::Io {
                 arg: target.to_string(),
                 source: std::io::Error::other("mounted transcript path is unavailable"),
-            }
         })?
     } else {
         let path = session::jsonl::resolve_session_path_across_worktrees(
@@ -723,7 +818,8 @@ async fn remount_source_at(
     target: uuid::Uuid,
     path: &std::path::Path,
 ) -> Result<RemountSource, LoaderError> {
-    let path = crate::init::validate_exact_tui_resume_path(home, target, path).map_err(|error| {
+    let path =
+        crate::init::validate_exact_tui_resume_path(home, target, path).map_err(|error| {
         LoaderError::Io {
             arg: path.display().to_string(),
             source: std::io::Error::other(error.to_string()),
@@ -770,6 +866,27 @@ fn claim_mounted_transcript(
     let path = crate::init::validate_exact_tui_resume_path(home, session_id, path)
         .map_err(|error| error.to_string())?;
     Ok((path, claim))
+}
+
+/// Branch the selected persistent mount, revalidating it while the shared
+/// source claim is held by `create_independent_cli_branch`.
+async fn branch_mounted_cli(
+    home: &std::path::Path,
+    cwd: &str,
+    source: uuid::Uuid,
+    state: Option<&crate::mode::RemountState>,
+    title: Option<&str>,
+) -> Result<session::branch::BranchResult, String> {
+    let state = state.ok_or_else(|| "mounted session state is unavailable".to_string())?;
+    if !state.transcript_persistent {
+        return Err("mounted session is read-only".into());
+    }
+    let path = state.transcript_path.as_deref()
+        .ok_or_else(|| "mounted transcript path is unavailable".to_string())?;
+    let (_, result) = create_independent_cli_branch(
+        home, cwd, source, uuid::Uuid::new_v4(), Some(path), title,
+    ).await?;
+    Ok(result)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1028,22 +1145,10 @@ pub(super) async fn drive_tui_switch_loop_inner(
                 let lingxi_home = lingxi_home_dir();
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let cwd_str = cwd.to_string_lossy().into_owned();
-                let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.clone()));
                 let mut state = state;
-                let branch = match claim_mounted_transcript(&lingxi_home, source, state.as_ref()) {
-                    Ok((path, _claim)) => {
-                        session::branch::create_branch_from_path(
-                            &lingxi_home,
-                            &cwd_str,
-                            source,
-                            &path,
-                            title.as_deref(),
-                            fs,
-                        )
-                        .await
-                    }
-                    Err(error) => Err(session::BranchError::Io(std::io::Error::other(error))),
-                };
+                let branch = branch_mounted_cli(
+                    &lingxi_home, &cwd_str, source, state.as_ref(), title.as_deref(),
+                ).await;
                 let mount_target = match branch {
                     Ok(result) => {
                         // claude-code 2.1.205 success confirmation, rendered in
@@ -1070,7 +1175,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
                         }
                         result.new_session_id
                     }
-                    Err(session::BranchError::NoConversation) => {
+                    Err(e) if e == "No conversation to branch" => {
                         // claude-code's in-transcript empty-state line (was a
                         // stderr-only eprintln): re-mount the source session
                         // carrying the notice.
@@ -1095,7 +1200,9 @@ pub(super) async fn drive_tui_switch_loop_inner(
                         &mount_target.to_string(),
                     );
                     match crate::init::absolute_resolved_tui_resume_path(path) {
-                        Ok(path) => remount_source_at(&lingxi_home, &cwd, mount_target, &path).await,
+                        Ok(path) => {
+                            remount_source_at(&lingxi_home, &cwd, mount_target, &path).await
+                        }
                         Err(error) => Err(LoaderError::Io {
                             arg: mount_target.to_string(),
                             source: std::io::Error::other(error.to_string()),
@@ -1175,7 +1282,10 @@ pub(super) async fn drive_tui_switch_loop_inner(
                             .await
                             {
                                 Ok(outcome) => {
-                                    eprintln!("lingxi-cli: rewound {} file(s)", outcome.changed.len());
+                                    eprintln!(
+                                        "lingxi-cli: rewound {} file(s)",
+                                        outcome.changed.len()
+                                    );
                                     if outcome.skipped_links > 0 {
                                         let noun = if outcome.skipped_links == 1 {
                                             "path was"
@@ -1232,7 +1342,9 @@ pub(super) async fn drive_tui_switch_loop_inner(
                         current = Some(mount_target);
                         let path = match state.as_ref().and_then(|s| s.transcript_path.as_ref()) {
                             Some(path) => match crate::init::validate_exact_tui_resume_path(
-                                &lingxi_home, mount_target, path,
+                                &lingxi_home,
+                                mount_target,
+                                path,
                             ) {
                                 Ok(path) => path,
                                 Err(error) => {
@@ -1447,8 +1559,15 @@ pub(super) async fn run_resume_stdio_picker(argv: &Argv, sink: &dyn OutputSink) 
     let mut stdout = tokio::io::stdout();
     match select_session_interactive(&rows, &mut stdin, &mut stdout).await {
         Ok(Some(uuid)) => {
-            sink.text(&format!("Resumed session {uuid}\n")).await;
-            exit_codes::SUCCESS
+            let target = match initial_resume_target(argv, uuid).await {
+                Ok(id) => id,
+                Err(error) => {
+                    sink.error("runtime", &error).await;
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            };
+            sink.text(&format!("Resumed session {target}\n")).await;
+            crate::repl::run_repl_resumed_with_stdin(argv, target, stdin).await
         }
         Ok(None) => {
             sink.text("Cancelled.\n").await;
@@ -1494,6 +1613,13 @@ pub(super) async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i3
 
     match picked {
         Ok(Ok(Some(uuid))) => {
+            let uuid = match initial_resume_target(argv, uuid).await {
+                Ok(id) => id,
+                Err(error) => {
+                    sink.error("runtime", &error).await;
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            };
             let messages = match load_resume_session(uuid).await {
                 Ok(messages) => messages,
                 Err(error) => {

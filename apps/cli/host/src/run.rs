@@ -1,6 +1,10 @@
 //! Product-owned interactive resume selectors and TUI remount lifecycle.
 mod resume;
 
+pub(crate) use resume::create_independent_cli_branch;
+#[cfg(test)]
+pub(crate) use resume::apply_cli_resume_profile;
+
 pub(crate) use resume::{
     daemon_runtime_dir, drive_background_tui_switch_loop, drive_tui_switch_loop,
     inherited_resume_effort, lingxi_home_dir, load_resume_picker_rows,

@@ -227,6 +227,18 @@ impl Transcript {
         true
     }
 
+    /// Remove only a row which never acquired a persisted transcript identity.
+    pub fn remove_unadmitted_user_row(&mut self, row_token: &str) -> bool {
+        let Some(index) = self.row_tokens.iter().find_map(|(index, token)| {
+            (token == row_token && !self.row_uuids.contains_key(index)).then_some(*index)
+        }) else {
+            return false;
+        };
+        let marker = format!("unadmitted:{}", uuid::Uuid::new_v4());
+        self.row_uuids.insert(index, vec![marker.clone()]);
+        self.remove_transcript_rows(&[marker]) == 1
+    }
+
     /// Attach successful per-block JSONL UUIDs to the ordinary assistant
     /// text rows from a response. The internal MessageId is only a grouping
     /// key; it is never exposed to selection as a request id. If the rendered
@@ -515,9 +527,39 @@ impl Transcript {
     /// scrollback; full-screen mode has no native scrollback and therefore
     /// redraws the committed cells plus active tail from this immutable view.
     #[must_use]
-    pub fn message_line_offset(&self, uuid: &str, width: u16, theme: &Theme, hyperlinks: bool, cwd: Option<&Path>) -> Option<usize> {
-        let index = self.row_uuids.iter().filter(|(_, ids)| ids.iter().any(|id| id == uuid)).map(|(index, _)| *index).min()?;
-        Some(self.committed.iter().take(index).map(|cell| wrap_to_width(cell.scrollback_lines(width.max(1), theme, self.render_mode, hyperlinks, cwd), width.max(1)).len()).sum())
+    pub fn message_line_offset(
+        &self,
+        uuid: &str,
+        width: u16,
+        theme: &Theme,
+        hyperlinks: bool,
+        cwd: Option<&Path>,
+    ) -> Option<usize> {
+        let index = self
+            .row_uuids
+            .iter()
+            .filter(|(_, ids)| ids.iter().any(|id| id == uuid))
+            .map(|(index, _)| *index)
+            .min()?;
+        Some(
+            self.committed
+                .iter()
+                .take(index)
+                .map(|cell| {
+                    wrap_to_width(
+                        cell.scrollback_lines(
+                            width.max(1),
+                            theme,
+                            self.render_mode,
+                            hyperlinks,
+                            cwd,
+                        ),
+                        width.max(1),
+                    )
+                    .len()
+                })
+                .sum(),
+        )
     }
 
     pub fn visible_fullscreen_lines(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
@@ -607,12 +649,27 @@ impl Transcript {
         hyperlinks_enabled: bool,
         hyperlink_cwd: Option<&Path>,
     ) -> Option<&str> {
-        self.request_id_for_fullscreen_rows_at(start_row, end_row, viewport_height, width, theme, hyperlinks_enabled, hyperlink_cwd, None)
+        self.request_id_for_fullscreen_rows_at(
+            start_row,
+            end_row,
+            viewport_height,
+            width,
+            theme,
+            hyperlinks_enabled,
+            hyperlink_cwd,
+            None,
+        )
     }
 
     pub fn request_id_for_fullscreen_rows_at(
-        &self, start_row: usize, end_row: usize, viewport_height: usize,
-        width: u16, theme: &Theme, hyperlinks_enabled: bool, hyperlink_cwd: Option<&Path>,
+        &self,
+        start_row: usize,
+        end_row: usize,
+        viewport_height: usize,
+        width: u16,
+        theme: &Theme,
+        hyperlinks_enabled: bool,
+        hyperlink_cwd: Option<&Path>,
         viewport_start: Option<usize>,
     ) -> Option<&str> {
         if start_row > end_row || end_row >= viewport_height {

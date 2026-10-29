@@ -129,8 +129,7 @@ class MobileGStreamerCargoTests(unittest.TestCase):
             shutil.copy2(device / "Headers/arm64/glibconfig.h", simulator / "Headers/x86_64/glibconfig.h")
             macos = base / "macos-sdk"
             host_environment = {
-                "LINGXI_GSTREAMER_SDK_MACOS": str(macos),
-                "LINGXI_GSTREAMER_SDK_IOS": str(framework),
+                mobile_gstreamer.IOS_SDK_ENV: str(framework),
                 "PKG_CONFIG": str(macos / "bin/pkg-config"),
                 "PKG_CONFIG_PATH": str(macos / "lib/pkgconfig"),
                 "PKG_CONFIG_LIBDIR": str(macos / "lib/pkgconfig"),

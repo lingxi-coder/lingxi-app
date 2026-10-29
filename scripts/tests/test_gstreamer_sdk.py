@@ -206,28 +206,35 @@ class GStreamerSDKTests(unittest.TestCase):
     def test_windows_installer_requires_the_exact_four_part_package_version(self) -> None:
         lock = gstreamer_sdk.load_lock()
         with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            (root / ".lingxi-gstreamer-sdk-version").write_text(lock["version"] + "\n", encoding="ascii")
-            (root / "bin").mkdir()
-            (root / "bin/pkg-config.exe").touch()
+            root = pathlib.Path(directory) / "windows-sdk"
+            installer = pathlib.Path(directory) / "installer.exe"
+            installer.touch()
             plugin_dir = root / "lib/gstreamer-1.0"
-            plugin_dir.mkdir(parents=True)
-            for name in gstreamer_sdk.PLUGIN_NAMES:
-                (plugin_dir / f"gst{name}.dll").touch()
 
             for version in ("1.28.8.1", "1.28.8.2", "1.28.9.1", "1.28.8", "1.28.8.1.1"):
                 with self.subTest(version=version):
                     def fake_run(command, **kwargs):
+                        if command[0] == str(installer):
+                            (root / "bin").mkdir()
+                            (root / "bin/pkg-config.exe").touch()
+                            plugin_dir.mkdir(parents=True)
+                            for name in gstreamer_sdk.PLUGIN_NAMES:
+                                (plugin_dir / f"gst{name}.dll").touch()
+                            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
                         stdout = version if "--modversion" in command else str(plugin_dir)
                         return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
 
-                    with patch.object(gstreamer_sdk.subprocess, "run", side_effect=fake_run), \
+                    # The first successful install writes its own reuse marker.
+                    with patch.object(gstreamer_sdk, "download_artifact", return_value=installer), \
+                            patch.object(gstreamer_sdk.subprocess, "run", side_effect=fake_run), \
                             patch.object(gstreamer_sdk, "export_environment") as export:
                         if version == "1.28.8.1":
                             gstreamer_sdk.install_windows(lock, root)
                             export.assert_called_once()
                         else:
-                            with self.assertRaises(gstreamer_sdk.SetupError):
+                            with self.assertRaisesRegex(
+                                gstreamer_sdk.SetupError, "does not match pinned|reported an invalid version"
+                            ):
                                 gstreamer_sdk.install_windows(lock, root)
                             export.assert_not_called()
 

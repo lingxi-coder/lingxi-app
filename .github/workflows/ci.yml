@@ -23,6 +23,8 @@ jobs:
           python3 scripts/tests/test_store_compliance.py
       - name: Validate both pinned runtime sources
         run: python3 scripts/checks/check-runtime-dependency.py
+      - name: Test translation gate rejection cases
+        run: python3 scripts/checks/test_check_i18n_pairing.py
       - name: Run every checked-in product gate
         working-directory: .
         run: ./scripts/check-all.sh

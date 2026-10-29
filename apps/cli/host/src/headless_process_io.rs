@@ -51,6 +51,17 @@ impl AsFd for ProcessFd {
     }
 }
 
+#[allow(unsafe_code)]
+fn register(fd: ProcessFd, interest: Interest) -> io::Result<AsyncFd<ProcessFd>> {
+    // SAFETY: `fd` retains an Arc to the immutable ProcessFds group, whose
+    // OwnedFd remains open for the whole registration. Its fixed index always
+    // returns the same descriptor, and no mutable access to the registered
+    // ProcessFd is exposed. AsyncFd deregisters before dropping its inner fd;
+    // on registration failure the error conversion drops that fd, preserving the
+    // group's existing last-owner flag restoration and descriptor drop order.
+    unsafe { AsyncFd::register_with_interest(fd, interest) }.map_err(io::Error::from)
+}
+
 enum ProcessIo {
     Ready(AsyncFd<ProcessFd>),
     /// Regular files have no readiness registration on epoll. Perform their
@@ -179,7 +190,7 @@ pub(crate) fn open() -> io::Result<HeadlessIo> {
             // nonblocking syscall completes immediately.
             Ok(ProcessIo::File(fd))
         } else {
-            AsyncFd::with_interest(fd, interest).map(ProcessIo::Ready)
+            register(fd, interest).map(ProcessIo::Ready)
         }
     };
     Ok(HeadlessIo {

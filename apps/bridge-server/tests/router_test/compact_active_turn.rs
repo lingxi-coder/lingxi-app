@@ -106,6 +106,10 @@ async fn active_force_compact_refuses_while_slash_text_queues_and_ws_liveness_su
         },
     )
     .await;
+    assert!(matches!(
+        next_frame(&mut ws).await,
+        Frame::Event(ClientEvent::TurnStarted { turn_id: Some(91) })
+    ));
     let request_id = match next_frame(&mut ws).await {
         Frame::PermissionRequest(request) => request.request_id,
         other => panic!("expected pending permission, got {other:?}"),

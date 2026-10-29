@@ -266,6 +266,16 @@ ARRIVING_PLUGIN_NEEDLES = [
 ]
 ARRIVING_COMPILED = [(re.compile(p), p) for p in ARRIVING_PLUGIN_NEEDLES]
 
+# These two consecutive lines document supported external plugin manifest
+# inputs, not LingXi-owned storage. Harness accepts the external format while
+# preferring native metadata. Restrict the exception to the exact path, lines,
+# and marker spans; duplicate or changed lines fall back to ordinary G7 scan.
+G7_EXTERNAL_FORMAT_DOC_PATH = "resources/extensions/README.md"
+G7_EXTERNAL_FORMAT_DOC_LINES = (
+    "The installer reads the current Claude `.claude-plugin/plugin.json` and",
+    "`.claude-plugin/marketplace.json` formats alongside LingXi's native metadata.",
+)
+
 # G2 的保留清单与 G7 的 needle 必须不相交，否则一个名字会同时「被 G2 明确
 # 放行」和「被 G7 报红」。这不是注释，是启动时就跑的判据 —— 有人往
 # KEEP_CLAUDE_ENV 里加一个 `CLAUDE_PLUGIN_*` 名字时，门会当场炸而不是
@@ -592,6 +602,23 @@ def span_is_exempt(line, start, end, literals):
     return False
 
 
+def external_format_doc_spans(path, lines):
+    """Return only the two approved G7 marker spans in the exact doc context."""
+    if path != G7_EXTERNAL_FORMAT_DOC_PATH:
+        return set()
+    first, second = G7_EXTERNAL_FORMAT_DOC_LINES
+    if lines.count(first) != 1 or lines.count(second) != 1:
+        return set()
+    index = lines.index(first)
+    if lines.index(second) != index + 1:
+        return set()
+    marker = ".claude-plugin"
+    return {
+        (line_no + 1, line.index(marker), line.index(marker) + len(marker))
+        for line_no, line in ((index, first), (index + 1, second))
+    }
+
+
 def scan(root, exempt=None):
     """产出 (rule_id, path, lineno, needle) 四元组的集合。"""
     exempt = exempt or {}
@@ -607,6 +634,7 @@ def scan(root, exempt=None):
         pats = needles_for(path)
         in_branding = path.startswith(BRANDING_PREFIX)
         frozen_here = exempt.get(path, ())
+        doc_spans = external_format_doc_spans(path, lines)
 
         for i, line in enumerate(lines, start=1):
             comment = is_comment_line(path, line)
@@ -655,6 +683,8 @@ def scan(root, exempt=None):
                 for rx, needle in ARRIVING_COMPILED:
                     # 同 G1/G3：遍历全部匹配，首匹配被豁免不等于本行干净。
                     for m in rx.finditer(line):
+                        if needle == r"\.claude-plugin" and (i, m.start(), m.end()) in doc_spans:
+                            continue
                         if frozen_here and span_is_exempt(line, m.start(), m.end(), frozen_here):
                             continue
                         findings.add(("G7", path, i, needle))
@@ -670,9 +700,17 @@ def scan(root, exempt=None):
 
 
 BRANDING_LIB = "crates/branding/src/lib.rs"
-BRANDING_CONST = re.compile(r"^pub const ([A-Z][A-Z0-9_]*): &str")
+BRANDING_CONST = re.compile(
+    r'^pub const ([A-Z][A-Z0-9_]*): &str(?:\s*=\s*"([^"]*)")?'
+)
 # 故意不属于本产品命名空间的常量。
 G6_ALLOWLIST = {"LEGACY_GLOBAL_CONFIG_FILE"}
+# The pinned Harness accepts this exact external plugin input format, while
+# LingXi's persisted namespace remains separate. This mirrors the upstream
+# G6 check without exempting other constants or marker values.
+G6_EXTERNAL_FORMAT_CONSTANTS = {
+    "CLAUDE_PLUGIN_MANIFEST_DIR": ".claude-plugin",
+}
 
 
 def check_namespace_coverage(root):
@@ -692,24 +730,46 @@ def check_namespace_coverage(root):
     with open(full, encoding="utf-8") as fh:
         lines = text_lines(fh.read())
 
-    declared, listed, in_list = [], set(), False
+    declared, listed, namespace_lines, in_list = [], set(), [], False
     for i, line in enumerate(lines, start=1):
         m = BRANDING_CONST.match(line)
         if m:
-            declared.append((m.group(1), i))
+            declared.append((m.group(1), i, m.group(2)))
         if line.startswith("pub const NAMESPACE_VALUES"):
             in_list = True
-            continue
+            # Do not skip the declaration's right-hand side: it can already
+            # contain the first entry, including the external marker.
+            line = line.partition("=")[2]
         if in_list:
-            if line.strip() == "];":
+            entry = line.partition("//")[0].strip()
+            if entry.endswith("];"):
                 in_list = False
-            else:
-                listed.add(line.strip().rstrip(","))
+                entry = entry[:-2].strip()
+            if entry:
+                namespace_lines.append(entry)
+                listed.add(entry.rstrip(",").strip())
 
-    for name, lineno in declared:
-        if name in G6_ALLOWLIST or name in listed:
+    for name, lineno, literal in declared:
+        if name in G6_ALLOWLIST:
+            continue
+        external_literal = G6_EXTERNAL_FORMAT_CONSTANTS.get(name)
+        if external_literal is not None:
+            name_pattern = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
+            literal_pattern = re.compile(r'(?:r#*)?"' + re.escape(external_literal) + r'"#*')
+            in_namespace = any(name_pattern.search(entry) or literal_pattern.search(entry)
+                               for entry in namespace_lines)
+            if literal != external_literal or in_namespace:
+                findings.add((
+                    "G6", BRANDING_LIB, lineno,
+                    f"{name} external-format value drift or product namespace contamination",
+                ))
+            continue
+        if name in listed:
             continue
         findings.add(("G6", BRANDING_LIB, lineno, f"{name} not in NAMESPACE_VALUES"))
+    declared_names = {name for name, _, _ in declared}
+    for name in G6_EXTERNAL_FORMAT_CONSTANTS.keys() - declared_names:
+        findings.add(("G6", BRANDING_LIB, 0, f"{name} external-format constant missing"))
     return findings
 
 
@@ -786,6 +846,7 @@ SELFTEST_FILES = {
     "crates/st/g4.rs": '// upstream: process.env.LINGXI_FAKE_CITATION\n',
     "crates/branding/src/lib.rs": (
         'pub const ST_UNLISTED: &str = "x";\n'
+        'pub const CLAUDE_PLUGIN_MANIFEST_DIR: &str = ".claude-plugin";\n'
         'pub const NAMESPACE_VALUES: &[&str] = &[\n];\n'
     ),
     # G7 的四种**不带引号**的到达形态。这四条正是 P0a.0 写作阶段漏掉的洞：
@@ -797,6 +858,14 @@ SELFTEST_FILES = {
     # G7 的两个**必须静默**的对照。
     "crates/st/neg_comment.rs": '// oracle spells it CLAUDE_PLUGIN_ROOT / CLAUDE_PROJECT_DIR\n',
     "crates/st/neg_reponame.rs": 'fn f() { let r = "anthropics/claude-plugins-official"; }\n',
+    "resources/extensions/README.md": (
+        'The installer reads the current Claude `.claude-plugin/plugin.json` and\n'
+        "`.claude-plugin/marketplace.json` formats alongside LingXi's native metadata.\n"
+    ),
+    "resources/extensions/unrelated.md": (
+        'The installer reads the current Claude `.claude-plugin/plugin.json` and\n'
+        "`.claude-plugin/marketplace.json` formats alongside LingXi's native metadata.\n"
+    ),
     # text_lines 的 U+2028 用例：若换回 str.splitlines()，这一行会被切成两半,
     # 后面那行的行号会偏移 1，且 G1 需要的完整引号跨度会断掉。
     "crates/st/u2028.rs": (
@@ -842,6 +911,8 @@ SELFTEST_CASES = [
      [("G4", "crates/st/g4.rs", "LINGXI_FAKE_CITATION")], []),
     ("G6 fires on a branding const missing from NAMESPACE_VALUES",
      [("G6", "crates/branding/src/lib.rs", "ST_UNLISTED")], []),
+    ("G6 accepts only the exact external marker outside the product namespace",
+     [], [("G6", "crates/branding/src/lib.rs", "CLAUDE_PLUGIN_MANIFEST_DIR")]),
     ("G7 fires on a BARE $CLAUDE_PLUGIN_ROOT in a hook script",
      [("G7", "crates/st/hook.sh", "CLAUDE_PLUGIN_")], []),
     ("G7 fires on .claude-plugin in markdown prose (no quotes)",
@@ -854,6 +925,11 @@ SELFTEST_CASES = [
      [], [("G7", "crates/st/neg_comment.rs", "")]),
     ("G7 stays silent on anthropics/claude-plugins-official (no leading dot)",
      [], [("G7", "crates/st/neg_reponame.rs", "")]),
+    ("G7 accepts only documented external manifest formats",
+     [], [("G7", "resources/extensions/README.md", r"\.claude-plugin")]),
+    ("G7 still rejects the same text in an unrelated file",
+     [("G7", "resources/extensions/unrelated.md", r"\.claude-plugin", 1),
+      ("G7", "resources/extensions/unrelated.md", r"\.claude-plugin", 2)], []),
     # ⚠️ 这一条**必须钉行号**。只断言「命中存在」的版本对 splitlines() 的回退
     # 完全不敏感：切成三行之后命中仍然存在，只是行号从 2 变成 3——实测确认过
     # 那个版本的 mutant 全绿。行号才是这条规则真正守的东西。
@@ -940,12 +1016,85 @@ def run_selftest():
             if not failures or not any(f.startswith(name) for f in failures):
                 print(f"  ok   {name}")
 
+        branding_path = os.path.join(tmp, BRANDING_LIB)
+        original_branding = SELFTEST_FILES[BRANDING_LIB]
+        marker = 'pub const CLAUDE_PLUGIN_MANIFEST_DIR: &str = ".claude-plugin";\n'
+        g6_mutations = (
+            ("G6 rejects a changed external marker",
+             original_branding.replace('".claude-plugin"', '".wrong-plugin"'),
+             "CLAUDE_PLUGIN_MANIFEST_DIR external-format"),
+            ("G6 rejects the external marker in the product namespace",
+             original_branding.replace("&[\n];", "&[\n    CLAUDE_PLUGIN_MANIFEST_DIR,\n];"),
+             "CLAUDE_PLUGIN_MANIFEST_DIR external-format"),
+            ("G6 rejects a qualified marker with an inline comment in the product namespace",
+             original_branding.replace("&[\n];", "&[\n    crate::CLAUDE_PLUGIN_MANIFEST_DIR, // input format\n];"),
+             "CLAUDE_PLUGIN_MANIFEST_DIR external-format"),
+            ("G6 rejects an external marker on the namespace declaration line",
+             original_branding.replace("&[\n];", "&[CLAUDE_PLUGIN_MANIFEST_DIR,\n];"),
+             "CLAUDE_PLUGIN_MANIFEST_DIR external-format"),
+            ("G6 rejects an external literal on the namespace declaration line",
+             original_branding.replace("&[\n];", '&[".claude-plugin",\n];'),
+             "CLAUDE_PLUGIN_MANIFEST_DIR external-format"),
+            ("G6 rejects the external literal in the product namespace",
+             original_branding.replace("&[\n];", "&[\n    r#\".claude-plugin\"#,\n];"),
+             "CLAUDE_PLUGIN_MANIFEST_DIR external-format"),
+            ("G6 rejects a missing external marker",
+             original_branding.replace(marker, ""),
+             "CLAUDE_PLUGIN_MANIFEST_DIR external-format constant missing"),
+            ("G6 still rejects unreviewed external constants",
+             original_branding + 'pub const CLAUDE_PLUGIN_UNREVIEWED: &str = ".unreviewed";\n',
+             "CLAUDE_PLUGIN_UNREVIEWED not in NAMESPACE_VALUES"),
+        )
+        for name, content, expected in g6_mutations:
+            if content == original_branding:
+                failures.append(f"{name}: mutation did not change the fixture")
+                continue
+            with open(branding_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            mutated = check_namespace_coverage(tmp)
+            if not _selftest_matches(mutated, "G6", BRANDING_LIB, expected):
+                failures.append(f"{name}: expected G6 matching {expected!r}")
+            else:
+                print(f"  ok   {name}")
+        with open(branding_path, "w", encoding="utf-8") as fh:
+            fh.write(original_branding)
+
+        doc_path = os.path.join(tmp, G7_EXTERNAL_FORMAT_DOC_PATH)
+        original_doc = SELFTEST_FILES[G7_EXTERNAL_FORMAT_DOC_PATH]
+        first_doc, second_doc = G7_EXTERNAL_FORMAT_DOC_LINES
+        g7_mutations = (
+            ("G7 reports an additional external marker", original_doc + "Extra .claude-plugin\n", r"\.claude-plugin", [3]),
+            ("G7 reports duplicate approved documentation", original_doc + first_doc + "\n", r"\.claude-plugin", [1, 2, 3]),
+            ("G7 reports a changed documentation line", original_doc.replace(second_doc, second_doc + " extra"), r"\.claude-plugin", [1, 2]),
+            ("G7 reports an additional marker on an approved line", original_doc.replace(second_doc, second_doc + " .claude-plugin"), r"\.claude-plugin", [1, 2]),
+            ("G7 reports incomplete documentation", first_doc + "\n", r"\.claude-plugin", [1]),
+            ("G7 reports nonconsecutive documentation", original_doc.replace("\n", "\nExtra text\n", 1), r"\.claude-plugin", [1, 3]),
+            ("G7 still detects plugin env tokens in the same document", original_doc + "CLAUDE_PLUGIN_ROOT\n", "CLAUDE_PLUGIN_", [3]),
+            ("G7 still detects project env tokens in the same document", original_doc + "CLAUDE_PROJECT_DIR\n", "CLAUDE_PROJECT_DIR", [3]),
+        )
+        for name, content, needle, expected_lines in g7_mutations:
+            if content == original_doc:
+                failures.append(f"{name}: mutation did not change the fixture")
+                continue
+            with open(doc_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            actual_lines = sorted(f[2] for f in _selftest_matches(
+                scan(tmp, exemptions_by_path(entries)), "G7", G7_EXTERNAL_FORMAT_DOC_PATH,
+                needle
+            ))
+            if actual_lines != expected_lines:
+                failures.append(f"{name}: expected G7 lines {expected_lines}, got {actual_lines}")
+            else:
+                print(f"  ok   {name}")
+        with open(doc_path, "w", encoding="utf-8") as fh:
+            fh.write(original_doc)
+
         for f in failures:
             print(f"  FAIL {f}")
         if failures:
             print(f"selftest: {len(failures)} failure(s)")
             return 1
-        print(f"selftest: {len(cases)} cases ok ({len(findings)} findings on the synthetic tree)")
+        print(f"selftest: {len(cases) + len(g6_mutations) + len(g7_mutations)} cases ok ({len(findings)} findings on the synthetic tree)")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

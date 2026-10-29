@@ -12,12 +12,28 @@ fn ack(ids: Vec<String>, error: Option<String>) -> ShellHandoffAck {
     }
 }
 
+/// A failed handoff either settled ownership or left its source fence open.
+#[derive(Debug)]
+pub(crate) enum SourceHandoffError {
+    Resolved(String),
+    Uncertain(String),
+}
+
+impl From<SourceHandoffError> for lingxi_core::host::bg_session_forker::BgForkError {
+    fn from(error: SourceHandoffError) -> Self {
+        match error {
+            SourceHandoffError::Resolved(message) => Self::Dispatch(message),
+            SourceHandoffError::Uncertain(message) => Self::OwnershipUncertain(message),
+        }
+    }
+}
+
 pub(crate) async fn finish_source(
     home: &Path,
     short: &str,
     registry: &dyn TaskRegistryHandle,
     exported: &[ShellTaskHandoff],
-) -> Result<(), String> {
+) -> Result<(), SourceHandoffError> {
     if exported.is_empty() {
         return Ok(());
     }
@@ -29,15 +45,19 @@ pub(crate) async fn finish_source(
                 Ok(ack) => ack.error.unwrap(),
                 Err(error) => error.to_string(),
             };
-            abort_source(home, short, registry, exported, &error).await?;
-            return Err(error);
+            abort_source(home, short, registry, exported, &error)
+                .await
+                .map_err(SourceHandoffError::Uncertain)?;
+            return Err(SourceHandoffError::Resolved(error));
         }
     };
     let expected: Vec<_> = exported.iter().map(|task| task.task_id.clone()).collect();
     if ready.task_ids != expected {
         let error = "destination shell preparation acknowledged a different roster".to_string();
-        abort_source(home, short, registry, exported, &error).await?;
-        return Err(error);
+        abort_source(home, short, registry, exported, &error)
+            .await
+            .map_err(SourceHandoffError::Uncertain)?;
+        return Err(SourceHandoffError::Resolved(error));
     }
     // Natural completion and ownership transfer serialize inside the registry.
     // Only ids accepted by that atomic operation belong to the destination.
@@ -45,8 +65,10 @@ pub(crate) async fn finish_source(
         Ok(accepted) => accepted,
         Err(error) => {
             let message = error.to_string();
-            abort_source(home, short, registry, exported, &message).await?;
-            return Err(message);
+            abort_source(home, short, registry, exported, &message)
+                .await
+                .map_err(SourceHandoffError::Uncertain)?;
+            return Err(SourceHandoffError::Resolved(message));
         }
     };
     let transferred: Vec<_> = exported
@@ -66,14 +88,14 @@ pub(crate) async fn finish_source(
             Ok(Some(committed)) if committed.task_ids == accepted && committed.error.is_none() => {}
             Ok(None) => {
                 background_launch::write_shell_handoff_ack(home, short, "abort", &ack(Vec::new(), Some(error.to_string())))
-                    .map_err(|abort| format!("commit persistence failed ({error}); could not fence destination ({abort})"))?;
-                registry.rollback_shell_handoff(exported).await.map_err(|rollback| format!("commit persistence failed ({error}); ownership recovery failed ({rollback})"))?;
-                return Err(error.to_string());
+                    .map_err(|abort| SourceHandoffError::Uncertain(format!("commit persistence failed ({error}); could not fence destination ({abort})")))?;
+                registry.rollback_shell_handoff(exported).await.map_err(|rollback| SourceHandoffError::Uncertain(format!("commit persistence failed ({error}); ownership recovery failed ({rollback})")))?;
+                return Err(SourceHandoffError::Resolved(error.to_string()));
             }
             _ => {
-                return Err(format!(
+                return Err(SourceHandoffError::Uncertain(format!(
                     "shell handoff ownership is uncertain after commit persistence failed: {error}"
-                ))
+                )))
             }
         }
     }
@@ -87,11 +109,11 @@ pub(crate) async fn finish_source(
     registry
         .rollback_shell_handoff(&retained)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| SourceHandoffError::Uncertain(error.to_string()))?;
     // A durable commit is recoverable by this background job after a restart.
     // On timeout do not steal ownership back from a possibly active worker.
     let adopted = background_launch::wait_shell_handoff_ack(home, short, "adopted").await
-        .map_err(|error| format!("background session {short} owns the shell handoff, but restoration has not acknowledged it: {error}"))?;
+        .map_err(|error| SourceHandoffError::Resolved(format!("background session {short} owns the shell handoff, but restoration has not acknowledged it: {error}")))?;
     if let Some(error) = adopted.error {
         // Batch adoption reports an error before publishing any destination row.
         background_launch::write_shell_handoff_ack(
@@ -101,18 +123,24 @@ pub(crate) async fn finish_source(
             &ack(Vec::new(), Some(error.clone())),
         )
         .map_err(|abort| {
-            format!("adoption failed ({error}); could not fence destination ({abort})")
+            SourceHandoffError::Uncertain(format!(
+                "adoption failed ({error}); could not fence destination ({abort})"
+            ))
         })?;
         registry
             .rollback_shell_handoff(&transferred)
             .await
             .map_err(|rollback| {
-                format!("adoption failed ({error}); ownership recovery failed ({rollback})")
+                SourceHandoffError::Uncertain(format!(
+                    "adoption failed ({error}); ownership recovery failed ({rollback})"
+                ))
             })?;
-        return Err(error);
+        return Err(SourceHandoffError::Resolved(error));
     }
     if adopted.task_ids != accepted {
-        return Err("destination shell adoption acknowledged a different roster".into());
+        return Err(SourceHandoffError::Uncertain(
+            "destination shell adoption acknowledged a different roster".into(),
+        ));
     }
     Ok(())
 }
@@ -540,6 +568,19 @@ mod tests {
             assert_eq!(received.is_ok(), !fail_adopt);
             assert_eq!(*ownership.lock().unwrap(), (fail_adopt, !fail_adopt));
             if fail_adopt {
+                let failure = sent.unwrap_err();
+                assert!(matches!(failure, SourceHandoffError::Resolved(_)));
+                let lifecycle = std::sync::Arc::new(
+                    lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle::default(),
+                );
+                let error: lingxi_core::host::bg_session_forker::BgForkError = failure.into();
+                assert!(lifecycle
+                    .claim()
+                    .unwrap()
+                    .run_owned(async move { Err::<(), _>(error) })
+                    .await
+                    .is_err());
+                lifecycle.close_and_drain().await.unwrap();
                 assert!(background_launch::read_shell_handoff_ack(
                     home.path(),
                     "feed1234",

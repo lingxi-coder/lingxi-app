@@ -17,6 +17,7 @@ import subprocess
 import sys
 
 
+IOS_SDK_ENV = "LINGXI_GSTREAMER_SDK_IOS"
 PLUGINS = [
     "gstapp", "gstaudioconvert", "gstaudioresample", "gstcoreelements",
     "gstopus", "gstrtp", "gstrtpmanager", "gstvpx", "gstvideoconvertscale",
@@ -100,12 +101,12 @@ def resolve_android_sdk(target: str, requested: str | None) -> pathlib.Path:
 
 
 def ios_xcframework(requested: str | None) -> pathlib.Path:
-    value = requested or os.environ.get("LINGXI_GSTREAMER_SDK_IOS")
+    value = requested or os.environ.get(IOS_SDK_ENV)
     if not value:
-        fail("set LINGXI_GSTREAMER_SDK_IOS to the official GStreamer.xcframework")
+        fail(f"set {IOS_SDK_ENV} to the official GStreamer.xcframework")
     path = pathlib.Path(value).expanduser().resolve(strict=True)
     if path.name != "GStreamer.xcframework" or not path.is_dir():
-        fail(f"LINGXI_GSTREAMER_SDK_IOS must name GStreamer.xcframework: {path}")
+        fail(f"{IOS_SDK_ENV} must name GStreamer.xcframework: {path}")
     return path
 
 

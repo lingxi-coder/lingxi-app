@@ -152,3 +152,25 @@ The following checks belong to this integration checkpoint and do not include th
 | Bridge initial profile and captured-draft startup | 3 passed against the final pin; both profile restoration and SessionStart ordering are covered |
 
 The App pins all owned Harness dependencies to `5ea8b824141259f2ae92ec5c46a25053e53a24bd`, with no local source patch. CLI, TUI, TUI core and Bridge library test targets compile against this pin. The real CLI stdio resume test passed; complete interactive PTY acceptance has not run. The verified iOS GStreamer device SDK slice is available; the simulator slice remains unavailable. Regenerated mobile FFI, Android APK and the full iOS Xcode build are deferred because the shared host is low on disk space. No simulator, physical-device, signed-package or live-provider acceptance is established by the host checks above.
+
+## Background producer shutdown correction
+
+Background publication and startup prewarm now have explicit owners. Shutdown permanently closes their admission before its first await. An admitted publication continues independently of its caller, and records ordinary errors and panics before releasing its claim. A completed producer's historical diagnostic does not prevent later registry, pool or writer cleanup.
+
+Shell export registers retained recovery authority before starting the transfer. Recovery uses the reserved job identity, captured roster, durable commit and adoption acknowledgements, and successfully restored rows to confirm transfer or rollback. Dropping a caller or a recovery ticket cannot erase an unresolved transfer. Recovery attempts run independently of drain waiters and are single-flight; an unconfirmed result retains the registry and writer for a later sequential shutdown retry. Missing or ambiguous evidence stays unconfirmed rather than assigning ownership by assumption. This is not a guarantee of recovery from every process hard kill or every panic inside a partially completed registry operation.
+
+The foreground background-fork owner is consumed before Desktop configuration clones are made, so shutting down a cron child cannot close or rebind the parent's owner. When publication or recovery remains incomplete, cost settlement observes the remaining eight-second shutdown budget. Timing out the waiter preserves the actual settlement and recovery owners.
+
+The correction preserves the existing shutdown report contract: `complete` agrees with an empty `errors` list. Stopped-producer diagnostics are logged separately; unresolved recovery and drain timeouts make shutdown incomplete. It adds no CLI mode switch and does not interrupt an admitted query when a mode selection changes.
+
+| Focused host check | Result |
+| --- | --- |
+| Core launch ownership, cancellation, recovery retries and destructor reentry | 11 passed |
+| Prewarm owner / orchestrator prewarm integration | 5 / 4 passed |
+| Structured background snapshot and local-notice projection | 2 passed |
+| Runtime shutdown, child ownership and cost-settlement deadline | 6 passed |
+| CLI shell handoff / background owner / dispatch | 10 / 6 / 16 passed |
+| Bridge captured-profile startup and restored SessionStart attachments | 3 passed |
+| Immutable dependencies and native protocol ownership | 79 runtime packages at `12644fac08f680b1f63a5a30a182200d4c7d0e24`; 848 native sources and three fixture mirrors passed |
+
+The App's current Harness pin is `12644fac08f680b1f63a5a30a182200d4c7d0e24`, resolved with locked offline metadata and no local source patch. CLI and Bridge library test targets compile against this pin. Tests requiring process identity and local sockets passed with those permissions after the default sandbox denied access. These host checks do not establish mobile FFI regeneration, native application builds, signed packages, physical-device operation or live-provider acceptance.

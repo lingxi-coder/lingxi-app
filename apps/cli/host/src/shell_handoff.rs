@@ -12,133 +12,342 @@ fn ack(ids: Vec<String>, error: Option<String>) -> ShellHandoffAck {
     }
 }
 
-pub(crate) async fn finish_source(
-    home: &Path,
-    short: &str,
-    registry: &dyn TaskRegistryHandle,
-    exported: &[ShellTaskHandoff],
-) -> Result<(), String> {
-    if exported.is_empty() {
-        return Ok(());
-    }
-    let prepared = background_launch::wait_shell_handoff_ack(home, short, "ready").await;
-    let ready = match prepared {
-        Ok(ready) if ready.error.is_none() => ready,
-        result => {
-            let error = match result {
-                Ok(ack) => ack.error.unwrap(),
-                Err(error) => error.to_string(),
-            };
-            abort_source(home, short, registry, exported, &error).await?;
-            return Err(error);
-        }
-    };
-    let expected: Vec<_> = exported.iter().map(|task| task.task_id.clone()).collect();
-    if ready.task_ids != expected {
-        let error = "destination shell preparation acknowledged a different roster".to_string();
-        abort_source(home, short, registry, exported, &error).await?;
-        return Err(error);
-    }
-    // Natural completion and ownership transfer serialize inside the registry.
-    // Only ids accepted by that atomic operation belong to the destination.
-    let accepted = match registry.commit_shell_handoff(&expected).await {
-        Ok(accepted) => accepted,
-        Err(error) => {
-            let message = error.to_string();
-            abort_source(home, short, registry, exported, &message).await?;
-            return Err(message);
-        }
-    };
-    let transferred: Vec<_> = exported
-        .iter()
-        .filter(|task| accepted.contains(&task.task_id))
-        .cloned()
-        .collect();
-    if let Err(error) = background_launch::write_shell_handoff_ack(
-        home,
-        short,
-        "commit",
-        &ack(accepted.clone(), None),
-    ) {
-        // Atomic persistence can report an error after rename. Never reclaim
-        // ownership if the worker might already have observed the commit.
-        match background_launch::read_shell_handoff_ack(home, short, "commit") {
-            Ok(Some(committed)) if committed.task_ids == accepted && committed.error.is_none() => {}
-            Ok(None) => {
-                background_launch::write_shell_handoff_ack(home, short, "abort", &ack(Vec::new(), Some(error.to_string())))
-                    .map_err(|abort| format!("commit persistence failed ({error}); could not fence destination ({abort})"))?;
-                registry.rollback_shell_handoff(exported).await.map_err(|rollback| format!("commit persistence failed ({error}); ownership recovery failed ({rollback})"))?;
-                return Err(error.to_string());
-            }
-            _ => {
-                return Err(format!(
-                    "shell handoff ownership is uncertain after commit persistence failed: {error}"
-                ))
-            }
-        }
-    }
-    // A shell that completed during preparation remains fenced until the
-    // accepted subset is durable; only then may its source notification drain.
-    let retained: Vec<_> = exported
-        .iter()
-        .filter(|task| !accepted.contains(&task.task_id))
-        .cloned()
-        .collect();
-    registry
-        .rollback_shell_handoff(&retained)
-        .await
-        .map_err(|error| error.to_string())?;
-    // A durable commit is recoverable by this background job after a restart.
-    // On timeout do not steal ownership back from a possibly active worker.
-    let adopted = background_launch::wait_shell_handoff_ack(home, short, "adopted").await
-        .map_err(|error| format!("background session {short} owns the shell handoff, but restoration has not acknowledged it: {error}"))?;
-    if let Some(error) = adopted.error {
-        // Batch adoption reports an error before publishing any destination row.
-        background_launch::write_shell_handoff_ack(
-            home,
-            short,
-            "abort",
-            &ack(Vec::new(), Some(error.clone())),
-        )
-        .map_err(|abort| {
-            format!("adoption failed ({error}); could not fence destination ({abort})")
-        })?;
-        registry
-            .rollback_shell_handoff(&transferred)
-            .await
-            .map_err(|rollback| {
-                format!("adoption failed ({error}); ownership recovery failed ({rollback})")
-            })?;
-        return Err(error);
-    }
-    if adopted.task_ids != accepted {
-        return Err("destination shell adoption acknowledged a different roster".into());
-    }
-    Ok(())
+/// Retained source authority for one admitted shell handoff. The lifecycle
+/// retries this object after its producer has stopped, including after a panic.
+pub(crate) struct SourceHandoffRecovery {
+    home: std::path::PathBuf,
+    session_id: String,
+    registry: std::sync::Arc<dyn TaskRegistryHandle>,
+    progress: std::sync::Mutex<SourceProgress>,
 }
 
-async fn abort_source(
-    home: &Path,
-    short: &str,
-    registry: &dyn TaskRegistryHandle,
-    exported: &[ShellTaskHandoff],
-    reason: &str,
-) -> Result<(), String> {
-    background_launch::write_shell_handoff_ack(
-        home,
-        short,
-        "abort",
-        &ack(Vec::new(), Some(reason.into())),
-    )
-    .map_err(|error| {
-        format!(
-            "could not fence failed handoff; source notification claims remain reserved: {error}"
+#[derive(Default)]
+struct SourceProgress {
+    // None means export has not returned. The production registry's export
+    // guard releases every fence on error or unwind before returning.
+    exported: Option<Vec<ShellTaskHandoff>>,
+    short: Option<String>,
+    finish_started: bool,
+    restored: std::collections::HashSet<String>,
+}
+
+impl SourceHandoffRecovery {
+    pub(crate) fn new(
+        home: std::path::PathBuf,
+        session_id: String,
+        registry: std::sync::Arc<dyn TaskRegistryHandle>,
+    ) -> Self {
+        Self {
+            home,
+            session_id,
+            registry,
+            progress: std::sync::Mutex::new(SourceProgress::default()),
+        }
+    }
+
+    pub(crate) fn record_export(&self, exported: Vec<ShellTaskHandoff>) {
+        self.progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .exported = Some(exported);
+    }
+
+    pub(crate) async fn export(&self) -> Result<Vec<ShellTaskHandoff>, String> {
+        self.registry
+            .export_shell_handoff()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn record_short(&self, short: &str) {
+        self.progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .short = Some(short.to_owned());
+    }
+
+    fn snapshot(&self) -> (Option<String>, Option<Vec<ShellTaskHandoff>>, bool) {
+        let progress = self
+            .progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            progress.short.clone(),
+            progress.exported.clone(),
+            progress.finish_started,
         )
-    })?;
-    registry
-        .rollback_shell_handoff(exported)
-        .await
-        .map_err(|error| error.to_string())
+    }
+
+    /// Remember successful rollback before any further await. A completed row
+    /// may be notified and evicted, so recovery must not adopt it again.
+    async fn rollback(&self, records: &[ShellTaskHandoff]) -> Result<(), String> {
+        let pending: Vec<_> = {
+            let progress = self
+                .progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            records
+                .iter()
+                .filter(|record| !progress.restored.contains(&record.task_id))
+                .cloned()
+                .collect()
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.registry
+            .rollback_shell_handoff(&pending)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut progress = self
+            .progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        progress
+            .restored
+            .extend(pending.into_iter().map(|record| record.task_id));
+        Ok(())
+    }
+
+    /// Fence the destination before reclaiming anything. Even a failed atomic
+    /// write can have renamed its file, so verify the durable result explicitly.
+    fn fence(&self, short: &str, reason: &str) -> Result<(), String> {
+        let valid = |ack: &ShellHandoffAck| ack.task_ids.is_empty() && ack.error.is_some();
+        match background_launch::read_shell_handoff_ack(&self.home, short, "abort") {
+            Ok(Some(existing)) if valid(&existing) => return Ok(()),
+            Ok(Some(_)) => return Err("invalid shell handoff abort acknowledgement".into()),
+            Ok(None) => {}
+            Err(error) => return Err(format!("could not inspect shell handoff abort: {error}")),
+        }
+        let written = background_launch::write_shell_handoff_ack(
+            &self.home,
+            short,
+            "abort",
+            &ack(Vec::new(), Some(reason.into())),
+        );
+        match background_launch::read_shell_handoff_ack(&self.home, short, "abort") {
+            Ok(Some(existing)) if valid(&existing) => Ok(()),
+            observed => Err(format!(
+                "could not confirm destination fence: write={written:?}, read={observed:?}"
+            )),
+        }
+    }
+
+    async fn abort_source(
+        &self,
+        short: &str,
+        exported: &[ShellTaskHandoff],
+        reason: &str,
+    ) -> Result<(), String> {
+        self.fence(short, reason)
+            .map_err(|error| format!("{reason}; destination fence failed: {error}"))?;
+        self.rollback(exported)
+            .await
+            .map_err(|error| format!("{reason}; shell recovery failed: {error}"))
+    }
+
+    pub(crate) async fn finish_source(&self) -> Result<(), String> {
+        self.progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_started = true;
+        let (short, exported, _) = self.snapshot();
+        let exported = exported.ok_or_else(|| "shell export did not complete".to_string())?;
+        if exported.is_empty() {
+            return Ok(());
+        }
+        let short = short.ok_or_else(|| "background launch identity is unavailable".to_string())?;
+        let prepared = background_launch::wait_shell_handoff_ack(&self.home, &short, "ready").await;
+        let ready = match prepared {
+            Ok(ready) if ready.error.is_none() => ready,
+            result => {
+                let error = match result {
+                    Ok(ack) => ack.error.unwrap(),
+                    Err(error) => error.to_string(),
+                };
+                self.abort_source(&short, &exported, &error).await?;
+                return Err(error);
+            }
+        };
+        let expected: Vec<_> = exported.iter().map(|task| task.task_id.clone()).collect();
+        if ready.task_ids != expected {
+            let error = "destination shell preparation acknowledged a different roster".to_string();
+            self.abort_source(&short, &exported, &error).await?;
+            return Err(error);
+        }
+        let accepted = match self.registry.commit_shell_handoff(&expected).await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                let message = error.to_string();
+                self.abort_source(&short, &exported, &message).await?;
+                return Err(message);
+            }
+        };
+        let transferred: Vec<_> = exported
+            .iter()
+            .filter(|task| accepted.contains(&task.task_id))
+            .cloned()
+            .collect();
+        if let Err(error) = background_launch::write_shell_handoff_ack(
+            &self.home,
+            &short,
+            "commit",
+            &ack(accepted.clone(), None),
+        ) {
+            match background_launch::read_shell_handoff_ack(&self.home, &short, "commit") {
+                Ok(Some(committed))
+                    if committed.task_ids == accepted && committed.error.is_none() => {}
+                Ok(None) => {
+                    self.abort_source(&short, &exported, &error.to_string())
+                        .await?;
+                    return Err(error.to_string());
+                }
+                _ => {
+                    return Err(format!(
+                        "shell handoff ownership is uncertain after commit persistence failed: {error}"
+                    ));
+                }
+            }
+        }
+        let retained: Vec<_> = exported
+            .iter()
+            .filter(|task| !accepted.contains(&task.task_id))
+            .cloned()
+            .collect();
+        self.rollback(&retained)
+            .await
+            .map_err(|error| format!("could not restore retained source shells: {error}"))?;
+        let adopted = background_launch::wait_shell_handoff_ack(&self.home, &short, "adopted").await
+            .map_err(|error| format!("background session {short} owns the shell handoff, but restoration has not acknowledged it: {error}"))?;
+        if let Some(error) = adopted.error {
+            // The destination reports batch adoption failure before publishing rows.
+            if !adopted.task_ids.is_empty() || adopted.source.is_some() {
+                return Err("invalid failed shell adoption acknowledgement".into());
+            }
+            self.abort_source(&short, &transferred, &error).await?;
+            return Err(error);
+        }
+        if adopted.task_ids != accepted {
+            return Err("destination shell adoption acknowledged a different roster".into());
+        }
+        Ok(())
+    }
+
+    async fn recover_source(&self) -> Result<(), String> {
+        let (short, exported, finish_started) = self.snapshot();
+        let Some(exported) = exported else {
+            return Ok(());
+        };
+        if exported.is_empty() {
+            return Ok(());
+        }
+        {
+            let progress = self
+                .progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if exported
+                .iter()
+                .all(|task| progress.restored.contains(&task.task_id))
+            {
+                return Ok(());
+            }
+        }
+        if !finish_started {
+            // The source has not attempted any commit, so a confirmed abort
+            // fences even a partly published launch before source recovery.
+            if let Some(short) = short {
+                self.fence(
+                    &short,
+                    "source recovered interrupted background publication",
+                )?;
+            }
+            return self.rollback(&exported).await;
+        }
+        let short = short.ok_or_else(|| {
+            "background launch identity is unavailable after handoff started".to_string()
+        })?;
+        // Only this session's launch can be fenced. Once publication started,
+        // even a missing spec is unknown: a completed job may have been removed.
+        let launch = match background_launch::read_launch_spec(&self.home, &short) {
+            Ok(launch) => launch,
+            Err(error) => {
+                return Err(format!(
+                    "could not inspect background launch {short}: {error}"
+                ))
+            }
+        };
+        let expected: Vec<_> = exported.iter().map(|task| task.task_id.clone()).collect();
+        let launch_ids: Vec<_> = launch
+            .shell_handoff
+            .iter()
+            .map(|task| task.task_id.clone())
+            .collect();
+        if launch.session_id != self.session_id || launch_ids != expected {
+            return Err(format!(
+                "background launch {short} does not match the recorded shell handoff"
+            ));
+        }
+        let commit = background_launch::read_shell_handoff_ack(&self.home, &short, "commit")
+            .map_err(|error| format!("could not inspect shell handoff commit: {error}"))?;
+        let Some(commit) = commit else {
+            self.fence(&short, "source recovered interrupted shell handoff")?;
+            return self.rollback(&exported).await;
+        };
+        let mut unique = std::collections::HashSet::new();
+        if commit.error.is_some()
+            || commit.source.is_some()
+            || commit
+                .task_ids
+                .iter()
+                .any(|id| !expected.contains(id) || !unique.insert(id.clone()))
+        {
+            return Err("invalid shell handoff commit roster".into());
+        }
+        let retained: Vec<_> = exported
+            .iter()
+            .filter(|task| !unique.contains(&task.task_id))
+            .cloned()
+            .collect();
+        self.rollback(&retained).await?;
+        if commit.task_ids.is_empty() {
+            return Ok(());
+        }
+        let adopted = background_launch::read_shell_handoff_ack(&self.home, &short, "adopted")
+            .map_err(|error| format!("could not inspect shell handoff adoption: {error}"))?
+            .ok_or_else(|| {
+                format!("background session {short} has not acknowledged shell adoption")
+            })?;
+        if let Some(error) = adopted.error {
+            if !adopted.task_ids.is_empty() || adopted.source.is_some() {
+                return Err("invalid failed shell adoption acknowledgement".into());
+            }
+            self.fence(&short, &error)?;
+            let transferred: Vec<_> = exported
+                .iter()
+                .filter(|task| unique.contains(&task.task_id))
+                .cloned()
+                .collect();
+            return self.rollback(&transferred).await;
+        }
+        if adopted.source.is_some() || adopted.task_ids != commit.task_ids {
+            return Err("destination shell adoption acknowledged a different roster".into());
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchRecovery
+    for SourceHandoffRecovery
+{
+    fn description(&self) -> String {
+        format!("shell handoff for background session {}", self.session_id)
+    }
+
+    async fn recover(&self) -> Result<(), String> {
+        self.recover_source().await
+    }
 }
 
 pub(crate) async fn restore_destination(
@@ -403,6 +612,8 @@ mod tests {
         source: bool,
         fail_adopt: bool,
         ownership: std::sync::Arc<std::sync::Mutex<(bool, bool)>>,
+        rollback_failures: std::sync::atomic::AtomicUsize,
+        rollback_calls: std::sync::atomic::AtomicUsize,
     }
     #[async_trait::async_trait]
     impl TaskRegistryHandle for Registry {
@@ -475,6 +686,21 @@ mod tests {
             if records.is_empty() {
                 return Ok(());
             }
+            self.rollback_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self
+                .rollback_failures
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err(TaskRegistryError::Internal(
+                    "injected rollback failure".into(),
+                ));
+            }
             let mut state = self.ownership.lock().unwrap();
             assert!(
                 !state.1,
@@ -516,21 +742,29 @@ mod tests {
         for fail_adopt in [false, true] {
             let home = tempfile::tempdir().unwrap();
             let ownership = std::sync::Arc::new(std::sync::Mutex::new((true, false)));
-            let source = Registry {
+            let source = std::sync::Arc::new(Registry {
                 source: true,
                 fail_adopt: false,
                 ownership: ownership.clone(),
-            };
+                rollback_failures: std::sync::atomic::AtomicUsize::new(0),
+                rollback_calls: std::sync::atomic::AtomicUsize::new(0),
+            });
             let destination = Registry {
                 source: false,
                 fail_adopt,
                 ownership: ownership.clone(),
+                rollback_failures: std::sync::atomic::AtomicUsize::new(0),
+                rollback_calls: std::sync::atomic::AtomicUsize::new(0),
             };
             let exported = vec![shell()];
+            let recovery =
+                SourceHandoffRecovery::new(home.path().to_path_buf(), "session".into(), source);
+            recovery.record_short("feed1234");
+            recovery.record_export(exported.clone());
             write_source_intent(home.path(), "feed1234", &exported).unwrap();
             let (sent, received) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 tokio::join!(
-                    finish_source(home.path(), "feed1234", &source, &exported),
+                    recovery.finish_source(),
                     restore_destination(home.path(), "feed1234", &destination, &exported)
                 )
             })
@@ -549,5 +783,279 @@ mod tests {
                 .is_some());
             }
         }
+    }
+
+    fn retry_registry(failures: usize) -> std::sync::Arc<Registry> {
+        std::sync::Arc::new(Registry {
+            source: true,
+            fail_adopt: false,
+            ownership: std::sync::Arc::new(std::sync::Mutex::new((true, false))),
+            rollback_failures: std::sync::atomic::AtomicUsize::new(failures),
+            rollback_calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn published_recovery(
+        home: &Path,
+        registry: std::sync::Arc<Registry>,
+    ) -> std::sync::Arc<SourceHandoffRecovery> {
+        use background_launch::{
+            BackgroundLaunchKind, BackgroundLaunchOptions, BackgroundLaunchSpec, TerminalSize,
+            LAUNCH_SPEC_VERSION,
+        };
+        let exported = vec![shell()];
+        let recovery = std::sync::Arc::new(SourceHandoffRecovery::new(
+            home.to_path_buf(),
+            "session".into(),
+            registry,
+        ));
+        recovery.record_export(exported.clone());
+        recovery.record_short("feed1234");
+        let spec = BackgroundLaunchSpec {
+            schema_version: LAUNCH_SPEC_VERSION,
+            short: "feed1234".into(),
+            created_at: 0,
+            preflight_approved: true,
+            launch: BackgroundLaunchKind::Fork,
+            session_id: "session".into(),
+            transcript_path: "/tmp/session.jsonl".into(),
+            cwd: "/tmp".into(),
+            origin_cwd: "/tmp".into(),
+            worktree_path: None,
+            worktree_ownership_token: None,
+            initial_prompt: None,
+            handoff: None,
+            shell_handoff: exported,
+            options: BackgroundLaunchOptions::default(),
+            env: Default::default(),
+            terminal: TerminalSize::default(),
+        };
+        background_launch::write_launch_spec(home, "feed1234", &spec).unwrap();
+        recovery
+    }
+
+    #[tokio::test]
+    async fn cancelled_caller_preserves_error_and_retries_real_rollback() {
+        use lingxi_core::host::bg_session_forker::{
+            lifecycle::BackgroundLaunchLifecycle, BgForkError,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let registry = retry_registry(2);
+        let recovery = published_recovery(home.path(), registry.clone());
+        let lifecycle = std::sync::Arc::new(BackgroundLaunchLifecycle::default());
+        let claim = lifecycle.claim().unwrap();
+        let ticket = claim.register_recovery(recovery.clone());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let proceed = std::sync::Arc::new(tokio::sync::Notify::new());
+        let owner_gate = proceed.clone();
+        let owner_recovery = recovery.clone();
+        let caller = tokio::spawn(claim.run_owned(async move {
+            entered_tx.send(()).unwrap();
+            owner_gate.notified().await;
+            assert!(owner_recovery.recover_source().await.is_err());
+            drop(ticket);
+            Err::<(), _>(BgForkError::Dispatch(
+                "publication failed and rollback remains pending".into(),
+            ))
+        }));
+        entered_rx.await.unwrap();
+        caller.abort();
+        proceed.notify_one();
+        let first = lifecycle.close_and_drain().await;
+        assert!(!first.unconfirmed_recoveries.is_empty());
+        assert!(first
+            .diagnostics
+            .iter()
+            .any(|error| error.contains("publication failed")));
+        assert!(
+            background_launch::read_shell_handoff_ack(home.path(), "feed1234", "abort")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(*registry.ownership.lock().unwrap(), (true, false));
+        let retry = lifecycle.close_and_drain().await;
+        assert!(
+            retry.unconfirmed_recoveries.is_empty(),
+            "{:?}",
+            retry.unconfirmed_recoveries
+        );
+        assert_eq!(
+            registry
+                .rollback_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_after_commit_uses_ack_recovery_and_does_not_steal_destination() {
+        use lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle;
+        let home = tempfile::tempdir().unwrap();
+        let registry = retry_registry(0);
+        *registry.ownership.lock().unwrap() = (false, true);
+        let recovery = published_recovery(home.path(), registry.clone());
+        recovery.progress.lock().unwrap().finish_started = true;
+        background_launch::write_shell_handoff_ack(
+            home.path(),
+            "feed1234",
+            "commit",
+            &ack(vec!["bshell001".into()], None),
+        )
+        .unwrap();
+        background_launch::write_shell_handoff_ack(
+            home.path(),
+            "feed1234",
+            "adopted",
+            &ack(vec!["bshell001".into()], None),
+        )
+        .unwrap();
+        let lifecycle = std::sync::Arc::new(BackgroundLaunchLifecycle::default());
+        let claim = lifecycle.claim().unwrap();
+        let ticket = claim.register_recovery(recovery);
+        let result = claim
+            .run_owned(async move {
+                let _ticket = ticket;
+                panic!("injected source panic after destination adoption");
+                #[allow(unreachable_code)]
+                Ok::<(), lingxi_core::host::bg_session_forker::BgForkError>(())
+            })
+            .await;
+        assert!(result.is_err());
+        let report = lifecycle.close_and_drain().await;
+        assert!(report.unconfirmed_recoveries.is_empty());
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|error| error.contains("panicked")));
+        assert_eq!(
+            registry
+                .rollback_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(*registry.ownership.lock().unwrap(), (false, true));
+        assert!(lifecycle
+            .close_and_drain()
+            .await
+            .unconfirmed_recoveries
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn committed_without_adoption_ack_stays_unconfirmed() {
+        let home = tempfile::tempdir().unwrap();
+        let registry = retry_registry(0);
+        *registry.ownership.lock().unwrap() = (false, false);
+        let recovery = published_recovery(home.path(), registry.clone());
+        recovery.progress.lock().unwrap().finish_started = true;
+        background_launch::write_shell_handoff_ack(
+            home.path(),
+            "feed1234",
+            "commit",
+            &ack(vec!["bshell001".into()], None),
+        )
+        .unwrap();
+        assert!(recovery.recover_source().await.is_err());
+        assert_eq!(
+            registry
+                .rollback_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        background_launch::write_shell_handoff_ack(
+            home.path(),
+            "feed1234",
+            "adopted",
+            &ack(vec!["bshell001".into()], None),
+        )
+        .unwrap();
+        recovery.recover_source().await.unwrap();
+        assert_eq!(
+            registry
+                .rollback_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_published_launch_never_guesses_that_ownership_is_local() {
+        let home = tempfile::tempdir().unwrap();
+        let registry = retry_registry(0);
+        let recovery = published_recovery(home.path(), registry.clone());
+        recovery.progress.lock().unwrap().finish_started = true;
+        std::fs::remove_file(background_launch::launch_spec_path(home.path(), "feed1234")).unwrap();
+        assert!(recovery.recover_source().await.is_err());
+        assert_eq!(
+            registry
+                .rollback_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_before_first_launch_write_fences_and_rolls_back() {
+        let home = tempfile::tempdir().unwrap();
+        let registry = retry_registry(0);
+        let recovery = SourceHandoffRecovery::new(
+            home.path().to_path_buf(),
+            "session".into(),
+            registry.clone(),
+        );
+        recovery.record_export(vec![shell()]);
+        std::fs::create_dir_all(crate::agents_registry::jobs_dir(home.path()).join("feed1234"))
+            .unwrap();
+        recovery.record_short("feed1234");
+        recovery.recover_source().await.unwrap();
+        assert!(
+            background_launch::read_shell_handoff_ack(home.path(), "feed1234", "abort")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            registry
+                .rollback_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_does_not_readopt_a_retained_row_already_rolled_back() {
+        let home = tempfile::tempdir().unwrap();
+        let registry = retry_registry(0);
+        let recovery = published_recovery(home.path(), registry.clone());
+        let mut retained = shell();
+        retained.task_id = "bshell002".into();
+        retained.process.task_id = retained.task_id.clone();
+        let mut spec = background_launch::read_launch_spec(home.path(), "feed1234").unwrap();
+        spec.shell_handoff.push(retained.clone());
+        background_launch::write_launch_spec(home.path(), "feed1234", &spec).unwrap();
+        recovery.record_export(spec.shell_handoff.clone());
+        recovery.progress.lock().unwrap().finish_started = true;
+        recovery.rollback(&[retained]).await.unwrap();
+        *registry.ownership.lock().unwrap() = (false, true);
+        background_launch::write_shell_handoff_ack(
+            home.path(),
+            "feed1234",
+            "commit",
+            &ack(vec!["bshell001".into()], None),
+        )
+        .unwrap();
+        background_launch::write_shell_handoff_ack(
+            home.path(),
+            "feed1234",
+            "adopted",
+            &ack(vec!["bshell001".into()], None),
+        )
+        .unwrap();
+        recovery.recover_source().await.unwrap();
+        assert_eq!(
+            registry
+                .rollback_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 }

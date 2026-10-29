@@ -20,6 +20,9 @@
 //! depends on `apps/cli`.
 
 use async_trait::async_trait;
+use lingxi_core::host::bg_session_forker::lifecycle::{
+    BackgroundLaunchLifecycle, BackgroundLaunchRecovery, BackgroundRecoveryTicket,
+};
 use lingxi_core::host::bg_session_forker::{BgForkError, BgSessionForker, BgSessionSnapshot};
 use lingxi_core::host::FileSystem;
 #[cfg(unix)]
@@ -33,6 +36,7 @@ use std::sync::{Arc, RwLock};
 /// dirs. Constructed in `init::resolve_desktop_config` and set on
 /// `DesktopConfig.bg_session_forker`.
 pub struct CliBgSessionForker {
+    lifecycle: Arc<BackgroundLaunchLifecycle>,
     task_registry: RwLock<Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>>,
     /// `<config-home>` (`~/.lingxi`) — anchors `projects/<cwd>/<uuid>.jsonl` and
     /// the `jobs/<short>/state.json` writes.
@@ -52,6 +56,22 @@ pub struct CliBgSessionForker {
             >,
         >,
     >,
+}
+
+struct ForkPublication {
+    conversation: BgSessionSnapshot,
+    system_prompt: Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+    prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    model: String,
+    handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
+    cwd: PathBuf,
+    context: crate::background_dispatch::ForkLaunchContext,
+    config_home: PathBuf,
+    runtime_dir: PathBuf,
+    version: String,
+    session_id: String,
+    recovery: Option<Arc<crate::shell_handoff::SourceHandoffRecovery>>,
+    ticket: Option<BackgroundRecoveryTicket>,
 }
 
 /// Write the same transcript and host metadata the cold-resume loader reads.
@@ -106,6 +126,7 @@ impl CliBgSessionForker {
         _resolved_permission_mode: permission::PermissionMode,
     ) -> Self {
         Self {
+            lifecycle: Arc::new(BackgroundLaunchLifecycle::default()),
             task_registry: RwLock::new(None),
             config_home,
             runtime_dir,
@@ -138,6 +159,13 @@ impl CliBgSessionForker {
     }
 
     pub(crate) fn launch_identity(
+        &self,
+    ) -> Result<(PathBuf, crate::background_dispatch::ForkLaunchContext), BgForkError> {
+        self.lifecycle.ensure_open()?;
+        self.admitted_launch_identity()
+    }
+
+    fn admitted_launch_identity(
         &self,
     ) -> Result<(PathBuf, crate::background_dispatch::ForkLaunchContext), BgForkError> {
         let live = self
@@ -175,99 +203,177 @@ impl CliBgSessionForker {
         model: &str,
         handoff: Option<&lingxi_core::host::BackgroundingSnapshot>,
     ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, BgForkError> {
-        // Capture current permissions and the live tool cwd at the dispatch
-        // boundary; /cd and mode changes never mutate the process cwd/argv.
-        let (cwd_pb, mut launch_context) = self.launch_identity()?;
-        if let Some(options) = &mut launch_context.options {
-            options.preserve_admitted_context = true;
-        }
-        let cwd = cwd_pb.display().to_string();
-
-        // 1. Mint the new background session id.
-        let new_session_id = uuid::Uuid::new_v4().to_string();
-
-        // 2. SNAPSHOT the conversation into the new session's transcript.
-        let session_path =
-            session::jsonl::path::session_path(&self.config_home, &cwd, &new_session_id);
-        let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd_pb.clone()));
-        let writer = session::jsonl::writer::JsonlWriter::new(session_path, fs);
-        write_background_snapshot(
-            &writer,
-            conversation,
-            &new_session_id,
-            &cwd,
-            &self.version,
-            model,
-        )
-        .await?;
-        // 3. Dispatch a detached daemon worker that resumes the copied session.
-        launch_context.model = Some(model.to_string());
-        launch_context.handoff = handoff.cloned();
+        // Admit before I/O and transfer ownership to a worker that survives
+        // cancellation of the caller. Shutdown joins that worker before cleanup.
+        let claim = self.lifecycle.claim()?;
+        let (cwd, context) = self.admitted_launch_identity()?;
+        let session_id = uuid::Uuid::new_v4().to_string();
         let registry = self
             .task_registry
             .read()
             .expect("background registry lock")
             .clone();
-        if handoff.is_some() {
-            if let Some(registry) = &registry {
-                launch_context.shell_handoff = registry
-                    .export_shell_handoff()
-                    .await
-                    .map_err(|error| BgForkError::Dispatch(error.to_string()))?;
+        let recovery = if handoff.is_some() {
+            registry.map(|registry| {
+                Arc::new(crate::shell_handoff::SourceHandoffRecovery::new(
+                    self.config_home.clone(),
+                    session_id.clone(),
+                    registry,
+                ))
+            })
+        } else {
+            None
+        };
+        // Registration precedes export: a panic leaves the recovery object in
+        // the lifecycle until the registry's export guard or retry settles it.
+        let ticket = recovery
+            .as_ref()
+            .map(|recovery| claim.register_recovery(recovery.clone()));
+        let publication = ForkPublication {
+            conversation: conversation.clone(),
+            system_prompt,
+            prompt: prompt.clone(),
+            model: model.to_string(),
+            handoff: handoff.cloned(),
+            cwd,
+            context,
+            config_home: self.config_home.clone(),
+            runtime_dir: self.runtime_dir.clone(),
+            version: self.version.clone(),
+            session_id,
+            recovery,
+            ticket,
+        };
+        claim.run_owned(Self::publish_fork(publication)).await
+    }
+
+    async fn publish_fork(
+        publication: ForkPublication,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, BgForkError> {
+        let ForkPublication {
+            conversation,
+            system_prompt,
+            prompt,
+            model,
+            handoff,
+            cwd: cwd_pb,
+            context: mut launch_context,
+            config_home,
+            runtime_dir,
+            version,
+            session_id,
+            recovery,
+            mut ticket,
+        } = publication;
+        if let Some(options) = &mut launch_context.options {
+            options.preserve_admitted_context = true;
+        }
+        let cwd = cwd_pb.display().to_string();
+        let session_path = session::jsonl::path::session_path(&config_home, &cwd, &session_id);
+        let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd_pb.clone()));
+        let writer = session::jsonl::writer::JsonlWriter::new(session_path, fs);
+        if let Err(error) =
+            write_background_snapshot(&writer, &conversation, &session_id, &cwd, &version, &model)
+                .await
+        {
+            // Export has not started, so no shell authority needs recovery.
+            if let Some(ticket) = ticket.take() {
+                ticket.confirm_resolved();
             }
+            return Err(error);
+        }
+        launch_context.model = Some(model);
+        launch_context.handoff = handoff;
+        if let Some(recovery) = &recovery {
+            let exported = match recovery.export().await {
+                Ok(exported) => exported,
+                Err(error) => {
+                    // The registry's export guard releases the fences on error.
+                    if let Some(ticket) = ticket.take() {
+                        ticket.confirm_resolved();
+                    }
+                    return Err(BgForkError::Dispatch(error));
+                }
+            };
+            // No await between export and recording the exact recovery roster.
+            recovery.record_export(exported.clone());
+            launch_context.shell_handoff = exported;
         }
         if let Some(system_prompt) = system_prompt {
             launch_context.system_prompt = Some(system_prompt.as_ref().clone());
         }
+        let remember_short = |short: &str| {
+            if let Some(recovery) = &recovery {
+                recovery.record_short(short);
+            }
+        };
         let short = crate::background_dispatch::dispatch_forked_session_with_context(
-            &self.config_home,
-            &self.runtime_dir,
+            &config_home,
+            &runtime_dir,
             &cwd,
-            &new_session_id,
-            prompt,
+            &session_id,
+            &prompt,
             &launch_context,
+            Some(&remember_short),
         );
         let short = match short {
             Ok(short) => short,
             Err(error) => {
-                if let Some(registry) = &registry {
-                    if error.kind() == std::io::ErrorKind::WouldBlock {
-                        return Err(BgForkError::Dispatch(error.to_string()));
-                    }
-                    registry
-                        .rollback_shell_handoff(&launch_context.shell_handoff)
-                        .await
-                        .map_err(|rollback| {
-                            BgForkError::Dispatch(format!(
-                                "{error}; shell export recovery failed: {rollback}"
-                            ))
-                        })?;
-                }
-                return Err(BgForkError::Dispatch(error.to_string()));
+                return Err(Self::recover_failed_publication(
+                    BgForkError::Dispatch(error.to_string()),
+                    recovery.as_deref(),
+                    ticket.take(),
+                )
+                .await);
             }
         };
-
-        if let Some(registry) = &registry {
-            crate::shell_handoff::finish_source(
-                &self.config_home,
-                &short,
-                registry.as_ref(),
-                &launch_context.shell_handoff,
-            )
-            .await
-            .map_err(BgForkError::Dispatch)?;
+        if let Some(recovery) = &recovery {
+            if let Err(error) = recovery.finish_source().await {
+                return Err(Self::recover_failed_publication(
+                    BgForkError::Dispatch(error),
+                    Some(recovery.as_ref()),
+                    ticket.take(),
+                )
+                .await);
+            }
         }
-
-        // 4. The live-session system line. No oracle string is recoverable — the
-        //    2.1.212 `vAd` command has no `load` handler (the TUI special
-        //    dispatcher renders this), so this is grounded on the minted short id,
-        //    NOT byte-verified.
+        if let Some(ticket) = ticket.take() {
+            ticket.confirm_resolved();
+        }
         Ok(format!("Copied conversation into a new background session ({short}).").into())
+    }
+
+    async fn recover_failed_publication(
+        original: BgForkError,
+        recovery: Option<&crate::shell_handoff::SourceHandoffRecovery>,
+        ticket: Option<BackgroundRecoveryTicket>,
+    ) -> BgForkError {
+        if let Some(recovery) = recovery {
+            match recovery.recover().await {
+                Ok(()) => {
+                    if let Some(ticket) = ticket {
+                        ticket.confirm_resolved();
+                    }
+                }
+                Err(error) => {
+                    // Dropping the ticket does not clear it; shutdown retries
+                    // using the same registry and recorded transaction state.
+                    return BgForkError::Dispatch(format!(
+                        "{original}; shell handoff recovery pending: {error}"
+                    ));
+                }
+            }
+        }
+        original
     }
 }
 
 #[async_trait]
 impl BgSessionForker for CliBgSessionForker {
+    fn lifecycle(&self) -> Arc<BackgroundLaunchLifecycle> {
+        self.lifecycle.clone()
+    }
+
     fn set_task_registry(
         &self,
         registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
@@ -306,22 +412,29 @@ impl BgSessionForker for CliBgSessionForker {
         // path (`list_resumable_sessions` enumerated it), so — unlike the fork
         // path — there is NO snapshot to write: dispatch a detached daemon that
         // resumes `session_id` directly via the same `Launch::Resume` machinery.
-        let (cwd_pb, launch_context) = self.launch_identity()?;
-        let cwd = cwd_pb.display().to_string();
-        let short = crate::background_dispatch::dispatch_resumed_session_with_context(
-            &self.config_home,
-            &self.runtime_dir,
-            &cwd,
-            session_id,
-            &launch_context,
-        )
-        .map_err(|e| BgForkError::Dispatch(e.to_string()))?;
+        let claim = self.lifecycle.claim()?;
+        let (cwd_pb, launch_context) = self.admitted_launch_identity()?;
+        let config_home = self.config_home.clone();
+        let runtime_dir = self.runtime_dir.clone();
+        let session_id = session_id.to_string();
         // Same grounding caveat as `fork_to_background`: the 2.1.212 resume-as-bg
         // dispatch has no recoverable oracle line (the TUI special dispatcher
         // renders it), so this is grounded on the minted short id, NOT byte-verified.
-        Ok(format!(
-            "Resumed session into a new background session ({short})."
-        ))
+        claim
+            .run_owned(async move {
+                let short = crate::background_dispatch::dispatch_resumed_session_with_context(
+                    &config_home,
+                    &runtime_dir,
+                    &cwd_pb.display().to_string(),
+                    &session_id,
+                    &launch_context,
+                )
+                .map_err(|e| BgForkError::Dispatch(e.to_string()))?;
+                Ok(format!(
+                    "Resumed session into a new background session ({short})."
+                ))
+            })
+            .await
     }
 }
 
@@ -333,6 +446,74 @@ mod tests {
     use lingxi_core::types::{
         utf16_json::Utf16JsonProjection as Source, ConversationMessage, MessageId,
     };
+
+    #[tokio::test]
+    async fn closed_foreground_rejects_all_launches_before_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_home = directory.path().join("uncreated-config");
+        let runtime_dir = directory.path().join("uncreated-runtime");
+        let forker = Arc::new(CliBgSessionForker::new(
+            config_home.clone(),
+            runtime_dir.clone(),
+            crate::background_launch::BackgroundLaunchOptions::default(),
+            permission::PermissionMode::AcceptEdits,
+        ));
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        *forker.live_context.write().unwrap() = Some(Arc::new({
+            let reads = reads.clone();
+            let cwd = directory.path().to_path_buf();
+            move || {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((cwd.clone(), permission::PermissionMode::Plan))
+            }
+        }));
+        assert!(forker.launch_identity().is_ok());
+        let retained = forker.clone();
+        let report = forker.lifecycle.close_and_drain().await;
+        assert!(report.unconfirmed_recoveries.is_empty());
+        let prompt = "".into();
+        let conversation = BgSessionSnapshot::default();
+        assert!(retained
+            .fork_to_background(&conversation, None, &prompt, "model")
+            .await
+            .is_err());
+        assert!(retained
+            .background_conversation(&conversation, None, &prompt, "model", &Default::default())
+            .await
+            .is_err());
+        assert!(retained
+            .resume_to_background(&uuid::Uuid::nil().to_string())
+            .await
+            .is_err());
+        assert!(retained.launch_identity().is_err());
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!config_home.exists());
+        assert!(!runtime_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn accepted_claim_keeps_its_live_identity_after_closure() {
+        let forker = CliBgSessionForker::new(
+            PathBuf::from("/tmp/config"),
+            PathBuf::from("/tmp/runtime"),
+            crate::background_launch::BackgroundLaunchOptions::default(),
+            permission::PermissionMode::Plan,
+        );
+        *forker.live_context.write().unwrap() = Some(Arc::new(|| {
+            Ok((PathBuf::from("/tmp"), permission::PermissionMode::Plan))
+        }));
+        let claim = forker.lifecycle.claim().unwrap();
+        forker.lifecycle.close();
+        assert!(forker.launch_identity().is_err());
+        assert!(forker.admitted_launch_identity().is_ok());
+        drop(claim);
+        assert!(forker
+            .lifecycle
+            .close_and_drain()
+            .await
+            .unconfirmed_recoveries
+            .is_empty());
+    }
 
     #[test]
     fn unbound_background_forker_rejects_startup_authority() {
@@ -533,7 +714,9 @@ mod tests {
             worker_options.preserve_admitted_context = true;
             let worker_options: crate::background_launch::BackgroundLaunchOptions =
                 serde_json::from_str(&serde_json::to_string(&worker_options).unwrap()).unwrap();
-            crate::run::apply_cli_resume_profile(&resumed, Some(&worker_options)).await.unwrap();
+            crate::run::apply_cli_resume_profile(&resumed, Some(&worker_options))
+                .await
+                .unwrap();
             // This is the state desktop assembly exposes before SessionStart.
             let restored = resumed.conversation_mode().await;
             assert_eq!(
@@ -569,16 +752,29 @@ mod tests {
             cfg.session_id_override = Some(session_id.to_string());
             cfg.initial_conversation_mode = Some(ConversationMode::Code);
             cfg.native_settings_agent_context =
-                lingxi_core::host::NativeSettingsAgentContext::Subagent { is_main_session: true };
+                lingxi_core::host::NativeSettingsAgentContext::Subagent {
+                    is_main_session: true,
+                };
             let runtime = crate::init::build_runtime_from_config(
                 cfg,
                 Arc::new(orchestrator::test_support::MockOutputStream::new()),
-            ).await.unwrap();
-            crate::run::apply_cli_resume_profile(runtime.orchestrator.as_ref(), Some(&worker_options))
-                .await.unwrap();
+            )
+            .await
+            .unwrap();
+            crate::run::apply_cli_resume_profile(
+                runtime.orchestrator.as_ref(),
+                Some(&worker_options),
+            )
+            .await
+            .unwrap();
             assert_eq!(runtime.orchestrator.conversation_mode().await.active, mode);
             let mounted = runtime.orchestrator.session();
-            assert!(mounted.lock().await.model_context_history().iter().any(|row| row.id() == current_id));
+            assert!(mounted
+                .lock()
+                .await
+                .model_context_history()
+                .iter()
+                .any(|row| row.id() == current_id));
             drop(mounted);
             let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
             assert!(shutdown.complete, "{:?}", shutdown.errors);

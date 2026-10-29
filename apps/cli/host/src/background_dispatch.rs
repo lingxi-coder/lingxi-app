@@ -274,7 +274,9 @@ pub async fn dispatch_background(
             &source_id.to_string(),
             &target_id.to_string(),
             argv.fork_session,
-        ).await {
+        )
+        .await
+        {
             Ok(path) => path,
             Err(e) => {
                 eprintln!("lingxi-cli: could not prepare resume transcript: {e}");
@@ -298,6 +300,7 @@ pub async fn dispatch_background(
             &prompt,
             argv.fork_session,
             &context,
+            None,
             &SystemLockProbe,
             &mut RealSpawner,
         ) {
@@ -330,6 +333,18 @@ fn argv_with_resolved_permission_mode(
     resolved.permission_mode = Some(resolved_permission_mode.wire_str().to_string());
     resolved.dangerously_skip_permissions = false;
     resolved
+}
+
+/// Reserve while holding the shared job lock. The directory prevents another
+/// dispatch that already minted this id from claiming it after an unwind.
+fn reserve_unpublished_job(config_home: &Path, short: &str) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(agents_registry::jobs_dir(config_home).join(short))
 }
 
 /// Testable core: `config_home`/`runtime_dir`, the lock-liveness probe, and the
@@ -438,6 +453,10 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
             return exit_codes::RUNTIME_ERROR;
         }
     };
+    if let Err(error) = reserve_unpublished_job(config_home, &short) {
+        eprintln!("lingxi-cli: could not reserve background job: {error}");
+        return exit_codes::RUNTIME_ERROR;
+    }
     if let Err(e) = crate::background_launch::write_launch_spec(config_home, &short, &launch_spec) {
         eprintln!("lingxi-cli: could not write background launch context: {e}");
         return exit_codes::RUNTIME_ERROR;
@@ -495,6 +514,7 @@ pub fn dispatch_forked_session(
         session_id,
         prompt,
         &ForkLaunchContext::default(),
+        None,
     )
 }
 
@@ -506,6 +526,7 @@ pub fn dispatch_forked_session_with_context(
     session_id: &str,
     prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     context: &ForkLaunchContext,
+    on_short: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> std::io::Result<String> {
     dispatch_resumed_session_inner(
         config_home,
@@ -515,6 +536,7 @@ pub fn dispatch_forked_session_with_context(
         prompt,
         true,
         context,
+        on_short,
         &SystemLockProbe,
         &mut RealSpawner,
     )
@@ -553,6 +575,7 @@ pub fn dispatch_resumed_session_with_context(
         &lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
         false,
         context,
+        None,
         &SystemLockProbe,
         &mut RealSpawner,
     )
@@ -578,6 +601,7 @@ fn dispatch_forked_session_inner<LP: LockProbe, S: DaemonSpawner>(
         prompt,
         true,
         &ForkLaunchContext::default(),
+        None,
         lock_probe,
         spawner,
     )
@@ -592,6 +616,7 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
     prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     fork: bool,
     context: &ForkLaunchContext,
+    on_short: Option<&(dyn Fn(&str) + Send + Sync)>,
     lock_probe: &LP,
     spawner: &mut S,
 ) -> std::io::Result<String> {
@@ -687,6 +712,12 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
         terminal,
     };
     let _job_lock = agents_registry::lock_job_state(config_home, &short)?;
+    reserve_unpublished_job(config_home, &short)?;
+    // Claim the exact unused identity before the first launch write. Even if
+    // dispatch unwinds, recovery can fence this job without touching another.
+    if let Some(on_short) = on_short {
+        on_short(&short);
+    }
     let publication: std::io::Result<()> = (|| {
         crate::background_launch::write_launch_spec(config_home, &short, &launch_spec)?;
         crate::shell_handoff::write_source_intent(config_home, &short, &launch_spec.shell_handoff)?;
@@ -787,15 +818,27 @@ async fn prepare_resume_transcript(
         return Ok(source);
     }
     if source_session_id == target_session_id {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "branch target must differ from the source session"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "branch target must differ from the source session",
+        ));
     }
 
     let source_id = uuid::Uuid::parse_str(source_session_id)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let target_id = uuid::Uuid::parse_str(target_session_id)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    crate::run::create_independent_cli_branch(config_home, cwd, source_id, target_id, Some(&source), None)
-        .await.map(|(path, _)| path).map_err(std::io::Error::other)
+    crate::run::create_independent_cli_branch(
+        config_home,
+        cwd,
+        source_id,
+        target_id,
+        Some(&source),
+        None,
+    )
+    .await
+    .map(|(path, _)| path)
+    .map_err(std::io::Error::other)
 }
 
 fn validate_transcript_path(config_home: &Path, path: &Path) -> std::io::Result<PathBuf> {
@@ -1095,6 +1138,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reserved_job_identity_cannot_be_claimed_twice() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(agents_registry::jobs_dir(home.path())).unwrap();
+        reserve_unpublished_job(home.path(), "feed1234").unwrap();
+        assert_eq!(
+            reserve_unpublished_job(home.path(), "feed1234")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+    }
+
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -1267,16 +1323,21 @@ mod tests {
         let target_cwd = "/tmp/current-worktree";
         let selected = session::jsonl::path::session_path(&home, target_cwd, &source_id);
         let other = session::jsonl::path::session_path(&home, "/tmp/other-worktree", &source_id);
-        for (path, cwd, content) in [(&selected, target_cwd, "selected source"), (&other, "/tmp/other-worktree", "other source")] {
+        for (path, cwd, content) in [
+            (&selected, target_cwd, "selected source"),
+            (&other, "/tmp/other-worktree", "other source"),
+        ] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let row = serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(),
                 "parentUuid":null, "sessionId":source_id, "cwd":cwd,
                 "message":{"role":"user", "content":content}});
             std::fs::write(path, format!("{row}\n")).unwrap();
         }
-        filetime::set_file_mtime(&other, filetime::FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
+        filetime::set_file_mtime(&other, filetime::FileTime::from_unix_time(2_000_000_000, 0))
+            .unwrap();
         let branch = prepare_resume_transcript(&home, target_cwd, &source_id, &target_id, true)
-            .await.expect("branch selected source");
+            .await
+            .expect("branch selected source");
         let content = std::fs::read_to_string(branch).unwrap();
         assert!(content.contains("selected source"));
         assert!(!content.contains("other source"));
@@ -1301,12 +1362,14 @@ mod tests {
         )
         .unwrap();
         let original = std::fs::read_to_string(&source).unwrap();
-        let target = prepare_resume_transcript(&home, "/tmp/target", source_id, target_id, true).await
+        let target = prepare_resume_transcript(&home, "/tmp/target", source_id, target_id, true)
+            .await
             .expect("fork should copy from source before resolving the target");
         assert_ne!(std::fs::canonicalize(&source).unwrap(), target);
         assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
         let branch = std::fs::read_to_string(&target).unwrap();
-        let profile = session::JsonlWriter::session_mode_transition_from_source(&branch, target_id).unwrap();
+        let profile =
+            session::JsonlWriter::session_mode_transition_from_source(&branch, target_id).unwrap();
         assert!(profile.active_epoch > 0);
         assert!(branch.contains(target_id));
         let context = ForkLaunchContext {
@@ -1332,6 +1395,7 @@ mod tests {
             &lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             true,
             &context,
+            None,
             &lockp,
             &mut spawner,
         )
@@ -1567,6 +1631,7 @@ mod tests {
                 &lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
                 fork,
                 &context,
+                None,
                 &lockp,
                 &mut spawner,
             )

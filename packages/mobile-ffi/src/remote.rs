@@ -1001,7 +1001,9 @@ fn record_to_ffi(record: &RemoteRecord) -> RemoteRecordFfi {
             origin: match origin {
                 RemotePromptOrigin::Desktop => RemotePromptOriginFfi::Desktop,
                 RemotePromptOrigin::Device => RemotePromptOriginFfi::Device,
-                RemotePromptOrigin::Scheduled | RemotePromptOrigin::Bot => RemotePromptOriginFfi::Scheduled,
+                RemotePromptOrigin::Scheduled | RemotePromptOrigin::Bot => {
+                    RemotePromptOriginFfi::Scheduled
+                }
             },
             device_name: device_name.clone(),
         },

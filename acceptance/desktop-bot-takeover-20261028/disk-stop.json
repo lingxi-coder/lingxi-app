@@ -1,0 +1,7 @@
+{
+  "ios_sdk_pid": 5557,
+  "state": "SIGSTOP",
+  "reason": "Data volume below 3 GiB",
+  "android_archive_removed": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/gstreamer-sdk/downloads/gstreamer-1.0-android-universal-1.28.8.tar.xz",
+  "android_extracted_slice": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/gstreamer-sdk/android-arm64/arm64"
+}

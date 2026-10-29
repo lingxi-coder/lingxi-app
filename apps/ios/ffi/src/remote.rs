@@ -5,9 +5,9 @@ use remote_control_client::signaling::DevicePlatform;
 use std::{collections::HashMap, sync::Arc};
 use IosNativeMediaHost as NativeMediaHost;
 
+use IosRemoteBotsListener as PlatformRemoteBotsListener;
 use IosRemoteKeyStore as PlatformRemoteKeyStore;
 use IosRemoteListener as PlatformRemoteListener;
-use IosRemoteBotsListener as PlatformRemoteBotsListener;
 use IosRemoteMediaConfigProvider as PlatformRemoteMediaConfigProvider;
 use IosRemoteTokenProvider as PlatformRemoteTokenProvider;
 const REMOTE_DEVICE_PLATFORM: DevicePlatform = DevicePlatform::Ios;
@@ -409,18 +409,31 @@ impl IosRemoteControlClient {
         self.inner.set_bots_listener(listener);
     }
     /// The current computer's Bot list.
-    pub fn bots_state(&self) -> RemoteBotsStateFfi { self.inner.bots_state() }
+    pub fn bots_state(&self) -> RemoteBotsStateFfi {
+        self.inner.bots_state()
+    }
     /// The cached chats of one Bot.
-    pub fn bot_threads_state(&self, bot_id: String) -> RemoteBotThreadsStateFfi { self.inner.bot_threads_state(bot_id) }
+    pub fn bot_threads_state(&self, bot_id: String) -> RemoteBotThreadsStateFfi {
+        self.inner.bot_threads_state(bot_id)
+    }
     /// Keep a visible Bot's chats current.
-    pub async fn activate_bot_threads(&self, bot_id: String) -> Result<(), RemoteFfiError> { self.inner.activate_bot_threads(bot_id).await }
+    pub async fn activate_bot_threads(&self, bot_id: String) -> Result<(), RemoteFfiError> {
+        self.inner.activate_bot_threads(bot_id).await
+    }
     /// Stop following a Bot's chats.
-    pub fn deactivate_bot_threads(&self, bot_id: String) { self.inner.deactivate_bot_threads(bot_id); }
+    pub fn deactivate_bot_threads(&self, bot_id: String) {
+        self.inner.deactivate_bot_threads(bot_id);
+    }
     /// Start a Bot chat and return its session id.
-    pub async fn create_bot_thread(&self, bot_id: String) -> Result<String, RemoteFfiError> { self.inner.create_bot_thread(bot_id).await }
+    pub async fn create_bot_thread(&self, bot_id: String) -> Result<String, RemoteFfiError> {
+        self.inner.create_bot_thread(bot_id).await
+    }
     /// The Bot a known chat belongs to.
-    pub fn bot_of_thread(&self, session_id: String) -> Option<String> { self.inner.bot_of_thread(session_id) }
+    pub fn bot_of_thread(&self, session_id: String) -> Option<String> {
+        self.inner.bot_of_thread(session_id)
+    }
     /// The sending Bot of a delegated prompt.
-    pub fn prompt_origin_bot_name(&self, session_id: String, turn_id: u64) -> Option<String> { self.inner.prompt_origin_bot_name(session_id, turn_id) }
-
+    pub fn prompt_origin_bot_name(&self, session_id: String, turn_id: u64) -> Option<String> {
+        self.inner.prompt_origin_bot_name(session_id, turn_id)
+    }
 }

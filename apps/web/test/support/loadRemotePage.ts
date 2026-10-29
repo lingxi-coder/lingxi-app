@@ -11,6 +11,7 @@ import type { ReactElement } from 'react';
  */
 export function loadRemotePage(modules: Record<string, unknown>): (props: Record<string, unknown>) => ReactElement {
   const require = createRequire(import.meta.url);
+  const pageRequire = createRequire(new URL('../../src/pages/RemotePage.tsx', import.meta.url));
   const transpiled = transpileModule(readFileSync(new URL('../../src/pages/RemotePage.tsx', import.meta.url), 'utf8'), {
     compilerOptions: { jsx: JsxEmit.ReactJSX, module: ModuleKind.CommonJS, target: ScriptTarget.ES2020 },
   }).outputText;
@@ -21,7 +22,7 @@ export function loadRemotePage(modules: Record<string, unknown>): (props: Record
     if (specifier === '../remote/remote.css') return {};
     if (specifier === '../app/router') return require('../../src/app/router.ts');
     if (specifier === '../remote/strings') return require('../../src/remote/strings.ts');
-    return require(specifier);
+    return pageRequire(specifier);
   };
   new Function('require', 'module', 'exports', transpiled)(substitute, module, module.exports);
   return module.exports.default;

@@ -323,8 +323,27 @@ disabled until these are implemented and tested, with owner-only approvals,
 original-human question routing and termination on revocation/deadline. Do not
 reuse the owner Bot's router token, MCP connections, workspaces or plugin secrets.
 
-The current in-progress validation/checkpoint is recorded in
-`acceptance/teams-t3-20261029/report.md`. It does not establish T3 acceptance.
+The trusted backend checkpoint is recorded in
+`acceptance/teams-t3-20261029/report.md`.
+
+A companion Harness checkout at `../harness-runtime`, branch
+`codex/teams-runtime`, now contains local commit
+`6ac2f6f4e617a21a71b57e479bf2b7e195adcaea` based on the existing product pin.
+Its host-owned `DesktopConfig.scope_output_quota` shares one finite physical
+dispatch budget and per-request output cap across the main service, retries,
+forks and auxiliary services. It checks the final sealed wire limit and rejects
+multiple completions or routes without an enforceable cap. Revocation is checked
+again after awaited host admission. Normal services leave the quota unset.
+
+This is an output limit, not an input/total-token or monetary budget, and
+revocation does not terminate already admitted work. The product still pins
+`eed08ca06c35371c1eb7ea5b02ebc10bcae63a12`; the companion commit is unpushed and
+not consumed or enabled by a Team product entry point. It closes one runtime
+prerequisite, with 1,440 model-layer tests and a complete runtime library check
+passing. Host profile/isolation, limits and termination, routing and four-client
+UI remain required. Evidence and exact boundaries are in
+`acceptance/teams-t3-runtime-20261029/report.md`. Neither checkpoint establishes
+T3 acceptance.
 
 ### Required isolated runtime
 

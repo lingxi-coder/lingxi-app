@@ -264,6 +264,7 @@ enum LocalAppAgentEventPageReader {
 
 /// Shares the native Local App broker with browser runs. The intent carries the
 /// complete bounded input and never waits for an external browser handoff.
+#if compiler(>=6.4)
 @available(iOS 27.0, *)
 struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
     static let title: LocalizedStringResource = "Run Local App Agent"
@@ -429,6 +430,7 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
         throw LocalAppServiceFailure("AGENT_TASK_TIMEOUT", "The Local App Agent task exceeded its configured time limit.")
     }
 }
+#endif
 
 actor LocalAppAgentIntentCancellation {
     private let appID: String

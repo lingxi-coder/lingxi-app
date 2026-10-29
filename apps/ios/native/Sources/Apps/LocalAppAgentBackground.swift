@@ -355,11 +355,15 @@ final class LocalAppAgentBackgroundController {
     }
 
     private func submit(_ request: BGContinuedProcessingTaskRequest) async throws {
+#if compiler(>=6.4)
+        // The async submission API was added in the iOS 27 SDK. Runtime
+        // availability alone does not make it visible to an older SDK.
         if #available(iOS 27.0, *) {
             try await BGTaskScheduler.shared.submitTaskRequest(request)
-        } else {
-            try BGTaskScheduler.shared.submit(request)
+            return
         }
+#endif
+        try BGTaskScheduler.shared.submit(request)
     }
 
     private func register(_ identifier: String) throws {

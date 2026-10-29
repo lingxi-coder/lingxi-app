@@ -29,7 +29,7 @@ export interface BotDraft {
   persona: string;
   /** Empty: the model new chats use. */
   model: string;
-  /** Empty: the engine's default, which is the mode that asks before it acts. */
+  /** Empty: leave the Bot's settings in charge. `default` explicitly asks for approval. */
   permissionMode: PermissionModeId | '';
   workspaces: BotWorkspaceUi[];
   /** The ids of the Bots that may hand this one tasks, as saved; a Bot that was deleted since may still be among them. */
@@ -76,7 +76,7 @@ export function permissionModeNeedsConfirmation(mode: PermissionModeId | ''): bo
 }
 
 export function emptyBotDraft(): BotDraft {
-  return { name: '', description: '', persona: '', model: '', permissionMode: '', workspaces: [], acceptFrom: [], remote: false };
+  return { name: '', description: '', persona: '', model: '', permissionMode: 'default', workspaces: [], acceptFrom: [], remote: false };
 }
 
 export function draftFromBot(bot: BotUi, persona: string): BotDraft {
@@ -85,8 +85,7 @@ export function draftFromBot(bot: BotUi, persona: string): BotDraft {
     description: bot.description,
     persona,
     model: bot.model ?? '',
-    // Asking is what the default is, so a Bot that names it is shown as having none.
-    permissionMode: bot.permissionMode === undefined || bot.permissionMode === 'default' ? '' : bot.permissionMode,
+    permissionMode: bot.permissionMode ?? '',
     workspaces: bot.workspaces.map((workspace) => ({ ...workspace })),
     acceptFrom: [...(bot.acceptFrom ?? [])],
     remote: bot.remote === true,
@@ -138,7 +137,7 @@ export function botChanges(bot: BotUi, persona: string, draft: BotDraft, peers?:
   if (draft.name.trim() !== bot.name) patch.name = draft.name.trim();
   if (draft.description.trim() !== bot.description) patch.description = draft.description.trim();
   if (draft.model !== (bot.model ?? '')) patch.model = draft.model || null;
-  if ((draft.permissionMode || 'default') !== (bot.permissionMode ?? 'default')) patch.permissionMode = draft.permissionMode || null;
+  if (draft.permissionMode !== (bot.permissionMode ?? '')) patch.permissionMode = draft.permissionMode || null;
   if (!sameFolders(draft.workspaces, bot.workspaces)) patch.workspaces = draft.workspaces.map((workspace) => ({ ...workspace }));
   if (draft.remote !== (bot.remote === true)) patch.remote = draft.remote;
   if (peers !== undefined) {

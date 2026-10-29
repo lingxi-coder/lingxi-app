@@ -419,6 +419,20 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "ja": "この Bot のチャットはこのモードで始まります。チャット内でモードを変えても、そのチャットだけに適用され、あなた自身の設定は変わりません。",
     "ko": "이 Bot의 채팅은 이 모드로 시작합니다. 채팅 안에서 모드를 바꿔도 해당 채팅에만 적용되며 내 설정은 바뀌지 않습니다."
   },
+  "bots_permission_app_default": {
+    "zh-Hans": "应用默认",
+    "zh-Hant": "應用程式預設",
+    "en": "App default",
+    "ja": "アプリのデフォルト",
+    "ko": "앱 기본값"
+  },
+  "bots_permission_app_default_hint": {
+    "zh-Hans": "使用这个 Bot 已配置的权限模式；未配置时使用应用默认模式。",
+    "zh-Hant": "使用這個 Bot 已設定的權限模式；未設定時使用應用程式預設模式。",
+    "en": "Use this Bot's configured mode, or the app default if none is set.",
+    "ja": "この Bot に設定された権限モードを使います。未設定ならアプリのデフォルトを使います。",
+    "ko": "이 Bot에 설정된 권한 모드를 사용하며, 설정이 없으면 앱 기본 모드를 사용합니다."
+  },
   "bots_permission_full_title": {
     "zh-Hans": "授予此 Bot 完全访问权限？",
     "zh-Hant": "授予此 Bot 完全存取權限？",

@@ -73,8 +73,8 @@ test('each limit the main process enforces is reported before anything is sent',
   assert.deepEqual(botDraftProblems(draft({ workspaces: [{ path: '/work/a', mode: 'read' }, { path: '/work/a', mode: 'write' }] })), { folders: 'folders_duplicate' });
 });
 
-test('a new Bot is made from the trimmed name and only the parts the owner filled in', () => {
-  assert.deepEqual(botCreateRequest({ ...emptyBotDraft(), name: '  Scribe  ' }), { name: 'Scribe' });
+test('a new Bot sends the displayed approval mode and the trimmed fields the owner filled in', () => {
+  assert.deepEqual(botCreateRequest({ ...emptyBotDraft(), name: '  Scribe  ' }), { name: 'Scribe', permissionMode: 'default' });
   assert.deepEqual(botCreateRequest({
     name: 'Scribe', description: ' notes ', persona: '# Scribe\n', model: 'builtin/small', permissionMode: 'plan',
     workspaces: [{ path: '/work/a', mode: 'write' }],
@@ -84,7 +84,7 @@ test('a new Bot is made from the trimmed name and only the parts the owner fille
 test('a new Bot is made out of reach of remote devices: its draft has the switch off and the request never carries it', () => {
   assert.equal(emptyBotDraft().remote, false);
   const request = botCreateRequest({ ...emptyBotDraft(), name: 'Scribe', remote: true });
-  assert.deepEqual(request, { name: 'Scribe' });
+  assert.deepEqual(request, { name: 'Scribe', permissionMode: 'default' });
   assert.ok(!('remote' in request));
 });
 
@@ -96,7 +96,7 @@ test('creating a Bot sends nothing while the form has problems, and says why a r
   const created = fakeApi();
   const result = await createBot(created.api, { ...emptyBotDraft(), name: 'Scribe', persona: 'Be brief.' });
   assert.equal(result.ok, true);
-  assert.deepEqual(created.calls.create, [{ name: 'Scribe', persona: 'Be brief.' }]);
+  assert.deepEqual(created.calls.create, [{ name: 'Scribe', persona: 'Be brief.', permissionMode: 'default' }]);
 
   const failing = fakeApi({ create: overIpc('lingxi:bots:create', 'A Bot named “Scribe” already exists.') });
   assert.deepEqual(await createBot(failing.api, { ...emptyBotDraft(), name: 'Scribe' }), { ok: false, conflict: false, message: 'A Bot named “Scribe” already exists.' });
@@ -112,13 +112,15 @@ test('errors from the main process are read as their message, and a conflict by 
   assert.equal(isBotConflict(overIpc('lingxi:bots:update', 'No such Bot.')), false);
 });
 
-test('a Bot that names the default permission mode is shown, and saved, as having none', () => {
+test('explicit approval stays distinct from an unset mode when a Bot is shown or saved', () => {
   const asking = bot({ permissionMode: 'default' });
   const draft = draftFromBot(asking, 'persona');
-  assert.equal(draft.permissionMode, '');
+  assert.equal(draft.permissionMode, 'default');
   assert.deepEqual(botChanges(asking, 'persona', draft).patch, {});
   assert.equal(draftFromBot(bot(), '').permissionMode, '');
   assert.equal(draftFromBot(bot({ permissionMode: 'plan' }), '').permissionMode, 'plan');
+  assert.deepEqual(botChanges(bot(), '', { ...draftFromBot(bot(), ''), permissionMode: 'default' }).patch, { permissionMode: 'default' });
+  assert.deepEqual(botChanges(asking, 'persona', { ...draft, permissionMode: '' }).patch, { permissionMode: null });
 });
 
 test('only what the owner changed is sent, and clearing a choice sends null', () => {

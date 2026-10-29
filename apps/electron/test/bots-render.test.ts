@@ -127,15 +127,18 @@ test('the model can be chosen from the ones the engine lists, and a model that i
   assert.match(html, /<option value="builtin\/retired-model"[^>]*selected[^>]*>builtin\/retired-model \(not available now\)<\/option>/);
 });
 
-test('every permission mode can be the default, asking is the one chosen when none was, and only Full access is confirmed', () => {
+test('new Bots explicitly ask for approval, while an unset mode is shown as the app default', () => {
   const html = render(React.createElement(BotPermissionField, { draft: emptyBotDraft(), onChange: noop }));
   for (const label of ['Ask for approval', 'Accept edits', 'Plan mode', 'Approve for me', 'Full access']) assert.match(html, new RegExp(`>${label}</option>`), label);
   assert.match(html, /Don(&#x27;|')t ask<\/option>/);
-  assert.match(html, /<option value="" selected="">Ask for approval<\/option>/);
+  assert.match(html, /<option value="default" selected="">Ask for approval<\/option>/);
   assert.match(html, /never changes your own preference/);
 
   const plan = render(React.createElement(BotPermissionField, { draft: { ...emptyBotDraft(), permissionMode: 'plan' }, onChange: noop }));
   assert.match(plan, /<option value="plan" selected="">Plan mode<\/option>/);
+  const unset = render(React.createElement(BotPermissionField, { draft: { ...emptyBotDraft(), permissionMode: '' }, onChange: noop }));
+  assert.match(unset, /<option value="" selected="">App default<\/option>/);
+  assert.match(unset, /configured mode/);
 
   assert.equal(permissionModeNeedsConfirmation('bypassPermissions'), true);
   for (const mode of ['', 'default', 'acceptEdits', 'plan', 'auto', 'dontAsk'] as const) assert.equal(permissionModeNeedsConfirmation(mode), false, mode);

@@ -159,16 +159,17 @@ export function BotPermissionField({ draft, disabled = false, onChange }: Pick<F
   const { locale } = useI18n();
   const [confirming, setConfirming] = useState(false);
   const options = permissionModeOptions(locale);
-  const current = options.find((option) => option.id === (draft.permissionMode || 'default'));
+  const current = options.find((option) => option.id === draft.permissionMode);
   return <div className="bots-fields">
-    <Field label={tr('bots_permission_title')} hint={current?.description}>
+    <Field label={tr('bots_permission_title')} hint={current?.description ?? tr('bots_permission_app_default_hint')}>
       {(control) => <select {...control} value={draft.permissionMode} disabled={disabled}
         onChange={(event) => {
           const mode = event.target.value as PermissionModeId | '';
           if (permissionModeNeedsConfirmation(mode)) setConfirming(true);
           else onChange({ permissionMode: mode });
         }}>
-        {options.map((option) => <option key={option.id} value={option.id === 'default' ? '' : option.id}>{option.label}</option>)}
+        <option value="">{tr('bots_permission_app_default')}</option>
+        {options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
       </select>}
     </Field>
     <p className="bots-hint">{tr('bots_permission_hint')}</p>

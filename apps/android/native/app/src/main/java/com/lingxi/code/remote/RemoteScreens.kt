@@ -321,7 +321,10 @@ private fun RemoteAppsSessionList(
             finally { busy = false }
         }
     }
-    RemoteSessionList(transport, bots, sessions, onOpenBot, onOpenSession, localApps = {
+    RemoteSessionList(
+        transport, bots, sessions, onOpenBot, onOpenSession,
+        sessionsTitle = stringResource(R.string.remote_sessions_title),
+        localApps = {
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -345,8 +348,8 @@ private fun RemoteAppsSessionList(
                     }
                 }
             }
-            item { Text(stringResource(R.string.remote_sessions_title), color = t.text, fontWeight = FontWeight.SemiBold) }
-    })
+        },
+    )
 }
 
 /**
@@ -361,6 +364,7 @@ internal fun RemoteSessionList(
     onOpenBot: (RemoteBotSummaryFfi) -> Unit,
     onOpenSession: (RemoteSessionSummaryFfi) -> Unit,
     localApps: androidx.compose.foundation.lazy.LazyListScope.() -> Unit = {},
+    sessionsTitle: String? = null,
 ) {
     val t = LingXiTheme.palette
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -378,6 +382,11 @@ internal fun RemoteSessionList(
                 }
                 items(bots, key = { "bot/${it.botId}" }) { bot -> RemoteBotRow(bot, onOpenBot) }
                 item(key = "bots-end") { Spacer(Modifier.height(4.dp)) }
+            }
+            if (sessionsTitle != null) {
+                item(key = "sessions-title") {
+                    Text(sessionsTitle, color = t.text, fontWeight = FontWeight.SemiBold)
+                }
             }
             when {
                 sessions == null -> item(key = "loading") {

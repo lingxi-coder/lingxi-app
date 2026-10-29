@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  DATA_CHANNEL_DEAD_MS,
+  DATA_CHANNEL_OPEN_TIMEOUT_MS,
+  ICE_GATHER_TIMEOUT_MS,
   OFFER_ANSWER_TIMEOUT_MS,
   RemoteRpcError,
   b64uEncode,
@@ -10,7 +13,7 @@ import {
   type SessionsListResult,
 } from '@lingxi/bridge-client/remote';
 import { backoffMs, type ConnectionState } from '../src/remote/viewerConnection';
-import { drive, harness, settle, UID } from './support/remoteHarness';
+import { waitFor, withRealTime, harness, settle, START_TIME, UID } from './support/remoteHarness';
 
 const phases = (states: ConnectionState[]): string[] => states.map((state) => state.phase);
 
@@ -71,6 +74,44 @@ test('pairing shows the locally computed code, waits for the desktop, then pins 
   connection.stop();
 });
 
+test('waiting for pairing does not turn asynchronous answer delivery into a protocol timeout', async (t) => {
+  const h = await harness();
+  let answerWaiting!: () => void;
+  let releaseAnswer!: () => void;
+  const waiting = new Promise<void>((resolve) => { answerWaiting = resolve; });
+  const released = new Promise<void>((resolve) => { releaseAnswer = resolve; });
+  const put = h.rtdb.put.bind(h.rtdb);
+  t.mock.method(h.rtdb, 'put', async (path: string, value: unknown) => {
+    if (path.endsWith('/answer') && value !== null) {
+      answerWaiting();
+      await released;
+    }
+    await put(path, value);
+  });
+  const connection = h.connect();
+  connection.start();
+  const pairing = h.until(connection, 'awaiting_approval');
+  try {
+    await Promise.race([waiting, pairing]);
+    // The old waiter spent 25 ms of fake time on every event-loop turn,
+    // exhausting the 30-second deadline before this real answer was delivered.
+    await settle(Math.ceil(OFFER_ANSWER_TIMEOUT_MS / 25) + 1);
+    assert.equal(h.clock.now(), START_TIME);
+    assert.equal(connection.state.phase, 'connecting');
+    releaseAnswer();
+    await pairing;
+    const hostSide = [...h.host.connections.values()][0]!;
+    h.host.approve(hostSide.offer.device.id);
+    await h.until(connection, 'ready');
+    assert.equal(h.clock.now(), START_TIME);
+    assert.equal((await h.keys.pinnedHost(h.host.hostId))?.host_key, h.host.hostKeyB64);
+  } finally {
+    releaseAnswer();
+    connection.stop();
+    h.host.stop();
+  }
+});
+
 test('a pairing code that differs from the desktop is a protocol error, not something to show', async () => {
   const h = await harness();
   h.host.pairingCodeOverride = '------';
@@ -97,13 +138,20 @@ test('denying on the desktop ends the attempt without retrying', async () => {
   assert.equal(await h.keys.pinnedHost(h.host.hostId), undefined);
 });
 
-test('a channel that never opens falls back to the tunnel on a new connection id and remembers it', async () => {
+test('a channel that never opens falls back to the tunnel on a new connection id and remembers it', async (t) => {
   const h = await harness();
   await h.trustDevice();
   h.network.opensChannel = false;
+  const connect = t.mock.method(h.network, 'connect');
   const connection = h.connect();
   connection.start();
-  await h.until(connection, 'ready');
+  await waitFor(() => connect.mock.calls.length === 1, 'the verified direct answer');
+  h.clock.advance(DATA_CHANNEL_OPEN_TIMEOUT_MS - 1);
+  await settle();
+  assert.equal(h.network.connections[0]!.closed, false, 'the direct attempt remains open before its deadline');
+  assert.equal(h.host.offers.length, 1, 'no tunnel fallback before the direct deadline');
+  h.clock.advance(1);
+  await withRealTime(h.clock, () => h.until(connection, 'ready'));
 
   assert.equal(h.host.offers.length, 2);
   const [first, second] = h.host.offers;
@@ -114,19 +162,19 @@ test('a channel that never opens falls back to the tunnel on a new connection id
   assert.equal(connection.state.transport, 'tunnel');
   assert.ok(h.tunnelMemory.prefers(h.host.hostId));
   assert.ok(h.network.connections[0]!.closed, 'the failed peer connection was closed');
-  await drive(h.clock, () => h.rtdb.read(toHostConnPath(UID, h.host.hostId, first!.connId)) === null, 'the first attempt to be cleaned up');
+  await waitFor(() => h.rtdb.read(toHostConnPath(UID, h.host.hostId, first!.connId)) === null, 'the first attempt to be cleaned up');
 
   // The tunnel really carries traffic.
   h.host.sessions = [{ session_id: 's1', title: 'T', project_label: 'p', status: 'idle', viewers: 0 }];
   const result = connection.request('sessions.list', {});
-  await drive(h.clock, () => settledPromise(result), 'the tunnel reply');
+  await withRealTime(h.clock, () => waitFor(() => settledPromise(result), 'the tunnel reply'));
   assert.deepEqual(await result, { sessions: h.host.sessions });
   connection.stop();
 
   // A second dial in the same ten minutes goes straight to the tunnel.
   const again = h.connect();
   again.start();
-  await h.until(again, 'ready');
+  await withRealTime(h.clock, () => h.until(again, 'ready'));
   assert.equal(h.host.offers.length, 3);
   assert.equal(h.host.offers[2]!.offer.transport, 'tunnel');
   assert.equal(h.network.connections.length, 1, 'no new peer connection was made');
@@ -151,7 +199,7 @@ test('when the desktop answers a direct offer with the tunnel the same connectio
   h.host.transportChoice = 'tunnel';
   const connection = h.connect();
   connection.start();
-  await h.until(connection, 'ready');
+  await withRealTime(h.clock, () => h.until(connection, 'ready'));
   assert.equal(h.host.offers.length, 1, 'no second offer');
   assert.equal(h.host.offers[0]!.offer.transport, 'webrtc');
   assert.equal(connection.state.transport, 'tunnel');
@@ -164,7 +212,7 @@ test('forcing the tunnel never creates a peer connection', async () => {
   await h.trustDevice();
   const connection = h.connect({ forceTunnel: true });
   connection.start();
-  await h.until(connection, 'ready');
+  await withRealTime(h.clock, () => h.until(connection, 'ready'));
   assert.equal(h.network.connections.length, 0);
   assert.equal(h.host.offers[0]!.offer.transport, 'tunnel');
   connection.stop();
@@ -175,7 +223,7 @@ test('a browser without WebRTC uses the tunnel', async () => {
   await h.trustDevice();
   const connection = h.connect({ peerConnections: undefined });
   connection.start();
-  await h.until(connection, 'ready');
+  await withRealTime(h.clock, () => h.until(connection, 'ready'));
   assert.equal(connection.state.transport, 'tunnel');
   connection.stop();
 });
@@ -186,6 +234,13 @@ test('an offer SDP that never finishes gathering is sent after the three-second 
   h.network.neverFinishGathering = true;
   const connection = h.connect();
   connection.start();
+  await waitFor(() => h.network.connections[0]?.iceGatheringState === 'gathering', 'ICE gathering to start');
+  h.clock.advance(ICE_GATHER_TIMEOUT_MS - 1);
+  await settle();
+  assert.equal(h.host.offers.length, 0, 'the offer waits for the gathering deadline');
+  assert.equal(typeof h.network.connections[0]!.onicegatheringstatechange, 'function', 'gathering is still being awaited');
+  h.clock.advance(1);
+  assert.equal(h.network.connections[0]!.onicegatheringstatechange, null, 'the deadline ends the gathering wait');
   await h.until(connection, 'ready');
   assert.equal(h.host.offers[0]!.offer.transport, 'webrtc');
   assert.match(h.host.offers[0]!.offer.sdp ?? '', /candidate/);
@@ -226,7 +281,7 @@ test('refusals the desktop signs are reported by reason, and only busy ones are 
     h.host.rejectWith = reason;
     const connection = h.connect();
     connection.start();
-    await drive(h.clock, () => connection.state.failure !== undefined, `${reason} to be reported`);
+    await h.until(connection, auto ? 'reconnecting' : 'failed', `${reason} to be reported`);
     assert.equal(connection.state.failure?.kind, kind, reason);
     assert.equal(connection.state.failure?.auto, auto, reason);
     assert.equal(connection.state.phase, auto ? 'reconnecting' : 'failed', reason);
@@ -282,11 +337,19 @@ test('no answer within thirty seconds removes the offer and fails the first atte
   h.host.mode = 'silent';
   const connection = h.connect();
   connection.start();
-  await drive(h.clock, () => h.host.offers.length === 1, 'the offer to arrive');
+  await waitFor(() => h.host.offers.length === 1, 'the offer to arrive');
   const { connId } = h.host.offers[0]!;
   assert.notEqual(h.rtdb.read(offerPath(UID, h.host.hostId, connId)), null);
+  assert.equal(h.clock.now(), START_TIME, 'answer timeout begins before the test explicitly advances time');
 
-  await drive(h.clock, () => connection.state.phase === 'failed', 'the answer timeout', { stepMs: 1000 });
+  h.clock.advance(OFFER_ANSWER_TIMEOUT_MS - 1);
+  await settle();
+  const beforeDeadline = connection.state;
+  assert.equal(beforeDeadline.phase, 'connecting', 'an unanswered offer has not timed out before its deadline');
+  assert.equal(beforeDeadline.failure, undefined);
+  assert.notEqual(h.rtdb.read(offerPath(UID, h.host.hostId, connId)), null, 'the pending offer remains until its deadline');
+  h.clock.advance(1);
+  await h.until(connection, 'failed', 'the answer timeout');
   assert.equal(connection.state.failure?.kind, 'no_answer');
   assert.equal(connection.state.failure?.auto, false);
   assert.ok(h.clock.now() - 1_700_000_000_000 >= OFFER_ANSWER_TIMEOUT_MS);
@@ -311,7 +374,11 @@ test('a silent desktop is noticed by the keepalive and the connection is re-dial
     if (state.phase === 'reconnecting' && droppedAt === 0) droppedAt = h.clock.now();
   });
   // 45 s of nothing from the desktop ends a direct link.
-  await drive(h.clock, () => connection.state.phase === 'reconnecting', 'the keepalive timeout', { stepMs: 1000 });
+  h.clock.advance(DATA_CHANNEL_DEAD_MS - 1);
+  await settle();
+  assert.equal(connection.state.phase, 'ready', 'keepalive does not end a live link before its deadline');
+  h.clock.advance(1);
+  await h.until(connection, 'reconnecting', 'the keepalive timeout');
   assert.equal(connection.state.failure?.kind, 'closed');
   assert.equal(connection.state.failure?.detail, 'keepalive_timeout');
   assert.equal(connection.state.failure?.auto, true);
@@ -320,7 +387,12 @@ test('a silent desktop is noticed by the keepalive and the connection is re-dial
   await assert.rejects(connection.request('sessions.list', {}), (error: unknown) => error instanceof RemoteRpcError && error.code === 'closed');
 
   assert.equal(h.host.offers.length, 1, 'nothing happens before the backoff has passed');
-  await drive(h.clock, () => connection.state.phase === 'ready', 'the reconnect', { stepMs: 100 });
+  h.clock.advance(999);
+  await settle();
+  assert.equal(h.host.offers.length, 1, 'no redial before the backoff deadline');
+  assert.equal(connection.state.retryAt, droppedAt + 1000, 'the backoff is still pending');
+  h.clock.advance(1);
+  await h.until(connection, 'ready', 'the reconnect');
   assert.equal(h.host.offers.length, 2);
   assert.equal(readies, 2, 'ready listeners run again after a reconnect');
   connection.stop();
@@ -333,11 +405,15 @@ test('coming back to the page skips the rest of the backoff', async () => {
   connection.start();
   await h.until(connection, 'ready');
   [...h.host.connections.values()][0]!.silent = true;
-  await drive(h.clock, () => connection.state.phase === 'reconnecting', 'the keepalive timeout', { stepMs: 1000 });
+  h.clock.advance(DATA_CHANNEL_DEAD_MS - 1);
+  await settle();
+  assert.equal(connection.state.phase, 'ready', 'the old link remains ready before the keepalive deadline');
+  h.clock.advance(1);
+  await h.until(connection, 'reconnecting', 'the keepalive timeout');
   assert.equal(h.host.offers.length, 1);
 
   connection.nudge();
-  await drive(h.clock, () => connection.state.phase === 'ready', 'the immediate reconnect', { stepMs: 1 });
+  await h.until(connection, 'ready', 'the immediate reconnect');
   assert.equal(h.host.offers.length, 2);
   connection.stop();
 });
@@ -350,8 +426,8 @@ test('stopping while waiting for approval closes the link and removes the offer'
   const hostSide = [...h.host.connections.values()][0]!;
   connection.stop();
   assert.equal(connection.state.phase, 'idle');
-  await drive(h.clock, () => hostSide.closes.length > 0, 'the desktop to see the link close');
-  await drive(h.clock, () => h.rtdb.read(toHostConnPath(UID, h.host.hostId, hostSide.connId)) === null, 'the offer to be removed');
+  await waitFor(() => hostSide.closes.length > 0, 'the desktop to see the link close');
+  await waitFor(() => h.rtdb.read(toHostConnPath(UID, h.host.hostId, hostSide.connId)) === null, 'the offer to be removed');
 });
 
 test('host notifications reach listeners, including ones sent right after approval', async () => {
@@ -373,7 +449,7 @@ test('host notifications reach listeners, including ones sent right after approv
   connection.stop();
 });
 
-/** True once a promise has settled (for polling in `drive`). */
+/** True once a promise has settled (for polling in `waitFor`). */
 const settledPromises = new WeakMap<Promise<unknown>, boolean>();
 function settledPromise(promise: Promise<unknown>): boolean {
   if (!settledPromises.has(promise)) {

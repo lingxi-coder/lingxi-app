@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ConversationControlsDto, MessageDto, PermissionRequest } from '@lingxi/bridge-client';
-import { RemoteRpcError, type RemotePending, type RemoteSeqRecord, type SessionAttachParams } from '@lingxi/bridge-client/remote';
+import { DATA_CHANNEL_DEAD_MS, RemoteRpcError, type RemotePending, type RemoteSeqRecord, type SessionAttachParams } from '@lingxi/bridge-client/remote';
 import { RemoteClient, questionAnswers, selectablePermissionModes, type SessionController } from '../src/remote/remoteClient';
 import { imageRefOf, IMAGE_REF_SCHEME } from '../src/remote/sessionModel';
 import type { HostConnection } from './support/fakeHost';
-import { drive, harness, type Harness } from './support/remoteHarness';
+import { waitFor, harness, settle, type Harness } from './support/remoteHarness';
 
 const SESSION = 'sess-1';
 const NO_PENDING: RemotePending = { permissions: [], questions: [], computer_access: [] };
@@ -92,30 +92,14 @@ async function open(h: Harness): Promise<{ client: RemoteClient; controller: Ses
   const connection = h.connect();
   const client = new RemoteClient(connection, { clock: h.clock });
   const script = new SessionScript(h);
-  // Authentication uses real WebCrypto. Advancing fake protocol deadlines on
-  // every event-loop turn can time it out while the crypto worker is still busy.
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => finish(new Error('timed out waiting for connection readiness')), 5_000);
-    const off = connection.subscribe((state) => {
-      if (state.phase === 'ready') finish();
-      else if (state.phase === 'failed') finish(new Error(`connection failed: ${JSON.stringify(state.failure)}`));
-    });
-    function finish(error?: Error): void {
-      clearTimeout(timeout);
-      off();
-      if (error) {
-        client.dispose();
-        connection.stop();
-        reject(error);
-      } else resolve();
-    }
-    connection.start();
-  });
+  connection.start();
+  try { await h.until(connection, 'ready'); }
+  catch (error) { client.dispose(); throw error; }
   const controller = client.session(SESSION);
   return { client, controller, script, conn: () => [...h.host.connections.values()].at(-1)! };
 }
 
-const live = (h: Harness, controller: SessionController) => drive(h.clock, () => controller.getState().status === 'live', 'the session to go live');
+const live = (controller: SessionController) => waitFor(() => controller.getState().status === 'live', 'the session to go live');
 
 test('a snapshot becomes the same rows the desktop shows, with prompts, extras and the pending set', async () => {
   const h = await harness();
@@ -129,11 +113,11 @@ test('a snapshot becomes the same rows the desktop shows, with prompts, extras a
   script.cursorSeq = 4;
   script.pending = { permissions: [permission(9)], questions: [], computer_access: [] };
   script.running = true;
-  await drive(h.clock, () => client.getState().sessions !== undefined, 'the session list');
+  await waitFor(() => client.getState().sessions !== undefined, 'the session list');
   assert.equal(client.getState().sessions![0]!.title, 'Fix bug', 'direction controls are stripped from titles');
 
   controller.activate();
-  await live(h, controller);
+  await live(controller);
   const state = controller.getState();
   const items = state.transcript.conversation.items;
   assert.deepEqual(items.map((i) => (i.type === 'narration' ? `${i.role}:${i.text}` : i.type)), ['user:hi', 'assistant:hello', 'user:run ls', 'assistant:Working']);
@@ -155,14 +139,14 @@ test('live records apply in order, repeats are ignored, and early ones wait for 
   script.records = [event(1, { type: 'turn_started' }), event(2, { type: 'text_delta', text: 'a' })];
   script.cursorSeq = 2;
   controller.activate();
-  await live(h, controller);
+  await live(controller);
 
   const send = (seq: number, e: object) => void conn().notify('session.event', { session_id: SESSION, ...event(seq, e) });
   send(2, { type: 'text_delta', text: 'a' }); // already in the snapshot
   send(3, { type: 'text_delta', text: 'b' });
   send(3, { type: 'text_delta', text: 'b' }); // a repeat
   send(4, { type: 'text_delta', text: 'c' });
-  await drive(h.clock, () => JSON.stringify(controller.getState().transcript.conversation.items).includes('abc'), 'the live text');
+  await waitFor(() => JSON.stringify(controller.getState().transcript.conversation.items).includes('abc'), 'the live text');
   const texts = controller.getState().transcript.conversation.items.filter((i) => i.type === 'narration').map((i) => (i as any).text);
   assert.ok(texts.includes('abc'), texts.join('|'));
 });
@@ -171,16 +155,16 @@ test('permission mode events update known modes and ignore unknown modes', async
   const h = await harness();
   const { controller, conn } = await open(h);
   controller.activate();
-  await live(h, controller);
+  await live(controller);
 
   const send = (seq: number, e: object) => void conn().notify('session.event', { session_id: SESSION, ...event(seq, e) });
   send(1, { type: 'permission_mode_changed', mode: 'acceptEdits' });
-  await drive(h.clock, () => controller.getState().controls?.permission.requested === 'acceptEdits', 'the permission mode update');
+  await waitFor(() => controller.getState().controls?.permission.requested === 'acceptEdits', 'the permission mode update');
   assert.equal(controller.getState().controls?.permission.effective, 'acceptEdits');
 
   send(2, { type: 'permission_mode_changed', mode: 'future-mode' });
   send(3, { type: 'model_changed', model: 'p/model-b' });
-  await drive(h.clock, () => controller.getState().controls?.qualified_model === 'p/model-b', 'the event after an unknown permission mode');
+  await waitFor(() => controller.getState().controls?.qualified_model === 'p/model-b', 'the event after an unknown permission mode');
   assert.equal(controller.getState().controls?.permission.requested, 'acceptEdits');
   assert.equal(controller.getState().controls?.permission.effective, 'acceptEdits');
 });
@@ -198,8 +182,8 @@ test('events that arrive before the snapshot ends are applied after it, minus wh
     original(c);
   };
   controller.activate();
-  await live(h, controller);
-  await drive(h.clock, () => JSON.stringify(controller.getState().transcript.conversation.items).includes('ab'), 'the held record');
+  await live(controller);
+  await waitFor(() => JSON.stringify(controller.getState().transcript.conversation.items).includes('ab'), 'the held record');
   assert.ok(conn());
   assert.ok(!JSON.stringify(controller.getState().transcript.conversation.items).includes('aab'));
 });
@@ -210,15 +194,23 @@ test('after a reconnect the session resumes from its last epoch and sequence', a
   script.records = [event(1, { type: 'turn_started' }), event(2, { type: 'text_delta', text: 'a' })];
   script.cursorSeq = 2;
   controller.activate();
-  await live(h, controller);
+  await live(controller);
   script.deltaFor = (after) => [event(after + 1, { type: 'text_delta', text: 'b' })];
   script.pending = { permissions: [permission(5)], questions: [], computer_access: [] };
 
   conn().silent = true; // the desktop goes quiet; the keepalive ends the link and the viewer re-dials
-  await drive(h.clock, () => controller.getState().status === 'offline', 'the session to notice', { stepMs: 1000 });
-  await drive(h.clock, () => script.attaches.length === 2, 'the second attach', { stepMs: 100 });
+  h.clock.advance(DATA_CHANNEL_DEAD_MS - 1);
+  await settle();
+  assert.equal(controller.getState().status, 'live', 'the old session stays live before the keepalive deadline');
+  h.clock.advance(1);
+  await waitFor(() => controller.getState().status === 'offline', 'the session to notice');
+  h.clock.advance(999);
+  await settle();
+  assert.equal(script.attaches.length, 1, 'no reattach before the reconnect backoff ends');
+  h.clock.advance(1);
+  await waitFor(() => script.attaches.length === 2, 'the second attach');
   assert.deepEqual(script.attaches[1], { session_id: SESSION, resume: { epoch: 'e1', after_seq: 2 } });
-  await drive(h.clock, () => controller.getState().status === 'live' && controller.getState().pending.permissions.length === 1, 'the delta');
+  await waitFor(() => controller.getState().status === 'live' && controller.getState().pending.permissions.length === 1, 'the delta');
   assert.ok(JSON.stringify(controller.getState().transcript.conversation.items).includes('ab'));
 });
 
@@ -226,14 +218,14 @@ test('a reset clears the session and a new snapshot replaces it', async () => {
   const h = await harness();
   const { controller, script, conn } = await open(h);
   controller.activate();
-  await live(h, controller);
+  await live(controller);
   assert.equal(controller.getState().transcript.conversation.items.length, 2);
 
   script.epoch = 'e2';
   script.messages = [message('user', 'fresh')];
   void conn().notify('session.reset', { session_id: SESSION });
   script.sendSnapshot(conn());
-  await drive(h.clock, () => JSON.stringify(controller.getState().transcript.conversation.items).includes('fresh'), 'the new snapshot');
+  await waitFor(() => JSON.stringify(controller.getState().transcript.conversation.items).includes('fresh'), 'the new snapshot');
   assert.equal(controller.getState().transcript.conversation.items.length, 1);
   assert.equal(script.attaches.length, 1, 'no second attach while the desktop sends the snapshot itself');
 });
@@ -242,9 +234,15 @@ test('a reset with no snapshot behind it asks for one', async () => {
   const h = await harness();
   const { controller, script, conn } = await open(h);
   controller.activate();
-  await live(h, controller);
+  await live(controller);
   void conn().notify('session.reset', { session_id: SESSION });
-  await drive(h.clock, () => script.attaches.length === 2, 'the fallback attach', { stepMs: 500 });
+  await waitFor(() => controller.getState().status === 'loading', 'the reset to arrive');
+  assert.equal(script.attaches.length, 1);
+  h.clock.advance(2_999);
+  await settle();
+  assert.equal(script.attaches.length, 1, 'the desktop has the full reset grace period to send a snapshot');
+  h.clock.advance(1);
+  await waitFor(() => script.attaches.length === 2, 'the fallback attach');
   assert.deepEqual(script.attaches[1], { session_id: SESSION }, 'not a resume: the base changed');
 });
 
@@ -252,7 +250,7 @@ test('permission answers go out as allow-once or deny, and losing the race is qu
   const h = await harness();
   const { controller, script } = await open(h);
   controller.activate();
-  await live(h, controller);
+  await live(controller);
   await controller.respondPermission(9, { type: 'allow_once' });
   await controller.respondPermission(10, { type: 'deny' });
   assert.deepEqual(script.calls.filter((c) => c.method === 'permission.respond').map((c) => c.params), [
@@ -288,7 +286,7 @@ test('prompts: images only while idle, the echo is matched by turn id, failures 
   const h = await harness();
   const { controller, script, conn } = await open(h);
   controller.activate();
-  await live(h, controller);
+  await live(controller);
   const image = { media_type: 'image/png', base64: 'AAAA' };
 
   await controller.sendPrompt('look', [image]);
@@ -296,10 +294,10 @@ test('prompts: images only while idle, the echo is matched by turn id, failures 
   assert.deepEqual(first.images, [image]);
   assert.equal(controller.getState().outgoing[0]!.turnId, 42);
   void conn().notify('session.event', { session_id: SESSION, seq: 1, record: { type: 'prompt', turn_id: 42, text: 'look', origin: 'device', device_name: 'Browser' } });
-  await drive(h.clock, () => controller.getState().outgoing.length === 0, 'the echo to replace the outgoing prompt');
+  await waitFor(() => controller.getState().outgoing.length === 0, 'the echo to replace the outgoing prompt');
 
   void conn().notify('session.event', { session_id: SESSION, seq: 2, record: { type: 'event', event: { type: 'turn_started', turn_id: 42 } } });
-  await drive(h.clock, () => controller.getState().turn.running, 'the turn to start');
+  await waitFor(() => controller.getState().turn.running, 'the turn to start');
   script.calls.length = 0;
   script.failWith.set('prompt.send', 'internal');
   await controller.sendPrompt('more', [image]);
@@ -317,7 +315,7 @@ test('older messages are fetched in a page and the transcript is rebuilt around 
   script.firstIndex = 2;
   script.history = [message('user', 'older'), message('assistant', 'oldest reply')];
   controller.activate();
-  await live(h, controller);
+  await live(controller);
   assert.equal(controller.getState().hasOlder, true);
   await controller.loadOlder();
   const texts = controller.getState().transcript.conversation.items.map((i) => (i as any).text);
@@ -330,7 +328,7 @@ test('controls: bypassPermissions is neither offered nor sent', async () => {
   const h = await harness();
   const { controller, script } = await open(h);
   controller.activate();
-  await live(h, controller);
+  await live(controller);
   assert.deepEqual(selectablePermissionModes(controller.getState().controls), ['default', 'acceptEdits']);
   await controller.setPermissionMode('bypassPermissions');
   await controller.setPermissionMode('acceptEdits');
@@ -346,7 +344,7 @@ test('an unknown session is an error state, not a hang', async () => {
   const { controller, script } = await open(h);
   script.failWith.set('session.attach', 'unknown_session');
   controller.activate();
-  await drive(h.clock, () => controller.getState().status === 'error', 'the error');
+  await waitFor(() => controller.getState().status === 'error', 'the error');
   assert.equal(controller.getState().error?.code, 'unknown_session');
 });
 
@@ -356,7 +354,7 @@ test('image-only prompts get a row, and image URLs are told apart from reference
   script.records = [{ seq: 1, record: { type: 'prompt', turn_id: 1, text: '', origin: 'desktop', images: [{ ref: 'abc', media_type: 'image/png' }, { ref: 'x', media_type: 'image/svg+xml' }] } }];
   script.cursorSeq = 1;
   controller.activate();
-  await live(h, controller);
+  await live(controller);
   const row = controller.getState().transcript.conversation.items.at(-1) as any;
   assert.equal(row.role, 'user');
   assert.deepEqual(row.images, [{ media_type: 'image/png', url: `${IMAGE_REF_SCHEME}abc` }], 'unsupported image types are dropped');

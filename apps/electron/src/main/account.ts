@@ -33,6 +33,7 @@ export class AccountService {
   private expiresAt = 0;
   private busy = false;
   private error: string | null = null;
+  private sessionExpired = false;
   private abort?: AbortController;
   private readonly events = new EventEmitter();
   private readonly ready: Promise<void>;
@@ -49,16 +50,21 @@ export class AccountService {
     try {
       const saved = await this.store.read();
       if (!saved) return;
-      const value = JSON.parse(saved) as Session;
+      const value = JSON.parse(saved) as Session & { sessionExpired?: boolean };
+      if (value.projectId === this.config.projectId && value.sessionExpired === true) {
+        this.sessionExpired = true;
+        this.error = accountError(new Error('TOKEN_EXPIRED'));
+        return;
+      }
       if (value.projectId !== this.config.projectId || typeof value.refreshToken !== 'string' || !value.refreshToken || typeof value.user?.uid !== 'string') throw new Error('Invalid session');
       this.session = { projectId: value.projectId, refreshToken: value.refreshToken, user: {
         uid: value.user.uid, email: typeof value.user.email === 'string' ? value.user.email : null,
         displayName: typeof value.user.displayName === 'string' ? value.user.displayName : null, emailVerified: value.user.emailVerified === true,
       } };
-    } catch { this.error = '无法恢复已保存的登录状态，请重新登录。'; }
+    } catch { this.sessionExpired = true; this.error = '无法恢复已保存的登录状态，请重新登录。'; }
   }
 
-  snapshot(): AccountState { return { user: this.session?.user ?? null, busy: this.busy, persistence: this.store.persistent ? 'secure' : 'session', error: this.error }; }
+  snapshot(): AccountState { return { user: this.session?.user ?? null, busy: this.busy, persistence: this.store.persistent ? 'secure' : 'session', error: this.error, ...(this.sessionExpired ? { sessionExpired: true } : {}) }; }
   onChanged(callback: (state: AccountState) => void): () => void {
     this.events.on('change', callback);
     return () => { this.events.off('change', callback); };
@@ -74,7 +80,9 @@ export class AccountService {
     return value as T;
   }
   private async save(): Promise<void> {
-    if (this.session) await this.store.write(JSON.stringify(this.session)); else await this.store.remove();
+    if (this.session) await this.store.write(JSON.stringify(this.session));
+    else if (this.sessionExpired) await this.store.write(JSON.stringify({ projectId: this.config.projectId, sessionExpired: true }));
+    else await this.store.remove();
   }
   private async invalidateSession(error: unknown, session: Session | null): Promise<void> {
     if (!session || this.session !== session || !(error instanceof Error)
@@ -82,6 +90,8 @@ export class AccountService {
     this.session = null;
     this.idToken = null;
     this.expiresAt = 0;
+    this.sessionExpired = true;
+    this.error = accountError(error);
     try { await this.save(); } finally { this.publish(); }
   }
   private async authenticatedRequest<T>(method: string, body: Record<string, unknown> = {}): Promise<T> {
@@ -101,6 +111,7 @@ export class AccountService {
       uid: value.localId, email: value.email ?? null, displayName: value.displayName ?? null, emailVerified: value.emailVerified === true,
     } };
     try { await this.save(); } catch (error) { this.session = previous; throw error; }
+    this.sessionExpired = false;
     this.idToken = value.idToken;
     this.expiresAt = Date.now() + Number(value.expiresIn) * 1000;
   }

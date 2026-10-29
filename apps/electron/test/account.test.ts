@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import { GoogleAuthProvider, OAuthCredential } from 'firebase/auth';
 import { AccountService, type AccountSessionStore } from '../src/main/account.ts';
 import { browserSignIn, parseBrowserCredential } from '../src/main/account-browser.ts';
-import { parseAccountCommand } from '../src/shared/account.ts';
+import { parseAccountCommand, type AccountState } from '../src/shared/account.ts';
 
 const config = { projectId: 'demo-lingxi', appId: 'demo-app', apiKey: 'demo-key', authDomain: 'demo-lingxi.firebaseapp.com' };
 function store(initial: string | null = null): AccountSessionStore & { value: string | null } {
@@ -64,8 +64,47 @@ test('revoked sessions clear local state; network failures retain recoverable se
     const service = new AccountService(config, saved, async () => {}, mockFetch(() => Response.json({ error: { message: code } }, { status: 400 })));
     const state = await service.execute({ type: 'reload' });
     assert.ok(state.error); assert.equal(state.user === null, code === 'INVALID_REFRESH_TOKEN');
-    assert.equal(saved.value === null, code === 'INVALID_REFRESH_TOKEN');
+    if (code === 'INVALID_REFRESH_TOKEN') assert.deepEqual(JSON.parse(saved.value!), { projectId: config.projectId, sessionExpired: true });
+    else assert.equal(saved.value, session());
+    assert.equal(state.sessionExpired === true, code === 'INVALID_REFRESH_TOKEN');
   }
+});
+test('background token expiry publishes a sign-in requirement, cleared only by successful authentication', async () => {
+  const saved = store(session());
+  let authenticate = false;
+  const service = new AccountService(config, saved, async () => {}, mockFetch((url) => {
+    if (url.includes('securetoken')) return Response.json({ error: { message: 'TOKEN_EXPIRED' } }, { status: 400 });
+    if (!authenticate) return Response.json({ error: { message: 'INVALID_LOGIN_CREDENTIALS' } }, { status: 400 });
+    return Response.json(url.includes('lookup') ? { users: [{ localId: 'u1' }] } : authResponse);
+  }));
+  const events: AccountState[] = []; service.onChanged(value => events.push(value));
+  await assert.rejects(service.getIdToken(), /TOKEN_EXPIRED/);
+  assert.equal(events.at(-1)?.sessionExpired, true);
+  assert.match(events.at(-1)!.error!, /重新登录/);
+  assert.equal((await service.execute({ type: 'signIn', email: 'a@example.com', password: 'fixture' })).sessionExpired, true);
+  authenticate = true;
+  const signedIn = await service.execute({ type: 'signIn', email: 'a@example.com', password: 'fixture' });
+  assert.equal(signedIn.user?.uid, 'u1');
+  assert.equal(signedIn.sessionExpired, undefined);
+  assert.ok(!JSON.stringify(events).includes('secret'));
+  const restarted = new AccountService(config, saved, async () => {}, mockFetch(() => { throw Error('expired marker must not refresh'); }));
+  // Successful sign-in replaced the marker with the newly authenticated session.
+  assert.equal((await restarted.execute({ type: 'status' })).sessionExpired, undefined);
+  restarted.dispose();
+  service.dispose();
+});
+test('an expired-session marker survives restart without retaining revoked credentials', async () => {
+  const saved = store(session());
+  const service = new AccountService(config, saved, async () => {}, mockFetch(() => Response.json({ error: { message: 'INVALID_REFRESH_TOKEN' } }, { status: 400 })));
+  await assert.rejects(service.getIdToken());
+  assert.ok(!saved.value!.includes('secret'));
+  service.dispose();
+  const restarted = new AccountService(config, saved, async () => {}, mockFetch(() => { throw Error('must not refresh a revoked credential'); }));
+  const state = await restarted.execute({ type: 'status' });
+  assert.equal(state.user, null);
+  assert.equal(state.sessionExpired, true);
+  assert.match(state.error!, /重新登录/);
+  restarted.dispose();
 });
 test('sign-out during background refresh cannot resurrect a session', async () => {
   let release!: (r: Response) => void;
@@ -164,7 +203,8 @@ test('cached-token terminal failures clear the session; transient and unrelated 
         ? { type: operation, email: 'other@example.com', password: 'secret' } : { type: operation });
       const cleared = operation !== 'signIn' && code !== 'NETWORK_ERROR';
       assert.equal(state.user === null, cleared, `${operation}: ${code}`);
-      assert.equal(saved.value === null, cleared);
+      if (cleared) assert.deepEqual(JSON.parse(saved.value!), { projectId: config.projectId, sessionExpired: true });
+      else assert.ok(saved.value!.includes('refresh-secret'));
       assert.equal(state.busy, false);
       assert.ok(state.error);
       if (cleared) await assert.rejects(service.getIdToken(), /请先登录/);

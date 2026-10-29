@@ -56,6 +56,7 @@ import { restoreSessionPickerFocus, SessionPicker } from './components/SessionPi
 import './components/SessionPicker.css';
 import { SESSION_PICKER_EVENT } from '../shared/sessionWorkspace';
 import { CreateProjectDialog } from './components/CreateProjectDialog';
+import { AccountGate } from './components/AccountGate';
 
 interface SessionPickerRequest {
   id: number;
@@ -408,6 +409,7 @@ export function App() {
 
   return (
     <Theme.Provider value={palette}>
+      <AccountGate>
       <ModUiSurfaceClientIdProvider clientId={bridge.uiSurfaceClientId}>
       <GitWorkspaceProvider scope={gitScope} onOpen={() => openPage('changes')} onTerminal={() => { openPage('chat'); if (!terminal.open) terminal.toggle(); }}>
       <div
@@ -609,6 +611,7 @@ export function App() {
       </div>
       </GitWorkspaceProvider>
       </ModUiSurfaceClientIdProvider>
+      </AccountGate>
     </Theme.Provider>
   );
 }

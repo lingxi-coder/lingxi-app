@@ -13,7 +13,7 @@ const projectId = 'demo-lingxi-teams-t0';
 const emulator = process.env.FIRESTORE_EMULATOR_HOST;
 const options = { skip: !emulator, timeout: 30_000 };
 const botKey = `bot:owner:${'h'.repeat(22)}:${'b'.repeat(22)}`;
-const bot = { ownerUid: 'owner', hostId: 'h'.repeat(22), botId: 'b'.repeat(22), name: 'Fixture Bot', status: 'online', use: 'listed', uids: ['alice'] };
+const bot = { ownerUid: 'owner', ownerGeneration: 1, hostId: 'h'.repeat(22), botId: 'b'.repeat(22), name: 'Fixture Bot', revision: 1, enabled: true, use: 'listed', uids: ['alice'] };
 let environment, adminApp, admin;
 const user = uid => environment.authenticatedContext(uid).firestore();
 const ref = (db, suffix) => doc(db, `teams/team-test/${suffix}`);
@@ -65,6 +65,11 @@ async function send(db, args = {}, parts) {
 test('teams: only default opts into Team rules', () => {
   const config = JSON.parse(readFileSync(new URL('../../../firebase.json', import.meta.url), 'utf8'));
   assert.equal(config.firestore.find(db => db.database === '(default)').rules, 'infra/firebase/firestore.default.rules');
+  assert.equal(config.firestore.find(db => db.database === '(default)').indexes, 'infra/firebase/firestore.teams.indexes.json');
+  assert.equal(config.firestore.find(db => db.database === 'model-catalog').indexes, 'infra/firebase/firestore.indexes.json');
+  const indexes = JSON.parse(readFileSync(new URL('../../../infra/firebase/firestore.teams.indexes.json', import.meta.url), 'utf8'));
+  assert.ok(indexes.indexes.some(index => index.collectionGroup === 'triggers' && index.queryScope === 'COLLECTION'
+    && JSON.stringify(index.fields) === JSON.stringify([{ fieldPath: 'botKey', order: 'ASCENDING' }, { fieldPath: 'seq', order: 'ASCENDING' }])));
   for (const database of ['model-catalog', 'push-notifications']) assert.equal(config.firestore.find(db => db.database === database).rules, 'infra/firebase/firestore.rules');
 });
 test('teams: clients cannot create a conversation or inject a hidden reader', options, async () => {
@@ -139,7 +144,8 @@ test('teams: changing Bot allowlist denies existing private-thread writes immedi
   await create({ ...conversation('bot-chat'), kind: 'bot_dm', participants: ['user:alice', botKey] });
   const alice = user('alice');
   await assertSucceeds(send(alice, { cid: 'bot-chat' }));
-  await assertSucceeds(updateDoc(ref(user('owner'), `bots/${botKey}`), { uids: [] }));
+  await assertFails(updateDoc(ref(user('owner'), `bots/${botKey}`), { uids: [] }));
+  await admin.doc(`teams/team-test/bots/${botKey}`).update({ uids: [], revision: 2 });
   await assertFails(send(alice, { cid: 'bot-chat', mid: 'message02', changeId: 'change002' }));
   await assertSucceeds(send(user('owner'), { cid: 'bot-chat', mid: 'message02', changeId: 'change002', author: { kind: 'bot', uid: 'owner', botKey } }));
 });

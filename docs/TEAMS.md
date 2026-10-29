@@ -1,7 +1,8 @@
 # Teams implementation contract
 
 Status: T0 validated; T1 and T2 implemented locally, with deployment and full native
-product/device acceptance still pending. This document refines the approved 2026-10-29 Team plan
+product/device acceptance still pending. T3 has an in-progress trusted backend
+protocol; its host executor and four-client UI are not implemented/enabled. This document refines the approved 2026-10-29 Team plan
 after review. It is the repository contract for subsequent phases; a phase is
 complete only when its stated checks pass on all four clients.
 
@@ -248,11 +249,92 @@ messages older than the reconnect cursor.
 
 ## Bot isolation and authenticated triggers (T3)
 
+### T3 backend checkpoint (not an enabled Bot feature)
+
+The existing `/v1/teams/messages` endpoint now defines the following trusted
+protocol. It is local source work, not deployed. No client UI starts a Team Bot
+yet. All four clients must gain the corresponding UI together when the isolated
+host runtime is ready; the T3 phase remains open.
+
+- `bots`, `bindBot`, `unbindBot`, `heartbeatBot` list/manage a card. Binding is
+  authenticated as its owner, uses an expected revision, and captures the owner's
+  current membership generation. Unbinding retains a tombstone and increments
+  the revision. A new binding/policy revision cannot revive an old trigger.
+  There are at most 200 card identities per team, including tombstones. Presence
+  is a 60-second heartbeat hint, not proof that execution is available.
+- Conversation `create` additionally accepts `kind: bot_dm` and `botKeys` (up to
+  eight) for private/group/channel participants. The existing trusted constructor
+  derives the read ACL, includes each Bot owner, and validates the caller's current
+  permission. A Bot private thread has exactly one human and one Bot.
+- Human `mutate/create` additionally accepts explicit `targets` (up to eight).
+  A Bot private thread derives its target from the conversation. A group/channel
+  requires an explicit participating, permitted Bot target. A text `@name` or SDK
+  `mentions` entry alone never triggers execution. In the **same transaction** as
+  the message/change, the server creates an immutable `triggers` record and adds
+  Admin-only `executionIntent` evidence to the original create receipt. SDK rules
+  cannot create that evidence or read/write execution state. Retrying an ordinary
+  SDK message cannot upgrade it into execution. Retrying an edit/recall does not
+  create new work.
+- `botQueue` reads the server checkpoint; an ahead-of-server cursor is rejected.
+  `claimBot` transactionally reserves the earliest unresolved trigger in a
+  per-Bot/per-conversation slot. Its 30-second claim can be reclaimed **before**
+  execution starts, fencing the previous attempt. Concurrent hosts cannot skip
+  an earlier live or ambiguous invocation.
+- Only the transaction changing `claimed` to `running` returns `execute: true`
+  from `startBot`. Repeated start calls return `execute: false`. The caller must
+  never execute without that one-shot permit. A lost start response deliberately
+  needs owner recovery. The total running deadline is five minutes, including
+  permission/question waits; polling does not extend it. A host must enforce the
+  deadline and terminate its process independently of this server lease.
+- `finishBot` atomically writes a deterministic Bot reply, immutable change and
+  terminal receipt/checkpoint. Reply ACK loss can be retried with the exact result.
+  All trusted output message/change IDs use the reserved `bot_` prefix (64 chars).
+  Human HTTP mutations and all SDK writes reject that namespace so members cannot
+  preoccupy predictable outputs. Status and Bot replies never create triggers.
+- After a running lease expires, work becomes `recovery`; it is never automatically
+  executed again. `recoverBot` is an owner-only, idempotent manual settlement,
+  without tool execution. Claim/start/poll/finish/recovery recheck the source
+  human's generation, unchanged/unrecalled create, authenticated receipt evidence,
+  current owner generation and exact binding revision. Invalid work only becomes
+  `revoked`, without publishing a result. Requests older than 24 hours receive one
+  missed reply instead of executing. The checkpoint moves with the terminal write.
+- `botQuestion` binds unique question strings and a deterministic question identity
+  to the run/attempt and original human. `botAnswer` accepts only that current
+  human/generation, validates the binding/source again for a new answer, and keeps
+  an immutable answer ID/digest. The owner or another member cannot answer for the
+  human. `botPoll` exposes the answer to the current valid owner attempt. No tool
+  approval endpoint is exposed to members.
+
+The `triggers` query's `(botKey ASC, seq ASC)` collection index is declared only
+for `(default)` in `infra/firebase/firestore.teams.indexes.json`. Named databases
+retain their existing configuration. Deploying the index/rules/API still needs
+explicit authorization.
+
+Runtime preflight found two missing prerequisites in the current Desktop path.
+An isolated configuration home does not itself restrict native Read/Grep/Edit
+tools; owner approval cannot substitute for an unbypassable scope. The pinned
+Harness supports Bash `denyRead(parent)` plus `allowRead(scope)`, but retaining
+native file tools needs a trusted path restriction (or a complete restricted-tool
+profile that excludes them and all host capabilities). Also Harness
+`token_budget` is an auto-continuation target, not a token ceiling. Strict token
+limits require an actual trusted runtime budget; a usage event followed by
+`cancelTurn` does not prove a process has stopped. Team execution must stay
+disabled until these are implemented and tested, with owner-only approvals,
+original-human question routing and termination on revocation/deadline. Do not
+reuse the owner Bot's router token, MCP connections, workspaces or plugin secrets.
+
+The current in-progress validation/checkpoint is recorded in
+`acceptance/teams-t3-20261029/report.md`. It does not establish T3 acceptance.
+
+### Required isolated runtime
+
 Separate Harness session IDs do not isolate memory. Both automatic memory and
 session-memory retrieval use the configuration home. Each private Bot
 conversation therefore has its own home, workspace, transcripts, automatic memory
-and session-memory namespace, scoped by `(teamId, conversationId, membership
-generation)`. Group conversations also use a conversation-specific namespace.
+and session-memory namespace, scoped by `(ownerUid, botKey, teamId,
+conversationId, originHumanUid, membership generation)`. Generations are per UID;
+Alice generation 1 and Bob generation 1 are not the same principal. Group
+conversations also use a conversation-specific, human-generation-scoped namespace.
 No team-wide writable home is shared between private conversations.
 
 Bot persona/skills are copied as immutable inputs into the selected scope. Any

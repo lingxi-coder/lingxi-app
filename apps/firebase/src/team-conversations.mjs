@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { botPermits } from './team-bots.mjs';
 
 const segment = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
@@ -33,7 +34,7 @@ export async function createTeamConversation(db, input) {
   const bots = parties.filter(party => party.kind === 'bot');
   if ((args.kind === 'dm' && (humans.length !== 2 || bots.length !== 0))
     || (args.kind === 'bot_dm' && (humans.length !== 1 || bots.length !== 1))
-    || humans.length === 0) throw new TeamConversationError(400, 'Invalid conversation participants');
+    || humans.length === 0 || (args.kind !== 'bot_dm' && parties.length < 2)) throw new TeamConversationError(400, 'Invalid conversation participants');
   const memberUids = [...new Set(parties.map(party => party.uid))].sort();
   if (!memberUids.includes(args.callerUid)) throw new TeamConversationError(403, 'Caller is not a participant');
   const participants = [...args.participants].sort();
@@ -56,13 +57,13 @@ export async function createTeamConversation(db, input) {
     const cards = snapshots.slice(memberUids.length);
     for (const [index, bot] of bots.entries()) {
       const card = cards[index].data();
-      if (!card || card.ownerUid !== bot.uid || bot.key !== `bot:${card.ownerUid}:${card.hostId}:${card.botId}`) {
+      if (!card || card.enabled !== true || card.ownerGeneration !== snapshots[memberUids.indexOf(bot.uid)].data()?.generation
+        || card.ownerUid !== bot.uid || bot.key !== `bot:${card.ownerUid}:${card.hostId}:${card.botId}`) {
         throw new TeamConversationError(403, 'Registered Bot required');
       }
       // A private Bot thread grants the human access; an owner cannot bypass the
       // target Bot's policy by creating it on behalf of a disallowed human.
-      if (args.kind === 'bot_dm' && humans[0].uid !== card.ownerUid
-        && card.use !== 'all' && !(card.use === 'listed' && card.uids?.includes(humans[0].uid))) {
+      if (!botPermits(card, args.kind === 'bot_dm' ? humans[0].uid : args.callerUid)) {
         throw new TeamConversationError(403, 'Bot use is not permitted');
       }
     }

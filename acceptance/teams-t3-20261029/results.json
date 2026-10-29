@@ -1,0 +1,53 @@
+{
+  "status": "backend_protocol_validated_T3_incomplete",
+  "parent": "b26556209",
+  "validation": {
+    "final_source_emulator": {
+      "rules_backend": 48,
+      "real_sdk": 7,
+      "failures": 0,
+      "skipped": 0,
+      "log": "logs/emulator-final.log.gz"
+    },
+    "backend_unit": {
+      "passed": 24,
+      "environment_skipped": 55,
+      "failures": 0,
+      "log": "logs/backend-unit.log.gz"
+    },
+    "final_source_emulator_rerun_required": false,
+    "syntax_checks": "passed",
+    "diff_check": "passed",
+    "review": "static backend approved; host/runtime and four-client gates open"
+  },
+  "disk_floor_bytes": 2147483648,
+  "not_implemented": [
+    "isolated TeamConnector and execution runtime",
+    "strict runtime token cap and unbypassable scope policy",
+    "owner approval/original-human question runtime integration",
+    "four-client T3 UI"
+  ],
+  "deployed": false,
+  "pushed": false,
+  "disk_floor_observed_then_recovered": true,
+  "source_sha256": {
+    "apps/firebase/scripts/test-teams.mjs": "cc3d2ad007c8e2a803acba8682a1d76c97a34553065f557131bd38a2e595c326",
+    "apps/firebase/src/team-bots.mjs": "f3e79340e73f591a25f62c197664576295892281a37a9815c7bd4eb7da584289",
+    "apps/firebase/src/team-conversations.mjs": "f2f443fcfb556ec876225adc8e3c9349fbcb52d44477704758544e9cd1c0e6c7",
+    "apps/firebase/src/team-messages.mjs": "4c5ed210b355ff33d58a7529b289c1d60c2d18497d0d91cf5898cd60b87ec051",
+    "apps/firebase/src/teams.mjs": "4e1cf2e68c6a49b92c064a2a94a7f7205ef582915fdce7192d3b06c28486f20b",
+    "apps/firebase/test/teams.bots.emulator.test.mjs": "ce81e46f9532e8c0e7e6ca9c8aaeff6539f968f144109ea2eacfab228d7b8a10",
+    "apps/firebase/test/teams.rules.emulator.test.mjs": "a55f7e2bbe1379ea20b601ace9b63620d1597af85629f112493d4c2ecf32ec3c",
+    "docs/TEAMS.md": "ea6f755ab302d0d23e8583b9f0838106bd20e2c6fd9a992b17abba849c2e4edd",
+    "firebase.json": "722ce45816cf8481403092ebe75d5ca32cf37ee3685e047b7beb97a22006fe68",
+    "infra/firebase/firestore.default.rules": "062fdf546f71bf0ac8e779895dc9a879a739f5ad4fb45f43dae9bcaa942d012c",
+    "infra/firebase/firestore.teams.indexes.json": "414ec0506fe8efe18d171d30f725cf1fed09ec6263361f46c6c23f20c4b0e390",
+    "acceptance/teams-t3-20261029/report.md": "8ca9765b387f1ed039ec510f9405cb795aed8d81a643da7cb8ca0ed7f99e0e37"
+  },
+  "log_sha256": {
+    "logs/backend-unit.log.gz": "66183f5fd29b9f7693e57fe59ffcc98583390432abc1238d3291913ca6961ad6",
+    "logs/emulator-before-final-hardening.log.gz": "2c21a878d0e62d752a0ae3574bdb86e06827e625107d4ffa39a368f4c3cfda2e",
+    "logs/emulator-final.log.gz": "4508e1c46fb6bd97f5f078bad4d37e662e3e250f9ed91c7a11b71287933235b3"
+  },
+  "last_free_gib": 6.218
+}

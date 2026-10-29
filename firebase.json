@@ -16,7 +16,7 @@
     {
       "database": "(default)",
       "rules": "infra/firebase/firestore.default.rules",
-      "indexes": "infra/firebase/firestore.indexes.json"
+      "indexes": "infra/firebase/firestore.teams.indexes.json"
     },
     {
       "database": "model-catalog",

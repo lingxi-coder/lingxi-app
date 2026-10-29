@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { TeamConversationError } from './team-conversations.mjs';
 import { TeamMessagesStore, TeamMessageError } from './team-messages.mjs';
+import { TeamBotError } from './team-bots.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
@@ -221,6 +222,7 @@ export function createTeamsHandler({ store, verifyToken, createCustomToken, orig
     } catch (error) {
       if (error instanceof z.ZodError) return reply({ error: { code: 'INVALID_INPUT' } }, 400);
       if (error instanceof TeamMessageError) return reply({ error: { code: error.code } }, error.status);
+      if (error instanceof TeamBotError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamsError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamConversationError) return reply({ error: { code: error.code } }, error.status);
       return reply({ error: { code: 'SERVICE_UNAVAILABLE' } }, 503);

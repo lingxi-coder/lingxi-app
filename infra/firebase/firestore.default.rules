@@ -22,8 +22,9 @@ service cloud.firestore {
     }
     function mayUseBot(tid, key) {
       let b = get(botPath(tid, key)).data;
-      return b.ownerUid == request.auth.uid || b.use == 'all'
-        || (b.use == 'listed' && request.auth.uid in b.get('uids', []));
+      return b.enabled == true && b.ownerGeneration == get(memberPath(tid, b.ownerUid)).data.generation
+        && (b.ownerUid == request.auth.uid || b.use == 'all'
+        || (b.use == 'listed' && request.auth.uid in b.get('uids', [])));
     }
     function maySpeak(tid, cid) {
       let c = get(convPath(tid, cid)).data;
@@ -36,7 +37,9 @@ service cloud.firestore {
         (a.kind == 'user' && a.keys().hasOnly(['kind', 'uid']))
         || (a.kind == 'bot' && a.keys().hasOnly(['kind', 'uid', 'botKey']) && a.botKey is string
           && a.botKey in get(convPath(tid, cid)).data.participants
-          && get(botPath(tid, a.botKey)).data.ownerUid == request.auth.uid));
+          && get(botPath(tid, a.botKey)).data.ownerUid == request.auth.uid
+          && get(botPath(tid, a.botKey)).data.enabled == true
+          && get(botPath(tid, a.botKey)).data.ownerGeneration == get(memberPath(tid, request.auth.uid)).data.generation));
     }
 
     // Cross-check the immutable receipt and both sides of the conversation cursor.
@@ -53,7 +56,7 @@ service cloud.firestore {
       let m = request.resource.data;
       return m.keys().hasOnly(['seq', 'author', 'kind', 'text', 'mentions', 'replyTo', 'createdAt', 'changeSeq', 'changeId'])
         && m.keys().hasAll(['seq', 'author', 'kind', 'text', 'createdAt', 'changeSeq', 'changeId'])
-        && validId(mid) && m.seq is int && m.seq == get(convPath(tid, cid)).data.lastSeq + 1
+        && validId(mid) && !mid.matches('^bot_.*$') && m.seq is int && m.seq == get(convPath(tid, cid)).data.lastSeq + 1
         && getAfter(convPath(tid, cid)).data.lastSeq == m.seq
         && getAfter(convPath(tid, cid)).data.lastMessage.id == mid
         && m.createdAt == request.time && m.kind in ['text', 'status', 'question', 'task_ref', 'app_ref']
@@ -98,7 +101,7 @@ service cloud.firestore {
       let m = getAfter(msgPath(tid, cid, e.messageId)).data;
       return e.keys().hasOnly(['seq', 'messageId', 'operation', 'actorUid', 'generation', 'at', 'textDigest'])
         && e.keys().hasAll(['seq', 'messageId', 'operation', 'actorUid', 'generation', 'at', 'textDigest'])
-        && validId(id) && validId(e.messageId) && e.seq is int
+        && validId(id) && !id.matches('^bot_.*$') && validId(e.messageId) && !e.messageId.matches('^bot_.*$') && e.seq is int
         && e.seq == get(convPath(tid, cid)).data.lastChangeSeq + 1
         && getAfter(convPath(tid, cid)).data.lastChangeSeq == e.seq
         && getAfter(convPath(tid, cid)).data.lastChange.id == id
@@ -114,16 +117,6 @@ service cloud.firestore {
       return r.keys().hasOnly(['lastReadSeq', 'generation']) && r.generation == get(memberPath(tid, request.auth.uid)).data.generation && r.lastReadSeq is int && r.lastReadSeq >= 0
         && r.lastReadSeq <= getAfter(convPath(tid, cid)).data.lastSeq;
     }
-    function isOwnBot(key) {
-      let b = request.resource.data;
-      return b.keys().hasOnly(['ownerUid', 'hostId', 'botId', 'name', 'description', 'status', 'lastSeen', 'use', 'uids'])
-        && b.keys().hasAll(['ownerUid', 'hostId', 'botId', 'name', 'status', 'use'])
-        && b.ownerUid == request.auth.uid && request.auth.uid.matches('^[A-Za-z0-9_-]{1,128}$')
-        && b.hostId.matches('^[A-Za-z0-9_-]{22}$') && b.botId.matches('^[A-Za-z0-9_-]{22}$')
-        && key == 'bot:' + b.ownerUid + ':' + b.hostId + ':' + b.botId
-        && b.name is string && b.name.size() <= 80 && b.status is string && b.status.size() <= 32
-        && b.use in ['all', 'listed'] && (!('uids' in b) || (b.uids is list && b.uids.size() <= 500));
-    }
 
     match /users/{uid}/teams/{tid} { allow get, list: if isSelf(uid); }
     match /teams/{tid} {
@@ -136,9 +129,8 @@ service cloud.firestore {
       }
       match /bots/{key} {
         allow get, list: if isMember(tid);
-        allow create: if isMember(tid) && isOwnBot(key);
-        allow update: if isMember(tid) && resource.data.ownerUid == request.auth.uid && isOwnBot(key);
-        allow delete: if isMember(tid) && resource.data.ownerUid == request.auth.uid;
+        // Binding revisions and owner generations are trusted API writes. In
+        // particular, an SDK write cannot resurrect an old binding/trigger.
       }
       match /conversations/{cid} {
         // Create/participant mutation go through teamsApi, which derives memberUids

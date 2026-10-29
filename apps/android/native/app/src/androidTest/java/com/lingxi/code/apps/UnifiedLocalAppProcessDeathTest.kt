@@ -39,10 +39,27 @@ class UnifiedLocalAppProcessDeathTest {
         NativeAppActivityHost(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
             if (phase == "prepare") {
                 check(!receipt.exists()) { "A previous acceptance receipt must be recovered first" }
-                val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/owner-death-${UUID.randomUUID()}")
+                val sourceDirectory = com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/owner-death-${UUID.randomUUID()}"
+                val source = apps.hostFile(sourceDirectory)
                 check(File(context.filesDir, "local-app-acceptance-fixtures/python").copyRecursively(source))
+                assertEquals(sourceDirectory, apps.guestPath(source.absolutePath))
+                val workspaceId = UUID.randomUUID().toString()
+                val projectRef = AppProjectRef("mobileProject", projectId = UUID.randomUUID().toString())
+                val sessionId = UUID.randomUUID().toString()
+                val pending = apps.registerAuthoring(JSONObject()
+                    .put("workspaceId", workspaceId)
+                    .put("sourceDirectory", sourceDirectory)
+                    .put("projectRef", projectRef.toJson())
+                    .put("authoringSessionId", sessionId))
+                assertNull(pending.appId)
+                assertEquals(sourceDirectory, pending.sourceDirectory)
+                assertEquals(workspaceId, pending.workspaceId)
+                assertEquals(projectRef, pending.projectRef)
+                assertEquals(sessionId, pending.authoringSessionId)
                 val value = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
                 val record = value.getJSONObject("record").appRecord()
+                assertEquals(sourceDirectory, record.authoring?.sourceDirectory)
+                assertEquals(record.id, record.authoring?.appId)
                 val release = value.getJSONObject("release").appRelease()
                 try {
                     apps.grant(record.id, release.digest)

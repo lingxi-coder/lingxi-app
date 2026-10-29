@@ -7,7 +7,9 @@ Team 的首个客户端 Firestore 访问例外仅限 `(default)` 的 `teams` 数
 `model-catalog` 和 `push-notifications` 仍为 deny-all。该配置尚未部署，
 T1 的 Team API、四端成员管理和邀请功能已在本地实现，验证记录见
 [T1 acceptance](../acceptance/teams-t1-20261029/report.md)。生产部署与完整原生包、
-真机及线上团队双账号验收仍待后续。
+真机及线上团队双账号验收仍待后续。T2 已补充四端成员消息、持久变更补齐、
+未读、编辑/撤回和本地定义的 `onTeamMessage`，见 [T2 acceptance](../acceptance/teams-t2-20261029/report.md)。
+消息 API 和 create trigger 均未部署；Eventarc/default 数据库与发送身份的权限仍需发布前核对。
 
 `teamsApi` 计划复用 `push-api` 身份。现有该身份的 Firestore 授权限定
 `push-notifications`，部署前必须另外确认/授予它对 `(default)` 的必要数据权限，

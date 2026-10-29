@@ -313,7 +313,7 @@ class MainActivity : ComponentActivity() {
                     if (parts.first() != "remote") remoteOpen = false
                     if (parts.first() != "team") teamsOpen = false
                     when {
-                        link.route == "team/join" -> { teamInvite = link.params["code"]; openTeams() }
+                        link.route in setOf("team/join", "team/inbox") -> { teamInvite = link.params["code"]; openTeams() }
                         parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)?.let(openRemote) ?: run { handled = false }
                         link.params["workspace"] != null && parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
                         parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import") -> { requestedFeatureLink = link; awaitingFeature = true }

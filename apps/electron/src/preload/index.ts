@@ -463,6 +463,8 @@ const api: LingxiApi = {
   teams: {
     list: uid => teamsRequest({ type: 'list', uid }),
     detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
+    messages: (uid, command) => teamsRequest({ type: 'messages', uid, command }),
+    onMessagesChanged: callback => subscribe('lingxi:teams:messages', callback),
     execute: (uid, command) => teamsRequest({ type: 'execute', uid, command }),
     onChanged: callback => subscribe('lingxi:teams:changed', callback),
   },

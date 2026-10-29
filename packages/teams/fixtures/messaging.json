@@ -1,0 +1,124 @@
+{
+  "pages": [
+    {
+      "conversation": {
+        "id": "test-chat",
+        "kind": "dm",
+        "title": "Fixture",
+        "participants": [
+          "user:owner",
+          "user:alice"
+        ],
+        "lastSeq": 1,
+        "lastChangeSeq": 1,
+        "lastReadSeq": 0
+      },
+      "changes": [
+        {
+          "id": "change001",
+          "seq": 1,
+          "messageId": "message01",
+          "operation": "create"
+        }
+      ],
+      "messages": [
+        {
+          "id": "message01",
+          "seq": 1,
+          "author": {
+            "kind": "user",
+            "uid": "owner"
+          },
+          "kind": "text",
+          "text": "Synthetic",
+          "createdAt": null,
+          "editedAt": null,
+          "changeSeq": 1,
+          "changeId": "change001",
+          "recalled": false
+        }
+      ],
+      "hasMore": false
+    },
+    {
+      "conversation": {
+        "id": "test-chat",
+        "kind": "dm",
+        "title": "Fixture",
+        "participants": [
+          "user:owner",
+          "user:alice"
+        ],
+        "lastSeq": 1,
+        "lastChangeSeq": 2,
+        "lastReadSeq": 1
+      },
+      "changes": [
+        {
+          "id": "change002",
+          "seq": 2,
+          "messageId": "message01",
+          "operation": "edit"
+        }
+      ],
+      "messages": [
+        {
+          "id": "message01",
+          "seq": 1,
+          "author": {
+            "kind": "user",
+            "uid": "owner"
+          },
+          "kind": "text",
+          "text": "Edited",
+          "createdAt": null,
+          "editedAt": "2026-10-29T00:00:00Z",
+          "changeSeq": 2,
+          "changeId": "change002",
+          "recalled": false
+        }
+      ],
+      "hasMore": false
+    },
+    {
+      "conversation": {
+        "id": "test-chat",
+        "kind": "dm",
+        "title": "Fixture",
+        "participants": [
+          "user:owner",
+          "user:alice"
+        ],
+        "lastSeq": 1,
+        "lastChangeSeq": 3,
+        "lastReadSeq": 1
+      },
+      "changes": [
+        {
+          "id": "change003",
+          "seq": 3,
+          "messageId": "message01",
+          "operation": "recall"
+        }
+      ],
+      "messages": [
+        {
+          "id": "message01",
+          "seq": 1,
+          "author": {
+            "kind": "user",
+            "uid": "owner"
+          },
+          "kind": "text",
+          "text": "",
+          "createdAt": null,
+          "editedAt": "2026-10-29T00:00:00Z",
+          "changeSeq": 3,
+          "changeId": "change003",
+          "recalled": true
+        }
+      ],
+      "hasMore": false
+    }
+  ]
+}

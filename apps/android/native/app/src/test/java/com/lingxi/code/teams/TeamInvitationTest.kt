@@ -3,6 +3,7 @@ package com.lingxi.code.teams
 import org.junit.Assert.*
 import org.junit.Test
 import com.lingxi.code.navigation.DeepLink
+import com.lingxi.code.push.PushRoute
 import com.lingxi.code.navigation.DeepLinkInbox
 import com.lingxi.code.navigation.DeepLinkReadiness
 import androidx.lifecycle.SavedStateHandle
@@ -32,5 +33,16 @@ class TeamInvitationTest {
         assertEquals(raw, inbox.next(ready))
         assertNull(inbox.next(ready.copy(blockingSurfaceOpen = true)))
         assertNull(inbox.next(ready.copy(foreground = false)))
+    }
+    @Test fun pushInboxBypassesEngineAndRejectsParameters() {
+        val inbox = DeepLinkInbox(SavedStateHandle())
+        val link = "lingxi://team/inbox"
+        assertEquals("team/inbox", DeepLink.parse(link)?.route)
+        assertEquals(link, PushRoute.link("team/inbox"))
+        assertNull(PushRoute.link("team/inbox?workspace=x"))
+        assertTrue(inbox.enqueue(link))
+        assertEquals(link, inbox.next(DeepLinkReadiness(true, true, false, true, false)))
+        assertNull(DeepLink.parse("lingxi://team/inbox?workspace=x"))
+        assertNull(DeepLink.parse("lingxi://team/inbox#payload=%7B%7D"))
     }
 }

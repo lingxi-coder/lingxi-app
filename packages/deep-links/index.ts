@@ -8,7 +8,7 @@ export type DeepLinkTarget = {
 export class DeepLinkError extends Error {
   constructor(public readonly code: 'invalid' | 'unsupported', message: string) { super(message); }
 }
-const routes = /^(session\/[^/]+|project\/[^/]+|new|settings\/[^/]+|provider\/[^/]+|extensions\/(mcp|skill|plugin)\/[^/]+|cron\/(job|run)\/[^/]+|terminal\/[^/]+|apps\/[^/]+|market\/[^/]+|runtime\/(agent|task|plan|review|activity)\/[^/]+|import\/(mcp|plugin|skill|provider)|remote\/[^/]+\/[^/]+|team\/join)$/u;
+const routes = /^(session\/[^/]+|project\/[^/]+|new|settings\/[^/]+|provider\/[^/]+|extensions\/(mcp|skill|plugin)\/[^/]+|cron\/(job|run)\/[^/]+|terminal\/[^/]+|apps\/[^/]+|market\/[^/]+|runtime\/(agent|task|plan|review|activity)\/[^/]+|import\/(mcp|plugin|skill|provider)|remote\/[^/]+\/[^/]+|team\/(join|inbox))$/u;
 const parameters = new Set(['workspace', 'message', 'mode', 'scope', 'code']);
 function validatePayload(value: unknown, depth = 0): void {
   if (depth > 16) throw new DeepLinkError('invalid', 'Payload is too deeply nested');
@@ -52,6 +52,7 @@ export function parseDeepLink(raw: string): DeepLinkTarget {
   if (params.mode && !['chat', 'code'].includes(params.mode)) throw new DeepLinkError('invalid', 'Invalid session mode');
   if (params.message && (!route.startsWith('session/') || !/^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/iu.test(params.message))) throw new DeepLinkError('invalid', 'Invalid message identity');
   if (params.message) params.message = params.message.toLowerCase();
+  if (route === 'team/inbox' && Object.keys(params).length) throw new DeepLinkError('invalid', 'Unexpected team inbox parameter');
   if (route === 'team/join' ? Object.keys(params).length !== 1 || !/^[A-Za-z0-9_-]{32}$/u.test(params.code ?? '') : params.code !== undefined) throw new DeepLinkError('invalid', 'Invalid team invitation');
   const result: DeepLinkTarget = { route, params };
   if (url.hash) {

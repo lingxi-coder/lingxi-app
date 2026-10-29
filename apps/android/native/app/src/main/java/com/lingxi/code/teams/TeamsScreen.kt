@@ -19,6 +19,7 @@ import java.util.UUID
 @Composable
 fun TeamsScreen(initialInvite: String?, onInviteHandled: () -> Unit, onOpenAccount: () -> Unit, onClose: () -> Unit, model: TeamsViewModel = viewModel()) {
     val state by model.state.collectAsStateWithLifecycle()
+    var messageContext by remember { mutableStateOf<TeamDetail?>(null) }
     var name by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
     var maxUses by remember { mutableIntStateOf(1) }
@@ -28,7 +29,8 @@ fun TeamsScreen(initialInvite: String?, onInviteHandled: () -> Unit, onOpenAccou
     val clipboard = LocalClipboardManager.current
     DisposableEffect(model) { model.start(); onDispose { model.stop() } }
     LaunchedEffect(initialInvite) { initialInvite?.let { code = it } }
-    LaunchedEffect(state.uid) { confirmation = null; name = "" }
+    LaunchedEffect(state.uid) { messageContext = null; confirmation = null; name = "" }
+    if (messageContext != null && state.uid != null) { TeamMessagesScreen(state.uid!!, messageContext!!, onClose = { messageContext = null }); return }
     BackHandler(onBack = onClose)
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
@@ -60,7 +62,7 @@ fun TeamsScreen(initialInvite: String?, onInviteHandled: () -> Unit, onOpenAccou
                     }
                     state.detail?.let { detail ->
                         val team = detail.team
-                        item { HorizontalDivider(); Text(team.name, style = MaterialTheme.typography.headlineSmall); Text(stringResource(R.string.teams_members), style = MaterialTheme.typography.titleMedium) }
+                        item { TextButton(onClick = { messageContext = detail }) { Text(stringResource(R.string.teams_conversations)) }; HorizontalDivider(); Text(team.name, style = MaterialTheme.typography.headlineSmall); Text(stringResource(R.string.teams_members), style = MaterialTheme.typography.titleMedium) }
                         items(detail.members, key = { "member-${it.uid}" }) { member ->
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Text(member.displayName, style = MaterialTheme.typography.titleSmall); Text(teamRole(member.role), style = MaterialTheme.typography.bodySmall)

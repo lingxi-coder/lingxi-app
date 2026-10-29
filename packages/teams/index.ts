@@ -1,3 +1,4 @@
+import type { MessageApi, MessageCommand } from './messages';
 export type TeamRole = 'owner' | 'admin' | 'member';
 export interface TeamSummary { id: string; name: string; memberCount: number; role: TeamRole; generation: number }
 export interface TeamMember { uid: string; displayName: string; role: TeamRole; generation: number }
@@ -13,7 +14,7 @@ export type TeamCommand =
   | { action: 'remove'; teamId: string; uid: string; generation: number }
   | { action: 'role'; teamId: string; uid: string; generation: number; role: 'admin' | 'member' };
 export interface TeamResult { teamId?: string; code?: string; generation?: number; alreadyMember?: boolean; ok?: boolean }
-export interface TeamsApi {
+export interface TeamsApi extends MessageApi {
   list(): Promise<{ teams: TeamSummary[] }>;
   detail(teamId: string): Promise<TeamDetail>;
   execute(command: TeamCommand): Promise<TeamResult>;
@@ -25,6 +26,8 @@ export interface DesktopTeamsApi {
   detail(uid: string, teamId: string): Promise<TeamDetail>;
   execute(uid: string, command: TeamCommand): Promise<TeamResult>;
   onChanged: TeamsApi['onChanged'];
+  messages<T>(uid: string, command: MessageCommand): Promise<T>;
+  onMessagesChanged: MessageApi['onMessagesChanged'];
 }
 export class TeamsApiError extends Error {
   constructor(public readonly code: string, public readonly status: number) { super(code); }

@@ -32,7 +32,7 @@ val stageTeamsStrings by tasks.registering {
 tasks.named("preBuild") { dependsOn(stageTeamsStrings) }
 val stageTeamsSources = tasks.register<Sync>("stageTeamsSources") {
     from("../../../../apps/android/native/app/src/main/java") {
-        include("com/lingxi/code/teams/**", "com/lingxi/code/navigation/DeepLink.kt", "com/lingxi/code/navigation/DeepLinkInbox.kt")
+        include("com/lingxi/code/teams/**", "com/lingxi/code/navigation/DeepLink.kt", "com/lingxi/code/navigation/DeepLinkInbox.kt", "com/lingxi/code/push/PushRoute.kt")
     }
     from("Sources")
     into(layout.buildDirectory.dir("teams-src"))

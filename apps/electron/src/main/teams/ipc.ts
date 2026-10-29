@@ -12,6 +12,7 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
     try {
       const value = command.type === 'list' ? await service.list(command.uid)
         : command.type === 'detail' && typeof command.teamId === 'string' ? await service.detail(command.teamId, command.uid)
+        : command.type === 'messages' && command.command && typeof command.command === 'object' ? await service.messages(command.command as Parameters<TeamsService['messages']>[0], command.uid)
         : command.type === 'execute' && command.command && typeof command.command === 'object' ? await service.execute(command.command as Parameters<TeamsService['execute']>[0], command.uid)
         : (() => { throw new Error('INVALID_INPUT'); })();
       return { value };
@@ -22,5 +23,6 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
     }
   });
   const stop = service.onChanged(event => { for (const target of windows()) if (!target.isDestroyed()) target.webContents.send('lingxi:teams:changed', event); });
-  return () => { stop(); ipcMain.removeHandler(channel); service.close(); };
+  const stopMessages = service.onMessagesChanged(() => { for (const target of windows()) if (!target.isDestroyed()) target.webContents.send('lingxi:teams:messages'); });
+  return () => { stopMessages(); stop(); ipcMain.removeHandler(channel); service.close(); };
 }

@@ -8,6 +8,7 @@ export function Teams({ zh, initialInvite, onInviteHandled }: { zh: boolean; ini
   const desktop = window.lingxi?.teams, uid = state?.user?.uid;
   const api = useMemo<TeamsApi | undefined>(() => desktop && uid ? {
     list: () => desktop.list(uid), detail: teamId => desktop.detail(uid, teamId), execute: command => desktop.execute(uid, command),
+    messages: command => desktop.messages(uid, command), onMessagesChanged: callback => desktop.onMessagesChanged(callback),
     onChanged: callback => desktop.onChanged(callback),
   } : undefined, [desktop, uid]);
   return api && uid ? <TeamsPanel key={uid} api={api} uid={uid} zh={zh} initialInvite={initialInvite} onInviteHandled={onInviteHandled} />

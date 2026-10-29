@@ -17,7 +17,7 @@ const bot = { ownerUid: 'owner', hostId: 'h'.repeat(22), botId: 'b'.repeat(22), 
 let environment, adminApp, admin;
 const user = uid => environment.authenticatedContext(uid).firestore();
 const ref = (db, suffix) => doc(db, `teams/team-test/${suffix}`);
-const conversation = (id = 'ordinary') => ({ teamId: 'team-test', conversationId: id, callerUid: 'alice', kind: 'dm', title: 'Fixture', participants: ['user:alice', 'user:bob'] });
+const conversation = (id = 'ordinary') => ({ teamId: 'team-test', conversationId: id, callerUid: 'alice', callerGeneration: 1, kind: 'dm', title: 'Fixture', participants: ['user:alice', 'user:bob'] });
 const create = (input = conversation()) => createTeamConversation(admin, input);
 
 before(async () => {
@@ -44,7 +44,7 @@ after(async () => {
   if (adminApp) await deleteApp(adminApp);
 });
 
-function mutation(writer, db, current, { operation = 'create', mid = 'message01', changeId = 'change001', text = 'Synthetic message', author = { kind: 'user', uid: 'alice' }, changeSeq = current.lastChangeSeq + 1, seq = current.lastSeq + 1, cid = 'ordinary', textDigest = createHash('sha256').update(operation === 'recall' ? '' : text).digest('hex') } = {}, parts = ['conversation', 'message', 'change']) {
+function mutation(writer, db, current, { operation = 'create', mid = 'message01', changeId = 'change001', text = 'Synthetic message', author = { kind: 'user', uid: 'alice' }, changeSeq = current.lastChangeSeq + 1, seq = current.lastSeq + 1, cid = 'ordinary', generation = 1, textDigest = createHash('sha256').update(operation === 'recall' ? '' : text).digest('hex') } = {}, parts = ['conversation', 'message', 'change']) {
   const parent = `conversations/${cid}`;
   if (parts.includes('conversation')) writer.update(ref(db, parent), { lastChangeSeq: changeSeq, lastChange: { id: changeId, seq: changeSeq },
     ...(operation === 'create' ? { lastSeq: seq, lastMessage: { id: mid, seq, at: serverTimestamp() } } : {}) });
@@ -53,7 +53,7 @@ function mutation(writer, db, current, { operation = 'create', mid = 'message01'
     if (operation === 'create') writer.set(target, { seq, author, kind: 'text', text, createdAt: serverTimestamp(), changeSeq, changeId });
     else writer.update(target, { text: operation === 'recall' ? '' : text, editedAt: serverTimestamp(), changeSeq, changeId, ...(operation === 'recall' ? { recalled: true } : {}) });
   }
-  if (parts.includes('change')) writer.set(ref(db, `${parent}/changes/${changeId}`), { seq: changeSeq, messageId: mid, operation, actorUid: author.uid, at: serverTimestamp(), textDigest });
+  if (parts.includes('change')) writer.set(ref(db, `${parent}/changes/${changeId}`), { seq: changeSeq, messageId: mid, operation, actorUid: author.uid, generation, at: serverTimestamp(), textDigest });
 }
 async function send(db, args = {}, parts) {
   const current = (await getDoc(ref(db, `conversations/${args.cid ?? 'ordinary'}`))).data();
@@ -180,10 +180,10 @@ test('teams: text limit is UTF-8 bytes and read watermarks never move backwards'
   const alice = user('alice');
   await assertFails(send(alice, { text: '中'.repeat(2731) }));
   await assertSucceeds(send(alice, { text: '中'.repeat(2730) }));
-  await assertSucceeds(setDoc(ref(alice, 'conversations/ordinary/reads/alice'), { lastReadSeq: 1 }));
+  await assertSucceeds(setDoc(ref(alice, 'conversations/ordinary/reads/alice'), { lastReadSeq: 1, generation: 1 }));
   await assertFails(updateDoc(ref(alice, 'conversations/ordinary/reads/alice'), { lastReadSeq: 0 }));
   await assertFails(updateDoc(ref(alice, 'conversations/ordinary/reads/alice'), { lastReadSeq: 2 }));
-  await assertFails(setDoc(ref(user('bob'), 'conversations/ordinary/reads/alice'), { lastReadSeq: 1 }));
+  await assertFails(setDoc(ref(user('bob'), 'conversations/ordinary/reads/alice'), { lastReadSeq: 1, generation: 1 }));
 });
 test('teams: unimplemented App, task, invite and epoch writes remain denied', options, async () => {
   const alice = user('alice');
@@ -207,4 +207,13 @@ test('teams: both configured non-Team rule files compile and deny client access'
       await assertFails(getDoc(doc(db, 'teams/team-test')));
     } finally { await isolated.cleanup(); }
   }
+});
+
+test('teams: SDK message receipts and reads must match the current membership generation', options, async () => {
+  await create(); const alice = user('alice');
+  await admin.doc('teams/team-test/members/alice').update({ generation: 2 });
+  await assertFails(send(alice));
+  await assertSucceeds(send(alice, { generation: 2 }));
+  await assertFails(setDoc(ref(alice, 'conversations/ordinary/reads/alice'), { lastReadSeq: 1, generation: 1 }));
+  await assertSucceeds(setDoc(ref(alice, 'conversations/ordinary/reads/alice'), { lastReadSeq: 1, generation: 2 }));
 });

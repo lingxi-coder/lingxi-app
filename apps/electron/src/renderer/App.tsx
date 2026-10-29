@@ -325,7 +325,7 @@ export function App() {
           if (!session) throw new Error(tr('desktop_link_open_project_config'));
           if (!await bridge.openSession(delivery.projectPath, session.uuid)) throw new Error(tr('desktop_link_project_conversation_error'));
         }
-        if (route === 'team/join') { setTeamInvite(params.code); setPage('teams'); }
+        if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); }
         else if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
         else if (kind === 'settings') {
           if (!SETTINGS_NAV.some(page => page.id === id)) throw new Error(tr('desktop_link_settings_unavailable'));

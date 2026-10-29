@@ -45,7 +45,7 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         }) else { return nil }
         let parts = segments.compactMap { $0 }
         let simple: Set<String> = ["session", "project", "settings", "provider", "terminal", "apps", "market"]
-        let valid = parts == ["new"] || parts == ["team", "join"] || (parts.count == 2 && simple.contains(parts[0]))
+        let valid = parts == ["new"] || parts == ["team", "join"] || parts == ["team", "inbox"] || (parts.count == 2 && simple.contains(parts[0]))
             || (parts.count == 3 && parts[0] == "extensions" && ["mcp", "skill", "plugin"].contains(parts[1]))
             || (parts.count == 3 && parts[0] == "cron" && ["job", "run"].contains(parts[1]))
             || (parts.count == 3 && parts[0] == "runtime" && ["agent", "task", "plan", "review", "activity"].contains(parts[1]))
@@ -76,6 +76,7 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         }
         if let message = params["message"] { params["message"] = message.lowercased() }
         if parts.first == "remote", !params.isEmpty { return nil }
+        if parts == ["team", "inbox"], !params.isEmpty { return nil }
         if parts == ["team", "join"] {
             guard params.count == 1, let code = params["code"], code.range(of: "^[A-Za-z0-9_-]{32}$", options: .regularExpression) != nil else { return nil }
         } else if params["code"] != nil { return nil }

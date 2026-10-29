@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events';
-import { collection, onSnapshot } from 'firebase/firestore';
+import { collection, onSnapshot, query, where, doc } from 'firebase/firestore';
 import type { FirebaseOptions } from 'firebase/app';
 import { teamsTransport, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../../packages/teams';
+import type { MessageCommand } from '../../../../../packages/teams/messages';
 import { openTeamsFirestoreSession, type TeamsFirestoreSession, type TeamsFirestoreOptions } from './firestore';
 
 interface Account {
@@ -31,6 +32,7 @@ export class TeamsService {
   onChanged(callback: (event: { invalidated?: boolean }) => void): () => void {
     this.events.on('change', callback); return () => { this.events.off('change', callback); };
   }
+  onMessagesChanged(callback: () => void): () => void { this.events.on('messages', callback); return () => { this.events.off('messages', callback); }; }
   private reset(): void {
     this.epoch++;
     for (const stop of this.stops.values()) stop();
@@ -104,6 +106,20 @@ export class TeamsService {
       }));
     }
     return current;
+  }
+  async messages<T>(command: MessageCommand, expectedUid: string): Promise<T> {
+    if (!command || !/^[A-Za-z0-9_-]{8,64}$/u.test(command.teamId) || !Number.isSafeInteger(command.generation) || command.generation < 1) throw new Error('INVALID_INPUT');
+    const session = await this.connect(expectedUid), epoch = this.epoch;
+    const key = `messages:${command.teamId}:${command.generation}`;
+    const emit = () => { if (epoch === this.epoch) this.events.emit('messages'); };
+    if (!this.stops.has(key)) this.stops.set(key, onSnapshot(query(collection(session.db, 'teams', command.teamId, 'conversations'), where('memberUids', 'array-contains', expectedUid)),
+      { includeMetadataChanges: true }, snapshot => { if (!snapshot.metadata.fromCache) emit(); }, emit));
+    if (command.action === 'sync') {
+      if (!/^[A-Za-z0-9_-]{8,64}$/u.test(command.conversationId)) throw new Error('INVALID_INPUT');
+      const readKey = `${key}:${command.conversationId}`;
+      if (!this.stops.has(readKey)) this.stops.set(readKey, onSnapshot(doc(session.db, 'teams', command.teamId, 'conversations', command.conversationId, 'reads', expectedUid), snapshot => { if (!snapshot.metadata.fromCache) emit(); }, emit));
+    }
+    return this.checked<T>(expectedUid, '/messages', command);
   }
   execute(command: TeamCommand, expectedUid: string): Promise<TeamResult> { return this.checked(expectedUid, '', command); }
   close(): void { this.stopAccount(); this.reset(); this.events.removeAllListeners(); }

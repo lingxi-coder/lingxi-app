@@ -47,7 +47,7 @@ service cloud.firestore {
       return validId(m.changeId) && m.changeSeq is int && m.changeSeq == c.lastChangeSeq + 1
         && after.lastChangeSeq == m.changeSeq && after.lastChange.id == m.changeId
         && change.seq == m.changeSeq && change.messageId == mid && change.operation == operation
-        && change.actorUid == request.auth.uid && change.at == request.time;
+        && change.actorUid == request.auth.uid && change.generation == get(memberPath(tid, request.auth.uid)).data.generation && change.at == request.time;
     }
     function isNewMessage(tid, cid, mid) {
       let m = request.resource.data;
@@ -96,13 +96,13 @@ service cloud.firestore {
     function isNewChange(tid, cid, id) {
       let e = request.resource.data;
       let m = getAfter(msgPath(tid, cid, e.messageId)).data;
-      return e.keys().hasOnly(['seq', 'messageId', 'operation', 'actorUid', 'at', 'textDigest'])
-        && e.keys().hasAll(['seq', 'messageId', 'operation', 'actorUid', 'at', 'textDigest'])
+      return e.keys().hasOnly(['seq', 'messageId', 'operation', 'actorUid', 'generation', 'at', 'textDigest'])
+        && e.keys().hasAll(['seq', 'messageId', 'operation', 'actorUid', 'generation', 'at', 'textDigest'])
         && validId(id) && validId(e.messageId) && e.seq is int
         && e.seq == get(convPath(tid, cid)).data.lastChangeSeq + 1
         && getAfter(convPath(tid, cid)).data.lastChangeSeq == e.seq
         && getAfter(convPath(tid, cid)).data.lastChange.id == id
-        && e.actorUid == request.auth.uid && e.at == request.time
+        && e.actorUid == request.auth.uid && e.generation == get(memberPath(tid, request.auth.uid)).data.generation && e.at == request.time
         && e.textDigest == hashing.sha256(m.text.toUtf8()).toHexString().lower()
         && m.changeSeq == e.seq && m.changeId == id
         && ((e.operation == 'create' && !exists(msgPath(tid, cid, e.messageId)))
@@ -111,7 +111,7 @@ service cloud.firestore {
     }
     function isReadMark(tid, cid) {
       let r = request.resource.data;
-      return r.keys().hasOnly(['lastReadSeq']) && r.lastReadSeq is int && r.lastReadSeq >= 0
+      return r.keys().hasOnly(['lastReadSeq', 'generation']) && r.generation == get(memberPath(tid, request.auth.uid)).data.generation && r.lastReadSeq is int && r.lastReadSeq >= 0
         && r.lastReadSeq <= getAfter(convPath(tid, cid)).data.lastSeq;
     }
     function isOwnBot(key) {
@@ -159,7 +159,7 @@ service cloud.firestore {
           allow get: if isSelf(uid) && inConversation(tid, cid);
           allow create: if isSelf(uid) && inConversation(tid, cid) && isReadMark(tid, cid);
           allow update: if isSelf(uid) && inConversation(tid, cid) && isReadMark(tid, cid)
-            && request.resource.data.lastReadSeq >= resource.data.lastReadSeq;
+            && (resource.data.generation != request.resource.data.generation || request.resource.data.lastReadSeq >= resource.data.lastReadSeq);
         }
       }
     }

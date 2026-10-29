@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { inviteCode, inviteLink, type TeamCommand, type TeamDetail, type TeamSummary, type TeamsApi } from './index';
 import './teams.css';
+import { MessagesPanel } from './MessagesPanel';
 
 export function TeamsPanel({ api, uid, zh, initialInvite, onInviteHandled }: {
   api: TeamsApi; uid: string; zh: boolean; initialInvite?: string; onInviteHandled?: () => void;
 }) {
   const t = (en: string, cn: string) => zh ? cn : en;
+  const [messageContext, setMessageContext] = useState<TeamDetail | null>(null);
   const [teams, setTeams] = useState<TeamSummary[]>([]);
   const [selected, setSelected] = useState('');
   const [detail, setDetail] = useState<TeamDetail | null>(null);
@@ -71,7 +73,7 @@ export function TeamsPanel({ api, uid, zh, initialInvite, onInviteHandled }: {
     setBusy(true); setError(''); setNotice('');
     try {
       const result = await api.execute(command);
-      if (command.action === 'delete' || command.action === 'leave') { selection.current = ''; setSelected(''); setDetail(null); }
+      if (command.action === 'delete' || command.action === 'leave') { setMessageContext(null); selection.current = ''; setSelected(''); setDetail(null); }
       if (authorized !== authority.current) { await refresh(); return; }
       if (result.code) setLink(inviteLink(result.code));
       if (command.action === 'join') { setCode(''); onInviteHandled?.(); }
@@ -90,7 +92,7 @@ export function TeamsPanel({ api, uid, zh, initialInvite, onInviteHandled }: {
     <p className="teams-disclosure">{t('Team data and messages are readable by the platform. A Bot’s owner can read conversations with their Bot.', '团队资料与消息平台可读。与 Bot 的对话对该 Bot 的所有者可见。')}</p>
     {error ? <p role="alert" className="teams-error">{error}</p> : null}
     {notice ? <p role="status">{notice}</p> : null}
-    <div className="teams-layout"><aside className="teams-list" aria-label={t('My teams', '我的团队')}>
+    {messageContext ? <MessagesPanel api={api} uid={uid} team={messageContext.team} members={messageContext.members} zh={zh} onClose={() => setMessageContext(null)} /> : <div className="teams-layout"><aside className="teams-list" aria-label={t('My teams', '我的团队')}>
       {teams.map(team => <button key={team.id} className="teams-card" type="button" aria-current={selected === team.id ? 'page' : undefined} onClick={() => select(team.id)}><b>{team.name}</b><span>{role(team.role)} · {team.memberCount} {t('members', '人')}</span></button>)}
       {!loading && teams.length === 0 ? <p>{t('Create a team or join with an invite.', '创建团队，或通过邀请加入。')}</p> : null}
       <form onSubmit={event => { event.preventDefault(); void execute({ action: 'create', teamId: crypto.randomUUID(), name: name.trim() }); }}>
@@ -106,6 +108,7 @@ export function TeamsPanel({ api, uid, zh, initialInvite, onInviteHandled }: {
       {loading ? <p role="status">{t('Loading…', '正在加载…')}</p> : null}
       {team ? <><header className="teams-team-header"><div><h2>{team.name}</h2><span>{role(team.role)} · {team.memberCount} {t('members', '人')}</span></div>
         <button className="teams-danger" type="button" disabled={busy} onClick={() => setConfirmation({ title: team.role === 'owner' ? t(`Delete ${team.name} for everyone?`, `删除团队「${team.name}」？所有成员将失去访问权限。`) : t(`Leave ${team.name}?`, `退出团队「${team.name}」？`), command: team.role === 'owner' ? { action: 'delete', teamId: team.id } : { action: 'leave', teamId: team.id, generation: team.generation } })}>{team.role === 'owner' ? t('Delete team', '删除团队') : t('Leave team', '退出团队')}</button></header>
+        <button type="button" onClick={() => setMessageContext(detail)}>{t('Conversations', '会话')}</button>
         <h3>{t('Members', '成员')}</h3><ul className="teams-members">{detail.members.map(member => <li key={member.uid}><div><b>{member.displayName}</b><small>{member.uid === uid ? t('You', '你') : ''} {role(member.role)}</small></div>
           {member.uid !== uid && member.role !== 'owner' && (team.role === 'owner' || (team.role === 'admin' && member.role === 'member')) ? <div className="teams-row-actions">
             {team.role === 'owner' ? <button disabled={busy} onClick={() => setConfirmation({ title: t(`Change ${member.displayName}’s role?`, `更改 ${member.displayName} 的角色？`), command: { action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' } })}>{member.role === 'admin' ? t('Make member', '设为成员') : t('Make admin', '设为管理员')}</button> : null}
@@ -119,7 +122,7 @@ export function TeamsPanel({ api, uid, zh, initialInvite, onInviteHandled }: {
         </form>{link ? <div className="teams-share"><label>{t('Share this invitation', '分享邀请')}<input readOnly value={link} onFocus={event => event.target.select()} /></label><button onClick={() => void navigator.clipboard.writeText(link).then(() => setNotice(t('Link copied', '链接已复制')), () => setNotice(t('Select and copy the link above.', '请选中上方链接并复制。')))}>{t('Copy', '复制')}</button></div> : null}
         <ul className="teams-invite-list">{detail.invites.map(invite => <li key={invite.id}><span>{role(invite.role)} · {invite.uses}/{invite.maxUses} · {new Date(invite.expiresAt).toLocaleString(zh ? 'zh-CN' : 'en-US')}</span>{invite.revoked ? <span>{t('Revoked', '已撤销')}</span> : <button disabled={busy || (team.role !== 'owner' && invite.role === 'admin')} onClick={() => void execute({ action: 'revokeInvite', teamId: team.id, inviteId: invite.id })}>{t('Revoke', '撤销')}</button>}</li>)}</ul></section> : null}
       </> : !loading ? <div className="teams-empty"><h2>{t('A shared place for your team', '与团队保持连接')}</h2><p>{t('Choose a team to see its members and manage invitations.', '选择团队查看成员并管理邀请。')}</p></div> : null}
-    </div></div>
+    </div></div>}
     {confirmation ? <div className="teams-modal"><section role="alertdialog" aria-modal="true" aria-labelledby="teams-confirm-title"><h2 id="teams-confirm-title">{confirmation.title}</h2><div><button autoFocus disabled={busy} onClick={() => setConfirmation(null)}>{t('Cancel', '取消')}</button><button className="teams-danger" disabled={busy} onClick={() => void execute(confirmation.command)}>{t('Confirm', '确认')}</button></div></section></div> : null}
   </section>;
 }

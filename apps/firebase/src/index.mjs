@@ -4,6 +4,8 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { onRequest } from 'firebase-functions/v2/https';
+import { onDocumentCreated } from 'firebase-functions/v2/firestore';
+import { onTeamMessageCreated } from './team-message-push.mjs';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { defineSecret } from 'firebase-functions/params';
 import { createMarketGateway } from './market-gateway.mjs';
@@ -68,3 +70,8 @@ export const teamsApi = onRequest({ region: 'us-central1', minInstances: 0, maxI
   output.headers.forEach((value, key) => res.set(key, value));
   res.status(output.status).send(Buffer.from(await output.arrayBuffer()));
 });
+
+// Deployment requires the separately approved default-db/Eventarc IAM preflight.
+export const onTeamMessage = onDocumentCreated({ document: 'teams/{teamId}/conversations/{conversationId}/messages/{messageId}',
+  database: '(default)', region: 'us-central1', memory: '256MiB', maxInstances: 2, serviceAccount: pushServiceAccount,
+}, event => onTeamMessageCreated({ db: getFirestore(app), pushStore, messaging: getMessaging(app), ...event.params, original: event.data?.data() }));

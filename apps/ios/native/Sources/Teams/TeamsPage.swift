@@ -10,6 +10,7 @@ struct TeamsPage: View {
     @State private var maxUses = 1
     @State private var ttl = 86400
     @State private var inviteRole = "member"
+    @State private var messageContext: MessageContext?
     @State private var confirmation: TeamConfirmation?
 
     var body: some View {
@@ -30,7 +31,7 @@ struct TeamsPage: View {
                 }
                 creationSection
                 joinSection
-                if let detail = model.detail { membersSection(detail); if detail.team.role != "member" { invitesSection(detail) } }
+                if let detail = model.detail { Section { Button("teams_conversations") { messageContext = MessageContext(detail: detail) } }; membersSection(detail); if detail.team.role != "member" { invitesSection(detail) } }
             }
         }
         .navigationTitle(Text("teams_title"))
@@ -39,8 +40,11 @@ struct TeamsPage: View {
         .disabled(model.busy)
         .task { model.start(); if let initialInvite { code = initialInvite } }
         .onChange(of: initialInvite) { _, value in if let value { code = value } }
-        .onChange(of: model.uid) { _, _ in confirmation = nil; name = "" }
+        .onChange(of: model.uid) { _, _ in messageContext = nil; confirmation = nil; name = "" }
         .onDisappear { model.stop() }
+        .sheet(item: $messageContext) { context in
+            if let uid = model.uid { NavigationStack { TeamMessagesPage(uid: uid, detail: context.detail, onClose: { messageContext = nil }) } }
+        }
         .confirmationDialog(confirmation.map { Text(LocalizedStringKey($0.title)) } ?? Text("teams_confirm_change"), isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }), titleVisibility: .visible) {
             if let confirmation { Button("teams_confirm", role: .destructive) { execute(confirmation.input); self.confirmation = nil } }
             Button("teams_cancel", role: .cancel) { confirmation = nil }
@@ -107,5 +111,6 @@ struct TeamsPage: View {
     private func roleKey(_ role: String) -> LocalizedStringKey { LocalizedStringKey("teams_" + role) }
     private func execute(_ input: [String: Any]) { Task { _ = await model.execute(input) } }
     private func confirm(_ title: String, _ input: [String: Any]) { confirmation = TeamConfirmation(title: title, input: input) }
+    private struct MessageContext: Identifiable { let detail: TeamDetail; var id: String { detail.team.id } }
     private struct TeamConfirmation { let title: String; let input: [String: Any] }
 }

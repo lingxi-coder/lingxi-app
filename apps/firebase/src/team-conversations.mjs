@@ -4,13 +4,13 @@ import { z } from 'zod';
 const segment = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const inputSchema = z.object({
-  teamId: segment, conversationId: id, callerUid: segment,
+  teamId: segment, conversationId: id, callerUid: segment, callerGeneration: z.number().int().positive(),
   kind: z.enum(['channel', 'group', 'dm', 'bot_dm']),
   title: z.string().max(120), participants: z.array(z.string().max(300)).min(1).max(500),
 }).strict();
 
 export class TeamConversationError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, code = 'CONVERSATION_REJECTED') { super(message); this.status = status; this.code = code; }
 }
 
 function principals(values) {
@@ -46,8 +46,12 @@ export async function createTeamConversation(db, input) {
     const [teamSnapshot, existing, ...snapshots] = await transaction.getAll(team, conversation,
       ...memberUids.map(uid => team.collection('members').doc(uid)),
       ...bots.map(bot => team.collection('bots').doc(bot.key)));
-    if (teamSnapshot.data()?.state !== 'active' || snapshots.slice(0, memberUids.length).some(member => !member.exists)) {
-      throw new TeamConversationError(403, 'Current team membership required');
+    if (teamSnapshot.data()?.state !== 'active' || !snapshots[memberUids.indexOf(args.callerUid)].exists) {
+      throw new TeamConversationError(403, 'Current team membership required', 'MEMBERSHIP_REQUIRED');
+    }
+    if (snapshots.slice(0, memberUids.length).some(member => !member.exists)) throw new TeamConversationError(403, 'Current participants required', 'PARTICIPANT_REQUIRED');
+    if (snapshots[memberUids.indexOf(args.callerUid)].data().generation !== args.callerGeneration) {
+      throw new TeamConversationError(409, 'Stale membership', 'STALE_MEMBERSHIP');
     }
     const cards = snapshots.slice(memberUids.length);
     for (const [index, bot] of bots.entries()) {

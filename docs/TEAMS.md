@@ -1,6 +1,6 @@
 # Teams implementation contract
 
-Status: T0 validated; T1 implemented locally, with deployment and full native
+Status: T0 validated; T1 and T2 implemented locally, with deployment and full native
 product/device acceptance still pending. This document refines the approved 2026-10-29 Team plan
 after review. It is the repository contract for subsequent phases; a phase is
 complete only when its stated checks pass on all four clients.
@@ -64,7 +64,8 @@ is a separate gate. There are no Remote Control authorization changes.
 Actions: `create {teamId,name}`, `delete {teamId}`, `invite
 {teamId,requestId,role,maxUses,ttlSeconds}`, `revokeInvite {teamId,inviteId}`, `join
 {code,requestId}`, `leave {teamId,generation}`, `remove {teamId,uid,generation}`,
-`role {teamId,uid,generation,role}` and the trusted `conversation` constructor.
+`role {teamId,uid,generation,role}`. Conversation creation uses the T2 message
+endpoint below; the unused, generation-less T1 constructor action was removed.
 IDs/request IDs use 8–64 URL-safe characters (UUIDs work). Invites have 192 bits
 of random entropy, 1–50 uses and 1 hour–7 days validity. Their global lookup is a
 SHA-256 digest; raw links are returned only to their creator and retained in an
@@ -107,8 +108,8 @@ team/member views, while authenticated HTTP responses populate them. Cached SDK
 snapshots do not grant access. Account changes and listener permission failures
 clear stale views; request/lifecycle versions discard late responses and prevent
 reattachment after a native page closes. Failed listeners do not retry continuously
-and can attach for a later membership generation. T1 requires a network connection;
-T2's durable offline message projection remains separate.
+and can attach for a later membership generation. T1 member administration requires a network connection. T2 message views retain
+previously loaded local history and pending intents while offline, as described below.
 
 Dedicated real Firebase owner/member test users were explicitly authorized and
 created on 2026-10-29 without admin claims or verification emails. After separate
@@ -119,6 +120,78 @@ mode-0600 files. `node apps/firebase/scripts/teams-test-accounts.mjs` refreshes 
 reuses them; `--create` is only for explicitly authorized initial creation. Preserve
 this private directory separately before removing/archiving the worktree. Never
 copy its contents into reports, Git, screenshots or logs.
+
+## T2 member conversations and clients
+
+`POST /v1/teams/messages` authenticates the same Firebase account as T1 and
+accepts a strict action object. Every action includes `{teamId,generation}`;
+conversation actions also include `conversationId`. The current membership and
+expected generation are read in the same trusted transaction. RC is unchanged.
+
+| Action | Additional fields / result |
+| --- | --- |
+| `list` | Optional `after` conversation ID; returns up to 100 authorized conversations, read watermarks and `next` |
+| `create` | Stable `conversationId`, human `participantUids`, `kind: dm|group|channel`, nonempty `title`; caller must participate and every participant must be a current member |
+| `sync` | `after` change sequence; returns up to 100 contiguous immutable changes, the latest referenced messages, current conversation/read watermarks and `hasMore` in one consistent transaction |
+| `mutate` | Stable `messageId`, `changeId`, `operation: create|edit|recall`, `text`, optional create-only `replyTo`; returns the acknowledged change identity |
+| `read` | `lastReadSeq`; returns the monotonic confirmed watermark |
+
+T2 writes human text messages. Bot DM execution and authenticated Bot triggers
+remain T3. Only the author may edit/recall a message. Replies reference an existing
+message in the same conversation. Recall permanently clears the server body;
+receipts keep the digest rather than the plaintext. The trusted API is the shared
+mutation implementation for all four clients, with the same three-document
+transaction invariants exercised by the client SDK rules. The message endpoint
+accepts at most 64 KiB of JSON; membership endpoints retain their 16 KiB limit.
+
+Desktop/Web use the shared `TeamMessaging` projection and one IndexedDB read/write
+transaction for message bodies, change cursor and pending intents. Native clients
+use an atomic, account/team/generation-scoped JSON file excluded from backup;
+iOS serializes disk work on a separate actor and Android uses IO dispatch plus
+atomic replacement. A failed local commit cannot advance the durable cursor.
+Overlapping pages merge by message `changeSeq`; late list/page responses retain
+the maximum confirmed message, change and read watermarks. Unread is always
+`max(0,lastSeq-lastReadSeq)`, never a delivery counter. Mark read is explicit.
+
+The local queue saves a stable intent before transport, including conversation
+creation. A response lost after server commit retries the same identity. A
+permanent rejection is displayed on the pending intent and can be discarded;
+a rejected creation cannot block synchronization of existing conversations.
+Before each submission, the client claims the latest durable intent. A 30-second
+lease coordinates concurrent windows; a separate durable `attempted` flag records
+that submission may have begun. Lease expiry permits an idempotent retry, but
+never proves that the earlier request was cancelled. Once attempted, an intent
+cannot be discarded until acknowledged or definitively rejected. Unattempted
+queued work can be discarded. Submission locks prevent rapid repeated taps from
+creating multiple intents; completing a save does not erase a newly typed draft.
+
+Firestore conversation/read listeners wake authenticated HTTP synchronization;
+a 15-second fallback handles reconnects and missed invalidations while the page
+is active. Cached data is explicitly labelled as this device's saved history and
+does not grant fresh membership. Revocation/account changes immediately clear the
+visible projection and stop sending, even if local storage fails. A fresh rejoin
+uses a new generation and a separate local namespace; the old queue cannot replay.
+The existing authorized conversation history remains available after rejoin, with
+a fresh generation's read watermark starting at zero. Native page exit removes
+its listeners/tasks; Desktop credentials/SDK remain exclusively in main and IPC
+is bound to the expected account UID.
+
+`onTeamMessage` is a locally defined, undeployed default-database create trigger
+using the existing push identity and installation helpers. It excludes the author,
+rechecks team/membership/conversation/recalled state and sender generation, and
+claims one durable attempt per message/recipient before FCM. Push is a best-effort
+notification; ambiguous attempts are not blindly repeated. Reliable history comes
+from `changes`, not push. Payloads contain the sender/Bot name and generic new
+message text, with no message plaintext or credentials. After the member check,
+the final awaited read rechecks the installation UID/revision before sending.
+Notifications open `team/inbox` on native clients through the existing guarded
+inbox, without requiring a local engine or automatically joining a team.
+
+Local evidence is in `acceptance/teams-t2-20261029/`. The browser's actual offline
+period was over ten minutes; message ordering/deduplication, an old edit, an old
+recall, queue replay, IndexedDB reload, cross-tab reads and removal/rejoin passed.
+This does not establish full native packages, physical-device offline runs or
+production FCM delivery. T1/T2 release acceptance and deployment remain open.
 
 ## Message identity and mutation catch-up (T0/T2)
 
@@ -131,7 +204,7 @@ Conversations have two independent cursors, both initialized to zero:
 
 Messages retain `seq` for life and carry the latest `changeSeq` and `changeId`.
 `changes/{changeId}` is an immutable receipt containing
-`{seq, messageId, operation: create|edit|recall, actorUid, at, textDigest}`.
+`{seq, messageId, operation: create|edit|recall, actorUid, generation, at, textDigest}`.
 `textDigest` is lowercase SHA-256 of the resulting UTF-8 body, checked by rules.
 It preserves retry evidence without retaining a recalled plaintext body. Message/change IDs
 are client-generated 8–64 character URL-safe IDs. Timestamps use server time.

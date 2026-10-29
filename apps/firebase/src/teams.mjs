@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { createTeamConversation, TeamConversationError } from './team-conversations.mjs';
+import { TeamConversationError } from './team-conversations.mjs';
+import { TeamMessagesStore, TeamMessageError } from './team-messages.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
@@ -17,9 +18,7 @@ const command = z.discriminatedUnion('action', [
   z.object({ action: z.literal('leave'), ...teamId, generation }).strict(),
   z.object({ action: z.literal('remove'), ...teamId, uid, generation }).strict(),
   z.object({ action: z.literal('role'), ...teamId, uid, generation, role: z.enum(['admin', 'member']) }).strict(),
-  z.object({ action: z.literal('conversation'), ...teamId, conversationId: id,
-    kind: z.enum(['dm', 'bot_dm', 'group', 'channel']), title: z.string().max(120),
-    participants: z.array(z.string().max(300)).min(1).max(200) }).strict(),
+
 ]);
 const hash = value => createHash('sha256').update(value).digest('hex');
 const millis = value => value?.toMillis?.() ?? Number.NaN;
@@ -73,10 +72,6 @@ export class TeamsStore {
   async execute(user, raw) {
     uid.parse(user.uid);
     const input = command.parse(raw), now = new Date(this.clock());
-    if (input.action === 'conversation') {
-      const { action: _, ...args } = input;
-      return { conversation: await createTeamConversation(this.db, { ...args, callerUid: user.uid }) };
-    }
     if (input.action === 'create') {
       return this.db.runTransaction(async tx => {
         const ref = this.team(input.teamId), previous = await tx.get(ref);
@@ -212,20 +207,22 @@ export function createTeamsHandler({ store, verifyToken, createCustomToken, orig
       if (path === '/v1/teams' && request.method === 'GET') return reply(await store.list(user.uid));
       const detail = /^\/v1\/teams\/([A-Za-z0-9_-]{8,64})$/u.exec(path);
       if (detail && detail[1] !== 'session' && request.method === 'GET') return reply(await store.detail(user.uid, detail[1]));
-      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session'].includes(path)) fail(404, 'NOT_FOUND');
+      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages'].includes(path)) fail(404, 'NOT_FOUND');
       const raw = await request.text();
-      if (Buffer.byteLength(raw) > 16384) fail(413, 'REQUEST_TOO_LARGE');
+      if (Buffer.byteLength(raw) > (path === '/v1/teams/messages' ? 65536 : 16384)) fail(413, 'REQUEST_TOO_LARGE');
       let body;
       try { body = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON'); }
       if (path === '/v1/teams/session') {
         z.object({}).strict().parse(body);
         return reply({ uid: user.uid, customToken: await createCustomToken(user.uid) });
       }
+      if (path === '/v1/teams/messages') return reply(await new TeamMessagesStore(store.db, store.clock).execute(user, body));
       return reply(await store.execute(user, body));
     } catch (error) {
       if (error instanceof z.ZodError) return reply({ error: { code: 'INVALID_INPUT' } }, 400);
+      if (error instanceof TeamMessageError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamsError) return reply({ error: { code: error.code } }, error.status);
-      if (error instanceof TeamConversationError) return reply({ error: { code: 'CONVERSATION_REJECTED' } }, error.status);
+      if (error instanceof TeamConversationError) return reply({ error: { code: error.code } }, error.status);
       return reply({ error: { code: 'SERVICE_UNAVAILABLE' } }, 503);
     }
   };

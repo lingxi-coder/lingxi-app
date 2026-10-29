@@ -32,7 +32,7 @@ const environment = { ...process.env, CI: '1', FIREBASE_CLI_DISABLE_UPDATE_CHECK
   ...(existsSync(javaHome) ? { JAVA_HOME: javaHome, PATH: `${join(javaHome, 'bin')}:${process.env.PATH}` } : {}) };
 const quote = value => `'${value.replaceAll("'", "'\"'\"'")}'`;
 const testCommand = [
-  `${quote(process.execPath)} --test --test-concurrency=1 ${quote(join(root, 'apps/firebase/test/teams.rules.emulator.test.mjs'))} ${quote(join(root, 'apps/firebase/test/teams.members.emulator.test.mjs'))}`,
+  `${quote(process.execPath)} --test --test-concurrency=1 ${quote(join(root, 'apps/firebase/test/teams.rules.emulator.test.mjs'))} ${quote(join(root, 'apps/firebase/test/teams.members.emulator.test.mjs'))} ${quote(join(root, 'apps/firebase/test/teams.messages.emulator.test.mjs'))}`,
   `${quote(process.execPath)} --import ${quote(join(root, 'packages/bridge-client/node_modules/tsx/dist/loader.mjs'))} --test ${quote(join(root, 'apps/electron/test/teams-firestore.emulator.test.ts'))} ${quote(join(root, 'apps/web/test/teams-firestore.emulator.test.ts'))} ${quote(join(root, 'apps/web/test/teams-members.emulator.test.ts'))}`,
 ].join(' && ');
 console.log(`Isolated Team emulator project: demo-lingxi-teams-t0; logs: ${scratch}`);

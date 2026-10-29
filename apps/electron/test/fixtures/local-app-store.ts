@@ -4,8 +4,8 @@ import { join, dirname, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { DesktopAuthoringRef, DesktopLocalApp } from '../../src/shared/localApps.js';
 import { parseManifest } from '../../src/main/local-apps/manifest.js';
-import { appId, atomicJson, containedFile, copySource } from '../../src/main/local-apps/store.js';
-export class LocalAppStore {
+import { appId, atomicJson, containedFile, copySource, type LocalAppStore as LocalAppStoreContract } from '../../src/main/local-apps/store.js';
+export class LocalAppStore implements LocalAppStoreContract {
   constructor(readonly root: string) {}
   directory(id: string): string { return join(this.root, appId(id)); }
   revisionPath(id: string, revision: number): string {
@@ -50,6 +50,16 @@ export class LocalAppStore {
   async save(row: DesktopLocalApp): Promise<void> {
     const { phase: _phase, error: _error, runningRevision: _running, ...persisted } = row;
     await atomicJson(join(this.directory(row.id), 'app.json'), { ...persisted, phase: 'stopped' });
+  }
+  async bindAuthoring(id: string, authoring: DesktopAuthoringRef): Promise<DesktopAuthoringRef> {
+    const owner = appId(id);
+    if (authoring.appId !== undefined && authoring.appId !== owner) throw new Error('Authoring binding belongs to another application');
+    if (authoring.projectRef.kind !== 'desktopPath' || !authoring.projectRef.path || !authoring.sourceDirectory
+      || !authoring.workspaceId || !authoring.authoringSessionId) throw new Error('Invalid Desktop authoring binding');
+    const row = await this.get(owner);
+    row.authoring = { ...authoring, appId: owner };
+    await this.save(row);
+    return row.authoring;
   }
   async publish(input: { id?: string; name?: string; summary?: string; html?: string; staged_path?: string; authoring?: DesktopAuthoringRef; expectedRevision?: number }): Promise<DesktopLocalApp> {
     const previous = input.id ? await this.get(input.id) : undefined;

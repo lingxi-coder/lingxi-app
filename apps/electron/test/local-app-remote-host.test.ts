@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { build } from 'esbuild';
 import { createServer } from 'node:http';
+import { LocalAppRuntime } from '../src/main/local-apps/runtime.ts';
 
 const require = createRequire(import.meta.url);
 const bundledHost = build({ entryPoints: [new URL('../src/main/local-apps/host.ts', import.meta.url).pathname], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron'] });
@@ -66,6 +67,79 @@ test('remote access IPC defaults off, persists trusted opt-in, and launches head
   await f.host.request({action:'remote-access',id,enabled:false});
   assert.equal(f.liveSession,false); assert.equal(await f.host.remoteCurrent({appId:id,revision:1,runId:'run-one'}),false);
   assert.deepEqual(JSON.parse(JSON.stringify(await f.host.request({action:'remote-settings'}))),{});
+});
+
+test('idle check sees a remote opening that arrives while the app list is loading', async t => {
+  const f = await fixture(t);
+  let release!: () => void, entered!: () => void, access = false;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  f.host.list = async () => { entered(); await blocked; return []; };
+  f.host.remoteGateway.hasAccess = () => access;
+  const check = f.host.hasBackgroundApps();
+  await waiting; access = true; release();
+  assert.equal(await check, true);
+});
+
+test('revoking the first of two owners does not cancel their shared real runtime startup', async t => {
+  const f = await fixture(t);
+  const second = { ...owner, deviceId: 'second-phone' };
+  const workspace = join(f.store.root, 'runtime-workspace');
+  await fs.mkdir(workspace); await fs.writeFile(join(workspace, 'index.html'), '<!doctype html>');
+  let release!: () => void, entered!: () => void, joined!: () => void, calls = 0;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const secondJoined = new Promise<void>(resolve => { joined = resolve; });
+  f.store.prepareWorkspace = async () => { entered(); await blocked; return workspace; };
+  const runtime = new LocalAppRuntime(f.store, () => {});
+  const start = runtime.start.bind(runtime);
+  runtime.start = (...args: Parameters<typeof runtime.start>) => { if (++calls === 2) joined(); return start(...args); };
+  f.host.runtime = runtime;
+  const granted: string[] = [];
+  f.host.remoteGateway.open = async (run: any, requestedOwner: any) => {
+    granted.push(requestedOwner.deviceId);
+    return { app_id: run.appId, revision: run.revision, url: 'https://example.test/', expires_at: Date.now() + 60000 };
+  };
+  f.host.remoteGateway.hasRun = () => granted.length > 0;
+  f.host.remoteGateway.hasAccess = () => granted.length > 0;
+  await f.host.setRemoteAccess(id, true);
+  const first = f.host.remoteOpen(id, owner);
+  const firstRejected = assert.rejects(first, /changed/);
+  await waiting;
+  const other = f.host.remoteOpen(id, second);
+  await secondJoined;
+  f.host.remoteRevokeOwner(owner);
+  release();
+  try {
+    await firstRejected;
+    assert.equal((await other).app_id, id);
+    assert.deepEqual(granted, ['second-phone']);
+    assert.equal(runtime.phase(id), 'running');
+  } finally { await runtime.dispose(); }
+});
+
+test('a real runtime committed just before owner revocation is reconciled', async t => {
+  const f = await fixture(t);
+  const workspace = join(f.store.root, 'runtime-workspace');
+  await fs.mkdir(workspace); await fs.writeFile(join(workspace, 'index.html'), '<!doctype html>');
+  f.store.prepareWorkspace = async () => workspace;
+  let committed = false;
+  const runtime = new LocalAppRuntime(f.store, () => {
+    if (!committed && runtime.phase(id) === 'running') {
+      committed = true;
+      f.host.remoteRevokeOwner(owner);
+    }
+  });
+  f.host.runtime = runtime;
+  await f.host.setRemoteAccess(id, true);
+  try {
+    await assert.rejects(f.host.remoteOpen(id, owner), /changed/);
+    for (let attempt = 0; attempt < 50 && runtime.phase(id) === 'running'; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(committed, true);
+    assert.equal(f.liveSession, false);
+    assert.equal(runtime.phase(id), 'stopped');
+    assert.equal(f.host.remoteManagedRuns.has(id), false);
+  } finally { await runtime.dispose(); }
 });
 
 test('owner revoke, stop, release publication and disable invalidate a remote open during startup', async t => {

@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const quote = value => JSON.stringify(value);
 function filePath(value, label) {
@@ -31,13 +32,14 @@ export function renderLocalAppTunnel(input) {
   const trustedCaFile = filePath(input.trustedCaFile, 'trustedCaFile');
   const certificateFile = filePath(input.certificateFile, 'certificateFile');
   const privateKeyFile = filePath(input.privateKeyFile, 'privateKeyFile');
+  const proxyName = `local-apps-${createHash('sha256').update(suffix).digest('hex').slice(0, 32)}`;
   const toml = [
     '# Generated Local App tunnel. TLS terminates on this Desktop.',
     `serverAddr = ${quote(serverAddr)}`, `serverPort = ${serverPort}`, 'loginFailExit = false',
     'auth.method = "token"', 'auth.tokenSource.type = "file"', `auth.tokenSource.file.path = ${quote(tokenFile)}`,
     'transport.tls.enable = true', `transport.tls.trustedCaFile = ${quote(trustedCaFile)}`,
     `transport.tls.serverName = ${quote(serverAddr)}`, 'log.level = "warn"', '',
-    '[[proxies]]', 'name = "local-apps"', 'type = "https"', `customDomains = [${quote(`*.${suffix}`)}]`, '',
+    '[[proxies]]', `name = ${quote(proxyName)}`, 'type = "https"', `customDomains = [${quote(`*.${suffix}`)}]`, '',
     '[proxies.plugin]', 'type = "https2http"', `localAddr = "127.0.0.1:${gatewayPort}"`,
     `crtPath = ${quote(certificateFile)}`, `keyPath = ${quote(privateKeyFile)}`,
     '# Preserve Host: the gateway authenticates each session origin.', '',

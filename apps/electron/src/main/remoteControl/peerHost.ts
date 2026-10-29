@@ -197,14 +197,24 @@ export class PeerHost {
     const window = this.createWindow();
     this.window = window;
     window.onGone((reason) => this.windowGone(window, reason));
-    const port = Promise.resolve().then(() => window.open()).then((opened) => {
+    const port = Promise.resolve().then(() => {
+      // shutdown or a gone notification can revoke ownership before this microtask.
+      if (this.window !== window) throw new Error('the WebRTC window was closed before opening');
+      return window.open();
+    }).then((opened) => {
+      if (this.window !== window) {
+        // An asynchronous open may finish after close; dispose any late resource.
+        try { window.close(); } catch { /* Already gone. */ }
+        throw new Error('the WebRTC window was closed while opening');
+      }
       opened.onMessage((data) => this.receive(window, data));
       return opened;
     });
-    this.port = port;
+    if (this.window === window) this.port = port;
     port.catch((error: unknown) => {
+      if (this.window !== window) return;
       this.diagnostics('warn', `the WebRTC window could not be opened (${describeError(error)})`);
-      if (this.window === window) this.closeWindow();
+      this.closeWindow();
     });
     return port;
   }

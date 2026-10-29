@@ -4,19 +4,35 @@ import Foundation
 @MainActor
 final class RemoteAppRequestEpoch {
     private(set) var value: UInt64 = 0
-    private var forgettingHost: String?
+    private final class ForgetBarrier {
+        var pending = 0
+        var departed: Bool
+        init(departed: Bool) { self.departed = departed }
+    }
+    private var forgetting: [String: ForgetBarrier] = [:]
 
     func advance() { value &+= 1 }
-    func reset() { forgettingHost = nil; advance() }
-    func permits(hostID: String) -> Bool { forgettingHost != hostID }
+    func reset() { forgetting.removeAll(); advance() }
+    func permits(hostID: String) -> Bool { forgetting[hostID] == nil }
 
     func observe(hostID: String, ready: Bool) {
-        if let forgettingHost, forgettingHost != hostID || !ready { self.forgettingHost = nil }
+        for (host, barrier) in forgetting where host != hostID || !ready {
+            barrier.departed = true
+            if barrier.pending == 0 { forgetting.removeValue(forKey: host) }
+        }
     }
 
     func forget(hostID: String, currentHostID: String?, action: () async -> Void) async {
-        if hostID == currentHostID { forgettingHost = hostID; advance() }
+        let barrier = forgetting[hostID] ?? ForgetBarrier(departed: hostID != currentHostID)
+        if barrier.departed && hostID == currentHostID { barrier.departed = false }
+        forgetting[hostID] = barrier
+        barrier.pending += 1
+        if hostID == currentHostID { advance() }
         await action()
+        // A reset can replace this account's barrier while the action awaits.
+        guard forgetting[hostID] === barrier else { return }
+        barrier.pending -= 1
+        if barrier.pending == 0 && barrier.departed { forgetting.removeValue(forKey: hostID) }
     }
 }
 

@@ -410,6 +410,64 @@ test('a peer closed while its window opens does not create a late renderer peer'
   host.dispose();
 });
 
+for (const action of ['shutdown', 'dispose'] as const) {
+  test(`${action} before the deferred window open does not create a late window`, async () => {
+    const t = setup();
+    const answer = t.host.answer(A, 'v=0', []);
+    const rejected = assert.rejects(answer, /window ended/);
+    // answer() queues window creation; open() is deferred by one more microtask.
+    queueMicrotask(() => t.host[action]());
+    await rejected;
+    await settle();
+    assert.equal(t.windows.length, 1);
+    assert.equal(t.windows[0]!.closed, 1);
+    assert.equal(t.windows[0]!.opened, 0, 'a closed window must not open afterwards');
+    assert.equal(t.host.windowOpen, false);
+    assert.equal(t.host.connectionCount, 0);
+
+    if (action === 'shutdown') {
+      await answered(t, B);
+      assert.equal(t.windows.length, 2);
+      assert.equal(t.windows[1]!.opened, 1);
+      t.host.dispose();
+    } else {
+      await assert.rejects(t.host.answer(B, 'v=0', []), /shut down/);
+    }
+  });
+}
+
+test('an open that finishes after shutdown is closed without disturbing the replacement', async () => {
+  const clock = new ManualClock(START);
+  const latePort = new FakePort();
+  let finishOpen!: (port: RtcPort) => void;
+  let closed = 0;
+  const lateWindow: RtcWindow = {
+    open: () => new Promise(resolve => { finishOpen = resolve; }),
+    onGone() {},
+    close() { closed++; },
+  };
+  const replacement = new FakeWindow();
+  let created = 0;
+  const host = new PeerHost({ clock, createWindow: () => created++ === 0 ? lateWindow : replacement });
+  const first = host.answer(A, 'v=0', []);
+  const rejected = assert.rejects(first, /window ended/);
+  await settle();
+  host.shutdown();
+  await rejected;
+  assert.equal(closed, 1);
+
+  const next = host.answer(B, 'v=0', []);
+  await settle();
+  finishOpen(latePort);
+  await settle();
+  assert.equal(closed, 2, 'the late resource is closed again');
+  assert.equal(host.windowOpen, true);
+  assert.deepEqual(latePort.posted, []);
+  replacement.port.say({ t: 'answered', conn: B, sdp: 'v=0 answer' });
+  assert.equal(await next, 'v=0 answer');
+  host.dispose();
+});
+
 test('synchronous window creation failure releases the pending peer', async () => {
   const host = new PeerHost({ createWindow: () => { throw new Error('no window'); } });
   await assert.rejects(host.answer(A, 'v=0', []), /no window/);

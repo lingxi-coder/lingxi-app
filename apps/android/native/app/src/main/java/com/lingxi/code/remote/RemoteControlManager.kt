@@ -162,6 +162,13 @@ class RemoteControlManager(
     private val mutableHosts = MutableStateFlow(RemoteHostsState())
     private val mutableConnection = MutableStateFlow<RemoteConnectionStateFfi?>(null)
     private val connectionEpoch = AtomicInteger(0)
+    private val appRequestLock = Any()
+    private class ForgetBarrier(val hostId: String, val client: RemoteClientPort, var state: RemoteConnectionStateFfi?) {
+        var pending = 0
+        var succeeded = false
+        var departed = state?.hostId != hostId || state?.phase == RemoteConnectionPhaseFfi.IDLE
+    }
+    private val forgetBarriers = mutableListOf<ForgetBarrier>()
     private val mutableSessions = MutableStateFlow(RemoteSessionsState())
     private data class ClientBinding(val uid: String, val client: RemoteClientPort)
     private data class SessionKey(val uid: String, val hostId: String, val sessionId: String)
@@ -192,6 +199,7 @@ class RemoteControlManager(
 
     private suspend fun rebuild(uid: String?) {
         val mine = generation.incrementAndGet()
+        synchronized(appRequestLock) { forgetBarriers.clear(); connectionEpoch.incrementAndGet() }
         val previous = mutableClient.getAndUpdate { null }
         sinks.values.forEach { channels -> channels.forEach { it.close() } }
         sinks.clear()
@@ -251,9 +259,45 @@ class RemoteControlManager(
     suspend fun retry() = client().retry()
 
     suspend fun forget(hostId: String) {
-        connectionEpoch.incrementAndGet()
-        client().forgetHost(hostId)
-        mutableHosts.update { state -> state.copy(hosts = state.hosts.map { if (it.hostId == hostId) it.copy(paired = false) else it }) }
+        val owner = checkNotNull(account.uid.value) { "not signed in" }
+        // Capture the account before waiting for its client; a later account
+        // must never receive this operation or its completion.
+        val bound = mutableClient.value?.takeIf { it.uid == owner }?.client ?: client(owner)
+        // Block new app requests before the FFI call can suspend. Forgetting a
+        // different computer must not invalidate work on the current one.
+        val barrier = synchronized(appRequestLock) {
+            if (account.uid.value != owner || mutableClient.value?.client !== bound) throw CancellationException("remote account changed")
+            val state = bound.connectionState()
+            val current = forgetBarriers.firstOrNull { it.hostId == hostId && it.client === bound }
+                ?: ForgetBarrier(hostId, bound, state).also { forgetBarriers.add(it) }
+            if (current.departed && state?.hostId == hostId && state.phase != RemoteConnectionPhaseFfi.IDLE) {
+                current.state = state
+                current.departed = false
+            }
+            current.pending++
+            if (state?.hostId == hostId) connectionEpoch.incrementAndGet()
+            current
+        }
+        var succeeded = false
+        try {
+            bound.forgetHost(hostId)
+            succeeded = true
+            mutableHosts.update { state ->
+                if (account.uid.value == owner && mutableClient.value?.client === bound) {
+                    state.copy(hosts = state.hosts.map { if (it.hostId == hostId) it.copy(paired = false) else it })
+                } else state
+            }
+        } finally {
+            synchronized(appRequestLock) {
+                if (forgetBarriers.contains(barrier)) {
+                    barrier.pending--
+                    barrier.succeeded = barrier.succeeded || succeeded
+                    // On failure, allow a retry when no other forget remains.
+                    // A successful forget stays blocked until the old connection departs.
+                    if (barrier.pending == 0 && (!barrier.succeeded || barrier.departed)) forgetBarriers.remove(barrier)
+                }
+            }
+        }
     }
 
     /** The screens went away: end the connection and stop watching. */
@@ -336,14 +380,21 @@ class RemoteControlManager(
     private suspend fun <T> appRequest(hostId: String, action: suspend (RemoteClientPort) -> T): T {
         val owner = checkNotNull(account.uid.value) { "not signed in" }
         val bound = port(owner, hostId)
-        val state = checkNotNull(bound.connectionState()) { "remote computer disconnected" }
-        check(state.hostId == hostId && state.phase == RemoteConnectionPhaseFfi.READY) { "remote computer disconnected" }
-        val epoch = connectionEpoch.get()
+        val (state, epoch) = synchronized(appRequestLock) {
+            check(account.uid.value == owner && mutableClient.value?.client === bound) { "remote account changed" }
+            val current = checkNotNull(bound.connectionState()) { "remote computer disconnected" }
+            check(current.hostId == hostId && current.phase == RemoteConnectionPhaseFfi.READY) { "remote computer disconnected" }
+            check(forgetBarriers.none { it.hostId == hostId && it.client === bound }) { "remote computer is being forgotten" }
+            current to connectionEpoch.get()
+        }
         val result = action(bound)
-        val current = bound.connectionState()
-        check(account.uid.value == owner && mutableClient.value?.client === bound && connectionEpoch.get() == epoch &&
-            current?.hostId == hostId && current.phase == RemoteConnectionPhaseFfi.READY && current.attempt == state.attempt) {
-            "remote computer or account changed"
+        synchronized(appRequestLock) {
+            val current = bound.connectionState()
+            check(account.uid.value == owner && mutableClient.value?.client === bound && connectionEpoch.get() == epoch &&
+                forgetBarriers.none { it.hostId == hostId && it.client === bound } &&
+                current?.hostId == hostId && current.phase == RemoteConnectionPhaseFfi.READY && current.attempt == state.attempt) {
+                "remote computer or account changed"
+            }
         }
         return result
     }
@@ -422,8 +473,18 @@ class RemoteControlManager(
     private inner class ManagerListener(private val mine: Int, private val ownerUid: String) : AndroidRemoteListener {
         override suspend fun onConnectionState(state: RemoteConnectionStateFfi) {
             if (mine != generation.get() || account.uid.value != ownerUid) return
-            if (mutableConnection.value?.let { it.hostId != state.hostId || it.phase != state.phase || it.attempt != state.attempt } != false) connectionEpoch.incrementAndGet()
-            mutableConnection.value = state
+            synchronized(appRequestLock) {
+                forgetBarriers.forEach { barrier ->
+                    if (barrier.hostId != state.hostId || barrier.state?.attempt != state.attempt ||
+                        state.phase == RemoteConnectionPhaseFfi.IDLE ||
+                        (barrier.state?.phase == RemoteConnectionPhaseFfi.READY && state.phase != RemoteConnectionPhaseFfi.READY)) {
+                        barrier.departed = true
+                    }
+                }
+                forgetBarriers.removeAll { it.pending == 0 && it.succeeded && it.departed }
+                if (mutableConnection.value?.let { it.hostId != state.hostId || it.phase != state.phase || it.attempt != state.attempt } != false) connectionEpoch.incrementAndGet()
+                mutableConnection.value = state
+            }
             if (state.hostId != mutableSessions.value.hostId) mutableSessions.value = RemoteSessionsState(state.hostId)
         }
 

@@ -127,7 +127,7 @@ function quitIfNothingNeedsTheApp(): void {
   void (async () => {
     const background = await localApps?.hasBackgroundApps();
     const viewers = (remoteControl?.status().connections.length ?? 0) > 0;
-    if (!background && !viewers && BrowserWindow.getAllWindows().length === 0) app.quit();
+    if (!background && !localApps?.hasRemoteAccess() && !viewers && BrowserWindow.getAllWindows().length === 0) app.quit();
   })().catch(error => console.error('Unable to check background applications', error));
 }
 function getMainWindow(): BrowserWindow | undefined { return [...mainWindows].find(window => !window.isDestroyed()); }

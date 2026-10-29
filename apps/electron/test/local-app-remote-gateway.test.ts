@@ -11,10 +11,10 @@ async function freePort(): Promise<number> {
   const server = createServer(); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as {port:number}).port; await new Promise<void>(resolve => server.close(() => resolve())); return port;
 }
-async function request(port: number, host: string, path: string, options: {method?: string; body?: string; cookie?: string; origin?: string; omit?: boolean} = {}): Promise<{status:number; body:string; cookie?:string}> {
+async function request(port: number, host: string, path: string, options: {method?: string; body?: string; cookie?: string; origin?: string; omit?: boolean} = {}): Promise<{status:number; body:string; cookie?:string; cookieHeader?:string}> {
   return new Promise((resolve, reject) => {
     const req = httpRequest({hostname:'127.0.0.1',port,path,method:options.method ?? 'GET',headers:{host,...(options.cookie ? {cookie:options.cookie} : {}),...(options.origin ? {origin:options.origin} : {}),...(options.omit ? {'x-lingxi-local-app-credentials':'omit'} : {}),...(options.body ? {'content-type':'application/json'} : {})}}, res => {
-      const chunks: Buffer[] = []; res.on('data', c => chunks.push(c)); res.on('end', () => resolve({status:res.statusCode!,body:Buffer.concat(chunks).toString(),cookie:res.headers['set-cookie']?.[0]?.split(';')[0]}));
+      const chunks: Buffer[] = []; res.on('data', c => chunks.push(c)); res.on('end', () => resolve({status:res.statusCode!,body:Buffer.concat(chunks).toString(),cookie:res.headers['set-cookie']?.[0]?.split(';')[0],cookieHeader:res.headers['set-cookie']?.[0]}));
     }); req.on('error', reject); req.end(options.body);
   });
 }
@@ -37,6 +37,31 @@ test('a launch deadline during gateway authorization never creates a ticket', as
   const controller=new AbortController();const pending=gateway.open({appId:id,revision:1,runId:'run'},owner,controller.signal);
   const rejected=assert.rejects(pending,/deadline/);
   await waiting;controller.abort(new Error('deadline'));release();await rejected;assert.equal(gateway.hasAccess(),false);await gateway.dispose();
+});
+
+test('redeemed session cookie and active stream expire at the original deadline', async () => {
+  const {port,gateway,adapter} = await setup();
+  adapter.resource = async () => new Response(new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode('ready')); }}));
+  let client: ReturnType<typeof httpRequest> | undefined;
+  try {
+    const opened = new URL((await gateway.open({appId:id,revision:1,runId:'run'},owner)).url);
+    const ticket = (gateway as any).tickets.get(opened.hash.slice(1));
+    ticket.session.expires = Date.now() + 1500;
+    const redeemed = await request(port,opened.host,'/__lingxi_remote_bootstrap',{method:'POST',origin:opened.origin,body:JSON.stringify({ticket:opened.hash.slice(1)})});
+    assert.equal(redeemed.status,204);
+    assert.match(redeemed.cookieHeader ?? '', /Max-Age=1(?:;|$)/);
+    await new Promise<void>((resolve,reject) => {
+      let received = false;
+      const timeout = setTimeout(() => { client?.destroy(); reject(new Error('stream survived session expiry')); }, 2500);
+      client = httpRequest({hostname:'127.0.0.1',port,path:'/events',headers:{host:opened.host,cookie:redeemed.cookie!}}, res => {
+        res.once('data', chunk => { received = res.statusCode === 200 && chunk.toString() === 'ready'; });
+        res.once('close', () => { clearTimeout(timeout); if (received) resolve(); else reject(new Error('stream was not opened')); });
+        res.once('error', () => {});
+      });
+      client.once('error', reject); client.end();
+    });
+    assert.equal(gateway.hasAccess(),false);
+  } finally { client?.destroy(); await gateway.dispose(); }
 });
 test('single use fragment tickets, app origin isolation, owner revocation and run lifetime', async () => {
   const {port,gateway,invalidate} = await setup();
@@ -247,7 +272,7 @@ test('backend cookies stay app-scoped and omit preserves host authentication', a
 
 test('WebSocket upgrade is origin and run scoped and closes on revoke', async () => {
   const backend = createServer(); let backendSocket: import('node:stream').Duplex | undefined;
-  backend.on('upgrade', (req,socket) => { backendSocket = socket; assert.equal(req.headers.cookie,'app=value'); assert.equal(req.headers.forwarded,undefined); assert.equal(req.headers['x-real-ip'],undefined); assert.equal(req.headers['x-forwarded-for'],undefined); assert.equal(req.headers['x-forwarded-prefix'],undefined); assert.match(req.headers['x-forwarded-host'] ?? '', /^a[0-9a-f]{32}-[0-9a-f]{20}\.apps\.example\.com$/); assert.equal(req.headers['x-forwarded-proto'],'https'); socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'); socket.on('data', chunk => socket.write(chunk)); });
+  backend.on('upgrade', (req,socket) => { backendSocket = socket; assert.equal(req.headers.cookie,'app=value'); assert.equal(req.headers.forwarded,undefined); assert.equal(req.headers['x-real-ip'],undefined); assert.equal(req.headers['x-forwarded-for'],undefined); assert.equal(req.headers['x-forwarded-prefix'],undefined); const forwardedHost = req.headers['x-forwarded-host']; assert.ok(typeof forwardedHost === 'string'); assert.match(forwardedHost, /^a[0-9a-f]{32}-[0-9a-f]{20}\.apps\.example\.com$/); assert.equal(req.headers['x-forwarded-proto'],'https'); socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'); socket.on('data', chunk => socket.write(chunk)); });
   await new Promise<void>(resolve=>backend.listen(0,'127.0.0.1',resolve));
   const backendPort = (backend.address() as {port:number}).port;
   const {port,gateway,adapter} = await setup(); adapter.socket = async (_run,name) => name === 'api' ? backendPort : undefined;
@@ -259,6 +284,35 @@ test('WebSocket upgrade is origin and run scoped and closes on revoke', async ()
       req.on('response',()=>reject(new Error('upgrade rejected'))); req.on('error',reject); req.end();
     });
   } finally { await gateway.dispose(); backendSocket?.destroy(); backend.closeAllConnections(); await new Promise<void>(resolve=>backend.close(()=>resolve())); }
+});
+
+test('WebSocket routes named service root queries and default service paths separately', async () => {
+  const observed: Array<[string,string | undefined]> = [];
+  const sockets = new Set<import('node:stream').Duplex>();
+  const backends = ['default', 'api'].map(name => {
+    const backend = createServer();
+    backend.on('upgrade', (req,socket) => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); observed.push([name,req.url]); socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'); });
+    return backend;
+  });
+  for (const backend of backends) await new Promise<void>(resolve => backend.listen(0,'127.0.0.1',resolve));
+  const {port,gateway,adapter} = await setup();
+  adapter.socket = async (_run,name) => name === '' ? (backends[0]!.address() as {port:number}).port : name === 'api' ? (backends[1]!.address() as {port:number}).port : undefined;
+  try {
+    const s = await session(gateway,port);
+    const upgrade = (path: string) => new Promise<void>((resolve,reject) => {
+      const req = httpRequest({hostname:'127.0.0.1',port,path,headers:{host:s.host,origin:`https://${s.host}`,cookie:s.cookie,connection:'Upgrade',upgrade:'websocket'}});
+      req.once('upgrade',(_response,socket) => { socket.destroy(); resolve(); });
+      req.once('response',() => reject(new Error('upgrade rejected'))); req.once('error',reject); req.end();
+    });
+    await upgrade('/__services/api?token=one%2Ftwo');
+    await upgrade('/__services/api/ws?token=three');
+    await upgrade('/socket?token=default');
+    assert.deepEqual(observed,[['api','/?token=one%2Ftwo'],['api','/ws?token=three'],['default','/socket?token=default']]);
+  } finally {
+    await gateway.dispose();
+    for (const socket of sockets) socket.destroy();
+    for (const backend of backends) { backend.closeAllConnections(); await new Promise<void>(resolve => backend.close(() => resolve())); }
+  }
 });
 
 test('separate browser sessions for one app cannot exchange tickets or cookies', async () => {

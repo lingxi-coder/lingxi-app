@@ -23,6 +23,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
@@ -53,8 +58,10 @@ class RemoteControlManagerTest {
         val calls = mutableListOf<String>()
         var closed = false
         var pushId: String? = "unset"
-        var state: RemoteConnectionStateFfi? = null
+        @Volatile var state: RemoteConnectionStateFfi? = null
+        var onStateRead: (() -> Unit)? = null
         var stopWatchingGate: CompletableDeferred<Unit>? = null
+        var forgetGate: CompletableDeferred<Unit>? = null
         var listGate: CompletableDeferred<List<RemoteLocalAppFfi>>? = null
         override suspend fun listApps() = checkNotNull(listGate).await()
         var openGate: CompletableDeferred<RemoteLocalAppOpenFfi>? = null
@@ -69,9 +76,9 @@ class RemoteControlManagerTest {
         override suspend fun disconnect() { calls += "disconnect"; state = null }
         override suspend fun retry() { calls += "retry" }
         override suspend fun nudge() { calls += "nudge" }
-        override fun connectionState(): RemoteConnectionStateFfi? = state
+        override fun connectionState(): RemoteConnectionStateFfi? = state.also { onStateRead?.invoke() }
         override fun sessions(): List<RemoteSessionSummaryFfi>? = null
-        override suspend fun forgetHost(hostId: String) { calls += "forget:$hostId" }
+        override suspend fun forgetHost(hostId: String) { calls += "forget:$hostId"; forgetGate?.await() }
         override suspend fun repairHost(hostId: String) { calls += "repair:$hostId" }
         override suspend fun attachSession(sessionId: String) { calls += "attach:$sessionId" }
         override suspend fun detachSession(sessionId: String) { calls += "detach:$sessionId" }
@@ -109,6 +116,195 @@ class RemoteControlManagerTest {
     )
 
     private fun host(id: String, paired: Boolean) = RemoteHostFfi(id, "Mac $id", "macos", "1.0", true, 0uL, paired)
+
+    @Test fun forgettingCurrentHostRejectsPendingAndNewAppsUntilConnectionDeparts() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        client.listener.onConnectionState(client.state!!)
+        val appId = "a" + "1".repeat(32)
+        val url = "https://${appId}-0123456789abcdef0123.route.apps.example.com/__lingxi_remote_bootstrap#${"A".repeat(43)}"
+        val ticket = RemoteLocalAppOpenFfi(appId, 1uL, url, 9_007_199_254_740_991uL)
+        client.openGate = CompletableDeferred()
+        val pending = launch { assertTrue(runCatching { h.manager.openApp("h", appId, 1uL) }.isFailure) }
+        runCurrent()
+        client.forgetGate = CompletableDeferred()
+        val forget = launch { h.manager.forget("h") }
+        runCurrent()
+        assertTrue(runCatching { h.manager.openApp("h", appId, 1uL) }.isFailure)
+        assertTrue(runCatching { h.manager.listApps("h") }.isFailure)
+        client.openGate!!.complete(ticket); pending.join()
+        client.forgetGate!!.complete(Unit); forget.join()
+        assertTrue(runCatching { h.manager.openApp("h", appId, 1uL) }.isFailure)
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.IDLE)
+        client.listener.onConnectionState(client.state!!)
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        client.listener.onConnectionState(client.state!!)
+        assertEquals(url, h.manager.openApp("h", appId, 1uL))
+    }
+
+    @Test fun forgettingAnotherHostDoesNotInvalidateCurrentAppRequest() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        client.listener.onConnectionState(client.state!!)
+        val appId = "a" + "1".repeat(32)
+        val url = "https://${appId}-0123456789abcdef0123.route.apps.example.com/__lingxi_remote_bootstrap#${"A".repeat(43)}"
+        client.openGate = CompletableDeferred()
+        var result: Result<String>? = null
+        val pending = launch { result = runCatching { h.manager.openApp("h", appId, 1uL) } }
+        runCurrent()
+        client.forgetGate = CompletableDeferred()
+        val forget = launch { h.manager.forget("other") }
+        runCurrent()
+        client.openGate!!.complete(RemoteLocalAppOpenFfi(appId, 1uL, url, 9_007_199_254_740_991uL))
+        pending.join()
+        assertEquals(url, result!!.getOrThrow())
+        assertEquals(url, h.manager.openApp("h", appId, 1uL))
+        client.forgetGate!!.complete(Unit); forget.join()
+    }
+
+    @Test fun failedAndConcurrentForgetsReleaseOnlyTheirOwnBarrier() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        client.listener.onConnectionState(client.state!!)
+        client.listGate = CompletableDeferred(emptyList())
+        client.forgetGate = CompletableDeferred()
+        val first = launch { h.manager.forget("h") }
+        val second = launch { runCatching { h.manager.forget("h") } }
+        runCurrent()
+        first.cancel(); first.join()
+        assertTrue(runCatching { h.manager.listApps("h") }.isFailure)
+        client.forgetGate!!.completeExceptionally(IllegalStateException("forget failed"))
+        second.join()
+        assertEquals(emptyList<RemoteLocalAppFfi>(), h.manager.listApps("h"))
+    }
+
+    @Test fun forgettingReconnectingHostBlocksUntilAttemptChanges() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.RECONNECTING)
+        client.listener.onConnectionState(client.state!!)
+        client.listGate = CompletableDeferred(emptyList())
+        client.forgetGate = CompletableDeferred()
+        val forget = launch { h.manager.forget("h") }
+        runCurrent()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        client.listener.onConnectionState(client.state!!)
+        assertTrue(runCatching { h.manager.listApps("h") }.isFailure)
+        client.state = client.state!!.copy(attempt = 1u)
+        client.listener.onConnectionState(client.state!!)
+        assertTrue(runCatching { h.manager.listApps("h") }.isFailure)
+        client.forgetGate!!.complete(Unit); forget.join()
+        assertEquals(emptyList<RemoteLocalAppFfi>(), h.manager.listApps("h"))
+    }
+
+    @Test fun newForgetAfterReconnectWaitsForItsOwnDeparture() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        client.listener.onConnectionState(client.state!!)
+        client.listGate = CompletableDeferred(emptyList())
+        client.forgetGate = CompletableDeferred()
+        val first = launch { h.manager.forget("h") }
+        runCurrent()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.IDLE)
+        client.listener.onConnectionState(client.state!!)
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY).copy(attempt = 1u)
+        client.listener.onConnectionState(client.state!!)
+        val gate = client.forgetGate!!
+        client.forgetGate = null
+        h.manager.forget("h")
+        gate.complete(Unit); first.join()
+        assertTrue(runCatching { h.manager.listApps("h") }.isFailure)
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.IDLE)
+        client.listener.onConnectionState(client.state!!)
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY).copy(attempt = 2u)
+        client.listener.onConnectionState(client.state!!)
+        assertEquals(emptyList<RemoteLocalAppFfi>(), h.manager.listApps("h"))
+    }
+
+    @Test fun accountReplacementDoesNotRetainForgetBarrier() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        val first = h.clients.single()
+        first.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        first.listener.onConnectionState(first.state!!)
+        first.forgetGate = CompletableDeferred()
+        val forget = launch { h.manager.forget("h") }
+        runCurrent()
+        h.account.mutableUid.value = "u2"; runCurrent()
+        val replacement = h.clients.last()
+        replacement.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        replacement.listener.onConnectionState(replacement.state!!)
+        replacement.listener.onHosts(listOf(host("h", paired = true)))
+        replacement.listGate = CompletableDeferred(emptyList())
+        assertEquals(emptyList<RemoteLocalAppFfi>(), h.manager.listApps("h"))
+        first.forgetGate!!.complete(Unit); forget.join()
+        assertTrue(h.manager.hosts.value.hosts.single().paired)
+        assertEquals(1, first.calls.count { it == "forget:h" })
+        assertFalse(replacement.calls.contains("forget:h"))
+    }
+
+    @Test fun accountChangeWhileWaitingForClientDoesNotForgetOnReplacement() = runTest(UnconfinedTestDispatcher()) {
+        val account = FakeAccount("u1")
+        val buildGate = CompletableDeferred<Unit>()
+        val clients = mutableListOf<FakeClient>()
+        val manager = RemoteControlManager(backgroundScope, account, { uid, listener ->
+            if (uid == "u1") buildGate.await()
+            FakeClient(uid, listener).also { clients += it }
+        }, { null })
+        runCurrent()
+        val oldForget = launch { runCatching { manager.forget("h") } }
+        runCurrent()
+        account.mutableUid.value = "u2"
+        buildGate.complete(Unit); runCurrent(); oldForget.join()
+        assertEquals("u2", clients.last().uid)
+        assertTrue(clients.filter { it.uid == "u2" }.none { "forget:h" in it.calls })
+    }
+
+    @Test fun requestAdmissionSnapshotsConnectionAndEpochTogether() = runTest {
+        val h = Harness(this, "u1"); runCurrent()
+        val client = h.clients.single()
+        client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+        client.listener.onConnectionState(client.state!!)
+        client.listGate = CompletableDeferred()
+        val sampled = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        var reads = 0
+        client.onStateRead = {
+            if (++reads == 2) {
+                sampled.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+            }
+        }
+        val pending = launch(Dispatchers.Default) { assertTrue(runCatching { h.manager.listApps("h") }.isFailure) }
+        try {
+            assertTrue(withContext(Dispatchers.IO) { sampled.await(5, TimeUnit.SECONDS) })
+            val transitionStarted = CompletableDeferred<Thread>()
+            val transition = launch(Dispatchers.Default) {
+                transitionStarted.complete(Thread.currentThread())
+                client.state = connectionState("h", RemoteConnectionPhaseFfi.IDLE)
+                client.listener.onConnectionState(client.state!!)
+                client.state = connectionState("h", RemoteConnectionPhaseFfi.READY)
+                client.listener.onConnectionState(client.state!!)
+            }
+            val transitionThread = transitionStarted.await()
+            // The listener either completed before admission or is blocked by
+            // its lock. In both cases the ordering is known before releasing it.
+            assertTrue(withContext(Dispatchers.IO) {
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                while (!transition.isCompleted && transitionThread.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.yield()
+                transition.isCompleted || transitionThread.state == Thread.State.BLOCKED
+            })
+            release.countDown()
+            withTimeout(5_000) { transition.join() }
+            client.listGate!!.complete(emptyList())
+            withTimeout(5_000) { pending.join() }
+        } finally {
+            release.countDown()
+        }
+    }
 
     @Test fun appListRejectsResponseAfterReconnectEvenIfAttemptResets() = runTest(UnconfinedTestDispatcher()) {
         val h = Harness(this, "u1"); runCurrent()

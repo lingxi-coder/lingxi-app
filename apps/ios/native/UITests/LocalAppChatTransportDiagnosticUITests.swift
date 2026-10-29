@@ -493,4 +493,3 @@ final class LocalAppChatTransportDiagnosticUITests: XCTestCase {
         print("IOS_CHAT_TRANSPORT_DIAGNOSTIC \(line)")
     }
 }
-

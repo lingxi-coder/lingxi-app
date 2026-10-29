@@ -1460,12 +1460,31 @@ export class LocalAppHost {
   }
   private async joinOpening(opening: { promise: Promise<void>; controller: AbortController; waiters: number }, signal?: AbortSignal): Promise<void> {
     opening.waiters++;
-    try {
-      if (signal) await withAbort(opening.promise, signal);
-      else await opening.promise;
-    } finally {
+    let joined = true;
+    const leave = () => {
+      if (!joined) return;
+      joined = false;
       opening.waiters--;
       if (!opening.waiters) opening.controller.abort();
+    };
+    // Propagate the last cancellation synchronously, before an already queued
+    // window-load continuation can commit the abandoned opening.
+    let cancel!: () => void;
+    const cancelled = signal && new Promise<never>((_resolve, reject) => {
+      cancel = () => {
+        signal.removeEventListener('abort', cancel);
+        leave();
+        reject(signal.reason);
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+      if (signal.aborted) cancel();
+    });
+    try {
+      if (cancelled) await Promise.race([opening.promise, cancelled]);
+      else await opening.promise;
+    } finally {
+      if (signal) signal.removeEventListener('abort', cancel);
+      leave();
     }
   }
   private async openOnce(id: string, signal: AbortSignal, repair: boolean, restart: boolean, revision?: number, expectedCurrentRevision?: number): Promise<void> {

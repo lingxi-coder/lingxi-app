@@ -2267,6 +2267,170 @@ async fn cancelled_forget_keeps_lock_until_delete_finishes() {
     assert!(keys.inner.pinned_host("a").await.is_some());
 }
 
+#[tokio::test(start_paused = true)]
+async fn dropping_owner_during_cancelled_forget_stops_unrelated_live_connection() {
+    let rig = rig();
+    let keys = paused_delete_keys(&rig);
+    let client = client_with_keys(&rig, keys.clone());
+    rig.host.publish_presence().await;
+    let host = rig.host.host_id.clone();
+    client.connect(host.clone()).await.unwrap();
+    until("pairing", || {
+        client
+            .connection_state()
+            .is_some_and(|state| state.phase == RemoteConnectionPhaseFfi::Pairing)
+    })
+    .await;
+    rig.host.approve(&rig.host.conns()[0].conn_id).await;
+    until("ready", || {
+        client
+            .connection_state()
+            .is_some_and(|state| state.phase == RemoteConnectionPhaseFfi::Ready)
+    })
+    .await;
+    let connection = client
+        .core
+        .active
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .connection
+        .clone();
+    let weak_core = Arc::downgrade(&client.core);
+    client.watch_hosts().await;
+    let file_task = Arc::new(FileTask::default());
+    client
+        .core
+        .file_tasks
+        .lock()
+        .unwrap()
+        .insert("file".into(), file_task.clone());
+    let generation = client.core.current.load(Ordering::SeqCst);
+    keys.inner.pin(pin_for("forgotten-host")).await;
+    keys.pause.store(true, Ordering::SeqCst);
+    let forgetting = client.clone();
+    let forget = tokio::spawn(async move { forgetting.forget_host("forgotten-host".into()).await });
+    keys.entered.notified().await;
+    forget.abort();
+    assert!(forget.await.unwrap_err().is_cancelled());
+    drop(client);
+    assert_eq!(
+        connection.state().phase,
+        ConnectionPhase::Idle,
+        "dropping the owner must close the unrelated live connection before the delete finishes"
+    );
+    let retained = weak_core.upgrade().unwrap();
+    assert!(retained.active.lock().unwrap().is_none());
+    assert!(retained.current.load(Ordering::SeqCst) > generation);
+    assert!(retained.hosts_task.lock().unwrap().is_none());
+    assert!(file_task.cancel.is_cancelled());
+    until("delivery stopped", || retained.delivery.is_finished()).await;
+    keys.release.notify_one();
+    until("forgotten pin removed", || {
+        !rig.store
+            .state
+            .lock()
+            .unwrap()
+            .pins
+            .contains_key("forgotten-host")
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn dropping_owner_during_cancelled_inactive_repair_prevents_reconnect() {
+    let rig = rig();
+    let keys = Arc::new(PausedResetKeys {
+        inner: rig.client.core.parts.keys.clone(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let client = client_with_keys(&rig, keys.clone());
+    let weak_core = Arc::downgrade(&client.core);
+    let repairing = client.clone();
+    let repair = tokio::spawn(async move { repairing.repair_host("repair-host".into()).await });
+    keys.entered.notified().await;
+    repair.abort();
+    assert!(repair.await.unwrap_err().is_cancelled());
+    drop(client);
+    let retained = weak_core.upgrade().unwrap();
+    let closed_generation = retained.current.load(Ordering::SeqCst);
+    keys.release.notify_one();
+    until("identity deleted", || {
+        rig.store.state.lock().unwrap().identity_deletes == 1
+    })
+    .await;
+    until("repair cleanup finished", || {
+        retained.repairing.try_lock().is_ok()
+    })
+    .await;
+    assert_eq!(
+        retained.current.load(Ordering::SeqCst),
+        closed_generation,
+        "detached repair must not start a connection after the owner is dropped"
+    );
+    assert!(retained.active.lock().unwrap().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_owner_during_cancelled_active_repair_finishes_cleanup_without_reconnecting() {
+    use remote_control_client::signaling::AnswerRejectReason;
+
+    let rig = rig();
+    let keys = paused_delete_keys(&rig);
+    let client = client_with_keys(&rig, keys.clone());
+    rig.host
+        .configure(|config| config.reject = Some(AnswerRejectReason::Revoked));
+    rig.host.publish_presence().await;
+    let host = rig.host.host_id.clone();
+    client.connect(host.clone()).await.unwrap();
+    until("revoked", || {
+        client.connection_state().is_some_and(|state| {
+            state.phase == RemoteConnectionPhaseFfi::Failed
+                && state
+                    .failure
+                    .is_some_and(|failure| failure.kind == RemoteFailureKindFfi::Revoked)
+        })
+    })
+    .await;
+    let old_keys = connection_keys(&client, &host);
+    let epoch = old_keys.gate.trust_epoch.load(Ordering::SeqCst);
+    keys.inner.pin(pin_for(&host)).await;
+    let connection = client
+        .core
+        .active
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .connection
+        .clone();
+    let weak_core = Arc::downgrade(&client.core);
+    keys.pause.store(true, Ordering::SeqCst);
+    let repairing = client.clone();
+    let repair_host = host.clone();
+    let repair = tokio::spawn(async move { repairing.repair_host(repair_host).await });
+    keys.entered.notified().await;
+    repair.abort();
+    assert!(repair.await.unwrap_err().is_cancelled());
+    drop(client);
+    assert_eq!(connection.state().phase, ConnectionPhase::Idle);
+    let retained = weak_core.upgrade().unwrap();
+    let generation = retained.current.load(Ordering::SeqCst);
+    keys.release.notify_one();
+    until("active repair cleanup finished", || {
+        retained.repairing.try_lock().is_ok()
+    })
+    .await;
+    assert_eq!(rig.store.state.lock().unwrap().identity_deletes, 1);
+    assert!(keys.inner.pinned_host(&host).await.is_none());
+    assert_eq!(old_keys.gate.trust_epoch.load(Ordering::SeqCst), epoch + 1);
+    assert_eq!(retained.current.load(Ordering::SeqCst), generation);
+    assert!(retained.active.lock().unwrap().is_none());
+    assert_eq!(connection.state().phase, ConnectionPhase::Idle);
+}
+
 #[tokio::test]
 async fn cancelling_forget_before_admission_has_no_effect() {
     let rig = rig();

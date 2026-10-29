@@ -198,14 +198,19 @@ class RemoteControlManager(
     }
 
     private suspend fun rebuild(uid: String?) {
-        val mine = generation.incrementAndGet()
-        synchronized(appRequestLock) { forgetBarriers.clear(); connectionEpoch.incrementAndGet() }
-        val previous = mutableClient.getAndUpdate { null }
-        sinks.values.forEach { channels -> channels.forEach { it.close() } }
-        sinks.clear()
-        mutableHosts.value = RemoteHostsState()
-        mutableConnection.value = null
-        mutableSessions.value = RemoteSessionsState()
+        val (mine, previous, oldSinks) = synchronized(appRequestLock) {
+            val next = generation.incrementAndGet()
+            forgetBarriers.clear()
+            connectionEpoch.incrementAndGet()
+            val old = mutableClient.getAndUpdate { null }
+            val oldSinks = sinks.values.flatMap { it.toList() }
+            sinks.clear()
+            mutableHosts.value = RemoteHostsState()
+            mutableConnection.value = null
+            mutableSessions.value = RemoteSessionsState()
+            Triple(next, old, oldSinks)
+        }
+        oldSinks.forEach { it.close() }
         previous?.let { runCatching { it.client.close() } }
         if (uid == null) return
         val listener = ManagerListener(mine, uid)
@@ -214,17 +219,24 @@ class RemoteControlManager(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            if (account.uid.value == uid && mine == generation.get()) {
-                mutableHosts.value = RemoteHostsState(error = error.message ?: error.javaClass.simpleName)
+            synchronized(appRequestLock) {
+                if (account.uid.value == uid && mine == generation.get()) {
+                    mutableHosts.value = RemoteHostsState(error = error.message ?: error.javaClass.simpleName)
+                }
             }
             return
         }
-        if (mine != generation.get() || account.uid.value != uid) {
-            runCatching { client.close() }
-            return
-        }
         client.setPushInstallationId(pushInstallationId())
-        mutableClient.value = ClientBinding(uid, client)
+        val installed = synchronized(appRequestLock) {
+            if (mine != generation.get() || account.uid.value != uid) false
+            else {
+                mutableClient.value = ClientBinding(uid, client)
+                true
+            }
+        }
+        if (!installed) {
+            runCatching { client.close() }
+        }
     }
 
     private suspend fun client(expectedUid: String? = account.uid.value): RemoteClientPort {
@@ -282,10 +294,10 @@ class RemoteControlManager(
         try {
             bound.forgetHost(hostId)
             succeeded = true
-            mutableHosts.update { state ->
+            synchronized(appRequestLock) {
                 if (account.uid.value == owner && mutableClient.value?.client === bound) {
-                    state.copy(hosts = state.hosts.map { if (it.hostId == hostId) it.copy(paired = false) else it })
-                } else state
+                    mutableHosts.update { state -> state.copy(hosts = state.hosts.map { if (it.hostId == hostId) it.copy(paired = false) else it }) }
+                }
             }
         } finally {
             synchronized(appRequestLock) {
@@ -472,8 +484,8 @@ class RemoteControlManager(
 
     private inner class ManagerListener(private val mine: Int, private val ownerUid: String) : AndroidRemoteListener {
         override suspend fun onConnectionState(state: RemoteConnectionStateFfi) {
-            if (mine != generation.get() || account.uid.value != ownerUid) return
             synchronized(appRequestLock) {
+                if (mine != generation.get() || account.uid.value != ownerUid) return
                 forgetBarriers.forEach { barrier ->
                     if (barrier.hostId != state.hostId || barrier.state?.attempt != state.attempt ||
                         state.phase == RemoteConnectionPhaseFfi.IDLE ||
@@ -484,27 +496,35 @@ class RemoteControlManager(
                 forgetBarriers.removeAll { it.pending == 0 && it.succeeded && it.departed }
                 if (mutableConnection.value?.let { it.hostId != state.hostId || it.phase != state.phase || it.attempt != state.attempt } != false) connectionEpoch.incrementAndGet()
                 mutableConnection.value = state
+                if (state.hostId != mutableSessions.value.hostId) mutableSessions.value = RemoteSessionsState(state.hostId)
             }
-            if (state.hostId != mutableSessions.value.hostId) mutableSessions.value = RemoteSessionsState(state.hostId)
         }
 
         override suspend fun onHosts(hosts: List<RemoteHostFfi>) {
-            if (mine == generation.get() && account.uid.value == ownerUid) mutableHosts.value = RemoteHostsState(hosts, loaded = true)
+            synchronized(appRequestLock) {
+                if (mine == generation.get() && account.uid.value == ownerUid) mutableHosts.value = RemoteHostsState(hosts, loaded = true)
+            }
         }
 
         override suspend fun onHostsFailed(message: String) {
-            if (mine == generation.get() && account.uid.value == ownerUid) mutableHosts.update { it.copy(loaded = true, error = message) }
+            synchronized(appRequestLock) {
+                if (mine == generation.get() && account.uid.value == ownerUid) mutableHosts.update { it.copy(loaded = true, error = message) }
+            }
         }
 
         override suspend fun onSessions(hostId: String, sessions: List<RemoteSessionSummaryFfi>) {
-            if (mine == generation.get() && account.uid.value == ownerUid) mutableSessions.value = RemoteSessionsState(hostId, sessions)
+            synchronized(appRequestLock) {
+                if (mine == generation.get() && account.uid.value == ownerUid) mutableSessions.value = RemoteSessionsState(hostId, sessions)
+            }
         }
 
         override suspend fun onSessionUpdate(update: RemoteSessionUpdateFfi) {
-            if (mine != generation.get() || account.uid.value != ownerUid) return
-            val hostId = mutableClient.value?.client?.connectionState()?.hostId
-                ?: mutableConnection.value?.hostId ?: return
-            sinks[SessionKey(ownerUid, hostId, update.sessionId)]?.forEach { it.trySend(update) }
+            synchronized(appRequestLock) {
+                if (mine != generation.get() || account.uid.value != ownerUid) return
+                val hostId = mutableClient.value?.client?.connectionState()?.hostId
+                    ?: mutableConnection.value?.hostId ?: return
+                sinks[SessionKey(ownerUid, hostId, update.sessionId)]?.forEach { it.trySend(update) }
+            }
         }
     }
 

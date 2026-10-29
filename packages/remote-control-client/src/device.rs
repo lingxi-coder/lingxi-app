@@ -62,6 +62,11 @@ pub struct KeysError(pub String);
 /// Persistent device state, implemented by the app over its Keystore / Keychain / DataStore.
 #[async_trait]
 pub trait ViewerKeys: Send + Sync {
+    /// Optionally bind key operations to the trust state at the start of one
+    /// connection attempt. Stores without scoped state use the original object.
+    fn for_attempt(&self) -> Option<Arc<dyn ViewerKeys>> {
+        None
+    }
     /// The device identity, created on first use.
     async fn identity(&self) -> Result<DeviceIdentity, KeysError>;
     /// Throw the device key away; the next [`identity`](Self::identity) makes a new

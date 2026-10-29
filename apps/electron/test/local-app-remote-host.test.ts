@@ -81,6 +81,112 @@ test('idle check sees a remote opening that arrives while the app list is loadin
   assert.equal(await check, true);
 });
 
+test('concurrent Desktop version requests retain their own intent and expected revision', async t => {
+  const f = await fixture(t);
+  let release!: () => void, entered!: () => void, current = 3;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const calls: number[] = [];
+  f.host.openOnce = async (_id: string, _signal: AbortSignal, _repair: boolean, _restart: boolean, revision: number, expected: number) => {
+    calls.push(revision);
+    if (calls.length === 1) { entered(); await gate; }
+    if (current !== expected) throw new Error('current version changed');
+    current = revision;
+  };
+  const first = f.host.open(id, false, true, undefined, 1, 3);
+  const second = assert.rejects(f.host.open(id, false, true, undefined, 2, 3), /current version changed/);
+  await waiting; release(); await Promise.all([first, second]);
+  assert.deepEqual(calls, [1, 2]); assert.equal(current, 1);
+});
+
+test('concurrent version selections do not report a superseded selection as successful', async t => {
+  const f = await fixture(t); const calls: number[] = [];
+  f.host.openOnce = async (_id: string, _signal: AbortSignal, _repair: boolean, _restart: boolean, revision: number) => { calls.push(revision); };
+  const first = assert.rejects(f.host.request({ action: 'useVersion', id, revision: 1, expectedCurrentRevision: 3 }), /cancelled/);
+  const second = f.host.request({ action: 'useVersion', id, revision: 2, expectedCurrentRevision: 3 });
+  await Promise.all([first, second]); assert.deepEqual(calls, [2]);
+});
+
+test('Desktop opening callers cancel independently', async t => {
+  for (const cancelFirst of [true, false]) {
+    const f = await fixture(t);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    f.host.openOnce = async (_id: string, signal: AbortSignal) => { entered(); await gate; signal.throwIfAborted(); };
+    const first = new AbortController(), second = new AbortController();
+    const a = f.host.open(id, false, false, first.signal); await waiting;
+    const b = f.host.open(id, false, false, second.signal);
+    const cancelled = assert.rejects(cancelFirst ? a : b);
+    (cancelFirst ? first : second).abort(); await cancelled;
+    release(); await (cancelFirst ? b : a);
+  }
+});
+
+test('Stop cancels an incompatible Desktop opening waiting for another opening', async t => {
+  const f = await fixture(t);
+  let release!: () => void, entered!: () => void, calls = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  f.host.openOnce = async (_id: string, signal: AbortSignal) => { calls++; entered(); await gate; signal.throwIfAborted(); };
+  const first = assert.rejects(f.host.open(id)); await waiting;
+  const second = assert.rejects(f.host.open(id, false, true));
+  const stop = f.host.request({ action: 'stop', id });
+  release(); await Promise.all([first, second, stop]);
+  assert.equal(calls, 1);
+});
+
+test('Stop cancels a version selection waiting for an earlier Desktop opening', async t => {
+  const f = await fixture(t);
+  let release!: () => void, entered!: () => void, calls = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  f.host.openOnce = async (_id: string, signal: AbortSignal) => { calls++; entered(); await gate; signal.throwIfAborted(); };
+  const first = assert.rejects(f.host.open(id)); await waiting;
+  const version = assert.rejects(f.host.request({ action: 'useVersion', id, revision: 2, expectedCurrentRevision: 1 }), /cancelled/);
+  const stop = f.host.request({ action: 'stop', id });
+  release(); await Promise.all([first, version, stop]); assert.equal(calls, 1);
+});
+
+test('remote opening survives cancellation of a Desktop opening', async t => {
+  const f = await fixture(t); await f.host.setRemoteAccess(id, true);
+  const workspace = join(f.store.root, 'runtime-workspace');
+  await fs.mkdir(workspace); await fs.writeFile(join(workspace, 'index.html'), '<!doctype html>');
+  f.store.prepareWorkspace = async () => workspace;
+  const runtime = new LocalAppRuntime(f.store, () => {}); f.host.runtime = runtime;
+  let entered!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  f.host.openOnce = async (_id: string, signal: AbortSignal) => {
+    entered(); await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('Desktop cancelled')), { once: true }));
+  };
+  const controller = new AbortController();
+  const local = assert.rejects(f.host.open(id, false, false, controller.signal)); await waiting;
+  const remote = f.host.remoteOpen(id, owner);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  controller.abort(); await local;
+  try { assert.equal((await remote).app_id, id); assert.equal(runtime.phase(id), 'running'); }
+  finally { await runtime.dispose(); }
+});
+
+test('a last Desktop caller cancelling at runtime commit releases the orphaned run', async t => {
+  const f = await fixture(t);
+  const workspace = join(f.store.root, 'runtime-workspace');
+  await fs.mkdir(workspace); await fs.writeFile(join(workspace, 'index.html'), '<!doctype html>');
+  f.store.prepareWorkspace = async () => workspace;
+  const controller = new AbortController();
+  const runtime = new LocalAppRuntime(f.store, () => {
+    if (runtime.phase(id) === 'running') controller.abort();
+  });
+  f.host.runtime = runtime;
+  try {
+    const opening = f.host.open(id, false, false, controller.signal);
+    await assert.rejects(opening);
+    await f.host.opening.get(id)?.promise.catch(() => undefined);
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(runtime.phase(id), 'stopped');
+  } finally { await runtime.dispose(); }
+});
+
 test('revoking the first of two owners does not cancel their shared real runtime startup', async t => {
   const f = await fixture(t);
   const second = { ...owner, deviceId: 'second-phone' };

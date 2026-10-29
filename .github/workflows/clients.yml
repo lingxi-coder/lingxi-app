@@ -149,7 +149,7 @@ jobs:
           bash apps/android/native/scripts/verify-mobile-linux-pins.sh
           bash scripts/tests/test-rootfs-tooling.sh
           sdk_root="$(python3 scripts/lib/mobile_linux_source.py --root)"
-          rootfs_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["alpine"]["version"])' "$sdk_root/docs/toolchains/runtime-pins.json")"
+          rootfs_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["rootfs_version"])' "$sdk_root/docs/toolchains/runtime-pins.json")"
           evidence="$sdk_root/docs/mobile-linux/releases/$rootfs_version/arm64-v8a"
           bash "$sdk_root/scripts/rootfs/check-rootfs-manifest.sh" "$evidence/rootfs-manifest.json"
           python3 "$sdk_root/scripts/rootfs/verify-evidence.py" --evidence-dir "$evidence"
@@ -306,7 +306,7 @@ jobs:
       - name: Build native support and verified release rootfs
         run: |
           python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
-          bash apps/ios/native/scripts/build-linux-runtime.sh
+          bash apps/ios/native/scripts/build-linux-runtime.sh --rootfs-archive "$RUNNER_TEMP/sdk-rootfs/arm64-v8a/rootfs.tar.gz"
           bash apps/ios/native/scripts/install-sherpa-runtime.sh
 
       # Build the gitignored Generated/ Swift bindings + the

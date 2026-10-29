@@ -6,9 +6,10 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { getEventListeners } from 'node:events';
 import { LocalAppRuntime } from '../src/main/local-apps/runtime.ts';
+import { LocalAppAgentBroker } from '../src/main/local-apps/agentBroker.ts';
 
 const require = createRequire(import.meta.url);
 const bundledHost = build({
@@ -379,6 +380,162 @@ test('remote Agent request cannot reuse authorization across app withdrawal and 
   await f.host.remoteInvoke(run,'agent.chats.archive',{chatId:'chat'},session.signal,'s'.repeat(43));
   assert.equal(calls,1);
 });
+
+for (const change of ['withdrawal and regrant', 'session end'] as const) {
+  test(`remote Agent dispatch rejects a microtask ${change} after authorization`, async t => {
+    for (const [method, operation] of [['agent.tasks.start', 'run'], ['agent.chats.get', 'getChat'], ['agent.chats.archive', 'archiveChat']] as const) {
+      await t.test(method, async t => {
+        const f = await fixture(t);
+        await f.host.setRemoteAccess(id, true); await f.host.remoteOpen(id, owner);
+        const controller = new AbortController(), run = { appId: id, revision: 1, runId: 'run-one' };
+        let calls = 0, scheduled = false;
+        f.host.setAgentBroker({ cancelApp: async () => {}, cancelRemoteSession: async () => {},
+          [operation]: async () => { calls++; return { runId: 'task' }; } });
+        const capture = f.host.remoteInvokeGuard.bind(f.host);
+        f.host.remoteInvokeGuard = (...args: any[]) => {
+          const guard = capture(...args);
+          return () => {
+            const valid = guard();
+            if (valid && !scheduled) {
+              scheduled = true;
+              queueMicrotask(() => {
+                if (change === 'session end') controller.abort();
+                else {
+                  void f.host.cancelAgentApp(id, 'Agent access withdrawn');
+                  f.host.blockedAgentApps.delete(id);
+                }
+              });
+            }
+            return valid;
+          };
+        };
+        const input = { runId: 'task', chatId: 'chat', input: {} };
+        const outcome = await f.host.remoteInvoke(run, method, input, controller.signal, 's'.repeat(43))
+          .then(() => null, (error: Error) => error);
+        assert.equal(scheduled, true);
+        assert.equal(calls, 0, 'the stale request must be rejected before any Broker dispatch');
+        assert.match(outcome?.message ?? '', /Application operation is no longer active/);
+        if (change === 'withdrawal and regrant') {
+          await f.host.remoteInvoke(run, method, input, controller.signal, 's'.repeat(43));
+          assert.equal(calls, 1, 'a request admitted under the new grant can dispatch');
+        }
+      });
+    }
+  });
+}
+
+test('pending remote Agent read errors are fenced after withdrawal and regrant', async t => {
+  const f = await fixture(t);
+  await f.host.setRemoteAccess(id, true); await f.host.remoteOpen(id, owner);
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }), waiting = new Promise<void>(resolve => { entered = resolve; });
+  const privateError = new Error('Private Agent error details');
+  f.host.setAgentBroker({ cancelApp: async () => {}, chatHistory: async () => { entered(); await gate; throw privateError; } });
+  const run = { appId: id, revision: 1, runId: 'run-one' }, controller = new AbortController();
+  const pending = f.host.remoteInvoke(run, 'agent.chats.history', { chatId: 'chat' }, controller.signal, 's'.repeat(43));
+  const rejected = assert.rejects(pending, { message: 'Application Agent access changed' });
+  await waiting;
+  await f.host.cancelAgentApp(id, 'Agent access withdrawn'); f.host.blockedAgentApps.delete(id);
+  release(); await rejected;
+  await assert.rejects(f.host.remoteInvoke(run, 'agent.chats.history', { chatId: 'chat' }, controller.signal, 's'.repeat(43)),
+    error => error === privateError);
+});
+
+test('the production gateway fences a real Host and Broker response after Agent withdrawal and regrant', { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const listener = createServer();
+  await new Promise<void>(resolve => listener.listen(0, '127.0.0.1', resolve));
+  const port = (listener.address() as { port: number }).port;
+  await new Promise<void>(resolve => listener.close(() => resolve()));
+  const previousOrigin = process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN, previousPort = process.env.LINGXI_LOCAL_APP_GATEWAY_PORT;
+  let gateway: any;
+  try {
+    process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN = 'https://{appId}-{sessionId}.apps.example.com';
+    process.env.LINGXI_LOCAL_APP_GATEWAY_PORT = String(port);
+    f.host.remoteGateway = undefined;
+    gateway = f.host.gateway();
+  } finally {
+    if (previousOrigin === undefined) delete process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN; else process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN = previousOrigin;
+    if (previousPort === undefined) delete process.env.LINGXI_LOCAL_APP_GATEWAY_PORT; else process.env.LINGXI_LOCAL_APP_GATEWAY_PORT = previousPort;
+  }
+  const broker = new LocalAppAgentBroker({ root: join(f.store.root, 'ledger'),
+    authorize: principal => f.host.authorizeAgent(principal), revalidate: (principal, authorization) => f.host.revalidateAgent(principal, authorization),
+    execute: async () => { throw new Error('Resource reads must not execute an Agent'); } });
+  f.host.setAgentBroker(broker);
+  let release = () => {};
+  try {
+    await f.host.setRemoteAccess(id, true);
+    const launch = new URL((await f.host.remoteOpen(id, owner)).url);
+    const request = (path: string, body: unknown, cookie?: string) => new Promise<{ status: number; body: string; cookie?: string }>((resolve, reject) => {
+      const req = httpRequest({ hostname: '127.0.0.1', port, path, method: 'POST',
+        headers: { host: launch.host, origin: launch.origin, 'content-type': 'application/json', ...(cookie ? { cookie } : {}) } }, res => {
+        const chunks: Buffer[] = [];
+        res.on('data', chunk => chunks.push(chunk));
+        res.on('end', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks).toString(), cookie: res.headers['set-cookie']?.[0]?.split(';')[0] }));
+      });
+      req.on('error', reject); req.end(JSON.stringify(body));
+    });
+    const bootstrap = await request('/__lingxi_remote_bootstrap', { ticket: launch.hash.slice(1) });
+    assert.equal(bootstrap.status, 204); assert.ok(bootstrap.cookie);
+    const chat = await broker.createChat({ appId: id, releaseDigest: f.row.releaseDigest, invocationId: 'run-one' },
+      { requestId: '11111111-2222-4333-8444-555555555555', title: 'Private Agent title' });
+    const current = gateway.adapter.current;
+    let calls = 0, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; }), waiting = new Promise<void>(resolve => { entered = resolve; });
+    gateway.adapter.current = async (candidate: any) => {
+      const valid = await current(candidate);
+      if (++calls === 2) { entered(); await gate; }
+      return valid;
+    };
+    const input = { method: 'agent.chats.get', args: { chatId: chat.chatId } };
+    const pending = request('/__lingxi_remote_invoke', input, bootstrap.cookie);
+    await waiting;
+    const settings = structuredClone(f.row.agent);
+    await f.host.request({ action: 'agent-settings', id, settings: { ...settings, enabled: false } });
+    await f.host.request({ action: 'agent-settings', id, settings });
+    assert.equal(f.runtime.phase(), 'running'); assert.equal(gateway.hasAccess(), true);
+    release();
+    const stale = await pending;
+    assert.equal(stale.status, 400); assert.equal(stale.body.includes('Private Agent title'), false);
+    const fresh = await request('/__lingxi_remote_invoke', input, bootstrap.cookie);
+    assert.equal(fresh.status, 200); assert.equal(JSON.parse(fresh.body).result.title, 'Private Agent title');
+  } finally { release(); await gateway.dispose(); await broker.dispose(); }
+});
+
+for (const change of ['withdrawal', 'withdrawal and regrant', 'session end'] as const) {
+  test(`pending remote Agent reads reject after ${change}`, async t => {
+    const reads = [
+      ['agent.tasks.get', 'get', { runId: 'task' }],
+      ['agent.tasks.list', 'list', {}],
+      ['agent.tasks.events', 'events', { runId: 'task' }],
+      ['agent.chats.get', 'getChat', { chatId: 'chat' }],
+      ['agent.chats.history', 'chatHistory', { chatId: 'chat' }],
+    ] as const;
+    for (const [method, operation, args] of reads) await t.test(method, async t => {
+      const f = await fixture(t);
+      await f.host.setRemoteAccess(id, true); await f.host.remoteOpen(id, owner);
+      let release!: () => void, entered!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const waiting = new Promise<void>(resolve => { entered = resolve; });
+      const privateResult = { content: 'private Agent output' };
+      f.host.setAgentBroker({ cancelApp: async () => {}, [operation]: async () => { entered(); await gate; return privateResult; } });
+      const controller = new AbortController(), run = { appId: id, revision: 1, runId: 'run-one' };
+      const pending = f.host.remoteInvoke(run, method, args, controller.signal, 's'.repeat(43));
+      const rejected = assert.rejects(pending, /Application Agent access changed/);
+      await waiting;
+      if (change === 'session end') controller.abort();
+      else {
+        await f.host.cancelAgentApp(id, 'Agent access withdrawn');
+        if (change === 'withdrawal and regrant') f.host.blockedAgentApps.delete(id);
+      }
+      assert.equal(await f.host.remoteCurrent(run), true, 'the browser and application remain valid while Agent access changes');
+      release(); await rejected;
+      if (change === 'withdrawal and regrant') {
+        assert.deepEqual(await f.host.remoteInvoke(run, method, args, controller.signal, 's'.repeat(43)), privateResult);
+      }
+    });
+  });
+}
 
 test('remote browser access keeps the host alive and its unused headless run stops', async t => {
   const f=await fixture(t);await f.host.request({action:'remote-access',id,enabled:true});await f.host.remoteOpen(id,owner);

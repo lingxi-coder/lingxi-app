@@ -20,7 +20,7 @@ async function request(port: number, host: string, path: string, options: {metho
 }
 async function setup(bufferBudget?: number) {
   const port = await freePort(); let current = true;
-  const adapter: RemoteGatewayAdapter = { current: async () => current, resource: async (_run, req) => new Response(`resource:${new URL(req.url).pathname}`), invoke: async (_run, method) => method, socket: async () => undefined };
+  const adapter: RemoteGatewayAdapter = { current: async () => current, resource: async (_run, req) => new Response(`resource:${new URL(req.url).pathname}`), invoke: async (_run, method) => method, invokeGuard: () => () => current, socket: async () => undefined };
   const gateway = new LocalAppRemoteGateway('https://{appId}-{sessionId}.apps.example.com', port, adapter, bufferBudget);
   return {port,gateway,adapter,invalidate:()=>{current=false;}};
 }
@@ -346,6 +346,68 @@ test('revocation during asynchronous request authorization rejects before dispat
   } finally {await gateway.dispose();}
 });
 
+test('Agent invocation fails closed without a valid guard and a configured info invocation still works', async () => {
+  const { port, gateway, adapter } = await setup();
+  try {
+    const s = await session(gateway, port);
+    let calls = 0;
+    adapter.invoke = async (_run, method) => { calls++; return method; };
+    for (const guard of [undefined, () => undefined, () => () => false, async () => () => true, () => async () => true, () => () => ({})]) {
+      (adapter as any).invokeGuard = guard;
+      const response = await request(port, s.host, '/__lingxi_remote_invoke', {
+        method: 'POST', cookie: s.cookie, origin: `https://${s.host}`,
+        body: JSON.stringify({ method: 'agent.chats.history', args: { chatId: 'chat' } }),
+      });
+      assert.equal(response.status, 400);
+      assert.equal(calls, 0, 'missing, invalid or denied guards must reject before Agent dispatch');
+    }
+    adapter.invokeGuard = () => () => true;
+    const info = await request(port, s.host, '/__lingxi_remote_invoke', {
+      method: 'POST', cookie: s.cookie, origin: `https://${s.host}`, body: JSON.stringify({ method: 'info', args: {} }),
+    });
+    assert.equal(info.status, 200);
+    assert.deepEqual(JSON.parse(info.body), { result: 'info' });
+    assert.equal(calls, 1);
+  } finally { await gateway.dispose(); }
+});
+
+for (const change of ['session end', 'withdrawal and regrant'] as const) {
+  test(`invoke responses reject ${change} during final authorization`, async () => {
+    const { port, gateway, adapter } = await setup();
+    let release!: () => void, entered!: () => void, invoked = false, epoch = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    try {
+      const s = await session(gateway, port);
+      adapter.invokeGuard = () => { const admittedEpoch = epoch; return () => epoch === admittedEpoch; };
+      adapter.invoke = async () => { invoked = true; return { content: 'private Agent output' }; };
+      adapter.current = async () => {
+        if (invoked) { entered(); await gate; }
+        return true;
+      };
+      const pending = request(port, s.host, '/__lingxi_remote_invoke', {
+        method: 'POST', cookie: s.cookie, origin: `https://${s.host}`,
+        body: JSON.stringify({ method: 'agent.chats.history', args: { chatId: 'chat' } }),
+      });
+      await waiting;
+      if (change === 'session end') gateway.revokeOwner(owner);
+      else epoch++;
+      release();
+      const response = await pending;
+      assert.equal(response.status, 400);
+      assert.equal(response.body.includes('private Agent output'), false);
+      if (change === 'withdrawal and regrant') {
+        const next = await request(port, s.host, '/__lingxi_remote_invoke', {
+          method: 'POST', cookie: s.cookie, origin: `https://${s.host}`,
+          body: JSON.stringify({ method: 'agent.chats.history', args: { chatId: 'chat' } }),
+        });
+        assert.equal(next.status, 200);
+        assert.deepEqual(JSON.parse(next.body), { result: { content: 'private Agent output' } });
+      }
+    } finally { release(); await gateway.dispose(); }
+  });
+}
+
 test('large Agent input and streamed service upload preserve body and content length', async () => {
   const {port,gateway,adapter}=await setup();let captured=0, seenLength='';
   adapter.invoke=async(_run,method,args)=>{assert.equal(method,'agent.tasks.start');captured=(args.input as string).length;return {ok:true};};
@@ -438,7 +500,7 @@ test('gateway retries a transient loopback bind failure', async () => {
   const blocker = createServer();
   await new Promise<void>(resolve => blocker.listen(0, '127.0.0.1', resolve));
   const port = (blocker.address() as {port:number}).port;
-  const adapter: RemoteGatewayAdapter = {current:async()=>true,resource:async()=>new Response('ok'),invoke:async()=>null,socket:async()=>undefined};
+  const adapter: RemoteGatewayAdapter = {current:async()=>true,resource:async()=>new Response('ok'),invoke:async()=>null,invokeGuard:()=>()=>true,socket:async()=>undefined};
   const gateway = new LocalAppRemoteGateway('https://{appId}-{sessionId}.apps.example.com',port,adapter);
   try {
     await assert.rejects(gateway.open({appId:id,revision:1,runId:'run'},owner), {code:'EADDRINUSE'});

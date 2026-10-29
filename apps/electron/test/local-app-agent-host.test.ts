@@ -326,6 +326,31 @@ test('host returns persisted standard BaseEvent pages and rejects a navigated ap
   await assert.rejects(host.native(event, { method: 'agent.tasks.events', args: { runId: 'run-1', afterSequence: 0 } }), /Unauthorized/);
 });
 
+test('pending Desktop Agent reads cannot reuse authorization after withdrawal and regrant', async t => {
+  const reads = [
+    ['agent.tasks.get', 'get', { runId: 'task' }],
+    ['agent.tasks.list', 'list', {}],
+    ['agent.tasks.events', 'events', { runId: 'task' }],
+    ['agent.chats.get', 'getChat', { chatId: 'chat' }],
+    ['agent.chats.history', 'chatHistory', { chatId: 'chat' }],
+  ] as const;
+  for (const [method, operation, args] of reads) await t.test(method, async t => {
+    const { host, row, event } = await fixture(t);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const privateResult = { content: 'private Agent output' };
+    host.setAgentBroker({ cancelApp: async () => {}, [operation]: async () => { entered(); await gate; return privateResult; } });
+    const pending = host.native(event, { method, args });
+    const rejected = assert.rejects(pending, /Application Agent access changed/);
+    await waiting;
+    await host.cancelAgentApp(row.id, 'Agent access withdrawn');
+    host.blockedAgentApps.delete(row.id);
+    release(); await rejected;
+    assert.deepEqual(await host.native(event, { method, args }), privateResult);
+  });
+});
+
 test('preload exposes only host-scoped AG-UI resource methods without event streaming IPC', async () => {
   const result = await build({ entryPoints: [new URL('../src/preload/localApp.ts', import.meta.url).pathname], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron'] });
   let bridge: any;

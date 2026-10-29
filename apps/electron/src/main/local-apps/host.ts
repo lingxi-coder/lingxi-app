@@ -841,11 +841,17 @@ export class LocalAppHost {
     try {
       if (!originTemplate || !rawPort || !/^\d+$/.test(rawPort)) throw new Error('Set LINGXI_LOCAL_APP_REMOTE_ORIGIN to an HTTPS origin using {appId}-{sessionId} as its first DNS label, and set LINGXI_LOCAL_APP_GATEWAY_PORT');
       const port = Number(rawPort);
-      new LocalAppRemoteGateway(originTemplate, port, { current: async () => false, resource: async () => new Response(null), invoke: async () => undefined, socket: async () => undefined });
+      new LocalAppRemoteGateway(originTemplate, port, { current: async () => false, resource: async () => new Response(null), invoke: async () => undefined, invokeGuard: () => () => false, socket: async () => undefined });
       return { configured: true, originTemplate, port };
     } catch (error) { return { configured: false, error: error instanceof Error ? error.message : 'Invalid gateway configuration' }; }
   }
   setRemoteRtc(rtc: LocalAppRtc): void { this.remoteRtc?.dispose(); this.remoteRtc = rtc; }
+  private remoteInvokeGuard(run: RemoteRun, method: string): () => boolean {
+    const agentEpoch = this.agentEpochs.get(run.appId) ?? 0;
+    return () => !this.shuttingDown && !this.unavailable && this.runtime.revision(run.appId) === run.revision
+      && this.runtime.phase(run.appId) === 'running' && this.runtime.invocationId(run.appId) === run.runId
+      && (!method.startsWith('agent.') || (!this.blockedAgentApps.has(run.appId) && (this.agentEpochs.get(run.appId) ?? 0) === agentEpoch));
+  }
   private gateway(): LocalAppRemoteGateway {
     if (!this.remoteGateway) {
       const origin = process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN, rawPort = process.env.LINGXI_LOCAL_APP_GATEWAY_PORT;
@@ -853,6 +859,7 @@ export class LocalAppHost {
       this.remoteGateway = new LocalAppRemoteGateway(origin, Number(rawPort), {
         current: run => this.remoteCurrent(run), resource: (run, request) => this.remoteResource(run, request),
         invoke: (run, method, args, signal, sessionId) => this.remoteInvoke(run, method, args, signal, sessionId),
+        invokeGuard: (run, method) => this.remoteInvokeGuard(run, method),
         socket: async (run, name) => {
           if (!await this.remoteCurrent(run)) return;
           const entry = this.runtime.manifest(run.appId)?.entry;
@@ -1045,7 +1052,18 @@ export class LocalAppHost {
     }
   }
   private async remoteInvoke(run: RemoteRun, method: string, args: Record<string, unknown>, signal: AbortSignal, sessionId: string): Promise<unknown> {
-    const agentEpoch = this.agentEpochs.get(run.appId) ?? 0;
+    const invokeCurrent = this.remoteInvokeGuard(run, method);
+    const current = async () => !signal.aborted && await this.remoteCurrent(run) && !signal.aborted && invokeCurrent();
+    const guardedRead = async <T>(operation: Promise<T>): Promise<T> => {
+      try {
+        const value = await operation;
+        if (!await current()) throw new Error('Application Agent access changed');
+        return value;
+      } catch (error) {
+        if (!await current()) throw new Error('Application Agent access changed');
+        throw error;
+      }
+    };
     if (signal.aborted || !await this.remoteCurrent(run) || signal.aborted) throw new Error('Application operation is no longer active');
     const row = await this.store.getRevision(run.appId, run.revision);
     if (method === 'info') return { id: run.appId, name: row.name, runId: run.runId, revision: run.revision, platform: 'browser' };
@@ -1055,8 +1073,7 @@ export class LocalAppHost {
     if (!broker || !active || active.releaseDigest !== row.releaseDigest) throw new Error('Application Agent host is unavailable');
     const owner: LocalAppAgentOwner = { appId: run.appId, releaseDigest: active.releaseDigest, invocationId: run.runId, remoteSessionId: sessionId };
     await this.authorizeAgent(owner);
-    if (signal.aborted || !await this.remoteCurrent(run) || signal.aborted || this.blockedAgentApps.has(run.appId)
-      || (this.agentEpochs.get(run.appId) ?? 0) !== agentEpoch) throw new Error('Application operation is no longer active');
+    if (!await current() || signal.aborted || !invokeCurrent()) throw new Error('Application operation is no longer active');
     const cancelSession = async () => {
       try { await broker.cancelRemoteSession(owner); }
       finally {
@@ -1075,13 +1092,11 @@ export class LocalAppHost {
       return result;
     };
     if (method === 'agent.tasks.start') return start(broker.run(owner, args.input, signal));
-    if (method === 'agent.tasks.get') return broker.get(owner, String(args.runId));
-    if (method === 'agent.tasks.list') return broker.list(owner, args);
-    if (method === 'agent.tasks.events') return broker.events(owner, String(args.runId), args.afterSequence as number | undefined);
+    if (method === 'agent.tasks.get') return guardedRead(broker.get(owner, String(args.runId)));
+    if (method === 'agent.tasks.list') return guardedRead(broker.list(owner, args));
+    if (method === 'agent.tasks.events') return guardedRead(broker.events(owner, String(args.runId), args.afterSequence as number | undefined));
     if (method === 'agent.tasks.cancel') return broker.cancel(owner, String(args.runId), signal);
     if (method === 'agent.chats.create' || method === 'agent.chats.creationStatus' || method === 'agent.chats.list') {
-      const current = async () => !signal.aborted && await this.remoteCurrent(run) && !signal.aborted
-        && !this.blockedAgentApps.has(run.appId) && (this.agentEpochs.get(run.appId) ?? 0) === agentEpoch;
       // Match the local resource contract. An HTTP/transport failure stays
       // uncertain; only these host-owned results can resolve a pending create.
       try {
@@ -1096,10 +1111,10 @@ export class LocalAppHost {
         return { ok: false, error: { code, message: code === 'host_unavailable' ? 'The Agent host is unavailable.' : (error as Error).message } };
       }
     }
-    if (method === 'agent.chats.get') return broker.getChat(owner, String(args.chatId));
+    if (method === 'agent.chats.get') return guardedRead(broker.getChat(owner, String(args.chatId)));
     if (method === 'agent.chats.archive') return broker.archiveChat(owner, String(args.chatId), signal);
     if (method === 'agent.chats.delete') return broker.deleteChat(owner, String(args.chatId), signal);
-    if (method === 'agent.chats.history') return broker.chatHistory(owner, String(args.chatId), args);
+    if (method === 'agent.chats.history') return guardedRead(broker.chatHistory(owner, String(args.chatId), args));
     if (method === 'agent.chats.send') return start(broker.sendChat(owner, String(args.chatId), args.input, signal));
     if (method === 'agent.chats.cancel') return broker.cancelChat(owner, String(args.chatId), signal);
     throw new Error('Unknown application Agent API');
@@ -1687,7 +1702,8 @@ export class LocalAppHost {
       const owner: LocalAppAgentOwner = { appId: id, releaseDigest: activeOwner.releaseDigest, invocationId: invocation, webContentsId: event.sender.id };
       const assertCurrentAgent = () => {
         current(); need('agent');
-        if (this.blockedAgentApps.has(id) || this.runtime.revision(id) !== revision || this.runtime.owner(id)?.releaseDigest !== activeOwner.releaseDigest) {
+        if (this.blockedAgentApps.has(id) || (this.agentEpochs.get(id) ?? 0) !== agentEpoch
+          || this.runtime.revision(id) !== revision || this.runtime.owner(id)?.releaseDigest !== activeOwner.releaseDigest) {
           throw new Error('Application Agent access changed');
         }
       };

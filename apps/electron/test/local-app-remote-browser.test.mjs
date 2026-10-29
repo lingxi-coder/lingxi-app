@@ -60,6 +60,7 @@ test('real browser: remote gateway bootstrap, SDK, app cookies, isolation and re
   const gateway = new LocalAppRemoteGateway(`http://{appId}-{sessionId}.localhost:${port}`, port, {
     current: async candidate => candidate.appId === appId && candidate.runId === run.runId && candidate.revision === run.revision,
     invoke: async (_run, method) => { assert.equal(method, 'info'); return { appId, revision: 1 }; },
+    invokeGuard: () => () => true,
     socket: async () => undefined,
     resource: async (_run, request) => {
       const path = new URL(request.url).pathname;
@@ -196,6 +197,7 @@ test('real browser: HTTPS proxy accepts secure host-only cookies and isolates re
     gateway = new LocalAppRemoteGateway(`https://{appId}-{sessionId}.localhost:${tlsPort}`, backendPort, {
       current: async candidate => candidate.appId === appId && candidate.runId === run.runId && candidate.revision === run.revision,
       invoke: async (_run, method) => { assert.equal(method, 'info'); return { appId, revision: 1 }; },
+      invokeGuard: () => () => true,
       socket: async () => undefined,
       resource: async (_run, request) => {
         const path = new URL(request.url).pathname;
@@ -317,6 +319,7 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     let loseAcknowledgement = true, createCalls = 0;
     gateway = new LocalAppRemoteGateway(`https://{appId}-{sessionId}.localhost:${tlsPort}`, backendPort, {
       current: candidate => host.remoteCurrent(candidate),
+      invokeGuard: (candidate, method) => host.remoteInvokeGuard(candidate, method),
       invoke: async (candidate, method, args, signal, sessionId) => {
         const result = await host.remoteInvoke(candidate, method, args, signal, sessionId);
         if (method === 'agent.chats.create') {

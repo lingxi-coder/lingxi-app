@@ -10,9 +10,21 @@ iOS XCFramework slices, desktop package layout, and required plugin set.
 
 CI uses the official Android universal archive, the iOS XCFramework, both macOS
 universal installers, and the Windows MSVC x86_64 development installer. The
-unit-test and lint jobs use Ubuntu 26.04's archive packages for the GStreamer
-1.28 API required by Rust's `v1_28` feature. The Desktop Linux package job stays
-on Ubuntu 22.04 to preserve its existing glibc runtime baseline. It builds
+pinned Windows installer reports its package revision as `1.28.8.1`; CI checks
+that exact four-part version as well as the installer's SHA-256 digest. The
+lint job uses Ubuntu 26.04's archive packages for the GStreamer 1.28 API
+required by Rust's `v1_28` feature. The all-features unit-test job builds the
+same pinned Linux SDK on Ubuntu 22.04 with `--static-plugins` because that
+feature set includes static plugin registration. This mode uses Meson's
+`--default-library=both`, checks every required plugin archive and pkg-config
+file, and exports both the core and plugin pkg-config directories. It removes
+static core archives so the plugin probe links the same shared GStreamer core
+as the Rust crates, and isolates dynamic plugin discovery to prevent duplicate
+registration. The static SDK has a separate cache identity and cache path from
+the shared-only package SDK.
+
+The Desktop Linux package job stays on Ubuntu 22.04 to preserve its existing
+glibc runtime baseline. It builds
 GStreamer 1.28.8 from the pinned official monorepo tarball on that runner,
 using Jammy's system GLib and the pinned Meson release, then stages only the
 required GStreamer libraries, their non-glibc shared dependencies, nine media

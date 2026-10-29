@@ -85,7 +85,7 @@ class UnifiedLocalApps private constructor(
         if ("agent" in release.capabilities) ensureAgentHost()
         // Start a user-visible foreground lease while LingXi is still visible;
         // browser foreground must not cancel its independently owned tasks.
-        withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id, app.name, this) }
+        withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id, app.name, this@UnifiedLocalApps) }
         try {
             val launch = start(id)
             browserRuns[id] = launch
@@ -205,7 +205,7 @@ class UnifiedLocalApps private constructor(
             check(BuildConfig.MOBILE_LINUX_FULL) { "此发行渠道不支持安装、构建或运行应用服务。" }
             require(release.digest in app.executionGrants) { "请先允许此版本在 Linux 用户空间中运行。" }
             bindLinux()
-            if (keepRunning(id, release.digest)) withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id, app.name, this) }
+            if (keepRunning(id, release.digest)) withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id, app.name, this@UnifiedLocalApps) }
         }
         val value = try { request(op, id) { revision?.let { put("revision", it) } } as JSONObject } catch (error: Throwable) {
             // The shared service cancels only this preparation. An app-level
@@ -290,7 +290,7 @@ class UnifiedLocalApps private constructor(
             val code = ownsRun && release(id, running!!.getLong("revision")).executesCode
             if (value && code) {
                 check(visible.isNotEmpty()) { "Open LingXi before enabling background execution" }
-                LocalAppProcessService.acquire(context, id, appName, this)
+                LocalAppProcessService.acquire(context, id, appName, this@UnifiedLocalApps)
                 LocalAppProcessService.ready(id)
                 acquiredLease = !hadLease
             }

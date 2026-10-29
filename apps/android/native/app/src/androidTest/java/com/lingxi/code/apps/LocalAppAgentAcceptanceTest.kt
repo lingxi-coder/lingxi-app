@@ -1893,11 +1893,46 @@ class LocalAppAgentAcceptanceTest {
         } finally { ids.forEach { runCatching { apps.remove(it) } }; sources.forEach { it.deleteRecursively() } }
     }
 
+    private fun assertPlainChatReply(events: JSONArray, runId: String, threadId: String, expectedText: String): JSONObject {
+        val rows = (0 until events.length()).map { events.getJSONObject(it) }
+        assertEquals("RUN_STARTED", rows.first().getString("type"))
+        assertEquals("RUN_FINISHED", rows.last().getString("type"))
+        assertEquals("success", rows.last().getJSONObject("outcome").getString("type"))
+        for (event in listOf(rows.first(), rows.last())) {
+            assertEquals(runId, event.getString("runId"))
+            assertEquals(threadId, event.getString("threadId"))
+        }
+        assertEquals("A Chat turn starts once", 1, rows.count { it.optString("type") == "RUN_STARTED" })
+        assertEquals("A Chat turn finishes once", 1, rows.count { it.optString("type") == "RUN_FINISHED" })
+        assertFalse("A successful plain Chat must not contain errors or tool calls", rows.any {
+            it.optString("type") == "RUN_ERROR" || it.optString("type").startsWith("TOOL_CALL_")
+        })
+        val startIndex = rows.indexOfFirst { it.optString("type") == "TEXT_MESSAGE_START" }
+        val endIndex = rows.indexOfFirst { it.optString("type") == "TEXT_MESSAGE_END" }
+        assertEquals(1, rows.count { it.optString("type") == "TEXT_MESSAGE_START" })
+        assertEquals(1, rows.count { it.optString("type") == "TEXT_MESSAGE_END" })
+        assertTrue("Assistant text must finish before the successful terminal event", startIndex > 0 && endIndex > startIndex && endIndex < rows.lastIndex)
+        val messageId = rows[startIndex].getString("messageId")
+        assertTrue(messageId.isNotBlank())
+        assertEquals("assistant", rows[startIndex].getString("role"))
+        val content = rows.withIndex().filter { it.value.optString("type") == "TEXT_MESSAGE_CONTENT" }
+        assertTrue("The model must actually return assistant text", content.isNotEmpty())
+        for ((index, event) in content) {
+            assertTrue("Assistant content must occur inside its message", index > startIndex && index < endIndex)
+            assertEquals(messageId, event.getString("messageId"))
+        }
+        assertEquals(messageId, rows[endIndex].getString("messageId"))
+        val text = content.joinToString("") { it.value.getString("delta") }
+        assertEquals("The accepted assistant text must match the requested context probe", expectedText, text)
+        return JSONObject().put("id", messageId).put("role", "assistant").put("content", text)
+    }
+
     @Test fun externalBrowserPersistentChatStoresHistoryAndIsolatesThreads() = runBlocking<Unit> {
         val apps = UnifiedLocalApps.get(context)
         val sources = mutableListOf<File>(); val ids = mutableListOf<String>()
         val runId = "external-chat-" + UUID.randomUUID()
         val followupRunId = "external-chat-followup-" + UUID.randomUUID()
+        val contextMarker = "ANDROID_CHAT_CONTEXT_" + UUID.randomUUID().toString().replace("-", "").take(12)
         val reportNonce = UUID.randomUUID().toString().replace("-", "").take(8)
         val chatRequestId = UUID.randomUUID().toString()
         val isolatedRequestId = UUID.randomUUID().toString()
@@ -1924,12 +1959,25 @@ class LocalAppAgentAcceptanceTest {
                 if(!confirmed||confirmed.id!==chat.id||chat.id!==chatOptions.requestId){
                   throw new Error('Read-only Chat creation status did not match the request.');
                 }
+                const messageText=message=>{
+                  if(typeof message?.content==='string') return message.content;
+                  if(!Array.isArray(message?.content)||message.content.some(part=>part.type!=='text'||typeof part.text!=='string')) return null;
+                  return message.content.map(part=>part.text).join('');
+                };
+                const assistantReply=(run,expected)=>{
+                  if(!Array.isArray(run?.newMessages)||run.newMessages.length!==1) throw new Error('The Chat did not return one assistant message.');
+                  const reply=run.newMessages[0];
+                  if(reply.role!=='assistant'||typeof reply.id!=='string'||!reply.id||typeof reply.content!=='string'||reply.toolCalls?.length||messageText(reply)!==expected){
+                    throw new Error('The Chat assistant text did not match its context probe.');
+                  }
+                  return reply;
+                };
                 const input={
                   threadId:chat.id,runId:'$runId',messages:[{
-                    id:'message-$runId',role:'user',content:[{type:'text',text:'Return the exact uppercase word ORBIT using the result tool.'}]
+                    id:'message-$runId',role:'user',content:[{type:'text',text:'Remember this marker for my next message: $contextMarker. For this turn, reply with exactly context-seed.'}]
                   }],
                   forwardedProps:{'com.lingxi.localApp':{
-                    version:1,outputSchema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},
+                    version:1,
                     tools:[],skills:[],maxTurns:8,timeoutMs:180000
                   }}
                 };
@@ -1943,16 +1991,14 @@ class LocalAppAgentAcceptanceTest {
                   if(existing.threadId!==chat.id) throw new Error('Saved run belongs to another Chat.');
                   result=await localApp.agent.createClient({threadId:chat.id}).connectAgent({runId:'$runId'});
                 }
-                if(!result.result||result.result.answer!=='ORBIT'||!Array.isArray(result.newMessages)){
-                  throw new Error('Persistent Chat did not return the structured AG-UI result.');
-                }
+                const firstReply=assistantReply(result,'context-seed');
                 const task=await localApp.agent.tasks.get('$runId');
                 const followupInput={
                   threadId:chat.id,runId:'$followupRunId',messages:[{
-                    id:'message-$followupRunId',role:'user',content:[{type:'text',text:'What exact uppercase word did I ask you to return in my previous message? Use the result tool.'}]
+                    id:'message-$followupRunId',role:'user',content:[{type:'text',text:'What exact marker did I ask you to remember in the previous message? Reply with only the marker.'}]
                   }],
                   forwardedProps:{'com.lingxi.localApp':{
-                    version:1,outputSchema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},
+                    version:1,
                     tools:[],skills:[],maxTurns:8,timeoutMs:180000
                   }}
                 };
@@ -1965,9 +2011,7 @@ class LocalAppAgentAcceptanceTest {
                   if(existing.threadId!==chat.id) throw new Error('Saved follow-up belongs to another Chat.');
                   followupResult=await localApp.agent.createClient({threadId:chat.id}).connectAgent({runId:'$followupRunId'});
                 }
-                if(!followupResult.result||followupResult.result.answer!=='ORBIT'||!Array.isArray(followupResult.newMessages)){
-                  throw new Error('The second Chat turn did not recover the answer from the first turn.');
-                }
+                const followupReply=assistantReply(followupResult,'$contextMarker');
                 const followupTask=await localApp.agent.tasks.get('$followupRunId');
                 phase='H';
                 const history=await chat.history({limit:50});
@@ -1986,10 +2030,19 @@ class LocalAppAgentAcceptanceTest {
                 const reconnect=localApp.agent.createClient({threadId:task.threadId});
                 const replayCallbacks=[];
                 const replay=await reconnect.connectAgent({runId:'$runId'},{onEvent({event}){replayCallbacks.push(event.type);}});
+                const replayReply=assistantReply(replay,'context-seed');
+                const expectedMessages=[input.messages[0],firstReply,followupInput.messages[0],followupReply];
+                if(history.messages.length!==4||reopenedHistory.messages.length!==4||expectedMessages.some((message,index)=>
+                   history.messages[index].id!==message.id||history.messages[index].role!==message.role||
+                   messageText(history.messages[index])!==messageText(message)||
+                   reopenedHistory.messages[index].id!==message.id||reopenedHistory.messages[index].role!==message.role||
+                   messageText(reopenedHistory.messages[index])!==messageText(message))){
+                  throw new Error('Canonical Chat history changed the accepted message identities or text.');
+                }
                 const summary={
                   chatId:chat.id,runId:'$runId',threadId:input.threadId,taskThreadId:task.threadId,taskState:task.state,
-                  result:result.result,followupRunId:'$followupRunId',followupThreadId:followupTask.threadId,
-                  followupState:followupTask.state,followupResult:followupResult.result,
+                  assistantMessage:firstReply,followupRunId:'$followupRunId',followupThreadId:followupTask.threadId,
+                  followupState:followupTask.state,followupAssistantMessage:followupReply,
                   historyRoles:history.messages.map(message=>message.role),
                   historyIds:history.messages.map(message=>message.id),reopenedIds:reopenedHistory.messages.map(message=>message.id),
                   isolatedMessageCount:isolatedHistory.messages.length,
@@ -2004,7 +2057,7 @@ class LocalAppAgentAcceptanceTest {
                    eventPage.events.filter(event=>event.type==='RUN_STARTED').length!==1||
                    followupEvents.events.filter(event=>event.type==='RUN_STARTED').length!==1||
                    followupEvents.events[followupEvents.events.length-1]?.type!=='RUN_FINISHED'||
-                   !replay.result||replay.result.answer!=='ORBIT'||!Array.isArray(replay.newMessages)||
+                   replayReply.id!==firstReply.id||
                    replayCallbacks[0]!=='RUN_STARTED'||replayCallbacks[replayCallbacks.length-1]!=='RUN_FINISHED'||
                    replayCallbacks.includes('RUN_ERROR')){
                   throw new Error('Persistent Chat history, isolation, or task correlation failed: '+JSON.stringify(summary));
@@ -2108,7 +2161,7 @@ class LocalAppAgentAcceptanceTest {
                 assertEquals("RUN_FINISHED", lastEvent.getString("type"))
                 assertEquals(runId, lastEvent.getString("runId"))
                 assertEquals(task.getString("threadId"), lastEvent.getString("threadId"))
-                assertEquals("ORBIT", lastEvent.getJSONObject("result").getString("answer"))
+                val firstReply = assertPlainChatReply(events, runId, task.getString("threadId"), "context-seed")
                 assertFalse((0 until events.length()).any { events.getJSONObject(it).optString("type") == "RUN_ERROR" })
                 val followupBatch = agentCall(launch, "agent.tasks.events", JSONObject().put("runId", followupRunId)) as JSONObject
                 val followupEvents = followupBatch.getJSONArray("events")
@@ -2120,7 +2173,7 @@ class LocalAppAgentAcceptanceTest {
                 assertEquals(task.getString("threadId"), followupFirst.getString("threadId"))
                 assertEquals("RUN_FINISHED", followupLast.getString("type"))
                 assertEquals(followupRunId, followupLast.getString("runId"))
-                assertEquals("The follow-up answered from the previous turn", "ORBIT", followupLast.getJSONObject("result").getString("answer"))
+                val followupReply = assertPlainChatReply(followupEvents, followupRunId, task.getString("threadId"), contextMarker)
                 assertEquals("The follow-up was started once", 1,
                     (0 until followupEvents.length()).count { followupEvents.getJSONObject(it).optString("type") == "RUN_STARTED" })
                 assertFalse((0 until followupEvents.length()).any { followupEvents.getJSONObject(it).optString("type") == "RUN_ERROR" })
@@ -2149,13 +2202,17 @@ class LocalAppAgentAcceptanceTest {
                 val historyMessages = history.getJSONArray("messages")
                 val reopenedMessages = reopenedHistory.getJSONArray("messages")
                 val isolatedMessages = isolatedHistory.getJSONArray("messages")
-                assertTrue("Persistent Chat history contains both user and assistant turns", historyMessages.length() >= 4)
+                assertEquals("Two plain Chat turns persist exactly four messages", 4, historyMessages.length())
                 val historyRoles = (0 until historyMessages.length()).map { historyMessages.getJSONObject(it).getString("role") }
-                assertTrue(historyRoles.count { it == "user" } >= 2)
-                assertTrue(historyRoles.count { it == "assistant" } >= 2)
+                assertEquals(listOf("user", "assistant", "user", "assistant"), historyRoles)
                 val historyIds = (0 until historyMessages.length()).map { historyMessages.getJSONObject(it).getString("id") }
                 val reopenedIds = (0 until reopenedMessages.length()).map { reopenedMessages.getJSONObject(it).getString("id") }
                 assertEquals("A fresh history read preserves the reopened Chat messages", historyIds, reopenedIds)
+                assertEquals("Canonical history preserves both user and assistant identities",
+                    listOf("message-$runId", firstReply.getString("id"), "message-$followupRunId", followupReply.getString("id")), historyIds)
+                assertEquals("Canonical history stores the exact first assistant text", firstReply.getString("content"), historyMessages.getJSONObject(1).getString("content"))
+                assertEquals("Canonical history stores the exact recalled marker", contextMarker, historyMessages.getJSONObject(3).getString("content"))
+                assertEquals("Reopened history preserves assistant text", historyMessages.toString(), reopenedMessages.toString())
                 assertEquals("The isolated browser-created Chat stays empty", 0, isolatedMessages.length())
                 assertEquals("Only the browser-created run was started", 1,
                     (0 until events.length()).count { events.getJSONObject(it).optString("type") == "RUN_STARTED" })
@@ -2168,12 +2225,14 @@ class LocalAppAgentAcceptanceTest {
                     .put("runId", runId)
                     .put("followupRunId", followupRunId)
                     .put("followupTaskState", followupTask.getString("state"))
-                    .put("followupResult", followupLast.getJSONObject("result"))
+                    .put("followupAssistantMessage", followupReply)
                     .put("browserMarkerTitle", browserMarker.getString("title"))
                     .put("chatId", chatId)
                     .put("isolatedChatId", isolatedChat.getString("chatId"))
                     .put("taskState", task.getString("state"))
-                    .put("result", lastEvent.getJSONObject("result"))
+                    .put("assistantMessage", firstReply)
+                    .put("chatOutput", "plain_text")
+                    .put("structuredChatOutput", "not_supported")
                     .put("historyRoles", JSONArray(historyRoles))
                     .put("historyIds", JSONArray(historyIds))
                     .put("reopenedIds", JSONArray(reopenedIds))

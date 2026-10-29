@@ -9,6 +9,7 @@ private struct BrowserRunInputEvidence {
 private struct BrowserRunResultEvidence {
     let runAgentResult: [String: Any]
     let reconnect: [String: Any]?
+    let canonicalChat: [String: Any]?
 }
 
 /// Verifies the app-scoped foreground handoff UI without assuming which
@@ -283,7 +284,6 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
 
     private func runResultValue(_ value: Any?) -> [String: Any]? {
         guard let runAgentResult = value as? [String: Any],
-              runAgentResult["result"] as? [String: Any] != nil,
               runAgentResult["newMessages"] as? [[String: Any]] != nil else {
             return nil
         }
@@ -374,7 +374,8 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
                return true
            }),
            let result = runResultValue(direct["RunAgentResult"]) {
-            return BrowserRunResultEvidence(runAgentResult: result, reconnect: nil)
+            return BrowserRunResultEvidence(runAgentResult: result, reconnect: nil,
+                                           canonicalChat: direct["canonicalChat"] as? [String: Any])
         }
 
         guard let recovered = protocolPayload(in: app, accepting: { payload in
@@ -400,7 +401,8 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         }
         // The read-only result view omits input; use only the input captured
         // before handoff and only after reconnect metadata matches it exactly.
-        return BrowserRunResultEvidence(runAgentResult: result, reconnect: reconnect)
+        return BrowserRunResultEvidence(runAgentResult: result, reconnect: reconnect,
+                                       canonicalChat: recovered["canonicalChat"] as? [String: Any])
     }
 
     private func inputMessages(in input: [String: Any]) -> [[String: Any]]? {
@@ -417,8 +419,42 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         return textParts.isEmpty ? nil : textParts.joined()
     }
 
-    private func answer(in runAgentResult: [String: Any]) -> String? {
-        ((runAgentResult["result"] as? [String: Any])?["answer"] as? String)
+    private func plainChatAnswer(in runAgentResult: [String: Any]) -> String? {
+        guard let messages = runAgentResult["newMessages"] as? [[String: Any]], messages.count == 1,
+              let message = messages.first, message["role"] as? String == "assistant",
+              let id = message["id"] as? String, !id.isEmpty,
+              (message["toolCalls"] as? [[String: Any]] ?? []).isEmpty,
+              let text = message["content"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return text
+    }
+
+    private func assertPlainChatHistory(
+        _ evidence: BrowserRunResultEvidence,
+        input: BrowserRunInputEvidence,
+        expectedInputVerification: Bool = true
+    ) throws -> [[String: Any]] {
+        let options = try XCTUnwrap((input.input["forwardedProps"] as? [String: Any])?["com.lingxi.localApp"] as? [String: Any])
+        XCTAssertNil(options["outputSchema"], "Plain Chat must not request unsupported structured Chat output.")
+        let canonical = try XCTUnwrap(evidence.canonicalChat, "The Chat result did not include verified canonical history.")
+        XCTAssertEqual(canonical["threadId"] as? String, input.threadID)
+        XCTAssertEqual(canonical["inputMessagesVerified"] as? Bool, expectedInputVerification,
+                       "The fixture must disclose whether its original user input was still available for verification.")
+        let history = try XCTUnwrap(canonical["messages"] as? [[String: Any]])
+        let ids = history.compactMap { $0["id"] as? String }
+        XCTAssertEqual(ids.count, history.count, "Every canonical message needs an ID.")
+        XCTAssertEqual(Set(ids).count, ids.count, "Canonical history must not duplicate a message.")
+        let submitted = try XCTUnwrap(inputMessages(in: input.input))
+        let replies = try XCTUnwrap(evidence.runAgentResult["newMessages"] as? [[String: Any]])
+        XCTAssertNotNil(plainChatAnswer(in: evidence.runAgentResult), "A successful plain Chat must contain assistant text.")
+        for expected in submitted + replies {
+            let id = try XCTUnwrap(expected["id"] as? String)
+            let actual = try XCTUnwrap(history.first { $0["id"] as? String == id }, "Canonical Chat history lost message \(id).")
+            XCTAssertEqual(actual["role"] as? String, expected["role"] as? String)
+            XCTAssertEqual(textContent(in: actual), textContent(in: expected), "Canonical Chat history changed the accepted message text.")
+        }
+        return history
     }
 
     private func publicImageRunIDs(in payload: [String: Any]) -> (runID: String, threadID: String)? {
@@ -610,6 +646,8 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         while Date() < deadline {
             lastText = pageText(app)
             if let evidence = runResultEvidence(in: app, input: input, requireReconnect: requireReconnect),
+               (kind == "chat" ? plainChatAnswer(in: evidence.runAgentResult) != nil
+                    : evidence.runAgentResult["result"] as? [String: Any] != nil),
                hasLifecycleOutcome(app, runID: input.runID, threadID: input.threadID, outcome: "success") {
                 let directStatus = lastText.contains(
                     "\(kind) run succeeded · thread \(input.threadID) · run \(input.runID)"
@@ -1038,8 +1076,10 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         XCTAssertEqual(firstMessage["role"] as? String, "user")
         let firstInputText = try XCTUnwrap(textContent(in: firstMessage), "The first user message must include text content.")
         XCTAssertTrue(firstInputText.contains(contextMarker), "The first user prompt must contain the unique synthetic context marker.")
-        let firstAnswer = try XCTUnwrap(answer(in: firstEvidence.runAgentResult), "RunAgentResult.result.answer was missing from the first Chat turn.")
+        let firstAnswer = try XCTUnwrap(plainChatAnswer(in: firstEvidence.runAgentResult), "The first Chat turn did not return an assistant text message.")
         XCTAssertTrue(firstAnswer == "context-seed", "The first Chat turn should answer exactly context-seed. \(safePageSummary(browser, input: firstInput))")
+        let firstHistory = try assertPlainChatHistory(firstEvidence, input: firstInput)
+        XCTAssertEqual(firstHistory.count, 2, "The first plain Chat turn should persist one user and one assistant message.")
         attachScreen("browser-chat-first-run-\(firstChatRunID.prefix(8))")
 
         guard tapPageButton("Read-only reconnect to last run", in: browser) else { return }
@@ -1058,7 +1098,10 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         XCTAssertTrue(reconnect.contains(firstChatRunID), "Read-only replay must refer to the same public runId.")
         XCTAssertEqual(reconnectEvidence.reconnect?["runId"] as? String, firstInput.runID)
         XCTAssertEqual(reconnectEvidence.reconnect?["threadId"] as? String, firstInput.threadID)
-        XCTAssertTrue(answer(in: reconnectEvidence.runAgentResult) == "context-seed", "Read-only reconnect must restore the same typed result. \(safePageSummary(browser, input: firstInput))")
+        XCTAssertTrue(plainChatAnswer(in: reconnectEvidence.runAgentResult) == "context-seed", "Read-only reconnect must restore the same assistant reply. \(safePageSummary(browser, input: firstInput))")
+        let reconnectedHistory = try assertPlainChatHistory(reconnectEvidence, input: firstInput, expectedInputVerification: false)
+        XCTAssertEqual(reconnectedHistory.compactMap { $0["id"] as? String }, firstHistory.compactMap { $0["id"] as? String },
+                       "Read-only replay must preserve canonical history IDs.")
         guard tapPageButton("Refresh Chat history", in: browser) else { return }
         let history = waitForPageText(contextMarker, in: browser, timeout: 30, scroll: true)
         XCTAssertTrue(history.contains("context-seed"), "Canonical Chat history should preserve the first assistant turn separately from the next RunAgentInput.")
@@ -1085,6 +1128,8 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
             nativeRunPrefix: followupRun
         )
         XCTAssertEqual(followupInput.runID, followupRunID, "The follow-up RunAgentInput must match the public run reported by lifecycle events.")
+        XCTAssertEqual(followupInput.threadID, firstInput.threadID, "Both turns must use the same host-owned Chat.")
+        XCTAssertNotEqual(followupInput.runID, firstInput.runID, "Each explicit Chat turn needs a new run ID.")
         let followupMessages = try XCTUnwrap(inputMessages(in: followupInput.input), "The second RunAgentInput must expose messages.")
         XCTAssertEqual(followupMessages.count, 1, "The second RunAgentInput must send only the new user turn, not replay prior Chat history.")
         let followupMessage = try XCTUnwrap(followupMessages.first, "The second RunAgentInput has no user message.")
@@ -1092,8 +1137,12 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         let followupInputText = try XCTUnwrap(textContent(in: followupMessage), "The second user message must include text content.")
         XCTAssertTrue(followupInputText == followupPrompt, "The second RunAgentInput should contain only the new prompt. \(safePageSummary(browser, input: followupInput))")
         XCTAssertFalse(followupInputText.contains(contextMarker), "The second RunAgentInput must not include the marker as prompt text or replayed history.")
-        let followupAnswer = try XCTUnwrap(answer(in: followupEvidence.runAgentResult), "RunAgentResult.result.answer was missing from the follow-up Chat turn.")
+        let followupAnswer = try XCTUnwrap(plainChatAnswer(in: followupEvidence.runAgentResult), "The follow-up Chat turn did not return an assistant text message.")
         XCTAssertTrue(followupAnswer == contextMarker, "The second Chat turn must recall the marker from the host-persisted prior turn. \(safePageSummary(browser, input: followupInput))")
+        let followupHistory = try assertPlainChatHistory(followupEvidence, input: followupInput)
+        XCTAssertEqual(followupHistory.count, 4, "Two plain Chat turns should persist exactly four messages.")
+        XCTAssertEqual(followupHistory.prefix(firstHistory.count).compactMap { $0["id"] as? String },
+                       firstHistory.compactMap { $0["id"] as? String }, "The second turn must preserve the first turn's history IDs.")
         attachScreen("browser-chat-followup-\(followupRunID.prefix(8))")
 
         let cancellationPrompt = "Write a detailed 1500 word explanation of how a paper notebook is made. Continue until complete."
@@ -1127,6 +1176,16 @@ final class LocalAppBrowserAgentUITests: XCTestCase {
         XCTAssertFalse(cancelled.contains("RUN_ERROR"), "Cancellation should be a RUN_FINISHED cancelled outcome, not a success or error masquerading as completion.")
         attachScreen("browser-chat-cancelled-\(cancelledRunID.prefix(8))")
         print("IOS_AGUI_BROWSER_CANCEL_PASS runId=\(cancelledRunID) terminal=RUN_FINISHED outcome=cancelled")
+
+        guard tapPageButton("Create Chat", in: browser) else { return }
+        let isolated = waitForPageText("0 canonical Messages", in: browser, timeout: 30, scroll: true)
+        let emptyChatPattern = #"Open host Chat · threadId ([A-Za-z0-9._-]+) · 0 canonical Messages"#
+        let expression = try NSRegularExpression(pattern: emptyChatPattern)
+        let match = try XCTUnwrap(expression.firstMatch(in: isolated, range: NSRange(isolated.startIndex..., in: isolated)),
+                                  "A newly created isolated Chat must expose empty canonical history.")
+        let idRange = try XCTUnwrap(Range(match.range(at: 1), in: isolated))
+        XCTAssertNotEqual(String(isolated[idRange]), firstInput.threadID, "An isolated Chat needs its own thread ID.")
+        attachScreen("browser-chat-isolation-empty")
     }
 
     func testNativeForegroundActionIsScopedToAGUIRun() throws {

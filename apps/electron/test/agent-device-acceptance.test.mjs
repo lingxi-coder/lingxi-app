@@ -1,13 +1,19 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {File} from 'node:buffer';
-import {webcrypto} from 'node:crypto';
+import {createHash, webcrypto} from 'node:crypto';
 import test from 'node:test';
 import vm from 'node:vm';
 import {fileURLToPath} from 'node:url';
 
 const fixturePath = fileURLToPath(new URL('../../../fixtures/local-apps/v2/agent/index.html', import.meta.url));
 const fixtureSource = readFileSync(fixturePath, 'utf8');
+const sdkRoot = new URL('../vendor/local-app-agui/dist/', import.meta.url);
+const sdkManifest = JSON.parse(readFileSync(new URL('manifest.json', sdkRoot), 'utf8'));
+const sdkBrowserSource = readFileSync(new URL('browser.global.js', sdkRoot), 'utf8');
+assert.equal(sdkManifest.dependencies['@ag-ui/client'], '1.0.3');
+assert.equal(sdkManifest.source.commit, 'a1131c90709d51d562202b7b6cc0a2a1b48b05fc');
+assert.equal(createHash('sha256').update(sdkBrowserSource).digest('hex'), sdkManifest.artifacts['dist/browser.global.js']);
 const inlineScripts = [...fixtureSource.matchAll(/<script(?:\s+type="module")?>([\s\S]*?)<\/script>/g)].map(match => match[1]);
 assert.equal(inlineScripts.length, 2, 'fixture keeps the handoff-capture script before its module bootstrap');
 
@@ -134,7 +140,9 @@ function createBrowser({
   chatCreateHandler = null,
   chatStatusHandler = null,
   chatHistoryHandler = null,
+  chatSendHandler = null,
   chatPendingHandler = null,
+  pinnedSdk = false,
   task = successTask(),
   events = successEvents(),
   connectFailure = null,
@@ -176,13 +184,18 @@ function createBrowser({
   };
 
   const counters = {get: 0, getReturned: 0, events: 0, list: 0, chatsList: 0, chatsOpen: 0,
-    chatCreate: 0, chatStatus: 0, chatHistory: 0, chatPending: 0, connect: 0, cancel: 0, run: 0, start: 0, chatSend: 0};
+    chatCreate: 0, chatStatus: 0, chatHistory: 0, chatPending: 0, connect: 0, sdkEvents: 0, cancel: 0, run: 0, start: 0, chatSend: 0};
   const chatCreateRequests = [];
   const chatStatusRequests = [];
-  const chatHandle = id => ({id, async send() { counters.chatSend++; throw new Error('unexpected chat.send'); },
+  let toPage = value => value;
+  const chatHandle = id => ({id, async send(input) {
+      counters.chatSend++;
+      if (!chatSendHandler) throw new Error('unexpected chat.send');
+      return chatSendHandler(input);
+    },
     async history(query) {
       counters.chatHistory++;
-      return chatHistoryHandler ? chatHistoryHandler(id, query) : {messages: []};
+      return toPage(chatHistoryHandler ? await chatHistoryHandler(id, query) : {messages: []});
     }});
   const activeTask = task;
   let releaseGet;
@@ -219,8 +232,8 @@ function createBrowser({
           if (holdEvents) await eventsGate;
           if (eventsFailure) throw eventsFailure;
           assert.equal(query.runId, runId, 'event replay must keep the saved run ID');
-          if (query.afterSequence === 0) return {events: currentEvents, sequence: currentEvents.length};
-          return {events: [], sequence: currentEvents.length};
+          if (query.afterSequence === 0) return toPage({events: currentEvents, sequence: currentEvents.length});
+          return toPage({events: [], sequence: currentEvents.length});
         },
         async start() { counters.start++; throw new Error('unexpected tasks.start'); },
         async cancel(id) {
@@ -312,10 +325,39 @@ function createBrowser({
   const context = vm.createContext({
     window, document, location, localStorage, localApp: app,
     console, URL, URLSearchParams, CustomEvent: BrowserCustomEvent,
-    TextEncoder, File, AbortController, crypto: webcrypto,
+    TextEncoder, File, AbortController, Headers, Request, crypto: webcrypto,
     fetch: async () => ({ok: false, status: 404}),
     setTimeout, clearTimeout, setInterval: () => 1,
   });
+  if (pinnedSdk) {
+    context.structuredClone = vm.runInContext('(value) => JSON.parse(JSON.stringify(value))', context);
+    const inPage = vm.runInContext('(value) => JSON.parse(JSON.stringify(value))', context);
+    toPage = inPage;
+    context.__countConnect = () => { counters.connect++; };
+    context.__pinnedTransport = {
+      async start() { counters.start++; throw new Error('read-only SDK must not start a run'); },
+      async events(query) {
+        counters.sdkEvents++;
+        assert.equal(query.runId, runId);
+        return inPage({events: query.afterSequence ? [] : connectEvents, sequence: connectEvents.length});
+      },
+      async status() { return inPage({state: activeTask.state}); },
+    };
+    vm.runInContext(sdkBrowserSource, context, {filename: 'pinned-agui-1.0.3.browser.global.js'});
+    window.LingxiLocalAppAGUI = context.LingxiLocalAppAGUI;
+    context.__pinnedResources = {tasks: app.agent.tasks, chats: app.agent.chats};
+    app.agent.createClient = vm.runInContext(`config => {
+      const resources = LingxiLocalAppAGUI.installBrowserAgent({transport: __pinnedTransport,
+        ...__pinnedResources, isPersistentThread: () => true});
+      const client = resources.createClient(config);
+      const connect = client.connectAgent.bind(client);
+      client.connectAgent = (parameters, subscriber) => {
+        __countConnect();
+        return connect(parameters, subscriber);
+      };
+      return client;
+    }`, context);
+  }
   vm.runInContext(inlineScripts[0], context, {filename: `${fixturePath}#capture`});
   if (readyBeforeBootstrap) {
     const record = {type: 'localApp:agent-handoff-ready', detail: {runId}};
@@ -828,16 +870,158 @@ function acceptedReceipt(overrides = {}) {
 }
 
 function chatResult() {
-  return {result: {answer: 'KIWI-482'}, newMessages: [
-    {id: 'assistant-chat', role: 'assistant', content: [{type: 'text', text: 'KIWI-482'}]},
+  return {newMessages: [
+    {id: 'assistant-chat', role: 'assistant', content: 'KIWI-482'},
   ]};
 }
 
+function chatEvents() {
+  return [
+    {type: 'RUN_STARTED', protocolVersion: '1.0', threadId, runId},
+    {type: 'TEXT_MESSAGE_START', messageId: 'assistant-chat', role: 'assistant'},
+    {type: 'TEXT_MESSAGE_CONTENT', messageId: 'assistant-chat', delta: 'KIWI-482'},
+    {type: 'TEXT_MESSAGE_END', messageId: 'assistant-chat'},
+    {type: 'RUN_FINISHED', threadId, runId, outcome: {type: 'success'}},
+  ];
+}
+
+function savedChatState({pending = true} = {}) {
+  const input = {...savedInput(), forwardedProps: {'com.lingxi.localApp': {version: 1}}};
+  return {version: 1, chatId: threadId,
+    pending: pending ? {input, kind: 'chat', chatId: threadId} : null,
+    lastRun: {runId, threadId, kind: 'chat', chatId: threadId}};
+}
+
+test('pinned SDK reconstructs a plain Chat reply from text events and verifies the saved user message', async () => {
+  const state = savedChatState();
+  const browser = createBrowser({seedState: state, pinnedSdk: true, events: chatEvents(),
+    chatHistoryHandler: async () => ({messages: [...state.pending.input.messages, ...chatResult().newMessages]})});
+  await waitFor(() => /Read-only reconnect succeeded|Read-only recovery stopped/.test(browser.elements.get('status')?.textContent || ''),
+    'pinned SDK did not reconstruct the saved Chat');
+  assert.match(browser.elements.get('status').textContent, /Read-only reconnect succeeded/,
+    browser.elements.get('recovery-error')?.textContent);
+  assert.equal(browser.counters.sdkEvents, 1);
+  const evidence = JSON.parse(browser.elements.get('result').textContent);
+  assert.equal(evidence.RunAgentResult.newMessages[0].content, 'KIWI-482', 'the real pinned client assembles text event deltas');
+  assert.equal(evidence.canonicalChat.inputMessagesVerified, true);
+  assert.equal(browser.state().pending, null);
+  assertNoSubmission(browser);
+});
+
+test('read-only Chat recovery rejects missing or changed original user messages and preserves pending input', async () => {
+  for (const pinnedSdk of [false, true]) {
+    const state = savedChatState();
+    const user = state.pending.input.messages[0];
+    for (const userMessages of [[], [{...user, content: 'changed original user'}], [{...user, id: 'another-user'}]]) {
+      const browser = createBrowser({seedState: state, pinnedSdk, result: chatResult(), events: chatEvents(),
+        chatHistoryHandler: async () => ({messages: [...userMessages, ...chatResult().newMessages]})});
+      await waitFor(() => browser.elements.get('recovery-error')?.textContent.includes('chat_history_mismatch'),
+        'read-only recovery accepted incomplete or changed canonical user history');
+      assert.doesNotMatch(browser.elements.get('status').textContent, /Read-only reconnect succeeded/);
+      assert.deepEqual(browser.state().pending.input, state.pending.input, 'unverified original input must remain available');
+      assertNoSubmission(browser);
+    }
+  }
+});
+
+test('Chat recovery without original input explicitly marks its user history as unverified', async () => {
+  for (const source of [{seedState: null, sdkReceipt: acceptedReceipt()}, {seedState: savedChatState({pending: false})}]) {
+    const browser = createBrowser({...source, pinnedSdk: true, events: chatEvents(),
+      chatHistoryHandler: async () => ({messages: chatResult().newMessages})});
+    await waitFor(() => browser.elements.get('status')?.textContent.includes('Read-only reconnect succeeded'),
+      'exact accepted receipt or saved run was not recovered through the pinned SDK');
+    const evidence = JSON.parse(browser.elements.get('result').textContent);
+    assert.equal(evidence.canonicalChat.inputMessagesVerified, false);
+    assert.match(browser.elements.get('recovery').textContent, /original fixture input was unavailable/);
+    assertNoSubmission(browser);
+  }
+});
+
+test('pinned SDK cannot manufacture assistant messages from lifecycle-only callbacks', async () => {
+  const state = savedChatState();
+  const lifecycleOnly = chatEvents().filter(event => !event.type.startsWith('TEXT_MESSAGE_'));
+  const browser = createBrowser({seedState: state, pinnedSdk: true, events: chatEvents(), connectEvents: lifecycleOnly,
+    result: chatResult(), chatHistoryHandler: async () => ({messages: [...state.pending.input.messages, ...chatResult().newMessages]})});
+  await waitFor(() => browser.elements.get('recovery-error')?.textContent.includes('chat_reply_missing'),
+    'lifecycle-only SDK callbacks were accepted as an assistant reply');
+  assert.equal(browser.counters.sdkEvents, 1);
+  assert.doesNotMatch(browser.elements.get('status').textContent, /Read-only reconnect succeeded/);
+  assert.deepEqual(browser.state().pending.input, state.pending.input);
+  assertNoSubmission(browser);
+});
+
+test('mock newMessages cannot hide missing callback or durable text events', async () => {
+  const state = savedChatState();
+  const lifecycleOnly = chatEvents().filter(event => !event.type.startsWith('TEXT_MESSAGE_'));
+  for (const streams of [{events: chatEvents(), connectEvents: lifecycleOnly},
+    {events: lifecycleOnly, connectEvents: chatEvents()}]) {
+    const browser = createBrowser({seedState: state, result: chatResult(), ...streams,
+      chatHistoryHandler: async () => ({messages: [...state.pending.input.messages, ...chatResult().newMessages]})});
+    await waitFor(() => browser.elements.get('recovery-error')?.textContent.includes('chat_reply_event_mismatch'),
+      'mock reply without matching text events was accepted');
+    assert.doesNotMatch(browser.elements.get('status').textContent, /Read-only reconnect succeeded/);
+    assert.deepEqual(browser.state().pending.input, state.pending.input);
+    assertNoSubmission(browser);
+  }
+});
+
+test('plain Chat sends no output schema and verifies its new messages against canonical history', async () => {
+  let submitted;
+  const result = chatResult();
+  const browser = createBrowser({
+    seedState: {version: 1, chatId: threadId, pending: null, lastRun: null}, readyBeforeBootstrap: false,
+    events: chatEvents(), result,
+    chatSendHandler: async input => { submitted = JSON.parse(JSON.stringify(input)); return result; },
+    chatHistoryHandler: async () => ({messages: submitted ? [...submitted.messages, ...result.newMessages] : []}),
+  });
+  await waitFor(() => browser.elements.get('status')?.textContent.includes('Host Agent ready'), 'bootstrap did not finish');
+  await browser.elements.get('open-chat').handlers.get('click')();
+  browser.context.crypto = {randomUUID: () => runId};
+  browser.elements.get('chat-prompt').value = 'Remember KIWI-482.';
+  await browser.elements.get('send-chat').handlers.get('click')();
+  assert.equal(browser.counters.chatSend, 1);
+  assert.equal(browser.counters.run, 0);
+  assert.equal(submitted.threadId, threadId);
+  assert.equal(submitted.messages.length, 1);
+  assert.equal(submitted.messages[0].role, 'user');
+  assert.equal(submitted.messages[0].content[0].text, 'Remember KIWI-482.');
+  assert.equal(Object.hasOwn(submitted.forwardedProps['com.lingxi.localApp'], 'outputSchema'), false);
+  assert.match(browser.elements.get('status').textContent, /chat run succeeded/);
+  const evidence = JSON.parse(browser.elements.get('result').textContent);
+  assert.equal(Object.hasOwn(evidence.RunAgentResult, 'result'), false);
+  assert.equal(evidence.canonicalChat.threadId, threadId);
+  assert.deepEqual(evidence.canonicalChat.messages, [...submitted.messages, ...result.newMessages]);
+});
+
+test('successful Chat task with no assistant text cannot be replaced by a structured result', async () => {
+  for (const newMessages of [[], [{id: 'empty', role: 'assistant', content: '  '}],
+    [{id: 'wrong-role', role: 'user', content: 'KIWI-482'}]]) {
+    const result = {result: {answer: 'KIWI-482'}, newMessages};
+    const browser = createBrowser({seedState: null, sdkReceipt: acceptedReceipt(),
+      events: chatEvents(), result, chatHistoryHandler: async () => ({messages: newMessages})});
+    await waitFor(() => /chat_reply_(missing|invalid)/.test(browser.elements.get('recovery-error')?.textContent || ''),
+      'missing assistant text was accepted');
+    assert.doesNotMatch(browser.elements.get('status').textContent, /Read-only reconnect succeeded/);
+    assertNoSubmission(browser);
+  }
+});
+
+test('plain Chat reconnect requires exact canonical assistant identity and text', async () => {
+  for (const change of [{id: 'another-message'}, {content: 'a different reply'}, {role: 'user'}]) {
+    const browser = createBrowser({seedState: null, sdkReceipt: acceptedReceipt(), events: chatEvents(),
+      result: chatResult(), chatHistoryHandler: async () => ({messages: [{...chatResult().newMessages[0], ...change}]})});
+    await waitFor(() => browser.elements.get('recovery-error')?.textContent.includes('chat_history_mismatch'),
+      'canonical history mismatch was accepted');
+    assert.doesNotMatch(browser.elements.get('status').textContent, /Read-only reconnect succeeded/);
+    assertNoSubmission(browser);
+  }
+});
+
 test('accepted Chat receipt recovers the exact host run and thread when fixture pending is gone', async () => {
-  const events = successEvents().map(event => event.type === 'RUN_FINISHED'
-    ? {...event, result: {answer: 'KIWI-482'}} : event);
+  const events = chatEvents();
   const browser = createBrowser({seedState: null, sdkReceipt: acceptedReceipt(),
-    events, connectEvents: events, result: chatResult()});
+    events, connectEvents: events, result: chatResult(),
+    chatHistoryHandler: async () => ({messages: chatResult().newMessages})});
   await waitFor(() => browser.elements.get('status')?.textContent.includes('Read-only reconnect succeeded'),
     'matching SDK receipt did not reconnect');
   assert.equal(browser.counters.connect, 1);
@@ -976,10 +1160,10 @@ test('an exact accepted receipt can recover when fixture pending is lost and the
     setItem(key, value) { values.set(key, String(value)); },
     removeItem(key) { values.delete(key); },
   };
-  const events = successEvents().map(event => event.type === 'RUN_FINISHED'
-    ? {...event, result: {answer: 'KIWI-482'}} : event);
+  const events = chatEvents();
   const browser = createBrowser({sharedStorage, seedState: null, sdkReceipt: acceptedReceipt(),
-    events, connectEvents: events, result: chatResult()});
+    events, connectEvents: events, result: chatResult(),
+    chatHistoryHandler: async () => ({messages: chatResult().newMessages})});
   await waitFor(() => browser.elements.get('status')?.textContent.includes('Read-only reconnect succeeded'),
     'receipt was not recovered alongside the older selection');
   assert.equal(browser.counters.connect, 1);
@@ -998,12 +1182,12 @@ test('a ready event uses the exact other-tab record and refreshes this tab after
     setItem(key, value) { values.set(key, String(value)); },
     removeItem(key) { values.delete(key); },
   };
-  const events = successEvents().map(event => event.type === 'RUN_FINISHED'
-    ? {...event, result: {answer: 'KIWI-482'}} : event);
-  const browser = createBrowser({sharedStorage, seedState: null, readyBeforeBootstrap: false,
-    events, connectEvents: events, result: chatResult()});
-  await waitFor(() => browser.counters.get === 1, 'old local state was not checked');
+  const events = chatEvents();
   const input = {...savedInput(), threadId, runId};
+  const browser = createBrowser({sharedStorage, seedState: null, readyBeforeBootstrap: false,
+    events, connectEvents: events, result: chatResult(),
+    chatHistoryHandler: async () => ({messages: [...input.messages, ...chatResult().newMessages]})});
+  await waitFor(() => browser.counters.get === 1, 'old local state was not checked');
   sharedStorage.setItem(`${storagePrefix}.run.${runId}`, JSON.stringify({version: 1,
     pending: {input, kind: 'chat', chatId: threadId}, lastRun: {runId, threadId, kind: 'chat', chatId: threadId}}));
   sharedStorage.setItem(`${storagePrefix}.selectedRun`, runId);
@@ -1017,10 +1201,10 @@ test('a ready event uses the exact other-tab record and refreshes this tab after
 });
 
 test('duplicate accepted SDK notices reconnect only once without a fixture input', async () => {
-  const events = successEvents().map(event => event.type === 'RUN_FINISHED'
-    ? {...event, result: {answer: 'KIWI-482'}} : event);
+  const events = chatEvents();
   const browser = createBrowser({seedState: null, sdkReceipt: acceptedReceipt(), duplicateReady: true,
-    events, connectEvents: events, result: chatResult()});
+    events, connectEvents: events, result: chatResult(),
+    chatHistoryHandler: async () => ({messages: chatResult().newMessages})});
   await waitFor(() => browser.elements.get('status')?.textContent.includes('Read-only reconnect succeeded'),
     'accepted receipt was not recovered');
   browser.dispatchReady();

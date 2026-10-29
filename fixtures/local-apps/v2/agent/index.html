@@ -158,11 +158,6 @@
       type: 'object', additionalProperties: false, required: ['item', 'count'],
       properties: {item: {type: 'string', minLength: 1}, count: {type: 'integer', minimum: 0}},
     };
-    const chatSchema = {
-      type: 'object', additionalProperties: false, required: ['answer'],
-      properties: {answer: {type: 'string', minLength: 1}},
-    };
-
     let agent;
     let sdkInfo = null;
     let chat;
@@ -443,6 +438,7 @@
       if (pending?.input?.runId === safeRun) {
         const input = pending.input;
         if (!safeRunId(input.threadId) || !['image', 'document', 'chat'].includes(pending.kind)
+            || !Array.isArray(input.messages)
             || (pending.kind === 'chat' && pending.chatId !== input.threadId)) {
           throw recoveryFailure('task_identity_mismatch', 'Saved run and Chat identity is inconsistent.');
         }
@@ -450,7 +446,7 @@
             || (entry.lastRun.chatId ?? null) !== (pending.chatId ?? null)) {
           throw recoveryFailure('task_identity_mismatch', 'Saved pending and run metadata do not agree.');
         }
-        return {runId: safeRun, threadId: input.threadId, kind: pending.kind,
+        return {runId: safeRun, threadId: input.threadId, kind: pending.kind, input,
           ...(pending.chatId ? {chatId: pending.chatId} : {})};
       }
       const saved = entry.lastRun;
@@ -844,7 +840,7 @@
             version: 1,
             tools: [],
             skills: [],
-            outputSchema,
+            ...(outputSchema === undefined ? {} : {outputSchema}),
             maxTurns: 8,
             timeoutMs: 180000,
           },
@@ -861,7 +857,7 @@
     }
 
     function validateStructuredOutput(kind, value) {
-      const schema = {image: imageSchema, document: documentSchema, chat: chatSchema}[kind];
+      const schema = {image: imageSchema, document: documentSchema}[kind];
       const fail = () => { throw new Error(`${kind} result did not match its declared outputSchema.`); };
       if (!schema || schema.type !== 'object' || !isRecord(value)) fail();
 
@@ -885,14 +881,66 @@
     }
 
     function validateResult(kind, runResult) {
-      if (!isRecord(runResult) || !Array.isArray(runResult.newMessages) || !isRecord(runResult.result)) {
-        throw new Error('The official RunAgentResult did not contain the expected structured object and messages.');
+      if (!isRecord(runResult) || !Array.isArray(runResult.newMessages)) {
+        throw new Error('The official RunAgentResult did not contain its newMessages.');
       }
       if (typeof window.LingxiLocalAppAGUI?.validateMessage === 'function') {
         runResult.newMessages.forEach(message => window.LingxiLocalAppAGUI.validateMessage(message));
       }
+      if (kind === 'chat') {
+        if (runResult.newMessages.length !== 1) {
+          throw recoveryFailure('chat_reply_missing', 'The plain-text Chat did not return exactly one assistant reply.');
+        }
+        const message = runResult.newMessages[0];
+        if (!isRecord(message) || message.role !== 'assistant' || typeof message.id !== 'string'
+            || !message.id || typeof message.content !== 'string' || !message.content.trim() || message.toolCalls?.length) {
+          throw recoveryFailure('chat_reply_invalid', 'The plain-text Chat did not return a valid assistant text message.');
+        }
+        return;
+      }
+      if (!isRecord(runResult.result)) throw new Error('The file result did not contain its structured object.');
       // Accepted task receipts no longer contain the original output schema.
       if (kind !== 'sdk-task') validateStructuredOutput(kind, runResult.result);
+    }
+
+    function plainMessageText(message) {
+      if (typeof message?.content === 'string') return message.content;
+      if (!Array.isArray(message?.content) || !message.content.length
+          || message.content.some(part => !isRecord(part) || part.type !== 'text' || typeof part.text !== 'string')) return null;
+      return message.content.map(part => part.text).join('');
+    }
+
+    function verifyChatMessages(messages, expectedMessages) {
+      for (const expected of expectedMessages) {
+        const matches = messages.filter(message => message?.id === expected.id);
+        if (matches.length !== 1 || matches[0].role !== expected.role
+            || plainMessageText(expected) === null || plainMessageText(matches[0]) !== plainMessageText(expected)) {
+          throw recoveryFailure('chat_history_mismatch', 'Canonical Chat history did not preserve the exact message IDs, roles and text.');
+        }
+      }
+    }
+
+    function verifyChatReplyEvents(events, runResult) {
+      const reply = runResult.newMessages[0];
+      const fail = () => { throw recoveryFailure('chat_reply_event_mismatch', 'The Chat assistant reply did not match a complete standard text-message event sequence.'); };
+      let started = false;
+      let ended = false;
+      let contentEvents = 0;
+      let text = '';
+      for (const event of events) {
+        if (event.type === 'TEXT_MESSAGE_START') {
+          if (started || ended || event.messageId !== reply.id || event.role !== 'assistant') fail();
+          started = true;
+        } else if (event.type === 'TEXT_MESSAGE_CONTENT') {
+          if (!started || ended || event.messageId !== reply.id || typeof event.delta !== 'string') fail();
+          contentEvents += 1;
+          text += event.delta;
+        } else if (event.type === 'TEXT_MESSAGE_END') {
+          if (!started || ended || event.messageId !== reply.id) fail();
+          ended = true;
+        }
+      }
+      if (!started || !ended || !contentEvents || text !== plainMessageText(reply)) fail();
     }
 
     async function readTask(runId, threadId) {
@@ -1061,15 +1109,17 @@
       throw new Error(`Chat history was not fully read after ${MAX_PAGES} pages.`);
     }
 
-    async function refreshChatHistory(source) {
+    async function refreshChatHistory(source, expectedMessages = []) {
       if (!chat) return;
       let messages;
       try { messages = await observeChatCall('history', source, readDiagnosticField(chat, 'id'), () => allChatMessages(chat)); }
       catch (failure) {
         throw recoveryFailure('chat_history_unavailable', 'Canonical Chat history could not be read; see Chat lookup diagnostics.');
       }
+      verifyChatMessages(messages, expectedMessages);
       $('chat-history').textContent = JSON.stringify(redactProtocol(messages), null, 2);
       $('chat-handle').textContent = `Open host Chat · threadId ${chat.id} · ${messages.length} canonical Messages`;
+      return {threadId: chat.id, messages};
     }
 
     function preloadPublicImage() {
@@ -1253,6 +1303,13 @@
         validateResult(kind, runResult);
         const {task, events} = await taskEvidence(input.runId, input.threadId);
         terminalEvent(events, task);
+        let canonicalChat;
+        if (kind === 'chat') {
+          verifyChatReplyEvents(events, runResult);
+          chat = await agent.chats.open(chatId);
+          canonicalChat = await refreshChatHistory('run-completion', [...input.messages, ...runResult.newMessages]);
+          canonicalChat.inputMessagesVerified = true;
+        }
         startedRecoveryRunIds.add(input.runId);
         clearPendingForRun(input.runId);
         clearRecoveryErrors(input.runId);
@@ -1266,12 +1323,9 @@
         $('result').textContent = JSON.stringify({
           RunAgentInput: redactProtocol(input),
           RunAgentResult: redactProtocol(runResult),
+          ...(canonicalChat ? {canonicalChat: redactProtocol(canonicalChat)} : {}),
         }, null, 2);
         setStatus(`${kind} run succeeded · thread ${input.threadId} · run ${input.runId}`);
-        if (kind === 'chat') {
-          chat = await agent.chats.open(chatId);
-          await refreshChatHistory('run-completion');
-        }
       } catch (failure) {
         const terminal = await observeAfterFailure(input);
         if (selectedRunId() !== input.runId) {
@@ -1584,7 +1638,7 @@
         const text = $('chat-prompt').value.trim();
         if (!text) throw new Error('Enter a Chat message first.');
         const input = makeInput(chat.id,
-          [{id: newId(), role: 'user', content: [{type: 'text', text}]}], chatSchema);
+          [{id: newId(), role: 'user', content: [{type: 'text', text}]}]);
         await submitInput(input, 'chat', chat.id);
         $('chat-prompt').value = '';
       } catch (failure) { setError(failure?.message || String(failure)); }
@@ -1727,10 +1781,20 @@
           return false;
         }
 
+        let canonicalChat;
         try {
           validateResult(reference.kind, runResult);
+          if (reference.kind === 'chat' && reference.chatId) {
+            verifyChatReplyEvents(events, runResult);
+            verifyChatReplyEvents(callbackEvents, runResult);
+            chat = await agent.chats.open(reference.chatId);
+            const originalMessages = reference.input?.messages;
+            canonicalChat = await refreshChatHistory(automatic ? 'automatic-recovery' : 'reconnect-button',
+              [...(originalMessages ?? []), ...runResult.newMessages]);
+            canonicalChat.inputMessagesVerified = Array.isArray(originalMessages);
+          }
         } catch (failure) {
-          clearPendingForRun(runId);
+          if (reference.kind !== 'chat') clearPendingForRun(runId);
           addRecoveryError(runId, failure?.code || 'output_schema_invalid', failure?.message
             || 'The recovered RunAgentResult did not match the saved output schema.');
           return false;
@@ -1742,6 +1806,7 @@
           reconnect: {mode: 'read-only', threadId: reference.threadId, runId},
           ...(reference.kind === 'sdk-task' ? {outputSchemaVerified: false} : {}),
           RunAgentResult: redactProtocol(runResult),
+          ...(canonicalChat ? {canonicalChat: redactProtocol(canonicalChat)} : {}),
           callbackEventTypes: callbackEvents.map(event => event.type),
         }, null, 2);
         if (reference.kind === 'sdk-task') {
@@ -1749,18 +1814,9 @@
           $('recovery').textContent = 'The exact SDK receipt and host task matched. The original output schema could not be verified; no new run was started.';
         } else {
           setStatus(`Read-only reconnect succeeded · ${callbackEvents.length} callback events · no new run started.`);
-          $('recovery').textContent = reference.fromSdkReceipt
+          $('recovery').textContent = canonicalChat?.inputMessagesVerified === false
             ? `Recovered the exact accepted Chat run and thread; the original fixture input was unavailable.${selectedAtStart && selectedAtStart !== runId ? ' The other selected run remains unchanged.' : ''}`
             : `Recovered the existing ${reference.kind} RunAgentResult; the saved input and IDs were unchanged.`;
-        }
-        if (reference.kind === 'chat' && reference.chatId) {
-          try {
-            chat = await agent.chats.open(reference.chatId);
-            await refreshChatHistory(automatic ? 'automatic-recovery' : 'reconnect-button');
-          } catch {
-            addRecoveryError(runId, 'chat_history_unavailable',
-              'The run was recovered, but the Chat could not be opened or its history could not be read.');
-          }
         }
         return true;
       } catch (failure) {

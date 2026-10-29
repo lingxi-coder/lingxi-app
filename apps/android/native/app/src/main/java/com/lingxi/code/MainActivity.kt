@@ -270,6 +270,9 @@ class MainActivity : ComponentActivity() {
             // Remote Control is a full-surface overlay like settings; a link or a
             // notification names the destination, which the overlay consumes once.
             var remoteOpen by rememberSaveable { mutableStateOf(false) }
+            var teamsOpen by rememberSaveable { mutableStateOf(false) }
+            var teamInvite by rememberSaveable { mutableStateOf<String?>(null) }
+            val openTeams: () -> Unit = { teamsOpen = true; settingsOpen = false; terminalOpen = false; remoteOpen = false }
             var requestedRemoteRoute by remember { mutableStateOf<com.lingxi.code.remote.RemoteRoute?>(null) }
             val openRemote: (com.lingxi.code.remote.RemoteRoute) -> Unit = { route ->
                 requestedRemoteRoute = route
@@ -308,7 +311,9 @@ class MainActivity : ComponentActivity() {
                     var awaitingFeature = false
                     // Any destination but a Remote Control session leaves the overlay behind.
                     if (parts.first() != "remote") remoteOpen = false
+                    if (parts.first() != "team") teamsOpen = false
                     when {
+                        link.route == "team/join" -> { teamInvite = link.params["code"]; openTeams() }
                         parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)?.let(openRemote) ?: run { handled = false }
                         link.params["workspace"] != null && parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
                         parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import") -> { requestedFeatureLink = link; awaitingFeature = true }
@@ -407,6 +412,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onOpenTerminal = openTerminal,
                         onOpenRemoteControl = { openRemote(com.lingxi.code.remote.RemoteRoute.Hosts) },
+                        onOpenTeams = openTeams,
                         modelSetupRequired = settingsState.needsLlmSetup,
                         assistantName = prefs.assistantName,
                         inputDialog = prefs.inputDialog,
@@ -525,6 +531,12 @@ class MainActivity : ComponentActivity() {
                             },
                             onClose = { remoteOpen = false },
                         )
+                    }
+
+                    if (teamsOpen) {
+                        com.lingxi.code.teams.TeamsScreen(initialInvite = teamInvite, onInviteHandled = { teamInvite = null },
+                            onOpenAccount = { teamsOpen = false; settingsInitialRoute = SettingsRoutes.ACCOUNT; settingsOpen = true },
+                            onClose = { teamsOpen = false; teamInvite = null })
                     }
 
                     // First-run setup wizard — shown until onboarding completes;

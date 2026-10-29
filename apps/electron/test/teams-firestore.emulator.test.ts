@@ -17,7 +17,7 @@ before(async () => {
   if (!enabled) return;
   app = initializeApp({ projectId }, 'teams-sdk-spike');
   admin = getFirestore(app);
-  await admin.doc('teams/main-spike').set({ name: 'Synthetic main spike' });
+  await admin.doc('teams/main-spike').set({ name: 'Synthetic main spike', state: 'active' });
   await admin.doc('teams/main-spike/members/alice').set({ role: 'member', generation: 1 });
   await admin.doc('teams/main-spike/conversations/sdk-chat').set({ kind: 'dm', participants: ['user:alice'], memberUids: ['alice'], lastSeq: 0, lastMessage: null, lastChangeSeq: 0, lastChange: null });
 });

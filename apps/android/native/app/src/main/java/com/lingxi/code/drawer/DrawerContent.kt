@@ -145,6 +145,7 @@ fun DrawerContent(
     onOpenApp: (String) -> Unit = {},
     /** Opens Remote Control, which follows the sessions of the user's computers. */
     onOpenRemoteControl: () -> Unit = {},
+    onOpenTeams: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
 
@@ -270,6 +271,7 @@ fun DrawerContent(
                 onClick = onOpenRemoteControl,
             )
             FilterChips(selected = ui.filter, onSelect = { ui.filter = it })
+            EntryRow(icon = LXIconName.Link, label = stringResource(R.string.teams_title), tag = "drawer.entry.teams", onClick = onOpenTeams)
         }
 
         // Scrolling body — fills the space above the bottom bar.

@@ -1,6 +1,7 @@
 # Teams implementation contract
 
-Status: T0 validation. This document refines the approved 2026-10-29 Team plan
+Status: T0 validated; T1 implemented locally, with deployment and full native
+product/device acceptance still pending. This document refines the approved 2026-10-29 Team plan
 after review. It is the repository contract for subsequent phases; a phase is
 complete only when its stated checks pass on all four clients.
 
@@ -44,6 +45,80 @@ be remotely erased and must not be represented as a new authorized read.
 The only member-document client update is the caller's own `lastActiveAt`, using
 a server timestamp. Role, generation and all other membership fields are trusted
 backend writes.
+
+## T1 membership API and clients
+
+`teamsApi` uses the existing Functions codebase and existing `push-api` service
+identity. Hosting routes `/v1/teams` and `/v1/teams/**` before the catalog rewrite.
+Every request verifies the caller's ID token with revocation checking. The API
+is defined locally; deploying it and its default-database IAM/signing permissions
+is a separate gate. There are no Remote Control authorization changes.
+
+| Request | Body / result |
+| --- | --- |
+| `GET /v1/teams` | Current teams from the caller's private index, revalidated against team state and membership |
+| `GET /v1/teams/{teamId}` | Current team, members and (for managers) invite metadata |
+| `POST /v1/teams/session` | Empty object; custom token for the authenticated UID, Desktop main only |
+| `POST /v1/teams` | Strict action object, as below |
+
+Actions: `create {teamId,name}`, `delete {teamId}`, `invite
+{teamId,requestId,role,maxUses,ttlSeconds}`, `revokeInvite {teamId,inviteId}`, `join
+{code,requestId}`, `leave {teamId,generation}`, `remove {teamId,uid,generation}`,
+`role {teamId,uid,generation,role}` and the trusted `conversation` constructor.
+IDs/request IDs use 8–64 URL-safe characters (UUIDs work). Invites have 192 bits
+of random entropy, 1–50 uses and 1 hour–7 days validity. Their global lookup is a
+SHA-256 digest; raw links are returned only to their creator and retained in an
+Admin-only idempotency record. Members cannot enumerate invitations through rules.
+
+Only the owner can delete a team or assign/remove administrators. An administrator
+may issue member invitations and remove ordinary members; a member can leave.
+The single owner cannot leave or be removed/demoted. Ownership transfer is outside
+T1. Limits are 200 members/team and 20 teams/user, keeping deletion/index updates
+within one transaction. Creation, joining, role changes, removal and deletion
+maintain the `users/{uid}/teams/{teamId}` index atomically.
+
+Deletion marks the team `state: deleted` and deletes active memberships/indexes
+in the same transaction. Rules and trusted conversation creation require
+`state: active`. Epochs, request receipts and the team tombstone remain so an old
+request or invitation cannot recreate deleted state. Deletion is access revocation,
+not a promise to erase every record or another device's already-cached data.
+
+`users/{uid}/teamJoinRequests/{requestId}` is an Admin-only durable receipt bound
+to the invitation, team and resulting generation. A lost join response can be
+retried without consuming another invite use. After removal/leave or a later
+rejoin, replaying the original request returns `STALE_MEMBERSHIP`; it cannot create
+a fresh membership. An intentional rejoin uses a new request ID and advances the
+durable membership epoch. Removal, leaving and role updates also require the
+expected target generation so delayed mutations cannot affect a later rejoin.
+
+All four clients expose Teams/member management and review an invite before
+joining. Supported links are `lingxi://team/join?code=...` and
+`https://lingxios.net/open/team/join?code=...`; the latter offers the Web page
+`/teams/join?code=...`. Duplicate/extra parameters, alternate origins and fragments
+are rejected. Opening a link never joins automatically. Mobile links preserve
+the local conversation and do not need its engine; a pending invite survives the
+login page. The Web removes the code from its address bar after capturing it and
+uses `no-referrer` on invitation/Teams pages.
+
+Desktop/Web share `packages/teams/TeamsPanel.tsx`; Firestore remains in Desktop
+main and renderer IPC is bound to the panel's expected account UID. Browser and
+native clients use their existing Firebase account. SDK listeners invalidate the
+team/member views, while authenticated HTTP responses populate them. Cached SDK
+snapshots do not grant access. Account changes and listener permission failures
+clear stale views; request/lifecycle versions discard late responses and prevent
+reattachment after a native page closes. Failed listeners do not retry continuously
+and can attach for a later membership generation. T1 requires a network connection;
+T2's durable offline message projection remains separate.
+
+Dedicated real Firebase owner/member test users were explicitly authorized and
+created on 2026-10-29 without admin claims or verification emails. After separate
+explicit authorization, isolated `lingxios.net` browser sessions were saved and
+restored without login. Credentials, refresh tokens and IndexedDB storage states
+are only in the mode-0700, Git-ignored `output/teams-t1-private/` directory, with
+mode-0600 files. `node apps/firebase/scripts/teams-test-accounts.mjs` refreshes and
+reuses them; `--create` is only for explicitly authorized initial creation. Preserve
+this private directory separately before removing/archiving the worktree. Never
+copy its contents into reports, Git, screenshots or logs.
 
 ## Message identity and mutation catch-up (T0/T2)
 

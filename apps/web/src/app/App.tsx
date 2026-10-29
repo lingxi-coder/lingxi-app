@@ -23,6 +23,7 @@ const DocsPage = lazy(async () => {
 });
 const RemotePage = lazy(() => import('../pages/RemotePage'));
 const RemoteSignInPage = lazy(() => import('../pages/RemoteSignInPage'));
+const TeamsPage = lazy(() => import('../pages/TeamsPage'));
 
 export function App() {
   const route = useRouter();
@@ -33,7 +34,9 @@ export function App() {
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
     document.documentElement.dataset.theme = theme;
-    if (isRemoteRoute(route) || route === '/login/remote') {
+    if (route === '/teams' || route === '/teams/join') {
+      document.title = locale === 'zh' ? '团队 — 灵犀 LingXi' : 'Teams — LingXi';
+    } else if (isRemoteRoute(route) || route === '/login/remote') {
       document.title = locale === 'zh' ? '灵犀远控 — LingXi Remote' : 'LingXi Remote';
     } else if (!route.startsWith('/docs')) {
       document.title = route === '/privacy' ? (locale === 'zh' ? '隐私政策 — 灵犀 LingXi' : 'Privacy policy — LingXi')
@@ -64,6 +67,7 @@ export function App() {
   };
 
   if (route.startsWith('/open/')) return <OpenLinkPage locale={locale} />;
+  if (route === '/teams' || route === '/teams/join') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载团队…' : 'Loading teams…'}</main>}><TeamsPage locale={locale} /></Suspense>;
 
   if (isRemoteRoute(route) || route === '/login/remote') {
     const fallback = <main role="status">{locale === 'zh' ? '正在加载…' : 'Loading…'}</main>;

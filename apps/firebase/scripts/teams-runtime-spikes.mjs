@@ -23,7 +23,7 @@ await build({ entryPoints: [join(electronRoot, 'test/fixtures/teams-main-spike.t
 const mainAdminApp = initializeApp({ projectId: 'demo-lingxi-teams-t0' }, 'teams-electron-seed');
 const mainAdmin = getFirestore(mainAdminApp);
 try {
-  await mainAdmin.doc('teams/electron-spike').set({ name: 'Synthetic runtime probe' });
+  await mainAdmin.doc('teams/electron-spike').set({ name: 'Synthetic runtime probe', state: 'active' });
   await mainAdmin.doc('teams/electron-spike/members/alice').set({ role: 'member', generation: 1 });
   await mainAdmin.doc('teams/electron-spike/conversations/sdk-chat').set({ kind: 'dm', participants: ['user:alice'], memberUids: ['alice'], lastSeq: 0, lastChangeSeq: 0 });
   const [host, firestorePort] = process.env.FIRESTORE_EMULATOR_HOST.split(':');
@@ -56,7 +56,7 @@ const adminApp = initializeApp({ projectId: 'demo-lingxi-teams-t0' }, 'teams-rea
 const admin = getFirestore(adminApp);
 let server;
 try {
-  await admin.doc('teams/browser-spike').set({ name: 'Synthetic browser runtime' });
+  await admin.doc('teams/browser-spike').set({ name: 'Synthetic browser runtime', state: 'active' });
   await admin.doc('teams/browser-spike/members/alice').set({ role: 'member', generation: 1 });
   await admin.doc('teams/browser-spike/conversations/sdk-chat').set({ kind: 'dm', participants: ['user:alice'], memberUids: ['alice'], lastSeq: 1, lastChangeSeq: 2 });
   await admin.doc('teams/browser-spike/conversations/sdk-chat/changes/change002').set({ seq: 2, messageId: 'message01', operation: 'recall', actorUid: 'alice', at: new Date() });

@@ -18,6 +18,8 @@ export const appRoutes = [
   '/docs',
   '/remote',
   '/login/remote',
+  '/teams',
+  '/teams/join',
 ] as const;
 
 export type AppRoute =
@@ -92,9 +94,10 @@ export function isRemoteRoute(route: string): boolean {
  * `pushState` would keep the old document's policy, so {@link navigateTo} loads
  * the new page instead.
  */
-export type SecurityZone = 'remote' | 'sign-in' | 'site';
+export type SecurityZone = 'remote' | 'sign-in' | 'site' | 'teams';
 
 export function securityZone(route: string): SecurityZone {
+  if (route === '/teams' || route.startsWith('/teams/')) return 'teams';
   if (isRemoteRoute(route)) return 'remote';
   return route === '/login/remote' ? 'sign-in' : 'site';
 }

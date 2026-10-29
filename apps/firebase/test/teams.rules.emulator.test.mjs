@@ -33,7 +33,7 @@ beforeEach(async () => {
   if (!environment) return;
   await environment.clearFirestore();
   const batch = admin.batch();
-  batch.set(admin.doc('teams/team-test'), { name: 'Synthetic team' });
+  batch.set(admin.doc('teams/team-test'), { name: 'Synthetic team', state: 'active' });
   for (const uid of ['alice', 'bob', 'owner', 'hidden']) batch.set(admin.doc(`teams/team-test/members/${uid}`), { role: 'member', generation: 1 });
   batch.set(admin.doc(`teams/team-test/bots/${botKey}`), bot);
   await batch.commit();

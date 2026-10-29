@@ -5,7 +5,15 @@
 Team 的首个客户端 Firestore 访问例外仅限 `(default)` 的 `teams` 数据，契约见
 [Teams](TEAMS.md)。本地配置为它单独使用 `firestore.default.rules`；
 `model-catalog` 和 `push-notifications` 仍为 deny-all。该配置尚未部署，
-Team API、客户端功能和生产验收仍按阶段推进。
+T1 的 Team API、四端成员管理和邀请功能已在本地实现，验证记录见
+[T1 acceptance](../acceptance/teams-t1-20261029/report.md)。生产部署与完整原生包、
+真机及线上团队双账号验收仍待后续。
+
+`teamsApi` 计划复用 `push-api` 身份。现有该身份的 Firestore 授权限定
+`push-notifications`，部署前必须另外确认/授予它对 `(default)` 的必要数据权限，
+以及为自身签发 custom token 所需的 `iam.serviceAccounts.signBlob` 权限。
+本次没有变更 IAM 或部署规则/函数/Hosting。测试账号已按用户明确授权创建，
+独立浏览器会话经授权保存；凭据仅保存在本机私有、Git 忽略目录，不写入报告。
 
 FCM 的 Android/iOS 客户端、独立注册 API、30 天绑定租约和清理代码见
 [Firebase Cloud Messaging](firebase-fcm.md)。用户已明确授权并完成该部分生产部署，

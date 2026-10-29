@@ -46,7 +46,7 @@ export async function createTeamConversation(db, input) {
     const [teamSnapshot, existing, ...snapshots] = await transaction.getAll(team, conversation,
       ...memberUids.map(uid => team.collection('members').doc(uid)),
       ...bots.map(bot => team.collection('bots').doc(bot.key)));
-    if (!teamSnapshot.exists || snapshots.slice(0, memberUids.length).some(member => !member.exists)) {
+    if (teamSnapshot.data()?.state !== 'active' || snapshots.slice(0, memberUids.length).some(member => !member.exists)) {
       throw new TeamConversationError(403, 'Current team membership required');
     }
     const cards = snapshots.slice(memberUids.length);

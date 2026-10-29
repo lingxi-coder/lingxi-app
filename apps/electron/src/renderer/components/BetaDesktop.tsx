@@ -434,7 +434,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, bots = false, botsAvailable = false, onOpenBots, onOpenChat, children, topbar }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, bots = false, botsAvailable = false, onOpenBots, teams = false, onOpenTeams, onOpenChat, children, topbar }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -448,6 +448,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   /** Bots can be used on this computer. Where they cannot, the sidebar does not mention them. */
   botsAvailable?: boolean;
   onOpenBots?(): void;
+  teams?: boolean;
+  onOpenTeams?(): void;
   onOpenChat?(): void;
   children?: ReactNode;
   topbar?: ReactNode;
@@ -817,7 +819,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       </div>
       <div className="desktop-body">
       <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
-        <button type="button" className="desktop-rail-button" data-active={!scheduled && !apps && !changes && !bots || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
+        <button type="button" className="desktop-rail-button" data-active={!scheduled && !apps && !changes && !bots && !teams || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
+        <button type="button" className="desktop-rail-button" data-active={teams || undefined} aria-label={tr('teams_title')} title={tr('teams_title')} onClick={onOpenTeams}><Icon name="users" size={21} stroke={1.7} /></button>
         <button type="button" className="desktop-rail-button" data-active={apps || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={onOpenApps}><AppsGlyph size={21}/></button>
         {botsAvailable && <button type="button" className="desktop-rail-button" data-active={bots || undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={onOpenBots}><Icon name="bot" size={21} stroke={1.7} /></button>}
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><Icon name="clock" size={21} stroke={1.7} /></button>
@@ -872,6 +875,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         <button type="button" className="sidebar-primary-action" aria-current={apps ? 'page' : undefined} onClick={onOpenApps}
           style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 10, border: 0, background: apps ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}>
           <AppsGlyph size={18}/><span>{tr('apps_title')}</span>
+        </button>
+        <button type="button" className="sidebar-primary-action" aria-current={teams ? 'page' : undefined} onClick={onOpenTeams}
+          style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 10, border: 0, background: teams ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}>
+          <Icon name="users" size={18} stroke={1.8} /><span>{tr('teams_title')}</span>
         </button>
         {botsAvailable && <button type="button" className="sidebar-primary-action" aria-current={bots ? 'page' : undefined} onClick={onOpenBots}
           style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 10, border: 0, background: bots ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}>

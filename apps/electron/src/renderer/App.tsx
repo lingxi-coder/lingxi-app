@@ -3,6 +3,7 @@ import { useI18n } from './i18n/useI18n';
 import { LocalApps } from './components/LocalApps';
 import './components/LocalApps.css';
 import { Bots } from './components/Bots';
+import { Teams } from './components/Teams';
 import './components/Bots.css';
 import { useBots } from './bridge/useBots';
 import { botScopesKey } from './bridge/botRoutines';
@@ -78,7 +79,9 @@ export function App() {
   const [localAppNavigationError, setLocalAppNavigationError] = useState('');
   const localAppNavigation = useRef(0);
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
-  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps' | 'changes' | 'bots'>('chat');
+  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams'>('chat');
+  const [teamInvite, setTeamInvite] = useState<string>();
+  const handledTeamInvite = useCallback(() => setTeamInvite(undefined), []);
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const [sessionPicker, setSessionPicker] = useState<SessionPickerRequest | null>(null);
@@ -141,7 +144,7 @@ export function App() {
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
   }, []);
-  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots') => {
+  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams') => {
     if (sessionNavigationBlocked()) return;
     cancelLocalAppNavigation();
     setPage(next);
@@ -322,7 +325,8 @@ export function App() {
           if (!session) throw new Error(tr('desktop_link_open_project_config'));
           if (!await bridge.openSession(delivery.projectPath, session.uuid)) throw new Error(tr('desktop_link_project_conversation_error'));
         }
-        if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
+        if (route === 'team/join') { setTeamInvite(params.code); setPage('teams'); }
+        else if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
         else if (kind === 'settings') {
           if (!SETTINGS_NAV.some(page => page.id === id)) throw new Error(tr('desktop_link_settings_unavailable'));
           linkSurfacePending.current = true;
@@ -425,6 +429,8 @@ export function App() {
             apps={page === 'apps'}
             changes={page === 'changes'}
             onOpenApps={() => openPage('apps')}
+            teams={page === 'teams'}
+            onOpenTeams={() => openPage('teams')}
             bots={page === 'bots'}
             botsAvailable={bots.available}
             onOpenBots={() => openPage('bots')}
@@ -454,6 +460,7 @@ export function App() {
           <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
+          {page === 'teams' && <Teams zh={locale.startsWith('zh')} initialInvite={teamInvite} onInviteHandled={handledTeamInvite} />}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}

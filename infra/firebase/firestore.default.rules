@@ -14,7 +14,8 @@ service cloud.firestore {
 
     function isSelf(uid) { return database == '(default)' && request.auth != null && request.auth.uid == uid; }
     function isMember(tid) {
-      return database == '(default)' && request.auth != null && exists(teamPath(tid)) && exists(memberPath(tid, request.auth.uid));
+      return database == '(default)' && request.auth != null && get(teamPath(tid)).data.state == 'active'
+        && exists(memberPath(tid, request.auth.uid));
     }
     function inConversation(tid, cid) {
       return isMember(tid) && request.auth.uid in get(convPath(tid, cid)).data.memberUids;

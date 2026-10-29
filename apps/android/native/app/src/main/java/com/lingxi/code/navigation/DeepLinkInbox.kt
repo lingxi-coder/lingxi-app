@@ -22,7 +22,11 @@ class DeepLinkInbox(private val saved: SavedStateHandle) : ViewModel() {
         update(mutable.value + raw!!)
         return true
     }
-    fun next(readiness: DeepLinkReadiness): String? = mutable.value.firstOrNull().takeIf { readiness.canNavigate }
+    fun next(readiness: DeepLinkReadiness): String? {
+        val first = mutable.value.firstOrNull() ?: return null
+        val team = DeepLink.parse(first)?.route == "team/join"
+        return first.takeIf { readiness.canNavigate || (team && readiness.foreground && readiness.onboardingComplete && !readiness.blockingSurfaceOpen) }
+    }
     fun complete(raw: String) {
         if (mutable.value.firstOrNull() == raw) update(mutable.value.drop(1))
     }

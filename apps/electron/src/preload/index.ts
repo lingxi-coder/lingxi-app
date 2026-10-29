@@ -5,6 +5,7 @@ import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
 import { CH_COMPUTER_SETTINGS, CH_COMPUTER_SETTINGS_CHANGED, type ComputerSettingsApi } from '../shared/computerSettings.js';
 import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
 import type { AccountApi, AccountState } from '../shared/account.js';
+import type { DesktopTeamsApi } from '../../../../packages/teams';
 import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/applicationMenu.js';
 import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectCreationPurpose, type ProjectFolderSelection } from '../shared/projectCreation.js';
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
@@ -272,6 +273,7 @@ export interface LingxiApi {
   platform: NodeJS.Platform;
   isElectron: true;
   account: AccountApi;
+  teams: DesktopTeamsApi;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
   openSettingsFile(path: string): Promise<void>;
@@ -358,6 +360,11 @@ export interface LingxiApi {
   modUi: ModUiApi;
 }
 
+async function teamsRequest<T>(command: unknown): Promise<T> {
+  const result = await ipcRenderer.invoke('lingxi:teams', command) as { value: T; error?: string };
+  if (result.error) throw new Error(result.error);
+  return result.value;
+}
 function subscribe<T>(channel: string, callback: (payload: T) => void): Unsubscribe {
   const listener = (_event: IpcRendererEvent, payload: T): void => callback(payload);
   ipcRenderer.on(channel, listener);
@@ -452,6 +459,12 @@ const api: LingxiApi = {
       ipcRenderer.on('lingxi:account:changed', listener);
       return () => { ipcRenderer.removeListener('lingxi:account:changed', listener); };
     },
+  },
+  teams: {
+    list: uid => teamsRequest({ type: 'list', uid }),
+    detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
+    execute: (uid, command) => teamsRequest({ type: 'execute', uid, command }),
+    onChanged: callback => subscribe('lingxi:teams:changed', callback),
   },
   scheduled: {
     context: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'context', scopeId }),

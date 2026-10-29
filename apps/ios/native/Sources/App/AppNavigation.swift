@@ -43,6 +43,7 @@ enum AppRoute: Hashable {
     case project(id: String)
     /// 应用: the installed apps and the market; one app's page.
     case apps
+    case teams(invite: String?)
     case localApp(id: String)
     case marketApp(id: String)
 }
@@ -64,6 +65,8 @@ extension AppRoute: Identifiable {
             return "projects"
         case .apps:
             return "apps"
+        case .teams:
+            return "teams"
         case .localApp(let id):
             return "local-app:\(id)"
         case .marketApp(let id):
@@ -196,6 +199,7 @@ final class AppNavigationModel {
     func openApps() {
         pushPage(.apps)
     }
+    func openTeams(invite: String? = nil) { pushPage(.teams(invite: invite)) }
 
     func openLocalApp(_ appID: String) { pushPage(.localApp(id: appID)) }
 
@@ -241,7 +245,7 @@ private extension AppRoute {
         case (.cron, .cron), (.cron, .cronRun), (.cronRun, .cron), (.cronRun, .cronRun),
              (.cronNew, .cronNew), (.cronNew, .cron), (.cron, .cronNew),
              (.projects, .projects), (.project, .project),
-             (.apps, .apps), (.localApp, .localApp), (.marketApp, .marketApp):
+             (.apps, .apps), (.teams, .teams), (.localApp, .localApp), (.marketApp, .marketApp):
             true
         default:
             false

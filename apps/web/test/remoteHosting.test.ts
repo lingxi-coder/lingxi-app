@@ -59,9 +59,20 @@ test('the sign-in page has its own, lighter policy and the strict one does not a
   assert.deepEqual(directives(light).get('frame-ancestors'), ["'none'"]);
 });
 
-test('no other path gets a policy, and the patterns do not overlap with different values', () => {
+test('security zones have disjoint policy patterns', () => {
   const withPolicy = config.hosting.headers.filter((entry) => entry.headers.some((header) => header.key === 'Content-Security-Policy')).map((entry) => entry.source);
-  assert.deepEqual(withPolicy, ['/remote', '/remote/**', '/login/remote']);
+  assert.deepEqual(withPolicy, ['/remote', '/remote/**', '/login/remote', '/teams', '/teams/**']);
+});
+
+test('Teams alone gets Firestore connectivity and invitation links suppress referrers', () => {
+  const teamPolicy = policyFor('/teams');
+  assert.ok(teamPolicy);
+  assert.equal(policyFor('/teams/**'), teamPolicy);
+  assert.ok(directives(teamPolicy).get('connect-src')!.includes('https://firestore.googleapis.com'));
+  assert.ok(!directives(policyFor('/remote')!).get('connect-src')!.includes('https://firestore.googleapis.com'));
+  for (const source of ['/teams', '/teams/**', '/open/team/join']) {
+    assert.equal(config.hosting.headers.find(entry => entry.source === source)?.headers.find(header => header.key === 'Referrer-Policy')?.value, 'no-referrer');
+  }
 });
 
 // Firebase Hosting's globs, as far as firebase.json uses them: `**` crosses `/`, `*` does not.
@@ -71,6 +82,13 @@ const globToRegExp = (glob: string): RegExp => {
   return new RegExp(`^${body}$`, 'u');
 };
 const matches = (source: string, route: string): boolean => globToRegExp(source).test(route);
+
+test('membership requests reach teamsApi before the general catalog rewrite', () => {
+  for (const route of ['/v1/teams', '/v1/teams/session', '/v1/teams/team-test']) {
+    assert.deepEqual(config.hosting.rewrites.find(entry => matches(entry.source, route))?.function,
+      { functionId: 'teamsApi', region: 'us-central1' });
+  }
+});
 
 test('the globs of firebase.json are read as Hosting reads them', () => {
   assert.ok(matches('/remote/**', '/remote/a/b/c') && matches('/remote/**', '/remote/a'));

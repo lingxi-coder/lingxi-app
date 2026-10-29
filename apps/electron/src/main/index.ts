@@ -12,6 +12,8 @@ import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
 import { installDeepLinks } from './deepLinks.js';
 import { installCrashReporting } from './crashReporting.js';
 import { AccountService } from './account.js';
+import { TeamsService } from './teams/service.js';
+import { installTeamsIpc } from './teams/ipc.js';
 import { accountSessionStore } from './account-storage.js';
 import { brokerAccountSessionStore } from './account-broker-storage.js';
 import firebaseConfig from '../shared/firebaseConfig.json';
@@ -127,6 +129,7 @@ let remotePush: RemotePush | null = null;
 let remoteUi: RemoteControlUi | null = null;
 /** Desktop Bots; absent until the product paths are known. */
 let bots: BotService | null = null;
+let stopTeams: (() => void) | undefined;
 /** The endpoint through which Bots hand tasks to each other; made with the Bots. */
 let botRouter: BotRouter | null = null;
 let botTasks: BotTasks | null = null;
@@ -660,6 +663,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     ? brokerAccountSessionStore(credentialBroker)
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
   host.attachAccount(account);
+  stopTeams = installTeamsIpc(new TeamsService(account, firebaseConfig), () => [...mainWindows]);
   // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
   const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
     diagnostics.add(level, 'host', `remote control: ${message}`);
@@ -981,6 +985,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
+  stopTeams?.(); stopTeams = undefined;
   desktopUpdates?.dispose();
   desktopUpdates = null;
   host?.dispose();

@@ -20,7 +20,7 @@ test('teams web: real SDK authentication and change listener recover an old-mess
     assert.ok(['127.0.0.1', 'localhost'].includes(host));
     connectAuthEmulator(auth, `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}`, { disableWarnings: true });
     connectFirestoreEmulator(db, host, Number(port));
-    await admin.doc('teams/web-spike').set({ name: 'Synthetic Web spike' });
+    await admin.doc('teams/web-spike').set({ name: 'Synthetic Web spike', state: 'active' });
     await admin.doc('teams/web-spike/members/alice').set({ role: 'member', generation: 1 });
     await admin.doc('teams/web-spike/conversations/sdk-chat').set({ kind: 'dm', participants: ['user:alice'], memberUids: ['alice'], lastSeq: 1, lastChangeSeq: 1 });
     await signInWithCustomToken(auth, await backend('firebase-admin/auth').getAuth(adminApp).createCustomToken('alice'));

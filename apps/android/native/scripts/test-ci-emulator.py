@@ -30,17 +30,21 @@ def method(source, name):
 
 
 class AndroidCIEmulatorTests(unittest.TestCase):
-    def test_owner_death_runner_requires_both_opt_in_and_recovery_marker(self):
+    def test_owner_death_runner_requires_host_issued_capability(self):
+        capability = "a" * 64
+        run_nonce = "b" * 64
         for phase in ("prepare", "recover"):
-            args = owner_death.instrumentation_args("TestClass", "pkg.test/Runner", phase)
+            args = owner_death.instrumentation_args(phase, capability, run_nonce)
             self.assertEqual(args[args.index("ownerDeathAcceptance") + 1], "true")
             self.assertEqual(args[args.index("ownerDeathPhase") + 1], phase)
+            self.assertEqual(args[args.index("ownerDeathCiCapability") + 1], capability)
+            self.assertEqual(args[args.index("ownerDeathRunNonce") + 1], run_nonce)
         with self.assertRaises(ValueError):
-            owner_death.instrumentation_args("TestClass", "pkg.test/Runner", "invalid")
-        self.assertFalse(owner_death.recovery_passed("OK (1 test)\n"))
-        self.assertFalse(owner_death.recovery_passed("INSTRUMENTATION_RESULT: ownerDeathResult=RECOVERED\n"))
-        self.assertFalse(owner_death.recovery_passed("INSTRUMENTATION_RESULT: ownerDeathResult=RECOVERED\nOK (1 test)\nFAILURES!!!\n"))
-        self.assertTrue(owner_death.recovery_passed("INSTRUMENTATION_RESULT: ownerDeathResult=RECOVERED\r\nOK (1 test)\r\n"))
+            owner_death.instrumentation_args("invalid", capability, run_nonce)
+        with self.assertRaises(ValueError):
+            owner_death.instrumentation_args("prepare", "caller-supplied", run_nonce)
+        with self.assertRaises(ValueError):
+            owner_death.instrumentation_args("prepare", capability, "stale")
 
     def test_only_prerequisite_dependent_cases_have_explicit_gates(self):
         apps = TESTS / "apps"
@@ -85,7 +89,12 @@ class AndroidCIEmulatorTests(unittest.TestCase):
         owner = (apps / "UnifiedLocalAppProcessDeathTest.kt").read_text(encoding="utf-8")
         owner_test = method(owner, "hostSigkillRequiresFreshRunAndPreservesData")
         self.assertRegex(owner_test, r'requireAcceptanceOptIn\(\s*"ownerDeathAcceptance"')
-        self.assertIn('UnifiedLocalAppProcessDeathTest#hostSigkillRequiresFreshRunAndPreservesData", "ownerDeathPhase"', owner_test)
+        self.assertIn('UnifiedLocalAppProcessDeathTest#hostSigkillRequiresFreshRunAndPreservesData",', owner_test)
+        self.assertIn('"ownerDeathCiCapability", "ownerDeathPhase", "ownerDeathRunNonce"', owner_test)
+        self.assertIn("consumeCiCapability(context, ciCapability)", owner_test)
+        self.assertLess(owner_test.index("consumeCiCapability(context, ciCapability)"),
+                        owner_test.index("newOwnerDeathConfigHome(context)"))
+        self.assertIn("AtomicFile(file)", owner)
         self.assertIn('putString("ownerDeathResult", "RECOVERED")', owner_test)
         runtime = (TESTS / "runtime/MobileLinuxProductAcceptanceTest.kt").read_text(encoding="utf-8")
         for name, flag, marker, test_class in (
@@ -180,6 +189,7 @@ if os.environ.get("CI_OWNER_FAIL") == "1": sys.exit(1)
             owner = [event for event in events if event[0] == "owner"]
             self.assertEqual(len(owner), 1)
             self.assertIn("emulator-5554", owner[0])
+            self.assertIn("--ci-ephemeral-emulator", owner[0])
             for package in ("com.lingxi.code.debug", "com.lingxi.code.direct.debug"):
                 self.assertTrue(any("com.lingxi.code.EngineRoundtripTest" in event and
                                     f"{package}.test/androidx.test.runner.AndroidJUnitRunner" in event

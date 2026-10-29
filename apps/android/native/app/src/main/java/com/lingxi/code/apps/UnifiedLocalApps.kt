@@ -26,7 +26,11 @@ import org.json.JSONObject
 import java.io.File
 
 /** Process-owned service. Constructing or browsing the library never needs a conversation. */
-class UnifiedLocalApps private constructor(private val context: Context) {
+class UnifiedLocalApps private constructor(
+    private val context: Context,
+    private val serviceConfigHome: String,
+    openedPreferencesName: String,
+) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutableState = MutableStateFlow(AppLibraryState())
     val state: StateFlow<AppLibraryState> = mutableState.asStateFlow()
@@ -62,7 +66,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     }
 
     val market = UnifiedAppMarket(context, this)
-    private val opened = context.getSharedPreferences("local-app-v2-opened", Context.MODE_PRIVATE)
+    private val opened = context.getSharedPreferences(openedPreferencesName, Context.MODE_PRIVATE)
     private val visible = mutableSetOf<android.app.Activity>()
     private val backgroundSettings = Mutex()
     private val browserRuns = mutableMapOf<String, AppLaunch>()
@@ -81,7 +85,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
         if ("agent" in release.capabilities) ensureAgentHost()
         // Start a user-visible foreground lease while LingXi is still visible;
         // browser foreground must not cancel its independently owned tasks.
-        withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id, app.name) }
+        withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id, app.name, this) }
         try {
             val launch = start(id)
             browserRuns[id] = launch
@@ -127,9 +131,8 @@ class UnifiedLocalApps private constructor(private val context: Context) {
 
     private suspend fun service(): MobileLocalAppServiceHandle = creation.withLock {
         handle ?: withContext(Dispatchers.IO) {
-            val directories = MobileUserStorage.directories(context)
             // Browsing and static apps are available even when Linux assets are missing.
-            buildAndroidLocalAppService(directories.configHome, null).also { created ->
+            buildAndroidLocalAppService(serviceConfigHome, null).also { created ->
                 decodeAppResponse(created.requestJson(JSONObject().put("op", "configureTarget").put("target", appTarget(if (BuildConfig.MOBILE_LINUX_FULL) "mobile-linux" else "web")).toString()))
             }
         }.also { handle = it }
@@ -159,11 +162,10 @@ class UnifiedLocalApps private constructor(private val context: Context) {
         check(BuildConfig.MOBILE_LINUX_FULL) { "此发行渠道不支持 Linux 应用代码执行。" }
         if (linuxBound) return@withLock
         withContext(Dispatchers.IO) {
-            val directories = MobileUserStorage.directories(context)
             val linux = buildAndroidMobileLinuxRuntimeHandle(LinuxRuntimeBridge.configForWorkspace(context, LinuxRuntimeMode.MobileLinux))
             // The Rust registry fills the existing owner's lazy runtime slot; it does
             // not replace current app runs, the library or the persistent origin.
-            buildAndroidLocalAppService(directories.configHome, linux)
+            buildAndroidLocalAppService(serviceConfigHome, linux)
         }
         linuxBound = true
     }
@@ -203,7 +205,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             check(BuildConfig.MOBILE_LINUX_FULL) { "此发行渠道不支持安装、构建或运行应用服务。" }
             require(release.digest in app.executionGrants) { "请先允许此版本在 Linux 用户空间中运行。" }
             bindLinux()
-            if (keepRunning(id, release.digest)) withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id, app.name) }
+            if (keepRunning(id, release.digest)) withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id, app.name, this) }
         }
         val value = try { request(op, id) { revision?.let { put("revision", it) } } as JSONObject } catch (error: Throwable) {
             // The shared service cancels only this preparation. An app-level
@@ -288,7 +290,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             val code = ownsRun && release(id, running!!.getLong("revision")).executesCode
             if (value && code) {
                 check(visible.isNotEmpty()) { "Open LingXi before enabling background execution" }
-                LocalAppProcessService.acquire(context, id, appName)
+                LocalAppProcessService.acquire(context, id, appName, this)
                 LocalAppProcessService.ready(id)
                 acquiredLease = !hadLease
             }
@@ -331,9 +333,36 @@ class UnifiedLocalApps private constructor(private val context: Context) {
         }
     }
     companion object {
+        internal const val OWNER_DEATH_ACCEPTANCE_CONFIG_PREFIX = ".lingxi-owner-death-acceptance-"
+        internal const val OWNER_DEATH_ACCEPTANCE_OWNER_MARKER = ".owner-death-acceptance-owner"
         @Volatile private var instance: UnifiedLocalApps? = null
         fun get(context: Context): UnifiedLocalApps = instance ?: synchronized(this) {
-            instance ?: UnifiedLocalApps(context.applicationContext).also { instance = it }
+            instance ?: UnifiedLocalApps(
+                context.applicationContext,
+                MobileUserStorage.directories(context.applicationContext).configHome,
+                "local-app-v2-opened",
+            ).also { instance = it }
+        }
+
+        /** A separate app-library root for the owner-death Android acceptance fixture. */
+        internal fun createOwnerDeathAcceptanceInstance(context: Context, configHome: File): UnifiedLocalApps {
+            val appContext = context.applicationContext
+            val home = File(MobileUserStorage.directories(appContext).home).canonicalFile
+            val supplied = configHome.absoluteFile
+            val selected = supplied.canonicalFile
+            val token = selected.name.removePrefix(OWNER_DEATH_ACCEPTANCE_CONFIG_PREFIX)
+            require(supplied.path == selected.path && selected.parentFile == home && token != selected.name) {
+                "Owner-death acceptance config must be a direct child of the active Linux user home"
+            }
+            require(runCatching { java.util.UUID.fromString(token).toString() == token }.getOrDefault(false)) {
+                "Owner-death acceptance config must carry a canonical test UUID"
+            }
+            val marker = File(selected, OWNER_DEATH_ACCEPTANCE_OWNER_MARKER)
+            require(selected.isDirectory && marker.absoluteFile.path == marker.canonicalFile.path &&
+                marker.isFile && marker.readText() == token) {
+                "Owner-death acceptance config marker does not match its canonical test UUID"
+            }
+            return UnifiedLocalApps(appContext, selected.path, "local-app-v2-opened-owner-death-$token")
         }
     }
 }

@@ -34,8 +34,11 @@ class LocalAppProcessService : Service() {
         monitoring.launch {
             while (true) {
                 delay(1500)
-                for (id in synchronized(active) { ready.toList() }) {
-                    val status = runCatching { UnifiedLocalApps.get(this@LocalAppProcessService).request("status", id) as org.json.JSONObject }.getOrNull() ?: continue
+                val ownersToMonitor = synchronized(active) {
+                    ready.mapNotNull { id -> owners[id]?.let { owner -> id to owner } }
+                }
+                for ((id, owner) in ownersToMonitor) {
+                    val status = runCatching { owner.request("status", id) as org.json.JSONObject }.getOrNull() ?: continue
                     val phase = status.optJSONObject("run")?.optString("phase")
                     if (phase !in setOf("preparing", "starting", "running", "stopping")) release(this@LocalAppProcessService, id)
                 }
@@ -45,9 +48,14 @@ class LocalAppProcessService : Service() {
     override fun onDestroy() {
         foregroundReady = false
         monitoring.cancel()
-        val abandoned = synchronized(active) { active.keys.toList().also { active.clear(); ready.clear() } }
+        val abandoned = synchronized(active) {
+            active.keys.mapNotNull { id -> owners.remove(id)?.let { owner -> id to owner } }
+                .also { active.clear(); ready.clear() }
+        }
         synchronized(active) { if (instance === this) instance = null }
-        UnifiedLocalApps.get(this).scope.launch { abandoned.forEach { id -> runCatching { UnifiedLocalApps.get(this@LocalAppProcessService).suspend(id) } } }
+        abandoned.forEach { (id, owner) ->
+            owner.scope.launch { runCatching { owner.suspend(id) } }
+        }
         super.onDestroy()
     }
     override fun onBind(intent: Intent?): IBinder? = null
@@ -58,8 +66,9 @@ class LocalAppProcessService : Service() {
                 if (synchronized(active) { active.isEmpty() }) stopSelf(startId)
                 return START_NOT_STICKY
             }
-            UnifiedLocalApps.get(this).scope.launch {
-                runCatching { UnifiedLocalApps.get(this@LocalAppProcessService).stop(appId) }
+            val owner = synchronized(active) { owners[appId] } ?: UnifiedLocalApps.get(this)
+            owner.scope.launch {
+                runCatching { owner.stop(appId) }
                 if (owns(appId)) updateForegroundNotification()
                 else if (synchronized(active) { active.isEmpty() }) stopSelf()
                 else updateForegroundNotification()
@@ -110,6 +119,7 @@ class LocalAppProcessService : Service() {
         private const val APP_ID = "appId"
         private var instance: LocalAppProcessService? = null
         private val active = linkedMapOf<String, String>()
+        private val owners = mutableMapOf<String, UnifiedLocalApps>()
         private val ready = mutableSetOf<String>()
         private var foregroundGeneration = 0L
         internal fun owns(appId: String): Boolean = synchronized(active) { appId in active }
@@ -117,9 +127,15 @@ class LocalAppProcessService : Service() {
             appId in active && instance?.foregroundReady == true
         }
         fun ready(appId: String) { synchronized(active) { if (appId in active) ready.add(appId) } }
-        suspend fun acquire(context: Context, appId: String, appName: String = appId) {
+        suspend fun acquire(
+            context: Context,
+            appId: String,
+            appName: String = appId,
+            owner: UnifiedLocalApps = UnifiedLocalApps.get(context),
+        ) {
             val generationBefore = synchronized(active) {
                 active[appId] = appName
+                owners[appId] = owner
                 ready.remove(appId)
                 foregroundGeneration
             }
@@ -142,7 +158,7 @@ class LocalAppProcessService : Service() {
         }
         fun release(context: Context, appId: String) {
             val (empty, service) = synchronized(active) {
-                active.remove(appId); ready.remove(appId)
+                active.remove(appId); owners.remove(appId); ready.remove(appId)
                 active.isEmpty() to instance
             }
             if (empty) context.stopService(Intent(context, LocalAppProcessService::class.java))

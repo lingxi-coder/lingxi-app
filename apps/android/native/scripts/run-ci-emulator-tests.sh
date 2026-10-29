@@ -42,9 +42,11 @@ for package in com.lingxi.code.debug com.lingxi.code.direct.debug; do
   grep -Fxq 'OK (2 tests)' <<< "$output"
 done
 
-# This runner kills only its recorded Direct test host PID and validates a
-# new-process recovery; am force-stop would hide orphan-process regressions.
+# This runner's Direct fixture self-SIGKILLs in both phases. It leaves its
+# unique configHome and receipts on this disposable AVD; no user data is deleted.
+# The CI workflow creates a fresh AVD without snapshot save and tears it down at job end.
 python3 scripts/test-local-app-owner-death.py --serial "$ANDROID_SERIAL" \
+  --ci-ephemeral-emulator \
   --output-dir "$RUNNER_TEMP/android-owner-death"
 
 printf '%s\n' 'External market, provider, MCP, interactive and diagnostic cases require explicit opt-in; see scripts/README-ci-acceptance.md.'

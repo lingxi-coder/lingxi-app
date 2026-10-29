@@ -115,6 +115,20 @@ test('stop cancels a queued background invocation resume before services restart
   await Promise.all([gate, resumed, stopped]);
   assert.equal(runtime.phase(row.id), 'stopped');
 });
+test('a shared background resume survives one caller cancelling', async t => {
+  const { store, runtime } = await fixture(t);
+  const row = await store.publish({ name: 'Shared resume', html: '<!doctype html>' });
+  await runtime.start(row.id); const invocation = runtime.invocationId(row.id)!; await runtime.stop(row.id);
+  let release!: () => void;
+  const gate = runtime.exclusive(row.id, () => new Promise<void>(resolve => { release = resolve; }));
+  await delay(0);
+  const first = new AbortController(), second = new AbortController();
+  const rejected = assert.rejects(runtime.resume(row.id, row.revision, invocation, first.signal));
+  const other = runtime.resume(row.id, row.revision, invocation, second.signal);
+  first.abort(); await rejected; release();
+  await Promise.all([gate, other]);
+  assert.equal(runtime.phase(row.id), 'running'); assert.equal(runtime.invocationId(row.id), invocation);
+});
 test('stop cancels every queued repair before any installation side effect', async t => {
   const { store, runtime } = await fixture(t);
   const row = await project(store, { schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Queued', entry: { type: 'static', path: 'index.html' }, install: [{ command: 'echo wrong > "$LOCAL_APP_DATA_DIR/installed"' }] }, { 'index.html': '<!doctype html>' });
@@ -138,6 +152,183 @@ test('caller cancellation interrupts only its owned startup and preserves an alr
   await store.publish({ id: row.id, html: '<!doctype html>' }); await runtime.start(row.id);
   const again = new AbortController(); await runtime.start(row.id, false, again.signal); again.abort();
   assert.equal(runtime.phase(row.id), 'running');
+});
+test('shared startup survives either waiter cancelling and stops when all waiters leave', async t => {
+  for (const cancelledFirst of [true, false]) {
+    const { store, runtime } = await fixture(t);
+    const row = await store.publish({ name: 'Shared callers', html: '<!doctype html>' });
+    const prepare = store.prepareWorkspace.bind(store);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    store.prepareWorkspace = async app => { entered(); await gate; return prepare(app); };
+    const first = new AbortController(), second = new AbortController();
+    const a = runtime.start(row.id, false, first.signal);
+    await waiting;
+    const b = runtime.start(row.id, false, second.signal);
+    const cancelled = assert.rejects(cancelledFirst ? a : b);
+    (cancelledFirst ? first : second).abort();
+    await cancelled; release();
+    await (cancelledFirst ? b : a);
+    assert.equal(runtime.phase(row.id), 'running');
+  }
+  const { store, runtime } = await fixture(t);
+  const row = await store.publish({ name: 'No callers', html: '<!doctype html>' });
+  const prepare = store.prepareWorkspace.bind(store);
+  let release!: () => void, entered!: () => void, preparations = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  store.prepareWorkspace = async app => { if (++preparations === 1) { entered(); await gate; } return prepare(app); };
+  const first = new AbortController(), second = new AbortController();
+  const a = assert.rejects(runtime.start(row.id, false, first.signal));
+  await waiting;
+  const b = assert.rejects(runtime.start(row.id, false, second.signal));
+  first.abort(); second.abort();
+  // A new owner arriving during cleanup must start a fresh invocation.
+  const replacement = runtime.start(row.id);
+  release(); await Promise.all([a, b, replacement]);
+  assert.equal(preparations, 2); assert.equal(runtime.phase(row.id), 'running');
+});
+test('the final cancelled caller observes a startup already committed for host reconciliation', async t => {
+  const { store } = await fixture(t);
+  const row = await store.publish({ name: 'Committed startup', html: '<!doctype html>' });
+  const controller = new AbortController();
+  const runtime = new LocalAppRuntime(store, () => {
+    if (runtime.phase(row.id) === 'running') controller.abort();
+  });
+  t.after(() => runtime.dispose());
+  await runtime.start(row.id, false, controller.signal);
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(runtime.phase(row.id), 'running');
+});
+test('a new caller can cancel while an abandoned startup is still cleaning up', async t => {
+  const { store, runtime } = await fixture(t);
+  const row = await store.publish({ name: 'Abandoned start', html: '<!doctype html>' });
+  const prepare = store.prepareWorkspace.bind(store);
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  store.prepareWorkspace = async app => { entered(); await gate; return prepare(app); };
+  const first = new AbortController(), second = new AbortController();
+  const firstResult = assert.rejects(runtime.start(row.id, false, first.signal));
+  await waiting; first.abort();
+  const secondResult = assert.rejects(runtime.start(row.id, false, second.signal));
+  second.abort();
+  try {
+    await Promise.race([secondResult, delay(300).then(() => { throw new Error('Cancelled caller waited for another startup cleanup'); })]);
+  } finally { release(); await Promise.all([firstResult, secondResult]); }
+});
+test('an incompatible waiting start can cancel without interrupting the original', async t => {
+  const { store, runtime } = await fixture(t);
+  const row = await store.publish({ name: 'Separate intents', html: '<!doctype html>' });
+  const prepare = store.prepareWorkspace.bind(store);
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  store.prepareWorkspace = async app => { entered(); await gate; return prepare(app); };
+  const first = runtime.start(row.id);
+  await waiting;
+  const controller = new AbortController();
+  const second = assert.rejects(runtime.start(row.id, false, controller.signal, true));
+  controller.abort();
+  try {
+    await Promise.race([second, delay(300).then(() => { throw new Error('Cancelled caller waited for another startup'); })]);
+  } finally { release(); await Promise.all([first, second]); }
+  assert.equal(runtime.phase(row.id), 'running');
+});
+test('stop cancels an incompatible start waiting outside the runtime queue', async t => {
+  const { store, runtime } = await fixture(t);
+  const row = await store.publish({ name: 'Stop waiting start', html: '<!doctype html>' });
+  const prepare = store.prepareWorkspace.bind(store);
+  let release!: () => void, entered!: () => void, preparations = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  store.prepareWorkspace = async app => { if (++preparations === 1) { entered(); await gate; } return prepare(app); };
+  const first = assert.rejects(runtime.start(row.id));
+  await waiting;
+  const replacement = assert.rejects(runtime.start(row.id, false, undefined, true), /cancelled/i);
+  const stopping = runtime.stop(row.id);
+  release(); await Promise.all([first, replacement, stopping]);
+  assert.equal(preparations, 1); assert.equal(runtime.phase(row.id), 'stopped');
+  await runtime.start(row.id);
+  assert.equal(preparations, 2); assert.equal(runtime.phase(row.id), 'running');
+});
+test('stop cancels a background resume waiting for an incompatible start', async t => {
+  const { store, runtime } = await fixture(t);
+  const row = await store.publish({ name: 'Stop waiting resume', html: '<!doctype html>' });
+  await runtime.start(row.id); const invocation = runtime.invocationId(row.id)!; await runtime.stop(row.id);
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const prepare = store.prepareWorkspace.bind(store);
+  store.prepareWorkspace = async app => { entered(); await gate; return prepare(app); };
+  const first = assert.rejects(runtime.start(row.id, false, undefined, true));
+  await waiting;
+  const resume = assert.rejects(runtime.resume(row.id, row.revision, invocation), /cancelled/i);
+  const stopping = runtime.stop(row.id);
+  release(); await Promise.all([first, resume, stopping]);
+  assert.equal(runtime.phase(row.id), 'stopped');
+});
+test('a new start after stop waits for cleanup and starts a fresh invocation', async t => {
+  const { store, runtime } = await fixture(t);
+  const row = await store.publish({ name: 'Start after stop', html: '<!doctype html>' });
+  const prepare = store.prepareWorkspace.bind(store);
+  let release!: () => void, entered!: () => void, preparations = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  store.prepareWorkspace = async app => { if (++preparations === 1) { entered(); await gate; } return prepare(app); };
+  const first = assert.rejects(runtime.start(row.id)); await waiting;
+  const stopping = runtime.stop(row.id);
+  const next = runtime.start(row.id);
+  release(); await Promise.all([first, stopping, next]);
+  assert.equal(preparations, 2); assert.equal(runtime.phase(row.id), 'running');
+});
+test('stop cancels a start waiting on an existing running invocation', async t => {
+  const { store, runtime } = await fixture(t);
+  const row = await store.publish({ name: 'Stop existing start', html: '<!doctype html>' });
+  await runtime.start(row.id);
+  let release!: () => void, entered!: () => void;
+  const enteredQueue = new Promise<void>(resolve => { entered = resolve; });
+  const gate = runtime.exclusive(row.id, () => new Promise<void>(resolve => { release = resolve; entered(); }));
+  await enteredQueue;
+  const start = assert.rejects(runtime.start(row.id), /abort|cancel/i);
+  const stop = runtime.stop(row.id);
+  release(); await Promise.all([gate, start, stop]);
+  assert.equal(runtime.phase(row.id), 'stopped');
+});
+for (const action of ['remove', 'dispose'] as const) {
+  test(`${action} cancels an incompatible start waiting outside the runtime queue`, async t => {
+    const { store, runtime } = await fixture(t);
+    const row = await store.publish({ name: `Waiting ${action}`, html: '<!doctype html>' });
+    const prepare = store.prepareWorkspace.bind(store);
+    let release!: () => void, entered!: () => void, preparations = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    store.prepareWorkspace = async app => { if (++preparations === 1) { entered(); await gate; } return prepare(app); };
+    const first = assert.rejects(runtime.start(row.id)); await waiting;
+    const replacement = assert.rejects(runtime.start(row.id, false, undefined, true), /cancelled/i);
+    const ending = action === 'remove' ? runtime.remove(row.id) : runtime.dispose();
+    await assert.rejects(runtime.start(row.id), /stopping|deleted/);
+    release(); await Promise.all([first, replacement, ending]);
+    assert.equal(preparations, 1);
+  });
+}
+test('different startup intents retain replacement and expected revision checks', async t => {
+  const { store, runtime } = await fixture(t);
+  const original = await store.publish({ name: 'Versioned', html: '<!doctype html>one' });
+  const prepare = store.prepareWorkspace.bind(store);
+  let release!: () => void, entered!: () => void, blocked = true;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  store.prepareWorkspace = async app => { if (blocked) { blocked = false; entered(); await gate; } return prepare(app); };
+  const first = runtime.start(original.id);
+  await waiting;
+  const next = await store.publish({ id: original.id, html: '<!doctype html>two' });
+  const replacement = runtime.start(original.id, false, undefined, true, next.revision);
+  const badVersion = assert.rejects(runtime.start(original.id, false, undefined, true, undefined, 999), /current version changed/);
+  release(); await first; await replacement; await badVersion;
+  assert.equal(runtime.revision(original.id), next.revision);
+  await assert.rejects(runtime.start(original.id, false, undefined, false, undefined, 999), /current version changed/);
 });
 test('readiness survives oversized output and markers split between chunks', async t => {
   const { store, runtime } = await fixture(t);

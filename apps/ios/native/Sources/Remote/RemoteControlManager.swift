@@ -139,7 +139,8 @@ final class RemoteControlManager {
     func repair(_ hostID: String) async throws { try await activeClient().repairHost(hostId: hostID) }
     func forget(_ hostID: String) async {
         let client = client
-        await connectionEpoch.forget(hostID: hostID, currentHostID: connection?.hostId) {
+        let currentHostID = connection?.phase == .idle ? nil : connection?.hostId
+        await connectionEpoch.forget(hostID: hostID, currentHostID: currentHostID) {
             await client?.forgetHost(hostId: hostID)
         }
     }

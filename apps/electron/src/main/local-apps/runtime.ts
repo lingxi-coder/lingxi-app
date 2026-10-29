@@ -23,6 +23,7 @@ interface Invocation {
   readiness: Map<string, { needle: string; matched: boolean; stdout: string; stderr: string }>;
   workspace: string; preparationDataPath?: string; error?: string; retired?: Invocation[];
 }
+interface SharedStart { controller: AbortController; operation: Promise<void>; waiters: number; intent: string }
 export interface RuntimeOptions { onRunEnded?: (appId: string, runId: string, reason: string) => Promise<void> | void; nodeExecutable?: string; bunExecutable?: string; shell?: string; environment?: NodeJS.ProcessEnv }
 
 export function orderedProcesses(processes: LocalAppProcess[]): LocalAppProcess[] {
@@ -97,6 +98,8 @@ export class LocalAppRuntime {
   private readonly deleting = new Set<string>();
   private disposed = false;
   private readonly starts = new Map<string, Promise<void>>();
+  private readonly sharedStarts = new Map<string, SharedStart>();
+  private readonly waitingStarts = new Map<string, Set<AbortController>>();
   private readonly requests = new Map<string, Set<InvocationRef>>();
   private readonly cancellations = new CancellationTombstones(1000);
   constructor(readonly store: LocalAppStore, private readonly changed: () => void, private readonly options: RuntimeOptions = {}) {}
@@ -142,13 +145,101 @@ export class LocalAppRuntime {
     try { return await pending; }
     finally { if (this.queues.get(id) === pending) this.queues.delete(id); }
   }
-  async start(id: string, repair = false, signal?: AbortSignal, replace = false, revision?: number, expectedCurrentRevision?: number): Promise<void> {
+  private async waitForStart(operation: Promise<void>, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    if (!repair && this.starts.has(id)) return this.starts.get(id)!;
+    if (!signal) { await operation.catch(() => undefined); return; }
+    let abort!: () => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    });
+    try { await Promise.race([operation.catch(() => undefined), cancelled]); signal.throwIfAborted(); }
+    finally { signal.removeEventListener('abort', abort); }
+  }
+  private async sharedStart(id: string, intent: string, signal: AbortSignal | undefined, start: (signal: AbortSignal) => Promise<void>): Promise<void> {
+    signal?.throwIfAborted();
+    if (this.disposed || this.deleting.has(id)) throw new Error('Application service is stopping or application is being deleted');
+    let shared = this.sharedStarts.get(id);
+    // Different requested versions, replacements and resumes must each run
+    // their own checks. An abandoned start must also finish its cleanup first.
+    if (shared && (shared.controller.signal.aborted || shared.intent !== intent)) {
+      const controller = new AbortController();
+      const waiting = this.waitingStarts.get(id) ?? new Set<AbortController>();
+      waiting.add(controller); this.waitingStarts.set(id, waiting);
+      const waitingSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+      try {
+        await this.waitForStart(shared.operation, waitingSignal);
+        waitingSignal.throwIfAborted();
+        return this.sharedStart(id, intent, signal, start);
+      } finally {
+        waiting.delete(controller); if (!waiting.size) this.waitingStarts.delete(id);
+      }
+    }
+    if (!shared) {
+      const controller = new AbortController();
+      shared = { controller, operation: start(controller.signal), waiters: 0, intent };
+      this.sharedStarts.set(id, shared);
+      const current = shared;
+      void current.operation.then(() => {
+        if (this.sharedStarts.get(id) === current) this.sharedStarts.delete(id);
+      }, () => {
+        if (this.sharedStarts.get(id) === current) this.sharedStarts.delete(id);
+      });
+    }
+    const current = shared;
+    current.waiters++;
+    let joined = true;
+    let abandoned = false;
+    const leave = () => {
+      if (!joined) return;
+      joined = false;
+      current.waiters--;
+      if (!current.waiters) current.controller.abort();
+    };
+    let abort!: () => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      abort = () => {
+        leave();
+        const fail = () => reject(signal?.reason ?? new Error('Application operation cancelled'));
+        // The final caller waits for cancellation cleanup or an activation
+        // that has already crossed its commit boundary.
+        if (!current.waiters) { abandoned = true; void current.operation.then(fail, fail); } else fail();
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+    });
+    // A committed operation may finish after its final caller cancels. Return
+    // that success so its host can record the run and reconcile the cancelled
+    // opening; before commit, the aborted operation still rejects normally.
+    try { await Promise.race([current.operation, cancelled]); if (!abandoned) signal?.throwIfAborted(); }
+    finally { signal?.removeEventListener('abort', abort); leave(); }
+  }
+  async start(id: string, repair = false, signal?: AbortSignal, replace = false, revision?: number, expectedCurrentRevision?: number): Promise<void> {
+    if (repair) return this.startOnce(id, repair, signal, replace, revision, expectedCurrentRevision);
+    const intent = JSON.stringify(['start', replace, revision ?? null, expectedCurrentRevision ?? null]);
+    return this.sharedStart(id, intent, signal, ownedSignal => this.startOnce(id, repair, ownedSignal, replace, revision, expectedCurrentRevision));
+  }
+  private async startOnce(id: string, repair = false, signal?: AbortSignal, replace = false, revision?: number, expectedCurrentRevision?: number): Promise<void> {
+    signal?.throwIfAborted();
+    if (!repair && this.starts.has(id)) {
+      await this.waitForStart(this.starts.get(id)!, signal);
+      return this.startOnce(id, repair, signal, replace, revision, expectedCurrentRevision);
+    }
     // Cancellation is owned by the invocation, not the currently selected UI.
     const existing = this.invocations.get(id);
-    if (existing && ['installing', 'building', 'starting', 'running'].includes(existing.phase) && !repair && !replace) {
-      await this.queues.get(id); return;
+    if (existing && ['installing', 'building', 'starting', 'running'].includes(existing.phase) && !repair && !replace
+      && (revision === undefined || existing.revision === revision)) {
+      if (expectedCurrentRevision !== undefined) {
+        await this.exclusive(id, async () => {
+          signal?.throwIfAborted();
+          const row = await this.store.get(id);
+          signal?.throwIfAborted();
+          if (row.currentRevision !== expectedCurrentRevision) throw new Error('The current version changed; refresh before switching versions');
+        });
+      } else await this.queues.get(id);
+      signal?.throwIfAborted();
+      return;
     }
     const ref = createInvocationRef("local-app", id, { next: () => randomUUID() });
     const requests = this.requests.get(id) ?? new Set<InvocationRef>();
@@ -258,8 +349,13 @@ export class LocalAppRuntime {
   }
   /** Resume services for an expressly retained background Agent invocation. */
   async resume(id: string, revision: number, invocationId: string, signal?: AbortSignal): Promise<void> {
+    const intent = JSON.stringify(['resume', revision, invocationId]);
+    await this.sharedStart(id, intent, signal, ownedSignal => this.resumeOnce(id, revision, invocationId, ownedSignal));
+    if (this.revision(id) !== revision || this.invocationId(id) !== invocationId) throw new Error('Application invocation changed before resume');
+  }
+  private async resumeOnce(id: string, revision: number, invocationId: string, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    if (this.starts.has(id)) await this.starts.get(id);
+    if (this.starts.has(id)) await this.waitForStart(this.starts.get(id)!, signal);
     const run = this.invocations.get(id);
     if (!run || run.revision !== revision || run.id !== invocationId) throw new Error('Application invocation changed before resume');
     if (run.phase === 'running') return;
@@ -433,6 +529,8 @@ export class LocalAppRuntime {
   }
   async stop(id: string): Promise<void> {
     // Abort before waiting for the queue: Stop must interrupt an in-progress install/readiness wait.
+    this.sharedStarts.get(id)?.controller.abort();
+    for (const waiter of this.waitingStarts.get(id) ?? []) waiter.abort(new Error('Application operation cancelled'));
     for (const ref of this.requests.get(id) ?? []) this.cancellations.add(ref);
     this.preparing.get(id)?.controller.abort();
     this.invocations.get(id)?.controller.abort();
@@ -447,6 +545,8 @@ export class LocalAppRuntime {
     return { output: this.logs(id).filter(l => l.runId === run.id && l.process === name).map(l => l.text).join('') };
   }
   async remove(id: string): Promise<void> {
+    this.sharedStarts.get(id)?.controller.abort();
+    for (const waiter of this.waitingStarts.get(id) ?? []) waiter.abort(new Error('Application operation cancelled'));
     for (const ref of this.requests.get(id) ?? []) this.cancellations.add(ref);
     this.preparing.get(id)?.controller.abort();
     this.invocations.get(id)?.controller.abort();
@@ -456,6 +556,8 @@ export class LocalAppRuntime {
   }
   async dispose(): Promise<void> {
     this.disposed = true;
+    for (const shared of this.sharedStarts.values()) shared.controller.abort();
+    for (const waiting of this.waitingStarts.values()) for (const waiter of waiting) waiter.abort(new Error('Application operation cancelled'));
     for (const requests of this.requests.values()) for (const ref of requests) this.cancellations.add(ref);
     for (const run of this.preparing.values()) run.controller.abort();
     for (const run of this.invocations.values()) run.controller.abort();

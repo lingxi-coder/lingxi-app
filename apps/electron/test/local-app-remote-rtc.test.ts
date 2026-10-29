@@ -175,7 +175,8 @@ test('invalid SDP cannot leave an unhandled peer answer rejection', async () => 
 });
 
 test('event streams and downloadable files fall back without buffering their bodies', async () => {
-  for (const headers of [{ 'content-type': 'text/event-stream' }, { 'content-disposition': 'attachment; filename=a.txt' }, { 'content-length': '300000' }]) {
+  const headerFixtures: Record<string, string>[] = [{ 'content-type': 'text/event-stream' }, { 'content-disposition': 'attachment; filename=a.txt' }, { 'content-length': '300000' }];
+  for (const headers of headerFixtures) {
     let canceled = false;
     const { rtc, client } = await setup(async () => new Response(new ReadableStream({ cancel() { canceled = true; } }), { headers }));
     assert.equal((await exchange(client, { id: 1, method: 'GET', path: '/file', headers: {} })).fallback, true);

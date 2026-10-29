@@ -150,6 +150,24 @@ test('live records apply in order, repeats are ignored, and early ones wait for 
   assert.ok(texts.includes('abc'), texts.join('|'));
 });
 
+test('permission mode events update known modes and ignore unknown modes', async () => {
+  const h = await harness();
+  const { controller, conn } = await open(h);
+  controller.activate();
+  await live(h, controller);
+
+  const send = (seq: number, e: object) => void conn().notify('session.event', { session_id: SESSION, ...event(seq, e) });
+  send(1, { type: 'permission_mode_changed', mode: 'acceptEdits' });
+  await drive(h.clock, () => controller.getState().controls?.permission.requested === 'acceptEdits', 'the permission mode update');
+  assert.equal(controller.getState().controls?.permission.effective, 'acceptEdits');
+
+  send(2, { type: 'permission_mode_changed', mode: 'future-mode' });
+  send(3, { type: 'model_changed', model: 'p/model-b' });
+  await drive(h.clock, () => controller.getState().controls?.qualified_model === 'p/model-b', 'the event after an unknown permission mode');
+  assert.equal(controller.getState().controls?.permission.requested, 'acceptEdits');
+  assert.equal(controller.getState().controls?.permission.effective, 'acceptEdits');
+});
+
 test('events that arrive before the snapshot ends are applied after it, minus what it covers', async () => {
   const h = await harness();
   const { controller, script, conn } = await open(h);

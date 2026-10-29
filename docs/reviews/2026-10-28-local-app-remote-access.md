@@ -483,3 +483,143 @@ Rust receipts: `/private/tmp/lingxi-local-app-main-ffi-tests.log` and
 `/private/tmp/lingxi-remote-main-merge-rust-client.log`.
 Full native packages, physical devices and public deployment acceptance retain
 the pending boundaries recorded above.
+
+## Sixth independent review
+
+This review used the isolated branch `codex/local-app-remote-review6-20261028`
+at canonical main `8f193300b9577b3b4600a20d22214ca28c3c646d`. Stage 1 checked
+that Desktop hosting, retained Mobile hosting and the user's browser-opening
+choices remained intact before Stage 2 examined the transport, authorization,
+concurrent startup, lifetime and cross-platform paths. Its coverage was the
+89-file feature change plus runtime and runtime tests, Web remote-client and
+reuse files and tests, and the store fixture: **95 files in the union**.
+
+Ten MEDIUM and five LOW findings were fixed; there were no CRITICAL or HIGH
+findings. Seven MEDIUM findings came from the independent review, two from
+cross-checking the shared-start repair, and one was a pre-existing main Web
+typecheck blocker. No confirmed finding remains open in this source scope.
+Locations below refer to the corrected source.
+
+| Severity | Corrected location | Trigger, impact, correction and evidence |
+| --- | --- | --- |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteGateway.ts:199` | Redemption near the end of a ticket's lifetime started a new eight-hour timer and cookie lifetime, allowing an existing stream, WebSocket or RTC peer to outlive the original session deadline. Use the remaining time for both the abort timer and cookie Max-Age. The gateway regression holds a live stream until the shortened original deadline and checks the cookie lifetime; its cookie assertion failed before the fix. |
+| MEDIUM | `apps/electron/src/main/local-apps/remoteGateway.ts:335` | A WebSocket request for `/__services/api?token=...` was matched against the raw URL, missed the service and was routed to the default backend or rejected. Split pathname and query and preserve the raw query when forwarding. The regression checks a root query, nested named-service path and default-service path; before the fix the root query reached the default backend. |
+| MEDIUM | `apps/electron/scripts/local-app-remote-tunnel.mjs:35` | Every generated frpc configuration registered the same proxy name, so two Desktop-specific routes on one relay could conflict. Derive a stable proxy name from the route. The generator regression checks stable distinct names for two routes and failed against the original constant name. The [frp configuration reference](https://gofrp.org/en/docs/features/common/configure/) describes proxy-name uniqueness between clients. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:1708`, `apps/electron/src/main/index.ts:127` | A remote opening could appear while the asynchronous background-app list was being read, after the idle check's first access check, allowing Desktop to quit despite the new opening. Recheck remote access after the list and immediately before quitting. A controlled host test inserts access while the list is blocked. |
+| MEDIUM | `apps/electron/src/main/local-apps/runtime.ts:159` | Two owners could join one startup whose cancellation belonged to the first caller, so revoking that caller could cancel the other owner's launch. Track shared waiters and give the underlying operation a shared cancellation controller; stop it when the last waiter leaves. Tests cancel either waiter, cancel all waiters, resume a retained invocation and revoke one of two owners during real runtime startup. |
+| MEDIUM | `apps/electron/src/main/remoteControl/peerHost.ts:197` | Shutdown or disposal between creating a hidden RTC window and its deferred open could leave a late window or peer. Recheck ownership before and after open, close a late resource and avoid closing a replacement. Peer tests cover shutdown and disposal before the deferred open and a late completion after a replacement starts. |
+| MEDIUM | `apps/android/native/app/src/main/java/com/lingxi/code/remote/RemoteControlManager.kt:260` | Forgetting the current host invalidated existing requests but left a window during which new app requests could enter before FFI returned or the old connection departed. Block admission and result acceptance for that binding, with scoped handling for concurrent/failed forgets, account replacement and connection attempts. The Android test source exercises these cases; a separate JVM harness using the production method reproduced and checked the fix. |
+| MEDIUM | `apps/electron/src/main/local-apps/runtime.ts:145` | In the first shared-start repair, a new or incompatible caller waiting for an abandoned startup's cleanup could not promptly observe its own cancellation. Before repair, a cancelled second caller remained unsettled until a blocked workspace preparation was released. Race the wait against that caller's signal without interrupting the original operation. Controlled runtime tests cancel each kind of waiter while cleanup or the other start remains blocked. |
+| MEDIUM | `apps/electron/src/main/local-apps/runtime.ts:161` | The first shared-start repair could coalesce incompatible start or resume intents, dropping a requested replacement or revision check. Before repair, an incompatible request with expected revision 999 succeeded after a blocked ordinary start. Key sharing by intent, wait for incompatible work independently, and recheck the expected revision. A held-start test publishes a new revision, requests replacement and verifies that an invalid expected revision is rejected. |
+| MEDIUM | `apps/web/src/remote/remoteClient.ts:371` | A pre-existing main event accepted an arbitrary permission-mode string where typed controls require a supported mode, blocking Web typechecking and potentially inserting an unsupported mode. Guard the event with the shared mode validator. The Web regression checks known and unknown events and a later event. |
+| LOW | `apps/electron/test/local-app-agent-host.test.ts:325` | A captured `unknown` IPC request was indexed without narrowing. Narrow the array and compare its serialized message. |
+| LOW | `apps/electron/test/local-app-remote-gateway.test.ts:275` | A forwarded header's `string | string[] | undefined` type was passed directly to a string assertion. Narrow it before matching. |
+| LOW | `apps/electron/test/local-app-remote-rtc.test.ts:178` | An inferred union of header fixtures was incompatible with the response header type. Type the fixtures as string records. |
+| LOW | `apps/electron/test/local-app-service-broker.test.ts:55` | The HTTP upgrade callback supplies a `Duplex`, while the test stored it as a narrower `Socket`. Use the declared callback type. |
+| LOW | `apps/electron/test/fixtures/local-app-store.ts:8` | The runtime test store fixture lacked `bindAuthoring` and could drift from the production store contract. Implement the method and declare the fixture's contract. |
+
+Final verification:
+
+- Feature/gateway/peer/browser suite: **163 passed**, with no failures,
+  cancellations or skips, after the final production runtime repair and before
+  the test-fixture-only `bindAuthoring` addition. Agent/runtime suite: **83
+  passed**; the runtime-only rerun after aligning the fixture passed **24**.
+- Web suite: **177 passed**. Bridge suite: **345 passed, five skipped** out of
+  350. Desktop Node and renderer typechecks and the unsigned Desktop JS build
+  passed; Web typechecking passed after the permission-mode guard.
+- The installed TypeScript language server published diagnostics for all
+  **56 requested files**, with zero errors. Its configured projects use the
+  parsed compiler options, paths and libraries, the effective `composite: false`
+  setting and an ES2022 test project. An earlier default-project snapshot
+  included stale generated output and inferred settings; the five real test
+  typing errors it exposed were corrected before the final configured scan.
+- A further independent read-only review confirmed both shared-start repair
+  findings were closed and reported no additional grounded issue.
+
+An initial TypeScript AST pass found no syntax errors in 52 changed files, and
+the injected browser SDK source also parsed cleanly. Production code in scope
+had no matches for the reviewed `console.log` or literal-credential patterns;
+empty catches were examined in context. Android repository JUnit was not run:
+generated bindings and JNI were unavailable. The JVM harness checked the exact
+production forget method, and Swift 6 parsing passed for changed Swift files;
+neither establishes a native application or physical-device pass.
+
+The generated frpc configuration uses an outbound relay connection and the
+Desktop loopback gateway, so a Desktop address change does not require a new
+address registry. Reconnection is supported by the [frp v0.71.1 client
+implementation](https://github.com/fatedier/frp/blob/v0.71.1/client/service.go#L265-L360);
+the process supervisor is an external deployment responsibility. No frpc binary
+or public relay was available for live tunnel validation.
+
+Receipts are under `/private/tmp/lingxi-review6-*`, including the feature,
+Agent/runtime, Web, bridge, Desktop typecheck/build, LSP and AST logs and the
+Android harness source and artifacts. The last runtime-only rerun is
+`/private/tmp/lingxi-review6-runtime-final.log`; LSP diagnostics are in
+`/private/tmp/lingxi-review6-lsp-final.json`. The round changed 22 files. This
+work remains uncommitted and unpushed in the isolated review branch; canonical
+main remains unchanged and clean at the recorded commit. Recommendation:
+**COMMENT**, bounded by the outstanding native package, physical browser/device
+and public deployment acceptance described above.
+
+## Seventh independent review
+
+Stage 1 checked the Desktop-authoritative runtime, per-opening browser origins,
+scoped withdrawal, HTTP/WebSocket/SSE with optional RTC fallback, and the
+outbound reconnecting tunnel contract. Stage 2 continued the cumulative
+**95-file union** of feature changes, fixtures, runtime and Web context,
+with fresh inspection focused on this round's eight changed runtime, native
+and test files and their callers. Five new
+findings were confirmed and repaired: one HIGH and four MEDIUM. No CRITICAL or
+unresolved HIGH finding remains in this reviewed source scope.
+
+| Severity | Corrected location | Trigger, impact and evidence |
+| --- | --- | --- |
+| HIGH | `apps/electron/src/main/local-apps/runtime.ts:160`, `:532` | An incompatible start or resume waiting outside the runtime queue survived Stop and could start again after the stopped operation settled. In a real runtime repro, start A was held, replacement B waited, and Stop was followed by B reaching `running`. Register waiting operations and abort them and shared controllers on Stop, removal and disposal; also recheck cancellation in the existing-run fast path. Runtime regressions cover incompatible start/resume, lifecycle cancellation and a fresh start after Stop. |
+| MEDIUM | `apps/electron/src/main/local-apps/runtime.ts:193`, `apps/electron/src/main/local-apps/host.ts:906` | Revoking the last remote opener just after activation committed made the shared wrapper hide that successful run from host ownership, leaving it running without a session. Preserve the committed operation's success for the final cancelled waiter; the host records its run and then checks its own cancellation. The real-runtime host regression failed before the fix with `running`, no session and no cleanup owner, and passes afterward. Earlier cancellation of one shared waiter remains isolated from another owner. |
+| MEDIUM | `apps/android/native/app/src/main/java/com/lingxi/code/remote/RemoteControlManager.kt:261` | A delayed forget could complete after an account change and modify the replacement account's hosts list. Capture the originating account and client, and apply completion only if both still match. The faithful extracted Kotlin harness reproduces the old cross-account effect and verifies isolation after the fix. |
+| MEDIUM | `apps/android/native/app/src/main/java/com/lingxi/code/remote/RemoteControlManager.kt:268`, `apps/ios/native/Sources/Remote/RemoteAppLaunchURL.swift:7` | Departure could clear a forget barrier while its unpair operation was still suspended; a reconnect could then admit app requests before forget completed. Track pending operations and departure per barrier, preserving identity across account reset and concurrent forgets. The pre-fix Android and Swift harnesses reproduce premature admission; the corrected harnesses check pending forget, reconnect and recovery. |
+| MEDIUM | `apps/android/native/app/src/main/java/com/lingxi/code/remote/RemoteControlManager.kt:380` | App request admission sampled connection state and epoch separately, allowing a replacement attempt between those reads to be treated as the originating attempt. Snapshot and validate them under the same lock used by connection updates, then recheck account, client, epoch and attempt on completion. A controlled old/new Kotlin harness exercises the interleaving. |
+
+Fresh verification on this review tree:
+
+- The feature/gateway/peer/real-Chrome suite passed **164/164** using the
+  bundled Electron Node runtime. Standalone Node 24 Agent/runtime tests passed
+  **90/90**. Desktop Node and renderer typechecks and production JS build passed.
+- The installed TypeScript language server returned diagnostics for **56/56**
+  requested files with zero errors. The TypeScript AST scan found zero syntax
+  errors in 56 files, no reviewed `console.log` or literal-credential matches,
+  and 26 empty catches were reviewed in context. The dedicated LSP and
+  ast-grep MCP tools were unavailable; these checks used the installed language
+  server over LSP and the TypeScript AST directly.
+- A regenerated harness using the exact Android production method compiled and
+  passed pending-forget, reconnect, recovery and account-isolation checks; its
+  compilation reported two unnecessary safe-call warnings. The standalone
+  Swift helper passed, all three changed Swift files parsed, and the helper plus
+  a copy of the XCTest source typechecked together with the simulator SDK and
+  XCTest overlays. Only the application-module import was removed in that copy.
+  Neither Android repository JUnit nor XCTest was executed; no full native
+  application build or physical-device acceptance is claimed.
+- Prior round 6 evidence remains **177/177** Web tests and **345 passed, five
+  skipped** bridge tests; those suites were not rerun in this round. A standalone
+  Node host-suite attempt passed its individual assertions but hit a native
+  `async_id` assertion during teardown even when the new regression was skipped;
+  it is not counted as a passing suite. The fresh bundled-runtime suite above
+  completed normally.
+
+Receipts: `/private/tmp/lingxi-review7-feature.log`,
+`/private/tmp/lingxi-review7-agent-runtime.log`,
+`/private/tmp/lingxi-review7-desktop-typecheck.log`,
+`/private/tmp/lingxi-review7-desktop-build.log`,
+`/private/tmp/lingxi-review7-lsp-final.json`,
+`/private/tmp/lingxi-review7-ast.json`,
+`/private/tmp/lingxi-review7-host-before.log`,
+`/private/tmp/lingxi-review7-host-targeted.log`, and
+`/private/tmp/lingxi-review7-swift-typecheck.log`. Android and Swift harness
+sources and binaries are under `/private/tmp/lingxi-review7-*`.
+
+The round directly changed eight runtime, test and native files; the cumulative
+uncommitted review tree contains 25 modified files, including the three iOS
+files added in this round. Canonical main was rechecked clean at
+`8f193300b9577b3b4600a20d22214ca28c3c646d`. Recommendation: **COMMENT**;
+native packages, physical browser/device flows and public relay/TURN acceptance
+remain separate outstanding release checks. No commit or push was made.

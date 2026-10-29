@@ -395,6 +395,7 @@ struct AttemptData {
 struct Attempt {
     cancel: CancellationToken,
     data: Mutex<AttemptData>,
+    keys: Arc<dyn ViewerKeys>,
 }
 
 impl Attempt {
@@ -679,17 +680,36 @@ impl ViewerConnection {
         }
     }
 
-    async fn local_app_request(&self, method: &str, params: Value, timeout: Option<Duration>) -> Result<Value, RpcError> {
-        let attempt = self.inner.core.lock().expect("core").live.clone()
+    async fn local_app_request(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value, RpcError> {
+        let attempt = self
+            .inner
+            .core
+            .lock()
+            .expect("core")
+            .live
+            .clone()
             .ok_or_else(|| RpcError::code(RemoteErrorCode::Closed))?;
         let rpc = {
             let data = attempt.data.lock().expect("attempt");
-            if !data.ready || data.disposed { return Err(RpcError::code(RemoteErrorCode::Closed)); }
-            data.rpc.clone().ok_or_else(|| RpcError::code(RemoteErrorCode::Closed))?
+            if !data.ready || data.disposed {
+                return Err(RpcError::code(RemoteErrorCode::Closed));
+            }
+            data.rpc
+                .clone()
+                .ok_or_else(|| RpcError::code(RemoteErrorCode::Closed))?
         };
         let value = rpc.request(method, Some(params), timeout).await?;
         let core = self.inner.core.lock().expect("core");
-        if core.live.as_ref().is_none_or(|live| !Arc::ptr_eq(live, &attempt)) {
+        if core
+            .live
+            .as_ref()
+            .is_none_or(|live| !Arc::ptr_eq(live, &attempt))
+        {
             return Err(RpcError::code(RemoteErrorCode::Closed));
         }
         Ok(value)
@@ -697,17 +717,33 @@ impl ViewerConnection {
 
     /// List Local Apps explicitly shared by this desktop.
     pub async fn list_apps(&self) -> Result<Vec<crate::local_apps::RemoteLocalApp>, RpcError> {
-        let value = self.local_app_request("apps.list", serde_json::json!({}), None).await?;
-        crate::local_apps::parse_list(value).ok_or_else(|| RpcError::new(RemoteErrorCode::Internal, "invalid apps.list result"))
+        let value = self
+            .local_app_request("apps.list", serde_json::json!({}), None)
+            .await?;
+        crate::local_apps::parse_list(value)
+            .ok_or_else(|| RpcError::new(RemoteErrorCode::Internal, "invalid apps.list result"))
     }
 
     /// Obtain the single-use browser bootstrap for a shared Local App.
-    pub async fn open_app(&self, app_id: &str) -> Result<crate::local_apps::RemoteLocalAppOpen, RpcError> {
+    pub async fn open_app(
+        &self,
+        app_id: &str,
+    ) -> Result<crate::local_apps::RemoteLocalAppOpen, RpcError> {
         if !crate::local_apps::valid_id(app_id) {
-            return Err(RpcError::new(RemoteErrorCode::InvalidParams, "invalid app id"));
+            return Err(RpcError::new(
+                RemoteErrorCode::InvalidParams,
+                "invalid app id",
+            ));
         }
-        let value = self.local_app_request("apps.open", serde_json::json!({"app_id": app_id}), Some(Duration::from_secs(930))).await?;
-        crate::local_apps::parse_open(value, app_id).ok_or_else(|| RpcError::new(RemoteErrorCode::Internal, "invalid apps.open result"))
+        let value = self
+            .local_app_request(
+                "apps.open",
+                serde_json::json!({"app_id": app_id}),
+                Some(Duration::from_secs(930)),
+            )
+            .await?;
+        crate::local_apps::parse_open(value, app_id)
+            .ok_or_else(|| RpcError::new(RemoteErrorCode::Internal, "invalid apps.open result"))
     }
 
     /// Send a notification on the ready link; dropped when there is none.
@@ -1078,6 +1114,11 @@ impl Inner {
         let attempt = Arc::new(Attempt {
             cancel: CancellationToken::new(),
             data: Mutex::new(AttemptData::default()),
+            keys: self
+                .deps
+                .keys
+                .for_attempt()
+                .unwrap_or_else(|| Arc::clone(&self.deps.keys)),
         });
         {
             let mut core = self.core.lock().expect("core");
@@ -1140,12 +1181,12 @@ impl Inner {
         requested: TransportKind,
     ) -> Result<RemoteHostInfo, Fail> {
         let deps = &self.deps;
-        let identity: DeviceIdentity = match self.raced(a, deps.keys.identity()).await? {
+        let identity: DeviceIdentity = match self.raced(a, a.keys.identity()).await? {
             Ok(identity) => identity,
             Err(error) => return Err(failed(FailureKind::Unsupported, Some(&error.0), false)),
         };
         a.data.lock().expect("attempt").device_id = identity.id.clone();
-        let pin = self.raced(a, deps.keys.pinned_host(&deps.host_id)).await?;
+        let pin = self.raced(a, a.keys.pinned_host(&deps.host_id)).await?;
         let mut eph = Some(EphemeralKey::generate());
         let expected_host_key = match &pin {
             Some(pin) => pin.host_key.clone(),
@@ -1246,7 +1287,7 @@ impl Inner {
             // The desktop vouched for the refusal with its own signature, so a revoked
             // pairing really is over.
             if failure.kind == FailureKind::Revoked {
-                deps.keys.unpair(&deps.host_id).await;
+                a.keys.unpair(&deps.host_id).await;
             }
             return Err(Fail::Failed {
                 failure,
@@ -1696,7 +1737,7 @@ impl Inner {
         if pin.as_ref().map(|p| p.name.as_str()) != Some(host_name.as_str()) {
             // Not awaited: notifications may already be arriving, and a slow store must
             // not hold them up.
-            let keys = Arc::clone(&deps.keys);
+            let keys = Arc::clone(&a.keys);
             let record = PinnedHost {
                 host_id: deps.host_id.clone(),
                 host_key: expected_host_key.to_owned(),
@@ -1794,7 +1835,7 @@ impl Inner {
                 _ => ConnectionFailure::new(FailureKind::Denied, Some(notice), false),
             };
             if failure.kind == FailureKind::Revoked {
-                let keys = Arc::clone(&self.deps.keys);
+                let keys = Arc::clone(&a.keys);
                 let host_id = self.deps.host_id.clone();
                 tokio::spawn(async move { keys.unpair(&host_id).await });
             }

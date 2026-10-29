@@ -372,7 +372,10 @@ export class LocalAppRuntime {
       const missing = (run.manifest.capabilities ?? []).filter(capability => !row.grants.includes(capability));
       if (missing.length) throw new Error(`Application permission required: ${missing.join(', ')}`);
       run.controller = new AbortController(); run.error = undefined; run.readiness.clear();
-      try { await this.startServices(id, run); await this.syncRun(id, run); }
+      try {
+        await this.startServices(id, run, () => signal?.removeEventListener('abort', cancel));
+        await this.syncRun(id, run);
+      }
       catch (error) {
         const failure = run.error, canceled = run.controller.signal.aborted && !failure;
         run.controller.abort(); await this.killChildren(run);
@@ -389,7 +392,7 @@ export class LocalAppRuntime {
       requests.delete(ref); if (!requests.size) this.requests.delete(id);
     }
   }
-  private async startServices(id: string, run: Invocation): Promise<void> {
+  private async startServices(id: string, run: Invocation, commit: () => void): Promise<void> {
     run.phase = 'starting'; this.changed();
     const controller = run.controller;
     for (const spec of orderedProcesses(run.manifest.processes ?? [])) {
@@ -410,6 +413,9 @@ export class LocalAppRuntime {
     }
     if (run.manifest.entry.type === 'static' && !(await fs.stat(await containedFile(run.workspace, run.manifest.entry.path))).isFile()) throw new Error('The application entry is not a file');
     controller.signal.throwIfAborted();
+    // Once the retained invocation is running, caller cancellation must not
+    // abort its controller; the host reconciles any abandoned opening instead.
+    commit();
     run.phase = 'running'; this.log(id, run, 'host', 'Application is ready'); this.changed();
   }
   private async launch(id: string, run: Invocation, step: LocalAppStep, name: string, extra: NodeJS.ProcessEnv, createEnvironment: boolean): Promise<ChildProcess> {

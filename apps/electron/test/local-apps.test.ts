@@ -129,6 +129,23 @@ test('a shared background resume survives one caller cancelling', async t => {
   await Promise.all([gate, other]);
   assert.equal(runtime.phase(row.id), 'running'); assert.equal(runtime.invocationId(row.id), invocation);
 });
+test('cancelling at background resume commit does not abort the retained run', async t => {
+  const { store } = await fixture(t);
+  const row = await store.publish({ name: 'Resume commit', html: '<!doctype html>' });
+  const controller = new AbortController();
+  let armed = false;
+  const runtime = new LocalAppRuntime(store, () => {
+    if (armed && runtime.phase(row.id) === 'running') controller.abort();
+  });
+  t.after(() => runtime.dispose());
+  await runtime.start(row.id); const invocation = runtime.invocationId(row.id)!; await runtime.stop(row.id);
+  armed = true;
+  await runtime.resume(row.id, row.revision, invocation, controller.signal);
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(runtime.phase(row.id), 'running');
+  assert.equal(runtime.invocationId(row.id), invocation);
+  assert.equal((runtime as any).invocations.get(row.id).controller.signal.aborted, false);
+});
 test('stop cancels every queued repair before any installation side effect', async t => {
   const { store, runtime } = await fixture(t);
   const row = await project(store, { schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Queued', entry: { type: 'static', path: 'index.html' }, install: [{ command: 'echo wrong > "$LOCAL_APP_DATA_DIR/installed"' }] }, { 'index.html': '<!doctype html>' });

@@ -444,6 +444,14 @@ struct Inner {
     delivery: mpsc::UnboundedSender<Delivery>,
     state_tx: watch::Sender<ConnectionState>,
     repairing: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    stop_test_hook: Mutex<Option<StopTestHook>>,
+}
+
+#[cfg(test)]
+struct StopTestHook {
+    entered: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
 }
 
 /// The viewer's connection to one computer. Cheap to clone.
@@ -608,6 +616,8 @@ impl ViewerConnection {
                 delivery,
                 state_tx,
                 repairing: tokio::sync::Mutex::new(()),
+                #[cfg(test)]
+                stop_test_hook: Mutex::new(None),
             }),
         }
     }
@@ -817,21 +827,28 @@ impl ViewerConnection {
             if let Some(retry) = core.retry.take() {
                 retry.abort();
             }
+            if core.current.phase != ConnectionPhase::Idle {
+                core.current.phase = ConnectionPhase::Idle;
+                core.current.pairing_code = None;
+                core.current.failure = None;
+                core.current.retry_at = None;
+                core.current.attempt = core.failures;
+                let snapshot = core.current.clone();
+                self.inner.state_tx.send_replace(snapshot.clone());
+                let _ = self.inner.delivery.send(Delivery::State(snapshot));
+            }
             (core.dialing.take(), core.live.take())
         };
+        #[cfg(test)]
+        if let Some(hook) = self.inner.stop_test_hook.lock().unwrap().take() {
+            hook.entered.send(()).unwrap();
+            hook.resume.recv().unwrap();
+        }
         if let Some(dialing) = dialing {
             self.inner.dispose(&dialing, "cancelled");
         }
         if let Some(live) = live {
             self.inner.dispose(&live, "cancelled");
-        }
-        if self.state().phase != ConnectionPhase::Idle {
-            self.inner.update(|state| {
-                state.phase = ConnectionPhase::Idle;
-                state.pairing_code = None;
-                state.failure = None;
-                state.retry_at = None;
-            });
         }
     }
 }
@@ -1931,5 +1948,125 @@ impl Inner {
         } else if offer_written {
             tokio::spawn(remove);
         }
+    }
+}
+
+#[cfg(test)]
+mod stop_repair_tests {
+    use super::*;
+    use crate::device::{KeysError, MemoryViewerKeys};
+    use crate::rtdb::MemoryRtdb;
+    use std::sync::atomic::AtomicUsize;
+
+    struct PausedKeys {
+        inner: Arc<MemoryViewerKeys>,
+        entered: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+        dialed: tokio::sync::Notify,
+        identity_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ViewerKeys for PausedKeys {
+        async fn identity(&self) -> Result<DeviceIdentity, KeysError> {
+            self.identity_calls.fetch_add(1, Ordering::SeqCst);
+            self.dialed.notify_one();
+            self.inner.identity().await
+        }
+        async fn reset_identity(&self) -> Result<(), KeysError> {
+            self.entered.notify_one();
+            self.resume.notified().await;
+            self.inner.reset_identity().await
+        }
+        async fn pinned_host(&self, host_id: &str) -> Option<PinnedHost> {
+            self.inner.pinned_host(host_id).await
+        }
+        async fn pin(&self, host: PinnedHost) {
+            self.inner.pin(host).await;
+        }
+        async fn unpair(&self, host_id: &str) {
+            self.inner.unpair(host_id).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_fences_repair_admitted_during_shutdown() {
+        let keys = Arc::new(PausedKeys {
+            inner: MemoryViewerKeys::new(),
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+            dialed: tokio::sync::Notify::new(),
+            identity_calls: AtomicUsize::new(0),
+        });
+        let deps = ViewerConnectionDeps::new(
+            "uid",
+            "host",
+            Arc::new(MemoryRtdb::new()),
+            keys.clone(),
+            DevicePlatform::Android,
+        );
+        let connection = ViewerConnection::new(deps);
+        // A verified revoked attempt takes this production failure path after
+        // its dialing/live resources have been disposed.
+        connection
+            .inner
+            .fail(ConnectionFailure::new(FailureKind::Revoked, None, false));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *connection.inner.stop_test_hook.lock().unwrap() = Some(StopTestHook {
+            entered: entered_tx,
+            resume: resume_rx,
+        });
+        let stopping = connection.clone();
+        let stop = std::thread::spawn(move || stopping.stop());
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let repairing = connection.clone();
+        let mut repair = tokio::spawn(async move { repairing.repair().await });
+        // A correctly stopped connection declines repair immediately. Before
+        // the fix it admits repair and reaches the paused identity reset.
+        let reset_started = tokio::select! {
+            _ = keys.entered.notified() => true,
+            result = &mut repair => {
+                result.unwrap();
+                false
+            }
+        };
+        resume_tx.send(()).unwrap();
+        stop.join().unwrap();
+        assert_eq!(connection.state().phase, ConnectionPhase::Idle);
+        if reset_started {
+            keys.resume.notify_one();
+            repair.await.unwrap();
+        }
+        if connection.state().phase != ConnectionPhase::Idle {
+            keys.dialed.notified().await;
+        }
+        assert_eq!(
+            keys.identity_calls.load(Ordering::SeqCst),
+            0,
+            "repair redialled after stop"
+        );
+        assert_eq!(connection.state().phase, ConnectionPhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn stopped_connection_can_be_retried_or_started_again() {
+        let connection = ViewerConnection::new(ViewerConnectionDeps::new(
+            "uid",
+            "host",
+            Arc::new(MemoryRtdb::new()),
+            MemoryViewerKeys::new(),
+            DevicePlatform::Android,
+        ));
+        connection
+            .inner
+            .fail(ConnectionFailure::new(FailureKind::Revoked, None, false));
+        connection.stop();
+        connection.retry();
+        assert_eq!(connection.state().phase, ConnectionPhase::Connecting);
+        connection.stop();
+        connection.start();
+        assert_eq!(connection.state().phase, ConnectionPhase::Connecting);
+        connection.stop();
     }
 }

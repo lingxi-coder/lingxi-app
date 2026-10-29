@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { build } from 'esbuild';
 import { createServer } from 'node:http';
+import { getEventListeners } from 'node:events';
 import { LocalAppRuntime } from '../src/main/local-apps/runtime.ts';
 
 const require = createRequire(import.meta.url);
@@ -16,14 +17,15 @@ const model = { providerId:'p', modelId:'m', label:'Model', canSelect:true, supp
 
 async function fixture(t: { after(fn: () => Promise<void>): void }, launchTimeoutMs?: number) {
   const root = await fs.mkdtemp(join(tmpdir(),'remote-app-host-'));
-  let windowCount = 0, running = false, revision = 1, runId = 'run-one', liveSession = false, honorAbort = true, ended = 0;
+  let windowCount = 0, shown = 0, running = false, revision = 1, runId = 'run-one', liveSession = false, honorAbort = true, ended = 0;
   let startHook = async (_signal?: AbortSignal) => {};
+  let loadWindow = (): Promise<void> => Promise.reject(new Error('load failed'));
   const electron = { BrowserWindow: class {
     static getAllWindows(){return [];}
     private closed?:()=>void;private destroyed=false;
     webContents={id:17,on(){},setWindowOpenHandler(){}};
     constructor(){windowCount++;}isDestroyed(){return this.destroyed;}on(name:string,fn:()=>void){if(name==='closed')this.closed=fn;}
-    destroy(){this.destroyed=true;this.closed?.();}async loadURL(){throw new Error('load failed');}show(){}focus(){}
+    destroy(){this.destroyed=true;this.closed?.();}loadURL(){return loadWindow();}show(){shown++;}focus(){}
   }, ipcMain:{removeHandler(){}}, session:{fromPartition:()=>({flushStorageData(){}})}, dialog:{showMessageBox:async()=>({response:1})} };
   const module = { exports: {} };
   const hostSetTimeout = (fn: () => void, ms: number) => {
@@ -51,7 +53,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, launchTimeou
   host.remoteGateway=gateway;
   host.setAgentBroker({cancelApp:async()=>{},dispose:async()=>{}});
   t.after(async()=>{ if (host.changeTimer) clearTimeout(host.changeTimer); await fs.rm(root,{recursive:true,force:true}); });
-  return {host,row,store,runtime,get windowCount(){return windowCount;},get ended(){return ended;},setStartHook:(fn:(signal?:AbortSignal)=>Promise<void>)=>{startHook=fn;},ignoreStartAbort:()=>{honorAbort=false;},setRun:(value:boolean)=>{running=value;}, get liveSession(){return liveSession;}};
+  return {host,row,store,runtime,get windowCount(){return windowCount;},get shown(){return shown;},get ended(){return ended;},setStartHook:(fn:(signal?:AbortSignal)=>Promise<void>)=>{startHook=fn;},setWindowLoad:(fn:()=>Promise<void>)=>{loadWindow=fn;},ignoreStartAbort:()=>{honorAbort=false;},setRun:(value:boolean)=>{running=value;}, get liveSession(){return liveSession;}};
 }
 
 test('remote access IPC defaults off, persists trusted opt-in, and launches headlessly', async t => {
@@ -121,6 +123,48 @@ test('Desktop opening callers cancel independently', async t => {
     (cancelFirst ? first : second).abort(); await cancelled;
     release(); await (cancelFirst ? b : a);
   }
+});
+
+test('last Desktop caller cancellation before the window-load continuation closes the opening', async t => {
+  const f = await fixture(t);
+  let release!: () => void, entered!: () => void;
+  const load = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  f.setWindowLoad(() => { entered(); return load; });
+  f.host.configureSession = async () => {}; f.host.clearCodeCache = async () => {};
+  f.setRun(true);
+  const controller = new AbortController();
+  const opening = f.host.open(id, false, false, controller.signal);
+  await waiting;
+  const operation = f.host.opening.get(id).promise;
+  release(); controller.abort();
+  await assert.rejects(opening);
+  await assert.rejects(operation);
+  assert.equal(f.shown, 0); assert.equal(f.host.windows.has(id), false);
+  assert.equal(f.runtime.phase(), 'stopped');
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('another Desktop caller can finish when one cancels at the window-load boundary', async t => {
+  const f = await fixture(t);
+  let release!: () => void, entered!: () => void;
+  const load = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  f.setWindowLoad(() => { entered(); return load; });
+  f.host.configureSession = async () => {}; f.host.clearCodeCache = async () => {};
+  f.setRun(true);
+  const controller = new AbortController();
+  const survivor = new AbortController();
+  const cancelled = f.host.open(id, false, false, controller.signal);
+  await waiting;
+  const remaining = f.host.open(id, false, false, survivor.signal);
+  release(); controller.abort();
+  await assert.rejects(cancelled);
+  await remaining;
+  assert.equal(f.shown, 1); assert.equal(f.host.windows.has(id), true);
+  assert.equal(f.runtime.phase(), 'running');
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+  assert.equal(getEventListeners(survivor.signal, 'abort').length, 0);
 });
 
 test('Stop cancels an incompatible Desktop opening waiting for another opening', async t => {

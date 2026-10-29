@@ -1,0 +1,59 @@
+{
+  "time_utc": "2026-10-29T04:35:08.403088+00:00",
+  "authorization": "User-authorized current-task Rust and Android/iOS temporary-cache cleanup",
+  "removed": [
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-apple-ios/debug/deps",
+      "allocated_bytes_before": 2376458240
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-apple-ios/debug/.fingerprint",
+      "allocated_bytes_before": 9908224
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-apple-ios/debug/incremental",
+      "allocated_bytes_before": 0
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/deps",
+      "allocated_bytes_before": 263864320
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/.fingerprint",
+      "allocated_bytes_before": 3571712
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/incremental",
+      "allocated_bytes_before": 0
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/Build/Intermediates.noindex",
+      "allocated_bytes_before": 664322048
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/ModuleCache.noindex",
+      "allocated_bytes_before": 131964928
+    }
+  ],
+  "preserved_input_sha256": {
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libios_framework.a": "25d10c37d36d9fe86e38fe61a7fbbbd3791a6869076fbe49ad136e552bc11ccf",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libandroid_aar.dylib": "62d0f499744c6c3529aeeaa897c201492a9ca2a526eb5af89252e2b11c28a552",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/uniffi-bindgen": "389b98c8e9289180ca2a15897b428969cbad94fe727ce3959e0ab50526cdfb7e",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-linux-android/debug/libandroid_aar.so": "569fb636d76dde5823d06c1c55839a7d7ca1e9515bb1e5952f28306c999e99fd",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-apple-ios/debug/libios_framework.a": "af23478dc1c3f005b2c0dde965044064e42be2c2b67cace201254fe84005c1bd",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/libios_framework.a": "4d8fd10863884123e8cbf2ecccf65b90459d05224734492d343e76bae688bd93",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/Build/Products/FullDebug-iphoneos/LingxiCode.app/LingxiCode": "600e28a4ac9c912dc589788429846cb15d3d544a06907147657db8759dffcdd6",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/Build/Products/LingxiCodeFull_iphoneos27.1-arm64.xctestrun": "0d84efa82a6bc7c025482da3b11f65a8af0f1426fdafbc5d5e776c07930f5c85"
+  },
+  "preserved_paths": [
+    "iOS/Android real bindings",
+    "all top-level raw native libraries and XCFrameworks",
+    "native C build library inputs",
+    "SDK and download prefix/range state",
+    "SwiftPM",
+    "Build/Products including signed app and test runners",
+    "all acceptance records and xcresult"
+  ],
+  "free_gib_before": 6.903,
+  "free_gib_after": 9.737
+}

@@ -1,0 +1,10 @@
+{
+  "head_exit_code": 1,
+  "working_tree_exit_code": 1,
+  "diagnostics_identical": true,
+  "head_snapshot": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/i18n-head-3pngj52z",
+  "before_log": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/i18n-head.log",
+  "after_log": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/i18n-permission-fix.log",
+  "before_diagnostics_sha256": "c7038463eee3ed8ff3fa4698f9c718625c92a9fed429a8868d155524b774a93c",
+  "after_diagnostics_sha256": "c7038463eee3ed8ff3fa4698f9c718625c92a9fed429a8868d155524b774a93c"
+}

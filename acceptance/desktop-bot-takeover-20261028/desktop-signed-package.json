@@ -1,0 +1,25 @@
+{
+  "signed_team": "AZ4AX7J833",
+  "wrapper": "npm run package:mac:flare",
+  "output": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/desktop-package/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
+  "zip": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/desktop-package/LingXi-Code-0.1.0-mac-arm64.zip",
+    "bytes": 299364248,
+    "sha256": "898c053c1e40cc2a99ee5f8a9d3648d489a169e39a2877dbb3c6ab2161392a1d"
+  },
+  "bridge_sha256": "9182ec373aaf9b17ac23499b4f175e74cf2620a84184c8cbe7b5331e1f8c5dc7",
+  "app_asar_sha256": "688fb29629c2451d71e7427fd6bf7d3ec3079b67f9d57e2f1e3ed760b8a33b5e",
+  "wrapper_exit_code": 0,
+  "static_verification": "pass",
+  "runtime_smoke": "pass",
+  "original_development_broker_restored": "restored original service; original plist and program hashes unchanged",
+  "log": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/desktop-flare-permission-fix-rebuild.log",
+  "source_head": "56a7d4038209887eb3c296f86d9cedc30e70d999",
+  "uncommitted_source_fix": "Explicit Ask mode remains distinct from an unset Bot permission mode",
+  "manual_only": [
+    "Gatekeeper transfer prompt on another Mac",
+    "Developer ID notarization/stapling"
+  ],
+  "free_gib_after_build": 5.307,
+  "tested_source_fix_commit": "9a1c75f32"
+}

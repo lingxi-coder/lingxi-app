@@ -1,0 +1,10 @@
+{
+  "source": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3/bun",
+  "target": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/toolchain/bin/bun",
+  "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3/bun",
+  "version": "1.4.3",
+  "revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+  "platform": "darwin",
+  "arch": "arm64",
+  "sha256": "28c7dd0a06916aba284d570ef44a2d70e9c538eaf2ba58dfe0910525563b3f79"
+}

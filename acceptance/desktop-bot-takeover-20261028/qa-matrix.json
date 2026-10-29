@@ -1,0 +1,121 @@
+{
+  "scope": "Fresh real FFI, compiled/signed device packages, and actual Desktop-hosted Bot Remote Control across Android/iOS; no new cloud-inbox/sharing deployment",
+  "checks": [
+    {
+      "id": "desktop-bot",
+      "claim": "Create and configure an isolated Bot with a configured user-authorized Terra/Luna model",
+      "controls": [
+        "Bot navigation",
+        "New Bot",
+        "name/persona/model/mode",
+        "save",
+        "new conversation"
+      ],
+      "functional": "Create through normal UI; send prompt; observe actual assistant reply and selected model",
+      "visual": "As-launched window, Bot list/card, Bot detail and active conversation; smaller supported window",
+      "state": "pending"
+    },
+    {
+      "id": "pairing",
+      "claim": "Owner devices reach the fresh signed Desktop host",
+      "controls": [
+        "Remote Control enable",
+        "device approval"
+      ],
+      "functional": "Enable host and approve only the known Galaxy S25/iPhone; both load the same dedicated Bot",
+      "visual": "Desktop host/device status and each phone host/Bot list",
+      "state": "pending"
+    },
+    {
+      "id": "android-live",
+      "claim": "Real Android JNI callbacks drive Bot list/new chat and actual streaming reply",
+      "controls": [
+        "host row",
+        "Bot row",
+        "new Bot chat",
+        "composer/send",
+        "Back"
+      ],
+      "functional": "Create/send/reopen a Bot chat on Galaxy; Desktop observes the same thread and reply",
+      "visual": "Local Apps then Bots then sessions heading; ready/running/idle states",
+      "state": "pending"
+    },
+    {
+      "id": "ios-live",
+      "claim": "Real iOS FFI delivers Bot list/chat/reply and survives navigation and cold launch",
+      "controls": [
+        "drawer remote",
+        "host/Bot row",
+        "new chat",
+        "composer/send",
+        "system Back",
+        "existing thread"
+      ],
+      "functional": "Run opt-in RemoteBotsDeviceAcceptanceUITests against the fresh host and configured model; actual assistant marker must arrive and remain after cold launch",
+      "visual": "Saved XCTest screenshot of dedicated real Bot assistant response",
+      "state": "pending"
+    },
+    {
+      "id": "human-action",
+      "claim": "Remote human action requests stay associated with their Bot conversation",
+      "controls": [
+        "permission approve/deny",
+        "question answer",
+        "Bot pending badge"
+      ],
+      "functional": "Ask configured model to request a safe workspace action and an explicit user question; act from phone; observe pending state and completion on Desktop",
+      "visual": "Pending action, question choices/answer, resolved Bot status",
+      "state": "pending"
+    },
+    {
+      "id": "cancel-reconnect",
+      "claim": "Interrupted work and transport changes recover without duplicate turns",
+      "controls": [
+        "stop",
+        "app background/foreground",
+        "host Remote Control off/on",
+        "retry if offered"
+      ],
+      "functional": "Cancel only a dedicated test turn; background/reopen viewer and cycle host availability; send a follow-up after recovery",
+      "visual": "Running/stop, offline/reconnecting, ready/idle restored",
+      "exploratory": true,
+      "state": "pending"
+    },
+    {
+      "id": "bot-revocation",
+      "claim": "Bot Remote Control off immediately revokes viewer access and can be restored",
+      "controls": [
+        "Bot remote switch off/on",
+        "viewer Back/reopen"
+      ],
+      "functional": "Disable only the dedicated Bot; viewer loses Bot access; reenable and reopen persisted conversation",
+      "visual": "Unavailable state, removed/reappearing Bot row, preserved chat",
+      "exploratory": true,
+      "state": "pending"
+    },
+    {
+      "id": "visual",
+      "claim": "Relevant Bot controls and conversation remain usable at actual device/window sizes",
+      "functional": "Viewport and region bounds after relevant interactions; short exploratory normal-input pass",
+      "visual": "Inspect desktop initial/smaller window, Bot list/detail/chat and phone list/chat/action states for clipping, occlusion, text contrast and stable layout",
+      "state": "pending"
+    }
+  ],
+  "already_verified": {
+    "android_unit": 1244,
+    "android_device_compose": 17,
+    "ios_device_remote_unit": 20,
+    "desktop_related_unit": 631,
+    "real_phone_architecture_ffi_libraries_and_bindings": "both pass",
+    "full_signed_ios_and_verified_android_builds": "pass",
+    "desktop_flare_static_runtime": "pass",
+    "desktop_actual_ask_permission": "pass"
+  },
+  "real_model": null,
+  "three_platform_e2e_complete": false,
+  "blockers": [
+    "Desktop account signed out; user normal-browser sign-in requested",
+    "Galaxy S25 locked; user unlock requested",
+    "GPT-6.1 Terra/Luna unavailable in current product catalog; waiting for model choice"
+  ]
+}

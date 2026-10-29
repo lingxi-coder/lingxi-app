@@ -1,0 +1,13 @@
+{
+  "pid": 52088,
+  "command": [
+    "bash",
+    "apps/ios/native/scripts/build-xcframework.sh"
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app",
+  "floor_gib": 4,
+  "started_at": 1793248018.009392,
+  "exit_code": 0,
+  "stopped_for_disk": false,
+  "free_gib": 8.345
+}

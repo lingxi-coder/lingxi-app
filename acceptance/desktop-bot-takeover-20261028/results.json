@@ -10,7 +10,10 @@
     "web_remote": 169,
     "android_unit": 1244,
     "rust_remote": 153,
-    "mobile_ffi": 70
+    "mobile_ffi": 70,
+    "android_device_bot_ui": 17,
+    "ios_device_remote_unit": 20,
+    "electron_permission_regression": 45
   },
   "generated_bindings": [
     {
@@ -44,7 +47,67 @@
       "sha256": "4479826811d420c55fc7a512cfa64dc8beb1a2374a6e674c506c58c17272ea24"
     }
   ],
-  "native_libraries_for_devices_rebuilt": false,
+  "native_libraries_for_devices_rebuilt": true,
   "device_e2e_completed": false,
-  "stop_reason": "Data volume reached 2.2 GiB available; iOS SDK download process 5557 is SIGSTOP; no new large builds until capacity recovers."
+  "stop_reason": null,
+  "source_head": "56a7d4038209887eb3c296f86d9cedc30e70d999",
+  "source_changes_under_validation": [
+    "apps/android/native/app/src/main/java/com/lingxi/code/remote/RemoteScreens.kt",
+    "apps/ios/native/UITests/RemoteBotsDeviceAcceptanceUITests.swift",
+    "apps/electron/src/renderer/bridge/botForm.ts",
+    "apps/electron/src/renderer/components/BotFields.tsx",
+    "apps/electron/src/renderer/i18n/botsCatalog.ts",
+    "apps/electron/test/bot-form.test.ts",
+    "apps/electron/test/bots-render.test.ts"
+  ],
+  "android_device": {
+    "device": "Galaxy S25 / Android 16",
+    "abi": "arm64-v8a",
+    "native_library_fresh": true,
+    "bindings_from_phone_library": true,
+    "full_apk_native_verification": true,
+    "unit_tests": 1244,
+    "instrumentation_tests": 17,
+    "instrumentation_duration_seconds": 90.338,
+    "installed_without_data_reset": true,
+    "cold_launch_observed": true,
+    "artifacts_sha256": {
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libios_framework.a": "25d10c37d36d9fe86e38fe61a7fbbbd3791a6869076fbe49ad136e552bc11ccf",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libandroid_aar.dylib": "62d0f499744c6c3529aeeaa897c201492a9ca2a526eb5af89252e2b11c28a552",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/uniffi-bindgen": "389b98c8e9289180ca2a15897b428969cbad94fe727ce3959e0ab50526cdfb7e",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-linux-android/debug/libandroid_aar.so": "569fb636d76dde5823d06c1c55839a7d7ca1e9515bb1e5952f28306c999e99fd",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/src/play/jniLibs/arm64-v8a/libandroid_aar.so": "7a634a4e6fc295a4ee473b5d0fbfc18e794b6d2eabffba1f0581c6880cc772f2",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/nativeSymbols/play/arm64-v8a/libandroid_aar.so": "569fb636d76dde5823d06c1c55839a7d7ca1e9515bb1e5952f28306c999e99fd",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/outputs/apk/play/debug/app-play-debug.apk": "bb57b6588ebfb2b524267383985f6cc29ce2cea12d1370a1b97c1daf8b427b21",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/outputs/apk/androidTest/play/debug/app-play-debug-androidTest.apk": "b9f980b9081a37fec8f4b49273c792396037b2b751abb62621bcaab9c7b7bd1d"
+    },
+    "first_instrumentation_run": "Started while screen was locked; one test failed before user unlocked; stopped only own test app and reran entire suite with 17 pass.",
+    "source_heading_fix": "Sessions header now follows Bots, after Local Apps."
+  },
+  "platform_native_status": {
+    "android": "Fresh arm64 JNI and binding/APK pair built, installed and UI-tested",
+    "ios": "Fresh current arm64 FFI/bindings, FullDebug app+tests compile/sign, update install, 20 focused Remote/Bot device unit tests pass",
+    "desktop": "Fresh source bridge and Flare signed package pass static/runtime verification; real Ask-mode UI regression verified"
+  },
+  "current_stage": "Actual three-platform acceptance awaiting Desktop sign-in, Galaxy unlock, and user choice of available model",
+  "ios_sdk_provenance": "ios-gstreamer-input-provenance.json",
+  "ios_device_library_pair": "ios-device-binding-library-pair.json",
+  "ios_device": {
+    "device": "iPhone 11 / iOS 27.0.1",
+    "bundle": "com.lingxi.code.full",
+    "signing_team": "AZ4AX7J833",
+    "full_app_and_tests_build": "pass",
+    "installed_as_update": true,
+    "focused_unit_tests": 20,
+    "bot_device_ui_test_compiled": true,
+    "real_remote_conversation_e2e": "pending Desktop host"
+  },
+  "desktop_package": "desktop-signed-package.json",
+  "desktop_actual_ui": "desktop-permission-actual-ui.json",
+  "i18n_gate": {
+    "pass": false,
+    "unchanged_from_head": true,
+    "proof": "i18n-comparison.json"
+  },
+  "tested_source_fix_commit": "9a1c75f32"
 }

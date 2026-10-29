@@ -1,0 +1,13 @@
+{
+  "time_utc": "2026-10-29T04:54:17.851766+00:00",
+  "removed_completed_release_caches": [
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/release/deps",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/release/.fingerprint",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/release/incremental"
+  ],
+  "preserved_release_bridge_sha256": "9182ec373aaf9b17ac23499b4f175e74cf2620a84184c8cbe7b5331e1f8c5dc7",
+  "preserved_release_bridge_bytes": 226506112,
+  "preserved_native_C_library_inputs": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/release/build",
+  "free_gib_before": 6.002,
+  "free_gib_after": 9.198
+}

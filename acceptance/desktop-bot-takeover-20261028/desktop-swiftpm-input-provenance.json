@@ -1,0 +1,7 @@
+{
+  "source": "/Users/luolingfeng/lingxi/lingxi-app/apps/electron/.native-cache/crashlytics",
+  "independent_clone": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/electron/.native-cache/crashlytics",
+  "package_resolved_sha256": "16247c47ed8458c91e0934ec0fdb0c9c81134d90004994f2e4b708d92a797f73",
+  "external_symlinks": 0,
+  "purpose": "Reuse package source/download inputs only; Xcode compiles fresh macOS products with current path remapping"
+}

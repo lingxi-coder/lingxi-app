@@ -309,6 +309,12 @@ jobs:
           bash apps/ios/native/scripts/build-linux-runtime.sh --rootfs-archive "$RUNNER_TEMP/sdk-rootfs/arm64-v8a/rootfs.tar.gz"
           bash apps/ios/native/scripts/install-sherpa-runtime.sh
 
+      # Binding generation first builds ios-framework for the macOS host.
+      # Install after rootfs staging to preserve its libarchive search path;
+      # each iOS target selects its own XCFramework through the Cargo wrapper.
+      - name: Install the pinned GStreamer macOS SDK for host bindings
+        run: python3 scripts/ci/gstreamer_sdk.py macos --root "$RUNNER_TEMP/gstreamer-sdk/macos"
+
       # Build the gitignored Generated/ Swift bindings + the
       # LingxiCodeFFI.xcframework that the Xcode project links against.
       - name: Build XCFramework + Swift bindings

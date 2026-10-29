@@ -388,6 +388,12 @@ class GStreamerSDKTests(unittest.TestCase):
             self.assertIn(f"scripts/ci/gstreamer_sdk.py {platform}", block)
             self.assertLess(block.index(f"scripts/ci/gstreamer_sdk.py {platform}"), block.index(gate))
 
+        ios = job_block(clients, "ios")
+        host_sdk = 'scripts/ci/gstreamer_sdk.py macos --root "$RUNNER_TEMP/gstreamer-sdk/macos"'
+        self.assertIn(host_sdk, ios)
+        self.assertLess(ios.index("Build native support and verified release rootfs"), ios.index(host_sdk))
+        self.assertLess(ios.index(host_sdk), ios.index("Build XCFramework + Swift bindings"))
+
         desktop = job_block(ROOT / ".github/workflows/desktop-packages.yml", "package")
         self.assertIn("runner: ubuntu-22.04", desktop)
         self.assertIn("actions/cache@v6", desktop)

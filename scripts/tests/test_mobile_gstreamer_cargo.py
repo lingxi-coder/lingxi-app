@@ -6,6 +6,7 @@ import importlib.util
 import os
 import pathlib
 import plistlib
+import shutil
 import sys
 import tempfile
 import unittest
@@ -116,6 +117,59 @@ class MobileGStreamerCargoTests(unittest.TestCase):
 
     def test_ios_header_symlink_cannot_escape_configured_xcframework(self) -> None:
         self._assert_ios_link_rejected("header")
+
+    def test_ios_targets_isolate_pkg_config_from_the_macos_host_sdk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory).resolve()
+            framework = make_ios_xcframework(base)
+            device = framework / "ios-arm64"
+            simulator = framework / "ios-arm64_x86_64-simulator"
+            shutil.copytree(device, simulator)
+            (simulator / "Headers/x86_64").mkdir()
+            shutil.copy2(device / "Headers/arm64/glibconfig.h", simulator / "Headers/x86_64/glibconfig.h")
+            macos = base / "macos-sdk"
+            host_environment = {
+                "LINGXI_GSTREAMER_SDK_MACOS": str(macos),
+                "LINGXI_GSTREAMER_SDK_IOS": str(framework),
+                "PKG_CONFIG": str(macos / "bin/pkg-config"),
+                "PKG_CONFIG_PATH": str(macos / "lib/pkgconfig"),
+                "PKG_CONFIG_LIBDIR": str(macos / "lib/pkgconfig"),
+                "CARGO_TARGET_DIR": str(base / "cargo-target"),
+            }
+            commands = []
+            pc_directories = set()
+
+            def fake_run(command, *, env=None, **kwargs):
+                if command[0] == "xcrun":
+                    return SimpleNamespace(returncode=0, stdout="arm64 x86_64", stderr="")
+                commands.append((command, env))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.dict(os.environ, host_environment), \
+                    patch.object(mobile_gstreamer.subprocess, "run", side_effect=fake_run):
+                for target, sdk in (
+                    ("aarch64-apple-ios", device),
+                    ("aarch64-apple-ios-sim", simulator),
+                    ("x86_64-apple-ios", simulator),
+                ):
+                    with self.subTest(target=target):
+                        command = ["cargo", "build", "--target", target]
+                        mobile_gstreamer.run_mobile("ios", target, None, None, command)
+                        actual_command, environment = commands[-1]
+                        self.assertEqual(actual_command, command)
+                        self.assertEqual(environment["PKG_CONFIG"], host_environment["PKG_CONFIG"])
+                        self.assertEqual(environment["PKG_CONFIG_PATH"], "")
+                        pc_dir = pathlib.Path(environment["PKG_CONFIG_LIBDIR"])
+                        self.assertTrue(pc_dir.is_relative_to(base / "cargo-target/.mobile-gstreamer-pc"))
+                        pc_directories.add(pc_dir)
+                        for module in mobile_gstreamer.MODULES:
+                            contents = (pc_dir / f"{module}.pc").read_text()
+                            self.assertIn(f"prefix={sdk}\n", contents)
+                            self.assertIn("Libs: -L${libdir} -lGStreamer\n", contents)
+                            self.assertNotIn(str(macos), contents)
+                        for name, value in host_environment.items():
+                            self.assertEqual(os.environ[name], value)
+            self.assertEqual(len(pc_directories), 3)
 
     def test_ios_cache_target_changes_when_static_archive_bytes_change(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,8 +1,9 @@
 import { promises as fs, constants as fsConstants, openSync, closeSync, writeFileSync, fsyncSync, lstatSync, unlinkSync } from 'node:fs';
+import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BaseEvent, Message, RunAgentInput } from '@ag-ui/core';
-import { EventSchema } from '@lingxi/local-app-agui/client';
+import { EventSchema, MessageSchema } from '@lingxi/local-app-agui/client';
 import type {
   LocalAppAgentChatHistory, LocalAppAgentChatListPage, LocalAppAgentChatSummary, LocalAppAgentModelChoice,
   LocalAppAgentSettings, LocalAppAgentTask, LocalAppAgentTaskState, LocalAppAgentUsage,
@@ -233,6 +234,7 @@ export class LocalAppAgentBroker {
   private readonly chatTombstones = new Map<string, ChatTombstone>();
   private readonly uncertainChats = new Set<string>();
   private readonly unsupportedApps = new Set<string>();
+  private readonly unavailableApps = new Set<string>();
   private readonly active = new Map<string, ActiveRun>();
   private readonly settlementListeners = new Set<(owner: LocalAppAgentOwner) => void>();
   private readonly epochs = new Map<string, number>();
@@ -262,6 +264,9 @@ export class LocalAppAgentBroker {
     await this.initialize();
     if (this.unsupportedApps.has(appId)) {
       throw new LocalAppAgentError('agent_format_unsupported', 'This Local App has unsupported Agent storage. Its data has been preserved.');
+    }
+    if (this.unavailableApps.has(appId)) {
+      throw new LocalAppAgentError('agent_storage_unavailable', 'This Local App has invalid or unsafe Agent storage. Its data has been preserved.');
     }
   }
   private appRoot(appId: string): string { return join(this.options.root, 'apps', appId, 'agent'); }
@@ -439,180 +444,271 @@ export class LocalAppAgentBroker {
       return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'invalid';
     } finally { await file?.close().catch(() => undefined); }
   }
+  private async readAgentJson(path: string): Promise<unknown> {
+    const stat = await fs.lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('unsafe Agent record');
+    const file = await fs.open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    try {
+      const opened = await file.stat();
+      if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error('Agent record changed during inspection');
+      return JSON.parse(await file.readFile({ encoding: 'utf8' }));
+    } finally { await file.close(); }
+  }
   private async load(): Promise<void> {
-    const interrupted = new Map<string, { path: string; record: LedgerRecord; hadFence: boolean }>();
     await this.safeDirectory(this.options.root);
     await this.ensureStorageFormat();
     const appsPath = join(this.options.root, 'apps');
     await this.safeDirectory(appsPath);
     for (const appEntry of await fs.readdir(appsPath, { withFileTypes: true })) {
-      if (!appEntry.isDirectory() || appEntry.isSymbolicLink() || !/^a[a-f0-9]{32}$/.test(appEntry.name)) continue;
-      const appId = appEntry.name, agentRoot = this.appRoot(appId);
+      if (!/^a[a-f0-9]{32}$/.test(appEntry.name)) continue;
+      const appId = appEntry.name;
       if (this.unsupportedApps.has(appId)) continue;
-      let agentStat;
-      try { agentStat = await fs.lstat(agentRoot); }
+      try {
+        if (!appEntry.isDirectory() || appEntry.isSymbolicLink()) throw new LocalAppAgentError('ledger_invalid', 'Agent storage contains an unsafe application directory.');
+        await this.loadApp(appId);
+      } catch {
+        // A rejected App store must neither poison shared initialization nor
+        // leave partially loaded records available to APIs or later recovery.
+        this.unavailableApps.add(appId);
+        for (const [key, record] of this.records) if (record.owner.appId === appId) {
+          this.records.delete(key); this.requests.delete(key); this.uncertainTasks.delete(key);
+        }
+        for (const [key, chat] of this.chats) if (chat.appId === appId) this.chats.delete(key);
+        for (const [key, chat] of this.chatTombstones) if (chat.appId === appId) this.chatTombstones.delete(key);
+        for (const key of this.uncertainChats) if (key.startsWith(`${appId}:`)) this.uncertainChats.delete(key);
+      }
+    }
+  }
+  private async loadApp(appId: string): Promise<void> {
+    const agentRoot = this.appRoot(appId);
+    let agentStat;
+    try { agentStat = await fs.lstat(agentRoot); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+    if (!agentStat.isDirectory() || agentStat.isSymbolicLink()) throw new LocalAppAgentError('ledger_invalid', 'Agent storage contains an unsafe application directory.');
+
+    // Inspect the entire App before changing any of it. Recovery can update a
+    // task, rewrite a Chat or delete tombstoned assets, so doing those while a
+    // later record is still unchecked would alter data belonging to a rejected App.
+    const groups = new Map<string, { path: string; entries: Dirent[] }>();
+    for (const group of ['tasks', 'chats', 'assets']) {
+      const groupPath = join(agentRoot, group);
+      let stat;
+      try { stat = await fs.lstat(groupPath); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
-      if (!agentStat.isDirectory() || agentStat.isSymbolicLink()) throw new LocalAppAgentError('ledger_invalid', 'Agent storage contains an unsafe application directory.');
-      for (const group of ['tasks', 'chats']) {
-        const groupPath = join(agentRoot, group);
-        try { await fs.access(groupPath); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
-        const groupStat = await fs.lstat(groupPath);
-        if (!groupStat.isDirectory() || groupStat.isSymbolicLink()) throw new LocalAppAgentError('ledger_invalid', 'Agent storage contains an unsafe directory.');
-        const entries = await fs.readdir(groupPath, { withFileTypes: true });
-        if (group === 'tasks') {
-          for (const entry of entries) {
-            if (!entry.name.endsWith('.json')) continue;
-            if (!entry.isFile() || entry.isSymbolicLink()) throw new LocalAppAgentError('ledger_invalid', 'The Agent task ledger is invalid.');
-            const path = join(groupPath, entry.name), record = JSON.parse(await fs.readFile(path, 'utf8')) as LedgerRecord;
-            const principal = owner(record.owner);
-            if (principal.appId !== appId || record.schema !== 1 || !PRIVATE_TASK_ID.test(record.privateTaskId) || `${record.privateTaskId}.json` !== entry.name
-              || !validPublicId(record.publicRunId) || !validPublicId(record.threadId) || typeof record.fingerprint !== 'string' || !Array.isArray(record.events)
-              || record.eventSequence !== record.events.length || !['queued', 'running', ...TERMINAL].includes(record.run?.state)
-              || !Number.isSafeInteger(record.run?.sequence) || !Number.isFinite(record.run?.createdAt) || !Number.isFinite(record.run?.updatedAt)) {
-              throw new LocalAppAgentError('ledger_invalid', 'The Agent task ledger is invalid.');
-            }
-            if (record.chat && (!CHAT_ID.test(record.chat.chatId) || !validPublicId(record.chat.userMessageId))) {
-              throw new LocalAppAgentError('ledger_invalid', 'The Agent task Chat identity is invalid.');
-            }
-            if (record.completionPending !== undefined && (record.completionPending !== true || record.run.state !== 'succeeded' || (record.chat && !record.assistantMessage))) {
-              throw new LocalAppAgentError('ledger_invalid', 'The Agent task completion marker is invalid.');
-            }
-            if (record.interruptionPending !== undefined && (record.interruptionPending !== true || record.run.state !== 'interrupted'
-              || record.run.error?.code !== 'host_restarted' || record.completionPending !== undefined)) {
-              throw new LocalAppAgentError('ledger_invalid', 'The Agent task interruption marker is invalid.');
-            }
-            record.events = record.events.map(event => EventSchema.parse(event));
-            const started = record.events[0];
-            if (started?.type !== 'RUN_STARTED' || started.runId !== record.publicRunId || started.threadId !== record.threadId) throw new LocalAppAgentError('ledger_invalid', 'The Agent event journal is invalid.');
-            const fence = await this.readTerminationFence(`${path}.termination`, record);
-            const key = requestKey(principal, record.publicRunId);
-            if (this.requests.has(key) || this.records.has(key)) throw new LocalAppAgentError('ledger_invalid', 'The Agent task ledger contains conflicting run IDs.');
-            const nonterminal = !TERMINAL.has(record.run.state);
-            const noResultEvidence = !record.assistantMessage && record.events.length === 1 && record.events[0]?.type === 'RUN_STARTED';
-            const interruptionEvent = record.events.at(-1);
-            const validInterruption = !record.interruptionPending || (!record.assistantMessage && record.events.length === 2
-              && interruptionEvent?.type === 'RUN_ERROR' && interruptionEvent.code === 'host_restarted');
-            const resumableInterruption = (record.interruptionPending === true && validInterruption) || (nonterminal && noResultEvidence);
-            let uncertain = fence === 'invalid' || record.completionPending === true || !validInterruption
-              || (fence === 'valid' && !resumableInterruption) || (nonterminal && !noResultEvidence);
-            if (!uncertain && nonterminal) {
-              // Never replay the Agent or its tools: an interrupted external
-              // action may have completed even though no result was recorded.
-              record.run.state = 'interrupted'; record.run.phase = undefined; record.run.sequence += 1; record.run.updatedAt = this.now();
-              record.run.error = { code: 'host_restarted', message: 'The host stopped before this task completed. Tool effects and results may be unknown. The task was not replayed.' };
-              this.appendEvent(record, { type: 'RUN_ERROR', message: record.run.error.message, code: record.run.error.code, timestamp: this.now() });
-              record.interruptionPending = true;
-              try { await durableAgentJson(path, record); await this.syncAgentParents(appId, 'tasks'); }
-              catch { uncertain = true; }
-            }
-            this.records.set(key, record); this.requests.set(key, key);
-            if (uncertain) {
-              this.uncertainTasks.add(key);
-              if (record.chat) this.uncertainChats.add(this.chatKey(appId, record.chat.chatId));
-            } else if (record.interruptionPending) {
-              interrupted.set(key, { path, record, hadFence: fence === 'valid' });
-            }
-          }
-        } else {
-          for (const entry of entries) {
-            if (!CHAT_ID.test(entry.name)) continue;
-            const directory = join(groupPath, entry.name), path = join(directory, 'chat.json');
-            const key = this.chatKey(appId, entry.name);
-            // Never repair or expose a Chat while its terminal transaction
-            // is unresolved; preserve the files for explicit recovery.
-            if (this.uncertainChats.has(key)) continue;
-            try {
-              if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error('unsafe Chat directory');
-              const stat = await fs.lstat(directory), file = await fs.lstat(path);
-              if (!stat.isDirectory() || stat.isSymbolicLink() || !file.isFile() || file.isSymbolicLink()) throw new Error('unsafe Chat file');
-              const row = JSON.parse(await fs.readFile(path, 'utf8')) as ChatRecord | ChatTombstone;
-              if (row.schema !== 2 || row.appId !== appId || row.chatId !== entry.name || !/^[a-f0-9]{64}$/.test(row.creationFingerprint)) throw new Error('invalid Chat identity');
-              if ('deleted' in row) {
-                if (row.deleted !== true) throw new Error('invalid Chat tombstone');
-                this.chatTombstones.set(key, row);
-                // A crash after committing deletion may leave private assets.
-                await this.cleanupDeletedChat({ appId }, entry.name);
-                continue;
-              }
-              const chat = row as ChatRecord;
-              if (typeof chat.sessionId !== 'string' || !PRIVATE_TASK_ID.test(chat.sessionId)
-                || typeof chat.title !== 'string' || !Number.isFinite(chat.createdAt) || !Number.isFinite(chat.updatedAt)
-                || typeof chat.archived !== 'boolean' || (chat.activeRunId !== undefined && !validPublicId(chat.activeRunId))
-                || !Array.isArray(chat.messages) || chat.messages.some(message => !message || typeof message !== 'object' || !('message' in message))
-                || !['idle', 'running', 'interrupted'].includes(chat.state)) throw new Error('invalid Chat record');
-              const pending = [...interrupted.values()].filter(item => item.record.owner.appId === appId && item.record.chat?.chatId === chat.chatId);
-              if (pending.length > 1) throw new Error('conflicting interrupted Chat runs');
-              if (pending.length === 1) {
-                const record = pending[0]!.record;
-                const turn = chat.messages.filter(message => message.runId === record.publicRunId);
-                if (turn.length !== 1 || messageId(turn[0]?.message) !== record.chat?.userMessageId
-                  || messageRecord(turn[0]?.message)?.role !== 'user'
-                  || !((chat.state === 'running' && chat.activeRunId === record.publicRunId)
-                    || (chat.state === 'interrupted' && chat.activeRunId === undefined))) throw new Error('inconsistent interrupted Chat');
-              }
-              if (chat.state === 'running' || chat.activeRunId) { chat.state = 'interrupted'; chat.activeRunId = undefined; chat.updatedAt = this.now(); await durableAgentJson(path, chat); }
-              this.chats.set(key, chat);
-            } catch {
-              // An incomplete or unrecognised record must never be treated as absent.
-              this.uncertainChats.add(key);
-            }
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('unsafe Agent directory');
+      if (group !== 'assets') groups.set(group, { path: groupPath, entries: await fs.readdir(groupPath, { withFileTypes: true }) });
+    }
+
+    const tasks: Array<{ path: string; record: LedgerRecord; principal: LocalAppAgentOwner; fence: 'missing' | 'valid' | 'invalid'; uncertain: boolean }> = [];
+    const tasksByKey = new Map<string, LedgerRecord>();
+    const taskGroup = groups.get('tasks');
+    for (const entry of taskGroup?.entries ?? []) {
+      if (!entry.name.endsWith('.json')) continue;
+      if (!entry.isFile() || entry.isSymbolicLink()) throw new Error('unsafe Agent task record');
+      const path = join(taskGroup!.path, entry.name), record = await this.readAgentJson(path) as LedgerRecord;
+      const principal = owner(record.owner);
+      if (principal.appId !== appId || record.schema !== 1 || !PRIVATE_TASK_ID.test(record.privateTaskId) || `${record.privateTaskId}.json` !== entry.name
+        || !validPublicId(record.publicRunId) || !validPublicId(record.threadId) || !/^[a-f0-9]{64}$/.test(record.fingerprint) || !Array.isArray(record.events)
+        || record.eventSequence !== record.events.length || !['queued', 'running', ...TERMINAL].includes(record.run?.state)
+        || !Number.isSafeInteger(record.run?.sequence) || record.run.sequence < 1 || !Number.isFinite(record.run?.createdAt) || !Number.isFinite(record.run?.updatedAt)
+        || !Number.isSafeInteger(record.run?.limits?.maxTurns) || record.run.limits.maxTurns < 1 || record.run.limits.maxTurns > LOCAL_APP_AGENT_MAX_TURNS
+        || !Number.isSafeInteger(record.run?.limits?.timeoutMs) || record.run.limits.timeoutMs < 1 || record.run.limits.timeoutMs > LOCAL_APP_AGENT_MAX_TIMEOUT_MS) {
+        throw new Error('invalid Agent task record');
+      }
+      if (record.chat && (!CHAT_ID.test(record.chat.chatId) || !validPublicId(record.chat.userMessageId) || record.threadId !== record.chat.chatId)) {
+        throw new Error('invalid Agent task Chat identity');
+      }
+      if (record.assistantMessage && (!messageId(record.assistantMessage) || messageRecord(record.assistantMessage)?.role !== 'assistant')) {
+        throw new Error('invalid Agent assistant message');
+      }
+      if (record.completionPending !== undefined && (record.completionPending !== true || record.run.state !== 'succeeded' || (record.chat && !record.assistantMessage))) {
+        throw new Error('invalid Agent completion marker');
+      }
+      if (record.interruptionPending !== undefined && (record.interruptionPending !== true || record.run.state !== 'interrupted'
+        || record.run.error?.code !== 'host_restarted' || record.completionPending !== undefined)) {
+        throw new Error('invalid Agent interruption marker');
+      }
+      record.events = record.events.map(event => EventSchema.parse(event));
+      const started = record.events[0];
+      if (started?.type !== 'RUN_STARTED' || started.runId !== record.publicRunId || started.threadId !== record.threadId) throw new Error('invalid Agent event journal');
+      const key = requestKey(principal, record.publicRunId);
+      if (tasksByKey.has(key) || this.requests.has(key) || this.records.has(key)) throw new Error('conflicting Agent run IDs');
+      const fence = await this.readTerminationFence(`${path}.termination`, record);
+      const nonterminal = !TERMINAL.has(record.run.state);
+      const noResultEvidence = !record.assistantMessage && record.events.length === 1 && record.events[0]?.type === 'RUN_STARTED';
+      const interruptionEvent = record.events.at(-1);
+      const validInterruption = !record.interruptionPending || (!record.assistantMessage && record.events.length === 2
+        && interruptionEvent?.type === 'RUN_ERROR' && interruptionEvent.code === 'host_restarted');
+      const resumableInterruption = (record.interruptionPending === true && validInterruption) || (nonterminal && noResultEvidence);
+      const uncertain = fence === 'invalid' || record.completionPending === true || !validInterruption
+        || (fence === 'valid' && !resumableInterruption) || (nonterminal && !noResultEvidence);
+      tasksByKey.set(key, record);
+      tasks.push({ path, record, principal, fence, uncertain });
+    }
+    const taskIds = new Set(tasks.map(({ record }) => record.privateTaskId));
+    for (const entry of taskGroup?.entries ?? []) {
+      if (entry.name.endsWith('.json')) continue;
+      // A named fence belongs to its task even when its contents or type are
+      // unsafe. Keep it untouched and quarantine that task instead of
+      // confusing it with an unowned entry in the shared task directory.
+      if (entry.name.endsWith('.json.termination')
+        && taskIds.has(entry.name.slice(0, -'.json.termination'.length))) continue;
+      if (entry.isSymbolicLink()) throw new Error('unsafe task storage entry');
+      if (PRIVATE_TASK_ID.test(entry.name) && entry.isDirectory() && taskIds.has(entry.name)) continue;
+      const temporary = /^([0-9a-f-]+)\.json\.([0-9a-f-]+)\.tmp$/i.exec(entry.name);
+      if (temporary && PRIVATE_TASK_ID.test(temporary[1]!) && PRIVATE_TASK_ID.test(temporary[2]!) && entry.isFile()) continue;
+      throw new Error('unrecognised task storage entry');
+    }
+
+    const chats = new Map<string, { path: string; row: ChatRecord | ChatTombstone }>();
+    const sessionIds = new Set<string>();
+    const chatGroup = groups.get('chats');
+    for (const entry of chatGroup?.entries ?? []) {
+      if (!CHAT_ID.test(entry.name) || !entry.isDirectory() || entry.isSymbolicLink()) throw new Error('unsafe Chat directory');
+      const directory = join(chatGroup!.path, entry.name), path = join(directory, 'chat.json');
+      const stat = await fs.lstat(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('unsafe Chat directory');
+      const row = await this.readAgentJson(path) as ChatRecord | ChatTombstone;
+      if (!row || row.schema !== 2 || row.appId !== appId || row.chatId !== entry.name || !/^[a-f0-9]{64}$/.test(row.creationFingerprint)) throw new Error('invalid Chat identity');
+      const deleted = 'deleted' in row;
+      if (deleted) {
+        if (row.deleted !== true || Object.keys(row).some(key => !['schema', 'appId', 'chatId', 'creationFingerprint', 'deleted'].includes(key))) {
+          throw new Error('invalid Chat tombstone');
+        }
+      } else {
+        const chat = row as ChatRecord;
+        if (typeof chat.sessionId !== 'string' || !PRIVATE_TASK_ID.test(chat.sessionId) || sessionIds.has(chat.sessionId.toLowerCase())
+          || typeof chat.title !== 'string' || !Number.isFinite(chat.createdAt) || !Number.isFinite(chat.updatedAt)
+          || typeof chat.archived !== 'boolean' || (chat.activeRunId !== undefined && !validPublicId(chat.activeRunId))
+          || !Array.isArray(chat.messages) || chat.messages.some(message => !message || typeof message !== 'object' || !('message' in message))
+          || !['idle', 'running', 'interrupted'].includes(chat.state)
+          || (chat.state === 'running') !== (chat.activeRunId !== undefined)) throw new Error('invalid Chat record');
+        sessionIds.add(chat.sessionId.toLowerCase());
+      }
+      // Do not follow a substituted assets directory or a symlink encountered
+      // during the preflight. A tombstone may legitimately retain arbitrary
+      // files until cleanup, so its entry names are not interpreted as assets.
+      const assets = join(directory, 'assets');
+      let assetStat;
+      try { assetStat = await fs.lstat(assets); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (assetStat) {
+        if (!assetStat.isDirectory() || assetStat.isSymbolicLink()) throw new Error('unsafe Chat assets directory');
+        for (const asset of await fs.readdir(assets, { withFileTypes: true })) {
+          if (asset.isSymbolicLink()) throw new Error('unsafe Chat asset');
+          if (!deleted && (!asset.isFile() || (!/^[a-f0-9]{64}\.bin$/.test(asset.name) && !(asset.name.startsWith('.') && asset.name.endsWith('.tmp'))))) {
+            throw new Error('invalid Chat asset');
           }
         }
       }
+      if (!deleted) {
+        const journal = new LocalAppChatAssetJournal(directory);
+        for (const message of (row as ChatRecord).messages) MessageSchema.parse(await journal.rehydrateMessage(message.message));
+      }
+      chats.set(entry.name, { path, row });
     }
-    // A task outcome referring to an unreadable Chat is not a confirmed
-    // public success until the associated Chat can be recovered.
-    for (const record of this.records.values()) {
-      if (record.chat && this.uncertainChats.has(this.chatKey(record.owner.appId, record.chat.chatId))) {
-        this.uncertainTasks.add(requestKey(record.owner, record.publicRunId));
+
+    // Cross-check both directions. In particular, an orphaned Chat row could be
+    // an interrupted admission or a lost task file; neither case proves that
+    // deleting the row or its assets is safe.
+    const userRows = new Map<string, number>();
+    for (const [chatId, { row }] of chats) {
+      if ('deleted' in row) continue;
+      const messageIds = new Set<string>();
+      for (const item of row.messages) {
+        if (typeof item.runId !== 'string') throw new Error('Chat message has no task identity');
+        const key = requestKey({ appId }, item.runId), record = tasksByKey.get(key), message = messageRecord(item.message), id = messageId(item.message);
+        if (!record?.chat || record.chat.chatId !== chatId || !message || !id || messageIds.has(id)) throw new Error('inconsistent Chat message');
+        messageIds.add(id);
+        if (id === record.chat.userMessageId && message.role === 'user') userRows.set(key, (userRows.get(key) ?? 0) + 1);
+        else if (!record.assistantMessage || id !== messageId(record.assistantMessage) || message.role !== 'assistant'
+          || agentDigest(message) !== agentDigest(record.assistantMessage)) throw new Error('inconsistent Chat message');
+      }
+      if (row.activeRunId !== undefined) {
+        const active = tasksByKey.get(requestKey({ appId }, row.activeRunId));
+        if (!active?.chat || active.chat.chatId !== chatId) throw new Error('inconsistent active Chat');
       }
     }
-    // Remove an in-flight fence only after both the interrupted task and its
-    // original Chat user row are durably reconciled. A second crash resumes
-    // from interruptionPending instead of replaying a model or tool.
-    for (const [key, item] of interrupted) {
-      const { path, record, hadFence } = item;
-      const chatKey = record.chat ? this.chatKey(record.owner.appId, record.chat.chatId) : undefined;
-      const chat = chatKey ? this.chats.get(chatKey) : undefined;
-      if (this.uncertainTasks.has(key) || (chatKey && (this.uncertainChats.has(chatKey) || !chat))) {
-        this.uncertainTasks.add(key); if (chatKey) this.uncertainChats.add(chatKey); continue;
+    const pendingChats = new Set<string>();
+    for (const { record, principal } of tasks) {
+      if (!record.chat) continue;
+      const chat = chats.get(record.chat.chatId)?.row;
+      if (!chat) throw new Error('task Chat is missing');
+      if ('deleted' in chat) {
+        if (!TERMINAL.has(record.run.state) || record.interruptionPending) throw new Error('active task refers to deleted Chat');
+        continue;
       }
-      try {
-        if (hadFence) { await fs.unlink(`${path}.termination`); await syncDirectory(dirname(path)); }
-        delete record.interruptionPending;
-        await durableAgentJson(path, record); await this.syncAgentParents(record.owner.appId, 'tasks');
-      } catch {
-        this.uncertainTasks.add(key); if (chatKey) this.uncertainChats.add(chatKey);
-      }
-    }
-    // Drop a user-message write whose paired task record was not committed.
-    // Admission commits the chat row then the task file; a crash between them
-    // must not leave a ghost turn that blocks an exact retry.
-    for (const chat of this.chats.values()) {
-      if (this.uncertainChats.has(this.chatKey(chat.appId, chat.chatId))) continue;
-      const previousLength = chat.messages.length;
-      chat.messages = chat.messages.filter(row => {
-        if (typeof row.runId !== 'string') return false;
-        const record = typeof row.runId === 'string' ? this.records.get(requestKey({ appId: chat.appId }, row.runId)) : undefined;
-        if (!record?.chat || record.chat.chatId !== chat.chatId || record.owner.appId !== chat.appId) return false;
-        const id = messageId(row.message);
-        return id === record.chat.userMessageId || (record.assistantMessage && id === record.assistantMessage.id);
-      });
-      if (chat.messages.length !== previousLength) {
-        await this.saveChat(chat);
-        await new LocalAppChatAssetJournal(this.chatDirectory({ appId: chat.appId }, chat.chatId))
-          .pruneUnreferenced(chat.messages.map(message => message.message));
+      const key = requestKey(principal, record.publicRunId);
+      if (userRows.get(key) !== 1) throw new Error('task user message is missing');
+      if (!TERMINAL.has(record.run.state) || record.interruptionPending) {
+        if (pendingChats.has(record.chat.chatId)) throw new Error('conflicting active Chat tasks');
+        pendingChats.add(record.chat.chatId);
+        if (!((chat.state === 'running' && chat.activeRunId === record.publicRunId)
+          || (chat.state === 'interrupted' && chat.activeRunId === undefined))) throw new Error('inconsistent interrupted Chat');
       }
     }
-    // Recover the small commit window between a task's terminal event and its chat read-model write.
-    for (const record of this.records.values()) if (record.chat && record.run.state === 'succeeded' && record.assistantMessage) {
-      if (this.uncertainTasks.has(requestKey(record.owner, record.publicRunId))
-        || this.uncertainChats.has(this.chatKey(record.owner.appId, record.chat.chatId))) continue;
-      const chat = this.chats.get(this.chatKey(record.owner.appId, record.chat.chatId));
+
+    // A well-formed task with an unconfirmed outcome is not replayed or
+    // repaired. Mark all related records first so recovery cannot touch their
+    // Chat or tombstone, even when it appears earlier in directory order.
+    for (const { record, principal, uncertain } of tasks) {
+      const key = requestKey(principal, record.publicRunId);
+      this.records.set(key, record); this.requests.set(key, key);
+      if (uncertain) {
+        this.uncertainTasks.add(key);
+        if (record.chat) this.uncertainChats.add(this.chatKey(appId, record.chat.chatId));
+      }
+    }
+    for (const { record, principal } of tasks) {
+      if (record.chat && this.uncertainChats.has(this.chatKey(appId, record.chat.chatId))) {
+        this.uncertainTasks.add(requestKey(principal, record.publicRunId));
+      }
+    }
+    const interrupted = new Map<string, { path: string; record: LedgerRecord; hadFence: boolean }>();
+    for (const { path, record, principal, fence } of tasks) {
+      const key = requestKey(principal, record.publicRunId);
+      if (this.uncertainTasks.has(key)) continue;
+      if (!TERMINAL.has(record.run.state)) {
+        // Never replay an interrupted Agent or any of its external actions.
+        record.run.state = 'interrupted'; record.run.phase = undefined; record.run.sequence += 1; record.run.updatedAt = this.now();
+        record.run.error = { code: 'host_restarted', message: 'The host stopped before this task completed. Tool effects and results may be unknown. The task was not replayed.' };
+        this.appendEvent(record, { type: 'RUN_ERROR', message: record.run.error.message, code: record.run.error.code, timestamp: this.now() });
+        record.interruptionPending = true;
+        await durableAgentJson(path, record); await this.syncAgentParents(appId, 'tasks');
+      }
+      if (record.interruptionPending) interrupted.set(key, { path, record, hadFence: fence === 'valid' });
+    }
+    for (const [chatId, { path, row }] of chats) {
+      const key = this.chatKey(appId, chatId);
+      if (this.uncertainChats.has(key)) continue;
+      if ('deleted' in row) {
+        this.chatTombstones.set(key, row);
+        continue;
+      }
+      const chat = row as ChatRecord;
+      if (chat.state === 'running' || chat.activeRunId) { chat.state = 'interrupted'; chat.activeRunId = undefined; chat.updatedAt = this.now(); await durableAgentJson(path, chat); }
+      this.chats.set(key, chat);
+    }
+    for (const { path, record, hadFence } of interrupted.values()) {
+      const chatKey = record.chat ? this.chatKey(appId, record.chat.chatId) : undefined;
+      if (chatKey && !this.chats.has(chatKey)) throw new Error('interrupted task Chat is unavailable');
+      if (hadFence) { await fs.unlink(`${path}.termination`); await syncDirectory(dirname(path)); }
+      delete record.interruptionPending;
+      await durableAgentJson(path, record); await this.syncAgentParents(appId, 'tasks');
+    }
+    // Recover a terminal task whose Chat projection did not reach disk.
+    for (const { record } of tasks) if (record.chat && record.run.state === 'succeeded' && record.assistantMessage) {
+      if (this.uncertainTasks.has(requestKey(record.owner, record.publicRunId)) || this.uncertainChats.has(this.chatKey(appId, record.chat.chatId))) continue;
+      const chat = this.chats.get(this.chatKey(appId, record.chat.chatId));
       if (chat && !chat.messages.some(message => messageId(message.message) === record.assistantMessage!.id)) {
         chat.messages.push({ message: structuredClone(record.assistantMessage), runId: record.publicRunId });
         chat.state = 'idle'; chat.activeRunId = undefined; await this.saveChat(chat);
       }
+    }
+    // Cleanup is last: an earlier recovery failure must not delete a separate
+    // Chat's assets before this App has finished reconciling its records.
+    for (const [chatId, { row }] of chats) {
+      if ('deleted' in row && !this.uncertainChats.has(this.chatKey(appId, chatId))) await this.cleanupDeletedChat({ appId }, chatId);
     }
   }
   private lookup(caller: LocalAppAgentOwner, runId: string): LedgerRecord {

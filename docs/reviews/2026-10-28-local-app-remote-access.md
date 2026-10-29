@@ -623,3 +623,75 @@ files added in this round. Canonical main was rechecked clean at
 `8f193300b9577b3b4600a20d22214ca28c3c646d`. Recommendation: **COMMENT**;
 native packages, physical browser/device flows and public relay/TURN acceptance
 remain separate outstanding release checks. No commit or push was made.
+
+## Eighth independent review
+
+Stage 1 checked that Desktop's existing runtime remains authoritative, Mobile
+hosting and browser-opening choices remain available, and authenticated HTTPS
+continues to carry application traffic with optional RTC. The outbound tunnel
+still targets Desktop loopback and does not depend on its LAN or public IP;
+actual reconnection after an address change remains a deployment acceptance
+check. Stage 2 reviewed the **29-file union** of the 25 merged review-fix files
+(`8f193300b..daffddd21`) and four Rust context files. This round directly changed
+ten source and test files, plus this report. Seven grouped findings were fixed:
+one HIGH and six MEDIUM. Independent native review closed the identified
+issues within this reviewed source scope.
+
+| Severity | Corrected location | Trigger, fix and evidence |
+| --- | --- | --- |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:1426`, `:1378` | Desktop openings with different version intents could share the first result, and one caller's cancellation could cancel another. Openings now share only matching intents, count independent waiters, and cancel queued operations on Stop. Version selections retain their expected-current check and an opening epoch. The pre-fix reproduction returned success to both version requests after executing only the first; regressions cover independent cancellations, conflicting versions and Stop during a queued selection. |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:898` | A remote opener waiting for an unrelated Desktop opening inherited its cancellation. Wait for that opening's cleanup without adopting its error, then independently authorize and start the remote run. The pre-fix reproduction returned the Desktop cancellation to both callers; the regression uses a real runtime. |
+| MEDIUM | `apps/electron/src/main/local-apps/runtime.ts:376`, `:413` | Cancellation at retained-resume commit could leave a `running` invocation with its controller aborted. Detach caller cancellation at the running commit boundary; the host reconciles an abandoned opening. The pre-fix reproduction observed `running` with an aborted controller, and the new test checks the retained invocation and live controller. |
+| MEDIUM | `apps/android/native/app/src/main/java/com/lingxi/code/remote/RemoteControlManager.kt:200`, `:486` | An old account's callback or forget completion could pass a generation check and overwrite replacement-account state while rebuild ran. Rebuild, callback checks and state updates now share the admission lock; old channels and the old client close outside it. The controlled callback-lock test and exact-method JVM helper check replacement connection, sessions, forget barrier and recovery. |
+| HIGH | `packages/mobile-ffi/src/remote.rs:295`, `:316`, `:493`, `:2016` | Forget, connect and queued or in-flight pin reads/writes could interleave, including across replacement clients using the same platform store, allowing stale trust to survive or reappear. Shared per-store and per-host coordination orders operations, invalidates affected live roots and fences obsolete trust epochs. Controlled Rust tests cover in-flight reads and writes, replacement clients, old roots and unrelated hosts. |
+| MEDIUM | `packages/mobile-ffi/src/remote.rs:325`, `:376`, `packages/remote-control-client/src/connection.rs:1113` | The initial trust repair could discard legitimate approval or revocation writes after ordinary retirement, and mishandle stale roots or the repairing connection's own watcher. Per-attempt trust scopes and store epochs distinguish ordinary retirement from explicit trust reset; weak root invalidation preserves the active repair's own root. Regressions cover detached writes, failed and in-place repair, stale scopes and retained session watchers. |
+| MEDIUM | `packages/mobile-ffi/src/remote.rs:2016`, `:2037` | Cancelling forget or repair after admission could interrupt a platform delete or identity reset and release its lock before cleanup completed. Forget invalidates trust synchronously and repair snapshots the connection generation before spawning; the owned transaction retains both the `HostGate` and its mutex guard through completion. Cancellation before admission has no effect. Controlled tests pause delete and reset, cancel the caller and check first-poll ordering, gate lifetime and recovery. |
+
+Fresh verification on this review tree:
+
+- The gateway/peer/feature suite passed **171/171**, and the Agent/runtime
+  suite passed **91/91**, using the appropriate bundled Electron or cached
+  Node 24 runtime. A fresh bridge build, Desktop Node and renderer typechecks,
+  and the unsigned Desktop JavaScript build passed. The three pre-fix Desktop
+  reproductions are recorded in `/private/tmp/lingxi-review8-before.log`.
+- Configured TypeScript LSP diagnostics were received for **18/18** requested
+  files with zero errors. The 18-file AST scan found zero syntax errors and no
+  reviewed production `console.log` or literal-credential matches; the parent
+  reviewed 20 empty catches. Receipts are
+  `/private/tmp/lingxi-review8-lsp-final.json` and
+  `/private/tmp/lingxi-review8-ast.json`.
+- The exact-method Android JVM helper passed
+  (`/private/tmp/lingxi-review8-android-fence.log`). The cached Android shared
+  Rust remote suite passed **51/51** on the final behavioral tree, including
+  three first-poll and gate-lifetime regressions, with:
+
+  ```sh
+  CARGO_TARGET_DIR=/Users/luolingfeng/lingxi/lingxi-app/target CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test --offline -p android-aar --lib remote::common::tests:: -- --nocapture
+  ```
+
+  No raw logfile was retained for that Rust invocation. Only formatting of the
+  shared connection's Local App helpers followed that run, with no behavior
+  change; rustfmt and diff checks passed for all four changed Rust files.
+  The tested TypeScript, JavaScript and Kotlin file hashes were unchanged, and
+  the fresh unsigned Desktop JavaScript build completed. Android repository
+  JUnit and full native builds were not run. The iOS Rust build stopped for
+  disk space; an independent shared-client feature build stopped while
+  recompiling dependencies. Neither is counted as a pass.
+
+The existing `unpair()` contract ignores platform-delete errors; it was not
+changed here, and the storage-ordering tests establish behavior for successful
+storage operations. A completed RPC's live-`Arc` check is a valid completion
+linearization point. A generic cross-host chat callback concern predates the
+feature parent `d0ecc193` and no Local App admission failure was reproduced;
+neither was counted as a new finding.
+
+Additional receipts are `/private/tmp/lingxi-review8-feature.log`,
+`/private/tmp/lingxi-review8-agent-runtime.log`,
+`/private/tmp/lingxi-review8-bridge-build.log`,
+`/private/tmp/lingxi-review8-desktop-typecheck.log` and
+`/private/tmp/lingxi-review8-desktop-build.log`. Canonical main was checked
+clean at `daffddd21e77e53e9381a215d05856b1ac6b2462`; this isolated branch is
+uncommitted and unpushed. Recommendation: **COMMENT**; the identified native
+issues are closed within the reviewed source scope, while signed-package,
+physical-device, public relay, TURN and network-change acceptance remain open.
+These checks do not establish release acceptance or the absence of other defects.

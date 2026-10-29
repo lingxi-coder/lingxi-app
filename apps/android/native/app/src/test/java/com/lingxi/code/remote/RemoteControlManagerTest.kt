@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -244,6 +245,53 @@ class RemoteControlManagerTest {
         assertTrue(h.manager.hosts.value.hosts.single().paired)
         assertEquals(1, first.calls.count { it == "forget:h" })
         assertFalse(replacement.calls.contains("forget:h"))
+    }
+
+    @Test fun oldConnectionCallbackWaitingOnLockCannotOverwriteReplacement() = runTest(UnconfinedTestDispatcher()) {
+        val h = Harness(this, "u1"); runCurrent()
+        val oldListener = h.clients.single().listener
+        val lock = RemoteControlManager::class.java.getDeclaredField("appRequestLock").apply { isAccessible = true }.get(h.manager)
+        val finished = CountDownLatch(2)
+        lateinit var callbacks: List<Thread>
+        lateinit var replacement: FakeClient
+        lateinit var forget: kotlinx.coroutines.Job
+        synchronized(lock) {
+            callbacks = listOf(
+                Thread {
+                    try { runBlocking { oldListener.onConnectionState(connectionState("old", RemoteConnectionPhaseFfi.IDLE)) } }
+                    finally { finished.countDown() }
+                },
+                Thread {
+                    try { runBlocking { oldListener.onSessions("old", emptyList()) } }
+                    finally { finished.countDown() }
+                },
+            )
+            callbacks.forEach { it.start() }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (callbacks.any { it.state != Thread.State.BLOCKED } && System.nanoTime() < deadline) Thread.yield()
+            check(callbacks.all { it.state == Thread.State.BLOCKED }) { "old callbacks did not reach the manager lock" }
+            h.account.mutableUid.value = "u2"
+            runCurrent()
+            replacement = h.clients.last()
+            check(replacement.uid == "u2")
+            replacement.state = connectionState("new", RemoteConnectionPhaseFfi.READY)
+            runBlocking { replacement.listener.onConnectionState(replacement.state!!) }
+            replacement.forgetGate = CompletableDeferred()
+            forget = launch { h.manager.forget("new") }
+            runCurrent()
+        }
+        assertTrue(withContext(Dispatchers.IO) { finished.await(5, TimeUnit.SECONDS) })
+        callbacks.forEach { it.join() }
+        assertEquals("new", h.manager.connection.value?.hostId)
+        assertEquals("new", h.manager.sessions.value.hostId)
+        replacement.forgetGate!!.complete(Unit); forget.join()
+        replacement.listGate = CompletableDeferred(emptyList())
+        assertTrue(runCatching { h.manager.listApps("new") }.isFailure)
+        replacement.state = connectionState("new", RemoteConnectionPhaseFfi.IDLE)
+        replacement.listener.onConnectionState(replacement.state!!)
+        replacement.state = connectionState("new", RemoteConnectionPhaseFfi.READY)
+        replacement.listener.onConnectionState(replacement.state!!)
+        assertEquals(emptyList<RemoteLocalAppFfi>(), h.manager.listApps("new"))
     }
 
     @Test fun accountChangeWhileWaitingForClientDoesNotForgetOnReplacement() = runTest(UnconfinedTestDispatcher()) {

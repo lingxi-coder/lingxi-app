@@ -3,7 +3,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use super::{
     NativeMediaHost, PlatformRemoteKeyStore, PlatformRemoteListener,
@@ -50,7 +50,7 @@ use remote_control_client::session::{
     SessionListener, SessionState, SessionStatus,
 };
 use remote_control_client::signaling::{
-    hosts_path, parse_hosts_listing, HostPresence, HostRecord, TransportKind,
+    hosts_path, parse_hosts_listing, DevicePlatform, HostPresence, HostRecord, TransportKind,
 };
 use remote_control_client::text::display_text;
 use remote_control_client::version::HEARTBEAT_INTERVAL;
@@ -286,17 +286,170 @@ impl TokenProvider for TokenBridge {
 /// and the pins often, and a pin the store failed to persist still holds for this run.
 struct KeyStoreBridge {
     inner: Box<dyn PlatformRemoteKeyStore>,
+    coordinator: Arc<AccountCoordinator>,
+}
+
+/// Locks are kept only while a caller or connection uses them. Unrelated hosts
+/// never wait on one another's platform key-store operations.
+#[derive(Default)]
+struct HostGate {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    trust_epoch: AtomicU64,
+}
+
+#[derive(Default)]
+struct HostGates(Mutex<HashMap<String, Weak<HostGate>>>);
+
+impl HostGates {
+    fn get(&self, host_id: &str) -> Arc<HostGate> {
+        let mut gates = self.0.lock().expect("host gates");
+        gates.retain(|_, gate| gate.strong_count() != 0);
+        if let Some(gate) = gates.get(host_id).and_then(Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(HostGate::default());
+        gates.insert(host_id.to_owned(), Arc::downgrade(&gate));
+        gate
+    }
+}
+
+#[derive(Default)]
+struct AccountCoordinator {
+    host_gates: HostGates,
+    store_gates: HostGates,
     identity: tokio::sync::Mutex<Option<Arc<IdentityKey>>>,
     pins: Mutex<HashMap<String, PinnedHost>>,
+    roots: Mutex<Vec<Weak<ConnectionRoot>>>,
+}
+
+impl AccountCoordinator {
+    fn register(&self, root: &Arc<ConnectionRoot>) {
+        let mut roots = self.roots.lock().expect("connection roots");
+        roots.retain(|root| root.strong_count() != 0);
+        roots.push(Arc::downgrade(root));
+    }
+
+    fn invalidate(&self, host_id: &str, except: Option<&Arc<()>>) {
+        // Never hold the registry lock while entering another Core's active
+        // lock: connection installation registers while holding active.
+        let matches = {
+            let mut roots = self.roots.lock().expect("connection roots");
+            roots.retain(|root| root.strong_count() != 0);
+            roots
+                .iter()
+                .filter_map(Weak::upgrade)
+                .filter(|root| {
+                    root.host_id == host_id && except.is_none_or(|id| !Arc::ptr_eq(id, &root.id))
+                })
+                .collect::<Vec<_>>()
+        };
+        for root in matches {
+            root.invalidate();
+        }
+    }
+}
+
+fn account_coordinator(uid: &str) -> Arc<AccountCoordinator> {
+    static COORDINATORS: OnceLock<Mutex<HashMap<String, Weak<AccountCoordinator>>>> =
+        OnceLock::new();
+    // Android's current DataStore has one identity and host-pin namespace for
+    // the install. iOS Keychain services are account-scoped.
+    let key = match REMOTE_DEVICE_PLATFORM {
+        DevicePlatform::Android => "android-install".to_owned(),
+        _ => format!("account:{uid}"),
+    };
+    let mut entries = COORDINATORS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("account coordinators");
+    entries.retain(|_, coordinator| coordinator.strong_count() != 0);
+    if let Some(coordinator) = entries.get(&key).and_then(Weak::upgrade) {
+        return coordinator;
+    }
+    let coordinator = Arc::new(AccountCoordinator::default());
+    entries.insert(key, Arc::downgrade(&coordinator));
+    coordinator
+}
+
+/// Detached approval and revocation writes remain valid across ordinary
+/// disconnects, but must not cross an explicit trust reset for this host.
+struct ConnectionKeys {
+    inner: Arc<dyn ViewerKeys>,
+    host_id: String,
+    gate: Arc<HostGate>,
+    trust_epoch: AtomicU64,
+    coordinator: Arc<AccountCoordinator>,
+    root_id: Arc<()>,
+}
+
+#[async_trait]
+impl ViewerKeys for ConnectionKeys {
+    fn for_attempt(&self) -> Option<Arc<dyn ViewerKeys>> {
+        Some(Arc::new(Self {
+            inner: Arc::clone(&self.inner),
+            host_id: self.host_id.clone(),
+            gate: Arc::clone(&self.gate),
+            trust_epoch: AtomicU64::new(self.trust_epoch.load(Ordering::SeqCst)),
+            coordinator: Arc::clone(&self.coordinator),
+            root_id: Arc::clone(&self.root_id),
+        }))
+    }
+
+    async fn identity(&self) -> Result<DeviceIdentity, KeysError> {
+        self.inner.identity().await
+    }
+    async fn reset_identity(&self) -> Result<(), KeysError> {
+        self.inner.reset_identity().await?;
+        // A verified revocation's detached unpair may still be queued behind
+        // this repair. Remove the old pin before invalidating that attempt.
+        self.inner.unpair(&self.host_id).await;
+        let next = self.gate.trust_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        self.trust_epoch.store(next, Ordering::SeqCst);
+        self.coordinator
+            .invalidate(&self.host_id, Some(&self.root_id));
+        Ok(())
+    }
+    async fn pinned_host(&self, host_id: &str) -> Option<PinnedHost> {
+        if host_id != self.host_id {
+            return None;
+        }
+        let _guard = self.gate.lock.lock().await;
+        if self.gate.trust_epoch.load(Ordering::SeqCst) != self.trust_epoch.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.inner.pinned_host(host_id).await
+    }
+    async fn pin(&self, host: PinnedHost) {
+        if host.host_id != self.host_id {
+            return;
+        }
+        let _guard = self.gate.lock.lock().await;
+        if self.gate.trust_epoch.load(Ordering::SeqCst) == self.trust_epoch.load(Ordering::SeqCst) {
+            self.inner.pin(host).await;
+        }
+    }
+    async fn unpair(&self, host_id: &str) {
+        if host_id != self.host_id {
+            return;
+        }
+        let _guard = self.gate.lock.lock().await;
+        if self.gate.trust_epoch.load(Ordering::SeqCst) == self.trust_epoch.load(Ordering::SeqCst) {
+            self.inner.unpair(host_id).await;
+        }
+    }
 }
 
 impl KeyStoreBridge {
+    #[cfg(test)]
     fn new(inner: Box<dyn PlatformRemoteKeyStore>) -> Self {
-        Self {
-            inner,
-            identity: tokio::sync::Mutex::new(None),
-            pins: Mutex::new(HashMap::new()),
-        }
+        Self::with_coordinator(inner, Arc::new(AccountCoordinator::default()))
+    }
+
+    fn with_coordinator(
+        inner: Box<dyn PlatformRemoteKeyStore>,
+        coordinator: Arc<AccountCoordinator>,
+    ) -> Self {
+        Self { inner, coordinator }
     }
 }
 
@@ -307,7 +460,7 @@ fn keys_error(error: RemoteFfiError) -> KeysError {
 #[async_trait]
 impl ViewerKeys for KeyStoreBridge {
     async fn identity(&self) -> Result<DeviceIdentity, KeysError> {
-        let mut cached = self.identity.lock().await;
+        let mut cached = self.coordinator.identity.lock().await;
         if let Some(key) = cached.as_ref() {
             return Ok(DeviceIdentity::from_signer(Arc::clone(key) as _));
         }
@@ -331,14 +484,16 @@ impl ViewerKeys for KeyStoreBridge {
     }
 
     async fn reset_identity(&self) -> Result<(), KeysError> {
-        let mut cached = self.identity.lock().await;
+        let mut cached = self.coordinator.identity.lock().await;
         self.inner.delete_identity().await.map_err(keys_error)?;
         *cached = None;
         Ok(())
     }
 
     async fn pinned_host(&self, host_id: &str) -> Option<PinnedHost> {
-        if let Some(host) = self.pins.lock().expect("pins").get(host_id) {
+        let gate = self.coordinator.store_gates.get(host_id);
+        let _guard = gate.lock.lock().await;
+        if let Some(host) = self.coordinator.pins.lock().expect("pins").get(host_id) {
             return Some(host.clone());
         }
         let stored = self
@@ -353,7 +508,8 @@ impl ViewerKeys for KeyStoreBridge {
             name: stored.name,
             paired_at: stored.paired_at_ms,
         };
-        self.pins
+        self.coordinator
+            .pins
             .lock()
             .expect("pins")
             .insert(host_id.to_owned(), host.clone());
@@ -361,7 +517,10 @@ impl ViewerKeys for KeyStoreBridge {
     }
 
     async fn pin(&self, host: PinnedHost) {
-        self.pins
+        let gate = self.coordinator.store_gates.get(&host.host_id);
+        let _guard = gate.lock.lock().await;
+        self.coordinator
+            .pins
             .lock()
             .expect("pins")
             .insert(host.host_id.clone(), host.clone());
@@ -379,7 +538,9 @@ impl ViewerKeys for KeyStoreBridge {
     }
 
     async fn unpair(&self, host_id: &str) {
-        self.pins.lock().expect("pins").remove(host_id);
+        let gate = self.coordinator.store_gates.get(host_id);
+        let _guard = gate.lock.lock().await;
+        self.coordinator.pins.lock().expect("pins").remove(host_id);
         let _ = self.inner.delete_pinned_host(host_id.to_owned()).await;
     }
 }
@@ -1261,6 +1422,7 @@ struct Parts {
     uid: String,
     rtdb: Arc<dyn Rtdb>,
     keys: Arc<dyn ViewerKeys>,
+    coordinator: Arc<AccountCoordinator>,
     clock: Arc<dyn Clock>,
     random: Arc<dyn Fn() -> f64 + Send + Sync>,
     peers: Option<Arc<dyn PeerConnector>>,
@@ -1270,8 +1432,31 @@ struct Parts {
 }
 
 /// The connection to the current computer and what hangs off it.
+struct ConnectionRoot {
+    id: Arc<()>,
+    host_id: String,
+    active: Weak<Mutex<Option<Active>>>,
+    current: Arc<AtomicU64>,
+    out: OutSender,
+}
+
+impl ConnectionRoot {
+    fn invalidate(&self) {
+        if let Some(active) = self.active.upgrade() {
+            disconnect_active(
+                &active,
+                &self.current,
+                &self.out,
+                Some(&self.host_id),
+                Some(&self.id),
+            );
+        }
+    }
+}
+
 struct Active {
     host_id: String,
+    root: Arc<ConnectionRoot>,
     connection: ViewerConnection,
     client: RemoteClient,
     sessions_listener: u64,
@@ -1286,6 +1471,46 @@ impl Active {
         self.client.remove_listener(self.sessions_listener);
         self.client.dispose();
         self.connection.stop();
+    }
+}
+
+fn disconnect_active(
+    active: &Mutex<Option<Active>>,
+    current: &AtomicU64,
+    out: &OutSender,
+    expected_host: Option<&str>,
+    expected_root: Option<&Arc<()>>,
+) {
+    let (active, host_id, generation) = {
+        let mut active = active.lock().expect("active");
+        if expected_host.is_some_and(|host| active.as_ref().is_none_or(|a| a.host_id != host))
+            || expected_root
+                .is_some_and(|id| active.as_ref().is_none_or(|a| !Arc::ptr_eq(id, &a.root.id)))
+        {
+            return;
+        }
+        let host_id = active.as_ref().map(|a| a.host_id.clone());
+        let generation = current.fetch_add(1, Ordering::SeqCst) + 1;
+        (active.take(), host_id, generation)
+    };
+    if let Some(active) = active {
+        active.shutdown();
+    }
+    if let Some(host_id) = host_id {
+        let _ = out.send(Out::State(
+            generation,
+            RemoteConnectionStateFfi {
+                host_id,
+                phase: RemoteConnectionPhaseFfi::Idle,
+                transport: None,
+                pairing_code: None,
+                failure: None,
+                attempt: 0,
+                retry_at_ms: None,
+                host: None,
+                ever_ready: false,
+            },
+        ));
     }
 }
 
@@ -1357,10 +1582,10 @@ struct Core {
     /// Bumped whenever the current connection is replaced or ended; relays of an
     /// older connection go quiet.
     current: Arc<AtomicU64>,
-    active: Mutex<Option<Active>>,
+    active: Arc<Mutex<Option<Active>>>,
     hosts_task: Mutex<Option<JoinHandle<()>>>,
     delivery: JoinHandle<()>,
-    repairing: tokio::sync::Mutex<()>,
+    repairing: Arc<tokio::sync::Mutex<()>>,
     file_tasks: Mutex<HashMap<String, Arc<FileTask>>>,
 }
 
@@ -1384,7 +1609,7 @@ impl Drop for Core {
 
 /// The Remote Control viewer state shared by the platform binding objects.
 pub(super) struct RemoteControlCore {
-    core: Core,
+    core: Arc<Core>,
 }
 
 /// Build the client. `database_url` is the Realtime Database instance
@@ -1411,10 +1636,12 @@ pub(super) async fn build_remote_control_core(
         Arc::new(TokenBridge { inner: tokens }),
     ));
     let media_offer_handler = native_media_offer_handler(media_host, media_config_provider);
+    let coordinator = account_coordinator(&uid);
     let parts = Parts {
         uid,
         rtdb: Arc::new(rtdb),
-        keys: Arc::new(KeyStoreBridge::new(keys)),
+        keys: Arc::new(KeyStoreBridge::with_coordinator(keys, coordinator.clone())),
+        coordinator,
         clock: system_clock(),
         random: Arc::new(random_unit),
         peers: webrtc_peer_connector(),
@@ -1463,19 +1690,19 @@ impl RemoteControlCore {
         let current = Arc::new(AtomicU64::new(0));
         let tunnel_memory = Arc::new(TunnelMemory::new(Arc::clone(&parts.clock)));
         Self {
-            core: Core {
+            core: Arc::new(Core {
                 runtime: tokio::runtime::Handle::current(),
                 parts,
                 out,
                 tunnel_memory,
                 push_installation_id: Mutex::new(None),
                 current: Arc::clone(&current),
-                active: Mutex::new(None),
+                active: Arc::new(Mutex::new(None)),
                 hosts_task: Mutex::new(None),
                 delivery: tokio::spawn(deliver(queue, listener, current)),
-                repairing: tokio::sync::Mutex::new(()),
+                repairing: Arc::new(tokio::sync::Mutex::new(())),
                 file_tasks: Mutex::new(HashMap::new()),
-            },
+            }),
         }
     }
 
@@ -1511,11 +1738,28 @@ impl RemoteControlCore {
             return Ok(());
         }
         let generation = core.current.fetch_add(1, Ordering::SeqCst) + 1;
+        let gate = core.parts.coordinator.host_gates.get(host_id);
+        let root_id = Arc::new(());
+        let keys: Arc<dyn ViewerKeys> = Arc::new(ConnectionKeys {
+            inner: Arc::clone(&parts.keys),
+            host_id: host_id.to_owned(),
+            trust_epoch: AtomicU64::new(gate.trust_epoch.load(Ordering::SeqCst)),
+            gate,
+            coordinator: Arc::clone(&core.parts.coordinator),
+            root_id: Arc::clone(&root_id),
+        });
+        let root = Arc::new(ConnectionRoot {
+            id: root_id,
+            host_id: host_id.to_owned(),
+            active: Arc::downgrade(&core.active),
+            current: Arc::clone(&core.current),
+            out: core.out.clone(),
+        });
         let mut deps = ViewerConnectionDeps::new(
             parts.uid.clone(),
             host_id,
             Arc::clone(&parts.rtdb),
-            Arc::clone(&parts.keys),
+            keys,
             REMOTE_DEVICE_PLATFORM,
         );
         deps.clock = Arc::clone(&parts.clock);
@@ -1542,11 +1786,13 @@ impl RemoteControlCore {
         connection.start();
         let previous = active.replace(Active {
             host_id: host_id.to_owned(),
+            root: Arc::clone(&root),
             connection,
             client,
             sessions_listener,
             watchers: HashMap::new(),
         });
+        core.parts.coordinator.register(&root);
         drop(active);
         if let Some(previous) = previous {
             previous.shutdown();
@@ -1623,71 +1869,72 @@ impl RemoteControlCore {
                 message: "host_id is empty".into(),
             });
         }
-        let same = {
+        let gate = self.core.parts.coordinator.host_gates.get(&host_id);
+        let _guard = gate.lock.lock().await;
+        {
             let active = self.core.active.lock().expect("active");
-            match active.as_ref() {
-                Some(active) if active.host_id == host_id => {
-                    let phase = active.connection.state().phase;
-                    if phase == ConnectionPhase::Idle {
-                        None
-                    } else {
-                        Some(active.connection.clone())
-                    }
-                }
-                _ => None,
+            if let Some(active) = active.as_ref().filter(|active| {
+                active.host_id == host_id
+                    && active.connection.state().phase != ConnectionPhase::Idle
+            }) {
+                // Keep the active lock through retry: otherwise disconnect can
+                // retire this connection before retry starts a new dial.
+                active.connection.retry();
+                active.connection.nudge();
+                return Ok(());
             }
-        };
-        match same {
-            Some(connection) => {
-                connection.retry();
-                connection.nudge();
-                Ok(())
-            }
-            None => self.start_connection(&host_id),
         }
+        self.start_connection(&host_id)
     }
 
     /// End the connection: sessions are detached, the link is closed.
     pub async fn disconnect(&self) {
-        let (active, current, generation) = {
-            let mut active = self.core.active.lock().expect("active");
-            let current = active.as_ref().map(|a| a.host_id.clone());
-            let generation = self.core.current.fetch_add(1, Ordering::SeqCst) + 1;
-            (active.take(), current, generation)
-        };
-        if let Some(active) = active {
-            active.shutdown();
-        }
-        if let Some(host_id) = current {
-            let _ = self.core.out.send(Out::State(
-                generation,
-                RemoteConnectionStateFfi {
-                    host_id,
-                    phase: RemoteConnectionPhaseFfi::Idle,
-                    transport: None,
-                    pairing_code: None,
-                    failure: None,
-                    attempt: 0,
-                    retry_at_ms: None,
-                    host: None,
-                    ever_ready: false,
-                },
-            ));
-        }
+        self.disconnect_matching(None);
+    }
+
+    fn disconnect_matching(&self, expected_host: Option<&str>) {
+        disconnect_active(
+            &self.core.active,
+            &self.core.current,
+            &self.core.out,
+            expected_host,
+            None,
+        );
     }
 
     /// The user asks to try again after a failure.
     pub async fn retry(&self) {
-        if let Some(active) = self.core.active.lock().expect("active").as_ref() {
-            active.connection.retry();
-        }
+        self.connection_action(true).await;
     }
 
     /// The app returned to the foreground or the network came back: skip the rest
     /// of a backoff, and revive a connection that gave up on its own.
     pub async fn nudge(&self) {
-        if let Some(active) = self.core.active.lock().expect("active").as_ref() {
-            active.connection.nudge();
+        self.connection_action(false).await;
+    }
+
+    async fn connection_action(&self, retry: bool) {
+        let (host_id, generation) = {
+            let active = self.core.active.lock().expect("active");
+            let Some(active) = active.as_ref() else {
+                return;
+            };
+            (
+                active.host_id.clone(),
+                self.core.current.load(Ordering::SeqCst),
+            )
+        };
+        let gate = self.core.parts.coordinator.host_gates.get(&host_id);
+        let _guard = gate.lock.lock().await;
+        let active = self.core.active.lock().expect("active");
+        if self.core.current.load(Ordering::SeqCst) == generation {
+            if let Some(active) = active.as_ref().filter(|active| active.host_id == host_id) {
+                if retry {
+                    active.connection.retry();
+                } else {
+                    active.connection.nudge();
+                }
+            }
         }
     }
 
@@ -1767,18 +2014,23 @@ impl RemoteControlCore {
     /// Forget a computer: the pin goes, the desktop still lists this device until the
     /// user removes it there. Disconnects first when it is the current one.
     pub async fn forget_host(&self, host_id: String) {
-        let is_current = self
-            .core
-            .active
-            .lock()
-            .expect("active")
-            .as_ref()
-            .is_some_and(|active| active.host_id == host_id);
-        if is_current {
-            self.disconnect().await;
-        }
-        self.core.parts.keys.unpair(&host_id).await;
-        self.core.tunnel_memory.forget(&host_id);
+        let gate = self.core.parts.coordinator.host_gates.get(&host_id);
+        let guard = Arc::clone(&gate.lock).lock_owned().await;
+        gate.trust_epoch.fetch_add(1, Ordering::SeqCst);
+        self.core.parts.coordinator.invalidate(&host_id, None);
+        let core = Arc::clone(&self.core);
+        // Once admitted, keep both the Core and its host lock until the
+        // platform delete finishes, even if the foreign caller cancels.
+        tokio::spawn(async move {
+            let _guard = guard;
+            // The weak host registry must keep resolving to this gate while
+            // the detached transaction owns the lock.
+            let _gate = gate;
+            core.parts.keys.unpair(&host_id).await;
+            core.tunnel_memory.forget(&host_id);
+        })
+        .await
+        .expect("forget transaction panicked");
     }
 
     /// After a `Revoked` failure: make a new device key and pair again.
@@ -1788,35 +2040,57 @@ impl RemoteControlCore {
                 message: "host_id is empty".into(),
             });
         }
-        let Ok(_repair) = self.core.repairing.try_lock() else {
+        let gate = self.core.parts.coordinator.host_gates.get(&host_id);
+        let guard = Arc::clone(&gate.lock).lock_owned().await;
+        let Ok(repair) = Arc::clone(&self.core.repairing).try_lock_owned() else {
             return Ok(());
         };
-        let generation = self.core.current.load(Ordering::SeqCst);
-        let connection = self
-            .core
-            .active
-            .lock()
-            .expect("active")
-            .as_ref()
-            .filter(|active| active.host_id == host_id)
-            .map(|active| active.connection.clone());
-        match connection {
-            Some(connection) => {
-                connection.repair().await;
-                Ok(())
-            }
-            None => {
-                self.core
-                    .parts
-                    .keys
-                    .reset_identity()
-                    .await
-                    .map_err(|error| RemoteFfiError::KeyStore {
-                        message: error.to_string(),
-                    })?;
-                self.start_connection_if_current(&host_id, Some(generation))
-            }
+        let (generation, connection) = {
+            let active = self.core.active.lock().expect("active");
+            let generation = self.core.current.load(Ordering::SeqCst);
+            let connection = active
+                .as_ref()
+                .filter(|active| active.host_id == host_id)
+                .map(|active| active.connection.clone());
+            (generation, connection)
+        };
+        let owned = Self {
+            core: Arc::clone(&self.core),
+        };
+        tokio::spawn(async move {
+            let _guard = guard;
+            let _repair = repair;
+            owned
+                .repair_host_admitted(host_id, gate, generation, connection)
+                .await
+        })
+        .await
+        .expect("repair transaction panicked")
+    }
+
+    async fn repair_host_admitted(
+        &self,
+        host_id: String,
+        gate: Arc<HostGate>,
+        generation: u64,
+        connection: Option<ViewerConnection>,
+    ) -> Result<(), RemoteFfiError> {
+        if let Some(connection) = connection {
+            connection.repair().await;
+            return Ok(());
         }
+        self.core
+            .parts
+            .keys
+            .reset_identity()
+            .await
+            .map_err(|error| RemoteFfiError::KeyStore {
+                message: error.to_string(),
+            })?;
+        self.core.parts.keys.unpair(&host_id).await;
+        gate.trust_epoch.fetch_add(1, Ordering::SeqCst);
+        self.core.parts.coordinator.invalidate(&host_id, None);
+        self.start_connection_if_current(&host_id, Some(generation))
     }
 
     /// Follow a session: attach now if connected, and again after every reconnect

@@ -465,7 +465,9 @@ export class LocalAppHost {
   private readonly token = randomBytes(32).toString('hex');
   private readonly windows = new Map<string, BrowserWindow>();
   private readonly windowRuns = new WeakMap<BrowserWindow, string>();
-  private readonly opening = new Map<string, { promise: Promise<void>; controller: AbortController }>();
+  private readonly opening = new Map<string, { promise: Promise<void>; controller: AbortController; intent: string; waiters: number }>();
+  private readonly waitingOpenings = new Map<string, Set<AbortController>>();
+  private readonly openingEpochs = new Map<string, number>();
   private readonly configured = new Set<string>();
   private readonly trustedWindows = new Map<number, string>();
   private changeTimer?: ReturnType<typeof setTimeout>;
@@ -493,6 +495,7 @@ export class LocalAppHost {
       this.remoteRevokeAll();
       this.launchGrants.clear();
       for (const opening of this.opening.values()) opening.controller.abort();
+      for (const waiting of this.waitingOpenings.values()) for (const controller of waiting) controller.abort();
       for (const window of this.windows.values()) window.destroy();
       void this.services.dispose();
       // No automatic bridge reconnect: native cleanup must finish before a new
@@ -892,7 +895,7 @@ export class LocalAppHost {
     const cleaning = this.remoteCleaning.get(id);
     if (cleaning) await withAbort(cleaning, signal);
     const pending = this.opening.get(id);
-    if (pending) await withAbort(pending.promise, signal);
+    if (pending) await withAbort(pending.promise.catch(() => undefined), signal);
     signal.throwIfAborted();
     const row = await this.store.get(id);
     await this.store.assertTarget(row);
@@ -1242,7 +1245,8 @@ export class LocalAppHost {
     if (action === 'useVersion') {
       if (!Number.isSafeInteger(input.revision) || Number(input.revision) < 1 || !Number.isSafeInteger(input.expectedCurrentRevision) || Number(input.expectedCurrentRevision) < 1) throw new Error('Choose a version from the current release list');
       this.invalidateRemoteOpenings(id); this.remoteGateway?.revokeApp(id);
-      await this.cancelOpening(id);
+      const epoch = await this.cancelOpeningBeforeNext(id, signal);
+      this.assertOpeningEpoch(id, epoch, signal);
       await this.open(id, false, true, signal, Number(input.revision), Number(input.expectedCurrentRevision));
       this.changed(); return;
     }
@@ -1341,8 +1345,8 @@ export class LocalAppHost {
       await opening;
       this.windows.get(id)?.close();
     } else if (action === 'restart' || action === 'repair') {
-      const opening = this.cancelOpening(id);
-      await opening;
+      const epoch = await this.cancelOpeningBeforeNext(id, signal);
+      this.assertOpeningEpoch(id, epoch, signal);
       await this.open(id, action === 'repair', true);
     } else if (action === 'background') {
       if (typeof input.enabled !== 'boolean') throw new Error('Invalid background preference');
@@ -1378,11 +1382,24 @@ export class LocalAppHost {
     return join(root, `${name.replace(/[^\p{L}\p{N} _-]/gu, '').slice(0, 50) || 'Application'}-${randomUUID().slice(0, 8)}`);
   }
   private cancelOpening(id: string): Promise<void> {
+    this.openingEpochs.set(id, (this.openingEpochs.get(id) ?? 0) + 1);
     const opening = this.opening.get(id);
     opening?.controller.abort();
+    for (const controller of this.waitingOpenings.get(id) ?? []) controller.abort();
     // Callers must also wait for open() to release its promise and cleanup, so
     // the next Open cannot join an operation that has already been canceled.
     return opening?.promise.then(() => undefined, () => undefined) ?? Promise.resolve();
+  }
+  private async cancelOpeningBeforeNext(id: string, signal?: AbortSignal): Promise<number> {
+    const opening = this.cancelOpening(id);
+    const epoch = this.openingEpochs.get(id)!;
+    if (signal) await withAbort(opening, signal); else await opening;
+    this.assertOpeningEpoch(id, epoch, signal);
+    return epoch;
+  }
+  private assertOpeningEpoch(id: string, epoch: number, signal?: AbortSignal): void {
+    signal?.throwIfAborted();
+    if (this.shuttingDown || this.unavailable || this.openingEpochs.get(id) !== epoch) throw new Error('Application opening cancelled');
   }
   private async authorize(id: string, signal: AbortSignal, revision?: number): Promise<void> {
     signal.throwIfAborted();
@@ -1424,12 +1441,25 @@ export class LocalAppHost {
   async open(id: string, repair = false, restart = false, signal?: AbortSignal, revision?: number, expectedCurrentRevision?: number): Promise<void> {
     if (this.shuttingDown) throw new Error('Application host is stopping');
     signal?.throwIfAborted();
-    const pending = this.opening.get(id); if (pending) return pending.promise;
+    const intent = JSON.stringify([repair, restart, revision ?? null, expectedCurrentRevision ?? null]);
+    const pending = this.opening.get(id);
+    if (pending && (pending.intent !== intent || pending.controller.signal.aborted)) {
+      const controller = new AbortController();
+      const waiting = this.waitingOpenings.get(id) ?? new Set<AbortController>();
+      waiting.add(controller); this.waitingOpenings.set(id, waiting);
+      const waitingSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+      try {
+        await withAbort(pending.promise.catch(() => undefined), waitingSignal);
+        waitingSignal.throwIfAborted();
+        return this.open(id, repair, restart, signal, revision, expectedCurrentRevision);
+      } finally {
+        waiting.delete(controller); if (!waiting.size) this.waitingOpenings.delete(id);
+      }
+    }
+    if (pending) return this.joinOpening(pending, signal);
     const controller = new AbortController();
-    const cancel = () => controller.abort();
-    signal?.addEventListener('abort', cancel, { once: true });
     const previousInvocation = this.runtime.invocationId(id);
-    const operation = { controller, promise: this.openOnce(id, controller.signal, repair, restart, revision, expectedCurrentRevision) };
+    const operation = { controller, intent, waiters: 0, promise: this.openOnce(id, controller.signal, repair, restart, revision, expectedCurrentRevision) };
     this.opening.set(id, operation);
     operation.promise = operation.promise.catch(async error => {
       if (!this.shuttingDown && ['running', 'starting', 'installing', 'building'].includes(this.runtime.phase(id))) {
@@ -1439,10 +1469,19 @@ export class LocalAppHost {
       }
       throw error;
     }).finally(() => {
-      signal?.removeEventListener('abort', cancel);
       if (this.opening.get(id) === operation) this.opening.delete(id);
     });
-    await operation.promise;
+    await this.joinOpening(operation, signal);
+  }
+  private async joinOpening(opening: { promise: Promise<void>; controller: AbortController; waiters: number }, signal?: AbortSignal): Promise<void> {
+    opening.waiters++;
+    try {
+      if (signal) await withAbort(opening.promise, signal);
+      else await opening.promise;
+    } finally {
+      opening.waiters--;
+      if (!opening.waiters) opening.controller.abort();
+    }
   }
   private async openOnce(id: string, signal: AbortSignal, repair: boolean, restart: boolean, revision?: number, expectedCurrentRevision?: number): Promise<void> {
     const cleaning = this.remoteCleaning.get(id);
@@ -1768,6 +1807,7 @@ export class LocalAppHost {
     for (const pending of this.agentQuestions.values()) pending.resolve(null);
     await this.agentBroker?.dispose();
     for (const operation of this.opening.values()) operation.controller.abort();
+    for (const waiting of this.waitingOpenings.values()) for (const controller of waiting) controller.abort();
     if (this.changeTimer) clearTimeout(this.changeTimer);
     ipcMain.removeHandler(CH_LOCAL_APPS); ipcMain.removeHandler(CH_LOCAL_APP_NATIVE);
     this.server?.closeAllConnections(); await new Promise<void>(resolve => this.server ? this.server.close(() => resolve()) : resolve());

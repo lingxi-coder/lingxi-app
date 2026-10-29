@@ -459,6 +459,219 @@ test('empty unmarked Agent directories are usable and unsafe old stores stay iso
   assert.equal(await fs.readFile(join(target, 'keep.txt'), 'utf8'), 'untouched');
 });
 
+test('marked Agent stores isolate task and directory faults without changing the affected App', async t => {
+  const taskId = '01111111-1111-4111-8111-111111111111';
+  const chatId = 'a1111111-1111-4111-8111-111111111111';
+  const tombstoneId = '01111111-1111-4111-8111-111111111111';
+  const badChatId = 'f2222222-2222-4222-8222-222222222222';
+  const badTaskId = 'f1111111-1111-4111-8111-111111111111';
+  const pending = {
+    schema: 1, privateTaskId: taskId, owner: principal, publicRunId: 'pending-before-fault', threadId: chatId,
+    fingerprint: '0'.repeat(64), eventSequence: 1,
+    events: [{ type: 'RUN_STARTED', threadId: chatId, runId: 'pending-before-fault', protocolVersion: '1.0' }],
+    run: { state: 'running', sequence: 1, createdAt: 1, updatedAt: 1, limits: { maxTurns: 20, timeoutMs: 600_000 } },
+    chat: { chatId, userMessageId: 'pending-user' },
+  };
+  async function snapshot(path: string): Promise<Array<[string, string]>> {
+    const rows: Array<[string, string]> = [];
+    const walk = async (current: string, relative: string): Promise<void> => {
+      const stat = await fs.lstat(current);
+      if (stat.isSymbolicLink()) rows.push([relative, `link:${await fs.readlink(current)}`]);
+      else if (stat.isDirectory()) {
+        rows.push([relative, `directory:${stat.mode}`]);
+        for (const entry of (await fs.readdir(current)).sort()) await walk(join(current, entry), `${relative}/${entry}`);
+      } else rows.push([relative, `file:${stat.mode}:${(await fs.readFile(current)).toString('hex')}`]);
+    };
+    await walk(path, '');
+    return rows;
+  }
+  const faults: Array<{ name: string; links?: boolean; inject(root: string, agent: string): Promise<void> }> = [
+    { name: 'malformed task JSON', inject: (_root, agent) => fs.writeFile(join(agent, 'tasks', `${badTaskId}.json`), '{ invalid task JSON\n') },
+    { name: 'invalid task schema', inject: (_root, agent) => fs.writeFile(join(agent, 'tasks', `${badTaskId}.json`), JSON.stringify({ ...pending, privateTaskId: badTaskId, schema: 0 })) },
+    { name: 'invalid AG-UI event schema', inject: (_root, agent) => fs.writeFile(join(agent, 'tasks', `${badTaskId}.json`), JSON.stringify({ ...pending, privateTaskId: badTaskId, events: [{ type: 'UNKNOWN_EVENT' }] })) },
+    { name: 'conflicting task run IDs', inject: (_root, agent) => fs.writeFile(join(agent, 'tasks', `${badTaskId}.json`), JSON.stringify({ ...pending, privateTaskId: badTaskId })) },
+    { name: 'malformed pending Chat JSON', inject: (_root, agent) => fs.writeFile(join(agent, 'chats', chatId, 'chat.json'), '{ broken Chat\n') },
+    { name: 'a second malformed Chat after a valid Chat and tombstone', inject: async (_root, agent) => {
+      await fs.mkdir(join(agent, 'chats', badChatId));
+      await fs.writeFile(join(agent, 'chats', badChatId, 'chat.json'), '{ broken second Chat\n');
+    } },
+    { name: 'task and Chat user message disagree', inject: async (_root, agent) => {
+      const path = join(agent, 'chats', chatId, 'chat.json'), chat = JSON.parse(await fs.readFile(path, 'utf8'));
+      chat.messages[0].message.id = 'different-user';
+      await fs.writeFile(path, JSON.stringify(chat));
+    } },
+    { name: 'orphaned Chat message', inject: async (_root, agent) => {
+      const path = join(agent, 'chats', chatId, 'chat.json'), chat = JSON.parse(await fs.readFile(path, 'utf8'));
+      chat.messages.push({ runId: 'missing-task', message: { id: 'preserve-orphan', role: 'user', content: 'keep' } });
+      await fs.writeFile(path, JSON.stringify(chat));
+    } },
+    { name: 'tombstone contains unexpected Chat data', inject: async (_root, agent) => {
+      const path = join(agent, 'chats', tombstoneId, 'chat.json'), row = JSON.parse(await fs.readFile(path, 'utf8'));
+      await fs.writeFile(path, JSON.stringify({ ...row, messages: [{ message: 'do not delete' }] }));
+    } },
+    { name: 'Chat directory is a symlink', links: true, inject: async (root, agent) => {
+      const path = join(agent, 'chats', chatId), target = join(root, 'original-target', 'chat');
+      await fs.rename(path, target); await fs.symlink(target, path);
+    } },
+    { name: 'Chat JSON is a symlink', links: true, inject: async (root, agent) => {
+      const path = join(agent, 'chats', chatId, 'chat.json'), target = join(root, 'original-target', 'chat.json');
+      await fs.rename(path, target); await fs.symlink(target, path);
+    } },
+    { name: 'Chat assets directory is a symlink', links: true, inject: async (root, agent) => {
+      await fs.symlink(join(root, 'original-target'), join(agent, 'chats', chatId, 'assets'));
+    } },
+    { name: 'task workspace is a symlink', links: true, inject: async (root, agent) => {
+      await fs.symlink(join(root, 'original-target'), join(agent, 'tasks', taskId));
+    } },
+    { name: 'tasks directory is a file', inject: async (root, agent) => {
+      await fs.rename(join(agent, 'tasks'), join(root, 'original-target', 'tasks'));
+      await fs.writeFile(join(agent, 'tasks'), 'preserve this unsafe directory entry');
+    } },
+    { name: 'tasks directory is a symlink', links: true, inject: async (root, agent) => {
+      const target = join(root, 'original-target', 'tasks');
+      await fs.rename(join(agent, 'tasks'), target); await fs.symlink(target, join(agent, 'tasks'));
+    } },
+    { name: 'tasks directory is a dangling symlink', links: true, inject: async (root, agent) => {
+      await fs.rename(join(agent, 'tasks'), join(root, 'original-target', 'tasks'));
+      await fs.symlink(join(root, 'missing-target'), join(agent, 'tasks'));
+    } },
+    { name: 'chats directory is a symlink', links: true, inject: async (root, agent) => {
+      const target = join(root, 'original-target', 'chats');
+      await fs.rename(join(agent, 'chats'), target); await fs.symlink(target, join(agent, 'chats'));
+    } },
+    { name: 'agent directory is a symlink', links: true, inject: async (root, agent) => {
+      const target = join(root, 'original-target', 'agent');
+      await fs.rename(agent, target); await fs.symlink(target, agent);
+    } },
+    { name: 'App directory is a symlink', links: true, inject: async (root, agent) => {
+      const target = join(root, 'original-target', 'app');
+      await fs.rename(dirname(agent), target); await fs.symlink(target, dirname(agent));
+    } },
+  ];
+  for (const fault of faults) await t.test(fault.name, { skip: fault.links && process.platform === 'win32' }, async sub => {
+    const executions: string[] = [], authorizations: string[] = [];
+    const { root, broker, options } = await fixture(sub, {
+      authorize: async caller => { authorizations.push(caller.appId); return auth(); },
+      execute: async execution => {
+        executions.push(execution.owner.appId);
+        return { result: { text: 'healthy', output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}`,
+          ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: {} };
+      },
+    });
+    const appPath = join(root, 'apps', principal.appId), agent = join(appPath, 'agent');
+    const taskPath = join(agent, 'tasks', `${taskId}.json`);
+    const target = join(root, 'original-target');
+    await fs.mkdir(dirname(taskPath), { recursive: true });
+    await fs.mkdir(join(agent, 'chats', chatId), { recursive: true });
+    await fs.mkdir(join(agent, 'chats', tombstoneId, 'assets'), { recursive: true });
+    await fs.mkdir(join(appPath, 'workspace'), { recursive: true });
+    await fs.mkdir(target);
+    await fs.writeFile(join(target, 'keep.bin'), Buffer.from([0, 255, 42]));
+    await fs.writeFile(join(appPath, 'workspace', 'business.bin'), Buffer.from([16, 0, 254]));
+    await fs.writeFile(join(agent, 'chats', tombstoneId, 'chat.json'), JSON.stringify({
+      schema: 2, creationFingerprint: agentDigest({}), chatId: tombstoneId, appId: principal.appId, deleted: true,
+    }));
+    await fs.writeFile(join(agent, 'chats', tombstoneId, 'assets', 'preserve.bin'), Buffer.from([12, 0, 42]));
+    await fs.writeFile(taskPath, JSON.stringify(pending));
+    await fs.writeFile(`${taskPath}.termination`, JSON.stringify({ schema: 1, appId: principal.appId, runId: pending.publicRunId, taskId }));
+    await fs.writeFile(join(agent, 'chats', chatId, 'chat.json'), JSON.stringify({
+      schema: 2, creationFingerprint: agentDigest({}), chatId, appId: principal.appId, title: 'Pending',
+      createdAt: 1, updatedAt: 1, archived: false, state: 'running', sessionId: taskId, activeRunId: pending.publicRunId,
+      messages: [{ runId: pending.publicRunId, message: { id: 'pending-user', role: 'user', content: 'Keep the original pending turn.' } }],
+    }));
+    const markerPath = join(root, 'desktop-agent-format.json');
+    const marker = JSON.stringify({ schemaVersion: 1, protocol: 'ag-ui/1.0', quarantinedAppIds: [] });
+    await fs.writeFile(markerPath, marker);
+    await fault.inject(root, agent);
+    const beforeApp = await snapshot(appPath), beforeTarget = await snapshot(target);
+    const request = { requestId: chatId };
+    const rejectedOperations = (store: LocalAppAgentBroker) => [
+      () => store.run(principal, runInput(pending.publicRunId)), () => store.get(principal, pending.publicRunId),
+      () => store.list(principal), () => store.events(principal, pending.publicRunId), () => store.cancel(principal, pending.publicRunId),
+      () => store.createChat(principal, request), () => store.chatCreationStatus(principal, request),
+      () => store.listChats(principal), () => store.getChat(principal, chatId), () => store.chatHistory(principal, chatId),
+      () => store.archiveChat(principal, chatId), () => store.deleteChat(principal, chatId), () => store.cancelChat(principal, chatId),
+      () => store.sendChat(principal, chatId, runInput('bad-chat-run', chatId)),
+    ];
+    const assertUnavailable = async (store: LocalAppAgentBroker): Promise<void> => {
+      for (const operation of rejectedOperations(store)) await assert.rejects(operation(), { code: 'agent_storage_unavailable' });
+    };
+    const input = runInput('healthy-marked-run');
+    const concurrent = await Promise.allSettled([broker.run(principal, runInput('blocked-concurrent')), broker.run(other, input)]);
+    assert.equal(concurrent[0]?.status, 'rejected');
+    assert.equal((concurrent[0] as PromiseRejectedResult).reason.code, 'agent_storage_unavailable');
+    assert.equal(concurrent[1]?.status, 'fulfilled');
+    await assertUnavailable(broker);
+    assert.equal((await terminal(broker, other, input.runId)).state, 'succeeded');
+    assert.equal((await broker.events(other, input.runId)).events.at(-1)?.type, 'RUN_FINISHED');
+    assert.deepEqual((await broker.list(other)).tasks.map(task => task.runId), [input.runId]);
+    await broker.createChat(other, request);
+    await broker.sendChat(other, chatId, runInput('healthy-chat-run', chatId));
+    assert.equal((await terminal(broker, other, 'healthy-chat-run')).state, 'succeeded');
+    await broker.dispose();
+    const restarted = new LocalAppAgentBroker(options);
+    sub.after(() => restarted.dispose().catch(() => undefined));
+    await restarted.initialize();
+    await assertUnavailable(restarted);
+    assert.equal((await restarted.get(other, input.runId)).state, 'succeeded');
+    assert.equal((await restarted.chatHistory(other, chatId)).messages.length, 2);
+    assert.deepEqual(await snapshot(appPath), beforeApp, 'the affected App, its pending task/fence and business data must be unchanged');
+    assert.deepEqual(await snapshot(target), beforeTarget, 'symlink targets must remain untouched');
+    assert.equal(await fs.readFile(markerPath, 'utf8'), marker, 'App faults must not rewrite shared format metadata');
+    assert.ok(authorizations.every(appId => appId === other.appId));
+    assert.ok(executions.every(appId => appId === other.appId));
+    await restarted.dispose();
+  });
+});
+
+test('a recovery write failure isolates the App before tombstone cleanup', async t => {
+  const { root, broker } = await fixture(t);
+  const taskId = '11111111-1111-4111-8111-111111111111';
+  const chatId = '22222222-2222-4222-8222-222222222222';
+  const agent = join(root, 'apps', principal.appId, 'agent');
+  const taskPath = join(agent, 'tasks', taskId + '.json');
+  const chatPath = join(agent, 'chats', chatId, 'chat.json');
+  const assetPath = join(agent, 'chats', chatId, 'assets', 'keep.bin');
+  await fs.mkdir(dirname(taskPath), { recursive: true });
+  await fs.mkdir(dirname(assetPath), { recursive: true });
+  await fs.writeFile(join(root, 'desktop-agent-format.json'), JSON.stringify({ schemaVersion: 1, protocol: 'ag-ui/1.0', quarantinedAppIds: [] }));
+  const taskBytes = Buffer.from(JSON.stringify({
+    schema: 1, privateTaskId: taskId, owner: principal, publicRunId: 'recovery-write-failure', threadId: 'thread',
+    fingerprint: '0'.repeat(64), eventSequence: 1,
+    events: [{ type: 'RUN_STARTED', threadId: 'thread', runId: 'recovery-write-failure', protocolVersion: '1.0' }],
+    run: { state: 'running', sequence: 1, createdAt: 1, updatedAt: 1, limits: { maxTurns: 20, timeoutMs: 600_000 } },
+  }));
+  const chatBytes = Buffer.from(JSON.stringify({ schema: 2, appId: principal.appId, chatId, creationFingerprint: agentDigest({}), deleted: true }));
+  const assetBytes = Buffer.from([4, 0, 255, 8]);
+  await fs.writeFile(taskPath, taskBytes);
+  await fs.writeFile(chatPath, chatBytes);
+  await fs.writeFile(assetPath, assetBytes);
+  const originalRename = fs.rename;
+  (fs as any).rename = async (from: unknown, to: unknown) => {
+    if (to === taskPath) throw new Error('injected recovery write failure');
+    return (originalRename as any)(from, to);
+  };
+  try {
+    await broker.initialize();
+    await assert.rejects(broker.get(principal, 'recovery-write-failure'), { code: 'agent_storage_unavailable' });
+    await broker.run(other, runInput('healthy-after-recovery-failure'));
+    assert.equal((await terminal(broker, other, 'healthy-after-recovery-failure')).state, 'succeeded');
+    assert.deepEqual(await fs.readFile(taskPath), taskBytes);
+    assert.deepEqual(await fs.readFile(chatPath), chatBytes);
+    assert.deepEqual(await fs.readFile(assetPath), assetBytes);
+  } finally { (fs as any).rename = originalRename; }
+});
+
+test('shared Agent format faults still fail closed for every App', async t => {
+  for (const marker of ['{ invalid marker', JSON.stringify({ schemaVersion: 1, protocol: 'unsupported' })]) {
+    const { root, broker } = await fixture(t);
+    await fs.writeFile(join(root, 'desktop-agent-format.json'), marker);
+    await assert.rejects(broker.initialize());
+    await assert.rejects(broker.run(other, runInput('shared-format-fault')));
+    assert.equal(await fs.readFile(join(root, 'desktop-agent-format.json'), 'utf8'), marker);
+  }
+});
+
 
 test('Chat creation is atomic by app and request, survives restart, and deletion retains its tombstone', async t => {
   const { root, broker, options } = await fixture(t);
@@ -490,7 +703,7 @@ test('Chat creation is atomic by app and request, survives restart, and deletion
   assert.deepEqual(files, ['chat.json']);
 });
 
-test('incomplete Chat storage fails closed after restart without blocking unrelated creations', async t => {
+test('incomplete Chat storage isolates its App after restart without blocking other Apps', async t => {
   const { root, broker, options } = await fixture(t);
   await broker.initialize();
   const input = { requestId: 'b2222222-2222-4222-8222-222222222222' };
@@ -500,9 +713,10 @@ test('incomplete Chat storage fails closed after restart without blocking unrela
   await assert.rejects(broker.chatCreationStatus(principal, input), { code: 'chat_storage_uncertain' });
   const restarted = new LocalAppAgentBroker(options);
   t.after(async () => { await restarted.dispose().catch(() => undefined); });
-  await assert.rejects(restarted.createChat(principal, input), { code: 'chat_storage_uncertain' });
+  await assert.rejects(restarted.createChat(principal, input), { code: 'agent_storage_unavailable' });
   const unrelated = { requestId: 'c3333333-3333-4333-8333-333333333333' };
-  assert.equal((await restarted.createChat(principal, unrelated)).chatId, unrelated.requestId);
+  await assert.rejects(restarted.createChat(principal, unrelated), { code: 'agent_storage_unavailable' });
+  assert.equal((await restarted.createChat(other, unrelated)).chatId, unrelated.requestId);
   assert.deepEqual(await fs.readdir(path), []);
 });
 
@@ -760,9 +974,9 @@ test('restart validates committed Chat metadata before exposing its identity', a
   await fs.writeFile(path, JSON.stringify({ ...saved, archived: 'not a boolean' }));
   const restarted = new LocalAppAgentBroker(options);
   t.after(async () => { await restarted.dispose().catch(() => undefined); });
-  await assert.rejects(restarted.chatCreationStatus(principal, input), { code: 'chat_storage_uncertain' });
-  await assert.rejects(restarted.createChat(principal, input), { code: 'chat_storage_uncertain' });
-  assert.deepEqual(await restarted.listChats(principal), { chats: [], hasUncertainChats: true, unavailableChats: [{ chatId: input.requestId, code: 'chat_storage_uncertain' }] });
+  await assert.rejects(restarted.chatCreationStatus(principal, input), { code: 'agent_storage_unavailable' });
+  await assert.rejects(restarted.createChat(principal, input), { code: 'agent_storage_unavailable' });
+  await assert.rejects(restarted.listChats(principal), { code: 'agent_storage_unavailable' });
 });
 
 test('task success remains unavailable until its Chat outcome is durably saved and recovered', async t => {
@@ -884,7 +1098,10 @@ test('restart fences a Chat success interrupted between task and Chat commits', 
     const frozenTask = join(snapshot, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
     const frozenChat = join(snapshot, 'apps', principal.appId, 'agent', 'chats', chat.chatId, 'chat.json');
     const taskBytes = await fs.readFile(frozenTask), chatBytes = await fs.readFile(frozenChat);
-    const recovered = new LocalAppAgentBroker({ ...options, root: snapshot });
+    const recovered = new LocalAppAgentBroker({ ...options, root: snapshot, execute: async execution => ({
+      result: { text: 'healthy', output: { ok: true }, attachments: [], messageId: 'healthy-completion-window',
+        ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: { turns: 1 },
+    }) });
     t.after(async () => { await recovered.dispose().catch(() => undefined); });
     await assert.rejects(recovered.get(principal, input.runId), { code: 'agent_storage_unavailable' });
     await assert.rejects(recovered.events(principal, input.runId), { code: 'agent_storage_unavailable' });
@@ -893,6 +1110,8 @@ test('restart fences a Chat success interrupted between task and Chat commits', 
     assert.deepEqual(page.chats.map(row => row.chatId), [healthy.chatId]);
     assert.deepEqual(page.unavailableChats, [{ chatId: chat.chatId, code: 'chat_storage_uncertain' }]);
     assert.equal(page.hasUncertainChats, true);
+    await recovered.sendChat(principal, healthy.chatId, runInput('healthy-completion-window', healthy.chatId));
+    assert.equal((await terminal(recovered, principal, 'healthy-completion-window')).state, 'succeeded');
     assert.deepEqual(await fs.readFile(frozenTask), taskBytes);
     assert.deepEqual(await fs.readFile(frozenChat), chatBytes);
     releaseChatCommit.resolve();
@@ -1158,22 +1377,30 @@ test('unsafe in-flight fence prevents task dispatch and remains unavailable afte
   let executions = 0;
   const privateId = 'aabbccdd-1111-4111-8111-111111111111';
   const { root, broker, options } = await fixture(t, { uuid: () => privateId, execute: async () => {
-    executions++; return { result: { text: 'unexpected', attachments: [], messageId: 'unexpected' }, usage: { turns: 1 } };
+    executions++; return { result: { text: 'healthy', output: { ok: true }, attachments: [], messageId: 'healthy-fence' }, usage: { turns: 1 } };
   } });
   await broker.initialize();
   const tasks = join(root, 'apps', principal.appId, 'agent', 'tasks');
   await fs.mkdir(tasks, { recursive: true });
   const fence = join(tasks, `${privateId}.json.termination`);
-  await fs.symlink(join(root, 'untrusted-target'), fence);
+  const target = join(root, 'untrusted-target'), targetBytes = Buffer.from([0, 25, 255]);
+  await fs.writeFile(target, targetBytes);
+  await fs.symlink(target, fence);
   const input = runInput('unsafe-inflight-fence');
   await assert.rejects(broker.run(principal, input), { code: 'agent_storage_unavailable' });
   assert.equal(executions, 0);
   await assert.rejects(broker.get(principal, input.runId), { code: 'agent_storage_unavailable' });
-  const restarted = new LocalAppAgentBroker(options);
+  const taskPath = join(tasks, `${privateId}.json`), taskBytes = await fs.readFile(taskPath);
+  const restarted = new LocalAppAgentBroker({ ...options, uuid: () => 'bbbbbbbb-1111-4111-8111-111111111111' });
   t.after(async () => { await restarted.dispose().catch(() => undefined); });
   await assert.rejects(restarted.get(principal, input.runId), { code: 'agent_storage_unavailable' });
+  const healthy = runInput('same-app-after-unsafe-fence');
+  await restarted.run(principal, healthy);
+  assert.equal((await terminal(restarted, principal, healthy.runId)).state, 'succeeded');
   assert.equal((await fs.lstat(fence)).isSymbolicLink(), true);
-  assert.equal(executions, 0);
+  assert.deepEqual(await fs.readFile(taskPath), taskBytes);
+  assert.deepEqual(await fs.readFile(target), targetBytes);
+  assert.equal(executions, 1);
 });
 
 test('cancellation write failure retains the existing fence and reports uncertainty', { skip: process.platform === 'win32' }, async t => {
@@ -1264,16 +1491,13 @@ test('a killed host recovers an in-flight Chat as interrupted without replaying 
     assert.equal((await second.events(principal, admitted.runId)).events.filter(event => event.type === 'RUN_ERROR').length, 1);
     await assert.rejects(fs.lstat(join(snapshot, 'apps', principal.appId, 'agent', 'tasks', `${admitted.taskId}.json.termination`)), { code: 'ENOENT' });
 
-    // A failed fence cleanup must not subsequently run orphan repair on a
-    // quarantined Chat or rewrite the preserved message bytes.
+    // A failed fence cleanup keeps the Chat unavailable and does not rewrite
+    // the message bytes after the failed recovery step.
     const failedRoot = await fs.mkdtemp(join(tmpdir(), 'lingxi-recovery-failed-'));
     t.after(async () => { await fs.rm(failedRoot, { recursive: true, force: true }); });
     await fs.cp(root, failedRoot, { recursive: true });
     const failedTask = join(failedRoot, 'apps', principal.appId, 'agent', 'tasks', `${admitted.taskId}.json`);
     const failedChat = join(failedRoot, 'apps', principal.appId, 'agent', 'chats', admitted.chatId, 'chat.json');
-    const withOrphan = JSON.parse(await fs.readFile(failedChat, 'utf8'));
-    withOrphan.messages.push({ runId: 'unknown-run', message: { id: 'orphan-preserve', role: 'user', content: 'preserve' } });
-    await fs.writeFile(failedChat, JSON.stringify(withOrphan));
     const earlierUnlink = fs.unlink;
     let atFailure: Buffer | undefined;
     (fs as any).unlink = async (path: unknown) => {
@@ -1287,10 +1511,10 @@ test('a killed host recovers an in-flight Chat as interrupted without replaying 
     t.after(async () => { await failed.dispose().catch(() => undefined); });
     try {
       await assert.rejects(failed.get(principal, admitted.runId), { code: 'agent_storage_unavailable' });
-      await assert.rejects(failed.chatHistory(principal, admitted.chatId), { code: 'chat_storage_uncertain' });
+      await assert.rejects(failed.chatHistory(principal, admitted.chatId), { code: 'agent_storage_unavailable' });
       assert.ok(atFailure);
       assert.deepEqual(await fs.readFile(failedChat), atFailure);
-      assert.equal(JSON.parse(atFailure.toString()).messages.at(-1).message.id, 'orphan-preserve');
+      assert.equal(JSON.parse(atFailure.toString()).messages.at(-1).message.id, 'message-fixture-1');
     } finally { (fs as any).unlink = earlierUnlink; }
 
     // A second crash after fence unlink, but before clearing the durable
@@ -1373,11 +1597,12 @@ test('a killed stateless task becomes interrupted without repeating a possible e
   await assert.rejects(fs.lstat(join(root, 'apps', principal.appId, 'agent', 'tasks', `${admitted.taskId}.json.termination`)), { code: 'ENOENT' });
 });
 
-test('in-flight records with partial result evidence stay isolated on restart', async t => {
+test('partial tool events isolate only their task and Chat across restarts', async t => {
   const started = deferred<LocalAppAgentExecution>();
   const never = deferred<{ result: LocalAppAgentPrivateResult; usage: { turns: number } }>();
   const { root, broker, options } = await fixture(t, { execute: execution => { started.resolve(execution); return never.promise; } });
   const creation = { requestId: 'db111111-1111-4111-8111-111111111111' };
+  const healthy = await broker.createChat(principal, { requestId: 'cc222222-2222-4222-8222-222222222222' });
   const chat = await broker.createChat(principal, creation);
   const input = runInput('inflight-with-partial-result', chat.chatId);
   await broker.sendChat(principal, chat.chatId, input);
@@ -1387,15 +1612,46 @@ test('in-flight records with partial result evidence stay isolated on restart', 
   await fs.cp(root, snapshot, { recursive: true });
   const path = join(snapshot, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
   const record = JSON.parse(await fs.readFile(path, 'utf8'));
-  record.events.push({ type: 'TEXT_MESSAGE_START', messageId: 'partial', role: 'assistant' });
+  const partialEvents = [
+    { type: 'TOOL_CALL_START', toolCallId: 'call-before-crash', toolCallName: 'Read' },
+    { type: 'TOOL_CALL_ARGS', toolCallId: 'call-before-crash', delta: '{"path":' },
+  ];
+  for (const event of partialEvents) EventSchema.parse(event);
+  record.events.push(...partialEvents);
   record.eventSequence = record.events.length;
   const bytes = Buffer.from(JSON.stringify(record));
   await fs.writeFile(path, bytes);
-  const restarted = new LocalAppAgentBroker({ ...options, root: snapshot });
+  const chatDirectory = join(snapshot, 'apps', principal.appId, 'agent', 'chats', chat.chatId);
+  const chatPath = join(chatDirectory, 'chat.json'), fencePath = `${path}.termination`;
+  const extraPath = join(chatDirectory, 'private-session.bin');
+  await fs.writeFile(extraPath, Buffer.from([0, 21, 255]));
+  const protectedPaths = [path, fencePath, chatPath, extraPath];
+  const protectedBytes = await Promise.all(protectedPaths.map(file => fs.readFile(file)));
+  const executions: string[] = [];
+  const recoveredOptions = { ...options, root: snapshot, execute: async (execution: LocalAppAgentExecution) => {
+    executions.push(execution.runId);
+    return { result: { text: 'healthy', output: { ok: true }, attachments: [] as [], messageId: `assistant-${execution.runId}`,
+      ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: { turns: 1 } };
+  } };
+  const restarted = new LocalAppAgentBroker(recoveredOptions);
   t.after(async () => { await restarted.dispose().catch(() => undefined); });
   await assert.rejects(restarted.get(principal, input.runId), { code: 'agent_storage_unavailable' });
   await assert.rejects(restarted.chatCreationStatus(principal, creation), { code: 'chat_storage_uncertain' });
-  assert.deepEqual(await fs.readFile(path), bytes);
+  const page = await restarted.listChats(principal);
+  assert.deepEqual(page.chats.map(row => row.chatId), [healthy.chatId]);
+  assert.deepEqual(page.unavailableChats, [{ chatId: chat.chatId, code: 'chat_storage_uncertain' }]);
+  await restarted.sendChat(principal, healthy.chatId, runInput('healthy-after-tool-crash', healthy.chatId));
+  assert.equal((await terminal(restarted, principal, 'healthy-after-tool-crash')).state, 'succeeded');
+  await restarted.run(principal, runInput('new-task-after-tool-crash'));
+  assert.equal((await terminal(restarted, principal, 'new-task-after-tool-crash')).state, 'succeeded');
+  await restarted.dispose();
+  const second = new LocalAppAgentBroker(recoveredOptions);
+  t.after(async () => { await second.dispose().catch(() => undefined); });
+  await assert.rejects(second.get(principal, input.runId), { code: 'agent_storage_unavailable' });
+  await assert.rejects(second.chatHistory(principal, chat.chatId), { code: 'chat_storage_uncertain' });
+  assert.equal((await second.chatHistory(principal, healthy.chatId)).messages.length, 2);
+  assert.deepEqual(await Promise.all(protectedPaths.map(file => fs.readFile(file))), protectedBytes);
+  assert.deepEqual(executions, ['healthy-after-tool-crash', 'new-task-after-tool-crash']);
   // Allow the original test fixture to finish; the snapshot must remain untouched.
   never.resolve({ result: { text: 'answer', output: { ok: true }, attachments: [], chatId: chat.chatId, messageId: 'assistant-original' }, usage: { turns: 1 } });
   await terminal(broker, principal, input.runId);

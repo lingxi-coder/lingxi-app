@@ -6,7 +6,10 @@ use remote_control_client::clock::ManualClock;
 use remote_control_client::rtdb::MemoryRtdb;
 use remote_control_client::testing::FakePeerNetwork;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
+use std::task::Poll;
 use std::time::Duration;
 
 // The fake desktop of the viewer crate's own integration tests (it only uses that
@@ -16,6 +19,14 @@ mod fake_host;
 use fake_host::FakeHost;
 
 const UID: &str = "user-1";
+
+async fn assert_pending<F: Future>(mut future: Pin<&mut F>) {
+    std::future::poll_fn(|cx| {
+        assert!(future.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+}
 
 // ---------------------------------------------------------------------------
 // Doubles
@@ -614,6 +625,100 @@ async fn pins_round_trip_and_survive_a_failing_store() {
     assert_eq!(restarted.pinned_host("h2").await.unwrap().host_key, "k2");
 }
 
+struct PausedLoadStore {
+    inner: FakeKeyStore,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl PlatformRemoteKeyStore for Arc<PausedLoadStore> {
+    async fn load_identity(&self) -> Result<Option<Vec<u8>>, RemoteFfiError> {
+        self.inner.load_identity().await
+    }
+    async fn store_identity(&self, key: Vec<u8>) -> Result<(), RemoteFfiError> {
+        self.inner.store_identity(key).await
+    }
+    async fn delete_identity(&self) -> Result<(), RemoteFfiError> {
+        self.inner.delete_identity().await
+    }
+    async fn load_pinned_host(
+        &self,
+        id: String,
+    ) -> Result<Option<RemotePinnedHostFfi>, RemoteFfiError> {
+        let result = self.inner.load_pinned_host(id).await;
+        self.entered.notify_one();
+        self.release.notified().await;
+        result
+    }
+    async fn store_pinned_host(&self, host: RemotePinnedHostFfi) -> Result<(), RemoteFfiError> {
+        self.inner.store_pinned_host(host).await
+    }
+    async fn delete_pinned_host(&self, id: String) -> Result<(), RemoteFfiError> {
+        self.inner.delete_pinned_host(id).await
+    }
+}
+
+#[tokio::test]
+async fn forgotten_pin_cannot_be_recached_by_an_inflight_store_read() {
+    let store = Arc::new(PausedLoadStore {
+        inner: FakeKeyStore::default(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    store
+        .inner
+        .store_pinned_host(RemotePinnedHostFfi {
+            host_id: "a".into(),
+            host_key: "key".into(),
+            name: "Mac".into(),
+            paired_at_ms: 1,
+        })
+        .await
+        .unwrap();
+    let bridge = Arc::new(KeyStoreBridge::new(Box::new(store.clone())));
+    let reading = bridge.clone();
+    let read = tokio::spawn(async move { reading.pinned_host("a").await });
+    store.entered.notified().await;
+    let forget = bridge.unpair("a");
+    tokio::pin!(forget);
+    assert_pending(forget.as_mut()).await;
+    store.release.notify_one();
+    assert!(read.await.unwrap().is_some());
+    forget.await;
+    assert!(bridge.coordinator.pins.lock().unwrap().get("a").is_none());
+    assert!(store.inner.state.lock().unwrap().pins.get("a").is_none());
+}
+
+#[tokio::test]
+async fn shared_store_bridges_observe_identity_reset_and_pin_replacement() {
+    let store = FakeKeyStore::default();
+    let coordinator = Arc::new(AccountCoordinator::default());
+    let first = KeyStoreBridge::with_coordinator(store.boxed(), coordinator.clone());
+    let second = KeyStoreBridge::with_coordinator(store.boxed(), coordinator);
+    let old_identity = first.identity().await.unwrap().id;
+    assert_eq!(second.identity().await.unwrap().id, old_identity);
+    second.reset_identity().await.unwrap();
+    assert_ne!(first.identity().await.unwrap().id, old_identity);
+    first.pin(pin_for("a")).await;
+    let mut newer = pin_for("a");
+    newer.host_key = "new key".into();
+    second.pin(newer).await;
+    assert_eq!(first.pinned_host("a").await.unwrap().host_key, "new key");
+}
+
+#[test]
+fn production_coordinator_matches_native_storage_domain() {
+    let first = account_coordinator("account-a");
+    let same = account_coordinator("account-a");
+    let other = account_coordinator("account-b");
+    assert!(Arc::ptr_eq(&first, &same));
+    assert_eq!(
+        Arc::ptr_eq(&first, &other),
+        matches!(REMOTE_DEVICE_PLATFORM, DevicePlatform::Android)
+    );
+}
+
 struct Tokens {
     calls: Arc<Mutex<Vec<bool>>>,
     fail: bool,
@@ -688,10 +793,15 @@ fn rig() -> Rig {
     });
     let store = FakeKeyStore::default();
     let recorder = Arc::new(Recorder::default());
+    let coordinator = Arc::new(AccountCoordinator::default());
     let parts = Parts {
         uid: UID.into(),
         rtdb: rtdb as _,
-        keys: Arc::new(KeyStoreBridge::new(store.boxed())),
+        keys: Arc::new(KeyStoreBridge::with_coordinator(
+            store.boxed(),
+            coordinator.clone(),
+        )),
+        coordinator,
         clock: clock as _,
         random: Arc::new(|| 0.0),
         // This fixture exercises the encrypted fallback; native WebRTC has its own adapter tests.
@@ -1423,6 +1533,478 @@ struct PausedResetKeys {
     release: tokio::sync::Notify,
 }
 
+struct PausedHostKeys {
+    inner: Arc<dyn ViewerKeys>,
+    pause_pin: bool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+struct PausedDeleteKeys {
+    inner: Arc<dyn ViewerKeys>,
+    pause: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ViewerKeys for PausedDeleteKeys {
+    async fn identity(&self) -> Result<DeviceIdentity, KeysError> {
+        self.inner.identity().await
+    }
+    async fn reset_identity(&self) -> Result<(), KeysError> {
+        self.inner.reset_identity().await
+    }
+    async fn pinned_host(&self, id: &str) -> Option<PinnedHost> {
+        self.inner.pinned_host(id).await
+    }
+    async fn pin(&self, host: PinnedHost) {
+        self.inner.pin(host).await;
+    }
+    async fn unpair(&self, id: &str) {
+        if self.pause.load(Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.unpair(id).await;
+    }
+}
+
+fn paused_delete_keys(rig: &Rig) -> Arc<PausedDeleteKeys> {
+    Arc::new(PausedDeleteKeys {
+        inner: rig.client.core.parts.keys.clone(),
+        pause: AtomicBool::new(false),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    })
+}
+
+#[async_trait]
+impl ViewerKeys for PausedHostKeys {
+    async fn identity(&self) -> Result<DeviceIdentity, KeysError> {
+        self.inner.identity().await
+    }
+    async fn reset_identity(&self) -> Result<(), KeysError> {
+        self.inner.reset_identity().await
+    }
+    async fn pinned_host(&self, id: &str) -> Option<PinnedHost> {
+        self.inner.pinned_host(id).await
+    }
+    async fn pin(&self, host: PinnedHost) {
+        if self.pause_pin {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.pin(host).await;
+    }
+    async fn unpair(&self, id: &str) {
+        if !self.pause_pin {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.unpair(id).await;
+    }
+}
+
+fn client_with_keys(rig: &Rig, keys: Arc<dyn ViewerKeys>) -> Arc<RemoteControlCore> {
+    let parts = &rig.client.core.parts;
+    Arc::new(RemoteControlCore::from_parts(
+        Parts {
+            uid: parts.uid.clone(),
+            rtdb: parts.rtdb.clone(),
+            keys,
+            coordinator: parts.coordinator.clone(),
+            clock: parts.clock.clone(),
+            random: parts.random.clone(),
+            peers: parts.peers.clone(),
+            media_offer_handler: parts.media_offer_handler.clone(),
+            device_name: parts.device_name.clone(),
+            app_version: parts.app_version.clone(),
+        },
+        rig.recorder.clone(),
+    ))
+}
+
+fn pin_for(host: &str) -> PinnedHost {
+    PinnedHost {
+        host_id: host.into(),
+        host_key: "key".into(),
+        name: "Mac".into(),
+        paired_at: 1,
+    }
+}
+
+fn connection_keys(client: &RemoteControlCore, host: &str) -> Arc<ConnectionKeys> {
+    let active = client.core.active.lock().unwrap();
+    let active = active.as_ref().unwrap();
+    assert_eq!(active.host_id, host);
+    let gate = client.core.parts.coordinator.host_gates.get(host);
+    Arc::new(ConnectionKeys {
+        inner: client.core.parts.keys.clone(),
+        host_id: host.into(),
+        trust_epoch: AtomicU64::new(gate.trust_epoch.load(Ordering::SeqCst)),
+        gate,
+        coordinator: client.core.parts.coordinator.clone(),
+        root_id: active.root.id.clone(),
+    })
+}
+
+#[tokio::test]
+async fn ordinary_switch_preserves_queued_approval_and_revocation_writes() {
+    let rig = rig();
+    let client = &rig.client;
+    client.connect("a".into()).await.unwrap();
+    let keys = connection_keys(client, "a");
+    let gate = keys.gate.clone();
+    let held = gate.lock.lock().await;
+    let pin = keys.pin(pin_for("a"));
+    tokio::pin!(pin);
+    assert_pending(pin.as_mut()).await;
+    client.connect("b".into()).await.unwrap();
+    drop(held);
+    pin.await;
+    assert!(client.core.parts.keys.pinned_host("a").await.is_some());
+
+    client.connect("a".into()).await.unwrap();
+    let keys = connection_keys(client, "a");
+    let gate = keys.gate.clone();
+    let held = gate.lock.lock().await;
+    let unpair = keys.unpair("a");
+    tokio::pin!(unpair);
+    assert_pending(unpair.as_mut()).await;
+    client.disconnect().await;
+    drop(held);
+    unpair.await;
+    assert!(client.core.parts.keys.pinned_host("a").await.is_none());
+}
+
+#[tokio::test]
+async fn repair_rejects_old_pairing_writes_after_new_pairing() {
+    let rig = rig();
+    let client = &rig.client;
+    client.connect("a".into()).await.unwrap();
+    let old_keys = connection_keys(client, "a");
+    client.disconnect().await;
+    client.repair_host("a".into()).await.unwrap();
+    let new_keys = connection_keys(client, "a");
+    let mut new_pin = pin_for("a");
+    new_pin.host_key = "new key".into();
+    new_keys.pin(new_pin).await;
+    old_keys.unpair("a").await;
+    old_keys.pin(pin_for("a")).await;
+    assert_eq!(
+        client
+            .core
+            .parts
+            .keys
+            .pinned_host("a")
+            .await
+            .unwrap()
+            .host_key,
+        "new key"
+    );
+}
+
+#[tokio::test]
+async fn repair_on_an_active_non_revoked_host_is_a_noop() {
+    let rig = rig();
+    let client = &rig.client;
+    client.connect("a".into()).await.unwrap();
+    let keys = connection_keys(client, "a");
+    let generation = client.core.current.load(Ordering::SeqCst);
+    client.repair_host("a".into()).await.unwrap();
+    assert_eq!(client.core.current.load(Ordering::SeqCst), generation);
+    assert_eq!(
+        keys.gate.trust_epoch.load(Ordering::SeqCst),
+        keys.trust_epoch.load(Ordering::SeqCst)
+    );
+    assert_eq!(rig.store.state.lock().unwrap().identity_deletes, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn repair_keeps_existing_session_watchers() {
+    use remote_control_client::signaling::AnswerRejectReason;
+    let rig = rig();
+    rig.host
+        .configure(|config| config.reject = Some(AnswerRejectReason::Revoked));
+    rig.host.publish_presence().await;
+    let host = rig.host.host_id.clone();
+    let other = client_with_keys(&rig, rig.client.core.parts.keys.clone());
+    let unrelated = client_with_keys(&rig, rig.client.core.parts.keys.clone());
+    rig.client.connect(host.clone()).await.unwrap();
+    rig.client.attach_session("s1".into()).await.unwrap();
+    other.connect(host.clone()).await.unwrap();
+    unrelated.connect("different-host".into()).await.unwrap();
+    until("revoked", || {
+        rig.client.connection_state().is_some_and(|state| {
+            state.phase == RemoteConnectionPhaseFfi::Failed
+                && state
+                    .failure
+                    .is_some_and(|failure| failure.kind == RemoteFailureKindFfi::Revoked)
+        })
+    })
+    .await;
+    until("other revoked", || {
+        other.connection_state().is_some_and(|state| {
+            state.phase == RemoteConnectionPhaseFfi::Failed
+                && state
+                    .failure
+                    .is_some_and(|failure| failure.kind == RemoteFailureKindFfi::Revoked)
+        })
+    })
+    .await;
+    rig.client.repair_host(host).await.unwrap();
+    let active = rig.client.core.active.lock().unwrap();
+    assert!(active.as_ref().unwrap().watchers.contains_key("s1"));
+    drop(active);
+    assert!(other.connection_state().is_none());
+    assert_eq!(
+        unrelated.connection_state().unwrap().host_id,
+        "different-host"
+    );
+}
+
+#[tokio::test]
+async fn attempt_scope_remains_old_after_in_place_successful_repair() {
+    let rig = rig();
+    let client = &rig.client;
+    client.connect("a".into()).await.unwrap();
+    let root = connection_keys(client, "a");
+    let old = root.for_attempt().unwrap();
+    root.reset_identity().await.unwrap();
+    let fresh = root.for_attempt().unwrap();
+    let mut pin = pin_for("a");
+    pin.host_key = "new key".into();
+    fresh.pin(pin).await;
+    old.unpair("a").await;
+    old.pin(pin_for("a")).await;
+    assert_eq!(
+        client
+            .core
+            .parts
+            .keys
+            .pinned_host("a")
+            .await
+            .unwrap()
+            .host_key,
+        "new key"
+    );
+}
+
+#[tokio::test]
+async fn forget_serializes_same_host_and_discards_old_epoch_writes() {
+    let rig = rig();
+    let keys = Arc::new(PausedHostKeys {
+        inner: rig.client.core.parts.keys.clone(),
+        pause_pin: false,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let client = client_with_keys(&rig, keys.clone());
+    client.connect("a".into()).await.unwrap();
+    let old_keys = connection_keys(&client, "a");
+    let forgetting = client.clone();
+    let forget = tokio::spawn(async move { forgetting.forget_host("a".into()).await });
+    keys.entered.notified().await;
+
+    // Another host is independent even while A's persistent deletion is paused.
+    client.connect("b".into()).await.unwrap();
+    assert_eq!(client.connection_state().unwrap().host_id, "b");
+    let late_pin = old_keys.pin(pin_for("a"));
+    tokio::pin!(late_pin);
+    assert_pending(late_pin.as_mut()).await;
+    let reconnect = client.connect("a".into());
+    tokio::pin!(reconnect);
+    assert_pending(reconnect.as_mut()).await;
+    assert_eq!(client.connection_state().unwrap().host_id, "b");
+    keys.release.notify_one();
+    forget.await.unwrap();
+    late_pin.await;
+    reconnect.await.unwrap();
+    assert!(keys.inner.pinned_host("a").await.is_none());
+    assert_eq!(client.connection_state().unwrap().host_id, "a");
+    let new_keys = connection_keys(&client, "a");
+    new_keys.pin(pin_for("a")).await;
+    old_keys.unpair("a").await;
+    // An old viewer must not obtain a fresh trust epoch by starting an attempt
+    // after the forget, even if its dial task was scheduled late.
+    old_keys.for_attempt().unwrap().unpair("a").await;
+    assert!(keys.inner.pinned_host("a").await.is_some());
+}
+
+#[tokio::test]
+async fn forget_waits_for_inflight_pin_then_removes_it() {
+    let rig = rig();
+    let keys = Arc::new(PausedHostKeys {
+        inner: rig.client.core.parts.keys.clone(),
+        pause_pin: true,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let client = client_with_keys(&rig, keys.clone());
+    client.connect("a".into()).await.unwrap();
+    let old_keys = connection_keys(&client, "a");
+    let pin = tokio::spawn(async move { old_keys.pin(pin_for("a")).await });
+    keys.entered.notified().await;
+    let forget = client.forget_host("a".into());
+    tokio::pin!(forget);
+    assert_pending(forget.as_mut()).await;
+    keys.release.notify_one();
+    pin.await.unwrap();
+    forget.await;
+    assert!(keys.inner.pinned_host("a").await.is_none());
+    assert!(client.connection_state().is_none());
+}
+
+#[tokio::test]
+async fn replacement_core_forget_invalidates_old_core_pin_and_cached_read() {
+    let rig = rig();
+    let coordinator = rig.client.core.parts.coordinator.clone();
+    let replacement_store: Arc<dyn ViewerKeys> = Arc::new(KeyStoreBridge::with_coordinator(
+        rig.store.boxed(),
+        coordinator,
+    ));
+    let paused = Arc::new(PausedHostKeys {
+        inner: replacement_store.clone(),
+        pause_pin: false,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let replacement = client_with_keys(&rig, paused.clone());
+    rig.client.connect("a".into()).await.unwrap();
+    let old_keys = connection_keys(&rig.client, "a");
+    old_keys.pin(pin_for("a")).await;
+    assert!(rig.client.core.parts.keys.pinned_host("a").await.is_some());
+
+    let forgetting = replacement.clone();
+    let forget = tokio::spawn(async move { forgetting.forget_host("a".into()).await });
+    paused.entered.notified().await;
+    let delayed_pin = old_keys.pin(pin_for("a"));
+    tokio::pin!(delayed_pin);
+    assert_pending(delayed_pin.as_mut()).await;
+    paused.release.notify_one();
+    forget.await.unwrap();
+    delayed_pin.await;
+    assert!(rig.client.core.parts.keys.pinned_host("a").await.is_none());
+    assert!(replacement_store.pinned_host("a").await.is_none());
+    assert!(!rig.store.state.lock().unwrap().pins.contains_key("a"));
+}
+
+#[tokio::test]
+async fn replacement_core_forget_waits_for_an_old_core_inflight_pin() {
+    let rig = rig();
+    let paused = Arc::new(PausedHostKeys {
+        inner: rig.client.core.parts.keys.clone(),
+        pause_pin: true,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let old_client = client_with_keys(&rig, paused.clone());
+    let replacement_store: Arc<dyn ViewerKeys> = Arc::new(KeyStoreBridge::with_coordinator(
+        rig.store.boxed(),
+        rig.client.core.parts.coordinator.clone(),
+    ));
+    let replacement = client_with_keys(&rig, replacement_store.clone());
+    old_client.connect("a".into()).await.unwrap();
+    let old_keys = connection_keys(&old_client, "a");
+    let pin = tokio::spawn(async move { old_keys.pin(pin_for("a")).await });
+    paused.entered.notified().await;
+    let forget = replacement.forget_host("a".into());
+    tokio::pin!(forget);
+    assert_pending(forget.as_mut()).await;
+    paused.release.notify_one();
+    pin.await.unwrap();
+    forget.await;
+    assert!(replacement_store.pinned_host("a").await.is_none());
+    assert!(old_client.core.parts.keys.pinned_host("a").await.is_none());
+    assert!(!rig.store.state.lock().unwrap().pins.contains_key("a"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn replacement_forget_stops_old_live_viewer_and_reconnect_persists_pin() {
+    let rig = rig();
+    let replacement = client_with_keys(
+        &rig,
+        Arc::new(KeyStoreBridge::with_coordinator(
+            rig.store.boxed(),
+            rig.client.core.parts.coordinator.clone(),
+        )),
+    );
+    let unrelated = client_with_keys(&rig, rig.client.core.parts.keys.clone());
+    rig.host.publish_presence().await;
+    let host = rig.host.host_id.clone();
+    rig.client.connect(host.clone()).await.unwrap();
+    until("first pairing", || {
+        rig.client
+            .connection_state()
+            .is_some_and(|s| s.phase == RemoteConnectionPhaseFfi::Pairing)
+    })
+    .await;
+    rig.host.approve(&rig.host.conns()[0].conn_id).await;
+    until("first ready", || {
+        rig.client
+            .connection_state()
+            .is_some_and(|s| s.phase == RemoteConnectionPhaseFfi::Ready)
+    })
+    .await;
+    replacement.connect(host.clone()).await.unwrap();
+    until("replacement ready", || {
+        replacement
+            .connection_state()
+            .is_some_and(|s| s.phase == RemoteConnectionPhaseFfi::Ready)
+    })
+    .await;
+    unrelated.connect("different-host".into()).await.unwrap();
+    replacement.forget_host(host.clone()).await;
+    assert!(rig.client.connection_state().is_none());
+    assert!(replacement.connection_state().is_none());
+    assert!(matches!(
+        rig.client.list_apps().await,
+        Err(RemoteFfiError::NotConnected)
+    ));
+    assert_eq!(
+        unrelated.connection_state().unwrap().host_id,
+        "different-host"
+    );
+
+    rig.client.connect(host.clone()).await.unwrap();
+    until("reconnected and pinned", || {
+        rig.client
+            .connection_state()
+            .is_some_and(|s| s.phase == RemoteConnectionPhaseFfi::Ready)
+            && rig.store.state.lock().unwrap().pins.contains_key(&host)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn invalidating_a_collected_old_root_does_not_stop_its_replacement() {
+    let rig = rig();
+    rig.client.connect("a".into()).await.unwrap();
+    let old = rig
+        .client
+        .core
+        .active
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .root
+        .clone();
+    rig.client.connect("b".into()).await.unwrap();
+    old.invalidate();
+    assert_eq!(rig.client.connection_state().unwrap().host_id, "b");
+}
+
+#[tokio::test]
+async fn forgetting_an_old_host_does_not_disconnect_its_replacement() {
+    let rig = rig();
+    rig.client.connect("a".into()).await.unwrap();
+    rig.client.connect("b".into()).await.unwrap();
+    rig.client.forget_host("a".into()).await;
+    assert_eq!(rig.client.connection_state().unwrap().host_id, "b");
+}
+
 #[async_trait]
 impl ViewerKeys for PausedResetKeys {
     async fn identity(&self) -> Result<DeviceIdentity, KeysError> {
@@ -1444,6 +2026,329 @@ impl ViewerKeys for PausedResetKeys {
     }
 }
 
+struct FailedResetKeys(Arc<dyn ViewerKeys>);
+
+#[async_trait]
+impl ViewerKeys for FailedResetKeys {
+    async fn identity(&self) -> Result<DeviceIdentity, KeysError> {
+        self.0.identity().await
+    }
+    async fn reset_identity(&self) -> Result<(), KeysError> {
+        Err(KeysError("reset failed".into()))
+    }
+    async fn pinned_host(&self, id: &str) -> Option<PinnedHost> {
+        self.0.pinned_host(id).await
+    }
+    async fn pin(&self, host: PinnedHost) {
+        self.0.pin(host).await;
+    }
+    async fn unpair(&self, id: &str) {
+        self.0.unpair(id).await;
+    }
+}
+
+#[tokio::test]
+async fn failed_repair_does_not_invalidate_the_existing_trust_epoch() {
+    let rig = rig();
+    let client = client_with_keys(
+        &rig,
+        Arc::new(FailedResetKeys(rig.client.core.parts.keys.clone())),
+    );
+    client.connect("a".into()).await.unwrap();
+    let old_keys = connection_keys(&client, "a");
+    client.disconnect().await;
+    assert!(matches!(
+        client.repair_host("a".into()).await,
+        Err(RemoteFfiError::KeyStore { .. })
+    ));
+    old_keys.pin(pin_for("a")).await;
+    assert!(client.core.parts.keys.pinned_host("a").await.is_some());
+    assert!(client.connection_state().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_in_place_repair_preserves_connection_and_trust() {
+    use remote_control_client::signaling::AnswerRejectReason;
+    let rig = rig();
+    let client = client_with_keys(
+        &rig,
+        Arc::new(FailedResetKeys(rig.client.core.parts.keys.clone())),
+    );
+    rig.host
+        .configure(|config| config.reject = Some(AnswerRejectReason::Revoked));
+    rig.host.publish_presence().await;
+    let host = rig.host.host_id.clone();
+    client.connect(host.clone()).await.unwrap();
+    let old_keys = connection_keys(&client, &host);
+    until("revoked", || {
+        client.connection_state().is_some_and(|s| {
+            s.phase == RemoteConnectionPhaseFfi::Failed
+                && s.failure
+                    .is_some_and(|f| f.kind == RemoteFailureKindFfi::Revoked)
+        })
+    })
+    .await;
+    let generation = client.core.current.load(Ordering::SeqCst);
+    client.repair_host(host.clone()).await.unwrap();
+    assert_eq!(client.core.current.load(Ordering::SeqCst), generation);
+    old_keys.pin(pin_for(&host)).await;
+    assert!(client.core.parts.keys.pinned_host(&host).await.is_some());
+    assert_eq!(
+        client.connection_state().unwrap().phase,
+        RemoteConnectionPhaseFfi::Failed
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_and_connect_wait_for_in_place_repair_reset() {
+    use remote_control_client::signaling::AnswerRejectReason;
+    let rig = rig();
+    let keys = Arc::new(PausedResetKeys {
+        inner: rig.client.core.parts.keys.clone(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let client = client_with_keys(&rig, keys.clone());
+    rig.host
+        .configure(|config| config.reject = Some(AnswerRejectReason::Revoked));
+    rig.host.publish_presence().await;
+    let host = rig.host.host_id.clone();
+    client.connect(host.clone()).await.unwrap();
+    until("revoked", || {
+        client.connection_state().is_some_and(|s| {
+            s.phase == RemoteConnectionPhaseFfi::Failed
+                && s.failure
+                    .is_some_and(|f| f.kind == RemoteFailureKindFfi::Revoked)
+        })
+    })
+    .await;
+    let old_keys = connection_keys(&client, &host);
+    keys.inner.pin(pin_for(&host)).await;
+    let repairing = client.clone();
+    let repairing_host = host.clone();
+    let repair = tokio::spawn(async move { repairing.repair_host(repairing_host).await });
+    keys.entered.notified().await;
+    let old_unpair = old_keys.unpair(&host);
+    tokio::pin!(old_unpair);
+    assert_pending(old_unpair.as_mut()).await;
+    let retry = client.retry();
+    tokio::pin!(retry);
+    assert_pending(retry.as_mut()).await;
+    let connect = client.connect(host.clone());
+    tokio::pin!(connect);
+    assert_pending(connect.as_mut()).await;
+    assert_eq!(
+        client.connection_state().unwrap().phase,
+        RemoteConnectionPhaseFfi::Failed
+    );
+    keys.release.notify_one();
+    repair.await.unwrap().unwrap();
+    assert!(
+        keys.inner.pinned_host(&host).await.is_none(),
+        "successful repair must clear the revoked pin before discarding the old unpair"
+    );
+    old_unpair.await;
+    retry.await;
+    connect.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_active_repair_finishes_delete_and_invalidates_old_scope() {
+    use remote_control_client::signaling::AnswerRejectReason;
+    let rig = rig();
+    let keys = paused_delete_keys(&rig);
+    let client = client_with_keys(&rig, keys.clone());
+    let replacement = client_with_keys(&rig, keys.inner.clone());
+    rig.host
+        .configure(|config| config.reject = Some(AnswerRejectReason::Revoked));
+    rig.host.publish_presence().await;
+    let host = rig.host.host_id.clone();
+    client.connect(host.clone()).await.unwrap();
+    client.attach_session("s1".into()).await.unwrap();
+    until("revoked", || {
+        client.connection_state().is_some_and(|s| {
+            s.phase == RemoteConnectionPhaseFfi::Failed
+                && s.failure
+                    .is_some_and(|f| f.kind == RemoteFailureKindFfi::Revoked)
+        })
+    })
+    .await;
+    let old_keys = connection_keys(&client, &host);
+    keys.inner.pin(pin_for(&host)).await;
+    keys.pause.store(true, Ordering::SeqCst);
+    let repairing = client.clone();
+    let repair_host = host.clone();
+    let repair = tokio::spawn(async move { repairing.repair_host(repair_host).await });
+    keys.entered.notified().await;
+    repair.abort();
+    assert!(repair.await.unwrap_err().is_cancelled());
+    let stale_pin = old_keys.pin(pin_for(&host));
+    tokio::pin!(stale_pin);
+    assert_pending(stale_pin.as_mut()).await;
+    let connect = replacement.connect(host.clone());
+    tokio::pin!(connect);
+    assert_pending(connect.as_mut()).await;
+    rig.host.configure(|config| config.reject = None);
+    keys.pause.store(false, Ordering::SeqCst);
+    keys.release.notify_one();
+    stale_pin.await;
+    connect.await.unwrap();
+    assert!(keys.inner.pinned_host(&host).await.is_none());
+    assert!(client
+        .core
+        .active
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .watchers
+        .contains_key("s1"));
+    let fresh = connection_keys(&replacement, &host);
+    fresh.pin(pin_for(&host)).await;
+    assert!(keys.inner.pinned_host(&host).await.is_some());
+}
+
+#[tokio::test]
+async fn cancelled_inactive_repair_finishes_before_new_connection() {
+    let rig = rig();
+    let keys = paused_delete_keys(&rig);
+    let client = client_with_keys(&rig, keys.clone());
+    let replacement = client_with_keys(&rig, keys.inner.clone());
+    client.connect("a".into()).await.unwrap();
+    let old_keys = connection_keys(&client, "a");
+    client.disconnect().await;
+    keys.inner.pin(pin_for("a")).await;
+    keys.pause.store(true, Ordering::SeqCst);
+    let repairing = client.clone();
+    let repair = tokio::spawn(async move { repairing.repair_host("a".into()).await });
+    keys.entered.notified().await;
+    repair.abort();
+    assert!(repair.await.unwrap_err().is_cancelled());
+    let stale_pin = old_keys.pin(pin_for("a"));
+    tokio::pin!(stale_pin);
+    assert_pending(stale_pin.as_mut()).await;
+    let connect = replacement.connect("a".into());
+    tokio::pin!(connect);
+    assert_pending(connect.as_mut()).await;
+    keys.release.notify_one();
+    stale_pin.await;
+    connect.await.unwrap();
+    assert!(keys.inner.pinned_host("a").await.is_none());
+    connection_keys(&replacement, "a").pin(pin_for("a")).await;
+    assert!(keys.inner.pinned_host("a").await.is_some());
+}
+
+#[tokio::test]
+async fn cancelled_forget_keeps_lock_until_delete_finishes() {
+    let rig = rig();
+    let keys = paused_delete_keys(&rig);
+    let client = client_with_keys(&rig, keys.clone());
+    let replacement = client_with_keys(&rig, keys.inner.clone());
+    client.connect("a".into()).await.unwrap();
+    let old_keys = connection_keys(&client, "a");
+    keys.inner.pin(pin_for("a")).await;
+    keys.pause.store(true, Ordering::SeqCst);
+    let forgetting = client.clone();
+    let forget = tokio::spawn(async move { forgetting.forget_host("a".into()).await });
+    keys.entered.notified().await;
+    forget.abort();
+    assert!(forget.await.unwrap_err().is_cancelled());
+    let stale_pin = old_keys.pin(pin_for("a"));
+    tokio::pin!(stale_pin);
+    assert_pending(stale_pin.as_mut()).await;
+    let connect = replacement.connect("a".into());
+    tokio::pin!(connect);
+    assert_pending(connect.as_mut()).await;
+    keys.release.notify_one();
+    stale_pin.await;
+    connect.await.unwrap();
+    assert!(keys.inner.pinned_host("a").await.is_none());
+    connection_keys(&replacement, "a").pin(pin_for("a")).await;
+    assert!(keys.inner.pinned_host("a").await.is_some());
+}
+
+#[tokio::test]
+async fn cancelling_forget_before_admission_has_no_effect() {
+    let rig = rig();
+    rig.client.connect("a".into()).await.unwrap();
+    let keys = connection_keys(&rig.client, "a");
+    keys.pin(pin_for("a")).await;
+    let gate = keys.gate.clone();
+    let held = gate.lock.lock().await;
+    let mut forget = Box::pin(rig.client.forget_host("a".into()));
+    assert_pending(forget.as_mut()).await;
+    drop(forget);
+    drop(held);
+    assert!(rig.client.core.parts.keys.pinned_host("a").await.is_some());
+    assert_eq!(rig.client.connection_state().unwrap().host_id, "a");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn forget_invalidates_live_roots_before_cleanup_task_first_poll() {
+    let rig = rig();
+    let other = client_with_keys(&rig, rig.client.core.parts.keys.clone());
+    rig.client.connect("a".into()).await.unwrap();
+    other.connect("a".into()).await.unwrap();
+    rig.client.core.parts.keys.pin(pin_for("a")).await;
+    let gate = rig.client.core.parts.coordinator.host_gates.get("a");
+    let mut forget = Box::pin(rig.client.forget_host("a".into()));
+    // This first poll admits the operation and spawns cleanup. On the
+    // current-thread runtime the spawned task cannot poll in this call.
+    assert_pending(forget.as_mut()).await;
+    assert!(rig.client.connection_state().is_none());
+    assert!(other.connection_state().is_none());
+    assert!(rig.store.state.lock().unwrap().pins.contains_key("a"));
+    drop(forget);
+    let _guard = gate.lock.lock().await;
+    assert!(!rig.store.state.lock().unwrap().pins.contains_key("a"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_forget_retains_host_gate_without_any_live_connection() {
+    let rig = rig();
+    let keys = paused_delete_keys(&rig);
+    keys.pause.store(true, Ordering::SeqCst);
+    let client = client_with_keys(&rig, keys.clone());
+    let mut forget = Box::pin(client.forget_host("a".into()));
+    assert_pending(forget.as_mut()).await;
+    drop(forget);
+    let mut connect = Box::pin(client.connect("a".into()));
+    assert_pending(connect.as_mut()).await;
+    keys.entered.notified().await;
+    keys.release.notify_one();
+    connect.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn repair_snapshots_generation_before_transaction_task_first_poll() {
+    let rig = rig();
+    let mut repair = Box::pin(rig.client.repair_host("a".into()));
+    // Poll the caller through admission, before the spawned task can run.
+    assert_pending(repair.as_mut()).await;
+    rig.client.connect("b".into()).await.unwrap();
+    assert_eq!(rig.store.state.lock().unwrap().identity_deletes, 0);
+    repair.await.unwrap();
+    assert_eq!(rig.client.connection_state().unwrap().host_id, "b");
+}
+
+#[tokio::test]
+async fn repair_cannot_replace_another_host_connected_during_identity_reset() {
+    let rig = rig();
+    let keys = Arc::new(PausedResetKeys {
+        inner: rig.client.core.parts.keys.clone(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let client = client_with_keys(&rig, keys.clone());
+    let repairing = client.clone();
+    let repair = tokio::spawn(async move { repairing.repair_host("a".into()).await });
+    keys.entered.notified().await;
+    client.connect("b".into()).await.unwrap();
+    keys.release.notify_one();
+    repair.await.unwrap().unwrap();
+    assert_eq!(client.connection_state().unwrap().host_id, "b");
+}
+
 #[tokio::test(start_paused = true)]
 async fn disconnect_during_repair_without_an_active_host_prevents_a_late_connect() {
     let rig = rig();
@@ -1458,6 +2363,7 @@ async fn disconnect_during_repair_without_an_active_host_prevents_a_late_connect
             uid: parts.uid.clone(),
             rtdb: parts.rtdb.clone(),
             keys: keys.clone(),
+            coordinator: parts.coordinator.clone(),
             clock: parts.clock.clone(),
             random: parts.random.clone(),
             peers: parts.peers.clone(),

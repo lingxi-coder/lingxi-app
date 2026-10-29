@@ -695,3 +695,186 @@ uncommitted and unpushed. Recommendation: **COMMENT**; the identified native
 issues are closed within the reviewed source scope, while signed-package,
 physical-device, public relay, TURN and network-change acceptance remain open.
 These checks do not establish release acceptance or the absence of other defects.
+
+
+## Ninth independent review (2026-10-29)
+
+Stage 1 checked the 11-file merged round-eight change
+(`daffddd21..41679eb12`) against the Desktop-authoritative runtime, authenticated
+HTTPS with optional RTC, retained Mobile hosting and browser-opening choices,
+and cancellation/revocation lifecycle requirements. No new requirement omission
+was identified in that scope. Stage 2 used independent Terra reviewers, source
+tracing and deterministic regressions. Two MEDIUM findings were reproduced and
+fixed; no CRITICAL or HIGH finding was identified. Independent review of the
+repairs found no confirmed unresolved defect in the reviewed scope.
+
+| Severity | Corrected location | Trigger, repair and evidence |
+| --- | --- | --- |
+| MEDIUM | `apps/electron/src/main/local-apps/host.ts:1461` | Resolving `window.loadURL()` and synchronously cancelling the final caller could let an already queued continuation show a window before `joinOpening` forwarded cancellation. The caller received cancellation while the window and run survived. Each waiter now leaves synchronously and idempotently from its abort listener; only the last departing waiter aborts the shared controller. The same-turn regression checks no displayed or retained window/run; another test checks a surviving waiter and listener removal. The bundled-host reproduction changes from `shown=1, windows=1` to `shown=0, windows=0`. |
+| MEDIUM | `packages/mobile-ffi/src/remote.rs:1594`, `:1632`, `:1753`, `:2084` | A cancelled, admitted forget/repair task retained `Arc<Core>` after the final public UniFFI client was released. Forgetting B while its store delete was paused left unrelated connection A Ready; inactive repair could also install a connection after owner destruction. These are direct-object-release paths without an earlier explicit disconnect; ordinary native account-switch close paths already disconnect. Public-client drop now synchronously shuts down live resources and fences installation under the active lock. Durable storage cleanup still retains the gate/Core and completes; repair no longer constructs a temporary public owner. Two tests failed before the repair (Ready versus Idle; generation 1 versus 0), then passed, covering connection, host-listener, file-task and delivery teardown, durable delete and no late reconnect. |
+
+Fresh verification on the final source:
+
+- The complete affected Desktop host/runtime suites passed **72/72** with
+  bundled Node 24. The seven focused cancellation/Stop/remote-owner tests also
+  passed with the bundled Electron runtime. A separate full-host Electron
+  attempt stopped after 38 passing subtests at Node's native
+  `execution_async_id` assertion; it is not counted as a full-suite pass.
+- The cached Android common Rust suite passed **53/53**, including both new
+  before/after regressions, real pairing and existing cancelled-caller recovery
+  tests. The final Rust file hashes match this invocation. Command:
+
+  ```sh
+  CARGO_TARGET_DIR=/Users/luolingfeng/lingxi/lingxi-app/target CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test --offline -p android-aar --lib remote::common::tests:: -- --nocapture
+  ```
+
+- Desktop Node and renderer typechecks passed. Actual TypeScript LSP diagnostic
+  publications were received for **4/4** scoped TypeScript files with zero
+  errors. The four-file TypeScript AST scan found no syntax errors, production
+  `console.log` or literal-credential candidates; all ten empty catches were
+  inspected as expected parsing, cleanup or startup handling. The named
+  `lsp_diagnostics`, `ast_grep_search`, ToolSearch and `ask_codex` tools were
+  unavailable; installed LSP/AST tools and independent reviewers supplied the
+  fallback. Rustfmt for all four reviewed Rust files and diff checks passed.
+- A freshly extracted and compiled exact-method Android JVM helper passed
+  replacement-account callback, forget-barrier and recovery checks. It does not
+  replace repository JUnit, a native package build or physical-device acceptance.
+
+Evidence: `/private/tmp/review9-before.txt`,
+`/private/tmp/review9-after.txt`, `/private/tmp/review9-target-tests.txt`,
+`/private/tmp/review9-host-tests.txt`,
+`/private/tmp/lingxi-review9-desktop-tests.log`,
+`/private/tmp/lingxi-review9-rust-before.log`,
+`/private/tmp/lingxi-review9-rust-final.log`,
+`/private/tmp/lingxi-review9-desktop-typecheck.log`,
+`/private/tmp/lingxi-review9-lsp-final.json`,
+`/private/tmp/lingxi-review9-ast.json` and
+`/private/tmp/lingxi-review9-android-fence.log`.
+
+The four source/test repairs and this report remain uncommitted on isolated
+branch `codex/local-app-remote-review9-20261029`, based on published main
+`41679eb128dfd6e3683837aea9b036419120c024`. Recommendation: **COMMENT**.
+The reproduced source findings are closed; signed packages, full Android/iOS
+native builds, physical browsers, public relay/TURN and actual address-change
+acceptance remain separate, unperformed checks. This review does not establish
+release acceptance or the absence of other defects.
+
+
+## Tenth independent review (2026-10-29)
+
+Stage 1 started from the five uncommitted round-nine files against published
+main `41679eb12`, and expanded to the shared connection implementation when
+tracing the public-client teardown path: **six reviewed files** in total.
+Desktop authority, authenticated remote access, Mobile hosting and browser
+choices remain consistent with the feature requirements. Stage 2 independently
+reviewed cancellation, public ownership, admitted storage transactions, lock
+ordering and connection restart. One additional MEDIUM finding was reproduced
+and repaired; no CRITICAL, HIGH or LOW finding was identified in this scope.
+
+**MEDIUM — active repair could redial after final client teardown.** Corrected
+at `packages/remote-control-client/src/connection.rs:823`, reached from the
+active-repair branch in `packages/mobile-ffi/src/remote.rs:2101`. Stop previously
+advanced its generation and only later changed Failed/Revoked to Idle. A
+concurrent, detached repair could capture the new generation with the old
+Revoked state, finish its asynchronous identity reset, and start a dial after
+Stop. The new public-client Drop makes this interleaving reachable before an
+admitted repair finishes. The existing FFI closed flag does not fence the
+already captured ViewerConnection. A dial holds its own Inner and is not
+cancelled merely by dropping the repair's connection clone.
+
+Stop now advances generation, clears failure metadata and publishes Idle in the
+same connection lock, then disposes captured old resources outside the lock.
+Repair either captures the old generation, which Stop invalidates, or observes
+Idle and declines admission. Explicit start/retry after Stop still works. State
+publication follows the existing locked watch/mpsc pattern and does not call
+external listeners inline. Independent review found no confirmed remaining
+defect in this repair. The previous round's Desktop and public-owner fixes
+remain in the pending patch; three reproduced findings across those two rounds
+are now closed within their reviewed source scopes.
+
+Fresh verification:
+
+- A deterministic unit regression invokes real Stop/repair with a private
+  `cfg(test)` scheduling barrier and delayed identity reset. Before the fix it
+  failed with one post-Stop dial identity call versus zero expected. This is a
+  connection-layer interleaving test, not an end-to-end public-owner test.
+- A separate new shared Mobile test uses a signed Revoked refusal and paused,
+  admitted storage deletion, cancels the caller and releases the final owner.
+  It checks Idle, completed identity/pin cleanup, trust epoch advancement and
+  no late reconnect. A second connection unit checks explicit retry and start.
+- The cached unified Android/shared-client build passed. The Android common
+  suite passed **54/54**; the freshly built shared-client unit binary passed
+  **36/36**, including both connection regressions and native data-only peer
+  transfer. The common-suite Cargo filter runs zero shared-client tests, so
+  the separate 36-test execution is explicitly required and was completed.
+- Installed TypeScript LSP publications were received for **2/2** modified
+  TypeScript files with zero errors. The two-file AST scan found no syntax
+  errors, production console.log or literal-credential candidates; the eight
+  empty catches retain the reviewed parsing/cleanup handling. Rustfmt on the
+  three pending Rust files and diff checks passed. Named LSP/AST/consultation
+  MCP tools remain unavailable; installed tools and independent reviewers
+  provided the fallback.
+- The two TypeScript source/test files remain byte-identical to the preceding
+  verified tree. Its Node 24 **72/72**, focused Electron **7/7** and Desktop
+  typecheck evidence is retained without rerunning unchanged suites. The
+  previous complete Electron-host native assertion remains a validation limit.
+
+Receipts: `/private/tmp/lingxi-review10-rust-before.log`,
+`/private/tmp/lingxi-review10-rust-common-final.log`,
+`/private/tmp/lingxi-review10-rust-client-final.log`,
+`/private/tmp/lingxi-review10-rust-tested-sha.json`,
+`/private/tmp/lingxi-review10-lsp-final.json` and
+`/private/tmp/lingxi-review10-ast.json`. The build uses the existing cache and
+selects both `android-aar` and `remote-control-client` with
+`remote-control-client/native-media` to keep the Android feature graph unified.
+
+Recommendation: **COMMENT**. No confirmed unresolved source finding remains in
+this reviewed patch. The six pending files remain uncommitted/unpushed on
+`codex/local-app-remote-review9-20261029`; canonical main is unchanged. Signed
+packages, full native builds, physical browsers, public relay/TURN and actual
+address-change acceptance remain unperformed checks. The review does not
+establish release acceptance or the absence of other defects.
+
+
+## Eleventh independent review (2026-10-29)
+
+Stage 1 rechecked the same **six-file uncommitted patch** against main
+`41679eb12`: cancellation ownership, public-client teardown, admitted storage
+cleanup and restart behavior remain consistent with the requirements. Stage 2
+used two independent Terra reviewers to inspect Stop state publication, late
+notifications, active/inactive repair, foreign-thread teardown, shared Desktop
+waiters and the regression tests. **No confirmed finding** was identified:
+CRITICAL 0, HIGH 0, MEDIUM 0, LOW 0. No additional source/test repair was retained.
+
+A proposed pre-I/O repair issue was withdrawn after independent cross-check.
+Active repair checks Revoked eligibility when it begins; an earlier Stop makes
+it Idle and can cancel that still-unstarted work, as explicit disconnect already
+did. Once reset/delete starts, the admitted cleanup must finish. Existing tests
+cover that latter obligation. No product or affected native-consumer requirement
+was found that would force global identity deletion after closure before any
+store operation began. The reviewed generic notification-preemption concerns
+also produced no confirmed introduced effect in this patch's consumers.
+
+Fresh TypeScript LSP diagnostics were received for **2/2** modified TypeScript
+files with zero errors. The two-file AST scan found zero syntax errors or
+production console.log/literal-credential candidates; the eight existing empty
+catches retain their reviewed handling. Rustfmt for all three pending Rust files
+and diff checks passed. Named LSP/AST/consultation MCP tools were unavailable;
+installed tools and independent reviewers supplied the fallback.
+
+Before updating this report, all six file hashes matched the preceding verified
+tree. Therefore the recorded Android common **54/54**, shared-client **36/36**,
+Node 24 Desktop **72/72**, focused Electron **7/7** and Desktop typecheck results
+remain applicable. These suites were not rerun on identical source. Fresh
+receipts are `/private/tmp/lingxi-review11-before.json`,
+`/private/tmp/lingxi-review11-lsp-final.json`,
+`/private/tmp/lingxi-review11-ast.json` and
+`/private/tmp/lingxi-review11-final-verification.json`.
+
+Recommendation: **APPROVE for the reviewed six-file source patch**. The three
+reproduced findings from rounds nine and ten are closed, with no confirmed
+unresolved source issue in this scope. The complete Electron-host native
+assertion and unperformed signed-package, full native build, physical browser,
+public relay/TURN and address-change checks remain the documented release
+acceptance limits. The pending patch is uncommitted/unpushed on
+`codex/local-app-remote-review9-20261029`; canonical main remains unchanged.

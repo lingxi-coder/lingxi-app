@@ -1583,14 +1583,25 @@ struct Core {
     /// older connection go quiet.
     current: Arc<AtomicU64>,
     active: Arc<Mutex<Option<Active>>>,
+    closed: AtomicBool,
     hosts_task: Mutex<Option<JoinHandle<()>>>,
     delivery: JoinHandle<()>,
     repairing: Arc<tokio::sync::Mutex<()>>,
     file_tasks: Mutex<HashMap<String, Arc<FileTask>>>,
 }
 
-impl Drop for Core {
-    fn drop(&mut self) {
+impl Core {
+    fn shutdown(&self) {
+        let active = {
+            let mut active = self.active.lock().expect("active");
+            if self.closed.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            // Serialize shutdown with connection installation and fence any
+            // detached repair that captured the previous generation.
+            self.current.fetch_add(1, Ordering::SeqCst);
+            active.take()
+        };
         // UniFFI frees objects synchronously on the foreign caller's thread.
         // Session/tunnel shutdown may spawn async cleanup even from deinit.
         let _runtime = self.runtime.enter();
@@ -1601,15 +1612,29 @@ impl Drop for Core {
         if let Some(task) = self.hosts_task.lock().expect("hosts task").take() {
             task.abort();
         }
-        if let Some(active) = self.active.lock().expect("active").take() {
+        if let Some(active) = active {
             active.shutdown();
         }
+    }
+}
+
+impl Drop for Core {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
 /// The Remote Control viewer state shared by the platform binding objects.
 pub(super) struct RemoteControlCore {
     core: Arc<Core>,
+}
+
+impl Drop for RemoteControlCore {
+    fn drop(&mut self) {
+        // Admitted storage transactions may retain Core, but must not retain
+        // its live resources after the public client has gone away.
+        self.core.shutdown();
+    }
 }
 
 /// Build the client. `database_url` is the Realtime Database instance
@@ -1698,6 +1723,7 @@ impl RemoteControlCore {
                 push_installation_id: Mutex::new(None),
                 current: Arc::clone(&current),
                 active: Arc::new(Mutex::new(None)),
+                closed: AtomicBool::new(false),
                 hosts_task: Mutex::new(None),
                 delivery: tokio::spawn(deliver(queue, listener, current)),
                 repairing: Arc::new(tokio::sync::Mutex::new(())),
@@ -1721,20 +1747,21 @@ impl RemoteControlCore {
     }
 
     fn start_connection(&self, host_id: &str) -> Result<(), RemoteFfiError> {
-        self.start_connection_if_current(host_id, None)
+        Self::start_connection_if_current(&self.core, host_id, None)
     }
 
     fn start_connection_if_current(
-        &self,
+        core: &Core,
         host_id: &str,
         expected: Option<u64>,
     ) -> Result<(), RemoteFfiError> {
-        let core = &self.core;
         let parts = &core.parts;
         // Generation and active installation are one transaction: disconnect
         // cannot finish between them and be undone by a stale constructor.
         let mut active = core.active.lock().expect("active");
-        if expected.is_some_and(|generation| generation != core.current.load(Ordering::SeqCst)) {
+        if core.closed.load(Ordering::SeqCst)
+            || expected.is_some_and(|generation| generation != core.current.load(Ordering::SeqCst))
+        {
             return Ok(());
         }
         let generation = core.current.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2054,22 +2081,18 @@ impl RemoteControlCore {
                 .map(|active| active.connection.clone());
             (generation, connection)
         };
-        let owned = Self {
-            core: Arc::clone(&self.core),
-        };
+        let core = Arc::clone(&self.core);
         tokio::spawn(async move {
             let _guard = guard;
             let _repair = repair;
-            owned
-                .repair_host_admitted(host_id, gate, generation, connection)
-                .await
+            Self::repair_host_admitted(core, host_id, gate, generation, connection).await
         })
         .await
         .expect("repair transaction panicked")
     }
 
     async fn repair_host_admitted(
-        &self,
+        core: Arc<Core>,
         host_id: String,
         gate: Arc<HostGate>,
         generation: u64,
@@ -2079,18 +2102,17 @@ impl RemoteControlCore {
             connection.repair().await;
             return Ok(());
         }
-        self.core
-            .parts
+        core.parts
             .keys
             .reset_identity()
             .await
             .map_err(|error| RemoteFfiError::KeyStore {
                 message: error.to_string(),
             })?;
-        self.core.parts.keys.unpair(&host_id).await;
+        core.parts.keys.unpair(&host_id).await;
         gate.trust_epoch.fetch_add(1, Ordering::SeqCst);
-        self.core.parts.coordinator.invalidate(&host_id, None);
-        self.start_connection_if_current(&host_id, Some(generation))
+        core.parts.coordinator.invalidate(&host_id, None);
+        Self::start_connection_if_current(&core, &host_id, Some(generation))
     }
 
     /// Follow a session: attach now if connected, and again after every reconnect

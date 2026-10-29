@@ -2,6 +2,11 @@
 
 目标项目：`lingxi-5e4b2`。现有客户端账号继续使用同一个 Firebase Authentication。
 
+Team 的首个客户端 Firestore 访问例外仅限 `(default)` 的 `teams` 数据，契约见
+[Teams](TEAMS.md)。本地配置为它单独使用 `firestore.default.rules`；
+`model-catalog` 和 `push-notifications` 仍为 deny-all。该配置尚未部署，
+Team API、客户端功能和生产验收仍按阶段推进。
+
 FCM 的 Android/iOS 客户端、独立注册 API、30 天绑定租约和清理代码见
 [Firebase Cloud Messaging](firebase-fcm.md)。用户已明确授权并完成该部分生产部署，
 Android 真机已验证注册、后台通知、消息到期移除、换账号隔离及离线退出后自动解绑；

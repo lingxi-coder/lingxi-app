@@ -15,7 +15,7 @@
   "firestore": [
     {
       "database": "(default)",
-      "rules": "infra/firebase/firestore.rules",
+      "rules": "infra/firebase/firestore.default.rules",
       "indexes": "infra/firebase/firestore.indexes.json"
     },
     {

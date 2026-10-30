@@ -72,13 +72,8 @@
   .local-app-chat-card { border-color: var(--apps-text); }
   .local-app-chat-card button { outline: 1px solid currentColor; outline-offset: -1px; }
 }
-.local-app-tabs { display: flex; gap: 6px; margin-bottom: 24px; }
-.local-app-tabs button[aria-current=page] { background: var(--apps-surface); color: var(--apps-accent); border-color: var(--apps-accent); }
-.local-app-market-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
-.local-app-market-controls .local-app-search { margin: 0; }
-.local-app-market-controls label { font-size: 13px; }
-.local-app-market > .local-app-update { margin: 18px 0 26px; }
-.local-app-market .local-app-tile p { color: var(--apps-muted); font-size: 13px; }
+.local-app-topbar-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; }
+.local-app-market-button { width: 40px; height: 40px; flex-basis: 40px; }
 .local-app-publish { color: var(--apps-text); background: var(--apps-surface); border: 1px solid var(--apps-border); border-radius: 16px; width: min(90vw,520px); max-height: 85vh; padding: 24px; }
 .local-app-publish::backdrop { background: #0008; }
 .local-app-publish h2 { margin-top: 0; font-size: 20px; }

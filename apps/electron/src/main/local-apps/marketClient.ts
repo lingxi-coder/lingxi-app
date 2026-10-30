@@ -6,7 +6,6 @@ import type { DesktopAppManifest, DesktopLocalApp, LocalAppTarget } from '../../
 import { CoreLocalAppStore, type AppRecord, type AppRelease } from './coreStore.js';
 import { canonical, packSource, sha256, unpackSource, type SourceFile } from './sourcePackage.js';
 
-export interface MarketApp { id: string; name: string; summary: string; description?: string; currentVersion?: { id: string }; visibility?: string }
 interface Distribution { schema: number; appId: string; versionId: string; sequence: number; releaseDigest: string; manifest: DesktopAppManifest; files: SourceFile[]; dependencies: SourceFile[]; artifact: { sizeBytes: number; sha256: string; downloadUrl: string } }
 export interface MarketPublication { name: string; summary: string; description: string; category: string; notes: string }
 interface PublicationRelease {
@@ -55,14 +54,6 @@ export class LocalAppMarketClient {
     const result = await response.json() as { data?: T; error?: { code?: string; message?: string } };
     if (!response.ok) throw Object.assign(new Error(result.error?.message ?? `Market request failed (${response.status})`), { code: result.error?.code });
     return result.data as T;
-  }
-  async list(query = '', owned = false): Promise<MarketApp[]> {
-    const capabilities = await this.request<{ apiVersion: string; packageSchema: number }>('capabilities');
-    if (capabilities.apiVersion !== 'v2' || capabilities.packageSchema !== 2) throw new Error('This market does not support source applications yet');
-    const platform = desktopTargets()[0]!.platform;
-    const rows = await this.request<MarketApp[]>(`${owned ? 'me/apps' : 'apps'}?limit=24${owned ? '' : `&platform=${platform}&q=${encodeURIComponent(query)}`}`, undefined, owned);
-    if (!Array.isArray(rows)) throw new Error('Market returned an invalid catalog');
-    return rows;
   }
   async install(remoteId: string, existing?: DesktopLocalApp): Promise<DesktopLocalApp> {
     if (existing && existing.marketOrigin?.appId !== remoteId) throw new Error('Update does not belong to this local installation');
@@ -155,7 +146,7 @@ export class LocalAppMarketClient {
     await save();
     const validId = (value: string) => { if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error('Invalid market identity'); return value; };
     if (!receipt.appId) {
-      const app = await writer.request<MarketApp>('apps', receipt.createBody, true, 'POST', { 'Idempotency-Key': receipt.createKey });
+      const app = await writer.request<{ id: string }>('apps', receipt.createBody, true, 'POST', { 'Idempotency-Key': receipt.createKey });
       receipt.appId = validId(app.id); await save();
     }
     const appId = validId(receipt.appId);

@@ -1,4 +1,4 @@
-import { LocalAppMarket, LocalAppPublish } from './LocalAppMarket';
+import { LocalAppPublish } from './LocalAppPublish';
 import { useI18n } from '../i18n/useI18n';
 import { tr } from '../i18n/locale';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
@@ -13,10 +13,25 @@ const phaseLabels: Record<LocalAppPhase, string> = { stopped: 'desktop_apps_read
 export function AppsGlyph({ size = 20 }: { size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.8"/></svg>;
 }
+export function LocalAppsTopBar({ onOpenMarket }: { onOpenMarket: () => void }) {
+  const t = useT();
+  return <header className="drag-region desktop-topbar local-app-topbar" style={{
+    '--toolbar-material': t.sidebarBg, '--topbar-action-color': t.text3,
+    '--topbar-action-hover-color': t.text, '--topbar-action-focus': t.surfaceHover,
+    '--topbar-action-ring': t.borderStrong,
+  } as CSSProperties}>
+    <span className="local-app-topbar-title">{tr('apps_title')}</span>
+    <button type="button" className="no-drag desktop-topbar-action local-app-market-button"
+      aria-label="Market · Open in browser" title="Market · Open in browser" onClick={onOpenMarket}>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" aria-hidden="true">
+        <path d="M3 10h18l-2-6H5l-2 6Z"/><path d="M3 10v2a3 3 0 0 0 6 0 3 3 0 0 0 6 0 3 3 0 0 0 6 0v-2M5 15v6h14v-6M10 21v-5h4v5M9 10l1-6m5 6-1-6"/>
+      </svg>
+    </button>
+  </header>;
+}
 export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: () => void }) {
   const t = useT();
   const { locale } = useI18n();
-  const [tab, setTab] = useState<'mine' | 'market'>('mine');
   const [publication, setPublication] = useState<DesktopLocalApp>();
   const [apps, setApps] = useState<DesktopLocalApp[]>([]);
   const [remoteSettings, setRemoteSettings] = useState<Record<string, boolean>>({});
@@ -49,9 +64,6 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
   const filtered = apps.filter(app => `${app.name} ${app.summary}`.toLocaleLowerCase(locale).includes(query.toLocaleLowerCase(locale)));
   return <section className="local-app-library" aria-label={tr('apps_title')} style={{ '--apps-background': t.stageBg, '--apps-text': t.text, '--apps-muted': t.text3, '--apps-surface': t.surface, '--apps-border': t.border, '--apps-accent': t.accent, '--apps-error': t.danger } as CSSProperties}>
     <header className="local-app-library-header"><div><h1>{tr('apps_title')}</h1><p>{tr('desktop_apps_tagline')}</p></div><button onClick={onCreate}>{tr('desktop_apps_create_chat')}</button></header>
-    <nav className="local-app-tabs" aria-label={tr('apps_title')}><button aria-current={tab === 'mine' ? 'page' : undefined} onClick={() => setTab('mine')}>My apps</button><button aria-current={tab === 'market' ? 'page' : undefined} onClick={() => setTab('market')}>Market</button></nav>
-    <LocalAppMarket visible={visible && tab === 'market'} installed={apps} onInstalled={() => void refresh()}/>
-    <div hidden={tab !== 'mine'}>
     <p className="local-app-update">{tr('desktop_apps_deployment_hint')}</p>
     {!remoteConfigured && <p className="local-app-update">{tr('desktop_apps_remote_unconfigured')}</p>}
     {error && <div className="local-app-error" role="alert">{error}<button onClick={() => { setError(''); void refresh(); }}>{tr('common_retry')}</button></div>}
@@ -90,7 +102,6 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
       {versions.map(version => { const app = apps.find(a => a.id === selected); return <div key={version.revision} className="local-app-actions"><span>v{version.revision} · {new Date(version.createdAtMs).toLocaleString(locale)}{app?.currentRevision === version.revision ? ' · Current' : ''}</span><button disabled={busy === selected || !app || app.currentRevision === undefined || app.currentRevision === version.revision} onClick={() => app?.currentRevision !== undefined && void act(selected, () => appsApi().useVersion(selected, version.revision, app.currentRevision!))}>Use version</button></div>; })}
       <h3>Permissions</h3><p>{apps.find(a => a.id === selected)?.grants.join(', ') || 'No capabilities granted for the latest release.'}</p>
       <h3>{tr('desktop_logs')}</h3><pre>{logs.length ? logs.map(l => `[${new Date(l.time).toLocaleTimeString(locale)}] ${l.process}: ${l.text}`).join('\n') : tr('desktop_apps_log_empty')}</pre></aside>}
-    </div>
     {publication && <LocalAppPublish key={publication.id} app={publication} onClose={() => setPublication(undefined)}/>}
     {agentSettings && apps.find(app => app.id === agentSettings) && <LocalAppAgentSettingsDialog key={agentSettings} app={apps.find(app => app.id === agentSettings)!} onClose={() => setAgentSettings(null)} onSaved={() => void refresh()}/>}
     <LocalAppAgentQuestions/>

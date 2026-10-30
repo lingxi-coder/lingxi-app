@@ -111,7 +111,8 @@ export interface LocalAppsApi {
   bindAuthoring(id: string, session: { projectPath: string; sessionId: string }): Promise<DesktopAuthoringRef>;
   /** Persist a host-verified, ownerless source binding before a new app draft is shown. */
   prepareAuthoring(session: { projectPath: string; sessionId: string }): Promise<DesktopAuthoringRef>;
-  marketList(query?: string, owned?: boolean): Promise<LocalAppMarketRow[]>;
+  marketBrowse(): Promise<void>;
+  marketInstallLink(remoteId: string): Promise<DesktopLocalApp | null>;
   marketInstall(remoteId: string, id?: string, expectedRevision?: number): Promise<DesktopLocalApp>;
   marketPublish(id: string, metadata: LocalAppMarketPublication, expectedRevision: number): Promise<{ appId: string; versionId: string; status: string } | undefined>;
   marketManage(): Promise<void>;
@@ -126,5 +127,4 @@ export interface LocalAppsApi {
 
 export interface LocalAppVersion { revision: number; digest: string; createdAtMs: number; manifest: DesktopAppManifest }
 
-export interface LocalAppMarketRow { id: string; name: string; summary: string; currentVersion?: { id: string }; visibility?: string }
 export interface LocalAppMarketPublication { name: string; summary: string; description: string; category: string; notes: string }

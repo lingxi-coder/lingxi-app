@@ -1,6 +1,6 @@
 import { tr } from './i18n/locale';
 import { useI18n } from './i18n/useI18n';
-import { LocalApps } from './components/LocalApps';
+import { LocalApps, LocalAppsTopBar } from './components/LocalApps';
 import './components/LocalApps.css';
 import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
 import type { LocalAppEditRequest } from '../shared/localApps';
@@ -70,6 +70,7 @@ export function App() {
   const [scheduledTarget, setScheduledTarget] = useState<ScheduledLinkRequest | undefined>();
   const [activityView, setActivityView] = useState(false);
   const [localAppDraft, setLocalAppDraft] = useState<LocalAppDraft>();
+  const [localAppInstallStatus, setLocalAppInstallStatus] = useState('');
   const [localAppNavigationError, setLocalAppNavigationError] = useState('');
   const localAppNavigation = useRef(0);
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
@@ -322,6 +323,16 @@ export function App() {
           setTerminalLinkScope(scope);
           if (typeof delivery.target.payload?.command === 'string') linkSurfacePending.current = true;
           await terminal.openLink(scope, id!, typeof delivery.target.payload?.command === 'string' ? delivery.target.payload.command : undefined);
+        } else if (kind === 'market') {
+          setPage('apps');
+          setLocalAppNavigationError('');
+          setLocalAppInstallStatus('Preparing local application…');
+          try {
+            const localApps = window.lingxi?.localApps;
+            if (!localApps) throw new Error('Local application host is unavailable');
+            const localApp = await localApps.marketInstallLink(id!);
+            setLocalAppInstallStatus(localApp ? `${localApp.name} · Available in local apps` : '');
+          } catch (error) { setLocalAppInstallStatus(''); throw error; }
         } else if (kind === 'cron') {
           setScheduledTarget({ requestId: delivery.id, kind: id as 'job' | 'run', id: detailId!, scope: delivery.projectPath ?? params.scope });
           setPage('scheduled');
@@ -392,7 +403,8 @@ export function App() {
             onOpenScheduled={() => openPage('scheduled')}
             onOpenChat={() => openPage('chat')}
             onOpenSettings={() => openSettings()}
-            topbar={
+            topbar={<>
+              {page === 'apps' && <LocalAppsTopBar onOpenMarket={() => { void window.lingxi?.localApps?.marketBrowse().catch(error => setLocalAppNavigationError(error instanceof Error ? error.message : String(error))); }} />}
               <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
@@ -406,12 +418,13 @@ export function App() {
                   onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!bridge.runtimeCenter.overviewOpen)}
                 />
               </div>
-            }
+            </>}
           >
           <div className="desktop-workspace">
           <div className="desktop-content" style={{ background: palette.stageBg }}>
           <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
+          {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>

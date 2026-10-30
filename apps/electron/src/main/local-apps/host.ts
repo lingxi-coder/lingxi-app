@@ -1,3 +1,5 @@
+import { localAppMarketUrl } from '../../shared/productConfig.js';
+import { MarketLinkInstaller } from './marketLinkInstaller.js';
 import { nativeTr } from '../../shared/nativeLocale.js';
 import { BrowserWindow, dialog, session, net, shell, clipboard, Notification, ipcMain, systemPreferences, type IpcMainInvokeEvent } from 'electron';
 import { createServer, type Server } from 'node:http';
@@ -448,6 +450,7 @@ export class LocalAppHost {
   readonly store: CoreLocalAppStore;
   readonly services = new LocalAppServiceBroker();
   readonly market: LocalAppMarketClient;
+  private readonly marketLinkInstaller: MarketLinkInstaller;
   readonly runtime: LocalAppRuntime;
   private server?: Server;
   private remoteGateway?: LocalAppRemoteGateway;
@@ -487,6 +490,20 @@ export class LocalAppHost {
     this.store = new CoreLocalAppStore(join(options.configHome, 'local-apps', 'v2'), options.core);
     this.pendingAuthoringPath = join(this.store.root, 'authoring-pending.v1.json');
     this.market = new LocalAppMarketClient(this.store, options.accountToken ?? (() => Promise.reject(new Error('Sign in before publishing to the market'))), undefined, undefined, options.accountId);
+    this.marketLinkInstaller = new MarketLinkInstaller({
+      list: () => this.store.list(),
+      preview: id => this.market.request(`apps/${encodeURIComponent(id)}`),
+      confirm: async app => {
+        const options = { type: 'question' as const, title: 'Local App Market', message: `Install ${app.name.slice(0, 160)}?`,
+          detail: `${app.summary.slice(0, 1000)}\n\nDownload and add this application to your local library. Running it will use the normal application permission flow.`,
+          buttons: ['Cancel', 'Install'], defaultId: 1, cancelId: 0 };
+        const parent = this.options.mainWindow();
+        const result = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+        return result.response === 1;
+      },
+      install: id => this.market.install(id),
+      installed: () => this.changed(),
+    });
     this.runtime = new LocalAppRuntime(this.store, () => this.changed(), { ...options,
       onRunEnded: (appId, runId, reason) => this.runEnded(appId, runId, reason) });
     options.core.onDisconnected?.(error => {
@@ -1161,7 +1178,8 @@ export class LocalAppHost {
     if (action === 'remote-settings') return this.remoteSettings();
     if (action === 'remote-configuration') return this.remoteConfiguration();
     if (action === 'remote-access') { if (typeof input.enabled !== 'boolean') throw new Error('Invalid remote access setting'); await this.setRemoteAccess(appId(input.id), input.enabled); return; }
-    if (action === 'marketList') return this.market.list(String(input.query ?? ''), input.owned === true);
+    if (action === 'marketBrowse') { await shell.openExternal(localAppMarketUrl); return; }
+    if (action === 'marketInstallLink') return this.marketLinkInstaller.install(input.remoteId);
     if (action === 'marketManage') { await shell.openExternal(new URL('/mine', this.market.base).href); return; }
     if (action === 'marketInstall') {
       if (typeof input.remoteId !== 'string') throw new Error('Choose a market application');

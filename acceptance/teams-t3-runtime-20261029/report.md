@@ -47,7 +47,7 @@ was used.
 | Full `llm-runtime` library regression, serial test execution | **1,440 pass**, zero failed/ignored/skipped |
 | New quota cases included in that full regression | **14 pass**: concurrent/rollback semantics, explicit cap, retry, fork/helper sharing, separate operation budget, late revocation, streaming, WebSocket/prewarm, codec fields, multipliers, subscription rejection and awaited host admission |
 | Focused `scope_` filter | **30 pass**, zero failed/ignored; includes the 14 new cases and 16 existing scope cases |
-| Complete `harness-runtime` library check | Pass, including final post-format check |
+| Default-feature `harness-runtime` library check | Pass, including final post-format check; this command did not enable the Desktop assembly feature |
 | Changed Rust source formatting and `git diff --check` | Pass |
 | Independent final source review | APPROVE; eight Rust source files, no blocking findings |
 
@@ -58,6 +58,11 @@ cargo test --offline --locked -p llm-runtime --lib --no-default-features -- --te
 cargo test --offline --locked -p llm-runtime --lib scope_ --no-default-features
 cargo check --offline --locked -p harness-runtime --lib
 ```
+
+Scope correction recorded during the subsequent profile checkpoint: the command
+above checked the default engine library, not Desktop assembly. Desktop-feature
+compilation and real assembly/shell fixtures are recorded separately in
+`../teams-t3-profile-20261029/report.md`.
 
 The subscription regression first seals a valid uncapped synthetic subscription
 request, then confirms that adding the hard cap is rejected for that cap. It

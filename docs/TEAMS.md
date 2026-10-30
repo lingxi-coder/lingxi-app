@@ -1,8 +1,9 @@
 # Teams implementation contract
 
 Status: T0 validated; T1 and T2 implemented locally, with deployment and full native
-product/device acceptance still pending. T3 has an in-progress trusted backend
-protocol; its host executor and four-client UI are not implemented/enabled. This document refines the approved 2026-10-29 Team plan
+product/device acceptance still pending. T3 has locally validated backend and
+runtime prerequisites; its host executor and four-client UI are not implemented
+or enabled. This document refines the approved 2026-10-29 Team plan
 after review. It is the repository contract for subsequent phases; a phase is
 complete only when its stated checks pass on all four clients.
 
@@ -339,11 +340,43 @@ This is an output limit, not an input/total-token or monetary budget, and
 revocation does not terminate already admitted work. The product still pins
 `eed08ca06c35371c1eb7ea5b02ebc10bcae63a12`; the companion commit is unpushed and
 not consumed or enabled by a Team product entry point. It closes one runtime
-prerequisite, with 1,440 model-layer tests and a complete runtime library check
-passing. Host profile/isolation, limits and termination, routing and four-client
-UI remain required. Evidence and exact boundaries are in
+prerequisite, with 1,440 model-layer tests and a default-feature engine library
+check passing. That historical check did not enable Desktop assembly. Full host
+process isolation, limits and termination, routing and four-client UI remain
+required. Evidence and exact boundaries are in
 `acceptance/teams-t3-runtime-20261029/report.md`. Neither checkpoint establishes
 T3 acceptance.
+
+### T3 private-profile checkpoint (execution stays disabled)
+
+The same companion branch now has local commit
+`dfab0eb36bb20196534509298d88654fce008554`. Its nonserialized host profile uses
+private principal-specific home/workspace/tmp/transcripts/memory/output paths,
+immutable persona/Skill snapshots, a revocable tool lease and the shared output
+quota. Only selected provider configuration and memory credentials are retained.
+Owner folders, native tools, MCP, plugins, hooks, settings watchers, startup
+helpers and prompt shell expansion are withheld.
+
+The macOS-only Bash boundary clears inherited environment/startup files and
+requires a frozen sandbox with workspace/tmp writes and no network. It rejects
+background handoff, sandbox downgrade, forged Git grant expansion and unconfined
+cwd readback. Host Git probes in boot/prompt/transcript/classifier paths are also
+disabled: a model-controlled `.git` or `core.fsmonitor` must not run host code.
+Every Bash command requests host approval; no owner question channel is inherited.
+The actual authenticated owner and original-human brokers remain to be built.
+
+Final checks: **721 tests pass**, including 13 real Desktop assembly/macOS shell
+profile cases, two same-group process cleanup cases, explicit memory-root and
+valid malicious-Git fixture controls. Desktop and Mobile-feature library checks
+pass on macOS; this is not signed product, iOS/Android device or live-model
+acceptance. Independent static review approved only this disabled prerequisite.
+
+The product pin remains unchanged and the companion is unpublished. Fresh
+clean-environment processes, actual provider request verification, reliable total
+five-minute termination including detached descendants, authenticated brokers,
+durable executor recovery and four-client T3 UI are still required. The byte
+input/output/turn bounds do not establish total tokens, billing or resource
+ceilings. Evidence: `acceptance/teams-t3-profile-20261029/report.md`.
 
 ### Required isolated runtime
 

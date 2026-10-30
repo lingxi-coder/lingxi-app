@@ -323,6 +323,11 @@ AREAS = [
     ("apps/", CLIENT_NEEDLES),
     ("packages/bridge-client/", CLIENT_NEEDLES),
     ("resources/", CLIENT_NEEDLES),
+    # This directory is the first-party visual identity kit, whose purpose is
+    # to define and display product names. Apply the same display-name policy
+    # as native UI while still checking namespace paths and all G2-G7 rules.
+    # Do not extend this policy to unrelated assets or future sibling kits.
+    ("assets/brand/identity-v1/", CLIENT_NEEDLES),
     ("crates/", FULL_NEEDLES),
     (".github/", FULL_NEEDLES),
     ("scripts/", FULL_NEEDLES),
@@ -543,10 +548,19 @@ def needles_for(path):
     return DEFAULT_NEEDLES
 
 
+FROZEN_LINE_RECEIPT = re.compile(
+    r"^@line(?:\[(?P<count>[1-9][0-9]*)\])?"
+    r"(?:\{(?P<span>[^{}]+)\})?:(?P<line>.+)$"
+)
+
+
 def parse_frozen(frozen_path):
     """读 L3 冻结清单，返回 [(lineno, path, literal), ...]。
 
-    格式：`<path>:<literal>  # 理由`
+    格式：`<path>:<literal>  # 理由`。`@line:` 之后的内容须恰好匹配
+    一行去除前后空白的源码，用于不能安全放行子串的代码身份；
+    `@line[2]:` 等格式允许且要求显式的精确出现次数；
+    `@line{literal}:` 只放行该完整行内指定字面量的命中跨度。
 
     两种「空豁免」必须显式拒绝，否则一条豁免会**永远为真**而没人发现：
       1. 没有冒号（或冒号后为空）=> literal 是 ""，而 `"" in text` 恒为真，
@@ -567,7 +581,11 @@ def parse_frozen(frozen_path):
             if not entry:
                 continue
             path, sep, literal = entry.partition(":")
-            if not sep or not literal:
+            line_receipt = literal.startswith(("@line:", "@line[", "@line{"))
+            receipt = FROZEN_LINE_RECEIPT.fullmatch(literal)
+            invalid_span = bool(receipt and receipt.group("span") and
+                                receipt.group("line").count(receipt.group("span")) != 1)
+            if not sep or not literal or (line_receipt and not receipt) or invalid_span:
                 raise SystemExit(
                     f"check_brand_leaks: {frozen_path}:{lineno}: malformed frozen entry "
                     f"{stripped!r} — expected `<path>:<literal>  # reason`. "
@@ -594,6 +612,19 @@ def span_is_exempt(line, start, end, literals):
     会让一行里恰好挨着的另一处真泄漏也被顺带放行。
     """
     for lit in literals:
+        receipt = FROZEN_LINE_RECEIPT.fullmatch(lit)
+        if receipt:
+            # The complete line is a reviewed receipt, not a substring
+            # allowance. When a span is specified, other markers on that
+            # very same line stay visible too.
+            if line.strip() == receipt.group("line"):
+                span = receipt.group("span")
+                if span is None:
+                    return True
+                pos = line.find(span)
+                if pos >= 0 and pos <= start and end <= pos + len(span):
+                    return True
+            continue
         pos = line.find(lit)
         while pos != -1:
             if pos <= start and end <= pos + len(lit):
@@ -785,8 +816,17 @@ def check_frozen(root, frozen_path, entries):
             findings.add(("G5", frozen_rel, lineno, f"missing file {path}"))
             continue
         with open(full, encoding="utf-8", errors="replace") as target:
-            if literal not in target.read():
-                findings.add(("G5", frozen_rel, lineno, f"literal gone: {literal}"))
+            content = target.read()
+        receipt = FROZEN_LINE_RECEIPT.fullmatch(literal)
+        if receipt:
+            expected_count = int(receipt.group("count") or "1")
+            expected = receipt.group("line")
+            count = sum(line.strip() == expected for line in text_lines(content))
+            if count != expected_count:
+                findings.add(("G5", frozen_rel, lineno,
+                              f"exact line count changed ({count}/{expected_count}): {path}: {expected}"))
+        elif literal not in content:
+            findings.add(("G5", frozen_rel, lineno, f"literal gone: {literal}"))
     return findings
 
 
@@ -843,6 +883,25 @@ SELFTEST_FILES = {
     ),
     "crates/st/g3-window.rs": 'fn f() { let api = window.lingxi; }\n',
     "crates/st/g3-window-unfrozen.rs": 'fn f() { let api = window.lingxi; }\n',
+    "crates/st/g3-exact-line.ts": (
+        'const api = window.lingxi;\n'
+        'const other = window.lingxi; const path = "/tmp/.lingxi";\n'
+        'const path = "/tmp/window.lingxi";\n'
+    ),
+    "crates/st/g3-exact-pair.ts": 'const root = "/tmp/.lingxi";\n' * 2,
+    "crates/st/g3-span-line.ts": 'const env = "LINGXI_CONFIG_DIR"; const path = "/tmp/.lingxi";\n',
+    "assets/brand/identity-v1/probe.json": (
+        '{"label": "LingXi", "local": ".lingxi", '
+        '"foreign": ".claude", "override": "LINGXI_CONFIG_DIR"}\n'
+    ),
+    "assets/brand/identity-v1/probe.py": (
+        'data = "window.LINGXI_BRAND = LINGXI_UNREVIEWED"\n'
+        'getenv("CLAUDE_CODE_UNKEPT_NAME")\n'
+        'token = "CLAUDE_PLUGIN_ROOT"\n'
+        'data = "window.LINGXI_BRAND = "\n'
+        'data = "window.LINGXI_BRAND_UNREVIEWED = "\n'
+    ),
+    "assets/brand/unrelated/probe.json": '{"label": "LingXi"}\n',
     "crates/st/g4.rs": '// upstream: process.env.LINGXI_FAKE_CITATION\n',
     "crates/branding/src/lib.rs": (
         'pub const ST_UNLISTED: &str = "x";\n'
@@ -907,6 +966,30 @@ SELFTEST_CASES = [
      [("G3", "crates/st/g3-window-unfrozen.rs", ".lingxi")], []),
     ("G3 honors the exact frozen window.lingxi bridge identity",
      [], [("G3", "crates/st/g3-window.rs", ".lingxi")]),
+    ("G3 exact-line receipt rejects adjacent paths and quoted lookalikes",
+     [("G3", "crates/st/g3-exact-line.ts", ".lingxi", 2),
+      ("G3", "crates/st/g3-exact-line.ts", ".lingxi", 3)],
+     [("G3", "crates/st/g3-exact-line.ts", ".lingxi", 1)]),
+    ("G3 exact-line receipt accepts only the specified duplicate count",
+     [], [("G3", "crates/st/g3-exact-pair.ts", ".lingxi")]),
+    ("span-scoped line receipt preserves other findings on the same line",
+     [("G1", "crates/st/g3-span-line.ts", r"\.lingxi", 1),
+      ("G3", "crates/st/g3-span-line.ts", ".lingxi", 1)],
+     [("G1", "crates/st/g3-span-line.ts", "LINGXI", 1),
+      ("G3", "crates/st/g3-span-line.ts", "LINGXI_CONFIG_DIR", 1)]),
+    ("identity kit permits display names but keeps namespace and upstream checks",
+     [("G1", "assets/brand/identity-v1/probe.json", r"\.lingxi(?!"),
+      ("G1", "assets/brand/identity-v1/probe.json", r"\.claude(?!"),
+      ("G1", "assets/brand/identity-v1/probe.json", "LINGXI_"),
+      ("G3", "assets/brand/identity-v1/probe.json", ".lingxi"),
+      ("G3", "assets/brand/identity-v1/probe.json", "LINGXI_CONFIG_DIR"),
+      ("G1", "assets/brand/identity-v1/probe.py", "LINGXI_", 1),
+      ("G1", "assets/brand/identity-v1/probe.py", "LINGXI_", 5),
+      ("G2", "assets/brand/identity-v1/probe.py", "CLAUDE_CODE_UNKEPT_NAME", 2),
+      ("G7", "assets/brand/identity-v1/probe.py", "CLAUDE_PLUGIN_", 3),
+      ("G1", "assets/brand/unrelated/probe.json", "LingXi")],
+     [("G1", "assets/brand/identity-v1/probe.json", "LingXi"),
+      ("G1", "assets/brand/identity-v1/probe.py", "LINGXI_", 4)]),
     ("G4 fires on a fake oracle citation",
      [("G4", "crates/st/g4.rs", "LINGXI_FAKE_CITATION")], []),
     ("G6 fires on a branding const missing from NAMESPACE_VALUES",
@@ -971,6 +1054,10 @@ def run_selftest():
         frozen = os.path.join(tmp, "frozen.txt")
         with open(frozen, "w", encoding="utf-8") as fh:
             fh.write("crates/st/vanished.rs:.lingxi  # 目标文件不存在 => G5\n")
+            fh.write("assets/brand/identity-v1/probe.py:window.LINGXI_BRAND =  # preview global\n")
+            fh.write("crates/st/g3-exact-line.ts:@line:const api = window.lingxi;  # exact code line\n")
+            fh.write("crates/st/g3-exact-pair.ts:@line[2]:const root = \"/tmp/.lingxi\";  # exact pair\n")
+            fh.write("crates/st/g3-span-line.ts:@line{LINGXI_CONFIG_DIR}:const env = \"LINGXI_CONFIG_DIR\"; const path = \"/tmp/.lingxi\";  # one exact span\n")
             fh.write(
                 "crates/st/g3-window.rs:window.lingxi  "
                 "# 受支持的 Electron preload API 命名空间\n"
@@ -1089,12 +1176,66 @@ def run_selftest():
         with open(doc_path, "w", encoding="utf-8") as fh:
             fh.write(original_doc)
 
+        exact_path = os.path.join(tmp, "crates/st/g3-exact-line.ts")
+        original_exact = SELFTEST_FILES["crates/st/g3-exact-line.ts"]
+        exact_line_mutations = (
+            ("G5 rejects an altered exact receipt line",
+             original_exact.replace('const api = window.lingxi;',
+                                    'const api = window.lingxi; /* drift */')),
+            ("G5 rejects a duplicated exact receipt line",
+             original_exact + 'const api = window.lingxi;\n'),
+        )
+        for name, content in exact_line_mutations:
+            with open(exact_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            mutated = check_frozen(tmp, frozen, entries)
+            if not _selftest_matches(mutated, "G5", "frozen.txt", "exact line count changed"):
+                failures.append(f"{name}: expected G5 for the changed exact receipt")
+            else:
+                print(f"  ok   {name}")
+        with open(exact_path, "w", encoding="utf-8") as fh:
+            fh.write(original_exact)
+
+        pair_path = os.path.join(tmp, "crates/st/g3-exact-pair.ts")
+        original_pair = SELFTEST_FILES["crates/st/g3-exact-pair.ts"]
+        pair_mutations = (
+            ("G5 rejects one missing line from an exact pair", original_pair.split("\n", 1)[0] + "\n"),
+            ("G5 rejects an extra line in an exact pair", original_pair + original_pair.split("\n", 1)[0] + "\n"),
+        )
+        for name, content in pair_mutations:
+            with open(pair_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            mutated = check_frozen(tmp, frozen, entries)
+            if not _selftest_matches(mutated, "G5", "frozen.txt", "exact line count changed"):
+                failures.append(f"{name}: expected G5 for the changed exact pair")
+            else:
+                print(f"  ok   {name}")
+        with open(pair_path, "w", encoding="utf-8") as fh:
+            fh.write(original_pair)
+
+        invalid_frozen = os.path.join(tmp, "invalid-frozen.txt")
+        with open(invalid_frozen, "w", encoding="utf-8") as fh:
+            fh.write("crates/st/g3-exact-line.ts:@line:  # empty exact line\n")
+        try:
+            parse_frozen(invalid_frozen)
+            failures.append("G5 accepts an empty exact-line receipt")
+        except SystemExit:
+            print("  ok   G5 rejects an empty exact-line receipt")
+
+        with open(invalid_frozen, "w", encoding="utf-8") as fh:
+            fh.write("crates/st/g3-span-line.ts:@line{MISSING}:const path = \"/tmp/.lingxi\";  # span absent\n")
+        try:
+            parse_frozen(invalid_frozen)
+            failures.append("G5 accepts a span absent from its exact line")
+        except SystemExit:
+            print("  ok   G5 rejects a span absent from its exact line")
+
         for f in failures:
             print(f"  FAIL {f}")
         if failures:
             print(f"selftest: {len(failures)} failure(s)")
             return 1
-        print(f"selftest: {len(cases) + len(g6_mutations) + len(g7_mutations)} cases ok ({len(findings)} findings on the synthetic tree)")
+        print(f"selftest: {len(cases) + len(g6_mutations) + len(g7_mutations) + len(exact_line_mutations) + len(pair_mutations) + 2} cases ok ({len(findings)} findings on the synthetic tree)")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

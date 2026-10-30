@@ -257,7 +257,7 @@ def run_case(cli, collector, output, case):
             env = {key: os.environ[key] for key in ("PATH", "HOME", "USER", "LANG") if key in os.environ}
             env.update({"RUST_BACKTRACE": "1", "RUST_MIN_STACK": "16777216", "TMPDIR": str(root / "tmp"), "LINGXI_CONFIG_DIR": str(config_home),
                         "CLAUDE_CONFIG_DIR": str(config_home), "ANTHROPIC_API_KEY": "fixture-only-key",
-                        "LINGXI_API_KEY": "fixture-only-key", "ANTHROPIC_BASE_URL": model_url,
+                        "ANTHROPIC_BASE_URL": model_url,
                         "LINGXI_API_BASE_URL": model_url, "DISABLE_AUTOUPDATER": "1",
                         "DISABLE_ERROR_REPORTING": "1", "ENABLE_TOOL_SEARCH": "false",
                         "HTTP_PROXY": model_url, "HTTPS_PROXY": model_url, "ALL_PROXY": model_url,

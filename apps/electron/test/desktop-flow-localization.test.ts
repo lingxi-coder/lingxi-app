@@ -45,7 +45,10 @@ test('extension management screens render the selected language and preserve cat
     assert.ok(skills.includes('User skill name'));
     const plugins = renderInLocale(locale, React.createElement(Plugins, props));
     assert.ok(plugins.includes(translate('desktop_extension_plugin_description', locale)), locale);
-    assert.ok(plugins.includes('User plugin name'));
+    // Installed plugins are on the personal tab; an explicitly selected
+    // plugin still renders its catalog name in its details.
+    const pluginDetails = renderInLocale(locale, React.createElement(Plugins, { ...props, initialPluginId: 'user-plugin' }));
+    assert.ok(pluginDetails.includes('User plugin name'));
     for (const html of [mcp, skills, plugins]) assert.doesNotMatch(html, /desktop_extension_|settings_title_plugins/);
   }
 });

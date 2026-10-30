@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -13,9 +13,13 @@ import type { UseBridge } from '../src/renderer/bridge/bridgeTypes.js';
 import { RuntimeCenterInspector } from '../src/renderer/components/RuntimeCenter';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
+import { installTestLocale } from './test-locale';
 
 // Match the existing render tests under the root tsconfig's classic JSX loader.
 (globalThis as { React?: typeof React }).React = React;
+let restoreLocale: () => void;
+before(() => { restoreLocale = installTestLocale('en'); });
+after(() => restoreLocale());
 
 const SESSION_ID = 'btw-render-session';
 const QUESTION = 'Which tasks remain unfinished?';
@@ -64,7 +68,7 @@ test('/btw errors retain the question and show the failure response', () => {
   assert.ok(!html.includes('>running</span>'));
 });
 
-test('/btw remains available alongside existing subagents in the ordinary subagent list', () => {
+test('/btw stays available in its tab while ordinary subagents occupy their own list', () => {
   const initial = emptyRuntimeCenterState();
   const state = beginSideQuestion({ ...initial, agents: {
     reviewer: { agent_id: 'reviewer', name: 'Existing reviewer', agent_type: 'general-purpose', status: 'running' },
@@ -73,7 +77,7 @@ test('/btw remains available alongside existing subagents in the ordinary subage
   const list = renderInspector(openRuntimeCenterItem(completed, { kind: 'section', id: 'agents' }));
   assert.ok(list.includes('Existing reviewer'));
   assert.ok(list.includes('/btw'));
-  assert.match(list, />done<\/span>/);
+  assert.match(list, /No completed subagents/);
   assert.match(list, />running<\/span>/);
   const reopened = renderInspector(openRuntimeCenterItem(completed, { kind: 'agent', id: 'btw:1' }));
   assert.ok(reopened.includes(QUESTION));

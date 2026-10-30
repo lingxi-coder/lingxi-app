@@ -11,6 +11,9 @@ import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import { settingsLinkRequest } from '../../src/renderer/deepLinkRoutes';
 import type { TerminalSnapshot } from '../../src/shared/terminal';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
+
+setLanguagePreference('en');
 const calls: { domain: string; command: any }[] = [];
 const records: TerminalSnapshot[] = [];
 const inputs: string[] = [];

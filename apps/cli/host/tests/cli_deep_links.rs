@@ -12,7 +12,7 @@ fn generated_link(args: &[&str]) -> String {
     let output = Command::cargo_bin("lingxi-cli")
         .unwrap()
         .timeout(std::time::Duration::from_secs(10))
-        .env("LINGXI_CONFIG_DIR", home.path())
+        .env(branding::CONFIG_DIR_ENV, home.path())
         .args(args)
         .assert()
         .success()
@@ -94,7 +94,7 @@ fn link_rejects_draft_on_existing_session_and_invalid_message_identity() {
         Command::cargo_bin("lingxi-cli")
             .unwrap()
             .timeout(std::time::Duration::from_secs(10))
-            .env("LINGXI_CONFIG_DIR", home.path())
+            .env(branding::CONFIG_DIR_ENV, home.path())
             .args(args)
             .assert()
             .code(1)
@@ -119,7 +119,7 @@ fn open_cli_without_terminal_exits_before_runtime_or_draft_submission() {
         Command::cargo_bin("lingxi-cli")
             .unwrap()
             .timeout(std::time::Duration::from_secs(10))
-            .env("LINGXI_CONFIG_DIR", &blocked_store)
+            .env(branding::CONFIG_DIR_ENV, &blocked_store)
             .env("ANTHROPIC_API_KEY", "sk-test-not-a-real-key")
             .args(["open", url, "--cli"])
             .write_stdin("this stdin must not become a prompt\n")
@@ -149,7 +149,7 @@ fn malformed_open_urls_fail_validation_without_becoming_prompts() {
         Command::cargo_bin("lingxi-cli")
             .unwrap()
             .timeout(std::time::Duration::from_secs(10))
-            .env("LINGXI_CONFIG_DIR", home.path())
+            .env(branding::CONFIG_DIR_ENV, home.path())
             .env("ANTHROPIC_API_KEY", "sk-test-not-a-real-key")
             .args(["open", url])
             .write_stdin("must not be read as a prompt\n")
@@ -176,7 +176,7 @@ fn desktop_handoff_from_custom_store_rejects_local_targets_before_os_opener() {
         let opener = bin.path().join(name);
         std::fs::write(
             &opener,
-            "#!/bin/sh\n: > \"$LINGXI_TEST_OPENER_MARKER\"\nexit 0\n",
+            "#!/bin/sh\n: > \"$HARNESS_TEST_OPENER_MARKER\"\nexit 0\n",
         )
         .unwrap();
         std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -186,11 +186,17 @@ fn desktop_handoff_from_custom_store_rejects_local_targets_before_os_opener() {
         std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&inherited_path)),
     )
     .unwrap();
-    let guard = "Desktop cannot verify this custom LINGXI_CONFIG_DIR; use --cli for this local destination\n";
+    let guard = format!(
+        "Desktop cannot verify this custom {}; use --cli for this local destination\n",
+        branding::CONFIG_DIR_ENV
+    );
     for (url, expected) in [
-        (format!("lingxi://session/{SESSION}"), guard),
-        ("lingxi://project/project.local".into(), guard),
-        ("lingxi://new?workspace=project.local".into(), guard),
+        (format!("lingxi://session/{SESSION}"), guard.as_str()),
+        ("lingxi://project/project.local".into(), guard.as_str()),
+        (
+            "lingxi://new?workspace=project.local".into(),
+            guard.as_str(),
+        ),
         // Validation takes precedence over the custom-store guard even when
         // the malformed URL otherwise points at a local session.
         (
@@ -201,8 +207,8 @@ fn desktop_handoff_from_custom_store_rejects_local_targets_before_os_opener() {
         Command::cargo_bin("lingxi-cli")
             .unwrap()
             .timeout(std::time::Duration::from_secs(10))
-            .env("LINGXI_CONFIG_DIR", home.path())
-            .env("LINGXI_TEST_OPENER_MARKER", &marker)
+            .env(branding::CONFIG_DIR_ENV, home.path())
+            .env("HARNESS_TEST_OPENER_MARKER", &marker)
             .env("PATH", &path)
             .args(["open", &url])
             .assert()
@@ -227,16 +233,16 @@ fn cli_resolution_requires_existing_local_identity_and_keeps_new_text_as_draft()
     impl Drop for RestoreConfig {
         fn drop(&mut self) {
             match &self.0 {
-                Some(value) => std::env::set_var("LINGXI_CONFIG_DIR", value),
-                None => std::env::remove_var("LINGXI_CONFIG_DIR"),
+                Some(value) => std::env::set_var(branding::CONFIG_DIR_ENV, value),
+                None => std::env::remove_var(branding::CONFIG_DIR_ENV),
             }
         }
     }
     // This is the only test in this binary mutating the parent environment;
     // every spawned command above supplies its own explicit config directory.
-    let _restore = RestoreConfig(std::env::var_os("LINGXI_CONFIG_DIR"));
+    let _restore = RestoreConfig(std::env::var_os(branding::CONFIG_DIR_ENV));
     let home = tempfile::tempdir().unwrap();
-    std::env::set_var("LINGXI_CONFIG_DIR", home.path());
+    std::env::set_var(branding::CONFIG_DIR_ENV, home.path());
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
     let first_cwd = first.path().canonicalize().unwrap();

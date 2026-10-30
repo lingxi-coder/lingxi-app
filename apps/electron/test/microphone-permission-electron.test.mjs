@@ -136,7 +136,7 @@ test('the voice page reads the real OS microphone grant, not the page permission
     );
 
     // The mounted page renders the OS answer, not the page permission.
-    const labels = { granted: '已授权', denied: '未授权', prompt: '尚未询问', unavailable: '无法确定' };
+    const labels = { granted: '已授权', denied: '已拒绝', prompt: '待授权', unavailable: '未知' };
     assert.ok(
       result.rowTextFromOs.includes(`当前状态：${labels[result.mainProcessRead]}`),
       `the 麦克风权限 row does not show the OS grant (${result.mainProcessRead}); it rendered:\n${result.rowTextFromOs}`,
@@ -155,14 +155,14 @@ test('the voice page reads the real OS microphone grant, not the page permission
     // back to the window is the only signal macOS gives, and the row has to
     // act on it — a row read once at mount is wrong from that moment on.
     assert.ok(
-      result.rowTextAfterRefocus.includes('当前状态：未授权'),
+      result.rowTextAfterRefocus.includes('当前状态：已拒绝'),
       'the 麦克风权限 row did not follow the OS grant when the user came back to the window; it rendered:\n'
       + result.rowTextAfterRefocus,
     );
     // The v3 permissions card keeps the denied state and remedy inline with
     // the OS-backed row instead of rendering a separate permission banner.
     assert.ok(
-      result.rowTextAfterRefocus.includes('当前状态：未授权'),
+      result.rowTextAfterRefocus.includes('当前状态：已拒绝'),
       `the denied OS state was not visible in the microphone row; the page said:\n${result.rowTextAfterRefocus}`,
     );
     assert.ok(

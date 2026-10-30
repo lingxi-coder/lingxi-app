@@ -3,6 +3,9 @@ import { createRoot } from 'react-dom/client';
 import { SessionStorageNotice } from '../../src/renderer/components/SessionStorageNotice';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
+
+setLanguagePreference('zh-Hans');
 
 function Fixture() {
   const [paused, setPaused] = useState(true);

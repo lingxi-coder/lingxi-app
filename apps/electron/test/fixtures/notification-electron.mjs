@@ -64,7 +64,7 @@ async function main() {
     await run(`window.notificationFixture.setDark(false)`); await delay(60);
     await capture('notification-settings-light');
     await run(`document.querySelectorAll('.notification-preview-options button')[1].click()`); await delay(40);
-    assert.match(await run(`document.querySelector('.notification-preview-card').textContent`), /需要你的许可/);
+    assert.match(await run(`document.querySelector('.notification-preview-card').textContent`), /needs your permission/);
     await run(`document.querySelector('[role=switch]').click()`); await delay(40);
     assert.ok(await run(`document.querySelector('fieldset').disabled`));
     assert.ok(await run(`document.querySelector('[data-idle-threshold]').matches(':disabled')`));

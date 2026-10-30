@@ -184,8 +184,6 @@ final class LocalAppAgentHandoffPreparations {
 final class UnifiedLocalApps {
     private(set) var records: [UnifiedAppRecord] = []
     private(set) var runs: [String: UnifiedAppRun] = [:]
-    private(set) var legacyArchives: [LocalAppLegacyArchive] = []
-    private(set) var legacyEntries: [LocalAppLegacyEntry] = []
     private(set) var busy = Set<String>()
     private(set) var error: String?
     private(set) var initialized = false
@@ -397,14 +395,6 @@ final class UnifiedLocalApps {
             for removedAppID in previousAppIDs.subtracting(currentAppIDs) {
                 await cancelAgentApp(removedAppID)
             }
-            let coreArchives: [LocalAppLegacyArchive] = try await client.request(["op": .string("legacyArchives")])
-            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            let nativeArchives = ["LocalAppMarket", "chat-apps.json", "local-app-info.json"].compactMap { name -> LocalAppLegacyArchive? in
-                guard let path = support?.appendingPathComponent(name).path, FileManager.default.fileExists(atPath: path) else { return nil }
-                return LocalAppLegacyArchive(path: path, kind: "nativeArchive", status: "preservedNotMigrated")
-            }
-            legacyArchives = coreArchives + nativeArchives
-            legacyEntries = try await client.request(["op": .string("legacyEntries")])
             runs = runs.filter { key, _ in records.contains(where: { $0.appId == key }) }
             for record in records {
                 let status: LocalAppRuntimeStatus = try await client.request(["op": .string("status"), "appId": .string(record.appId)])
@@ -541,11 +531,6 @@ final class UnifiedLocalApps {
         let guest = MobileUserStorage.directories().appsGuestPath + "/" + slug + "-" + UUID().uuidString.prefix(8).lowercased()
         if create { try FileManager.default.createDirectory(at: hostSourceDirectory(guest), withIntermediateDirectories: true) }
         return guest
-    }
-    func importLegacy(_ entry: LocalAppLegacyEntry) async throws -> UnifiedAppRecord {
-        let guest = try Self.newAuthoringDirectory(name: entry.name, create: false)
-        let result: LocalAppPublishResult = try await client.request(["op": .string("importLegacy"), "legacyId": .string(entry.legacyId), "sourcePath": .string(try Self.hostSourceDirectory(guest).path), "authoring": try .encode(LocalAppAuthoring(sourceDirectory: guest))])
-        await refresh(); return result.record
     }
     func restoreAuthoring(_ app: UnifiedAppRecord) async throws -> UnifiedAppRecord {
         let guest = try Self.newAuthoringDirectory(name: app.name, create: false)

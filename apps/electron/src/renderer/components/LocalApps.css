@@ -79,9 +79,6 @@
 .local-app-market-controls label { font-size: 13px; }
 .local-app-market > .local-app-update { margin: 18px 0 26px; }
 .local-app-market .local-app-tile p { color: var(--apps-muted); font-size: 13px; }
-.local-app-archives { border-top: 1px solid var(--apps-border); margin-top: 30px; padding-top: 18px; color: var(--apps-muted); font-size: 13px; }
-.local-app-archives summary { cursor: pointer; color: var(--apps-text); }
-.local-app-archives > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 10px 0; }
 .local-app-publish { color: var(--apps-text); background: var(--apps-surface); border: 1px solid var(--apps-border); border-radius: 16px; width: min(90vw,520px); max-height: 85vh; padding: 24px; }
 .local-app-publish::backdrop { background: #0008; }
 .local-app-publish h2 { margin-top: 0; font-size: 20px; }

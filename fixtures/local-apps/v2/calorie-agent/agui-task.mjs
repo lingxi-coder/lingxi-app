@@ -2,35 +2,6 @@ export const terminalStates = new Set(['succeeded', 'failed', 'cancelled', 'inte
 
 const pendingKey = 'meal-notes.agui-v1.pending';
 const runKey = 'meal-notes.agui-v1.run';
-const obsoleteAgentKeys = ['meal-notes.agent.pending', 'meal-notes.agent.run'];
-const obsoleteRevisionAgentKey = /^revision-\d+:meal-notes\.agent\.(?:pending|run)$/;
-
-function removeKnownObsoleteAgentKeys(storage) {
-  if (!storage || typeof storage.removeItem !== 'function') return;
-
-  // Remove the pre-revision keys without reading or decoding their values.
-  for (const key of obsoleteAgentKeys) storage.removeItem(key);
-
-  // Revision-scoped values are removable only when the storage exposes the
-  // standard Web Storage key/length interface. Generic storage mocks and
-  // lightweight adapters still get the exact unscoped-key cleanup above.
-  let length;
-  let keyAt;
-  try {
-    length = storage.length;
-    keyAt = storage.key;
-  } catch { return; }
-  if (!Number.isSafeInteger(length) || length < 0 || length > 100_000 || typeof keyAt !== 'function') return;
-
-  const keys = [];
-  try {
-    for (let index = 0; index < length; index += 1) {
-      const key = keyAt.call(storage, index);
-      if (typeof key === 'string' && obsoleteRevisionAgentKey.test(key)) keys.push(key);
-    }
-  } catch { return; }
-  for (const key of keys) storage.removeItem(key);
-}
 
 export function revisionStorage(storage, revision) {
   if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('应用运行版本不可用，请重新打开应用。');
@@ -39,10 +10,6 @@ export function revisionStorage(storage, revision) {
     getItem: (name) => storage.getItem(key(name)),
     setItem: (name, value) => storage.setItem(key(name), value),
     removeItem: (name) => storage.removeItem(key(name)),
-    removeObsoleteAgentKeys: () => {
-      for (const name of obsoleteAgentKeys) storage.removeItem(key(name));
-      removeKnownObsoleteAgentKeys(storage);
-    },
   };
 }
 
@@ -73,8 +40,6 @@ export class MealAgentTask {
     this.onEvent = onEvent;
     this.onTask = onTask;
     this.onError = onError;
-    if (typeof storage.removeObsoleteAgentKeys === 'function') storage.removeObsoleteAgentKeys();
-    else removeKnownObsoleteAgentKeys(storage);
     this.currentTask = null;
     this.runId = null;
     this.threadId = null;

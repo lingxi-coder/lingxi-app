@@ -1,10 +1,8 @@
 # Local App Agent protocol standardization
 
-Status: AG-UI migration in progress, 2026-10-24. The previous
-`agent.run/tasks/chats` functional prototype passed its recorded builds and smoke
-tests; those results do not establish AG-UI conformance. The shared adapter,
-Desktop, Mobile, generator and example migration requires fresh validation.
-See the acceptance report for actual completed checks and device evidence.
+The supported public contract is AG-UI 1.0. Desktop, Mobile, generation
+guidance and examples use the official Schema and SDK. See the acceptance
+report for source checks, signed-package validation and device evidence.
 
 ## Main protocol
 
@@ -149,12 +147,13 @@ standard does not make an OS lease indefinite or guarantee background wakeup.
 
 First implement one shared protocol adapter and schema contract, then use it in
 Desktop and the Mobile browser/host bridge. Update the application generator and
-examples in the same change. This first-release API does not need obsolete
-aliases, fallback decoders or migration branches that preserve the prototype's
-custom message format. Initialize a fresh Agent persistence version and remove
-known obsolete task/chat/pending data in the host-owned Agent scope. Do not
-convert legacy messages. Application business data, source Projects, immutable
-releases and protocol-independent authoring bindings are outside that cleanup.
+examples in the same change. This first-release API accepts only the current
+official contract and Agent persistence format. Remove obsolete API aliases,
+fallback decoders, old-format cleanup hooks and data conversion. Do not load,
+convert or replay prototype task/chat/pending records. Keep application business
+data, source Projects, immutable releases and protocol-independent authoring
+bindings separate from Agent persistence. Local App source import and publication
+accept schema 2 only; there is no old-package archive or import interface.
 
 Add protocol conformance cases for official schema validation, event ordering,
 terminal success/error/cancel/interrupt semantics, reconnect without replay,

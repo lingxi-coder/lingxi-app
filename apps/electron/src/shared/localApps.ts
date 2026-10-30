@@ -115,8 +115,6 @@ export interface LocalAppsApi {
   marketInstall(remoteId: string, id?: string, expectedRevision?: number): Promise<DesktopLocalApp>;
   marketPublish(id: string, metadata: LocalAppMarketPublication, expectedRevision: number): Promise<{ appId: string; versionId: string; status: string } | undefined>;
   marketManage(): Promise<void>;
-  legacyEntries(): Promise<LocalAppLegacyEntry[]>;
-  importLegacy(legacyId: string): Promise<void>;
   restoreSource(id: string): Promise<void>;
   remix(id: string): Promise<void>;
   agentCatalog(id: string): Promise<LocalAppAgentCatalog>;
@@ -129,5 +127,4 @@ export interface LocalAppsApi {
 export interface LocalAppVersion { revision: number; digest: string; createdAtMs: number; manifest: DesktopAppManifest }
 
 export interface LocalAppMarketRow { id: string; name: string; summary: string; currentVersion?: { id: string }; visibility?: string }
-export interface LocalAppLegacyEntry { legacyId: string; name: string; summary: string; status: string }
 export interface LocalAppMarketPublication { name: string; summary: string; description: string; category: string; notes: string }

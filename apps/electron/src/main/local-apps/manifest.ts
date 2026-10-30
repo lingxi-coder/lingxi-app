@@ -34,7 +34,7 @@ function steps(value: unknown): LocalAppStep[] {
 }
 export function parseManifest(value: unknown): DesktopAppManifest {
   const v = object(value);
-  if (v.schema !== 2) throw new Error('Application manifest schema must be 2; explicitly import legacy apps first');
+  if (v.schema !== 2) throw new Error('Application manifest schema must be 2');
   const e = object(v.entry);
   const entry: DesktopAppManifest['entry'] = e.type === 'static'
     ? { type: 'static', path: relativePath(e.path, 'entry') }

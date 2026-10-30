@@ -547,7 +547,7 @@ const remoteBridge = String.raw`(() => {
       return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/__services/' + name + path;
     },
     agent: Object.freeze({tasks:Object.freeze({start:input=>task('start',{input}),get:runId=>task('get',{runId}),list:args=>task('list',args||{}),events:args=>task('events',args),cancel:runId=>task('cancel',{runId})}),
-      chats:Object.freeze({create:args=>chat('create',args),creationStatus:args=>chat('creationStatus',args),open:chatId=>chat('get',{chatId}),get:chatId=>chat('get',{chatId}),list:args=>chat('list',args||{}),archive:chatId=>chat('archive',{chatId}),delete:chatId=>chat('delete',{chatId}),history:(chatId,args)=>chat('history',{chatId,...args}),send:(chatId,input)=>chat('send',{chatId,input}),cancel:chatId=>chat('cancel',{chatId})})}),
+      chats:Object.freeze({create:args=>chat('create',args),creationStatus:args=>chat('creationStatus',args),open:chatId=>chat('get',{chatId}),list:args=>chat('list',args||{}),archive:chatId=>chat('archive',{chatId}),delete:chatId=>chat('delete',{chatId}),history:(chatId,args)=>chat('history',{chatId,...args}),send:(chatId,input)=>chat('send',{chatId,input}),cancel:chatId=>chat('cancel',{chatId})})}),
   });
 })();`;
 export const REMOTE_LOCAL_APP_SDK = `${remoteBridge}\n${LOCAL_APP_SDK}`;

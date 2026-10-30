@@ -1106,7 +1106,7 @@ export class LocalAppHost {
         return { ok: true, value };
       } catch (error) {
         if (!await current()) return { ok: false, error: { code: 'host_unavailable', message: 'The Agent host is unavailable.' } };
-        const codes = new Set(['invalid_chat', 'invalid_input', 'chat_create_conflict', 'chat_create_deleted', 'chat_storage_uncertain', 'agent_format_unsupported']);
+        const codes = new Set(['invalid_chat', 'invalid_input', 'chat_create_conflict', 'chat_create_deleted', 'chat_storage_uncertain', 'agent_storage_unavailable']);
         const code = error instanceof LocalAppAgentError && codes.has(error.code) ? error.code : 'host_unavailable';
         return { ok: false, error: { code, message: code === 'host_unavailable' ? 'The Agent host is unavailable.' : (error as Error).message } };
       }
@@ -1163,13 +1163,6 @@ export class LocalAppHost {
     if (action === 'remote-access') { if (typeof input.enabled !== 'boolean') throw new Error('Invalid remote access setting'); await this.setRemoteAccess(appId(input.id), input.enabled); return; }
     if (action === 'marketList') return this.market.list(String(input.query ?? ''), input.owned === true);
     if (action === 'marketManage') { await shell.openExternal(new URL('/mine', this.market.base).href); return; }
-    if (action === 'legacyEntries') return this.store.core.request({ op: 'legacyEntries' });
-    if (action === 'importLegacy') {
-      if (typeof input.legacyId !== 'string') throw new Error('Choose an archived application');
-      const sourcePath = await this.authoringCopyPath('Imported app');
-      const result = await this.store.core.request<{ record: { appId: string } }>({ op: 'importLegacy', legacyId: input.legacyId, sourcePath, authoring: { sourceDirectory: sourcePath } });
-      this.changed(); await this.editAuthoring(await this.store.get(result.record.appId)); return;
-    }
     if (action === 'marketInstall') {
       if (typeof input.remoteId !== 'string') throw new Error('Choose a market application');
       const existing = input.id ? await this.store.get(appId(input.id)) : undefined;
@@ -1727,7 +1720,7 @@ export class LocalAppHost {
           return { ok: true, value };
         } catch (error) {
           try { assertCurrentAgent(); } catch { return { ok: false, error: { code: 'host_unavailable', message: 'The Agent host is unavailable.' } }; }
-          const codes = new Set(['invalid_chat', 'invalid_input', 'chat_create_conflict', 'chat_create_deleted', 'chat_storage_uncertain', 'agent_format_unsupported']);
+          const codes = new Set(['invalid_chat', 'invalid_input', 'chat_create_conflict', 'chat_create_deleted', 'chat_storage_uncertain', 'agent_storage_unavailable']);
           const code = error instanceof LocalAppAgentError && codes.has(error.code) ? error.code : 'host_unavailable';
           return { ok: false, error: { code, message: code === 'host_unavailable' ? 'The Agent host is unavailable.' : (error as Error).message } };
         }

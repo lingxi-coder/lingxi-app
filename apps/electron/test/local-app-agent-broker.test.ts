@@ -15,9 +15,10 @@ import {
   type LocalAppAgentOwner,
   type LocalAppAgentPrivateResult,
 } from '../src/main/local-apps/agentBroker.ts';
-import { agentDigest, parseRunAgentInput, sameAgentGrant } from '../src/main/local-apps/agentPolicy.ts';
+import { LocalAppAgentError, agentDigest, parseRunAgentInput, sameAgentGrant } from '../src/main/local-apps/agentPolicy.ts';
 import { LocalAppChatAssetJournal } from '../src/main/local-apps/agentChatAssets.ts';
 import type { LocalAppAgentTask, LocalAppAgentToolGrant } from '../src/shared/localAppAgent.ts';
+import { withFakeChatCheckpoint } from './fixtures/local-app-chat-checkpoint.ts';
 
 const AGUI_FIXTURE = JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json', import.meta.url), 'utf8')) as any;
 const principal: LocalAppAgentOwner = { appId: 'a11111111111111111111111111111111', releaseDigest: '1'.repeat(64), invocationId: 'invocation-1', webContentsId: 123 };
@@ -52,6 +53,8 @@ async function fixture(t: { after(callback: () => Promise<void>): void }, overri
       ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: { inputTokens: 8, outputTokens: 2, turns: 1 } }),
     ...overrides,
   };
+  const execute = options.execute;
+  options.execute = async execution => withFakeChatCheckpoint(execution, await execute(execution));
   const broker = new LocalAppAgentBroker(options);
   t.after(async () => { await broker.dispose().catch(() => undefined); await fs.rm(root, { recursive: true, force: true }); });
   return { root, broker, options };
@@ -219,7 +222,7 @@ test('durable broker replays a long AG-UI journal in bounded pages after restart
   await broker.run(principal, input);
   await terminal(broker, principal, input.runId);
 
-  const taskDirectory = join(root, 'apps', principal.appId, 'agent', 'tasks');
+  const taskDirectory = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks');
   const taskFiles = await fs.readdir(taskDirectory);
   assert.equal(taskFiles.length, 1);
   const taskPath = join(taskDirectory, taskFiles[0]!);
@@ -312,10 +315,10 @@ test('durable chats persist standard Message content and accept exact terminal r
   t.after(async () => { await resumed.dispose().catch(() => undefined); await fs.rm(root, { recursive: true, force: true }); });
   const recovered = await resumed.chatHistory(principal, chat.chatId);
   assert.deepEqual(recovered.messages.map(message => message.id), ['message-fixture-1', 'assistant-chat-run-1', 'chat-user-2', 'assistant-chat-run-2']);
-  const disk = await fs.readFile(join(root, 'apps', principal.appId, 'agent', 'chats', chat.chatId, 'chat.json'), 'utf8');
+  const disk = await fs.readFile(join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', chat.chatId, 'chat.json'), 'utf8');
   assert.ok(disk.includes('sessionId'));
   assert.ok(!disk.includes('iVBORw=='), 'inline attachment bytes are stored in the private per-chat asset directory');
-  assert.ok(await fs.readdir(join(root, 'apps', principal.appId, 'agent', 'chats', chat.chatId, 'assets')).then(rows => rows.length === 1));
+  assert.ok(await fs.readdir(join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', chat.chatId, 'assets')).then(rows => rows.length === 1));
 });
 
 test('chat rejects a forged supplied history prefix, duplicate user ID and cross-thread input', async t => {
@@ -396,70 +399,32 @@ test('authorization revocation cancels an active task before later tool dispatch
   assert.equal((events.events.at(-1) as any).outcome.type, 'cancelled');
 });
 
-test('unmarked Agent data is preserved and quarantined per App across restarts', async t => {
-  const root = await fs.mkdtemp(join(tmpdir(), 'lingxi-agent-prototype-preserve-'));
+test('current Agent storage ignores old namespaces and markers without reading or migrating them', async t => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'lingxi-agent-current-store-'));
   const appPath = join(root, 'apps', principal.appId);
-  const otherPath = join(root, 'apps', other.appId);
   const originalFiles = new Map<string, Buffer>([
-    [join(appPath, 'agent', 'tasks', 'legacy.json'), Buffer.from('{"legacy":"task"}\n')],
+    [join(appPath, 'agent', 'tasks', 'old.json'), Buffer.from('{ invalid old task')],
     [join(appPath, 'agent', 'chats', 'old-chat', 'history.bin'), Buffer.from([0, 255, 16, 42])],
-    [join(appPath, 'agent', 'assets', 'image.bin'), Buffer.from([1, 2, 3, 0, 254])],
+    [join(root, 'desktop-agent-format.json'), Buffer.from('{ invalid old marker')],
     [join(appPath, 'workspace', 'keep.txt'), Buffer.from('business data')],
   ]);
   for (const [path, bytes] of originalFiles) { await fs.mkdir(dirname(path), { recursive: true }); await fs.writeFile(path, bytes); }
-  for (const group of ['tasks', 'chats', 'assets']) await fs.mkdir(join(otherPath, 'agent', group), { recursive: true });
   const options: LocalAppAgentBrokerOptions = { root, authorize: async () => auth(), revalidate: async () => true,
     execute: async execution => ({ result: { text: 'healthy', output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}` }, usage: {} }) };
   const broker = new LocalAppAgentBroker(options);
   t.after(async () => { await broker.dispose().catch(() => undefined); await fs.rm(root, { recursive: true, force: true }); });
-  const request = { requestId: 'a1111111-1111-4111-8111-111111111111', title: 'Healthy' };
-  const unsupportedOperations = [
-    () => broker.createChat(principal, request), () => broker.chatCreationStatus(principal, request),
-    () => broker.listChats(principal), () => broker.getChat(principal, request.requestId),
-    () => broker.chatHistory(principal, request.requestId), () => broker.deleteChat(principal, request.requestId),
-    () => broker.archiveChat(principal, request.requestId), () => broker.cancelChat(principal, request.requestId),
-    () => broker.run(principal, runInput('unsupported-run')), () => broker.get(principal, 'unsupported-run'),
-    () => broker.list(principal), () => broker.events(principal, 'unsupported-run'), () => broker.cancel(principal, 'unsupported-run'),
-    () => broker.sendChat(principal, request.requestId, runInput('unsupported-chat-run', request.requestId)),
-  ];
-  for (const operation of unsupportedOperations) await assert.rejects(operation(), { code: 'agent_format_unsupported', message: /data has been preserved/i });
-  assert.equal((await broker.createChat(other, request)).chatId, request.requestId);
-  assert.equal((await broker.listChats(other)).chats.length, 1);
-  const input = runInput('healthy-run');
-  await broker.run(other, input);
-  assert.equal((await terminal(broker, other, input.runId)).state, 'succeeded');
-  for (const [path, bytes] of originalFiles) assert.deepEqual(await fs.readFile(path), bytes);
-  const marker = JSON.parse(await fs.readFile(join(root, 'desktop-agent-format.json'), 'utf8'));
-  assert.deepEqual(marker.quarantinedAppIds, [principal.appId]);
+  const request = { requestId: 'a1111111-1111-4111-8111-111111111111', title: 'Current' };
+  assert.equal((await broker.createChat(principal, request)).chatId, request.requestId);
+  const input = runInput('current-run'); await broker.run(principal, input);
+  assert.equal((await terminal(broker, principal, input.runId)).state, 'succeeded');
   const restarted = new LocalAppAgentBroker(options);
   t.after(async () => { await restarted.dispose().catch(() => undefined); });
-  await assert.rejects(restarted.createChat(principal, request), { code: 'agent_format_unsupported' });
-  assert.equal((await restarted.chatCreationStatus(other, request))?.chatId, request.requestId);
-  assert.equal((await restarted.get(other, input.runId)).state, 'succeeded');
+  assert.equal((await restarted.chatCreationStatus(principal, request))?.chatId, request.requestId);
+  assert.equal((await restarted.get(principal, input.runId)).state, 'succeeded');
   for (const [path, bytes] of originalFiles) assert.deepEqual(await fs.readFile(path), bytes);
 });
 
-test('empty unmarked Agent directories are usable and unsafe old stores stay isolated', { skip: process.platform === 'win32' }, async t => {
-  const root = await fs.mkdtemp(join(tmpdir(), 'lingxi-agent-empty-store-'));
-  const unsafePath = join(root, 'apps', principal.appId, 'agent');
-  const emptyPath = join(root, 'apps', other.appId, 'agent');
-  const target = join(root, 'unsafe-original');
-  await fs.mkdir(target, { recursive: true });
-  await fs.writeFile(join(target, 'keep.txt'), 'untouched');
-  await fs.mkdir(dirname(unsafePath), { recursive: true });
-  await fs.symlink(target, unsafePath);
-  for (const group of ['tasks', 'chats', 'assets']) await fs.mkdir(join(emptyPath, group), { recursive: true });
-  const broker = new LocalAppAgentBroker({ root, authorize: async () => auth(), revalidate: async () => true,
-    execute: async () => { throw new Error('not run'); } });
-  t.after(async () => { await broker.dispose().catch(() => undefined); await fs.rm(root, { recursive: true, force: true }); });
-  await assert.rejects(broker.listChats(principal), { code: 'agent_format_unsupported' });
-  const chat = await broker.createChat(other, { requestId: 'a2222222-2222-4222-8222-222222222222' });
-  assert.equal(chat.chatId, 'a2222222-2222-4222-8222-222222222222');
-  assert.equal((await fs.lstat(unsafePath)).isSymbolicLink(), true);
-  assert.equal(await fs.readFile(join(target, 'keep.txt'), 'utf8'), 'untouched');
-});
-
-test('marked Agent stores isolate task and directory faults without changing the affected App', async t => {
+test('current Agent stores isolate task and directory faults without changing the affected App', async t => {
   const taskId = '01111111-1111-4111-8111-111111111111';
   const chatId = 'a1111111-1111-4111-8111-111111111111';
   const tombstoneId = '01111111-1111-4111-8111-111111111111';
@@ -545,7 +510,7 @@ test('marked Agent stores isolate task and directory faults without changing the
     } },
     { name: 'App directory is a symlink', links: true, inject: async (root, agent) => {
       const target = join(root, 'original-target', 'app');
-      await fs.rename(dirname(agent), target); await fs.symlink(target, dirname(agent));
+      await fs.rename(dirname(dirname(agent)), target); await fs.symlink(target, dirname(dirname(agent)));
     } },
   ];
   for (const fault of faults) await t.test(fault.name, { skip: fault.links && process.platform === 'win32' }, async sub => {
@@ -558,7 +523,7 @@ test('marked Agent stores isolate task and directory faults without changing the
           ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: {} };
       },
     });
-    const appPath = join(root, 'apps', principal.appId), agent = join(appPath, 'agent');
+    const appPath = join(root, 'apps', principal.appId), agent = join(appPath, 'agent', 'agui-v1');
     const taskPath = join(agent, 'tasks', `${taskId}.json`);
     const target = join(root, 'original-target');
     await fs.mkdir(dirname(taskPath), { recursive: true });
@@ -579,9 +544,6 @@ test('marked Agent stores isolate task and directory faults without changing the
       createdAt: 1, updatedAt: 1, archived: false, state: 'running', sessionId: taskId, activeRunId: pending.publicRunId,
       messages: [{ runId: pending.publicRunId, message: { id: 'pending-user', role: 'user', content: 'Keep the original pending turn.' } }],
     }));
-    const markerPath = join(root, 'desktop-agent-format.json');
-    const marker = JSON.stringify({ schemaVersion: 1, protocol: 'ag-ui/1.0', quarantinedAppIds: [] });
-    await fs.writeFile(markerPath, marker);
     await fault.inject(root, agent);
     const beforeApp = await snapshot(appPath), beforeTarget = await snapshot(target);
     const request = { requestId: chatId };
@@ -617,7 +579,6 @@ test('marked Agent stores isolate task and directory faults without changing the
     assert.equal((await restarted.chatHistory(other, chatId)).messages.length, 2);
     assert.deepEqual(await snapshot(appPath), beforeApp, 'the affected App, its pending task/fence and business data must be unchanged');
     assert.deepEqual(await snapshot(target), beforeTarget, 'symlink targets must remain untouched');
-    assert.equal(await fs.readFile(markerPath, 'utf8'), marker, 'App faults must not rewrite shared format metadata');
     assert.ok(authorizations.every(appId => appId === other.appId));
     assert.ok(executions.every(appId => appId === other.appId));
     await restarted.dispose();
@@ -628,13 +589,12 @@ test('a recovery write failure isolates the App before tombstone cleanup', async
   const { root, broker } = await fixture(t);
   const taskId = '11111111-1111-4111-8111-111111111111';
   const chatId = '22222222-2222-4222-8222-222222222222';
-  const agent = join(root, 'apps', principal.appId, 'agent');
+  const agent = join(root, 'apps', principal.appId, 'agent', 'agui-v1');
   const taskPath = join(agent, 'tasks', taskId + '.json');
   const chatPath = join(agent, 'chats', chatId, 'chat.json');
   const assetPath = join(agent, 'chats', chatId, 'assets', 'keep.bin');
   await fs.mkdir(dirname(taskPath), { recursive: true });
   await fs.mkdir(dirname(assetPath), { recursive: true });
-  await fs.writeFile(join(root, 'desktop-agent-format.json'), JSON.stringify({ schemaVersion: 1, protocol: 'ag-ui/1.0', quarantinedAppIds: [] }));
   const taskBytes = Buffer.from(JSON.stringify({
     schema: 1, privateTaskId: taskId, owner: principal, publicRunId: 'recovery-write-failure', threadId: 'thread',
     fingerprint: '0'.repeat(64), eventSequence: 1,
@@ -662,17 +622,6 @@ test('a recovery write failure isolates the App before tombstone cleanup', async
   } finally { (fs as any).rename = originalRename; }
 });
 
-test('shared Agent format faults still fail closed for every App', async t => {
-  for (const marker of ['{ invalid marker', JSON.stringify({ schemaVersion: 1, protocol: 'unsupported' })]) {
-    const { root, broker } = await fixture(t);
-    await fs.writeFile(join(root, 'desktop-agent-format.json'), marker);
-    await assert.rejects(broker.initialize());
-    await assert.rejects(broker.run(other, runInput('shared-format-fault')));
-    assert.equal(await fs.readFile(join(root, 'desktop-agent-format.json'), 'utf8'), marker);
-  }
-});
-
-
 test('Chat creation is atomic by app and request, survives restart, and deletion retains its tombstone', async t => {
   const { root, broker, options } = await fixture(t);
   const input = { requestId: 'a1111111-1111-4111-8111-111111111111', title: '  Plan  ' };
@@ -699,7 +648,7 @@ test('Chat creation is atomic by app and request, survives restart, and deletion
   t.after(async () => { await restarted.dispose().catch(() => undefined); });
   await assert.rejects(restarted.chatCreationStatus(principal, input), { code: 'chat_create_deleted' });
   await assert.rejects(restarted.createChat(principal, input), { code: 'chat_create_deleted' });
-  const files = await fs.readdir(join(root, 'apps', principal.appId, 'agent', 'chats', input.requestId));
+  const files = await fs.readdir(join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', input.requestId));
   assert.deepEqual(files, ['chat.json']);
 });
 
@@ -707,7 +656,7 @@ test('incomplete Chat storage isolates its App after restart without blocking ot
   const { root, broker, options } = await fixture(t);
   await broker.initialize();
   const input = { requestId: 'b2222222-2222-4222-8222-222222222222' };
-  const path = join(root, 'apps', principal.appId, 'agent', 'chats', input.requestId);
+  const path = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', input.requestId);
   await fs.mkdir(path, { recursive: true }); // Simulates a crash after claiming the directory.
   await assert.rejects(broker.createChat(principal, input), { code: 'chat_storage_uncertain' });
   await assert.rejects(broker.chatCreationStatus(principal, input), { code: 'chat_storage_uncertain' });
@@ -754,7 +703,7 @@ test('committed Chat tombstones resume cleanup after failure and after host rest
   const second = { requestId: 'a7777777-7777-4777-8777-777777777777' };
   async function failAssetCleanup(input: { requestId: string }) {
     await broker.createChat(principal, input);
-    const directory = join(root, 'apps', principal.appId, 'agent', 'chats', input.requestId);
+    const directory = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', input.requestId);
     const assets = join(directory, 'assets');
     await fs.writeFile(join(assets, 'private-data'), 'private');
     const original = fs.rm;
@@ -795,7 +744,7 @@ test('Chat directory preparation failure hides the mutated in-memory state until
   const { root, broker, options } = await fixture(t);
   const input = { requestId: 'c9999999-9999-4999-8999-999999999999' };
   await broker.createChat(principal, input);
-  const chatDirectory = join(root, 'apps', principal.appId, 'agent', 'chats', input.requestId);
+  const chatDirectory = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', input.requestId);
   const original = fs.mkdir;
   (fs as any).mkdir = async (path: unknown, ...args: unknown[]) => {
     if (path === chatDirectory) throw new Error('injected directory failure');
@@ -841,7 +790,7 @@ test('Chat reads wait for an in-flight write and reject its uncommitted state af
   const { root, broker } = await fixture(t);
   const input = { requestId: 'ccaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
   await broker.createChat(principal, input);
-  const chatPath = join(root, 'apps', principal.appId, 'agent', 'chats', input.requestId, 'chat.json');
+  const chatPath = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', input.requestId, 'chat.json');
   const original = fs.rename, started = deferred<void>(), release = deferred<void>();
   (fs as any).rename = async (from: unknown, to: unknown) => {
     if (to === chatPath) { started.resolve(); await release.promise; throw new Error('injected commit failure'); }
@@ -872,7 +821,7 @@ test('failed terminal task journal write never publishes success or partial Chat
   const chat = await broker.createChat(principal, input);
   await broker.sendChat(principal, chat.chatId, runInput('failed-terminal-write', chat.chatId));
   const execution = await started.promise;
-  const path = join(root, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
+  const path = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${execution.taskStorageId}.json`);
   const attempted = deferred<void>(), original = fs.rename;
   (fs as any).rename = async (from: unknown, to: unknown) => {
     if (to === path) { attempted.resolve(); throw new Error('injected task journal failure'); }
@@ -924,7 +873,7 @@ test('task admission does not replay after a committed journal rename loses its 
 test('directory sync failure after Chat rename fences the request until restart', { skip: process.platform === 'win32' }, async t => {
   const { root, broker, options } = await fixture(t);
   const input = { requestId: 'cdeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' };
-  const directory = join(root, 'apps', principal.appId, 'agent', 'chats', input.requestId);
+  const directory = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', input.requestId);
   const original = fs.open;
   (fs as any).open = async (path: unknown, ...args: unknown[]) => {
     const handle = await (original as any)(path, ...args);
@@ -947,7 +896,7 @@ test('directory sync failure after task rename prevents replay until restart', {
   const { root, broker, options } = await fixture(t, { execute: async () => {
     executions++; return { result: { text: 'unexpected', attachments: [], messageId: 'unexpected' }, usage: { turns: 1 } };
   } });
-  const directory = join(root, 'apps', principal.appId, 'agent', 'tasks');
+  const directory = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks');
   const original = fs.open, input = runInput('ambiguous-directory-sync');
   (fs as any).open = async (path: unknown, ...args: unknown[]) => {
     const handle = await (original as any)(path, ...args);
@@ -969,7 +918,7 @@ test('restart validates committed Chat metadata before exposing its identity', a
   const { root, broker, options } = await fixture(t);
   const input = { requestId: 'efaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
   await broker.createChat(principal, input);
-  const path = join(root, 'apps', principal.appId, 'agent', 'chats', input.requestId, 'chat.json');
+  const path = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', input.requestId, 'chat.json');
   const saved = JSON.parse(await fs.readFile(path, 'utf8'));
   await fs.writeFile(path, JSON.stringify({ ...saved, archived: 'not a boolean' }));
   const restarted = new LocalAppAgentBroker(options);
@@ -987,7 +936,7 @@ test('task success remains unavailable until its Chat outcome is durably saved a
   const chat = await broker.createChat(principal, input);
   await broker.sendChat(principal, chat.chatId, runInput('chat-save-failed', chat.chatId));
   await started.promise;
-  const path = join(root, 'apps', principal.appId, 'agent', 'chats', chat.chatId, 'chat.json');
+  const path = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', chat.chatId, 'chat.json');
   const attempted = deferred<void>(), original = fs.rename;
   (fs as any).rename = async (from: unknown, to: unknown) => {
     if (to === path) { attempted.resolve(); throw new Error('injected Chat commit failure'); }
@@ -1003,8 +952,8 @@ test('task success remains unavailable until its Chat outcome is durably saved a
   } finally { (fs as any).rename = original; }
   const restarted = new LocalAppAgentBroker(options);
   t.after(async () => { await restarted.dispose().catch(() => undefined); });
-  await assert.rejects(restarted.get(principal, 'chat-save-failed'), { code: 'agent_storage_unavailable' });
-  await assert.rejects(restarted.chatHistory(principal, chat.chatId), { code: 'chat_storage_uncertain' });
+  assert.equal((await restarted.get(principal, 'chat-save-failed')).state, 'interrupted');
+  assert.equal((await restarted.chatHistory(principal, chat.chatId)).messages.some(message => message.id === 'assistant-chat-save'), false);
 });
 
 test('revocation during a pending terminal rename cannot publish success', async t => {
@@ -1014,7 +963,7 @@ test('revocation during a pending terminal rename cannot publish success', async
   const input = runInput('revoked-during-terminal-write');
   await broker.run(principal, input);
   const execution = await started.promise;
-  const path = join(root, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
+  const path = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${execution.taskStorageId}.json`);
   const beforeRename = deferred<void>(), releaseRename = deferred<void>(), original = fs.rename;
   let hold = true;
   (fs as any).rename = async (from: unknown, to: unknown) => {
@@ -1048,7 +997,7 @@ test('revocation during Chat outcome save removes the unconfirmed assistant resu
   const input = runInput('revoked-during-chat-write', chat.chatId);
   await broker.sendChat(principal, chat.chatId, input);
   await started.promise;
-  const path = join(root, 'apps', principal.appId, 'agent', 'chats', chat.chatId, 'chat.json');
+  const path = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', chat.chatId, 'chat.json');
   const beforeRename = deferred<void>(), releaseRename = deferred<void>(), original = fs.rename;
   let hold = true;
   (fs as any).rename = async (from: unknown, to: unknown) => {
@@ -1080,8 +1029,8 @@ test('restart fences a Chat success interrupted between task and Chat commits', 
   const input = runInput('completion-crash-window', chat.chatId);
   await broker.sendChat(principal, chat.chatId, input);
   const execution = await started.promise;
-  const chatPath = join(root, 'apps', principal.appId, 'agent', 'chats', chat.chatId, 'chat.json');
-  const taskPath = join(root, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
+  const chatPath = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', chat.chatId, 'chat.json');
+  const taskPath = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${execution.taskStorageId}.json`);
   const beforeChatCommit = deferred<void>(), releaseChatCommit = deferred<void>(), originalRename = fs.rename;
   let hold = true;
   (fs as any).rename = async (from: unknown, to: unknown) => {
@@ -1095,25 +1044,23 @@ test('restart fences a Chat success interrupted between task and Chat commits', 
     const snapshot = await fs.mkdtemp(join(tmpdir(), 'lingxi-chat-crash-snapshot-'));
     t.after(async () => { await fs.rm(snapshot, { recursive: true, force: true }); });
     await fs.cp(root, snapshot, { recursive: true });
-    const frozenTask = join(snapshot, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
-    const frozenChat = join(snapshot, 'apps', principal.appId, 'agent', 'chats', chat.chatId, 'chat.json');
-    const taskBytes = await fs.readFile(frozenTask), chatBytes = await fs.readFile(frozenChat);
-    const recovered = new LocalAppAgentBroker({ ...options, root: snapshot, execute: async execution => ({
+    const frozenTask = join(snapshot, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${execution.taskStorageId}.json`);
+    const frozenChat = join(snapshot, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', chat.chatId, 'chat.json');
+    const recovered = new LocalAppAgentBroker({ ...options, root: snapshot, execute: async execution => withFakeChatCheckpoint(execution, {
       result: { text: 'healthy', output: { ok: true }, attachments: [], messageId: 'healthy-completion-window',
         ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: { turns: 1 },
     }) });
     t.after(async () => { await recovered.dispose().catch(() => undefined); });
-    await assert.rejects(recovered.get(principal, input.runId), { code: 'agent_storage_unavailable' });
-    await assert.rejects(recovered.events(principal, input.runId), { code: 'agent_storage_unavailable' });
-    await assert.rejects(recovered.chatCreationStatus(principal, creation), { code: 'chat_storage_uncertain' });
+    assert.equal((await recovered.get(principal, input.runId)).state, 'interrupted');
+    assert.equal((await recovered.events(principal, input.runId)).events.at(-1)?.type, 'RUN_ERROR');
+    assert.equal((await recovered.chatCreationStatus(principal, creation))?.state, 'interrupted');
     const page = await recovered.listChats(principal);
-    assert.deepEqual(page.chats.map(row => row.chatId), [healthy.chatId]);
-    assert.deepEqual(page.unavailableChats, [{ chatId: chat.chatId, code: 'chat_storage_uncertain' }]);
-    assert.equal(page.hasUncertainChats, true);
+    assert.deepEqual(new Set(page.chats.map(row => row.chatId)), new Set([healthy.chatId, chat.chatId]));
+    assert.equal(page.unavailableChats, undefined);
     await recovered.sendChat(principal, healthy.chatId, runInput('healthy-completion-window', healthy.chatId));
     assert.equal((await terminal(recovered, principal, 'healthy-completion-window')).state, 'succeeded');
-    assert.deepEqual(await fs.readFile(frozenTask), taskBytes);
-    assert.deepEqual(await fs.readFile(frozenChat), chatBytes);
+    assert.equal(JSON.parse(await fs.readFile(frozenTask, 'utf8')).abandonedCompletion.assistantMessage.id, 'assistant-crash-window');
+    assert.equal(JSON.parse(await fs.readFile(frozenChat, 'utf8')).committedCheckpoint, undefined);
     releaseChatCommit.resolve();
     assert.equal((await terminal(broker, principal, input.runId)).state, 'succeeded');
     assert.equal(Object.hasOwn(JSON.parse(await fs.readFile(taskPath, 'utf8')), 'completionPending'), false);
@@ -1143,8 +1090,9 @@ test('asset cleanup failure fences the staged Chat outcome across restart', asyn
   } finally { LocalAppChatAssetJournal.prototype.pruneUnreferenced = original; }
   const restarted = new LocalAppAgentBroker(options);
   t.after(async () => { await restarted.dispose().catch(() => undefined); });
-  await assert.rejects(restarted.get(principal, input.runId), { code: 'agent_storage_unavailable' });
-  await assert.rejects(restarted.chatCreationStatus(principal, creation), { code: 'chat_storage_uncertain' });
+  assert.equal((await restarted.get(principal, input.runId)).state, 'interrupted');
+  assert.equal((await restarted.chatHistory(principal, chat.chatId)).messages.some(message => message.id === 'assistant-cleanup'), false);
+  assert.equal((await restarted.chatCreationStatus(principal, creation))?.state, 'interrupted');
 });
 
 test('revocation during asset cleanup cannot publish the staged Chat success', async t => {
@@ -1182,7 +1130,7 @@ test('Chat inventory paginates available and uncertain IDs without leaking other
   const uncertainIds = ['c3333333-3333-4333-8333-333333333333', 'd4444444-4444-4444-8444-444444444444'];
   for (const requestId of liveIds) await broker.createChat(principal, { requestId });
   for (const requestId of uncertainIds) {
-    await fs.mkdir(join(root, 'apps', principal.appId, 'agent', 'chats', requestId), { recursive: true });
+    await fs.mkdir(join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', requestId), { recursive: true });
     await assert.rejects(broker.createChat(principal, { requestId }), { code: 'chat_storage_uncertain' });
   }
   const otherId = 'e5555555-5555-4555-8555-555555555555';
@@ -1215,7 +1163,7 @@ test('termination fence survives snapshots taken around the final successful ren
     const input = runInput(`termination-fence-${scenario}`, chat?.chatId);
     if (chat) await broker.sendChat(principal, chat.chatId, input); else await broker.run(principal, input);
     const execution = await started.promise;
-    const taskPath = join(root, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
+    const taskPath = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${execution.taskStorageId}.json`);
     const reached = deferred<void>(), release = deferred<void>(), original = fs.rename;
     let commits = 0;
     (fs as any).rename = async (from: unknown, to: unknown) => {
@@ -1245,18 +1193,21 @@ test('termination fence survives snapshots taken around the final successful ren
       const snapshot = await fs.mkdtemp(join(tmpdir(), 'lingxi-termination-snapshot-'));
       t.after(async () => { await fs.rm(snapshot, { recursive: true, force: true }); });
       await fs.cp(root, snapshot, { recursive: true });
-      const snapshotTask = join(snapshot, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
+      const snapshotTask = join(snapshot, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${execution.taskStorageId}.json`);
       const before = await fs.readFile(snapshotTask);
       const recovered = new LocalAppAgentBroker({ ...options, root: snapshot });
       t.after(async () => { await recovered.dispose().catch(() => undefined); });
-      await assert.rejects(recovered.get(principal, input.runId), { code: 'agent_storage_unavailable' });
-      await assert.rejects(recovered.events(principal, input.runId), { code: 'agent_storage_unavailable' });
       if (chat) {
-        await assert.rejects(recovered.chatCreationStatus(principal, creation), { code: 'chat_storage_uncertain' });
+        assert.equal((await recovered.get(principal, input.runId)).state, 'interrupted');
+        assert.equal((await recovered.events(principal, input.runId)).events.at(-1)?.type, 'RUN_ERROR');
+        assert.equal((await recovered.chatCreationStatus(principal, creation))?.state, 'interrupted');
         const page = await recovered.listChats(principal);
-        assert.deepEqual(page.unavailableChats, [{ chatId: chat.chatId, code: 'chat_storage_uncertain' }]);
+        assert.equal(page.unavailableChats, undefined);
+      } else {
+        await assert.rejects(recovered.get(principal, input.runId), { code: 'agent_storage_unavailable' });
+        await assert.rejects(recovered.events(principal, input.runId), { code: 'agent_storage_unavailable' });
+        assert.deepEqual(await fs.readFile(snapshotTask), before);
       }
-      assert.deepEqual(await fs.readFile(snapshotTask), before);
       release.resolve(); await revoked;
       assert.equal((await broker.get(principal, input.runId)).state, 'cancelled');
       await assert.rejects(fs.lstat(`${taskPath}.termination`), { code: 'ENOENT' });
@@ -1274,7 +1225,7 @@ test('direct task cancellation fences a terminal rename before exposing its ackn
   const input = runInput('direct-cancel-after-rename');
   await broker.run(principal, input);
   const execution = await started.promise;
-  const path = join(root, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
+  const path = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${execution.taskStorageId}.json`);
   const reached = deferred<void>(), release = deferred<void>(), original = fs.rename;
   let hold = true;
   (fs as any).rename = async (from: unknown, to: unknown) => {
@@ -1309,7 +1260,7 @@ test('host shutdown fences a successful rename until termination is durably sett
   const input = runInput('shutdown-after-rename');
   await broker.run(principal, input);
   const execution = await started.promise;
-  const path = join(root, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
+  const path = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${execution.taskStorageId}.json`);
   const reached = deferred<void>(), release = deferred<void>(), original = fs.rename;
   let hold = true;
   (fs as any).rename = async (from: unknown, to: unknown) => {
@@ -1341,7 +1292,7 @@ test('Chat cancellation fences a completed final rename before it can report suc
   const input = runInput('chat-cancel-after-rename', chat.chatId);
   await broker.sendChat(principal, chat.chatId, input);
   const execution = await started.promise;
-  const path = join(root, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
+  const path = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${execution.taskStorageId}.json`);
   const reached = deferred<void>(), release = deferred<void>(), original = fs.rename;
   let commits = 0;
   (fs as any).rename = async (from: unknown, to: unknown) => {
@@ -1362,8 +1313,8 @@ test('Chat cancellation fences a completed final rename before it can report suc
     await fs.cp(root, snapshot, { recursive: true });
     const recovered = new LocalAppAgentBroker({ ...options, root: snapshot });
     t.after(async () => { await recovered.dispose().catch(() => undefined); });
-    await assert.rejects(recovered.get(principal, input.runId), { code: 'agent_storage_unavailable' });
-    await assert.rejects(recovered.chatCreationStatus(principal, creation), { code: 'chat_storage_uncertain' });
+    assert.equal((await recovered.get(principal, input.runId)).state, 'interrupted');
+    assert.equal((await recovered.chatCreationStatus(principal, creation))?.state, 'interrupted');
     release.resolve(); await cancelled;
     assert.equal((await broker.get(principal, input.runId)).state, 'cancelled');
     assert.equal((await broker.chatHistory(principal, chat.chatId)).messages.some(row => row.id === 'assistant-chat-cancel'), false);
@@ -1380,7 +1331,7 @@ test('unsafe in-flight fence prevents task dispatch and remains unavailable afte
     executions++; return { result: { text: 'healthy', output: { ok: true }, attachments: [], messageId: 'healthy-fence' }, usage: { turns: 1 } };
   } });
   await broker.initialize();
-  const tasks = join(root, 'apps', principal.appId, 'agent', 'tasks');
+  const tasks = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks');
   await fs.mkdir(tasks, { recursive: true });
   const fence = join(tasks, `${privateId}.json.termination`);
   const target = join(root, 'untrusted-target'), targetBytes = Buffer.from([0, 25, 255]);
@@ -1410,7 +1361,7 @@ test('cancellation write failure retains the existing fence and reports uncertai
   const input = runInput('cancel-storage-failure');
   await broker.run(principal, input);
   const execution = await started.promise;
-  const tasks = join(root, 'apps', principal.appId, 'agent', 'tasks');
+  const tasks = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks');
   const fence = join(tasks, `${execution.taskStorageId}.json.termination`);
   assert.equal((await fs.lstat(fence)).isFile(), true);
   await fs.chmod(tasks, 0o500);
@@ -1457,8 +1408,8 @@ test('a killed host recovers an in-flight Chat as interrupted without replaying 
   await childExited;
   const effectPath = join(root, 'external-effect.log');
   assert.equal(await fs.readFile(effectPath, 'utf8'), 'performed\n');
-  const taskPath = join(root, 'apps', principal.appId, 'agent', 'tasks', `${admitted.taskId}.json`);
-  const chatPath = join(root, 'apps', principal.appId, 'agent', 'chats', admitted.chatId, 'chat.json');
+  const taskPath = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${admitted.taskId}.json`);
+  const chatPath = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', admitted.chatId, 'chat.json');
   const fence = `${taskPath}.termination`;
   assert.equal((await fs.lstat(fence)).isFile(), true);
 
@@ -1489,15 +1440,15 @@ test('a killed host recovers an in-flight Chat as interrupted without replaying 
     assert.match(secondTask.error?.message ?? '', /effects and results may be unknown/i);
     assert.equal((await second.chatHistory(principal, admitted.chatId)).messages[0]?.id, 'message-fixture-1');
     assert.equal((await second.events(principal, admitted.runId)).events.filter(event => event.type === 'RUN_ERROR').length, 1);
-    await assert.rejects(fs.lstat(join(snapshot, 'apps', principal.appId, 'agent', 'tasks', `${admitted.taskId}.json.termination`)), { code: 'ENOENT' });
+    await assert.rejects(fs.lstat(join(snapshot, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${admitted.taskId}.json.termination`)), { code: 'ENOENT' });
 
     // A failed fence cleanup keeps the Chat unavailable and does not rewrite
     // the message bytes after the failed recovery step.
     const failedRoot = await fs.mkdtemp(join(tmpdir(), 'lingxi-recovery-failed-'));
     t.after(async () => { await fs.rm(failedRoot, { recursive: true, force: true }); });
     await fs.cp(root, failedRoot, { recursive: true });
-    const failedTask = join(failedRoot, 'apps', principal.appId, 'agent', 'tasks', `${admitted.taskId}.json`);
-    const failedChat = join(failedRoot, 'apps', principal.appId, 'agent', 'chats', admitted.chatId, 'chat.json');
+    const failedTask = join(failedRoot, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${admitted.taskId}.json`);
+    const failedChat = join(failedRoot, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', admitted.chatId, 'chat.json');
     const earlierUnlink = fs.unlink;
     let atFailure: Buffer | undefined;
     (fs as any).unlink = async (path: unknown) => {
@@ -1522,7 +1473,7 @@ test('a killed host recovers an in-flight Chat as interrupted without replaying 
     const afterUnlinkRoot = await fs.mkdtemp(join(tmpdir(), 'lingxi-recovery-unlink-window-'));
     t.after(async () => { await fs.rm(afterUnlinkRoot, { recursive: true, force: true }); });
     await fs.cp(root, afterUnlinkRoot, { recursive: true });
-    const afterTask = join(afterUnlinkRoot, 'apps', principal.appId, 'agent', 'tasks', `${admitted.taskId}.json`);
+    const afterTask = join(afterUnlinkRoot, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${admitted.taskId}.json`);
     const finalRename = deferred<void>(), releaseRename = deferred<void>(), oldRename = fs.rename;
     (fs as any).rename = async (source: unknown, destination: unknown) => {
       if (destination === afterTask) { finalRename.resolve(); await releaseRename.promise; }
@@ -1594,7 +1545,7 @@ test('a killed stateless task becomes interrupted without repeating a possible e
   assert.deepEqual(await broker.run(principal, runInput(admitted.runId, admitted.threadId)), { runId: admitted.runId });
   assert.equal(replayExecutions, 0);
   assert.equal(await fs.readFile(join(root, 'external-effect.log'), 'utf8'), 'performed\n');
-  await assert.rejects(fs.lstat(join(root, 'apps', principal.appId, 'agent', 'tasks', `${admitted.taskId}.json.termination`)), { code: 'ENOENT' });
+  await assert.rejects(fs.lstat(join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${admitted.taskId}.json.termination`)), { code: 'ENOENT' });
 });
 
 test('partial tool events isolate only their task and Chat across restarts', async t => {
@@ -1610,7 +1561,7 @@ test('partial tool events isolate only their task and Chat across restarts', asy
   const snapshot = await fs.mkdtemp(join(tmpdir(), 'lingxi-partial-result-snapshot-'));
   t.after(async () => { await fs.rm(snapshot, { recursive: true, force: true }); });
   await fs.cp(root, snapshot, { recursive: true });
-  const path = join(snapshot, 'apps', principal.appId, 'agent', 'tasks', `${execution.taskStorageId}.json`);
+  const path = join(snapshot, 'apps', principal.appId, 'agent', 'agui-v1', 'tasks', `${execution.taskStorageId}.json`);
   const record = JSON.parse(await fs.readFile(path, 'utf8'));
   const partialEvents = [
     { type: 'TOOL_CALL_START', toolCallId: 'call-before-crash', toolCallName: 'Read' },
@@ -1621,7 +1572,7 @@ test('partial tool events isolate only their task and Chat across restarts', asy
   record.eventSequence = record.events.length;
   const bytes = Buffer.from(JSON.stringify(record));
   await fs.writeFile(path, bytes);
-  const chatDirectory = join(snapshot, 'apps', principal.appId, 'agent', 'chats', chat.chatId);
+  const chatDirectory = join(snapshot, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', chat.chatId);
   const chatPath = join(chatDirectory, 'chat.json'), fencePath = `${path}.termination`;
   const extraPath = join(chatDirectory, 'private-session.bin');
   await fs.writeFile(extraPath, Buffer.from([0, 21, 255]));
@@ -1630,8 +1581,8 @@ test('partial tool events isolate only their task and Chat across restarts', asy
   const executions: string[] = [];
   const recoveredOptions = { ...options, root: snapshot, execute: async (execution: LocalAppAgentExecution) => {
     executions.push(execution.runId);
-    return { result: { text: 'healthy', output: { ok: true }, attachments: [] as [], messageId: `assistant-${execution.runId}`,
-      ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: { turns: 1 } };
+    return withFakeChatCheckpoint(execution, { result: { text: 'healthy', output: { ok: true }, attachments: [] as [], messageId: `assistant-${execution.runId}`,
+      ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: { turns: 1 } });
   } };
   const restarted = new LocalAppAgentBroker(recoveredOptions);
   t.after(async () => { await restarted.dispose().catch(() => undefined); });
@@ -1655,4 +1606,296 @@ test('partial tool events isolate only their task and Chat across restarts', asy
   // Allow the original test fixture to finish; the snapshot must remain untouched.
   never.resolve({ result: { text: 'answer', output: { ok: true }, attachments: [], chatId: chat.chatId, messageId: 'assistant-original' }, usage: { turns: 1 } });
   await terminal(broker, principal, input.runId);
+});
+
+test('a failed generation never becomes the next Chat base and restart retains the last confirmed success', async t => {
+  const bases: Array<{ runId: string; generation?: string }> = [];
+  const { root, broker, options } = await fixture(t, { execute: async execution => {
+    bases.push({ runId: execution.runId, generation: execution.chat?.baseCheckpoint?.generationId });
+    if (execution.runId === 'failed-generation') {
+      const directory = join(execution.chat!.sessionDirectory, execution.chat!.generationId);
+      await fs.mkdir(directory, { mode: 0o700 });
+      await fs.writeFile(join(directory, `${execution.chat!.sessionId}.jsonl`), 'FAILED_INTERNAL_CONTENT\n');
+      throw new Error('failed after internal output');
+    }
+    return { result: { text: `accepted-${execution.runId}`, output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}`, chatId: execution.chat!.chatId }, usage: { turns: 1 } };
+  } });
+  const chat = await broker.createChat(principal, { requestId: 'de111111-1111-4111-8111-111111111111' });
+  const input = (runId: string) => ({ ...runInput(runId, chat.chatId), messages: [{ id: `user-${runId}`, role: 'user', content: runId }] });
+  await broker.sendChat(principal, chat.chatId, input('first-generation'));
+  assert.equal((await terminal(broker, principal, 'first-generation')).state, 'succeeded');
+  const path = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', chat.chatId, 'chat.json');
+  const first = JSON.parse(await fs.readFile(path, 'utf8')).committedCheckpoint;
+  await broker.sendChat(principal, chat.chatId, input('failed-generation'));
+  assert.equal((await terminal(broker, principal, 'failed-generation')).state, 'failed');
+  assert.deepEqual(JSON.parse(await fs.readFile(path, 'utf8')).committedCheckpoint, first);
+  await broker.sendChat(principal, chat.chatId, input('next-generation'));
+  assert.equal((await terminal(broker, principal, 'next-generation')).state, 'succeeded');
+  assert.equal(bases.at(-1)?.generation, first.generationId);
+  const next = JSON.parse(await fs.readFile(path, 'utf8')).committedCheckpoint;
+  const source = await fs.readFile(join(dirname(path), next.generationId, `${next.sessionId}.jsonl`), 'utf8');
+  assert.ok(source.includes('accepted-first-generation') && source.includes('accepted-next-generation'));
+  assert.ok(!source.includes('FAILED_INTERNAL_CONTENT'));
+  const resumed = new LocalAppAgentBroker(options);
+  t.after(async () => { await resumed.dispose(); });
+  await resumed.sendChat(principal, chat.chatId, input('after-restart'));
+  assert.equal((await terminal(resumed, principal, 'after-restart')).state, 'succeeded');
+  assert.equal(bases.at(-1)?.generation, next.generationId);
+  assert.ok(!JSON.stringify(await resumed.get(principal, 'after-restart')).includes('Checkpoint'));
+  assert.ok(!JSON.stringify(await resumed.chatHistory(principal, chat.chatId)).includes('sessionDirectory'));
+});
+
+test('a Chat success requires a matching sealed checkpoint and a changed committed file blocks dispatch', async t => {
+  const { root, broker, options } = await fixture(t);
+  const chat = await broker.createChat(principal, { requestId: 'de222222-2222-4222-8222-222222222222' });
+  const input = (runId: string) => ({ ...runInput(runId, chat.chatId), messages: [{ id: `user-${runId}`, role: 'user', content: runId }] });
+  const verified = options.execute;
+  options.execute = async execution => {
+    const completion = await verified(execution);
+    delete completion.chatCheckpoint;
+    return completion;
+  };
+  await broker.sendChat(principal, chat.chatId, input('missing-proof'));
+  assert.equal((await terminal(broker, principal, 'missing-proof')).error?.code, 'chat_transcript_unavailable');
+  assert.equal((await broker.chatHistory(principal, chat.chatId)).messages.some(message => message.role === 'assistant'), false);
+  options.execute = verified;
+  await broker.sendChat(principal, chat.chatId, input('verified-proof'));
+  assert.equal((await terminal(broker, principal, 'verified-proof')).state, 'succeeded');
+  const directory = join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', chat.chatId);
+  const proof = JSON.parse(await fs.readFile(join(directory, 'chat.json'), 'utf8')).committedCheckpoint;
+  await fs.appendFile(join(directory, proof.generationId, `${proof.sessionId}.jsonl`), 'UNCOMMITTED_TAIL\n');
+  let called = false;
+  options.execute = async execution => { called = true; return verified(execution); };
+  await assert.rejects(broker.sendChat(principal, chat.chatId, input('tampered-proof')), { code: 'chat_transcript_unavailable' });
+  assert.equal(called, false);
+});
+
+test('cancelling a generation retains the previous checkpoint and the next turn can continue', async t => {
+  const started = deferred<void>();
+  const observed: LocalAppAgentExecution[] = [];
+  const { broker } = await fixture(t, { execute: async execution => {
+    observed.push(execution);
+    if (execution.runId === 'cancelled-generation') {
+      const directory = join(execution.chat!.sessionDirectory, execution.chat!.generationId);
+      await fs.mkdir(directory, { mode: 0o700 });
+      await fs.writeFile(join(directory, `${execution.chat!.sessionId}.jsonl`), 'CANCELLED_INTERNAL_CONTENT\n');
+      started.resolve();
+      await new Promise<void>((_resolve, reject) => {
+        const abort = () => reject(new Error('cancelled'));
+        execution.signal.addEventListener('abort', abort, { once: true });
+        if (execution.signal.aborted) abort();
+      });
+    }
+    return { result: { text: `accepted-${execution.runId}`, output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}`, chatId: execution.chat!.chatId }, usage: { turns: 1 } };
+  } });
+  const chat = await broker.createChat(principal, { requestId: 'de333333-3333-4333-8333-333333333333' });
+  const input = (runId: string) => ({ ...runInput(runId, chat.chatId), messages: [{ id: `user-${runId}`, role: 'user', content: runId }] });
+  await broker.sendChat(principal, chat.chatId, input('before-cancel'));
+  assert.equal((await terminal(broker, principal, 'before-cancel')).state, 'succeeded');
+  await broker.sendChat(principal, chat.chatId, input('cancelled-generation'));
+  await started.promise;
+  const base = observed.at(-1)!.chat!.baseCheckpoint!;
+  await broker.cancelChat(principal, chat.chatId);
+  assert.equal((await broker.get(principal, 'cancelled-generation')).state, 'cancelled');
+  await broker.sendChat(principal, chat.chatId, input('after-cancel'));
+  assert.equal((await terminal(broker, principal, 'after-cancel')).state, 'succeeded');
+  assert.deepEqual(observed.at(-1)!.chat!.baseCheckpoint, base);
+  const active = observed.at(-1)!.chat!;
+  const source = await fs.readFile(join(active.sessionDirectory, active.generationId, `${active.sessionId}.jsonl`), 'utf8');
+  assert.ok(!source.includes('CANCELLED_INTERNAL_CONTENT'));
+});
+
+test('a cancelled Chat cannot start another generation until its executor drain has settled', async t => {
+  const started = deferred<void>(), cancelled = deferred<void>(), drained = deferred<void>();
+  const observed: LocalAppAgentExecution[] = [];
+  const { root, broker } = await fixture(t, { execute: async execution => {
+    observed.push(execution);
+    assert.equal(execution.chat!.nativeUserMessageId, `msg:${execution.taskStorageId}`);
+    if (execution.runId === 'draining-generation') {
+      await execution.requireCleanupConfirmation!();
+      started.resolve();
+      await new Promise<void>(resolve => {
+        const abort = () => resolve();
+        execution.signal.addEventListener('abort', abort, { once: true });
+        if (execution.signal.aborted) abort();
+      });
+      cancelled.resolve();
+      await drained.promise;
+      throw new Error('cancelled after tool drain');
+    }
+    return { result: { text: 'accepted', output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}`, chatId: execution.chat!.chatId }, usage: { turns: 1 } };
+  } });
+  const chat = await broker.createChat(principal, { requestId: 'de444444-4444-4444-8444-444444444444' });
+  const input = (runId: string) => ({ ...runInput(runId, chat.chatId), messages: [{ id: `user-${runId}`, role: 'user', content: runId }] });
+  await broker.sendChat(principal, chat.chatId, input('before-drain'));
+  assert.equal((await terminal(broker, principal, 'before-drain')).state, 'succeeded');
+  await broker.sendChat(principal, chat.chatId, input('draining-generation'));
+  await started.promise;
+  const base = observed.at(-1)!.chat!.baseCheckpoint!;
+  const cancellation = broker.cancelChat(principal, chat.chatId);
+  try {
+    await cancelled.promise;
+    assert.equal((await terminal(broker, principal, 'draining-generation')).state, 'cancelled');
+    assert.equal(broker.hasActiveApp(principal.appId), true);
+    await assert.rejects(broker.sendChat(principal, chat.chatId, input('after-drain')), { code: 'busy' });
+    const saved = JSON.parse(await fs.readFile(join(root, 'apps', principal.appId, 'agent/agui-v1/chats', chat.chatId, 'chat.json'), 'utf8'));
+    assert.deepEqual(saved.committedCheckpoint, base);
+  } finally {
+    drained.resolve();
+    await cancellation;
+  }
+  await broker.sendChat(principal, chat.chatId, input('after-drain'));
+  assert.equal((await terminal(broker, principal, 'after-drain')).state, 'succeeded');
+  assert.deepEqual(observed.at(-1)!.chat!.baseCheckpoint, base);
+});
+
+test('unconfirmed native cleanup preserves the fence and blocks new generations across restart', async t => {
+  const started = deferred<void>(), cancelled = deferred<void>(), stopWaiting = deferred<void>();
+  const { root, broker, options } = await fixture(t, { execute: async execution => {
+    if (execution.runId === 'cleanup-unconfirmed') {
+      await execution.requireCleanupConfirmation!();
+      started.resolve();
+      await new Promise<void>(resolve => {
+        const abort = () => resolve();
+        execution.signal.addEventListener('abort', abort, { once: true });
+        if (execution.signal.aborted) abort();
+      });
+      cancelled.resolve();
+      await stopWaiting.promise;
+      throw new LocalAppAgentError('tool_cleanup_incomplete', 'Tool cleanup was not confirmed.');
+    }
+    return { result: { text: 'accepted', output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}`,
+      ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: { turns: 1 } };
+  } });
+  const chat = await broker.createChat(principal, { requestId: 'de555555-5555-4555-8555-555555555555' });
+  const input = (runId: string) => ({ ...runInput(runId, chat.chatId), messages: [{ id: `user-${runId}`, role: 'user', content: runId }] });
+  await broker.sendChat(principal, chat.chatId, input('before-unconfirmed'));
+  assert.equal((await terminal(broker, principal, 'before-unconfirmed')).state, 'succeeded');
+  const chatPath = join(root, 'apps', principal.appId, 'agent/agui-v1/chats', chat.chatId, 'chat.json');
+  const base = JSON.parse(await fs.readFile(chatPath, 'utf8')).committedCheckpoint;
+  await broker.sendChat(principal, chat.chatId, input('cleanup-unconfirmed'));
+  await started.promise;
+  const cancellation = broker.cancelChat(principal, chat.chatId);
+  const rejected = assert.rejects(cancellation, { code: 'tool_cleanup_incomplete' });
+  try {
+    await cancelled.promise;
+    assert.equal((await terminal(broker, principal, 'cleanup-unconfirmed')).state, 'cancelled');
+    await assert.rejects(broker.sendChat(principal, chat.chatId, input('during-unconfirmed')), { code: 'busy' });
+  } finally {
+    stopWaiting.resolve();
+    await rejected;
+  }
+  assert.equal(broker.hasActiveApp(principal.appId), true, 'unconfirmed owners still protect the application');
+  await assert.rejects(broker.cancelChat(principal, chat.chatId), { code: 'tool_cleanup_incomplete' });
+  await assert.rejects(broker.cancelApp(principal.appId), { code: 'tool_cleanup_incomplete' });
+  await assert.rejects(broker.sendChat(principal, chat.chatId, input('after-unconfirmed')), { code: 'tool_cleanup_incomplete' });
+  await assert.rejects(broker.deleteChat(principal, chat.chatId), { code: 'tool_cleanup_incomplete' });
+  assert.deepEqual(JSON.parse(await fs.readFile(chatPath, 'utf8')).committedCheckpoint, base);
+  const taskDirectory = join(root, 'apps', principal.appId, 'agent/agui-v1/tasks');
+  const paths = (await fs.readdir(taskDirectory)).filter(path => path.endsWith('.json'));
+  const pendingPath = (await Promise.all(paths.map(async path => {
+    const full = join(taskDirectory, path), record = JSON.parse(await fs.readFile(full, 'utf8'));
+    return record.publicRunId === 'cleanup-unconfirmed' ? full : undefined;
+  }))).find((path): path is string => !!path)!;
+  const saved = JSON.parse(await fs.readFile(pendingPath, 'utf8'));
+  assert.equal(saved.cleanupPending, true);
+  const fence = await fs.readFile(`${pendingPath}.termination`);
+  const recovered = new LocalAppAgentBroker(options);
+  assert.equal((await recovered.get(principal, 'cleanup-unconfirmed')).state, 'cancelled');
+  assert.equal(recovered.hasActiveApp(principal.appId), true);
+  await assert.rejects(recovered.sendChat(principal, chat.chatId, input('after-cleanup-restart')), { code: 'tool_cleanup_incomplete' });
+  assert.deepEqual(await fs.readFile(`${pendingPath}.termination`), fence);
+  assert.deepEqual(JSON.parse(await fs.readFile(chatPath, 'utf8')).committedCheckpoint, base);
+  await recovered.run(other, runInput('unrelated-app-after-unknown-cleanup'));
+  assert.equal((await terminal(recovered, other, 'unrelated-app-after-unknown-cleanup')).state, 'succeeded');
+  await assert.rejects(recovered.dispose(), { code: 'tool_cleanup_incomplete' });
+});
+
+test('a durable native cleanup receipt releases only its interrupted generation and never adopts candidate history', async t => {
+  const started = deferred<LocalAppAgentExecution>(), release = deferred<void>();
+  const { root, broker, options } = await fixture(t, { execute: async execution => {
+    if (execution.runId === 'crashed-native-owner') {
+      await execution.requireCleanupConfirmation(); started.resolve(execution); await release.promise;
+      throw new LocalAppAgentError('tool_cleanup_incomplete', 'No live transport acknowledgement');
+    }
+    return { result: { text: 'accepted', output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}`, chatId: execution.chat!.chatId }, usage: {} };
+  } });
+  const chat = await broker.createChat(principal, { requestId: 'de666666-6666-4666-8666-666666666666' });
+  const input = (runId: string) => ({ ...runInput(runId, chat.chatId), messages: [{ id: `user-${runId}`, role: 'user', content: runId }] });
+  await broker.sendChat(principal, chat.chatId, input('receipt-base'));
+  assert.equal((await terminal(broker, principal, 'receipt-base')).state, 'succeeded');
+  await broker.sendChat(principal, chat.chatId, input('crashed-native-owner'));
+  const execution = await started.promise, profile = execution.chat!;
+  const relativeTask = join('apps', principal.appId, 'agent/agui-v1/tasks', `${execution.taskStorageId}.json`);
+  const relativeChat = join('apps', principal.appId, 'agent/agui-v1/chats', chat.chatId, 'chat.json');
+  const base = profile.baseCheckpoint!;
+  const receipt = { schema: 1, status: 'complete', appId: principal.appId, versionId: principal.releaseDigest,
+    invocationId: principal.invocationId, chatId: chat.chatId, generationId: profile.generationId,
+    sessionId: profile.sessionId, nonce: profile.cleanupNonce };
+  // A native candidate may exist on disk even though no broker success commit
+  // exists. Cleanup evidence must not promote that candidate.
+  await withFakeChatCheckpoint(execution, { result: { text: 'uncommitted candidate', output: { ok: true }, attachments: [], messageId: 'uncommitted-assistant', chatId: chat.chatId }, usage: {} });
+  try {
+    for (const mode of ['complete', 'receipt-before-ledger-repair', 'ledger-repair-before-fence-unlink', 'wrong-app', 'wrong-generation', 'wrong-nonce', 'duplicate-from-earlier-generation', 'missing', 'malformed', 'hardlink'] as const) {
+      await t.test(mode, async sub => {
+        const copy = await fs.mkdtemp(join(tmpdir(), 'lingxi-chat-receipt-crash-'));
+        sub.after(() => fs.rm(copy, { recursive: true, force: true }));
+        await fs.cp(root, copy, { recursive: true });
+        const path = join(copy, 'apps', principal.appId, 'agent/agui-v1/chats', chat.chatId, profile.generationId, 'tool-cleanup.json');
+        const value = { ...receipt };
+        if (mode === 'wrong-app') value.appId = other.appId;
+        if (mode === 'wrong-generation' || mode === 'duplicate-from-earlier-generation') value.generationId = base.generationId;
+        if (mode === 'wrong-nonce') value.nonce = '0'.repeat(64);
+        if (mode !== 'missing') {
+          await fs.writeFile(path, mode === 'malformed' ? '{ malformed' : JSON.stringify(value), { mode: 0o600 });
+          if (mode === 'hardlink') await fs.link(path, `${path}.other-link`);
+        }
+        if (mode === 'receipt-before-ledger-repair') await fs.unlink(`${join(copy, relativeTask)}.termination`);
+        if (mode === 'ledger-repair-before-fence-unlink') {
+          const record = JSON.parse(await fs.readFile(join(copy, relativeTask), 'utf8'));
+          delete record.cleanupPending;
+          await fs.writeFile(join(copy, relativeTask), JSON.stringify(record));
+        }
+        const recovered = new LocalAppAgentBroker({ ...options, root: copy });
+        sub.after(() => recovered.dispose().catch(() => undefined));
+        assert.equal((await recovered.get(principal, execution.runId)).state, 'interrupted');
+        assert.deepEqual(JSON.parse(await fs.readFile(join(copy, relativeChat), 'utf8')).committedCheckpoint, base);
+        const accepted = mode === 'complete' || mode === 'receipt-before-ledger-repair' || mode === 'ledger-repair-before-fence-unlink';
+        assert.equal(recovered.hasActiveApp(principal.appId), !accepted);
+        if (!accepted) {
+          await assert.rejects(recovered.sendChat(principal, chat.chatId, input(`blocked-${mode}`)), { code: 'tool_cleanup_incomplete' });
+          assert.equal(JSON.parse(await fs.readFile(join(copy, relativeTask), 'utf8')).cleanupPending, true);
+          return;
+        }
+        await assert.rejects(fs.lstat(`${join(copy, relativeTask)}.termination`), { code: 'ENOENT' });
+        assert.equal(JSON.parse(await fs.readFile(join(copy, relativeTask), 'utf8')).cleanupPending, undefined);
+        assert.ok(!(await recovered.chatHistory(principal, chat.chatId)).messages.some(message => message.id === 'uncommitted-assistant'));
+        await recovered.sendChat(principal, chat.chatId, input(`continued-${mode}`));
+        assert.equal((await terminal(recovered, principal, `continued-${mode}`)).state, 'succeeded');
+        const history = await recovered.chatHistory(principal, chat.chatId);
+        assert.ok(!JSON.stringify(history).includes(profile.cleanupNonce), 'cleanup nonce stays in host-private records');
+        const again = new LocalAppAgentBroker({ ...options, root: copy });
+        sub.after(() => again.dispose().catch(() => undefined));
+        assert.equal((await again.get(principal, execution.runId)).state, 'interrupted', 'an already-consumed receipt is idempotent');
+        assert.equal(again.hasActiveApp(principal.appId), false);
+      });
+    }
+  } finally { release.resolve(); }
+});
+
+test('Chat deletion removes only its drained workspace and rejects a substituted workspace root', { skip: process.platform === 'win32' }, async t => {
+  const { root, broker } = await fixture(t);
+  const first = await broker.createChat(principal, { requestId: 'de777777-7777-4777-8777-777777777777' });
+  const second = await broker.createChat(principal, { requestId: 'de888888-8888-4888-8888-888888888888' });
+  const workspaces = join(root, 'apps', principal.appId, 'agent/agui-v1/workspaces');
+  const firstWorkspace = join(workspaces, first.chatId), secondWorkspace = join(workspaces, second.chatId);
+  await fs.mkdir(firstWorkspace, { recursive: true }); await fs.mkdir(secondWorkspace);
+  await fs.writeFile(join(firstWorkspace, 'owned.txt'), 'first'); await fs.writeFile(join(secondWorkspace, 'business.txt'), 'preserve');
+  await broker.deleteChat(principal, first.chatId);
+  await assert.rejects(fs.lstat(firstWorkspace), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(join(secondWorkspace, 'business.txt'), 'utf8'), 'preserve');
+  const target = join(root, 'other-business-data'); await fs.rename(secondWorkspace, target); await fs.symlink(target, secondWorkspace);
+  await assert.rejects(broker.deleteChat(principal, second.chatId), { code: 'chat_storage_uncertain' });
+  assert.equal(await fs.readFile(join(target, 'business.txt'), 'utf8'), 'preserve');
+  assert.equal((await fs.lstat(secondWorkspace)).isSymbolicLink(), true);
 });

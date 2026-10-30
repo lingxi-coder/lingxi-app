@@ -107,14 +107,14 @@ async function main() {
   assert.deepEqual(await window.webContents.executeJavaScript('localApp.agent.chats.pendingCreations()'), [{ ...request, state: 'deleted' }]);
   await window.webContents.executeJavaScript(`localApp.agent.chats.forgetCreation(${JSON.stringify(request.requestId)})`);
   assert.deepEqual(await window.webContents.executeJavaScript('localApp.agent.chats.pendingCreations()'), []);
-  // Check the real host IPC and isolated preload expose the preservation error
-  // rather than turning an unsupported App store into an empty Chat list.
-  (broker as any).unsupportedApps.add(appId);
-  const unsupportedRequest = { requestId: '22222222-2222-4222-8222-222222222222' };
-  assert.deepEqual(await window.webContents.executeJavaScript(`localApp.agent.chats.create(${JSON.stringify(unsupportedRequest)}).catch(e => ({code:e.code,message:e.message}))`),
-    { code: 'agent_format_unsupported', message: 'This Local App has unsupported Agent storage. Its data has been preserved.' });
-  assert.equal(await window.webContents.executeJavaScript(`localApp.agent.chats.list().catch(e => e.code)`), 'agent_format_unsupported');
-  assert.deepEqual(await window.webContents.executeJavaScript('localApp.agent.chats.pendingCreations()'), [{ ...unsupportedRequest, state: 'pending' }]);
+  // Current unsafe/unavailable storage must preserve its error across host IPC
+  // and isolated preload, rather than becoming an empty Chat list.
+  (broker as any).unavailableApps.add(appId);
+  const unavailableRequest = { requestId: '22222222-2222-4222-8222-222222222222' };
+  assert.deepEqual(await window.webContents.executeJavaScript(`localApp.agent.chats.create(${JSON.stringify(unavailableRequest)}).catch(e => ({code:e.code,message:e.message}))`),
+    { code: 'agent_storage_unavailable', message: 'This Local App has invalid or unsafe Agent storage. Its data has been preserved.' });
+  assert.equal(await window.webContents.executeJavaScript(`localApp.agent.chats.list().catch(e => e.code)`), 'agent_storage_unavailable');
+  assert.deepEqual(await window.webContents.executeJavaScript('localApp.agent.chats.pendingCreations()'), [{ ...unavailableRequest, state: 'pending' }]);
   window.destroy();
   ipcMain.removeHandler(CH_LOCAL_APP_NATIVE);
   await broker.dispose();

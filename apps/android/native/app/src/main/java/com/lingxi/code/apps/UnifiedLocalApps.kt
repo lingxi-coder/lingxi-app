@@ -321,9 +321,6 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     }
     fun markOpened(id: String) { opened.edit().putLong(id, System.currentTimeMillis()).apply(); mutableState.value = mutableState.value.copy(openedRevision = mutableState.value.openedRevision + 1) }
     fun drawerApps(records: List<AppRecord>) = records.map { MyApp(it.id, it.name, "", opened.getLong(it.id, 0).takeIf { time -> time > 0 }) }
-    internal fun legacyMarketRoot(): File = File(context.filesDir, "local-app-market")
-    internal fun newLegacyImportGuestPath(): String =
-        MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/import-${java.util.UUID.randomUUID()}"
     fun hostFile(guestPath: String): File {
         val dirs = MobileUserStorage.directories(context)
         require(guestPath.startsWith(dirs.guestHome + "/") && guestPath.split('/').none { it == "." || it == ".." }) { "Invalid Linux user directory" }

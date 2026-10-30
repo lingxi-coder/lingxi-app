@@ -1,4 +1,4 @@
-import { LocalAppMarket, LegacyLocalApps, LocalAppPublish } from './LocalAppMarket';
+import { LocalAppMarket, LocalAppPublish } from './LocalAppMarket';
 import { useI18n } from '../i18n/useI18n';
 import { tr } from '../i18n/locale';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
@@ -90,7 +90,6 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
       {versions.map(version => { const app = apps.find(a => a.id === selected); return <div key={version.revision} className="local-app-actions"><span>v{version.revision} · {new Date(version.createdAtMs).toLocaleString(locale)}{app?.currentRevision === version.revision ? ' · Current' : ''}</span><button disabled={busy === selected || !app || app.currentRevision === undefined || app.currentRevision === version.revision} onClick={() => app?.currentRevision !== undefined && void act(selected, () => appsApi().useVersion(selected, version.revision, app.currentRevision!))}>Use version</button></div>; })}
       <h3>Permissions</h3><p>{apps.find(a => a.id === selected)?.grants.join(', ') || 'No capabilities granted for the latest release.'}</p>
       <h3>{tr('desktop_logs')}</h3><pre>{logs.length ? logs.map(l => `[${new Date(l.time).toLocaleTimeString(locale)}] ${l.process}: ${l.text}`).join('\n') : tr('desktop_apps_log_empty')}</pre></aside>}
-    <LegacyLocalApps visible={visible && tab === 'mine'} onImported={() => void refresh()}/>
     </div>
     {publication && <LocalAppPublish key={publication.id} app={publication} onClose={() => setPublication(undefined)}/>}
     {agentSettings && apps.find(app => app.id === agentSettings) && <LocalAppAgentSettingsDialog key={agentSettings} app={apps.find(app => app.id === agentSettings)!} onClose={() => setAgentSettings(null)} onSaved={() => void refresh()}/>}

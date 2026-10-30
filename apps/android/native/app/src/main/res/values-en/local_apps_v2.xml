@@ -3,7 +3,6 @@
     <string name="local_app_v2_title">Apps</string>
     <string name="local_app_v2_mine">My apps</string>
     <string name="local_app_v2_market">Market</string>
-    <string name="local_app_v2_legacy">Legacy archives</string>
     <string name="local_app_v2_create">Create app</string>
     <string name="local_app_v2_refresh">Refresh</string>
     <string name="local_app_v2_search">Search apps</string>
@@ -12,8 +11,6 @@
     <string name="local_app_v2_manage">Manage</string>
     <string name="local_app_v2_develop">Continue development</string>
     <string name="local_app_v2_install">Install on this device</string>
-    <string name="local_app_v2_legacy_note">Legacy apps are preserved as archives. Import creates a new installation and keeps the original files and browser data.</string>
-    <string name="local_app_v2_import">Import</string>
     <string name="local_app_v2_create_note">Create a source project and develop the app in a regular conversation.</string>
     <string name="local_app_v2_name">App name</string>
     <string name="local_app_v2_create_confirm">Create</string>
@@ -34,7 +31,7 @@
     <string name="local_app_v2_logs_empty">No logs yet</string>
     <string name="local_app_v2_remove">Remove app</string>
     <string name="local_app_v2_remove_title">Remove this app?</string>
-    <string name="local_app_v2_remove_note">Stop the app and remove its local installation and browser data. Keep source projects and legacy archives.</string>
+    <string name="local_app_v2_remove_note">Stop the app and remove its local installation and browser data. Keep source projects.</string>
     <string name="local_app_v2_remove_confirm">Remove</string>
     <string name="local_app_v2_allow_release">Allow this version</string>
     <string name="local_app_v2_allow_version_title">Allow this version to run?</string>

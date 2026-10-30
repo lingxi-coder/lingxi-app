@@ -3,7 +3,6 @@
     <string name="local_app_v2_title">应用</string>
     <string name="local_app_v2_mine">我的</string>
     <string name="local_app_v2_market">市场</string>
-    <string name="local_app_v2_legacy">旧版归档</string>
     <string name="local_app_v2_create">创建应用</string>
     <string name="local_app_v2_refresh">刷新</string>
     <string name="local_app_v2_search">搜索应用</string>
@@ -12,8 +11,6 @@
     <string name="local_app_v2_manage">管理</string>
     <string name="local_app_v2_develop">继续开发</string>
     <string name="local_app_v2_install">安装到本机</string>
-    <string name="local_app_v2_legacy_note">旧版应用保留为归档。导入会创建新的应用身份；旧文件和浏览器数据不变。</string>
-    <string name="local_app_v2_import">导入</string>
     <string name="local_app_v2_create_note">为应用创建源码项目，并在普通会话中继续开发。</string>
     <string name="local_app_v2_name">应用名称</string>
     <string name="local_app_v2_create_confirm">创建</string>
@@ -34,7 +31,7 @@
     <string name="local_app_v2_logs_empty">尚无日志</string>
     <string name="local_app_v2_remove">移除应用</string>
     <string name="local_app_v2_remove_title">移除应用？</string>
-    <string name="local_app_v2_remove_note">停止应用并移除本机安装及浏览器数据。源码项目和旧版归档保留。</string>
+    <string name="local_app_v2_remove_note">停止应用并移除本机安装及浏览器数据。源码项目保留。</string>
     <string name="local_app_v2_remove_confirm">移除</string>
     <string name="local_app_v2_allow_release">允许此版本</string>
     <string name="local_app_v2_allow_version_title">允许此版本运行？</string>

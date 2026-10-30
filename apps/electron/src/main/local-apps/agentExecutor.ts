@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import type { AskQuestionDto } from '@lingxi/bridge-client';
 import type { LocalAppAgentCatalog, LocalAppAgentToolChoice, LocalAppAgentUsage } from '../../shared/localAppAgent.js';
 import type { LocalAppAgentExecution, LocalAppAgentExecutorResult } from './agentBroker.js';
+import { validChatCheckpoint } from './agentBroker.js';
 import { LocalAppAgentError, sameAgentGrant } from './agentPolicy.js';
 import { buildBridgeEnvironment, buildCredentialEnvelope } from '../host-utils.js';
 import { resolveServerBin } from '../bridgeDiscovery.js';
@@ -42,6 +43,8 @@ export interface LocalAppAgentExecutorOptions {
   spawnProcess?: typeof spawn;
   environment?: NodeJS.ProcessEnv;
   catalogTimeoutMs?: number;
+  /** Test-only shortened cancellation drain window. Production uses 12 seconds. */
+  cancelDrainGraceMs?: number;
 }
 
 const PROTOCOL_VERSION = 1;
@@ -49,6 +52,9 @@ const MAX_INPUT_BYTES = 116 * 1024 * 1024;
 const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const CATALOG_TTL_MS = 30_000;
+// Native owns a ten-second cancellation drain, including the eight-second
+// Harness shutdown barrier. Leave headroom for the control pipe and exit.
+const CANCEL_DRAIN_GRACE_MS = 12_000;
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function bounded(value: unknown, limit = 512): value is string { return typeof value === 'string' && value.length > 0 && value.length <= limit && !value.includes('\0'); }
 function protocolError(): LocalAppAgentError { return new LocalAppAgentError('executor_protocol', 'The Agent host returned an invalid response.'); }
@@ -65,6 +71,13 @@ function executionErrorMessage(code: string): string {
     turn_limit_exceeded: 'The Agent task reached its allowed turn limit.',
     timeout: 'The Agent task reached its time limit.',
     structured_output_missing: 'The Agent did not produce a result matching the requested schema.',
+    chat_tool_unsupported: 'A requested tool cannot safely preserve this Chat. Review the application tool selection.',
+    chat_context_unavailable: 'This Chat cannot continue until its saved context is verified. Its history and application data have been preserved.',
+    chat_context_compaction_unsupported: 'This Chat history cannot be summarized safely. Its history and application data have been preserved.',
+    chat_context_limit_exceeded: 'This Chat exceeds the selected model context limit. Its history and application data have been preserved.',
+    chat_context_budget_unknown: 'The selected model context limit could not be verified. Review the model configuration and retry.',
+    chat_context_authority_revoked: 'Application access changed while preparing this Chat. Its history and application data have been preserved.',
+    tool_cleanup_incomplete: 'The Agent could not confirm that its tools stopped. Its result was not saved.',
     result_too_large: 'The Agent result exceeded the allowed size.',
   };
   return messages[code] ?? 'The Agent could not finish this task. Review its configuration and retry.';
@@ -178,6 +191,9 @@ export class LocalAppAgentExecutor {
   async execute(execution: LocalAppAgentExecution): Promise<LocalAppAgentExecutorResult> {
     const { owner, runId, authorization, input, signal } = execution;
     await execution.assertAuthorized();
+    if (execution.chat && (execution.chat.generationId !== execution.taskStorageId
+      || execution.chat.nativeUserMessageId !== `msg:${execution.chat.generationId}`
+      || !/^[a-f0-9]{64}$/.test(execution.chat.cleanupNonce))) throw protocolError();
     const catalog = await this.catalog(true), wire = await this.wireCatalog();
     await execution.assertAuthorized();
     for (const grant of authorization.settings.tools) if (!catalog.tools.some(tool => sameAgentGrant(grant, tool))) {
@@ -190,14 +206,21 @@ export class LocalAppAgentExecutor {
     const mcp = authorization.settings.tools.flatMap(grant => grant.kind === 'mcp'
       ? wire.mcpTools.filter(tool => toolId(tool) === grant.id) : []);
     const mcpConfigs = [...new Set(mcp.map(tool => tool.configIndex))].map(index => wire.mcpConfigs[index]);
-    const taskDirectory = join(this.options.root, 'apps', owner.appId, 'agent', 'tasks', execution.taskStorageId);
-    const cwd = execution.chat?.sessionDirectory ?? taskDirectory;
-    await fs.mkdir(taskDirectory, { recursive: true, mode: 0o700 });
-    await fs.mkdir(cwd, { recursive: true, mode: 0o700 });
-    await fs.mkdir(join(this.options.root, 'apps', owner.appId, 'agent', 'assets'), { recursive: true, mode: 0o700 });
+    const taskDirectory = join(this.options.root, 'apps', owner.appId, 'agent', 'agui-v1', 'tasks', execution.taskStorageId);
+    const cwd = execution.chat ? join(this.options.root, 'apps', owner.appId, 'agent', 'agui-v1', 'workspaces', execution.chat.chatId) : taskDirectory;
+    const store = join(this.options.root, 'apps', owner.appId, 'agent', 'agui-v1');
+    const paths = [this.options.root, join(this.options.root, 'apps'), join(this.options.root, 'apps', owner.appId),
+      join(this.options.root, 'apps', owner.appId, 'agent'), store, join(store, 'tasks'), taskDirectory, join(store, 'assets'),
+      ...(execution.chat ? [join(store, 'workspaces'), cwd] : [])];
+    for (const path of paths) {
+      try { await fs.mkdir(path, { mode: 0o700 }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      const stat = await fs.lstat(path);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new LocalAppAgentError('agent_storage_unavailable', 'The Agent working directory is unsafe.');
+    }
     const requestedSkills = new Set(input.skills ?? []);
     const releaseFiles = authorization.releaseFiles.filter(file => [...requestedSkills].some(id => file.path.startsWith(`skills/${id}/`)));
-    let result: LocalAppAgentExecutorResult | undefined, sequence = 0;
+    let result: LocalAppAgentExecutorResult | undefined;
     let lastProgress: string | undefined, lastProgressAt = 0;
     const progress = async (phase: Parameters<LocalAppAgentExecution['emit']>[0]['phase']) => {
       const now = Date.now();
@@ -219,9 +242,9 @@ export class LocalAppAgentExecutor {
       modelCapabilities: { vision: model.supportsVision, structuredOutput: model.supportsStructuredOutput },
       maxTurns: authorization.settings.maxTurns, timeoutMs: authorization.settings.timeoutMs };
     await execution.assertAuthorized();
+    if (execution.chat || input.tools.length || input.skills.length) await execution.requireCleanupConfirmation();
+    await execution.assertAuthorized();
     await this.exchange(start, cwd, signal, async (event, send, childSignal) => {
-      if (event.runId !== runId || !Number.isSafeInteger(event.sequence) || event.sequence! <= sequence) throw protocolError();
-      sequence = event.sequence!;
       await execution.assertAuthorized();
       if (event.type === 'started') await progress('starting');
       else if (event.type === 'text') {
@@ -269,10 +292,15 @@ export class LocalAppAgentExecutor {
         if (input.outputSchema && event.result === null) throw new LocalAppAgentError('structured_output_not_representable', 'The structured result cannot be represented as an AG-UI run result.');
         if (typeof event.messageId !== 'string' || !bounded(event.messageId, 256)
           || (execution.chat && event.chatId !== execution.chat.chatId)) throw protocolError();
+        if (execution.chat) {
+          if (!validChatCheckpoint(event.chatCheckpoint) || event.chatCheckpoint.generationId !== execution.chat.generationId
+            || event.chatCheckpoint.sessionId !== execution.chat.sessionId) throw protocolError();
+        } else if (event.chatCheckpoint !== undefined) throw protocolError();
         const usage = publicUsage(event.usage);
         result = { result: { text: typeof event.text === 'string' ? event.text : '', attachments: [], messageId: event.messageId,
           ...(execution.chat ? { chatId: execution.chat.chatId } : {}), ...(event.result === undefined || event.result === null ? {} : { output: event.result }) },
-          ...(usage === undefined ? {} : { usage }) };
+          ...(usage === undefined ? {} : { usage }),
+          ...(execution.chat ? { chatCheckpoint: structuredClone(event.chatCheckpoint) } : {}) };
         return true;
       } else throw protocolError();
       return false;
@@ -283,18 +311,24 @@ export class LocalAppAgentExecutor {
 
   private exchange(first: unknown, cwd: string, signal: AbortSignal, onEvent: (event: WireEvent, send: (message: unknown) => void, childSignal: AbortSignal) => Promise<boolean>): Promise<void> {
     signal.throwIfAborted();
+    const task = record(first) && first.type === 'start' ? first : undefined;
+    const taskInput = record(task?.input) ? task.input : undefined;
+    const needsRuntimeCleanup = !!task?.appChat || (Array.isArray(taskInput?.tools) && taskInput.tools.length > 0)
+      || (Array.isArray(taskInput?.skills) && taskInput.skills.length > 0);
     const line = `${JSON.stringify(first)}\n`;
     if (Buffer.byteLength(line) > MAX_INPUT_BYTES) return Promise.reject(new LocalAppAgentError('input_too_large', 'The Agent request is too large.'));
     const child = (this.options.spawnProcess ?? spawn)(resolveServerBin(this.options), ['--app-agent'], {
-      cwd, env: buildBridgeEnvironment(this.options.environment ?? process.env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+      cwd, env: buildBridgeEnvironment({ PYTHONDONTWRITEBYTECODE: '1', ...(this.options.environment ?? process.env) }), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       detached: process.platform !== 'win32',
     }) as ChildProcessWithoutNullStreams;
     return new Promise((resolve, reject) => {
       let buffer = '', bytes = 0, ended = false, completed = false, settled = false;
-      let failure: unknown;
+      let failure: unknown, failed = false, wireSequence = 0, terminalSeen = false;
+      let cleanupAcknowledged = !needsRuntimeCleanup, cleanupUnconfirmed = false, invalidTransport = false;
       let pending = Promise.resolve();
       let killTimer: ReturnType<typeof setTimeout> | undefined;
       let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
+      let cancelTimer: ReturnType<typeof setTimeout> | undefined;
       const childController = new AbortController();
       const kill = (which: NodeJS.Signals) => {
         if (!child.pid || ended) return;
@@ -305,23 +339,38 @@ export class LocalAppAgentExecutor {
         signal.removeEventListener('abort', abort);
         if (killTimer) clearTimeout(killTimer);
         if (shutdownTimer) clearTimeout(shutdownTimer);
+        if (cancelTimer) clearTimeout(cancelTimer);
         childController.abort();
+        if (task && child.pid && (cleanupUnconfirmed || (needsRuntimeCleanup && (!cleanupAcknowledged || invalidTransport)))) {
+          error = new LocalAppAgentError('tool_cleanup_incomplete', executionErrorMessage('tool_cleanup_incomplete'));
+        }
         error ? reject(error) : resolve();
       };
       const stop = () => {
         if (killTimer) return;
         kill('SIGTERM'); killTimer = setTimeout(() => kill('SIGKILL'), 1000); killTimer.unref?.();
       };
-      const fail = (error: unknown) => {
-        if (settled) return;
-        failure ??= error; childController.abort();
-        if (ended) settle(failure); else stop();
+      const fail = (error: unknown, drain = false) => {
+        // Permission/credential callbacks may reject as a consequence of abort.
+        // They must not replace cancellation's already-owned drain window.
+        if (settled || failed) return;
+        failed = true; failure = error; childController.abort();
+        if (ended) settle(failure);
+        else if (drain) {
+          if (shutdownTimer) { clearTimeout(shutdownTimer); shutdownTimer = undefined; }
+          const grace = this.options.cancelDrainGraceMs ?? CANCEL_DRAIN_GRACE_MS;
+          cancelTimer = setTimeout(stop, Math.max(1, Math.min(CANCEL_DRAIN_GRACE_MS, grace)));
+          cancelTimer.unref?.();
+        } else stop();
       };
       const send = (message: unknown) => {
-        if (ended || child.stdin.destroyed) return;
+        if (ended || child.stdin.destroyed || child.stdin.writableEnded) return;
         child.stdin.write(`${JSON.stringify(message)}\n`);
       };
-      const abort = () => { send({ type: 'cancel' }); fail(new LocalAppAgentError('cancelled', 'The Agent task was cancelled.')); };
+      const abort = () => {
+        send({ type: 'cancel' });
+        fail(new LocalAppAgentError('cancelled', 'The Agent task was cancelled.'), record(first) && first.type === 'start');
+      };
       child.stdin.on('error', () => { if (!completed && !settled) fail(new LocalAppAgentError('executor_closed', 'The Agent host closed before accepting the request.')); });
       child.on('error', () => fail(new LocalAppAgentError('executor_unavailable', 'The Agent host could not start.')));
       // Never forward private subprocess diagnostics into an untrusted app or its ledger.
@@ -329,16 +378,35 @@ export class LocalAppAgentExecutor {
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk: string) => {
         bytes += Buffer.byteLength(chunk); buffer += chunk;
-        if (bytes > MAX_OUTPUT_BYTES || Buffer.byteLength(buffer) > MAX_LINE_BYTES) { fail(protocolError()); return; }
+        if (bytes > MAX_OUTPUT_BYTES || Buffer.byteLength(buffer) > MAX_LINE_BYTES) { invalidTransport = true; fail(protocolError()); return; }
         let newline: number;
         while ((newline = buffer.indexOf('\n')) !== -1) {
           const raw = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+          let event: WireEvent;
+          try {
+            const value: unknown = JSON.parse(raw);
+            if (!record(value) || !bounded(value.type, 64) || value.protocolVersion !== 1 || terminalSeen || completed) throw protocolError();
+            event = value as WireEvent;
+            if (task) {
+              if (event.runId !== task.runId || !Number.isSafeInteger(event.sequence) || event.sequence! <= wireSequence) throw protocolError();
+              wireSequence = event.sequence!;
+              if (event.type === 'finished') {
+                if (!['succeeded', 'failed', 'cancelled', 'interrupted'].includes(event.status as string)) throw protocolError();
+                terminalSeen = true;
+                cleanupUnconfirmed = event.cleanupStatus === 'unconfirmed';
+                cleanupAcknowledged = event.cleanupStatus === 'complete'
+                  || (event.cleanupStatus === 'not_required' && (!needsRuntimeCleanup || event.status !== 'succeeded'));
+                // Cleanup is a transport fact, read even after authorization or
+                // UI callbacks were cancelled. It never publishes the result.
+                if (failed && !child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+              }
+            }
+          } catch {
+            invalidTransport = true; fail(protocolError()); return;
+          }
           pending = pending.then(async () => {
-            if (settled || failure) return;
-            if (completed) throw protocolError();
-            const event: unknown = JSON.parse(raw);
-            if (!record(event) || !bounded(event.type, 64) || event.protocolVersion !== 1) throw protocolError();
-            completed = await onEvent(event as WireEvent, send, childController.signal);
+            if (settled || failed) return;
+            completed = await onEvent(event, send, childController.signal);
             if (completed && !ended) { child.stdin.end(); shutdownTimer = setTimeout(() => fail(new LocalAppAgentError('executor_shutdown', 'The Agent host did not shut down.')), 8000); }
           }).catch(fail);
         }
@@ -346,7 +414,8 @@ export class LocalAppAgentExecutor {
       child.on('close', code => {
         ended = true;
         childController.abort();
-        if (failure) { settle(failure); return; }
+        if (buffer.trim()) invalidTransport = true;
+        if (failed) { settle(failure); return; }
         void pending.then(() => {
           if (settled) return;
           if (!completed || code !== 0 || buffer.trim()) settle(new LocalAppAgentError('executor_closed', 'The Agent host exited before completing the task.'));

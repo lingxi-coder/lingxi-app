@@ -5,6 +5,10 @@ progress. Desktop and Mobile share the [protocol contract](LOCAL_APP_AGENT_PROTO
 Existing prototype builds/tests do not establish current standard conformance;
 actual package and device results are recorded separately.
 
+Only the current AG-UI Agent API and persistence format are supported. Android
+and iOS source import require schema 2 packages. Old App archive import, old
+Agent-data decoders and automatic old-format cleanup are absent.
+
 This document describes the current Local App contract shared by Android, iOS, Desktop, the browser SDK, and Harness. It is a source/design contract, not evidence that a build or a device acceptance run passed. Physical Android and iOS verification remains a separate release gate; evidence and open cases are recorded in the task acceptance report at `acceptance/mobile-app-agent-20261023/report.html`.
 
 ## One-off tasks and persistent chats
@@ -99,7 +103,18 @@ Mobile runtime paths come from the host's `BrandRuntimeProfile { brandId, linuxU
 
 The source-directory `uuid8` suffix is generated independently from the Project's `workspaceId`; the directory name is not an encoding of the workspace identity.
 
-The App library and agent data live below the config root under `local-apps/v2/apps/<appId>/{releases/<revision>/source,data,runs,agent/{chats/<chatId>,tasks/<runId>,assets}}`; immutable release source, user data, task records, Chat records, and attachments have separate directories. Linux user identity is a runtime profile and is independent of the Firebase account. No files or paths are migrated from `/root` or another brand profile.
+The App library lives below the config root at `local-apps/v2/apps/<appId>`.
+Immutable release source (`releases/<revision>/source`), application business
+data (`data`) and application process runs (`runs`) remain separate. The current
+Agent store is `agent/agui-v1`: private transcripts and checkpoints belong to
+`chats/<chatId>`, persistent Chat tool files to `workspaces/<chatId>`, and
+independent task files to `tasks/<runId>`. Attachments have their own managed
+asset directories. Tools never use the private transcript directory as their
+working directory. A selected Skill receives a fresh verified scope within its
+task or Chat workspace for each run; the host retains its handle until tool
+cleanup completes. Linux user identity is a runtime profile and is independent
+of the Firebase account. No files or paths are migrated from `/root` or another
+brand profile.
 
 ## External browser and process lifetime
 

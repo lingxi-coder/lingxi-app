@@ -222,7 +222,6 @@ struct LocalAppAuthoringResolution: Decodable, Sendable {
     let authoring: LocalAppAuthoring?
     let authoringSessionId: String?
 }
-struct LocalAppLegacyArchive: Decodable, Identifiable, Sendable { var id: String { path }; let path: String; let kind: String; let status: String }
 struct LocalAppLayout: Decodable, Sendable { let sourcePath: String; let dataPath: String; let releasesPath: String; let runsPath: String }
 struct LocalAppServiceFailure: Error, LocalizedError, Codable, Sendable {
     let code: String
@@ -248,5 +247,3 @@ struct LocalAppServiceEnvelope<T: Decodable>: Decodable {
         return value
     }
 }
-
-struct LocalAppLegacyEntry: Decodable, Identifiable, Sendable { var id: String { legacyId }; let legacyId: String; let name: String; let summary: String; let revision: UInt64; let sourcePath: String; let status: String }

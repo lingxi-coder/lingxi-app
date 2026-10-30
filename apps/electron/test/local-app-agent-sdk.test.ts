@@ -92,7 +92,6 @@ function createPage(options: { db?: ReturnType<typeof chatCreationIndexedDb>; ho
           return inPage(options.status ? await options.status(input) : { ok: true, value: null });
         },
         open: async (chatId: string) => inPage({ chatId, title: 'Meal', createdAt: 1, updatedAt: 1, archived: false, state: 'idle' }),
-        get: async (chatId: string) => inPage({ chatId, title: 'Meal', createdAt: 1, updatedAt: 1, archived: false, state: 'idle' }),
         list: async () => inPage({ ok: true, value: { chats: [{ chatId: 'chat-one', title: 'Meal', createdAt: 1, updatedAt: 1, archived: false, state: 'idle' }] } }),
         archive: async () => {},
         delete: async () => {},

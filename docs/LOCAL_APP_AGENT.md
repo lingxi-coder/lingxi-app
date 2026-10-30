@@ -1,9 +1,13 @@
 # Local App Agent on Desktop
 
-Protocol status: migration to the official AG-UI 1.0 Schema and SDK 1.0.3 is in
-progress. The [shared protocol contract](LOCAL_APP_AGENT_PROTOCOL.md) defines the
-input, event and client boundary. Recorded prototype tests are separate from
-current protocol and package acceptance.
+Local App Agent uses the official AG-UI 1.0 Schema and SDK 1.0.3. The
+[shared protocol contract](LOCAL_APP_AGENT_PROTOCOL.md) defines the input,
+event and client boundary. Source checks and signed-package acceptance are
+recorded separately in the acceptance report.
+
+Only the current AG-UI Agent API and persistence format are supported. Source
+import and publication require a schema 2 manifest; the library has no legacy
+archive or old-package conversion interface.
 
 Desktop Local Apps call an independent Agent through `window.localApp.agent`. The native Apps library owns the selected model, approved tools and Skills, task limits, and optional Agent background permission. The page never chooses provider credentials, a Harness session, a host path, or a permission mode.
 
@@ -74,7 +78,27 @@ Every request is owned by the trusted host's active app, immutable release diges
 
 A one-shot request with no tools or Skills runs through Harness `SideQuery`. It is stateless: it uses only that request's prompt and attachments, has no creator conversation, app-chat history, personal/project memory, or inherited tools. Strict structured output is validated through the configured SideQuery path; the host does not scrape JSON from arbitrary response text. A request with tools or Skills runs in a private `bridge-server --app-agent` subprocess that constructs an isolated Desktop Harness runtime. Persistent App Chats always use that runtime, even when a turn requests no tools, because their context belongs to the App Chat.
 
-Each App Chat has a host-assigned Harness session under `<config>/local-apps/v2/apps/<appId>/agent/chats/<chatId>`. Harness JSONL recording, cold resumption and normal compaction preserve its conversation across turns. The model context comes from that App-owned transcript; Desktop does not rebuild history by concatenating cached chat messages into a prompt. The session ID and directory stay private to the host. The separate App task/chat index is App-scoped. Canonical protocol messages are separate from the Harness model transcript; host-owned Chat assets preserve standard content parts for history and cold resumption. Private asset paths are never serialized to the page. Task metadata is separate from message content. Deleting the creator chat does not delete an App Chat.
+Each App Chat has a host-assigned Harness session under
+`<config>/local-apps/v2/apps/<appId>/agent/agui-v1/chats/<chatId>`.
+Every turn writes a fresh generation from the last successfully committed
+checkpoint. Failed or cancelled generations never become the next turn's
+history. Tool files use the separate persistent `workspaces/<chatId>` directory;
+the transcript directory is private host storage.
+
+The host retains the original conversation and inline attachments. When its
+model context approaches the selected model's limit, a controlled SideQuery
+summarizes complete earlier successful rounds for outgoing requests only. It
+does not rewrite the original transcript, re-execute earlier tools or include
+the current input in that summary. Tool calls and results stay within their
+user round. The App reads standard Chat history and sends its new user message;
+it does not implement its own compression or concatenate cached history into
+a prompt. The host still enforces finite storage, input and execution limits.
+
+Canonical protocol messages are separate from the Harness model transcript;
+managed Chat assets retain standard content parts for history and cold resume.
+Host session IDs, transcript locations and managed asset paths stay private;
+public task metadata remains separate from message content. Deleting the
+creator chat does not delete an App Chat.
 
 The runtime starts from a fresh App execution profile. It does not inherit the creating chat, its transcript, personal or project memory, user/project hooks, plugins, skills, or unselected MCP servers. Explicit managed policy and its trusted controls still apply. Built-in tools keep their normal host permission and filesystem/sandbox behavior; this profile does not add an operating-system sandbox.
 

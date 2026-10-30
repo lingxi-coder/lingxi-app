@@ -57,7 +57,6 @@ contextBridge.exposeInMainWorld('__lingxiLocalAppBridge', Object.freeze({
       create: (input: ChatCreationInput): Promise<ChatResourceResult<LocalAppAgentChatSummary | null>> => chatResourceInvoke('agent.chats.create', input),
       creationStatus: (input: ChatCreationInput): Promise<ChatResourceResult<LocalAppAgentChatSummary | null>> => chatResourceInvoke('agent.chats.creationStatus', input),
       open: (chatId: string): Promise<LocalAppAgentChatSummary> => invoke('agent.chats.get', { chatId }),
-      get: (chatId: string): Promise<LocalAppAgentChatSummary> => invoke('agent.chats.get', { chatId }),
       list: (options?: LocalAppAgentChatListOptions): Promise<ChatResourceResult<LocalAppAgentChatListPage>> => chatResourceInvoke('agent.chats.list', {
         ...(options?.cursor === undefined ? {} : { cursor: options.cursor }),
         ...(options?.limit === undefined ? {} : { limit: options.limit }),

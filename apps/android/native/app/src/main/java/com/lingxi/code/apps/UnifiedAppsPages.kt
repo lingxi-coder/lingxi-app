@@ -38,8 +38,6 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var catalog by remember { mutableStateOf<List<CatalogApp>>(emptyList()) }
-    var archives by remember { mutableStateOf<List<LegacyAppEntry>>(emptyList()) }
-    var showingArchives by rememberSaveable { mutableStateOf(false) }
     fun action(block: suspend () -> Unit) { scope.launch { busy = true; error = null; try { block() } catch (e: Exception) { error = e.message } finally { busy = false } } }
     val importSource = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) action { val imported = apps.importArchive(uri); onDetails(imported.id) }
@@ -51,7 +49,6 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
             try { catalog = apps.market.list(query); error = null } catch (e: Exception) { error = e.message } finally { busy = false }
         }
     }
-    LaunchedEffect(showingArchives) { if (showingArchives) try { archives = apps.legacyEntries() } catch (e: Exception) { error = e.message } }
     Column(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg).blockTouchesBehind().windowInsetsPadding(WindowInsets.systemBars).testTag(UiTags.APPS_PAGE)) {
         PageTopBar(title = stringResource(R.string.local_app_v2_title), onBack = onBack)
         PrimaryTabRow(selectedTabIndex = tab) {
@@ -69,7 +66,6 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             when (tab) {
                 0 -> {
-                    item { TextButton(onClick = { showingArchives = true }) { Text(stringResource(R.string.local_app_v2_legacy)) } }
                     if (state.apps.isEmpty() && !state.loading) item { Text(stringResource(R.string.local_app_v2_empty)) }
                     items(state.apps.filter { query.isBlank() || it.name.contains(query, true) }, key = { it.id }) { app ->
                         ElevatedCard(Modifier.fillMaxWidth().testTag(UiTags.appTile(app.id))) {
@@ -95,16 +91,6 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
             }
         }
     }
-    if (showingArchives) AlertDialog(onDismissRequest = { showingArchives = false }, title = { Text(stringResource(R.string.local_app_v2_legacy)) }, text = {
-        LazyColumn {
-            item { Text(stringResource(R.string.local_app_v2_legacy_note)) }
-            items(archives, key = { it.key }) { row ->
-                ListItem(headlineContent = { Text(row.name) }, supportingContent = { Text(row.kind) }, trailingContent = {
-                    TextButton(enabled = !busy, onClick = { action { val installed = apps.importLegacy(row); showingArchives = false; onDetails(installed.id) } }) { Text(stringResource(R.string.local_app_v2_import)) }
-                })
-            }
-        }
-    }, confirmButton = { TextButton(onClick = { showingArchives = false }) { Text(stringResource(R.string.local_app_v2_cancel)) } })
     if (creating) AlertDialog(onDismissRequest = { if (!busy) creating = false }, title = { Text(stringResource(R.string.local_app_v2_create)) }, text = {
         Column { Text(stringResource(R.string.local_app_v2_create_note)); OutlinedTextField(name, { name = it }, label = { Text(stringResource(R.string.local_app_v2_name)) }, singleLine = true)
             OutlinedTextField(sourceDirectory, { sourceDirectory = it }, label = { Text(stringResource(R.string.local_app_v2_source_directory)) }, placeholder = { Text("$appsGuestPath/…") }, singleLine = true)

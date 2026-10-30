@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { DesktopLocalApp, LocalAppLegacyEntry, LocalAppMarketPublication, LocalAppMarketRow } from '../../shared/localApps';
+import type { DesktopLocalApp, LocalAppMarketPublication, LocalAppMarketRow } from '../../shared/localApps';
 function api() { const value = window.lingxi?.localApps; if (!value) throw new Error('Application host is unavailable'); return value; }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -35,14 +35,6 @@ export function LocalAppMarket({ visible, installed, onInstalled }: { visible: b
     })}</div>}
     {!loading && !error && !rows.length && <p className="local-app-no-results">No matching applications.</p>}
   </div>;
-}
-
-export function LegacyLocalApps({ visible, onImported }: { visible: boolean; onImported: () => void }) {
-  const [entries, setEntries] = useState<LocalAppLegacyEntry[]>([]), [error, setError] = useState(''), [busy, setBusy] = useState<string>();
-  useEffect(() => { if (!visible) return; let active = true; void api().legacyEntries().then(rows => { if (active) setEntries(rows); }).catch(error => { if (active) setError(message(error)); }); return () => { active = false; }; }, [visible]);
-  if (!visible || (!entries.length && !error)) return null;
-  return <details className="local-app-archives"><summary>Archived applications</summary><p>Original packages and browser data are preserved. Import creates a new local application; browser databases are not migrated.</p>
-    {error && <p role="alert" className="local-app-error">{error}</p>}{entries.map(entry => <div key={entry.legacyId}><span>{entry.name} · {entry.status}</span><button disabled={Boolean(busy)} onClick={async () => { setBusy(entry.legacyId); setError(''); try { await api().importLegacy(entry.legacyId); onImported(); } catch (error) { setError(message(error)); } finally { setBusy(undefined); } }}>Import a copy</button></div>)}</details>;
 }
 
 export function LocalAppPublish({ app, onClose }: { app: DesktopLocalApp; onClose: () => void }) {

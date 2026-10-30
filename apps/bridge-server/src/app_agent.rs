@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,10 +15,12 @@ use cost::{
     CostCalculator, ModelRef as CostModelRef, PricingCatalog, ProviderId as CostProviderId,
 };
 use harness_runtime::desktop::app_invocation::{
-    AppChatProfile, AppInvocationIdentity, AppInvocationProfile, DEFAULT_MAX_TURNS,
-    DEFAULT_TIMEOUT_MS, MAX_MAX_TURNS, MAX_TIMEOUT_MS, prepare_app_config,
+    AppChatCleanupReceipt, AppChatProfile, AppInvocationIdentity, AppInvocationProfile, DEFAULT_MAX_TURNS,
+    DEFAULT_TIMEOUT_MS, MAX_MAX_TURNS, MAX_TIMEOUT_MS, checkpoint_app_chat, prepare_app_config, validate_app_chat_tools,
 };
-use harness_runtime::desktop::{DesktopConfig, DesktopRuntime, SharedCredentialStack};
+use harness_runtime::desktop::{
+    DesktopConfig, DesktopRuntime, DesktopSessionShutdownReport, SharedCredentialStack,
+};
 use lingxi_core::host::permission_gate::{PermissionDecision, PermissionGate};
 use lingxi_core::host::{CostSnapshot, OrchestratorHandle, OutputStream};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -41,6 +43,13 @@ const CANCELLED: u8 = 1;
 const INTERRUPTED: u8 = 2;
 const INVALID_CONTROL: u8 = 3;
 const TIMED_OUT: u8 = 4;
+const CLEANUP_NOT_REQUIRED: u8 = 0;
+const CLEANUP_UNCONFIRMED: u8 = 1;
+const CLEANUP_COMPLETE: u8 = 2;
+// The Harness shutdown barrier has an eight-second internal budget. Keep its
+// cancellation owner alive through that barrier; the parent grants extra pipe
+// and process-exit headroom before resorting to signals.
+const CANCEL_DRAIN_BUDGET: Duration = Duration::from_secs(10);
 
 /// Versioned private stdin start payload. These fields are resolved by the
 /// trusted host, not accepted from `window.localApp.agent.run` unchanged.
@@ -269,7 +278,7 @@ impl EventSink {
     }
     async fn fail(&self, code: &'static str, message: &'static str) {
         self.emit(
-            json!({"type":"finished","status":"failed","error":{"code":code,"message":message}}),
+            json!({"type":"finished","status":"failed","cleanupStatus":"not_required","error":{"code":code,"message":message}}),
         )
         .await;
     }
@@ -280,8 +289,12 @@ struct InteractionState {
     permissions: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
     questions: Mutex<HashMap<u64, AskUserQuestionExchange>>,
     lease: Mutex<Option<SessionToolGrantLease>>,
+    skill_scope: Mutex<Option<harness_runtime::app_agent_skills::SkillScope>>,
+    tool_cleanup_failed: Arc<AtomicBool>,
+    cleanup_receipt: Mutex<Option<AppChatCleanupReceipt>>,
     oauth: Mutex<Option<Arc<llm_runtime::auth::openai::HostSession>>>,
     reason: AtomicU8,
+    cleanup: AtomicU8,
     cancel: CancellationToken,
     sink: Arc<EventSink>,
 }
@@ -292,8 +305,12 @@ impl InteractionState {
             permissions: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
             lease: Mutex::new(None),
+            skill_scope: Mutex::new(None),
+            tool_cleanup_failed: Arc::new(AtomicBool::new(false)),
+            cleanup_receipt: Mutex::new(None),
             oauth: Mutex::new(None),
             reason: AtomicU8::new(0),
+            cleanup: AtomicU8::new(CLEANUP_NOT_REQUIRED),
             cancel,
             sink,
         }
@@ -302,12 +319,24 @@ impl InteractionState {
         let _ = self
             .reason
             .compare_exchange(0, reason, Ordering::AcqRel, Ordering::Acquire);
+        self.revoke_tool_authority().await;
+        self.cancel.cancel();
+    }
+
+    async fn revoke_tool_authority(&self) {
         if let Some(lease) = self.lease.lock().await.as_ref() {
             lease.revoke();
         }
-        self.cancel.cancel();
         self.permissions.lock().await.clear();
         self.questions.lock().await.clear();
+    }
+
+    fn cleanup_status(&self) -> &'static str {
+        match self.cleanup.load(Ordering::Acquire) {
+            CLEANUP_NOT_REQUIRED => "not_required",
+            CLEANUP_COMPLETE => "complete",
+            _ => "unconfirmed",
+        }
     }
 }
 #[async_trait]
@@ -356,6 +385,8 @@ fn runtime_build_error_code(error: harness_runtime::desktop::BuildError) -> &'st
     // failure without formatting it across the application boundary.
     match error {
         harness_runtime::desktop::BuildError::StructuredOutputSchema(_) => "invalid_schema",
+        harness_runtime::desktop::BuildError::AppInvocation(harness_runtime::desktop::app_invocation::AppInvocationError::ChatUnsupportedTool) => "chat_tool_unsupported",
+        harness_runtime::desktop::BuildError::AppInvocation(harness_runtime::desktop::app_invocation::AppInvocationError::ChatTranscriptUnavailable) => "chat_transcript_unavailable",
         _ => "runtime_initialization_failed",
     }
 }
@@ -557,6 +588,13 @@ fn validate_start(request: &StartRequest) -> Result<(), &'static str> {
         return Err("invalid_limits");
     }
     validate_agent_input(&request.input)?;
+    if request
+        .app_chat
+        .as_ref()
+        .is_some_and(|chat| chat.native_message_id().is_err())
+    {
+        return Err("invalid_chat");
+    }
     if request
         .input
         .max_turns
@@ -836,6 +874,38 @@ async fn execute(
     state: Arc<InteractionState>,
     output: Arc<AppOutput>,
 ) -> Result<Value, &'static str> {
+    // A scope may be removed only after the same native owner confirms that
+    // no tool, materializer or child can still use it. Cancellation can drop
+    // this waiter; mark that interval unconfirmed before awaiting removal.
+    let result = execute_inner(request, state.clone(), output).await;
+    let confirmed = state.cleanup.load(Ordering::Acquire);
+    if confirmed != CLEANUP_UNCONFIRMED {
+        let mut scope = state.skill_scope.lock().await;
+        if let Some(owned) = scope.as_mut() {
+            state.cleanup.store(CLEANUP_UNCONFIRMED, Ordering::Release);
+            owned
+                .cleanup_after_tools_drained()
+                .await
+                .map_err(|_| "tool_cleanup_incomplete")?;
+            scope.take();
+            state.cleanup.store(confirmed, Ordering::Release);
+        }
+    }
+    if state.cleanup.load(Ordering::Acquire) != CLEANUP_UNCONFIRMED {
+        if let Some(receipt) = state.cleanup_receipt.lock().await.as_ref() {
+            let confirmed = state.cleanup.swap(CLEANUP_UNCONFIRMED, Ordering::AcqRel);
+            receipt.publish_after_cleanup().await?;
+            state.cleanup.store(confirmed, Ordering::Release);
+        }
+    }
+    result
+}
+
+async fn execute_inner(
+    request: StartRequest,
+    state: Arc<InteractionState>,
+    output: Arc<AppOutput>,
+) -> Result<Value, &'static str> {
     let prepared = harness_runtime::app_agent_input::prepare(&request.input)
         .await
         .map_err(|error| {
@@ -855,15 +925,41 @@ async fn execute(
     {
         return execute_side_query(request, prepared.blocks, state).await;
     }
-    let skill_instructions = harness_runtime::app_agent_skills::materialize(
+    // A cancelled waiter can leave materialization's blocking owner alive too.
+    // Only the completed join below establishes that it no longer owns writes.
+    state.cleanup.store(CLEANUP_UNCONFIRMED, Ordering::Release);
+    let materialization = harness_runtime::app_agent_skills::materialize(
         &request.skill_source_directory,
         &request.cwd,
         &request.skill_specs,
         &request.release_files,
         &request.input.skills,
+        state.cancel.clone(),
     )
-    .await
-    .map_err(|_| "invalid_skills")?;
+    .await;
+    let materialization = match materialization {
+        Ok(materialized) => materialized,
+        Err(error) => {
+            let (code, scope) = error.into_parts();
+            if scope.is_some() {
+                *state.skill_scope.lock().await = scope;
+                return Err("tool_cleanup_incomplete");
+            }
+            if code == "skill_cleanup_incomplete" {
+                return Err("tool_cleanup_incomplete");
+            }
+            state.cleanup.store(CLEANUP_NOT_REQUIRED, Ordering::Release);
+            return Err("invalid_skills");
+        }
+    };
+    let skill_instructions = if let Some(materialized) = materialization {
+        let (instructions, scope) = materialized.into_parts();
+        *state.skill_scope.lock().await = Some(scope);
+        Some(instructions)
+    } else {
+        None
+    };
+    state.cleanup.store(CLEANUP_NOT_REQUIRED, Ordering::Release);
     let envelope = credentials(request.credentials.clone())?;
     let mut config = base_config(
         request.cwd.clone(),
@@ -904,33 +1000,64 @@ async fn execute(
     profile.timeout_ms = request.timeout_ms;
     profile.app_chat = request.app_chat.clone();
     profile.skill_instructions = skill_instructions;
+    profile.tool_cleanup_failed = Some(state.tool_cleanup_failed.clone());
+    let receipt_identity = profile.identity.clone();
     config = prepare_app_config(config, profile).map_err(|_| "invalid_profile")?;
+    if let Some(chat) = &request.app_chat {
+        *state.cleanup_receipt.lock().await =
+            Some(AppChatCleanupReceipt::open(&request.config_home, &receipt_identity, chat).await?);
+    }
+    config.session_tool_grant_lease = config
+        .session_tool_grant_lease
+        .take()
+        .map(|lease| lease.with_owner_cancellation(state.cancel.clone()));
     *state.lease.lock().await = config.session_tool_grant_lease.clone();
     let shared = credential_stack(&config, envelope, &state).await?;
+    // Construction can already own watchers, MCP children or queues. Dropping
+    // its future is not evidence that those resources have stopped.
+    state.cleanup.store(CLEANUP_UNCONFIRMED, Ordering::Release);
     let runtime = tokio::select! {
         biased;
         _ = state.cancel.cancelled() => return Err("cancelled"),
-        result = Box::pin(harness_runtime::desktop::build_with_credential_stack(config, output.clone(), Arc::new(NoPermissionSink), shared)) => result.map_err(runtime_build_error_code)?,
+        result = Box::pin(harness_runtime::desktop::build_with_credential_stack(config, output.clone(), Arc::new(NoPermissionSink), shared)) => match result {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                // Typed profile/mount errors precede every runtime producer in
+                // assembly. An awaited rejection owns no tool process; all
+                // later construction errors stay unconfirmed.
+                if matches!(&error, harness_runtime::desktop::BuildError::AppInvocation(_)) {
+                    state.cleanup.store(CLEANUP_NOT_REQUIRED, Ordering::Release);
+                }
+                return Err(runtime_build_error_code(error));
+            }
+        },
     };
+    if request.app_chat.is_some()
+        && validate_app_chat_tools(&runtime, &request.tool_policy).is_err()
+    {
+        return complete_runtime_execution(
+            Err("chat_tool_unsupported"),
+            &state,
+            runtime.session_lifecycle.shutdown_and_drain(),
+        )
+        .await;
+    }
     let actual_mcp_tools = runtime.mcp_registry.tool_identity_catalog().await;
     if !expected_mcp_tools
         .iter()
         .all(|grant| actual_mcp_tools.contains(grant))
     {
-        if let Some(lease) = state.lease.lock().await.as_ref() {
-            lease.revoke();
-        }
-        let _ = tokio::time::timeout(
-            Duration::from_secs(10),
+        return complete_runtime_execution(
+            Err("tool_changed"),
+            &state,
             runtime.session_lifecycle.shutdown_and_drain(),
         )
         .await;
-        return Err("tool_changed");
     }
     let result = execute_runtime(
         &runtime,
         &request.model,
-        request.app_chat.as_ref().map(|chat| chat.chat_id.as_str()),
+        request.app_chat.as_ref(),
         prepared.blocks,
         uses_vision,
         schema_required,
@@ -939,16 +1066,93 @@ async fn execute(
         question_rx,
     )
     .await;
-    // Stop discovery/watchers and settle cost before publishing the sole terminal.
-    if let Some(lease) = state.lease.lock().await.as_ref() {
-        lease.revoke();
-    }
-    let _ = tokio::time::timeout(
-        Duration::from_secs(10),
+    let mut result = complete_runtime_execution(
+        result,
+        &state,
         runtime.session_lifecycle.shutdown_and_drain(),
     )
-    .await;
-    result
+    .await?;
+    if let Some(chat) = &request.app_chat {
+        let assistant_id = result
+            .get("messageId")
+            .and_then(Value::as_str)
+            .ok_or("invalid_result")?;
+        let checkpoint = checkpoint_app_chat(&runtime, chat, assistant_id).await?;
+        if state.cancel.is_cancelled() {
+            return Err("cancelled");
+        }
+        result["chatCheckpoint"] =
+            serde_json::to_value(checkpoint).map_err(|_| "invalid_result")?;
+    }
+    Ok(result)
+}
+
+/// A model EndTurn is only a candidate result. Do not publish it until every
+/// owned tool/producer and durable queue has stopped. Await the Harness-owned
+/// bounded barrier itself rather than dropping its future on another timeout.
+async fn complete_runtime_execution<T>(
+    candidate: Result<T, &'static str>,
+    state: &InteractionState,
+    shutdown: impl std::future::Future<Output = DesktopSessionShutdownReport>,
+) -> Result<T, &'static str> {
+    state.cleanup.store(CLEANUP_UNCONFIRMED, Ordering::Release);
+    state.revoke_tool_authority().await;
+    let report = shutdown.await;
+    if !report.complete
+        || !report.errors.is_empty()
+        || state.tool_cleanup_failed.load(Ordering::Acquire)
+    {
+        return Err("tool_cleanup_incomplete");
+    }
+    state.cleanup.store(CLEANUP_COMPLETE, Ordering::Release);
+    if state.cancel.is_cancelled() {
+        return Err("cancelled");
+    }
+    candidate
+}
+
+async fn await_execution_with_cancel<T>(
+    execution: impl std::future::Future<Output = Result<T, &'static str>>,
+    state: &InteractionState,
+    budget: Duration,
+) -> Result<T, &'static str> {
+    tokio::pin!(execution);
+    tokio::select! {
+        biased;
+        result = &mut execution => result,
+        _ = state.cancel.cancelled() => {
+            match tokio::time::timeout(budget, &mut execution).await {
+                Ok(result) => result,
+                Err(_) if state.cleanup_status() == "unconfirmed" => Err("tool_cleanup_incomplete"),
+                Err(_) => Err("cancelled"),
+            }
+        }
+    }
+}
+
+fn execution_terminal(state: &InteractionState, result: Result<Value, &'static str>) -> Value {
+    let mut event = match state.reason.load(Ordering::Acquire) {
+        CANCELLED => json!({"type":"finished","status":"cancelled"}),
+        INTERRUPTED => {
+            json!({"type":"finished","status":"interrupted","error":{"code":"host_disconnected","message":"The host connection was interrupted."}})
+        }
+        TIMED_OUT => {
+            json!({"type":"finished","status":"failed","error":{"code":"timeout","message":"The Agent task reached its time limit."}})
+        }
+        INVALID_CONTROL => {
+            json!({"type":"finished","status":"failed","error":{"code":"invalid_control","message":"The host sent an invalid Agent control message."}})
+        }
+        _ => match result {
+            Ok(event) => event,
+            Err(code) => {
+                json!({"type":"finished","status":"failed","error":{"code":code,"message":"The Agent task could not complete. Check the selected model, credentials and granted tools."}})
+            }
+        },
+    };
+    // This host-private fact is independent of the public cancellation outcome.
+    // In particular, a dropped drain must never look like confirmed cleanup.
+    event["cleanupStatus"] = json!(state.cleanup_status());
+    event
 }
 
 async fn execute_side_query(
@@ -1061,10 +1265,49 @@ fn user_message(blocks: Vec<ContentBlock>) -> ConversationMessage {
     message
 }
 
+/// Preserve only the core's fixed Chat context failure classes. Provider
+/// diagnostics must never become an App-visible code or message, and the
+/// generic output callback must not erase a more precise typed failure.
+fn check_runtime_turn_result(
+    result: Result<orchestrator::conversation::TurnOutcome, orchestrator::error::OrchestratorError>,
+    output_failed: bool,
+    cancelled: bool,
+) -> Result<(), &'static str> {
+    use orchestrator::conversation::TurnOutcome;
+    use orchestrator::error::OrchestratorError;
+    if cancelled || matches!(&result, Ok(TurnOutcome::Cancelled)) {
+        return Err("cancelled");
+    }
+    if let Err(OrchestratorError::ApiCall(llm_runtime::LlmError::InvalidRequest { message })) =
+        &result
+    {
+        let code = match message.as_str() {
+            "chat_context_unavailable" => Some("chat_context_unavailable"),
+            "chat_context_compaction_unsupported" => Some("chat_context_compaction_unsupported"),
+            "chat_context_limit_exceeded" => Some("chat_context_limit_exceeded"),
+            "chat_context_budget_unknown" => Some("chat_context_budget_unknown"),
+            "chat_context_authority_revoked" => Some("chat_context_authority_revoked"),
+            _ => None,
+        };
+        if let Some(code) = code {
+            return Err(code);
+        }
+    }
+    if output_failed {
+        return Err("model_execution_failed");
+    }
+    match result {
+        Ok(TurnOutcome::EndTurn) => Ok(()),
+        Ok(TurnOutcome::MaxTurns) => Err("turn_limit_exceeded"),
+        Ok(TurnOutcome::Cancelled) => Err("cancelled"),
+        Err(_) => Err("model_execution_failed"),
+    }
+}
+
 async fn execute_runtime(
     runtime: &DesktopRuntime,
     model: &str,
-    chat_id: Option<&str>,
+    chat: Option<&AppChatProfile>,
     blocks: Vec<ContentBlock>,
     uses_vision: bool,
     schema_required: bool,
@@ -1072,6 +1315,10 @@ async fn execute_runtime(
     output: Arc<AppOutput>,
     question_rx: mpsc::Receiver<AskUserQuestionExchange>,
 ) -> Result<Value, &'static str> {
+    let user_message_id = chat
+        .map(AppChatProfile::native_message_id)
+        .transpose()
+        .map_err(|_| "invalid_chat")?;
     let listings = runtime.orchestrator.list_model_listings().await;
     let selected = listings
         .iter()
@@ -1109,7 +1356,11 @@ async fn execute_runtime(
     *output.cost_baseline.lock().await = Some(baseline.clone());
     let result = runtime
         .orchestrator
-        .run_turn_streaming_with_cancel_projected_content(&content, state.cancel.clone(), None)
+        .run_turn_streaming_with_cancel_projected_content(
+            &content,
+            state.cancel.clone(),
+            user_message_id,
+        )
         .await;
     questions.abort();
     state.questions.lock().await.clear();
@@ -1120,18 +1371,11 @@ async fn execute_runtime(
         output.completed_model_turns.load(Ordering::Acquire),
     );
     state.sink.emit(json!({"type":"usage","usage":usage})).await;
-    if state.cancel.is_cancelled() {
-        return Err("cancelled");
-    }
-    if output.error.load(Ordering::Acquire) != 0 {
-        return Err("model_execution_failed");
-    }
-    match result {
-        Ok(orchestrator::conversation::TurnOutcome::EndTurn) => {}
-        Ok(orchestrator::conversation::TurnOutcome::MaxTurns) => return Err("turn_limit_exceeded"),
-        Ok(orchestrator::conversation::TurnOutcome::Cancelled) => return Err("cancelled"),
-        Err(_) => return Err("model_execution_failed"),
-    }
+    check_runtime_turn_result(
+        result,
+        output.error.load(Ordering::Acquire) != 0,
+        state.cancel.is_cancelled(),
+    )?;
     let structured = runtime
         .structured_output_slot
         .as_ref()
@@ -1150,7 +1394,7 @@ async fn execute_runtime(
     let text = output.last_assistant_text.lock().await.clone();
     let mut terminal = json!({"type":"finished","status":"succeeded","text":text,"messageId":message_id,"usage":usage});
     if let Some(result) = result { terminal["result"] = result; }
-    if let Some(chat_id) = chat_id { terminal["chatId"] = json!(chat_id); }
+    if let Some(chat) = chat { terminal["chatId"] = json!(chat.chat_id); }
     if serde_json::to_vec(&terminal)
         .map_err(|_| "invalid_result")?
         .len()
@@ -1288,11 +1532,12 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
         }
     }
     let result = json!({"type":"catalog","protocolVersion":PROTOCOL_VERSION,"models":models,"builtins":builtins,"providerProfiles":provider_profiles,"routing":routing,"mcpTools":mcp_tools,"mcpConfigs":mcp_configs});
-    let _ = tokio::time::timeout(
-        Duration::from_secs(10),
+    let result = complete_runtime_execution(
+        Ok(result),
+        &state,
         runtime.session_lifecycle.shutdown_and_drain(),
     )
-    .await;
+    .await?;
     let mut bytes = serde_json::to_vec(&result).map_err(|_| "catalog_serialization_failed")?;
     if bytes.len() > 8 * 1024 * 1024 {
         return Err("catalog_too_large");
@@ -1376,27 +1621,15 @@ pub async fn run() -> anyhow::Result<()> {
                 cost_baseline: Mutex::new(None),
                 completed_model_turns: AtomicU32::new(0),
             });
-            let mut execution = Box::pin(execute(request, state.clone(), output));
-            let result = tokio::select! {
-                result = &mut execution => result,
-                _ = state.cancel.cancelled() => {
-                    // Give the engine its cancellation drain opportunity; a hung
-                    // provider/credential backend cannot keep the task alive forever.
-                    tokio::time::timeout(Duration::from_secs(5), &mut execution).await.unwrap_or(Err("cancelled"))
-                }
-            };
+            let result = await_execution_with_cancel(
+                execute(request, state.clone(), output),
+                &state,
+                CANCEL_DRAIN_BUDGET,
+            )
+            .await;
             deadline.abort();
             control.abort();
-            match state.reason.load(Ordering::Acquire) {
-                CANCELLED => sink.emit(json!({"type":"finished","status":"cancelled"})).await,
-                INTERRUPTED => sink.emit(json!({"type":"finished","status":"interrupted","error":{"code":"host_disconnected","message":"The host connection was interrupted."}})).await,
-                TIMED_OUT => sink.fail("timeout", "The Agent task reached its time limit.").await,
-                INVALID_CONTROL => sink.fail("invalid_control", "The host sent an invalid Agent control message.").await,
-                _ => match result {
-                    Ok(event) => sink.emit(event).await,
-                    Err(code) => sink.fail(code, "The Agent task could not complete. Check the selected model, credentials and granted tools.").await,
-                }
-            }
+            sink.emit(execution_terminal(&state, result)).await;
         }
         None => {
             let sink = EventSink::new(String::new(), tokio::io::stdout(), CancellationToken::new());
@@ -1413,6 +1646,236 @@ pub async fn run() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn interaction() -> Arc<InteractionState> {
+        let cancel = CancellationToken::new();
+        let sink = Arc::new(EventSink::new(
+            "run-1".into(),
+            tokio::io::sink(),
+            cancel.clone(),
+        ));
+        Arc::new(InteractionState::new(sink, cancel))
+    }
+
+    #[tokio::test]
+    async fn candidate_waits_for_shutdown_and_revokes_pending_tool_authority_first() {
+        let state = interaction();
+        let lease = SessionToolGrantLease::new(SessionToolPolicy::default());
+        *state.lease.lock().await = Some(lease.clone());
+        let (permission, answer) = oneshot::channel();
+        state.permissions.lock().await.insert(1, permission);
+        let (entered, ready) = oneshot::channel();
+        let (complete, released) = oneshot::channel();
+        let finishing =
+            complete_runtime_execution(Ok(json!({"text":"candidate"})), &state, async {
+                entered.send(()).unwrap();
+                released.await.unwrap();
+                DesktopSessionShutdownReport {
+                    complete: true,
+                    ..Default::default()
+                }
+            });
+        tokio::pin!(finishing);
+        tokio::select! {
+            result = &mut finishing => panic!("published before shutdown completed: {result:?}"),
+            _ = ready => {},
+        }
+        assert!(lease.is_revoked());
+        assert!(answer.await.is_err());
+        assert!(!state.sink.state.lock().await.terminal);
+        complete.send(()).unwrap();
+        assert_eq!(finishing.await.unwrap(), json!({"text":"candidate"}));
+    }
+
+    #[tokio::test]
+    async fn incomplete_shutdown_discards_success_without_exposing_private_diagnostics() {
+        for (complete, errors) in [
+            (false, Vec::new()),
+            (true, vec!["PRIVATE_TOOL_PATH_OR_CREDENTIAL".into()]),
+        ] {
+            let state = interaction();
+            let result =
+                complete_runtime_execution(Ok(json!({"text":"candidate"})), &state, async {
+                    DesktopSessionShutdownReport {
+                        complete,
+                        errors,
+                        ..Default::default()
+                    }
+                })
+                .await;
+            assert_eq!(result, Err("tool_cleanup_incomplete"));
+            assert!(!state.sink.state.lock().await.terminal);
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_cleanup_latch_cannot_be_cleared_by_a_successful_generic_shutdown_report() {
+        let state = interaction();
+        state.tool_cleanup_failed.store(true, Ordering::Release);
+        let result = complete_runtime_execution(Ok("candidate"), &state, async {
+            DesktopSessionShutdownReport { complete: true, ..Default::default() }
+        }).await;
+        assert_eq!(result, Err("tool_cleanup_incomplete"));
+        assert_eq!(state.cleanup_status(), "unconfirmed");
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_shutdown_cannot_restore_a_successful_candidate() {
+        let state = interaction();
+        let result = complete_runtime_execution(Ok(json!({"text":"candidate"})), &state, async {
+            state.cancel(CANCELLED).await;
+            DesktopSessionShutdownReport {
+                complete: true,
+                ..Default::default()
+            }
+        })
+        .await;
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(state.cleanup_status(), "complete");
+        assert_eq!(state.reason.load(Ordering::Acquire), CANCELLED);
+        let state = interaction();
+        let result: Result<Value, _> =
+            complete_runtime_execution(Err("tool_changed"), &state, async {
+                DesktopSessionShutdownReport {
+                    complete: true,
+                    ..Default::default()
+                }
+            })
+            .await;
+        assert_eq!(result, Err("tool_changed"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_timeout_marks_a_dropped_shutdown_as_unconfirmed() {
+        let state = interaction();
+        state.cancel(CANCELLED).await;
+        let result = await_execution_with_cancel(
+            complete_runtime_execution(Ok(json!({"text":"must remain private"})), &state, async {
+                std::future::pending::<DesktopSessionShutdownReport>().await
+            }),
+            &state,
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(result, Err("tool_cleanup_incomplete"));
+        let terminal = execution_terminal(&state, result);
+        assert_eq!(terminal["status"], "cancelled");
+        assert_eq!(terminal["cleanupStatus"], "unconfirmed");
+        assert!(terminal.get("text").is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_pure_side_query_does_not_invent_tool_ownership() {
+        let state = interaction();
+        state.cancel(CANCELLED).await;
+        let result = await_execution_with_cancel(
+            std::future::pending::<Result<Value, &'static str>>(),
+            &state,
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(
+            execution_terminal(&state, result)["cleanupStatus"],
+            "not_required"
+        );
+    }
+
+    #[test]
+    fn only_typed_chat_tool_failures_get_the_actionable_chat_code() {
+        use harness_runtime::desktop::app_invocation::AppInvocationError;
+        use harness_runtime::desktop::BuildError;
+        assert_eq!(
+            runtime_build_error_code(BuildError::AppInvocation(AppInvocationError::ChatUnsupportedTool)),
+            "chat_tool_unsupported",
+        );
+        assert_eq!(
+            runtime_build_error_code(BuildError::AppInvocation(AppInvocationError::UnsupportedTool(
+                "PRIVATE_TOOL_SECRET /Users/private/tool.json".into(),
+            ))),
+            "runtime_initialization_failed",
+        );
+    }
+
+    #[test]
+    fn runtime_context_codes_survive_the_generic_output_error_callback() {
+        use orchestrator::error::OrchestratorError;
+        for code in [
+            "chat_context_unavailable",
+            "chat_context_compaction_unsupported",
+            "chat_context_limit_exceeded",
+            "chat_context_budget_unknown",
+            "chat_context_authority_revoked",
+        ] {
+            for callback_failed in [false, true] {
+                let result = Err(OrchestratorError::ApiCall(
+                    llm_runtime::LlmError::InvalidRequest {
+                        message: code.to_owned(),
+                    },
+                ));
+                assert_eq!(
+                    check_runtime_turn_result(result, callback_failed, false),
+                    Err(code)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_context_mapping_never_returns_provider_bodies_or_nonmatching_error_variants() {
+        use orchestrator::error::OrchestratorError;
+        for message in [
+            "PRIVATE_PROVIDER_SECRET /Users/private/request.json",
+            "chat_context_unavailable: PRIVATE_SECRET",
+            "chat_context_limit_exceeded\n",
+            "/Users/private/chat_context_unavailable",
+            "CHAT_CONTEXT_UNAVAILABLE",
+        ] {
+            let result = Err(OrchestratorError::ApiCall(
+                llm_runtime::LlmError::InvalidRequest {
+                    message: message.to_owned(),
+                },
+            ));
+            assert_eq!(
+                check_runtime_turn_result(result, false, false),
+                Err("model_execution_failed")
+            );
+        }
+        for error in [
+            OrchestratorError::Internal("chat_context_unavailable".into()),
+            OrchestratorError::Streaming(llm_runtime::LlmError::InvalidRequest {
+                message: "chat_context_unavailable".into(),
+            }),
+        ] {
+            assert_eq!(
+                check_runtime_turn_result(Err(error), false, false),
+                Err("model_execution_failed")
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_cancellation_precedes_context_codes_and_the_output_error_callback() {
+        use orchestrator::conversation::TurnOutcome;
+        use orchestrator::error::OrchestratorError;
+        let result = Err(OrchestratorError::ApiCall(
+            llm_runtime::LlmError::InvalidRequest {
+                message: "chat_context_authority_revoked".into(),
+            },
+        ));
+        assert_eq!(
+            check_runtime_turn_result(result, true, true),
+            Err("cancelled")
+        );
+        assert_eq!(
+            check_runtime_turn_result(Ok(TurnOutcome::Cancelled), true, false),
+            Err("cancelled")
+        );
+        assert_eq!(
+            check_runtime_turn_result(Ok(TurnOutcome::EndTurn), true, true),
+            Err("cancelled")
+        );
+    }
 
     #[test]
     fn catalog_and_runs_register_the_host_question_tool() {
@@ -1672,6 +2135,46 @@ mod tests {
         value.output_schema = Some(json!({"definitions":{"item":{"type":"string"}},"properties":{"item":{"$ref":"#/definitions/item"}}}));
         assert!(validate_agent_input(&value).is_ok());
     }
+    #[tokio::test]
+    async fn persistent_chat_rejects_unverified_profile_before_provider_work() {
+        let root = tempfile::tempdir().unwrap();
+        let mut request = start_request(root.path());
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation_id = uuid::Uuid::new_v4().to_string();
+        request.app_chat = Some(AppChatProfile {
+            chat_id: uuid::Uuid::new_v4().to_string(),
+            session_id,
+            session_directory: root.path().join("chat"),
+            cleanup_nonce: "b".repeat(64),
+            native_user_message_id: format!("msg:{generation_id}"),
+            generation_id,
+            base_checkpoint: None,
+        });
+        request.credentials = json!({});
+        let cancel = CancellationToken::new();
+        let sink = Arc::new(EventSink::new(
+            "run-1".into(),
+            tokio::io::sink(),
+            cancel.clone(),
+        ));
+        let state = Arc::new(InteractionState::new(sink.clone(), cancel));
+        let output = Arc::new(AppOutput {
+            sink,
+            text: Mutex::new(String::new()),
+            current_assistant_text: Mutex::new(String::new()),
+            last_assistant_text: Mutex::new(String::new()),
+            assistant_message_id: Mutex::new(None),
+            error: AtomicU8::new(0),
+            cost_baseline: Mutex::new(None),
+            completed_model_turns: AtomicU32::new(0),
+        });
+        assert_eq!(
+            execute(request, state.clone(), output).await.err(),
+            Some("invalid_profile")
+        );
+        assert!(state.lease.lock().await.is_none());
+    }
+
     #[tokio::test]
     async fn output_sink_retains_the_actual_assistant_message_identity_for_the_private_terminal() {
         let cancel = CancellationToken::new();

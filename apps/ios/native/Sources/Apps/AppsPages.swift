@@ -44,7 +44,6 @@ struct AppsPage: View {
     @State private var query = ""
     @State private var creating = false
     @State private var importing = false
-    @State private var importingLegacy: LocalAppLegacyEntry?
     @State private var consent: MarketConsent?
     @State private var error: String?
     private struct MarketConsent: Identifiable { var id: String { distribution.versionId }; let distribution: MarketDistribution; let remix: Bool }
@@ -66,14 +65,6 @@ struct AppsPage: View {
                         }
                     }
                     if filtered.isEmpty { ContentUnavailableView("还没有应用",systemImage:"square.grid.2x2",description:Text("创建应用或从市场安装。应用独立于开发会话保存。")) }
-                    if !library.legacyArchives.isEmpty {
-                        Section("旧应用数据") {
-                            Text("旧包和浏览器数据已保留。显式导入会创建新的应用和浏览器空间，不会自动迁移浏览器数据库。").font(.footnote).foregroundStyle(.secondary)
-                            ForEach(library.legacyEntries) { entry in Button("导入 \(entry.name)") { importingLegacy = entry } }
-                            ForEach(library.legacyArchives) { archive in Text(URL(fileURLWithPath:archive.path).lastPathComponent).font(.caption) }
-                            Button("导入源码文件夹") { importing = true }
-                        }
-                    }
                 } else {
                     if let error = market.error { Text(error).foregroundStyle(.red) }
                     ForEach(market.apps) { app in
@@ -113,10 +104,6 @@ struct AppsPage: View {
                 }
             }
         }
-        .confirmationDialog("导入旧应用？", isPresented: Binding(get: { importingLegacy != nil }, set: { if !$0 { importingLegacy = nil } }), presenting: importingLegacy) { entry in
-            Button("创建新应用副本") { Task { do { let app = try await library.importLegacy(entry); importingLegacy = nil; onShowDetails(app.appId) } catch { self.error = error.localizedDescription } } }
-            Button("取消", role: .cancel) { importingLegacy = nil }
-        } message: { _ in Text("原包和浏览器数据保持原样。新副本使用新应用身份，不会复制浏览器数据库或原执行授权。") }
         .fileImporter(isPresented:$importing,allowedContentTypes:[.folder, .zip]) { result in
             Task {
                 do {

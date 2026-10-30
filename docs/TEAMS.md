@@ -1,9 +1,10 @@
 # Teams implementation contract
 
 Status: T0 validated; T1 and T2 implemented locally, with deployment and full native
-product/device acceptance still pending. T3 has locally validated backend and
-runtime prerequisites; its host executor and four-client UI are not implemented
-or enabled. This document refines the approved 2026-10-29 Team plan
+product/device acceptance still pending. T3 has locally validated backend,
+runtime and single-queue-item executor prerequisites; product host integration
+and the four-client UI are not implemented or enabled. This document refines the
+approved 2026-10-29 Team plan
 after review. It is the repository contract for subsequent phases; a phase is
 complete only when its stated checks pass on all four clients.
 
@@ -282,7 +283,10 @@ host runtime is ready; the T3 phase remains open.
   execution starts, fencing the previous attempt. Concurrent hosts cannot skip
   an earlier live or ambiguous invocation.
 - Only the transaction changing `claimed` to `running` returns `execute: true`
-  from `startBot`. Repeated start calls return `execute: false`. The caller must
+  and a versioned execution snapshot from `startBot`. The snapshot binds target,
+  attempt, owner/binding revision, original message, human UID/generation and
+  exact text in that transaction. Repeated calls for the same still-running
+  attempt return `execute: false` without a snapshot. The caller must
   never execute without that one-shot permit. A lost start response deliberately
   needs owner recovery. The total running deadline is five minutes, including
   permission/question waits; polling does not extend it. A host must enforce the
@@ -294,7 +298,9 @@ host runtime is ready; the T3 phase remains open.
   preoccupy predictable outputs. Status and Bot replies never create triggers.
 - After a running lease expires, work becomes `recovery`; it is never automatically
   executed again. `recoverBot` is an owner-only, idempotent manual settlement,
-  without tool execution. Claim/start/poll/finish/recovery recheck the source
+  without tool execution. It also accepts an expired claimed run when a host's
+  durable start intent never reached the server; a renewed active claim fences
+  recovery. Claim/start/poll/finish/recovery recheck the source
   human's generation, unchanged/unrecalled create, authenticated receipt evidence,
   current owner generation and exact binding revision. Invalid work only becomes
   `revoked`, without publishing a result. Requests older than 24 hours receive one
@@ -405,6 +411,46 @@ acceptance and all four T3 UIs remain open. No push/deploy/native product test o
 real model/account session occurred. Evidence and exact limits:
 `acceptance/teams-t3-process-20261029/report.md`; companion API contract:
 `docs/TEAM_INVOCATION_PROCESS.md`.
+
+### T3 authenticated connector checkpoint (execution stays disabled)
+
+Local companion commit `e8adfe0785e1cceef630df475015ff1b1c180667` connects
+one backend queue identity on macOS to the actual
+dedicated worker. A trusted account/epoch port supplies Firebase ID tokens only
+to the parent HTTP client. Redirects, proxies and transport retries are disabled;
+request/response JSON bodies are bounded. Input and the private human principal
+come only from the authenticated one-shot start snapshot, never a claim body.
+The original-human UID validation now matches backend Unicode/punctuation rules
+without changing existing private scope hashes.
+
+An owner-private append-only journal records the stable target/attempt/invocation
+identity before claiming and a start marker before dispatch. Ambiguous starts
+only observe the old attempt; they never mint a replacement worker or quota.
+Results are synced before `finishBot`; a dedicated result-only retry requires no
+model credential and cannot execute again. Expired claims can be manually settled
+by the owner, transactionally fencing late start/reclaim. No automatic recovery
+executes work. Live authorization polling, account cancellation, explicit cancel
+and future drop invoke worker cancellation/kill guards. Poll observation may take
+two seconds plus the five-second token/HTTP bound, followed by bounded cleanup;
+dropping a future does not await reaping or prove hard real-time termination.
+
+**101 distinct selected tests pass**: 13 connector loopback cases, one separately
+invoked real Auth/Firestore/HTTP/worker emulator case, 15 original process and
+13 private-profile cases, 52 backend/rules emulator and seven Desktop/Web SDK
+cases. The ordinary connector suite intentionally ignores the emulator case;
+the same case passed explicitly under its isolated fixture. All process cases
+used the freshly built normal Desktop-feature worker. Desktop/Mobile-feature
+library checks, worker build, formatting/syntax and independent static review
+pass. These remain unsigned local macOS/debug and demo-emulator results.
+
+**T3 remains disabled.** Product Cargo pins and runtime entry points are unchanged.
+This is a single-queue-item executor port: product account/queue integration,
+recovery UI, authenticated owner tool approvals and separate original-human
+questions remain open. Tools stay denied. Detached tool containment, resource/
+billing caps, other provider/auth routes, all four T3 UIs and signed/native/live
+acceptance also remain. No push/deploy/IAM, production account/session or real
+model was used. Evidence: `acceptance/teams-t3-connector-20261029/report.md`;
+companion API contract: `docs/TEAM_CONNECTOR.md`.
 
 ### Required isolated runtime
 

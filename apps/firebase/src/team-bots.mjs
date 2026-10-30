@@ -165,7 +165,12 @@ export class TeamBotsStore {
         settleCursor(); return { state: 'revoked' };
       }
       if (input.action === 'recoverBot') {
-        if (!state || !['running', 'recovery'].includes(state.state) || (state.state === 'running' && state.leaseUntil > now.getTime())) fail(409, 'RECOVERY_NOT_REQUIRED');
+        // A host can persist its conservative start intent before an account /
+        // transport failure prevents dispatch. That expired claim must also be
+        // manually settleable, without replaying it. This transaction fences a
+        // racing reclaim/start: a renewed live lease cannot be recovered.
+        if (!state || !['claimed', 'running', 'recovery'].includes(state.state)
+          || (['claimed', 'running'].includes(state.state) && state.leaseUntil > now.getTime())) fail(409, 'RECOVERY_NOT_REQUIRED');
         const replyId = appendBotMessage(tx, ref, c, trigger, input.triggerId, 'reply', input.text, now);
         tx.set(runRef, { ...state, state: 'recovered', replyId, recoveryDigest: botDigest(input.text), finishedAt: now });
         settleCursor(); return { state: 'recovered', replyId };
@@ -192,7 +197,17 @@ export class TeamBotsStore {
         if (state.state !== 'claimed') fail(409, 'BOT_LEASE_REQUIRED');
         const leaseUntil = now.getTime() + 300000;
         const statusId = appendBotMessage(tx, ref, c, trigger, input.triggerId, 'started', 'Processing on the Bot owner’s computer.', now);
-        tx.update(runRef, { state: 'running', leaseUntil, statusId, startedAt: now }); return { state: 'running', execute: true, leaseUntil };
+        tx.update(runRef, { state: 'running', leaseUntil, statusId, startedAt: now });
+        // The host consumes this authenticated snapshot, never an earlier claim
+        // body or renderer-supplied principal. Only the one-shot transition
+        // includes it; retries cannot reconstruct an execution capability.
+        return { state: 'running', execute: true, leaseUntil, execution: {
+          version: 1, teamId: input.teamId, conversationId: input.conversationId, botKey: input.botKey,
+          triggerId: input.triggerId, attemptId: input.attemptId, ownerUid: user.uid, ownerGeneration: input.generation,
+          hostId: card.hostId, botId: card.botId, botRevision: card.revision,
+          origin: { uid: trigger.actorUid, generation: trigger.generation },
+          messageId: trigger.messageId, seq: trigger.seq, text: original.text,
+        } };
       }
       if (state.state !== 'running') fail(409, 'BOT_LEASE_REQUIRED');
       if (input.action === 'finishBot') {
@@ -211,7 +226,7 @@ export class TeamBotsStore {
       }
       if (input.action === 'botPoll') {
         const question = state.questionId ? (await tx.get(ref.collection('botQuestions').doc(state.questionId))).data() : undefined;
-        return { state: 'running', questionId: state.questionId ?? null, answers: question?.answers ?? null };
+        return { state: 'running', leaseUntil: state.leaseUntil, questionId: state.questionId ?? null, answers: question?.answers ?? null };
       }
       fail(400, 'INVALID_INPUT');
     });

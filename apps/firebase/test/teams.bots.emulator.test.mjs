@@ -118,6 +118,60 @@ test('T3 protocol: a crash before start safely reclaims while fencing the old ho
   assert.equal((await execute(run('startBot', { attemptId: 'attempt-002' }))).execute, true);
 });
 
+test('T3 connector: only the one-shot start returns the authenticated execution snapshot', options, async () => {
+  await execute(send(), alice);
+  await execute(run('claimBot'));
+  const first = await execute(run('startBot'));
+  assert.equal(first.execute, true);
+  assert.deepEqual(first.execution, {
+    version: 1, teamId, conversationId, botKey, triggerId: triggerIdentity('human-msg01', botKey),
+    attemptId: 'attempt-001', ownerUid: owner.uid, ownerGeneration: 1, hostId, botId, botRevision: 1,
+    origin: { uid: alice.uid, generation: 1 }, messageId: 'human-msg01', seq: 1, text: 'Synthetic request',
+  });
+  const retry = await execute(run('startBot'));
+  assert.deepEqual(retry, { state: 'running', execute: false, leaseUntil: first.leaseUntil });
+  const poll = await execute(run('botPoll'));
+  assert.equal(poll.leaseUntil, first.leaseUntil);
+  assert.equal(poll.execution, undefined);
+  assert.equal(poll.execute, undefined);
+  assert.equal(first.leaseUntil, now + 300000);
+});
+
+test('T3 connector: an edit between claim and start cannot authorize the stale claim body', options, async () => {
+  await execute(send(), alice);
+  const claimed = await execute(run('claimBot'));
+  assert.equal(claimed.text, 'Synthetic request');
+  await execute(send({ operation: 'edit', changeId: 'between-claim-start', text: 'Changed after claim' }), alice);
+  const reply = await execute(run('startBot'));
+  assert.deepEqual(reply, { state: 'revoked' });
+  assert.equal(reply.execution, undefined);
+  assert.equal(await countMessages(), 1);
+});
+
+test('T3 connector: owner can manually settle an expired claim after undispatched start intent', options, async () => {
+  await execute(send(), alice); await execute(run('claimBot'));
+  const { attemptId: _, ...recovery } = run('recoverBot', { text: 'Owner closed an uncertain start without replay.' });
+  await assert.rejects(execute(recovery), { code: 'RECOVERY_NOT_REQUIRED' });
+  now += 30001;
+  await assert.rejects(execute(recovery, alice), { code: 'BOT_OWNER_REQUIRED' });
+  const first = await execute(recovery);
+  assert.equal(first.state, 'recovered');
+  assert.deepEqual(await execute(recovery), first);
+  // A late original host or a new claimant sees a terminal receipt, no permit.
+  assert.deepEqual(await execute(run('startBot')), first);
+  assert.deepEqual(await execute(run('claimBot', { attemptId: 'late-attempt' })), first);
+  assert.equal(await countMessages(), 2);
+});
+
+test('T3 connector: an active reclaimed lease fences stale manual recovery', options, async () => {
+  await execute(send(), alice); await execute(run('claimBot')); now += 30001;
+  await execute(run('claimBot', { attemptId: 'reclaimed-attempt' }));
+  const { attemptId: _, ...recovery } = run('recoverBot', { text: 'Must not settle a live claim' });
+  await assert.rejects(execute(recovery), { code: 'RECOVERY_NOT_REQUIRED' });
+  await assert.rejects(execute(run('startBot')), { code: 'BOT_LEASE_REQUIRED' });
+  assert.equal((await execute(run('startBot', { attemptId: 'reclaimed-attempt' }))).execute, true);
+});
+
 test('T3 protocol: ambiguous execution needs owner recovery, and recovery reply is idempotent', options, async () => {
   await execute(send(), alice); await execute(run('claimBot')); await execute(run('startBot'));
   now += 300001; // Simulate after-execution/before-reply interruption as well as a lost start ACK.

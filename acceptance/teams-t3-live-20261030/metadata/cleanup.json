@@ -1,0 +1,21 @@
+{
+  "mode": "STANDARD",
+  "scope": [
+    "docs/TEAMS.md",
+    "acceptance/teams-t3-complete-20261029/publication-plan.md",
+    "acceptance/teams-t3-live-20261030/"
+  ],
+  "behaviorLock": {
+    "publicationTests": 13,
+    "actualWrapperPayloadShapes": 5,
+    "productionProofs": "retained immutable"
+  },
+  "plan": [
+    "Remove stale publication/smoke status from current documentation",
+    "Keep historical failure evidence and distinguish source, API-only, browser, provider and full package scopes",
+    "Remove machine-specific probe root and unused output-file IO; assert all five wrapper payload outcomes"
+  ],
+  "runtimeBehaviorChanged": false,
+  "newDependencies": false,
+  "postCleanupVerification": "PASS: 13 publication tests, five actual SDK wrapper shape checks, changed-document links, secret scan, artifact hashes and diff check"
+}

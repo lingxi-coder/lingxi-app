@@ -1,0 +1,55 @@
+{
+  "status": "VERIFIED",
+  "functions": {
+    "onTeamMessage": {
+      "name": "projects/lingxi-5e4b2/locations/us-central1/functions/onTeamMessage",
+      "service": "projects/lingxi-5e4b2/locations/us-central1/services/onteammessage",
+      "uri": "https://onteammessage-pacws5zsoa-uc.a.run.app",
+      "revision": "onteammessage-00002-siw",
+      "runtimeAccount": "push-api@lingxi-5e4b2.iam.gserviceaccount.com",
+      "invokers": [
+        "serviceAccount:push-api@lingxi-5e4b2.iam.gserviceaccount.com"
+      ],
+      "signatureType": "cloudevent",
+      "trigger": {
+        "trigger": "projects/lingxi-5e4b2/locations/nam5/triggers/onteammessage-348779",
+        "triggerRegion": "nam5",
+        "eventType": "google.cloud.firestore.document.v1.created",
+        "eventFilters": [
+          {
+            "attribute": "database",
+            "value": "(default)"
+          },
+          {
+            "attribute": "namespace",
+            "value": "(default)"
+          },
+          {
+            "attribute": "document",
+            "value": "teams/{teamId}/conversations/{conversationId}/messages/{messageId}",
+            "operator": "match-path-pattern"
+          }
+        ],
+        "pubsubTopic": "projects/lingxi-5e4b2/topics/eventarc-nam5-onteammessage-348779-384",
+        "serviceAccountEmail": "push-api@lingxi-5e4b2.iam.gserviceaccount.com",
+        "retryPolicy": "RETRY_POLICY_DO_NOT_RETRY"
+      }
+    },
+    "teamsApi": {
+      "name": "projects/lingxi-5e4b2/locations/us-central1/functions/teamsApi",
+      "service": "projects/lingxi-5e4b2/locations/us-central1/services/teamsapi",
+      "uri": "https://teamsapi-pacws5zsoa-uc.a.run.app",
+      "revision": "teamsapi-00001-zax",
+      "runtimeAccount": "push-api@lingxi-5e4b2.iam.gserviceaccount.com",
+      "invokers": [
+        "allUsers"
+      ]
+    }
+  },
+  "defaultRulesRelease": "projects/lingxi-5e4b2/releases/cloud.firestore",
+  "defaultRulesSha256": "a901aea3c6f0fec967e85e94633b6760fe8e4562324df071f81362d939acb266",
+  "triggerIndex": "projects/lingxi-5e4b2/databases/(default)/collectionGroups/triggers/indexes/CICAgJiUpoMK",
+  "triggerIndexState": "READY",
+  "projectIamUnchangedByFunctionDeploy": true,
+  "serviceAccountIamUnchangedByFunctionDeploy": true
+}

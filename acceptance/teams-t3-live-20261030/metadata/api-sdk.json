@@ -1,0 +1,33 @@
+{
+  "status": "PASSED_API_ONLY_AND_REAL_SDK",
+  "projectId": "lingxi-5e4b2",
+  "endpoint": "https://teamsapi-pacws5zsoa-uc.a.run.app/",
+  "checkpoints": 18,
+  "responseRecords": 65,
+  "singleCreatedTeam": true,
+  "customTokenSdkSameUid": true,
+  "apiStatuses": {
+    "unauthenticated": 401,
+    "untrusted-origin": 403,
+    "nonmember-detail": 403,
+    "member-claim-denied": 403,
+    "member-start-denied": 403,
+    "start-without-lease-denied": 409,
+    "forged-actor-denied": 400,
+    "owner-cannot-answer-human-question": 403,
+    "original-human-answer": 200,
+    "exact-answer-retry": 200,
+    "exact-answer-retry-after-terminal": 200
+  },
+  "sdkPermissionDeniedChecks": 14,
+  "firstApiOnlyPermit": true,
+  "secondApiOnlyPermit": false,
+  "cancelledTerminal": "cancelled",
+  "sameCancelledReply": true,
+  "exactAnswerAfterTerminal": true,
+  "pendingApiOnlyCancellation": false,
+  "realModelExecution": false,
+  "realToolExecution": false,
+  "eventDelivery": "Separate fresh-event proof; original four events failed before signature fix",
+  "privateModeViolations": 0
+}

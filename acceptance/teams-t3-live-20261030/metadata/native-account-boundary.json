@@ -1,0 +1,10 @@
+{
+  "anthropicStaticCredentialLastObservedConfigured": false,
+  "credentialReadOrCopied": false,
+  "configurationRequestedThroughNormalUi": true,
+  "originalSignedInState": "unknown",
+  "sameUserBrokerSessionSlotShared": true,
+  "signedDesktopTestAccountUi": "NOT_PERFORMED",
+  "temporaryHomeIsSessionIsolation": false,
+  "independentOsUserIsOnlyPossiblePath": false
+}

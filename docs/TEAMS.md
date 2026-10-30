@@ -1,9 +1,12 @@
 # Teams implementation contract
 
 Status: T1/T2 and the T3 backend, Desktop host integration and four-client UI are
-implemented in local source. Current browser and native feature journeys pass,
-as does the signed Desktop host/worker integration. Full-application package
-smoke, real-provider behavior and production publication remain open gates.
+implemented. The scoped production API, message trigger, default rules/index and
+Teams Web overlay were published on 2026-10-30. Browser/native feature journeys,
+signed Desktop host/worker integration and the full signed Desktop package smoke
+pass. Production two-account API/SDK and actual event delivery pass. Real-provider
+execution, full-product mobile/device acceptance and a separate signed Desktop
+test-account UI remain open; T3 is not marked complete.
 Historical prerequisite reports describe their own
 snapshots, not the current product's acceptance status. This document refines the
 approved 2026-10-29 Team plan; a phase is complete only when its stated checks pass
@@ -413,18 +416,31 @@ Runtime contracts live in the companion checkout:
 [worker/guardian process](../../harness-runtime/docs/TEAM_INVOCATION_PROCESS.md)
 and [trusted connector](../../harness-runtime/docs/TEAM_CONNECTOR.md). Current
 source hashes, resolved product pins, commands/results and acceptance artifacts
-are recorded in the [current acceptance report](../acceptance/teams-t3-complete-20261029/report.md).
+are recorded in the [local acceptance report](../acceptance/teams-t3-complete-20261029/report.md)
+and [production publication record](../acceptance/teams-t3-live-20261030/report.md).
 Test definitions and historical counts are not proof of a current pass. Browser
 and native feature-harness journeys and the actual Flare-signed host/worker flow
-pass. The full Desktop smoke refuses to replace an already registered user
-credential Broker; that service is preserved. Full-product mobile/physical-device,
-live-provider/account and production publication evidence remain separate gates.
-No push, Firebase deployment or IAM change is authorized here.
+pass. After the user authorized a temporary interruption, the full signed Desktop
+smoke passed and the original application, Broker and URL handler were restored
+with unchanged executable/plist hashes. The two feature branches were pushed;
+main was not merged or changed. Production API/SDK/event acceptance does not
+establish real-model execution, a full signed mobile package or a signed Desktop
+test-account UI. The existing same-user Broker account slot is shared across
+user-data directories; a temporary HOME is not account-session isolation.
 
 The `(botKey ASC, seq ASC)` trigger index is declared only for Firestore
 `(default)` in `infra/firebase/firestore.teams.indexes.json`; named databases keep
 their existing configuration. Publishing rules/index/API changes requires the
 user's explicit authorization.
+
+For a gcloud deployment of the Firebase message trigger, explicitly set
+`FUNCTION_SIGNATURE_TYPE=cloudevent`. Legacy `event` unmarshalling loses the
+envelope expected by the SDK wrapper and can acknowledge an event before any
+database read. Verify actual Admin-only message receipts after deployment; an
+HTTP 200 or ACTIVE function alone is insufficient. The published Hosting overlay
+preserves all 19,265 prior file hashes and adds only the reviewed Teams assets and
+routes. Current deployment identifiers and the minimal IAM audit are in the
+publication record.
 
 ### Historical prerequisite evidence
 

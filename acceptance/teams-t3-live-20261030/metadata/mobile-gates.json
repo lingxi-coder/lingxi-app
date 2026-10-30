@@ -1,0 +1,39 @@
+{
+  "checkedAt": "2026-10-30",
+  "sourceOnlyAssessment": true,
+  "buildsStarted": false,
+  "downloadsStarted": false,
+  "cacheDeleted": false,
+  "freeGiB": 6.18,
+  "requiredFloorGiB": 2,
+  "incrementalBudgetGiB": 4.18,
+  "productHarnessRuntimePin": "2580fbcd1e6c5671bb25241cf5ccc465b30c3456",
+  "mobileLinuxPin": "bfd17e346f7ebbb2bcd5206f3c05f56b83a1858b",
+  "releaseHelperPin": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d",
+  "releaseMismatchExistedAtTaskBase": true,
+  "currentPinMatchingPublishedArtifactFound": false,
+  "releasesUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/releases",
+  "pinCiUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/actions/runs/40200194456",
+  "pinCiFailureScope": "standalone SDK mobile-linux-ffi brand_profile initializer; not proof product FFI fails",
+  "android": {
+    "ffiAndKotlinPairMissing": true,
+    "nativeSupportAndMavenMissing": true,
+    "rootfsAndSherpaMissing": true,
+    "firstBuildPlanningAdditionalGiB": [
+      8,
+      15
+    ]
+  },
+  "ios": {
+    "productGeneratedFrameworksProjectMissing": true,
+    "productFfiArchiveMissing": true,
+    "gstreamerAndFullSpmDependenciesMissing": true,
+    "nativeSupportOnlySourceBuildPathAvailable": true,
+    "firstBuildPlanningAdditionalGiB": [
+      15,
+      25
+    ]
+  },
+  "estimatesAreNotMeasuredUpperBounds": true,
+  "substituteOlderArtifactOrRepinToBypass": false
+}

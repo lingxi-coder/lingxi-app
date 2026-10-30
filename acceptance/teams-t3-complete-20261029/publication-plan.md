@@ -1,6 +1,8 @@
 # Teams publication approval plan
 
-This is a prepared plan, not an authorization or a deployment record. The handoff
+This plan was approved and executed on 2026-10-30. The
+[publication record](../teams-t3-live-20261030/report.md) contains the deployed
+revisions, verification and remaining gates. The handoff
 requires approval: **“No push and no Firebase deploy without the user's
 approval.”** The [local acceptance report](report.md) and `results.json` identify
 the reviewed source and tested artifacts.
@@ -56,7 +58,7 @@ database location and explicit runtime/trigger identity:
 ```sh
 gcloud functions deploy onTeamMessage \
   --project=lingxi-5e4b2 --gen2 --region=us-central1 --runtime=nodejs22 \
-  --source=/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/firebase \
+  --source=/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t3-cloud-deploy/functions-source \
   --entry-point=onTeamMessage \
   --service-account=push-api@lingxi-5e4b2.iam.gserviceaccount.com \
   --trigger-service-account=push-api@lingxi-5e4b2.iam.gserviceaccount.com \
@@ -65,12 +67,21 @@ gcloud functions deploy onTeamMessage \
   --trigger-event-filters-path-pattern='document=teams/{teamId}/conversations/{conversationId}/messages/{messageId}' \
   --memory=256MiB --cpu=1 --concurrency=80 --timeout=60s \
   --min-instances=0 --max-instances=2 --no-allow-unauthenticated \
+  --update-env-vars=FUNCTION_SIGNATURE_TYPE=cloudevent \
   --update-labels=firebase-functions-codebase=backend
 ```
 
 These are supported [GA flags](https://docs.cloud.google.com/sdk/gcloud/reference/functions/deploy).
+The source directory is the private, hash-checked staging copy of the 25 tracked
+backend files. Prepare and validate that copy before reuse; do not upload account
+state, local dependencies, environment files or unrelated task output.
 Read the resulting `serviceConfig.service` before granting its scoped invoker
 binding. Verify trigger filters, identity, location and actual event delivery.
+The Firebase `onDocumentCreated` wrapper requires the `cloudevent` signature.
+The gcloud build defaulted to legacy `event` during the first deployment: requests
+returned HTTP 200 without entering the handler's database reads. An explicit
+runtime signature override fixed delivery; three fresh events then produced
+their exact Admin-only receipts. Keep this flag on subsequent gcloud deployments.
 Then use the original Teams config with
 `--only functions:backend:teamsApi --project lingxi-5e4b2` for the HTTP function.
 The HTTP-only filtered deployment avoids the first-event-service IAM bootstrap.
@@ -124,19 +135,19 @@ whole-site version.
 
 ## Full Desktop smoke permission
 
-The official Flare wrapper produced the signed app/ZIP and static verification
-passed. Its final application smoke refused because
+At plan preparation, the official Flare wrapper had produced the signed app/ZIP
+and static verification passed. Its final application smoke refused because
 `gui/501/com.lingxi.code.credential-broker.development` is already registered.
 The [guard](../../apps/electron/scripts/packaged-app-smoke.mjs#L823) protects an
-active user's service; it has not been bypassed or unloaded. The separate actual
+active user's service; it was not bypassed or unloaded at that checkpoint. The separate actual
 signed Teams host/worker integration passed without using that service.
 
-Full application smoke needs a separate approval to close the current LingXi
-after work is saved, temporarily unregister its development Broker, run the
-isolated smoke, then restore the original application/service registration.
-Snapshot the exact original app/service paths first. Keep its settings,
-credentials, workspaces and business data intact. Permission to deploy Teams
-alone does not authorize interrupting the running application.
+The approved full application smoke temporarily closed the current LingXi
+after work was saved, unregistered its development Broker, ran the isolated
+smoke, then restored the snapshotted application/service and URL handler.
+Verification passed with unchanged original hashes and preserved settings,
+credentials, workspaces and business data. A later interruption still requires
+applicable session authorization; deployment permission alone is insufficient.
 
 ## After approval
 

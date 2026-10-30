@@ -1559,7 +1559,8 @@ fun RootScreen(
     var projectPageId by rememberSaveable { mutableStateOf<String?>(null) }
     // 应用: the page, one app's page and the running app, each drawn over the last.
     var appsPageOpen by rememberSaveable { mutableStateOf(false) }
-    var marketAppId by rememberSaveable { mutableStateOf<String?>(null) }
+    var marketInstallId by rememberSaveable { mutableStateOf<String?>(null) }
+    var localAppDetailsId by rememberSaveable { mutableStateOf<String?>(null) }
     var runtimeAppId by rememberSaveable { mutableStateOf<String?>(null) }
     val localApps = remember(appContext) { UnifiedLocalApps.get(appContext) }
     val appLibrary by localApps.state.collectAsState()
@@ -1635,7 +1636,7 @@ fun RootScreen(
                 }
                 try {
                     if (parts.first() !in setOf("project", "apps", "market")) {
-                        projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketAppId = null; sessionPanelOpen = false
+                        projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; sessionPanelOpen = false
                     }
                     if (parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal", "runtime", "import") && link.params["workspace"] != null) {
                         val targetScope = resolveLinkedScope(link.params["workspace"])
@@ -1696,7 +1697,7 @@ fun RootScreen(
                                 ?: error(resources.getString(R.string.deep_link_workspace_missing))
                             projectPageId = project
                         }
-                        "market" -> { appsPageOpen = true; marketAppId = id }
+                        "market" -> { appsPageOpen = true; localAppDetailsId = null; marketInstallId = id }
                         "apps" -> {
                             // Initial library refresh can still be in flight
                             // when a cold-start link reaches this route.
@@ -2029,7 +2030,7 @@ fun RootScreen(
                 }
                 draftRestoreGeneration += 1
                 draft = prompt; draftScopeKey = key; chatViewModel.onDraftChanged(prompt)
-                appsPageOpen = false; marketAppId = null; runtimeAppId = null
+                appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; runtimeAppId = null
                 closeDrawer(); closeProjectPages()
             } catch (error: Exception) { chatViewModel.reportHostError(error.message ?: "无法打开应用源码会话。") }
         }
@@ -2480,25 +2481,33 @@ fun RootScreen(
                 onBack = { appsPageOpen = false },
                 onRemoteApps = { appsPageOpen = false; onOpenRemoteControl() },
                 onOpen = { runtimeAppId = it },
-                onDetails = { marketAppId = it },
+                onDetails = { localAppDetailsId = it },
                 onAuthoring = ::openAppAuthoring,
             )
         }
+        marketInstallId?.let { remoteId ->
+            BackHandler { marketInstallId = null }
+            com.lingxi.code.apps.UnifiedMarketInstallPage(
+                apps = localApps, marketId = remoteId,
+                onBack = { marketInstallId = null },
+                onInstalled = { localId -> marketInstallId = null; localAppDetailsId = localId },
+            )
+        }
         // Like the project page, these keep their last app while sliding out.
-        var lastMarketAppId by remember { mutableStateOf<String?>(null) }
-        LaunchedEffect(marketAppId) { if (marketAppId != null) lastMarketAppId = marketAppId }
+        var lastLocalAppDetailsId by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(localAppDetailsId) { if (localAppDetailsId != null) lastLocalAppDetailsId = localAppDetailsId }
         AnimatedVisibility(
-            visible = marketAppId != null,
+            visible = localAppDetailsId != null,
             enter = slideInHorizontally(initialOffsetX = { it }),
             exit = slideOutHorizontally(targetOffsetX = { it }),
         ) {
-            val shownId = marketAppId ?: lastMarketAppId
+            val shownId = localAppDetailsId ?: lastLocalAppDetailsId
             if (shownId != null) {
-                BackHandler { marketAppId = null }
+                BackHandler { localAppDetailsId = null }
                 UnifiedAppDetailsPage(
                     apps = localApps,
                     appId = shownId,
-                    onBack = { marketAppId = null },
+                    onBack = { localAppDetailsId = null },
                     onOpen = { runtimeAppId = it },
                     onAuthoring = ::openAppAuthoring,
                 )
@@ -2520,7 +2529,7 @@ fun RootScreen(
                     onClose = { runtimeAppId = null },
                     onShowDetails = { appId ->
                         runtimeAppId = null
-                        marketAppId = appId
+                        localAppDetailsId = appId
                     },
                 )
             }

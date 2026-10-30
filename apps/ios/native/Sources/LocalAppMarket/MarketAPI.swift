@@ -9,10 +9,6 @@ struct MarketApp: Codable, Equatable, Identifiable, Sendable {
     let id: String; let name: String; let summary: String; let category: String
     let platforms: [String]; let coverUrl: String?; let currentVersion: MarketVersion?
 }
-struct MarketPage<T: Decodable & Sendable>: Decodable, Sendable {
-    let data: [T]; let pagination: Pagination
-    struct Pagination: Decodable, Sendable { let nextCursor: String? }
-}
 struct MarketDistribution: Codable, Sendable {
     struct File: Codable, Sendable { let path: String; let sizeBytes: Int; let sha256: String; let executable: Bool }
     struct Artifact: Codable, Sendable { let format: String; let filename: String; let sizeBytes: Int; let sha256: String; let downloadUrl: URL }
@@ -43,6 +39,11 @@ final class MarketAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         guard baseURL.scheme == "https", baseURL.host != nil, baseURL.user == nil, baseURL.password == nil else { throw MarketFailure("HTTPS_REQUIRED") }
         self.baseURL = baseURL; self.configuration = configuration
     }
+    var browseURL: URL? {
+        guard var parts = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else { return nil }
+        parts.path = "/"; parts.queryItems = [URLQueryItem(name: "platform", value: "ios")]; parts.fragment = nil
+        return parts.url
+    }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         // Authenticated writes never forward credentials across an origin.
         let authenticated = task.originalRequest?.value(forHTTPHeaderField: "Authorization") != nil
@@ -54,17 +55,16 @@ final class MarketAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         let envelope: MarketEnvelope<Value> = try await request("capabilities")
         guard envelope.data.apiVersion == "v2" else { throw MarketFailure("UNSUPPORTED_MARKET_API") }
     }
-    func catalog(query: String = "", cursor: String? = nil) async throws -> MarketPage<MarketApp> {
-        var items = [URLQueryItem(name: "platform", value: "ios"), URLQueryItem(name: "limit", value: "24"), URLQueryItem(name: "sort", value: query.isEmpty ? "updated" : "name")]
-        if !query.isEmpty { items.append(URLQueryItem(name: "q", value: query)) }; if let cursor { items.append(URLQueryItem(name: "cursor", value: cursor)) }
-        return try await request("apps", query: items)
-    }
     func detail(_ id: String) async throws -> MarketApp { let r: MarketEnvelope<MarketApp> = try await request("apps/\(try identifier(id))"); return r.data }
     func distribution(_ id: String, target: UnifiedAppManifest.Target, versionID: String? = nil) async throws -> MarketDistribution {
         var path = "apps/\(try identifier(id))"
         if let versionID { path += "/versions/\(try identifier(versionID))" }; path += "/distribution"
         let r: MarketEnvelope<MarketDistribution> = try await request(path, body: ["target": try .encode(target)])
         guard r.data.schema == 2, r.data.appId == id, versionID == nil || r.data.versionId == versionID else { throw MarketFailure("DISTRIBUTION_ID_MISMATCH") }
+        guard r.data.manifest.targets.contains(where: { $0.platform == target.platform && $0.environment == target.environment &&
+            ($0.channels?.isEmpty != false || !Set($0.channels ?? []).isDisjoint(with: target.channels ?? [])) }) else {
+            throw MarketFailure("NO_COMPATIBLE_RELEASE", "This release does not support this device's platform and runtime.")
+        }
         return r.data
     }
     func publish(_ path: String, body: [String: LocalAppJSON], bearer: String, idempotencyKey: String? = nil) async throws -> LocalAppJSON {

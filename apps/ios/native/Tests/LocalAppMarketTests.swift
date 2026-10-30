@@ -224,6 +224,26 @@ final class LocalAppMarketTests: XCTestCase {
         XCTAssertNil(request.value(forHTTPHeaderField:"Authorization"))
         XCTAssertThrowsError(try MarketAPI(baseURL:URL(string:"http://fixture.test/api/v2")!))
     }
+    func testBrowserMarketURLIsScopedToIOS() throws {
+        let api = try MarketAPI(baseURL: URL(string: "https://fixture.test/api/v2")!)
+        XCTAssertEqual(api.browseURL?.absoluteString, "https://fixture.test/?platform=ios")
+    }
+    func testDistributionRefusesOtherPlatformsAndChannels() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [LocalAppMarketProtocol.self]
+        let api = try MarketAPI(baseURL: URL(string: "https://fixture.test/api/v2")!, configuration: config)
+        let incompatible = ["android", "macos", "windows", "linux"].map {
+            manifest.replacingOccurrences(of: "\"platform\":\"ios\"", with: "\"platform\":\"\($0)\"")
+        } + [manifest.replacingOccurrences(of: "\"environment\":\"web\"", with: "\"environment\":\"web\",\"channels\":[\"other\"]")]
+        for value in incompatible {
+            LocalAppMarketProtocol.response = "{\"data\":{\"schema\":2,\"appId\":\"a\",\"versionId\":\"v1\",\"sequence\":1,\"releaseDigest\":\"digest\",\"manifest\":\(value),\"files\":[],\"dependencies\":[],\"artifact\":{\"format\":\"zip\",\"filename\":\"source.zip\",\"sizeBytes\":2,\"sha256\":\"digest\",\"downloadUrl\":\"https://fixture.test/source.zip\"},\"executionConsentRequired\":false}}"
+            do {
+                _ = try await api.distribution("a", target: .init(platform: "ios", environment: "web", channels: ["full"]))
+                XCTFail("A release for another platform or channel must not be installed")
+            } catch let error as MarketFailure { XCTAssertEqual(error.code, "NO_COMPATIBLE_RELEASE") }
+        }
+    }
+
 }
 private final class LocalAppMarketProtocol: URLProtocol, @unchecked Sendable {
     static var response = "{}"

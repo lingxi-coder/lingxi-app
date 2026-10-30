@@ -1178,7 +1178,11 @@ export class LocalAppHost {
     if (action === 'remote-settings') return this.remoteSettings();
     if (action === 'remote-configuration') return this.remoteConfiguration();
     if (action === 'remote-access') { if (typeof input.enabled !== 'boolean') throw new Error('Invalid remote access setting'); await this.setRemoteAccess(appId(input.id), input.enabled); return; }
-    if (action === 'marketBrowse') { await shell.openExternal(localAppMarketUrl); return; }
+    if (action === 'marketBrowse') {
+      const url = new URL(localAppMarketUrl);
+      url.searchParams.set('platform', process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux');
+      await shell.openExternal(url.href); return;
+    }
     if (action === 'marketInstallLink') return this.marketLinkInstaller.install(input.remoteId);
     if (action === 'marketManage') { await shell.openExternal(new URL('/mine', this.market.base).href); return; }
     if (action === 'marketInstall') {

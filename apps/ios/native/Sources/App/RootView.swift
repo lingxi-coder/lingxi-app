@@ -1163,14 +1163,14 @@ struct RootView: View {
             .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
         case .apps:
             AppsPage(library: LocalApps.library, market: LocalApps.market,
-                onOpenApp: { navigation.runApp($0) }, onShowDetails: { navigation.openLocalApp($0) }, onShowMarketDetails: { navigation.openMarketApp($0) },
+                onOpenApp: { navigation.runApp($0) }, onShowDetails: { navigation.openLocalApp($0) },
                 onDevelop: beginLocalAppDevelopment)
         case .localApp(let appID):
             LocalAppDetailPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
                 onOpenApp: { navigation.runApp($0) }, onDevelop: continueLocalAppDevelopment)
         case .marketApp(let appID):
-            MarketAppDetailPage(market: LocalApps.market, appId: appID,
-                onOpenApp: { navigation.runApp($0) }, onDevelop: beginLocalAppDevelopment)
+            MarketInstallPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
+                onOpenApp: { navigation.openLocalApp($0) })
         case .projects:
             ProjectsPage(
                 projectStore: projectStore,

@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Storefront
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
@@ -30,63 +32,46 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
     val appsGuestPath = remember(context) { com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath }
     val state by apps.state.collectAsState()
     val scope = rememberCoroutineScope()
-    var tab by rememberSaveable { mutableIntStateOf(0) }
     var query by rememberSaveable { mutableStateOf("") }
     var name by rememberSaveable { mutableStateOf("") }
     var sourceDirectory by rememberSaveable { mutableStateOf("") }
     var creating by rememberSaveable { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var catalog by remember { mutableStateOf<List<CatalogApp>>(emptyList()) }
     fun action(block: suspend () -> Unit) { scope.launch { busy = true; error = null; try { block() } catch (e: Exception) { error = e.message } finally { busy = false } } }
     val importSource = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) action { val imported = apps.importArchive(uri); onDetails(imported.id) }
     }
     LaunchedEffect(Unit) { apps.refresh() }
-    LaunchedEffect(tab, query) {
-        if (tab == 1) {
-            busy = true
-            try { catalog = apps.market.list(query); error = null } catch (e: Exception) { error = e.message } finally { busy = false }
-        }
-    }
     Column(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg).blockTouchesBehind().windowInsetsPadding(WindowInsets.systemBars).testTag(UiTags.APPS_PAGE)) {
-        PageTopBar(title = stringResource(R.string.local_app_v2_title), onBack = onBack)
-        PrimaryTabRow(selectedTabIndex = tab) {
-            listOf(stringResource(R.string.local_app_v2_mine), stringResource(R.string.local_app_v2_market)).forEachIndexed { index, title -> Tab(selected = index == tab, onClick = { tab = index }, text = { Text(title) }) }
-        }
+        PageTopBar(title = stringResource(R.string.local_app_v2_title), onBack = onBack, trailing = {
+            IconButton(onClick = { try { LocalAppBrowser.open(context, apps.market.browseUrl) } catch (e: Exception) { error = e.message } }) {
+                Icon(Icons.Outlined.Storefront, contentDescription = stringResource(R.string.local_app_v2_market))
+            }
+        })
         TextButton(onClick = onRemoteApps, modifier = Modifier.padding(horizontal = 16.dp)) { Text(stringResource(R.string.remote_apps_browse)) }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             TextButton(onClick = { creating = true }) { Text(stringResource(R.string.local_app_v2_create)) }
-            if (tab == 0) TextButton(enabled = !busy, onClick = { importSource.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) { Text(stringResource(R.string.local_app_v2_import_source)) }
+            TextButton(enabled = !busy, onClick = { importSource.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) { Text(stringResource(R.string.local_app_v2_import_source)) }
             TextButton(onClick = { action { apps.refresh() } }) { Text(stringResource(R.string.local_app_v2_refresh)) }
         }
         if (busy || state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         (error ?: state.error)?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         OutlinedTextField(query, { query = it }, label = { Text(stringResource(R.string.local_app_v2_search)) }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            when (tab) {
-                0 -> {
-                    if (state.apps.isEmpty() && !state.loading) item { Text(stringResource(R.string.local_app_v2_empty)) }
-                    items(state.apps.filter { query.isBlank() || it.name.contains(query, true) }, key = { it.id }) { app ->
-                        ElevatedCard(Modifier.fillMaxWidth().testTag(UiTags.appTile(app.id))) {
-                            Column(Modifier.padding(16.dp)) {
-                                Text(app.name, style = MaterialTheme.typography.titleMedium)
-                                Text(app.summary, style = MaterialTheme.typography.bodyMedium)
-                                Text(stringResource(R.string.local_app_v2_revision, app.currentRevision) + if (app.latestRevision > app.currentRevision) stringResource(R.string.local_app_v2_update_pending, app.latestRevision) else "", style = MaterialTheme.typography.labelMedium)
-                                Row {
-                                    TextButton(onClick = { onOpen(app.id) }) { Text(stringResource(R.string.local_app_v2_open)) }
-                                    TextButton(onClick = { onDetails(app.id) }) { Text(stringResource(R.string.local_app_v2_manage)) }
-                                    TextButton(onClick = { onAuthoring(app.id, app.name, "") }) { Text(stringResource(R.string.local_app_v2_develop)) }
-                                }
-                            }
+            if (state.apps.isEmpty() && !state.loading) item { Text(stringResource(R.string.local_app_v2_empty)) }
+            items(state.apps.filter { query.isBlank() || it.name.contains(query, true) }, key = { it.id }) { app ->
+                ElevatedCard(Modifier.fillMaxWidth().testTag(UiTags.appTile(app.id))) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(app.name, style = MaterialTheme.typography.titleMedium)
+                        Text(app.summary, style = MaterialTheme.typography.bodyMedium)
+                        Text(stringResource(R.string.local_app_v2_revision, app.currentRevision) + if (app.latestRevision > app.currentRevision) stringResource(R.string.local_app_v2_update_pending, app.latestRevision) else "", style = MaterialTheme.typography.labelMedium)
+                        Row {
+                            TextButton(onClick = { onOpen(app.id) }) { Text(stringResource(R.string.local_app_v2_open)) }
+                            TextButton(onClick = { onDetails(app.id) }) { Text(stringResource(R.string.local_app_v2_manage)) }
+                            TextButton(onClick = { onAuthoring(app.id, app.name, "") }) { Text(stringResource(R.string.local_app_v2_develop)) }
                         }
                     }
-                }
-                1 -> items(catalog, key = { it.id }) { row ->
-                    ElevatedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) {
-                        Text(row.name, style = MaterialTheme.typography.titleMedium); Text(row.summary)
-                        TextButton(enabled = !busy, onClick = { action { val installed = apps.market.install(row.id); onDetails(installed.id) } }) { Text(stringResource(R.string.local_app_v2_install)) }
-                    } }
                 }
             }
         }
@@ -283,6 +268,51 @@ private fun AgentTaskCard(task: AppAgentTask, enabled: Boolean, onCancel: () -> 
                 val message = it.optString("message").takeIf(String::isNotBlank)
                 Text(listOfNotNull(code, message).joinToString(": ").ifBlank { it.toString() }, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
+        }
+    }
+}
+
+/** A market link reviews a compatible source release; it never identifies a local record. */
+@Composable
+fun UnifiedMarketInstallPage(apps: UnifiedLocalApps, marketId: String, onBack: () -> Unit, onInstalled: (String) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var release by remember(marketId) { mutableStateOf<org.json.JSONObject?>(null) }
+    var busy by remember(marketId) { mutableStateOf(false) }
+    var error by remember(marketId) { mutableStateOf<String?>(null) }
+    androidx.activity.compose.BackHandler(enabled = busy) { }
+    LaunchedEffect(marketId) {
+        busy = true
+        try {
+            requireMarketId(marketId)
+            apps.refresh()
+            val existing = apps.state.value.apps.firstOrNull { it.marketOrigin?.let { origin -> origin.appId == marketId && origin.remixedFrom == null } == true }
+            if (existing != null) onInstalled(existing.id) else release = apps.market.distribution(marketId)
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (e: Exception) { error = e.message }
+        finally { busy = false }
+    }
+    Column(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg).blockTouchesBehind().windowInsetsPadding(WindowInsets.systemBars)) {
+        PageTopBar(title = stringResource(R.string.local_app_v2_install), onBack = { if (!busy) onBack() })
+        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            release?.let { selected ->
+                val manifest = selected.getJSONObject("manifest")
+                Text(manifest.getString("name"), style = MaterialTheme.typography.titleLarge)
+                Text(manifest.optString("summary"))
+                Text("Android · ${com.lingxi.code.BuildConfig.DISTRIBUTION_CHANNEL}")
+                Text(selected.getString("releaseDigest"), style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.local_app_v2_market_install_note))
+                Button(enabled = !busy, onClick = {
+                    busy = true; error = null
+                    scope.launch {
+                        try { onInstalled(apps.market.install(marketId, selected = selected).id) }
+                        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                        catch (e: Exception) { error = e.message }
+                        finally { busy = false }
+                    }
+                }) { Text(stringResource(R.string.local_app_v2_install)) }
+            }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }
 }

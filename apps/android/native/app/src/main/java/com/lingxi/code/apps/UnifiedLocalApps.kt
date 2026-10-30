@@ -340,5 +340,5 @@ class UnifiedLocalApps private constructor(private val context: Context) {
 internal fun appTarget(environment: String): JSONObject = JSONObject().put("platform", "android").put("environment", environment)
     .put("architecture", canonicalAppArchitecture(Build.SUPPORTED_ABIS.firstOrNull()))
     .put("runtimeVersion", BuildConfig.MOBILE_LINUX_SDK_VERSION)
-    .put("channels", JSONArray(listOf(BuildConfig.FLAVOR)))
+    .put("channels", JSONArray(listOf(BuildConfig.DISTRIBUTION_CHANNEL)))
     .put("capabilities", JSONArray((setOf("camera", "photos", "files", "microphone", "clipboard", "share", "network", "agent") + if (BuildConfig.MOBILE_LINUX_FULL) setOf("process", "background") else emptySet()).toList()))

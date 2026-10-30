@@ -75,4 +75,5 @@
     <string name="local_app_v2_record_active">Recording, up to 30 seconds. Finish to return the audio to this app.</string>
     <string name="local_app_v2_record_start">Start recording</string>
     <string name="local_app_v2_record_finish">Finish recording</string>
+    <string name="local_app_v2_market_install_note">Install the source release for this Android device. Running it still requires approval for that release.</string>
 </resources>

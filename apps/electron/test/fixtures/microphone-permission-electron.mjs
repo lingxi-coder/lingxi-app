@@ -90,7 +90,7 @@ async function main() {
     // The current Voice page consumes the host audio snapshot. Wait for its
     // first get_snapshot response to reach the row before comparing values.
     const initialPermissionLabel = {
-      granted: '已授权', denied: '未授权', prompt: '尚未询问', unavailable: '无法确定',
+      granted: '已授权', denied: '已拒绝', prompt: '待授权', unavailable: '未知',
     }[mainProcessRead];
     await waitFor(webContents,
       `window.__microphonePermissionTest.rowText().includes(${JSON.stringify(`当前状态：${initialPermissionLabel}`)})`);
@@ -108,7 +108,7 @@ async function main() {
     // while the window sits open. Coming back to the window is the only signal.
     const rowTextBeforeRefocus = await webContents.executeJavaScript('window.__microphonePermissionTest.rowText()');
     await webContents.executeJavaScript('window.__microphonePermissionTest.refocus()');
-    await waitFor(webContents, 'window.__microphonePermissionTest.rowText().includes("未授权") || null', 4000)
+    await waitFor(webContents, 'window.__microphonePermissionTest.rowText().includes("已拒绝") || null', 4000)
       .catch(() => undefined);
     const rowTextAfterRefocus = await webContents.executeJavaScript('window.__microphonePermissionTest.rowText()');
 

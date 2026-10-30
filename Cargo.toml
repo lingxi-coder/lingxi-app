@@ -293,5 +293,8 @@ lto = "thin"
 
 # The data-only WebRTC stack uses the same upstream patches as Harness.
 [patch.crates-io]
+# Official Askama PR #771 replaces unmaintained basic-toml. UniFFI remains
+# pinned to 0.32.2; derive and its path parser dependency stay on one tree.
+askama_derive = { git = "https://github.com/askama-rs/askama", rev = "d47daf8767805c0c4dfb456145fc857bfd9c1d2c" }
 webrtc = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e923867db80f5fa9bac009a603089f73ef90b8ab" }
 nix = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e923867db80f5fa9bac009a603089f73ef90b8ab" }

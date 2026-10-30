@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
-import { test } from 'node:test';
+import { after, before, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import React, { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -14,6 +14,8 @@ import * as layerFields from '../src/renderer/components/settings/layerFields';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import { imageFileToAttachment } from '../src/renderer/bridge/imageInput';
+import { translate } from '../src/renderer/i18n/locale';
+import { installTestLocale } from './test-locale';
 import {
   interruptConfigurationOperations, requestConfigurationOperation, settleConfigurationOperation,
   type PendingConfigurationOperations,
@@ -22,6 +24,9 @@ import type { ConfigurationOperationEvent } from '../src/renderer/bridge/bridgeT
 
 // Node's TSX loader uses the classic JSX transform for source imports.
 (globalThis as unknown as { React: typeof React }).React = React;
+let restoreLocale: () => void;
+before(() => { restoreLocale = installTestLocale('en'); });
+after(() => restoreLocale());
 const require = createRequire(import.meta.url);
 function source(path: string): ts.SourceFile {
   return ts.createSourceFile(path, readFileSync(resolve(path), 'utf8'), ts.ScriptTarget.Latest, true,
@@ -52,7 +57,7 @@ test('connected layered settings wait for a valid snapshot and offer retry after
   assert.match(loading, /settings-snapshot-loading/);
   assert.doesNotMatch(loading, /aria-label="enabledTools"/);
   const invalid = settingsMarkup({ type: 'settings_snapshot', effective_json: '{', provenance_json: '{}' });
-  assert.match(invalid, /settings-snapshot-error/); assert.match(invalid, /重试/);
+  assert.match(invalid, /settings-snapshot-error/); assert.match(invalid, /Retry/);
   assert.doesNotMatch(invalid, /aria-label="enabledTools"/);
   const ready = settingsMarkup({ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}',
     layers_json: JSON.stringify({ user: { enabledTools: ['Read'], outputStyle: 'Explanatory' } }) });
@@ -85,6 +90,8 @@ function toolsHarness() {
     react: hooks, 'react/jsx-runtime': require('react/jsx-runtime'), '../layerFields': layerFields,
     '../rows': { Card: 'Card', Row: 'Row', FieldProvenanceNotice: 'Notice' },
     '../../../theme/ThemeContext': { useT: () => tokens('light') }, '../primitives': { Toggle: 'Toggle' },
+    '../../../i18n/useI18n': { useI18n: () => ({}) },
+    '../../../i18n/locale': { tr: (key: string, ...args: (string | number)[]) => translate(key, 'en', ...args) },
     './ghostButton': { ghostButtonStyle: () => ({}), inputStyle: () => ({}) },
   };
   evaluate(readFileSync(resolve('src/renderer/components/settings/pages/ToolsAgent.tsx'), 'utf8'),
@@ -139,6 +146,7 @@ function imageHarness() {
   const revoked: string[] = [], notices: unknown[] = [];
   const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() },
     ready: true, activeSessionId: 'A', imageAttachments: [], MAX_IMAGE_ATTACHMENTS: 4,
+    tr: (key: string, ...args: (string | number)[]) => translate(key, 'en', ...args),
     draftSessionId: { current: 'A' }, imageDraftGeneration: { current: 1 }, composerDraftRevision: { current: 0 }, imageFileToAttachment,
     URL: { revokeObjectURL: (url: string) => revoked.push(url) },
     setImageNotice: (notice: unknown) => notices.push(notice),

@@ -122,6 +122,9 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Create an ephemeral Android debug key
+        run: bash scripts/ci/create-android-debug-keystore.sh apps/android/native/.signing/lingxi-5e4b2-debug.keystore
+
       # Installs the Android SDK + command-line tools and exports
       # ANDROID_HOME / ANDROID_SDK_ROOT for later steps.
       - uses: android-actions/setup-android@v3
@@ -178,6 +181,7 @@ jobs:
         working-directory: apps/android/native
         run: |
           ./gradlew \
+            --no-parallel --max-workers=1 -Pkotlin.daemon.jvmargs=-Xmx3072m \
             -PlingxiRootfsEvidenceDir="$RUNNER_TEMP/sdk-rootfs" \
             :app:testPlayDebugUnitTest :app:testDirectDebugUnitTest \
             :app:assemblePlayDebug :app:assembleDirectDebug \
@@ -224,6 +228,9 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Create an ephemeral Android debug key
+        run: bash scripts/ci/create-android-debug-keystore.sh apps/android/native/.signing/lingxi-5e4b2-debug.keystore
+
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -267,7 +274,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           working-directory: apps/android/native
-          script: ./gradlew -PlingxiRootfsEvidenceDir="$RUNNER_TEMP/sdk-rootfs" :app:connectedPlayDebugAndroidTest
+          script: ./gradlew --no-parallel --max-workers=1 -Pkotlin.daemon.jvmargs=-Xmx3072m -PlingxiRootfsEvidenceDir="$RUNNER_TEMP/sdk-rootfs" :app:connectedPlayDebugAndroidTest
 
   # ---------------------------------------------------------------------------
   # 4. ios — XCFramework build + Xcode simulator engine round-trip (macOS).
@@ -278,7 +285,9 @@ jobs:
   #    simulators only exist there).
   # ---------------------------------------------------------------------------
   ios:
-    runs-on: macos-latest
+    # RunLocalAppAgentIntent conforms to iOS 27 AppIntents protocols, which
+    # require the iOS 27 SDK even when the deployment target remains older.
+    runs-on: xcode-27
     needs: mobile-linux-policy
     env:
       LINGXI_MOBILE_LINUX_ENABLED: ${{ vars.LINGXI_MOBILE_LINUX_ENABLED || '0' }}
@@ -327,18 +336,21 @@ jobs:
         working-directory: apps/ios/native
         run: xcodegen generate
 
-      # Pick a concrete, currently-available iPhone simulator by name rather
-      # than hardcoding one Xcode-version-specific device — `simctl list` on the
-      # runner is the source of truth, so this survives runner image bumps.
-      # `jq` is preinstalled on GitHub macOS runners.
-      - name: Resolve a booted-capable simulator
+      # Pick a specific device in the newest installed iOS runtime, so its
+      # name and runtime cannot be mismatched by an OS=latest destination.
+      - name: Resolve an available iPhone simulator
         id: sim
         run: |
-          # First available iPhone simulator name across all runtimes.
-          name="$(xcrun simctl list devices available --json \
-            | jq -r '[.devices[][] | select(.isAvailable and (.name | startswith("iPhone"))) | .name] | first')"
-          echo "Using simulator: ${name}"
-          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          device="$(xcrun simctl list devices available --json | jq -er '
+            [.devices | to_entries[]
+              | select(.key | startswith("com.apple.CoreSimulator.SimRuntime.iOS-"))
+              | . as $runtime | .value[]
+              | select(.isAvailable and (.name | startswith("iPhone")))
+              | {runtime: $runtime.key, name, udid}]
+            | sort_by(.runtime | sub("^.*iOS-"; "") | split("-") | map(tonumber))
+            | last // empty')"
+          echo "Using simulator: $device"
+          echo "id=$(jq -r '.udid' <<< "$device")" >> "$GITHUB_OUTPUT"
 
       # Run EngineRoundtripTests on the simulator under the LingxiCode scheme.
       - name: xcodebuild test (simulator round-trip)
@@ -346,4 +358,4 @@ jobs:
         run: |
           xcodebuild test \
             -scheme LingxiCode \
-            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }},OS=latest"
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}"

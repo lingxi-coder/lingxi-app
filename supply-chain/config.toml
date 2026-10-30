@@ -13,6 +13,12 @@ url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
 [imports.mozilla]
 url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 
+[policy.askama_derive]
+audit-as-crates-io = true
+
+[policy.askama_parser]
+audit-as-crates-io = true
+
 [policy.git2]
 audit-as-crates-io = true
 

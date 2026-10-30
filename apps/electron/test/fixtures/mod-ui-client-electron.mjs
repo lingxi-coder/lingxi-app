@@ -203,19 +203,25 @@ async function main() {
 
     await run(`window.__modUiClientFixture.failNextRunInWorker(); document.querySelector('.mod-ui-client-button').click()`);
     await wait(`document.querySelector('.mod-ui-client-fallback') && window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.workerFault === true && call.request.type === 'runHeld' && call.request.handle === 17 && call.request.runtimeId === 'runtime-status')`);
+    // A failure is local to this Client. Force the sibling to resize after the
+    // fault so its valid operation cannot be mistaken for a failed-runtime call.
+    await run(`document.querySelector('[data-client="sibling"]').style.width = '240px'`);
+    await wait(`(() => { const calls = window.__modUiClientFixture.calls; const fault = calls.findIndex(call => call.workerFault === true); return calls.slice(fault + 1).some(call => call.kind === 'operation' && call.request.type === 'resize' && call.request.runtimeId === 'runtime-sibling-1'); })()`);
     await run(`window.__modUiClientFixture.emitHighSequenceFrameForFailedRuntime('runtime-status')`);
     await delay(100);
     const workerFaultDiagnostics = await run(`(() => {
       const calls = window.__modUiClientFixture.calls;
       const faultIndex = calls.findIndex((call) => call.kind === 'operation' && call.workerFault === true);
+      const failedRuntimeId = faultIndex < 0 ? null : calls[faultIndex].request.runtimeId;
       const postFaultRuntimeOperations = faultIndex < 0 ? [] : calls.slice(faultIndex + 1).filter((call) => call.kind === 'operation'
+        && call.request.runtimeId === failedRuntimeId
         && ['render', 'setProps', 'resize', 'pointer', 'key', 'runHeld'].includes(call.request.type));
       const duplicateFaultReports = calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_client_fault');
       return {
         fallbackVisible: Boolean(document.querySelector('.mod-ui-client-fallback')),
         faultIndex,
         staleHighSequenceTreeVisible: document.querySelector('.mod-ui-client-surface')?.textContent.includes('Late failed runtime frame') ?? false,
-        postFaultRuntimeOperationTypes: postFaultRuntimeOperations.map((call) => call.request.type),
+        postFaultRuntimeOperationTypes: postFaultRuntimeOperations.map((call) => ({ type: call.request.type, runtimeId: call.request.runtimeId })),
         duplicateFaultReportCount: duplicateFaultReports.length,
       };
     })()`);

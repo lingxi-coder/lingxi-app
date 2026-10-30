@@ -1,5 +1,5 @@
 import { useI18n } from '../../src/renderer/i18n/useI18n';
-import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
+import { LANGUAGE_STORAGE_KEY, invalidateLanguagePreference } from '../../src/renderer/i18n/locale';
 import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -26,6 +26,7 @@ Object.assign(window, { lingxi: { account: {
 
 // Keep the pre-existing interaction scenarios deterministic across developer locales.
 if (!localStorage.getItem(LANGUAGE_STORAGE_KEY)) localStorage.setItem(LANGUAGE_STORAGE_KEY, 'zh-Hans');
+invalidateLanguagePreference();
 function Fixture() {
   useI18n();
   const fixtureTheme = new URLSearchParams(window.location.search).get('theme') === 'dark' ? 'dark' : 'light';

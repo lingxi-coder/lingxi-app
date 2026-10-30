@@ -8,6 +8,9 @@ import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { emptyDesktopState } from '../../src/renderer/bridge/desktopState';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
+
+setLanguagePreference('en');
 
 // Explicit UI fixture: in-memory backend only. No preload, bridge, credentials,
 // filesystem access, real schedules, or engine process is loaded.

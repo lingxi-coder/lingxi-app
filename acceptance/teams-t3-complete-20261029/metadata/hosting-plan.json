@@ -1,0 +1,36 @@
+{
+  "status": "LOCAL_PREPARATION_ONLY",
+  "remoteWritesPerformed": false,
+  "publicationReady": false,
+  "baselineVersion": "sites/lingxi-5e4b2/versions/b628323e196483e0",
+  "baselineStatus": "FINALIZED",
+  "fileHashEncoding": "sha256(gzip-level-9)",
+  "baselineFileCount": 19265,
+  "unionFileCount": 19277,
+  "stagedFileCount": 12,
+  "preservedNonTeamFiles": 19265,
+  "rootIndexHash": "a1fd13b08beef277d7c0bf7e8e445dfbba38980e0839a501537e0e4b94900c73",
+  "hashes": {
+    "baselineConfig": "d067c626ae55924cb94f85f4874762fb80ddd8c0c60a6cdcf6753cf53d352159",
+    "candidateConfig": "00291004def62b35700e8d7c5b418c10bb413776053aff0031e50e2fbe003845",
+    "baselineFiles": "538c9aec0d7299d1a393f0bc8c809c2654d94234843078a90ae821d8467151d6",
+    "unionFiles": "a366991ed149d48fe569bd7a568f0f04001588aa483a5223db71902fa7805d1f"
+  },
+  "artifacts": {
+    "baseline-files.json": "45c3df9779689bfaaf762e624e0f5a804c59a446fb7409c99adbab225107e738",
+    "baseline-config.json": "936b3ad105a8f8f52f310c6d95840c449be5534bbdb968048868f626b9645cf5",
+    "candidate-config.json": "e817e536ec578cdea769fd9060774f0907da80018d49d423cbb687c616bf7233",
+    "union-files.json": "d6ca710a7619ef4ff7971078305207b09b1946b84315662a5f35eae016bc9d24",
+    "new-files.json": "642bf5b09879afe4d78a097f4d7d1b807ae264a9f164746ace7fcc0eab35bc5d"
+  },
+  "sourceSha256": {
+    "hostingVersion": "e70a522091569cc4f8256b9b3caa23684e93f3a0fba98e5327539674ce55e168",
+    "hostingFiles": "0f6854d267d0dd324eb9f1aca6273fbdc60abbcfb0de4edd334f9dfd45ba1fa9",
+    "firebaseConfig": "722ce45816cf8481403092ebe75d5ca32cf37ee3685e047b7beb97a22006fe68"
+  },
+  "requiredBeforePublication": [
+    "Confirm gcloud teamsApi serviceConfig.service resolves to Hosting run.serviceId teamsapi in us-central1; this plan does not verify it.",
+    "Refresh the current LIVE version and every file page immediately before publication; any version/file/config drift requires rebuilding and reviewing this plan.",
+    "Obtain explicit publication authorization; do not deploy the full Hosting tree, merge upstream main, change IAM or overwrite non-Team files."
+  ]
+}

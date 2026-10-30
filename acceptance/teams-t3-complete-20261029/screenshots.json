@@ -1,0 +1,72 @@
+[
+  {
+    "path": "screenshots/web-01-observer-question-readonly.png",
+    "sha256": "c94d9717987439ff32b0a9b383bd77a70f4c66f4e1b3eec1d257ee438506e8cd",
+    "bytes": 161576
+  },
+  {
+    "path": "screenshots/web-02-bot-cards-and-privacy.png",
+    "sha256": "1e871d9c13e950be102a0bb733e03e1ee115eaf756c6cd1f3718158f34ea90ba",
+    "bytes": 84721
+  },
+  {
+    "path": "screenshots/web-03-original-human-answer-acknowledged.png",
+    "sha256": "edae1e95063cb8ac8bd54717af6e35100bc4050773d8e1ebec9c30bc24448705",
+    "bytes": 157459
+  },
+  {
+    "path": "screenshots/web-04-bot-dm.png",
+    "sha256": "90c81c1c0255d0e4a6204f1f6a237f1c9e8553aeab04027d2473322f659a6d70",
+    "bytes": 155532
+  },
+  {
+    "path": "screenshots/web-05-plain-mention-no-execution.png",
+    "sha256": "e754c96a4e0e691580abbc10a34b6126e09c5947e29ad4f3110f5d8948dea531",
+    "bytes": 145463
+  },
+  {
+    "path": "screenshots/web-06-explicit-group-target-and-answer.png",
+    "sha256": "75874191424bb5a79098d61c1a2d7a0712d4ae93d25cc4cca31c600f6a59bcd0",
+    "bytes": 204118
+  },
+  {
+    "path": "screenshots/web-07-real-offline-queued-status.png",
+    "sha256": "bdaae2e3743ca1db865bd71999bebcf9c209842041fd90c7bcfe326c137ef81c",
+    "bytes": 144294
+  },
+  {
+    "path": "screenshots/android-01-bot-cards.png",
+    "sha256": "c15f080f840aa08dfe84dc70134803da3d90f033463b29a821aeea1e8874fa41",
+    "bytes": 236183
+  },
+  {
+    "path": "screenshots/android-02-original-human-question.png",
+    "sha256": "52806c7b4ff3a5cedd8dcba207faec0c0026a23f0a04855fd7afac56de425102",
+    "bytes": 178811
+  },
+  {
+    "path": "screenshots/android-03-explicit-bot-target.png",
+    "sha256": "758cb1f1f68234be9edf7b3b20b6757e74b5ab4d5f82958652be433a2875fa64",
+    "bytes": 129636
+  },
+  {
+    "path": "screenshots/ios-owner-no-answer-control.png",
+    "sha256": "24d5109380f6ee398d48e0749271574d1b6b95f5a217e95acb50d4c385702e83",
+    "bytes": 347450
+  },
+  {
+    "path": "screenshots/ios-bot-dm.png",
+    "sha256": "d1716c723056e2feab79117f3421fdd0d2330834710b5f72bdb0a27675d217c1",
+    "bytes": 372223
+  },
+  {
+    "path": "screenshots/ios-explicit-group-status.png",
+    "sha256": "8e19b5d1519e9fee677688de1b8afe96ac0cf0569876d317c1f6f8a96598657a",
+    "bytes": 413903
+  },
+  {
+    "path": "screenshots/ios-human-answer-ack.png",
+    "sha256": "ca231ad728b3abcdf0c3ce7c4fe65d4d8bc42d500d4313d0d96ed608b38e833a",
+    "bytes": 367352
+  }
+]

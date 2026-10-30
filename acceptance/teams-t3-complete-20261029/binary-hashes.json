@@ -1,0 +1,42 @@
+{
+  "macosZip": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/teams/output/teams-t3-macos/LingXi-Code-0.1.0-mac-arm64.zip",
+    "bytes": 366232895,
+    "sha256": "bc54c1dbbc9a336a2b674cb0c0a5eafeeb38427935b73de3fd9762581e9c783f"
+  },
+  "macosAsar": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/teams/output/teams-t3-macos/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/app.asar",
+    "bytes": 219379236,
+    "sha256": "273bf9e63ee9076ddf53c871d83b8541ed67bcad6895149aa3b341645f16edf7"
+  },
+  "signedHost": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/teams/output/teams-t3-macos/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/bin/harness-team-host",
+    "bytes": 6025168,
+    "sha256": "e89cf546c2bfb53102df695b9f837a7c19b4cfc4612f8e6dfcecce51d9c8445a"
+  },
+  "signedWorker": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/teams/output/teams-t3-macos/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/bin/harness-team-worker",
+    "bytes": 161281760,
+    "sha256": "d7ffc50e57eb98028f65fea69f1c749e4aeac9200be06a4415f487ea31d48b60"
+  },
+  "androidProbeApk": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t3-android/build/outputs/apk/debug/TeamsT3FeatureProbe-debug.apk",
+    "bytes": 45899954,
+    "sha256": "964c28ff462407e7c900f2468ccfcab400fc7f1efd0c75f3721d7fa0a8fb722d"
+  },
+  "androidProbeTestApk": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t3-android/build/outputs/apk/androidTest/debug/TeamsT3FeatureProbe-debug-androidTest.apk",
+    "bytes": 2495719,
+    "sha256": "053d16728f7cea9784ed247bffb5163a873ed129c96b6c311270436b6060cdf6"
+  },
+  "iosProbeExecutable": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/output/teams-t3-ios/DerivedData/Build/Products/Debug-iphonesimulator/TeamsT3Probe.app/TeamsT3Probe",
+    "bytes": 40496,
+    "sha256": "759520151a8b9c388438ac10b3c2293140bf35d172576bd8c3cd5e53d0ec6a7c"
+  },
+  "builtDesktopMain": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/electron/out/main/index.js",
+    "bytes": 1635967,
+    "sha256": "f7fdbadeab6b3581b2cb8538f713c65067979811596a19587986ecc77afc8d1a"
+  }
+}

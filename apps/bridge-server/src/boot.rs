@@ -1111,11 +1111,9 @@ pub struct BoundServer {
     /// `DesktopRuntime` carries broad handles (the tool registry among them)
     /// that nothing outside this struct has a reason to hold.
     runtime: Arc<DesktopRuntime>,
-    /// The request half of THIS connection's audio bridge — the same object
-    /// that went into `DesktopConfig::audio` and whose responder half is bound
-    /// to `connection`. Held so the pairing is visible at the composition root
-    /// rather than only implied by the order of two statements inside
-    /// [`assemble_with_provider_keys`].
+    /// The request half of this connection's audio bridge, used by the routed
+    /// audio service. Its responder half is bound to `connection`; retaining it
+    /// here keeps that pairing visible at the composition root.
     audio: Arc<AudioBridge>,
     /// The single shared media facade used by Desktop tools, UI/Remote RPC,
     /// and the legacy audio-only service projection.
@@ -1145,8 +1143,7 @@ impl BoundServer {
         self.runtime.registered_tool_names()
     }
 
-    /// This connection's `AudioService` bridge — every device operation on
-    /// this connection goes through it.
+    /// This connection's low-level `AudioService` bridge.
     #[must_use]
     pub fn audio(&self) -> &Arc<AudioBridge> {
         &self.audio
@@ -4112,6 +4109,15 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
+        // Allow this one test dispatch through the real policy gate without a
+        // provider-backed Auto-mode classifier or an interactive prompt.
+        let settings_dir = cwd.join(".lingxi");
+        std::fs::create_dir_all(&settings_dir).expect("create isolated settings directory");
+        std::fs::write(
+            settings_dir.join("settings.local.json"),
+            r#"{"permissions":{"defaultMode":"default","allow":["media_status"]}}"#,
+        )
+        .expect("configure the media_status allow rule");
         let cfg = {
             let mut __desktop_config = DesktopConfig::default();
             __desktop_config.remote_workspace = false;
@@ -4159,7 +4165,7 @@ mod tests {
             __desktop_config.managed_oauth_only = false;
             __desktop_config.anthropic_key_fd_present = false;
             __desktop_config.cwd = cwd.clone();
-            __desktop_config.lingxi_home = cwd.join(".lingxi");
+            __desktop_config.lingxi_home = settings_dir;
             __desktop_config.default_model = "claude-sonnet-4-20250514".to_string();
             // Deterministic across host machines: a dev keychain with real
             // provider keys must not trigger the connected-provider fallback.
@@ -4219,15 +4225,63 @@ mod tests {
             __desktop_config.bg_session_forker = None;
             __desktop_config.worktree_launch = None;
             __desktop_config.tmux_launch = None;
-            // `assemble` fills this with the connection's own bridge; a
-            // caller-supplied value would be a lie about which connection the
-            // engine's audio calls reach.
+            // `assemble` supplies the routed audio service for this connection.
             __desktop_config.audio = None;
             __desktop_config.inline_visualization = false;
             __desktop_config.local_apps = false;
             __desktop_config
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
+        assert!(
+            bound.runtime.has_audio(),
+            "assembly injects audio into the runtime"
+        );
+        assert!(
+            Arc::ptr_eq(
+                &bound
+                    .runtime
+                    .media_service()
+                    .expect("runtime media service"),
+                &bound.media_host.media_service(),
+            ),
+            "assembly injects the same app-scoped media facade into the runtime"
+        );
+        // Exercise the actual assembled tool path. A missing typed media
+        // asset produces a service-owned not-found result without requiring
+        // a device or a connection to answer a native request.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            Box::pin(
+                bound.runtime.orchestrator.call_tool_from_host(
+                    lingxi_core::types::ToolUseId::new(),
+                    "media_status".into(),
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                        r#"{"target":{"kind":"media","ref":"missing-fixture-asset"}}"#,
+                    )
+                    .unwrap(),
+                    None,
+                ),
+            ),
+        )
+        .await
+        .expect("assembled media dispatch must finish")
+        .expect("assembled media dispatch must complete")
+        .expect("media_status must be dispatchable");
+        match result {
+            lingxi_core::types::ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(
+                    content
+                        .to_json_string()
+                        .unwrap()
+                        .contains("media asset was not found"),
+                    "the assembled media service must report its missing asset: {content:?}"
+                );
+            }
+            other => panic!("expected a media tool result, got {other:?}"),
+        }
         assert!(bound.runtime.orchestrator.workspace_trusted().await);
         // The gate handle is reachable only when bind() ran with a real gate.
         let gate = bound.connection.gate_handle();

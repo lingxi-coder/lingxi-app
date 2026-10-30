@@ -2,17 +2,16 @@
 //! constructed.
 //!
 //! `tests/e2e_audio_test.rs` proves the `AudioBridge` works when a test wires it
-//! by hand. This file proves the PRODUCTION wiring: that `assemble` builds a
-//! bridge over the connection it is assembling, hands it to the engine through
-//! `DesktopConfig::audio`, and binds the responder half to that same connection.
+//! by hand. Here `assemble` builds the connection-scoped bridge and binds its
+//! responder; its app-scoped media host wraps that bridge and supplies the
+//! runtime's audio service and media facade.
 //!
 //! Three properties, each of which was unprovable while nothing constructed a
 //! bridge in production:
 //!
-//! 1. **It is wired at all** — an assembled runtime carries the capability, and
-//!    the tools that depend on it are in the registry the orchestrator
-//!    dispatches through.
-//! 2. **It is per-connection** — a request parked by one connection's engine can
+//! 1. **It is wired at all** — assembly supplies the runtime's audio and media
+//!    services, and the media tools are registered in the engine.
+//! 2. **It is per-connection** — a request parked by one connection's bridge can
 //!    NOT be resolved by a response arriving on a different connection, even
 //!    with the same `request_id`. The bridge and the responder are created as a
 //!    pair, per `assemble`; ids are per-bridge counters into per-bridge tables.
@@ -22,11 +21,11 @@
 //!    immediately instead of leaving the engine to wait out a 180s deadline.
 //!
 //! No orchestrator is needed: unlike the computer-access prompt, the audio
-//! traits are called directly, so the test IS the engine task. It calls
-//! `BoundServer::audio()` — the request half `assemble` built, the same object
-//! it put on `DesktopConfig::audio`. That the engine got THAT object is what
-//! property 1 asserts, through the registry: the two tools are registered only
-//! when the tool context carries the capability.
+//! bridge is called directly. The test calls
+//! `BoundServer::audio()` — the connection-scoped request half `assemble` built.
+//! The audio service and app-scoped media facade are both injected into the
+//! runtime. The media registry assertion checks the latter; the in-crate assembly
+//! test separately checks the runtime audio capability and facade identity.
 
 #![allow(clippy::unwrap_used)]
 
@@ -268,41 +267,45 @@ async fn barrier(
     }
 }
 
-/// Property 1: assembly wires the capability AND the tools that need it.
-///
-/// The registry assertion is what proves the bridge reached the ENGINE:
-/// `register_desktop_tools` registers these two only when the tool context
-/// carries the capability, so their presence means `DesktopConfig::audio`
-/// survived the whole way from `assemble` into the tool context.
+/// Property 1: assembly exposes its connection-scoped audio bridge and wires
+/// the app-scoped media facade into the engine's tool registry.
 #[tokio::test]
-async fn assemble_gives_the_engine_an_audio_capability_and_its_two_tools() {
+async fn assemble_exposes_audio_and_registers_the_media_tools() {
     let _serial = ASSEMBLE_SERIAL.lock().await;
     let (_tmp, cfg) = sandbox_config();
     assert!(
         cfg.audio.is_none(),
         "the capability must come from assembly, not from the caller's config"
     );
+    assert!(
+        cfg.media_service.is_none(),
+        "assembly supplies the media facade"
+    );
     let bound = Box::pin(boot::assemble(cfg))
         .await
         .expect("assemble must succeed");
 
-    // The registry is the assertion that matters: registration is gated on the
-    // tool context carrying the capability, so these two names are present only
-    // if the bridge `assemble` built travelled config → `build` → tool context.
+    // The media catalog is registered only when the tool context carries the
+    // app-scoped MediaService. Audio bridge routing is exercised below by the
+    // connection-isolation and disconnect tests.
     let names = bound.registered_tool_names();
-    assert!(
-        names.contains(&"voice".to_string()),
-        "the injected capability must register the voice tool; registered: {names:?}"
-    );
-    assert!(
-        names.contains(&"speech".to_string()),
-        "the injected capability must register the speech tool; registered: {names:?}"
-    );
+    for name in ["media_transcribe", "media_synthesize"] {
+        assert!(
+            names.iter().any(|registered| registered == name),
+            "the injected media service must register {name}; registered: {names:?}"
+        );
+    }
+    for legacy in ["voice", "speech"] {
+        assert!(
+            !names.iter().any(|registered| registered == legacy),
+            "legacy media tool {legacy} must not be registered"
+        );
+    }
 }
 
 /// Property 2 — the per-connection lifecycle.
 ///
-/// Two independently assembled servers. A `transcribe` on server A's engine
+/// Two independently assembled servers. A `Listen` on server A's bridge
 /// parks and pushes its `AudioRequest` to A's client. Answering it on B's socket
 /// with the SAME `request_id` must not resolve it: B has its own bridge and its
 /// own pending table, so to B that id is simply unknown (a logged no-op). The
@@ -334,7 +337,7 @@ async fn a_response_on_another_connection_cannot_resolve_this_connections_reques
     let mut ws_a = connect(endpoint_a.port()).await;
     let mut ws_b = connect(endpoint_b.port()).await;
 
-    // The engine task: one `transcribe` on A's capability.
+    // One `Listen` on A's connection-scoped bridge.
     let call: tokio::task::JoinHandle<Result<AudioOperationSuccess, AudioError>> =
         tokio::spawn(async move {
             audio_a

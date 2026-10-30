@@ -2028,8 +2028,9 @@ fn load_mock_server(root: &Path, server: &mut MockServerAccumulator) -> Result<(
     let server_prompt = root.join("_server.md");
     if server_prompt.is_file() {
         return Err(format!(
-            "{} uses an agent mock responder, which Claude Code 2.1.245 does not support yet",
-            server_prompt.display()
+            "{} uses an agent mock responder, which {} does not support yet",
+            server_prompt.display(),
+            branding::PRODUCT_NAME
         ));
     }
 
@@ -2093,8 +2094,9 @@ fn load_mock_server(root: &Path, server: &mut MockServerAccumulator) -> Result<(
         let kind = yaml_string(&frontmatter, "type").unwrap_or_else(|| "fixed".to_string());
         if kind != "fixed" {
             return Err(format!(
-                "{} uses unsupported mock responder type {kind:?}; Claude Code 2.1.245 accepts only fixed responders",
-                path.display()
+                "{} uses unsupported mock responder type {kind:?}; {} accepts only fixed responders",
+                path.display(),
+                branding::PRODUCT_NAME
             ));
         }
         let expect = yaml_value(&frontmatter, "expect")

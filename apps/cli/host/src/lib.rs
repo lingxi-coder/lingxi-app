@@ -52,7 +52,7 @@
 //! `docs/superpowers/plans/2026-05-25-m5-12-cli-binary.md` (one-shot),
 //! `docs/superpowers/plans/2026-05-25-m5-13-repl-mode.md` (REPL).
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 // Documentation debt, not a decision that docs do not matter: this crate had
 // 143 undocumented public item(s) when `missing_docs` was measured across the
 // workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW

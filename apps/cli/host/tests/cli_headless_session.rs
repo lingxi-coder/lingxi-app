@@ -151,18 +151,53 @@ mod process_io {
         }
 
         fn exited(&mut self) -> ExitStatus {
+            self.exited_with_diagnostics(|| String::new())
+        }
+
+        fn exited_with_diagnostics(
+            &mut self,
+            mut diagnostics: impl FnMut() -> String,
+        ) -> ExitStatus {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 if let Some(status) = self.child.try_wait().unwrap() {
                     return status;
                 }
-                assert!(
-                    Instant::now() < deadline,
-                    "headless process retained blocked IO after shutdown"
-                );
+                if Instant::now() >= deadline {
+                    panic!(
+                        "headless process retained blocked IO after shutdown; pid={}; {}\n{}",
+                        self.child.id(),
+                        diagnostics(),
+                        process_thread_states(self.child.id()),
+                    );
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_thread_states(pid: u32) -> String {
+        let mut threads = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/task")) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = std::fs::read_to_string(path.join("comm")).unwrap_or_default();
+                let wait = std::fs::read_to_string(path.join("wchan")).unwrap_or_default();
+                threads.push(format!(
+                    "{}: {} waiting in {}",
+                    entry.file_name().to_string_lossy(),
+                    name.trim(),
+                    wait.trim(),
+                ));
+            }
+        }
+        format!("Linux thread states: {}", threads.join(", "))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn process_thread_states(_pid: u32) -> String {
+        "thread wait channels unavailable on this platform".into()
     }
 
     impl Drop for HeadlessChild {
@@ -253,7 +288,15 @@ mod process_io {
             _home: home,
             output: Vec::new(),
         };
-        let status = process.exited();
+        reader.set_nonblocking(true).unwrap();
+        let status = process.exited_with_diagnostics(|| {
+            let mut captured = Vec::new();
+            let _ = reader.read_to_end(&mut captured);
+            format!(
+                "stdout/stderr so far: {:?}",
+                String::from_utf8_lossy(&captured)
+            )
+        });
         assert!(status.success());
         let restored = rustix::fs::fcntl_getfl(&output).unwrap();
         // Darwin exposes FWASWRITTEN after the child writes to this shared
@@ -265,6 +308,7 @@ mod process_io {
             (restored & !was_written, flags & !was_written)
         };
         assert_eq!(restored, flags);
+        reader.set_nonblocking(false).unwrap();
         reader
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -279,6 +323,7 @@ mod process_io {
         let mut input = tempfile::NamedTempFile::new().unwrap();
         input.write_all(b"/clear\n").unwrap();
         let output = tempfile::NamedTempFile::new().unwrap();
+        let errors = tempfile::NamedTempFile::new().unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_lingxi-cli"))
             .current_dir(home.path())
             .env("LINGXI_CONFIG_DIR", home.path())
@@ -286,7 +331,7 @@ mod process_io {
             .args(["--print", "--model", "anthropic/claude-sonnet-4-5"])
             .stdin(Stdio::from(input.reopen().unwrap()))
             .stdout(Stdio::from(output.reopen().unwrap()))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(errors.reopen().unwrap()))
             .spawn()
             .unwrap();
         let mut process = HeadlessChild {
@@ -294,7 +339,13 @@ mod process_io {
             _home: home,
             output: Vec::new(),
         };
-        assert!(process.exited().success());
+        assert!(process
+            .exited_with_diagnostics(|| format!(
+                "stdout so far: {:?}; stderr so far: {:?}",
+                std::fs::read_to_string(output.path()),
+                std::fs::read_to_string(errors.path()),
+            ))
+            .success());
         assert!(std::fs::read_to_string(output.path())
             .unwrap()
             .starts_with("Conversation cleared."));

@@ -6,8 +6,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,8 +15,9 @@ use cost::{
     CostCalculator, ModelRef as CostModelRef, PricingCatalog, ProviderId as CostProviderId,
 };
 use harness_runtime::desktop::app_invocation::{
-    AppChatCleanupReceipt, AppChatProfile, AppInvocationIdentity, AppInvocationProfile, DEFAULT_MAX_TURNS,
-    DEFAULT_TIMEOUT_MS, MAX_MAX_TURNS, MAX_TIMEOUT_MS, checkpoint_app_chat, prepare_app_config, validate_app_chat_tools,
+    checkpoint_app_chat, prepare_app_config, validate_app_chat_tools, AppChatCleanupReceipt,
+    AppChatProfile, AppInvocationIdentity, AppInvocationProfile, DEFAULT_MAX_TURNS,
+    DEFAULT_TIMEOUT_MS, MAX_MAX_TURNS, MAX_TIMEOUT_MS,
 };
 use harness_runtime::desktop::{
     DesktopConfig, DesktopRuntime, DesktopSessionShutdownReport, SharedCredentialStack,
@@ -26,9 +27,9 @@ use lingxi_core::host::{CostSnapshot, OrchestratorHandle, OutputStream};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use tool_api::ask_user_question::AskUserQuestionExchange;
 use tool_api::{SessionToolGrantLease, SessionToolPolicy};
@@ -385,8 +386,12 @@ fn runtime_build_error_code(error: harness_runtime::desktop::BuildError) -> &'st
     // failure without formatting it across the application boundary.
     match error {
         harness_runtime::desktop::BuildError::StructuredOutputSchema(_) => "invalid_schema",
-        harness_runtime::desktop::BuildError::AppInvocation(harness_runtime::desktop::app_invocation::AppInvocationError::ChatUnsupportedTool) => "chat_tool_unsupported",
-        harness_runtime::desktop::BuildError::AppInvocation(harness_runtime::desktop::app_invocation::AppInvocationError::ChatTranscriptUnavailable) => "chat_transcript_unavailable",
+        harness_runtime::desktop::BuildError::AppInvocation(
+            harness_runtime::desktop::app_invocation::AppInvocationError::ChatUnsupportedTool,
+        ) => "chat_tool_unsupported",
+        harness_runtime::desktop::BuildError::AppInvocation(
+            harness_runtime::desktop::app_invocation::AppInvocationError::ChatTranscriptUnavailable,
+        ) => "chat_transcript_unavailable",
         _ => "runtime_initialization_failed",
     }
 }
@@ -520,7 +525,9 @@ fn validate_agent_input(input: &local_app::v2::agent::Input) -> Result<(), &'sta
         match value {
             Value::Object(fields) => fields.iter().all(|(key, value)| {
                 if matches!(key.as_str(), "$ref" | "$dynamicRef" | "$recursiveRef") {
-                    value.as_str().is_some_and(|reference| reference.starts_with('#'))
+                    value
+                        .as_str()
+                        .is_some_and(|reference| reference.starts_with('#'))
                 } else {
                     has_only_local_schema_references(value)
                 }
@@ -1390,11 +1397,20 @@ async fn execute_runtime(
     if schema_required && result.as_ref().is_some_and(Value::is_null) {
         return Err("structured_output_not_representable");
     }
-    let message_id = output.assistant_message_id.lock().await.clone().ok_or("assistant_message_identity_missing")?;
+    let message_id = output
+        .assistant_message_id
+        .lock()
+        .await
+        .clone()
+        .ok_or("assistant_message_identity_missing")?;
     let text = output.last_assistant_text.lock().await.clone();
     let mut terminal = json!({"type":"finished","status":"succeeded","text":text,"messageId":message_id,"usage":usage});
-    if let Some(result) = result { terminal["result"] = result; }
-    if let Some(chat) = chat { terminal["chatId"] = json!(chat.chat_id); }
+    if let Some(result) = result {
+        terminal["result"] = result;
+    }
+    if let Some(chat) = chat {
+        terminal["chatId"] = json!(chat.chat_id);
+    }
     if serde_json::to_vec(&terminal)
         .map_err(|_| "invalid_result")?
         .len()
@@ -1503,14 +1519,13 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
                 serde_json::to_value(identity).map_err(|_| "catalog_serialization_failed")?;
             row["configIndex"] = json!(config_index);
             row["label"] = json!(format!("{} / {}", config.name, tool.tool_name));
-            row["description"] = json!(
-                tool.description
-                    .string_at("")
-                    .unwrap_or_default()
-                    .chars()
-                    .take(1024)
-                    .collect::<String>()
-            );
+            row["description"] = json!(tool
+                .description
+                .string_at("")
+                .unwrap_or_default()
+                .chars()
+                .take(1024)
+                .collect::<String>());
             mcp_tools.push(row);
         }
         mcp_configs.push(config.clone());
@@ -1713,8 +1728,12 @@ mod tests {
         let state = interaction();
         state.tool_cleanup_failed.store(true, Ordering::Release);
         let result = complete_runtime_execution(Ok("candidate"), &state, async {
-            DesktopSessionShutdownReport { complete: true, ..Default::default() }
-        }).await;
+            DesktopSessionShutdownReport {
+                complete: true,
+                ..Default::default()
+            }
+        })
+        .await;
         assert_eq!(result, Err("tool_cleanup_incomplete"));
         assert_eq!(state.cleanup_status(), "unconfirmed");
     }
@@ -1786,13 +1805,17 @@ mod tests {
         use harness_runtime::desktop::app_invocation::AppInvocationError;
         use harness_runtime::desktop::BuildError;
         assert_eq!(
-            runtime_build_error_code(BuildError::AppInvocation(AppInvocationError::ChatUnsupportedTool)),
+            runtime_build_error_code(BuildError::AppInvocation(
+                AppInvocationError::ChatUnsupportedTool
+            )),
             "chat_tool_unsupported",
         );
         assert_eq!(
-            runtime_build_error_code(BuildError::AppInvocation(AppInvocationError::UnsupportedTool(
-                "PRIVATE_TOOL_SECRET /Users/private/tool.json".into(),
-            ))),
+            runtime_build_error_code(BuildError::AppInvocation(
+                AppInvocationError::UnsupportedTool(
+                    "PRIVATE_TOOL_SECRET /Users/private/tool.json".into(),
+                )
+            )),
             "runtime_initialization_failed",
         );
     }
@@ -1907,16 +1930,12 @@ mod tests {
             read_frame(&mut data, 4).await.unwrap(),
             Some(b"next".to_vec())
         );
-        assert!(
-            read_frame(&mut std::io::Cursor::new(b"12345\n"), 4)
-                .await
-                .is_err()
-        );
-        assert!(
-            read_frame(&mut std::io::Cursor::new(b"1234"), 4)
-                .await
-                .is_err()
-        );
+        assert!(read_frame(&mut std::io::Cursor::new(b"12345\n"), 4)
+            .await
+            .is_err());
+        assert!(read_frame(&mut std::io::Cursor::new(b"1234"), 4)
+            .await
+            .is_err());
     }
     fn input() -> local_app::v2::agent::Input {
         local_app::v2::agent::Input {
@@ -2128,11 +2147,14 @@ mod tests {
         assert!(validate_agent_input(&value).is_err());
         for reference in ["$ref", "$dynamicRef", "$recursiveRef"] {
             let mut value = input();
-            value.output_schema = Some(json!({"properties":{"item":{reference:"https://example.invalid/schema"}}}));
+            value.output_schema =
+                Some(json!({"properties":{"item":{reference:"https://example.invalid/schema"}}}));
             assert_eq!(validate_agent_input(&value), Err("invalid_schema"));
         }
         let mut value = input();
-        value.output_schema = Some(json!({"definitions":{"item":{"type":"string"}},"properties":{"item":{"$ref":"#/definitions/item"}}}));
+        value.output_schema = Some(
+            json!({"definitions":{"item":{"type":"string"}},"properties":{"item":{"$ref":"#/definitions/item"}}}),
+        );
         assert!(validate_agent_input(&value).is_ok());
     }
     #[tokio::test]
@@ -2190,11 +2212,19 @@ mod tests {
             completed_model_turns: AtomicU32::new(0),
         };
         let message_id = MessageId::new();
-        output.emit_text(&Utf16JsonProjection::plain(json!("committed answer"))).await;
+        output
+            .emit_text(&Utf16JsonProjection::plain(json!("committed answer")))
+            .await;
         output.emit_assistant_message_identity(&message_id).await;
         let expected_id = message_id.to_string();
-        assert_eq!(output.assistant_message_id.lock().await.as_deref(), Some(expected_id.as_str()));
-        assert_eq!(&*output.last_assistant_text.lock().await, "committed answer");
+        assert_eq!(
+            output.assistant_message_id.lock().await.as_deref(),
+            Some(expected_id.as_str())
+        );
+        assert_eq!(
+            &*output.last_assistant_text.lock().await,
+            "committed answer"
+        );
     }
     #[test]
     fn credentials_fail_without_echoing_input() {
@@ -2223,24 +2253,18 @@ mod tests {
     }
     #[test]
     fn control_protocol_rejects_ambient_chat_and_extra_authority() {
-        assert!(
-            serde_json::from_value::<Control>(
-                json!({"type":"permission_response","requestId":1,"approved":true})
-            )
-            .is_ok()
-        );
-        assert!(
-            serde_json::from_value::<Control>(
-                json!({"type":"permission_response","requestId":1,"approved":true,"always":true})
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<Control>(
-                json!({"type":"send_prompt","sessionId":"another-chat"})
-            )
-            .is_err()
-        );
+        assert!(serde_json::from_value::<Control>(
+            json!({"type":"permission_response","requestId":1,"approved":true})
+        )
+        .is_ok());
+        assert!(serde_json::from_value::<Control>(
+            json!({"type":"permission_response","requestId":1,"approved":true,"always":true})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<Control>(
+            json!({"type":"send_prompt","sessionId":"another-chat"})
+        )
+        .is_err());
     }
 
     #[test]
@@ -2259,7 +2283,8 @@ mod tests {
             "../../electron/vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json"
         ))
         .unwrap();
-        let normalized = local_app::v2::agent::protocol::normalize_run_input(&official, &[]).unwrap();
+        let normalized =
+            local_app::v2::agent::protocol::normalize_run_input(&official, &[]).unwrap();
         let mut private_input = normalized.input;
         private_input.tools.clear();
         private_input.skills.clear();
@@ -2281,7 +2306,10 @@ mod tests {
         assert_eq!(request.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert!(validate_start(&request).is_ok());
         assert_eq!(request.input.request_id, "run-fixture-1");
-        assert_eq!(request.input.protocol_thread_id.as_deref(), Some("thread-fixture-1"));
+        assert_eq!(
+            request.input.protocol_thread_id.as_deref(),
+            Some("thread-fixture-1")
+        );
         assert_eq!(request.input.content_parts.len(), 2);
         let content_parts = serde_json::to_value(&request.input).unwrap();
         assert_eq!(content_parts["contentParts"][1]["kind"], "attachment");

@@ -735,7 +735,7 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
 /// Resolve a session UUID to its exact, regular transcript. The current cwd's
 /// standard path wins; otherwise scan the direct project buckets so explicit
 /// resume remains stable when invoked from another cwd/worktree.
-fn locate_session_transcript(
+pub(crate) fn locate_session_transcript(
     config_home: &Path,
     cwd: &str,
     session_id: &str,

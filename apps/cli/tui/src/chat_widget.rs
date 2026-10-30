@@ -989,7 +989,8 @@ impl ChatWidget {
                         area.width,
                         crate::terminal::hyperlinks_supported(),
                         live_cwd.as_deref().or(snapshot_cwd),
-                    ).len(),
+                    )
+                    .len(),
                 ),
             )
             .map(str::to_owned)
@@ -1176,15 +1177,31 @@ impl ChatWidget {
     /// handling (active view, completion, vim, composer), execute the
     /// returned intent, then surface the next queued permission if the key
     /// resolved the open prompt.
-    pub fn restore_link_draft(&mut self, text: &str) { self.bottom_pane.restore_composer_text(text); }
-    pub fn anchor_message(&mut self, uuid: String) { self.message_anchor = Some(uuid); self.history_offset = 0; self.brief_transcript = false; }
+    pub fn restore_link_draft(&mut self, text: &str) {
+        self.bottom_pane.restore_composer_text(text);
+    }
+    pub fn anchor_message(&mut self, uuid: String) {
+        self.message_anchor = Some(uuid);
+        self.history_offset = 0;
+        self.brief_transcript = false;
+    }
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatOutcome {
         if self.message_anchor.is_some() {
             match key.code {
-                crossterm::event::KeyCode::PageUp => { self.history_offset -= 10; return ChatOutcome::Continue; }
-                crossterm::event::KeyCode::PageDown => { self.history_offset += 10; return ChatOutcome::Continue; }
-                crossterm::event::KeyCode::End => { self.message_anchor = None; self.history_offset = 0; return ChatOutcome::Continue; }
-                _ => ()
+                crossterm::event::KeyCode::PageUp => {
+                    self.history_offset -= 10;
+                    return ChatOutcome::Continue;
+                }
+                crossterm::event::KeyCode::PageDown => {
+                    self.history_offset += 10;
+                    return ChatOutcome::Continue;
+                }
+                crossterm::event::KeyCode::End => {
+                    self.message_anchor = None;
+                    self.history_offset = 0;
+                    return ChatOutcome::Continue;
+                }
+                _ => (),
             }
         }
         if self.session_clear_pending {
@@ -3102,11 +3119,24 @@ impl ChatWidget {
         let hyperlink_cwd = live_hyperlink_cwd.as_deref().or(snapshot_hyperlink_cwd);
         let history =
             self.fullscreen_history_lines(history_area.width, hyperlinks_enabled, hyperlink_cwd);
-        let skip = self.anchored_history_start(
-            history_area.width, hyperlinks_enabled, hyperlink_cwd, history.len(),
-        )
-            .unwrap_or_else(|| history.len().saturating_sub(usize::from(history_area.height)));
-        for (row, line) in history.iter().skip(skip).take(usize::from(history_area.height)).enumerate() {
+        let skip = self
+            .anchored_history_start(
+                history_area.width,
+                hyperlinks_enabled,
+                hyperlink_cwd,
+                history.len(),
+            )
+            .unwrap_or_else(|| {
+                history
+                    .len()
+                    .saturating_sub(usize::from(history_area.height))
+            });
+        for (row, line) in history
+            .iter()
+            .skip(skip)
+            .take(usize::from(history_area.height))
+            .enumerate()
+        {
             let row_area = Rect::new(
                 history_area.x,
                 history_area.y + u16::try_from(row).unwrap_or(u16::MAX),
@@ -3142,12 +3172,22 @@ impl ChatWidget {
         cwd: Option<&std::path::Path>,
         history_len: usize,
     ) -> Option<usize> {
-        self.message_anchor.as_ref()
-            .and_then(|uuid| self.transcript.message_line_offset(
-                uuid, width, &self.theme, hyperlinks_enabled, cwd,
-            ))
-            .map(|offset| offset.saturating_add_signed(self.history_offset)
-                .min(history_len.saturating_sub(1)))
+        self.message_anchor
+            .as_ref()
+            .and_then(|uuid| {
+                self.transcript.message_line_offset(
+                    uuid,
+                    width,
+                    &self.theme,
+                    hyperlinks_enabled,
+                    cwd,
+                )
+            })
+            .map(|offset| {
+                offset
+                    .saturating_add_signed(self.history_offset)
+                    .min(history_len.saturating_sub(1))
+            })
     }
 
     fn fullscreen_history_lines(
@@ -5578,7 +5618,10 @@ impl ChatWidget {
             return self.show_system_text("Compaction already in progress", true);
         }
         if self.current_turn.is_some()
-            || self.pending_slash_dispatches.iter().any(PendingSlashDispatch::is_pending)
+            || self
+                .pending_slash_dispatches
+                .iter()
+                .any(PendingSlashDispatch::is_pending)
         {
             self.bottom_pane.set_command_alert(
                 "Compact is disabled while a chat is in progress".into(),
@@ -9438,7 +9481,10 @@ mod tests {
             ChatOutcome::Submit(_, _, _, _)
         ));
         let transcript_len = cells(&widget).len();
-        assert!(matches!(widget.handle_slash("/compact preserve decisions".into()), Some(ChatOutcome::Continue)));
+        assert!(matches!(
+            widget.handle_slash("/compact preserve decisions".into()),
+            Some(ChatOutcome::Continue)
+        ));
         assert_eq!(cells(&widget).len(), transcript_len);
         assert!(!widget.current_turn.as_ref().unwrap().is_cancelled());
         assert!(widget.queued_compact.is_none());

@@ -1850,11 +1850,15 @@ fn validate_plugin_manifest_fields(
         }
         let message = match field.as_str() {
             "source" | "strict" => format!(
-                "Field '{field}' belongs in the marketplace entry (marketplace.json), not plugin.json. It's harmless here but unused — Claude Code ignores it at load time."
+                "Field '{field}' belongs in the marketplace entry (marketplace.json), not plugin.json. It's harmless here but unused — {} ignores it at load time.",
+                branding::PRODUCT_NAME
             ),
             "capabilities" => "'capabilities' is no longer read: what a hooks module hooks and calls on $ is read from its source and listed under its hooks.json below. Delete the field.".to_string(),
             "experimental" => unreachable!("experimental is in KNOWN"),
-            _ => format!("Unknown field '{field}'. Claude Code ignores it at load time."),
+            _ => format!(
+                "Unknown field '{field}'. {} ignores it at load time.",
+                branding::PRODUCT_NAME
+            ),
         };
         warnings.push(message);
     }
@@ -5311,6 +5315,33 @@ mod validate_tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn manifest_warnings_identify_the_product_ignoring_fields() {
+        let manifest = json!({
+            "name": "demo",
+            "version": "1.0.0",
+            "description": "demo",
+            "author": {"name": "author"},
+            "source": ".",
+            "unrecognized": true
+        });
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+        validate_plugin_manifest_fields(&manifest, &mut errors, &mut warnings);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(warnings.contains(&format!(
+            "Field 'source' belongs in the marketplace entry (marketplace.json), not plugin.json. It's harmless here but unused — {} ignores it at load time.",
+            branding::PRODUCT_NAME
+        )), "{warnings:?}");
+        assert!(
+            warnings.contains(&format!(
+                "Unknown field 'unrecognized'. {} ignores it at load time.",
+                branding::PRODUCT_NAME
+            )),
+            "{warnings:?}"
+        );
+    }
 
     #[tokio::test]
     async fn deep_validation_aggregates_paths_and_component_frontmatter() {

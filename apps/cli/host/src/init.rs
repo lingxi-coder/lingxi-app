@@ -53,6 +53,15 @@ pub struct Runtime {
     pub(crate) background_forker: Option<Arc<crate::bg_session_forker::CliBgSessionForker>>,
 }
 
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // Allocation keepers are not foreground-session launch authority.
+        self.desktop
+            .orchestrator
+            .close_background_producer_admission();
+    }
+}
+
 impl std::ops::Deref for Runtime {
     type Target = DesktopRuntime;
 
@@ -2380,14 +2389,37 @@ mod tests {
                 forker.launch_identity().unwrap().1.resolved_permission_mode,
                 Some(permission::PermissionMode::Default)
             );
+            // A closed foreground must reject launches even when an unrelated
+            // consumer deliberately keeps the allocation and live gate alive.
+            let keeper = runtime.orchestrator.clone();
             let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
             assert!(shutdown.complete, "{:?}", shutdown.errors);
-            drop(runtime);
-            tokio::task::yield_now().await;
+            assert_eq!(keeper.permission_mode().as_deref(), Some("default"));
             assert!(
                 forker.launch_identity().is_err(),
-                "expired runtime must not restore boot privileges"
+                "shutdown revokes launch authority before runtime drop"
             );
+            use lingxi_core::host::bg_session_forker::{BgSessionForker, BgSessionSnapshot};
+            let conversation = BgSessionSnapshot::default();
+            let prompt = "".into();
+            assert!(forker
+                .fork_to_background(&conversation, None, &prompt, "model")
+                .await
+                .is_err());
+            assert!(forker
+                .background_conversation(&conversation, None, &prompt, "model", &Default::default())
+                .await
+                .is_err());
+            assert!(forker
+                .resume_to_background(&uuid::Uuid::nil().to_string())
+                .await
+                .is_err());
+            drop(runtime);
+            assert!(
+                forker.launch_identity().is_err(),
+                "expired foreground must not retain launch authority"
+            );
+            drop(keeper);
         });
     }
 

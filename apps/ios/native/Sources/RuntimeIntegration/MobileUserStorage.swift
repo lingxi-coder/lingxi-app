@@ -22,6 +22,33 @@ enum MobileUserStorage {
         return paths
     }
 
+    /// Resolves a host-owned cron manifest; generated runs remain outside the Project list.
+    static func scheduledWorkspace(sessionID: String?, managedRoot: String = LXISHDefaultWorkspace.managedRootPath()) throws -> String {
+        let paths = directories(managedRoot: managedRoot)
+        guard let sessionID, !sessionID.isEmpty else { return paths.scheduledCwd }
+        let id = sessionID.hasPrefix("sess:") ? String(sessionID.dropFirst(5)) : sessionID
+        guard UUID(uuidString: id)?.uuidString.lowercased() == id else { throw ProjectRepositoryError.escapedWorkspace }
+        let brandHome = URL(fileURLWithPath: paths.configHome, isDirectory: true)
+        let manifest = brandHome.appendingPathComponent("automations/sessions/\(id).json")
+        guard FileManager.default.fileExists(atPath: manifest.path) else { return paths.scheduledCwd }
+        guard try manifest.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { throw ProjectRepositoryError.escapedWorkspace }
+        struct Record: Decodable { let version: Int; let workspace: String }
+        let record = try JSONDecoder().decode(Record.self, from: Data(contentsOf: manifest))
+        let parts = record.workspace.split(separator: "/", omittingEmptySubsequences: false)
+        guard record.version == 1, parts.count == 3, parts[0] == "workspaces",
+              parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") }) else { throw ProjectRepositoryError.escapedWorkspace }
+        var workspace = brandHome
+        for part in parts {
+            workspace.appendPathComponent(String(part), isDirectory: true)
+            let metadata = try workspace.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard metadata.isDirectory == true, metadata.isSymbolicLink != true else { throw ProjectRepositoryError.escapedWorkspace }
+        }
+        let canonical = workspace.resolvingSymlinksInPath().standardizedFileURL
+        let root = brandHome.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent("workspaces", isDirectory: true)
+        guard canonical.path.hasPrefix(root.path + "/") else { throw ProjectRepositoryError.escapedWorkspace }
+        return canonical.path
+    }
+
     static var projectsURL: URL {
         URL(fileURLWithPath: directories().projects, isDirectory: true)
     }

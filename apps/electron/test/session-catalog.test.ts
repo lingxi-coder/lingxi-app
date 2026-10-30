@@ -24,23 +24,23 @@ function fakeChild(stdoutBody: string) {
 }
 
 test('product paths use native product discovery without merging workspace settings', async () => {
-  const configHome = join(tmpdir(), '.another-product');
+  const brandHome = join(tmpdir(), '.another-product');
   let flags: readonly string[] | undefined;
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
     spawnProcess: ((_bin: string, args: readonly string[]) => {
       flags = args;
-      return fakeChild(JSON.stringify({ version: 1, config_home: configHome, app_projects_root: join(configHome, '.apps') }));
+      return fakeChild(JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') }));
     }) as any });
-  assert.deepEqual(await catalog.productPaths(), { configHome, appProjectsRoot: join(configHome, '.apps') });
+  assert.deepEqual(await catalog.productPaths(), { brandHome, appProjectsRoot: join(brandHome, '.apps') });
   assert.deepEqual(flags, ['--product-paths-json']);
 });
 
 test('product directory discovery rejects malformed and nonabsolute native paths', async () => {
-  const configHome = join(tmpdir(), '.another-product');
-  const valid = { version: 1, config_home: configHome, app_projects_root: join(configHome, '.apps') };
+  const brandHome = join(tmpdir(), '.another-product');
+  const valid = { version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') };
   for (const response of ['{', JSON.stringify({ ...valid, version: 2 }),
-    JSON.stringify({ ...valid, config_home: 'relative' }), JSON.stringify({ ...valid, app_projects_root: 'relative' }),
-    JSON.stringify({ ...valid, config_home: configHome + '\0' })]) {
+    JSON.stringify({ ...valid, brand_home: 'relative' }), JSON.stringify({ ...valid, app_projects_root: 'relative' }),
+    JSON.stringify({ ...valid, brand_home: brandHome + '\0' })]) {
     const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
       spawnProcess: (() => fakeChild(response)) as any });
     await assert.rejects(catalog.productPaths(), /invalid product paths response/);

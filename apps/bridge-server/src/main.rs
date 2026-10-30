@@ -214,7 +214,7 @@ async fn main() -> anyhow::Result<()> {
     let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let bridge_dir = match &args.bridge_dir {
         Some(path) => path.clone(),
-        None => match boot::lingxi_config_home() {
+        None => match boot::brand_home() {
             Some(home) => home.join("bridge"),
             None => {
                 endpoint.shutdown().await;

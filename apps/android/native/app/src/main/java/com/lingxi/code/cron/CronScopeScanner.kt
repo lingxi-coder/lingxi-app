@@ -54,15 +54,6 @@ internal class CronScopeScanner(context: Context) {
 
     fun find(scopeId: String): CronScope? = scan().firstOrNull { it.scopeId == scopeId }
 
-    fun activeScopeId(scopes: List<CronScope> = scan()): String {
-        val index = File(projectsRoot, "index.json")
-        val active = runCatching {
-            val json = JSONObject(index.readText(Charsets.UTF_8))
-            if (json.isNull("activeProjectId")) null else json.getString("activeProjectId")
-        }.getOrNull()
-        return active?.takeIf { id -> scopes.any { it.scopeId == id } } ?: GLOBAL_CRON_SCOPE_ID
-    }
-
     private fun isLowercaseUuid(value: String): Boolean =
         value.length == 36 &&
             value == value.lowercase() &&

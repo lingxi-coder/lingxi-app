@@ -831,10 +831,11 @@ fn without_settings_credentials(
     })
 }
 
-/// User config-home: `$LINGXI_CONFIG_DIR` when set (including an empty value),
-/// else `~/.lingxi`. Shared by desktop config and lockfile resolution.
+/// Brand data home: the branding crate's configuration-directory override when
+/// set (including an empty value), otherwise the branded hidden home directory.
+/// Shared by configuration, sessions, apps, and scheduled workspaces.
 #[must_use]
-pub fn lingxi_config_home() -> Option<PathBuf> {
+pub fn brand_home() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir));
     }
@@ -861,7 +862,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let lingxi_home = args
         .session_config_home
         .clone()
-        .or_else(lingxi_config_home)
+        .or_else(brand_home)
         .unwrap_or_else(|| PathBuf::from("/dev/null"));
     let project_mcp_path = cwd.join(".mcp.json");
     // User/global-scope MCP servers live INSIDE `~/.lingxi.json` (top-level
@@ -1585,20 +1586,20 @@ fn initialize_live_session(
 
 /// Resolve product directories independently of settings, policy, and credentials.
 pub fn product_paths_json(cwd: &Path) -> Result<String, String> {
-    let config_home = lingxi_config_home().ok_or("product paths require a config home")?;
-    product_paths_json_from(cwd, &config_home)
+    let brand_home = brand_home().ok_or("product paths require a brand home")?;
+    product_paths_json_from(cwd, &brand_home)
 }
 
-fn product_paths_json_from(cwd: &Path, config_home: &Path) -> Result<String, String> {
-    let config_home = if config_home.is_absolute() {
-        config_home.to_path_buf()
+fn product_paths_json_from(cwd: &Path, brand_home: &Path) -> Result<String, String> {
+    let brand_home = if brand_home.is_absolute() {
+        brand_home.to_path_buf()
     } else {
-        cwd.join(config_home)
+        cwd.join(brand_home)
     };
     serde_json::to_string(&serde_json::json!({
         "version": 1,
-        "app_projects_root": config_home.join(".apps"),
-        "config_home": config_home,
+        "app_projects_root": brand_home.join(".apps"),
+        "brand_home": brand_home,
     }))
     .map_err(|_| "failed to encode product paths".into())
 }
@@ -1606,7 +1607,7 @@ fn product_paths_json_from(cwd: &Path, config_home: &Path) -> Result<String, Str
 /// Read settings-owned environment values before the parent spawns a runtime.
 /// This path never resolves providers, credentials, hooks, MCP, or tools.
 pub async fn workspace_environment_json(cwd: &Path) -> Result<String, String> {
-    let lingxi_home = lingxi_config_home().ok_or("workspace environment requires a config home")?;
+    let lingxi_home = brand_home().ok_or("workspace environment requires a config home")?;
     let mut cfg = DesktopConfig::default();
     cfg.cwd = cwd.to_path_buf();
     cfg.lingxi_home = lingxi_home.clone();
@@ -1685,7 +1686,7 @@ fn workspace_environment_json_from(
 /// resolves one row before every session it opens.
 pub async fn list_sessions_json(cwd: &Path, session_id: Option<&str>) -> Result<String, String> {
     let lingxi_home =
-        lingxi_config_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
+        brand_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
     list_sessions_json_from(cwd, &lingxi_home, session_id).await
 }
 
@@ -1696,7 +1697,7 @@ pub async fn list_sessions_json_in_scope(
     scope: session::jsonl::SessionDiscoveryScope,
 ) -> Result<String, String> {
     let lingxi_home =
-        lingxi_config_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
+        brand_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
     list_sessions_json_from_in_scope(cwd, &lingxi_home, session_id, scope).await
 }
 
@@ -2904,7 +2905,7 @@ mod tests {
             serde_json::from_str(&product_paths_json_from(root.path(), &home).unwrap()).unwrap();
         assert_eq!(
             paths,
-            serde_json::json!({"version": 1, "config_home": home, "app_projects_root": home.join(".apps")})
+            serde_json::json!({"version": 1, "brand_home": home, "app_projects_root": home.join(".apps")})
         );
         assert_eq!(
             std::fs::read_to_string(settings).unwrap(),
@@ -2921,7 +2922,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            paths["config_home"],
+            paths["brand_home"],
             serde_json::json!(root.path().join("custom-product"))
         );
         assert_eq!(

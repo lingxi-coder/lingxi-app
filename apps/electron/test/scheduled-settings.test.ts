@@ -80,3 +80,27 @@ test('unregistered arbitrary workspace cannot become active or archived', async 
   assert.throws(() => settings.setSessionArchived(ref, true), /project/);
   assert.equal(settings.isTrustedWorkspace(ref.projectPath), false);
 });
+
+
+test('generated scheduled workspaces keep session metadata across restart without becoming projects', async (t) => {
+  const path = await directory(t);
+  const settings = new SettingsStore(path);
+  const projectPath = join(path, '.other-brand', 'workspaces', '2026-10-30', 'task');
+  const ref = { projectPath, sessionId };
+  const memory = join(path, '.other-brand', 'automations', 'task', 'memory.md');
+  settings.registerScheduledSession(ref, 'task-1', memory);
+  settings.activateProject(projectPath);
+  settings.setActiveSession(ref);
+  settings.setSessionPinned({ ...ref, title: 'Generated run', pinnedAt: '2026-10-30T10:00:00Z' }, true);
+  settings.relocateSession(ref, projectPath);
+  const reopened = new SettingsStore(path);
+  assert.deepEqual(reopened.getPublic().projects, []);
+  assert.deepEqual(reopened.getPublic().activeSession, ref);
+  assert.equal(reopened.getPublic().pinnedSessions.length, 1);
+  assert.equal(reopened.isTrustedWorkspace(projectPath), true);
+  assert.deepEqual(reopened.scheduledSessionWorkspace(sessionId), { projectPath, taskId: 'task-1', memory });
+  assert.deepEqual(reopened.scheduledSessionRefs(), [ref]);
+  assert.equal(reopened.isTrustedWorkspace(join(path, '.other-brand', 'unregistered')), false);
+  reopened.setSessionArchived(ref, true);
+  assert.equal(new SettingsStore(path).isSessionArchived(ref), true);
+});

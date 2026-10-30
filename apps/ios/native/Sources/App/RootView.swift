@@ -1367,7 +1367,8 @@ struct RootView: View {
     private func makeSource(
         scope: ConversationScope,
         snapshot: ProviderLaunchSnapshot,
-        mode: SessionMode
+        mode: SessionMode,
+        sessionID: String? = nil
     ) throws -> any ConversationSource {
         let projectCwd: String?
         let project: ProjectSnapshot?
@@ -1388,7 +1389,7 @@ struct RootView: View {
             projectCwd = project?.workspace.hostURL.path
         case .scheduled:
             project = nil
-            projectCwd = MobileUserStorage.directories().scheduledCwd
+            projectCwd = try MobileUserStorage.scheduledWorkspace(sessionID: sessionID)
         }
         let runtime: TerminalRuntimeConfig? = TerminalRuntimeDescriptor.make(
             appSandboxRoot: appSandboxRoot,
@@ -1423,7 +1424,7 @@ struct RootView: View {
         persistConversationScope()
         let old = source
         try requireSourceReplacementAllowed(old)
-        let replacement = try makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode)
+        let replacement = try makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode, sessionID: activeSession)
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: replacement)
         #endif
@@ -1594,7 +1595,7 @@ struct RootView: View {
         // Pushed pages (scheduled tasks, projects) sit above the chat; picking a
         // conversation must land on it.
         navigation.path.removeAll()
-        if scope == activeScope && targetMode == activeMode {
+        if scope == activeScope && targetMode == activeMode && !(scope == .scheduled && resumeSessionID != nil && resumeSessionID != activeSession) {
             navigation.closeSidebar()
             if let resumeSessionID {
                 pendingSessionRestoreID = resumeSessionID
@@ -1636,7 +1637,8 @@ struct RootView: View {
                 let replacement = try makeSource(
                     scope: scope,
                     snapshot: providerRepository.makeLaunchSnapshot(),
-                    mode: targetMode
+                    mode: targetMode,
+                    sessionID: startNew ? nil : resumeSessionID ?? restoredSessionID(scope: scope, mode: targetMode)
                 )
                 #if canImport(harness_runtimeFFI)
                     installExternalEventHandler(on: replacement)

@@ -433,12 +433,10 @@ fun RootScreen(
         return scope.takeIf { it !is ConversationScope.Project || projectSnapshotForScope(it) != null }
     }
 
-    fun workspaceForScope(scope: ConversationScope) = when (scope) {
+    fun workspaceForScope(scope: ConversationScope, sessionId: String? = null) = when (scope) {
         ConversationScope.Global -> null
-        ConversationScope.Scheduled -> com.lingxi.code.project.ProjectWorkspace(
+        ConversationScope.Scheduled -> com.lingxi.code.project.MobileUserStorage.scheduledWorkspace(appContext, sessionId).copy(
             projectId = "b51bca68-b85f-4caa-8881-07dd33eba24d",
-            hostPath = com.lingxi.code.cron.CronScope.global(appContext).workspacePath,
-            guestPath = com.lingxi.code.project.MobileUserStorage.directories(appContext).scheduledGuestCwd,
         )
         is ConversationScope.Project -> projectSnapshotForScope(scope)?.workspace
     }
@@ -910,7 +908,7 @@ fun RootScreen(
                     context = appContext,
                     projectWorkspace = when (engineScope) {
                         ConversationScope.Global -> null
-                        ConversationScope.Scheduled -> workspaceForScope(engineScope)
+                        ConversationScope.Scheduled -> workspaceForScope(engineScope, destination.id.takeUnless { it == "new" })
                         is ConversationScope.Project -> project?.workspace
                     },
                     workspaceKey = engineScope.persistenceKey(),
@@ -1110,7 +1108,7 @@ fun RootScreen(
         pendingForkRequest = request
         val forkSource = EngineConversationSource.createInBackground(
             context = appContext,
-            projectWorkspace = workspaceForScope(sessionScope),
+            projectWorkspace = workspaceForScope(sessionScope, row.uuid),
             workspaceKey = sessionScope.persistenceKey(),
             sessionMode = row.mode,
             linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,

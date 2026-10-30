@@ -23,6 +23,11 @@ async function main() {
       await run(`${expression}.click()`);
       await delay(30);
     };
+    const taskAction = async (label) => {
+      await run("document.querySelector('.scheduled-job-row.selected .scheduled-more').click()");
+      await wait("Boolean(document.querySelector('.scheduled-context-menu'))");
+      await click(label);
+    };
     const submit = async () => {
       await wait("Boolean(document.querySelector('.scheduled-setup-submit:not(:disabled)'))");
       await run("document.querySelector('.scheduled-setup-submit').click()");
@@ -34,7 +39,7 @@ async function main() {
       await delay(30);
     };
     await wait("Boolean(document.querySelector('.scheduled-suggestion'))");
-    await run("[...document.querySelectorAll('.scheduled-suggestion')].find(b => b.textContent.includes('Weekly review')).click()");
+    await run("[...document.querySelectorAll('.scheduled-suggestion')].find(b => b.textContent.includes('Weekly finances update')).click()");
     await wait("Boolean(document.querySelector('[aria-label=\"Editable task details\"]'))");
     // A wide desktop window can still give this page a narrow pane.
     await run(`document.querySelector('.scheduled-tasks').style.maxWidth = '600px'`);
@@ -119,11 +124,13 @@ async function main() {
     await wait("document.querySelectorAll('.scheduled-job').length === 1");
     const result = { created: await state(), picker };
     await run("document.querySelector('.scheduled-job').click()");
+    await run("document.querySelector('.scheduled-task-card')?.click()");
     await wait("Boolean(document.querySelector('.scheduled-setup-title'))");
     await setTitle('Edited weekly review');
     await submit();
     await wait("Boolean(document.querySelector('.scheduled-job'))");
     await run("document.querySelector('.scheduled-job').click()");
+    await run("document.querySelector('.scheduled-task-card')?.click()");
     await wait("Boolean(document.querySelector('.scheduled-setup-title'))");
     result.reopenedTitle = await run("document.querySelector('.scheduled-setup-title').value");
     const select = async (label, value) => {
@@ -138,11 +145,21 @@ async function main() {
     await submit();
     await wait("window.scheduledCronFixture.state().jobs[0]?.automation?.status === 'paused'");
     result.configured = await state();
-    await click('Active');
+    await run("document.querySelector('.scheduled-setup-back').click()");
+    await wait("Boolean(document.querySelector('.scheduled-welcome'))");
+    result.emptyActive = await run("({activeHidden: !document.querySelector('.scheduled-task-group[aria-label=Active]'), pausedVisible: !!document.querySelector('.scheduled-task-group[aria-label=Paused]'), suggestions: document.querySelectorAll('.scheduled-welcome .scheduled-suggestion').length})");
+    if (process.env.LINGXI_SCHEDULED_SCREENSHOT) writeFileSync(process.env.LINGXI_SCHEDULED_SCREENSHOT.replace('.png','-empty.png'), (await window.webContents.capturePage()).toPNG());
+    await run("document.querySelector('.scheduled-job').click()");
+    await run("document.querySelector('.scheduled-task-card').click()");
+
+    await run("(() => { const select = document.querySelector('.scheduled-filter select'); select.value = 'active'; select.dispatchEvent(new Event('change', {bubbles:true})); })()");
+    await delay(30);
     result.activeCount = await run("document.querySelectorAll('.scheduled-job').length");
-    await click('Paused');
+    await run("(() => { const select = document.querySelector('.scheduled-filter select'); select.value = 'paused'; select.dispatchEvent(new Event('change', {bubbles:true})); })()");
+    await delay(30);
     result.pausedCount = await run("document.querySelectorAll('.scheduled-job').length");
-    await click('All');
+    await run("(() => { const select = document.querySelector('.scheduled-filter select'); select.value = 'all'; select.dispatchEvent(new Event('change', {bubbles:true})); })()");
+    await delay(30);
 
     await setTitle('Unsaved title');
     const beforeDirtyPoll = (await state()).requests.length;
@@ -157,16 +174,18 @@ async function main() {
     await wait("Boolean(document.querySelector('.scheduled-job'))");
     await click('Discard');
     await run("document.querySelector('.scheduled-job').click()");
-    await click('Delete');
+    await run("document.querySelector('.scheduled-task-card')?.click()");
+    await taskAction('Delete');
     if ((await state()).jobs.length !== 1) throw new Error('Delete must require confirmation');
     await click('Confirm delete');
     await wait("document.querySelectorAll('.scheduled-job').length === 0");
     result.deleted = await state();
     await run('window.scheduledCronFixture.addExternal()');
-    await click('Refresh');
+    await run("document.querySelector('button[aria-label=\"Refresh\"]').click()");
     await wait("document.querySelectorAll('.scheduled-job').length === 1");
     result.refreshed = await state();
     await run("document.querySelector('.scheduled-job').click()");
+    await run("document.querySelector('.scheduled-task-card')?.click()");
     await wait("Boolean(document.querySelector('.scheduled-setup-title'))");
     await setTitle('Saved during navigation');
     const offset = (await state()).requests.length;
@@ -181,23 +200,35 @@ async function main() {
     await wait("!document.querySelector('.scheduled-setup-submit')?.disabled");
     await delay(150);
     if (process.env.LINGXI_SCHEDULED_SCREENSHOT) writeFileSync(process.env.LINGXI_SCHEDULED_SCREENSHOT, (await window.webContents.capturePage()).toPNG());
-    await click('Copy to project…');
+    await taskAction('Copy to project…');
     await wait("Boolean(document.querySelector('.scheduled-setup-submit:not(:disabled)'))");
     result.copyDraft = await run("({mode:[...document.querySelectorAll('label')].find(l=>l.firstChild?.textContent==='Runs in').querySelector('select').value, projectEditable:![...document.querySelectorAll('label')].find(l=>l.firstChild?.textContent==='Project').querySelector('select').disabled})");
     await submit();
     await wait("window.scheduledCronFixture.state().jobs.length === 2");
-    await click('Run History');
+    await taskAction('Run History');
     await wait("document.querySelector('.scheduled-history')?.textContent.includes('No runs yet.')");
     result.copied = await state();
     await run("window.scheduledCronFixture.completeJob(window.scheduledCronFixture.state().jobs.at(-1).id)");
     await run('window.scheduledCronFixture.tickRefresh()');
-    await wait("document.querySelector('.scheduled-setup-header')?.textContent.includes('Completed')");
+    await wait("document.querySelector('.scheduled-overview-status')?.textContent.includes('Completed')");
     await wait("document.querySelector('.scheduled-history')?.textContent.includes('Automatic result refreshed')");
     result.pollUpdated = true;
     window.setSize(500, 900);
     await delay(150);
     result.narrow = await run("({listHidden:getComputedStyle(document.querySelector('.scheduled-master')).display === 'none', overflow:document.documentElement.scrollWidth > innerWidth})");
     if (process.env.LINGXI_SCHEDULED_SCREENSHOT) writeFileSync(process.env.LINGXI_SCHEDULED_SCREENSHOT.replace('.png','-narrow.png'), (await window.webContents.capturePage()).toPNG());
+
+    window.setSize(1440, 1000);
+    await run("document.querySelector('.scheduled-overview-header button').click()");
+    await run("[...document.querySelectorAll('.scheduled-job')].at(-1).click()");
+    await run("[...document.querySelectorAll('.scheduled-more')].at(-1).click()");
+    await wait("Boolean(document.querySelector('.scheduled-context-menu'))");
+    await click('Pause');
+    await wait("window.scheduledCronFixture.state().jobs.at(-1).automation.status === 'paused'");
+    result.menuPaused = true;
+    await run("[...document.querySelectorAll('.scheduled-more')].at(-1).click()");
+    await delay(80);
+    if (process.env.LINGXI_SCHEDULED_SCREENSHOT) writeFileSync(process.env.LINGXI_SCHEDULED_SCREENSHOT.replace('.png','-overview.png'), (await window.webContents.capturePage()).toPNG());
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally { window.destroy(); app.quit(); }
 }

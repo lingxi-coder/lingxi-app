@@ -1045,8 +1045,8 @@ export class HostController {
       }
       if (request['action'] === 'open') {
         if (!isSessionId(request['sessionId'])) throw new Error('Invalid scheduled session');
-        const projectPath = this.scheduled.resolveScope(request['scopeId']);
-        return this.enqueueNavigation(() => this.openSessionAndActivateInternal({ projectPath, sessionId: request['sessionId'] as string }));
+        const ref = this.scheduled.resolveSession(request['scopeId'], request['sessionId'] as string);
+        return this.enqueueNavigation(() => this.openSessionAndActivateInternal(ref));
       }
       throw new Error('Invalid scheduled action');
     });
@@ -1808,8 +1808,8 @@ export class HostController {
 
   private async deletePluginSecretsAfterUninstall(pluginId: string): Promise<PluginSecretCleanupResult> {
     if (!this.credentialBroker) throw new Error('secure plugin credential broker is unavailable');
-    const { configHome } = await this.sessionCatalog.productPaths();
-    const initial = readInstalledPluginRegistrySnapshot(configHome, pluginId);
+    const { brandHome } = await this.sessionCatalog.productPaths();
+    const initial = readInstalledPluginRegistrySnapshot(brandHome, pluginId);
     if (initial.installed) {
       return { pluginId, status: 'retained', deletedCount: 0, failedCount: 0 };
     }
@@ -1819,7 +1819,7 @@ export class HostController {
     const canDelete = async (): Promise<boolean> => {
       let current: InstalledPluginRegistrySnapshot;
       try {
-        current = readInstalledPluginRegistrySnapshot(configHome, pluginId);
+        current = readInstalledPluginRegistrySnapshot(brandHome, pluginId);
       } catch (error) {
         guardStatus = 'unavailable';
         this.diagnostics.add('warn', 'host', `plugin credential cleanup registry check failed: ${sanitizeDiagnostic(error)}`);

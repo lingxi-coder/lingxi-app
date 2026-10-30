@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readdir, readFile, stat, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import type { CronAutomationDto, CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
 import { ScheduledTaskService } from '../src/main/scheduled';
@@ -43,10 +43,12 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 async function harness(t: TestContext) {
-  const directory = await mkdtemp(join(tmpdir(), 'lingxi-scheduled-service-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'lingxi-scheduled-service-')));
   const project = join(directory, 'project');
   const global = join(directory, 'managed-scheduled-workspace');
   const projects = new Set([project]);
+  const managedSessions = new Map<string, { projectPath: string; taskId: string; memory: string }>();
+  const grants = new Map<string, readonly string[]>();
   const archived = new Set<string>();
   const catalogRows = new Map<string, { uuid: string; title: string }[]>([[project, [{ uuid: targetId, title: 'Chosen chat' }]], [global, []]]);
   const ensured: { ref: SessionRef; empty: boolean; model?: string }[] = [];
@@ -70,10 +72,14 @@ async function harness(t: TestContext) {
     settingsPath: join(directory, 'settings.v1.json'),
     getPublic: () => ({ projects: [...projects], model: 'openai/default' }),
     hasProject: (path: string) => projects.has(path),
-    isTrustedWorkspace: (path: string) => path === global || projects.has(path),
+    isTrustedWorkspace: (path: string) => path === global || projects.has(path) || [...managedSessions.values()].some(row => row.projectPath === path),
+    scheduledSessionWorkspace: (id: string) => managedSessions.get(id),
+    scheduledSessionRefs: () => [...managedSessions].map(([sessionId, row]) => ({ sessionId, projectPath: row.projectPath })),
+    registerScheduledSession: (ref: SessionRef, taskId: string, memory: string) => { managedSessions.set(ref.sessionId, { projectPath: ref.projectPath, taskId, memory }); },
     isSessionArchived: (ref: SessionRef) => archived.has(`${ref.projectPath}:${ref.sessionId}`),
   } as unknown as SettingsStore;
   const manager = {
+    setSessionDirectoryGrants: (id: string, directories: readonly string[]) => { grants.set(id, directories); },
     retainBackgroundSession: (ref: SessionRef) => { const lease = { ref, released: false }; leases.push(lease); return () => { lease.released = true; }; },
     ensure: async (ref: SessionRef, empty: boolean, model?: string) => { ensured.push({ ref, empty, model }); if (ensureFailure) throw ensureFailure; return runtime(ref); },
     withBackgroundSession: async <T>(ref: SessionRef, empty: boolean, model: string | undefined, operation: (runtime: SessionRuntime) => Promise<T>) => {
@@ -83,14 +89,16 @@ async function harness(t: TestContext) {
     newSession: () => assert.fail('Scheduled tasks must not create foreground drafts'),
   } as unknown as SessionRuntimeManager;
   const catalog = {
+    productPaths: async () => ({ brandHome: join(directory, '.test-brand'), appProjectsRoot: join(directory, '.test-brand', 'apps') }),
     list: async (path: string) => ({ sessions: (catalogRows.get(path) ?? []).slice(0, 200) }),
     find: async (path: string, sessionId: string) => catalogRows.get(path)?.find((row) => row.uuid === sessionId),
   } as unknown as ProjectSessionCatalog;
   const createService = () => new ScheduledTaskService(settings, manager, catalog, (title, body, ref) => notifications.push({ title, body, ref }), (error) => errors.push(error));
   const service = createService();
   t.after(async () => { service.dispose(); await rm(directory, { recursive: true, force: true }); });
-  return { directory, project, global, projects, archived, catalogRows, ensured, background, turns, requests, leases, notifications, errors, bindings, service, createService,
+  return { directory, catalog, project, global, managedSessions, grants, projects, archived, catalogRows, ensured, background, turns, requests, leases, notifications, errors, bindings, service, createService,
     source: runtime({ projectPath: project, sessionId: targetId }),
+    globalSource: runtime({ projectPath: global, sessionId: targetId }),
     setExecute: (callback: typeof execute) => { execute = callback; },
     failEnsure: (error: Error) => { ensureFailure = error; },
   };
@@ -307,4 +315,49 @@ test('selected and task-owned targets beyond the sidebar limit remain valid auth
   assert.equal(owned.sessionId, targetId);
   assert.equal(h.turns.length, 2);
   assert.deepEqual(h.background.map(({ empty }) => empty), [false, false]);
+});
+
+
+test('no-project runs use branded per-run workspaces, stable task memory, and resolvable history', async (t) => {
+  const h = await harness(t);
+  const saved = task();
+  const first = await runClaim(h.service, h.globalSource, 'global-first', saved);
+  const second = await runClaim(h.service, h.globalSource, 'global-second', saved);
+  const one = h.managedSessions.get(first.sessionId)!;
+  const two = h.managedSessions.get(second.sessionId)!;
+  assert.notEqual(one.projectPath, two.projectPath);
+  assert.ok(one.projectPath.startsWith(join(h.directory, '.test-brand', 'workspaces') + '/'));
+  assert.match(one.projectPath, /\/\d{4}-\d{2}-\d{2}\/Morning-brief-[a-f0-9-]+$/);
+  assert.deepEqual((await readdir(one.projectPath)).sort(), ['outputs', 'work']);
+  assert.equal(one.memory, two.memory, 'runs of the same task share durable memory');
+  assert.equal(await readFile(one.memory, 'utf8'), '');
+  assert.ok((await stat(join(one.projectPath, 'outputs'))).isDirectory());
+  assert.equal(h.background[0].ref.projectPath, one.projectPath, 'the engine really launches in the generated directory');
+  assert.deepEqual(h.service.resolveSession('global', first.sessionId), h.background[0].ref);
+  assert.deepEqual(h.notifications[0].ref, h.background[0].ref);
+  assert.equal(h.projects.size, 1, 'generated directories are not user projects');
+  assert.match(h.turns[0].task.prompt, /Task memory:/);
+  assert.ok(h.turns[0].task.prompt.includes(join(one.projectPath, 'outputs')));
+  assert.equal(saved.prompt, '# Morning brief\n\nSummarize the project.', 'host guidance does not mutate the persisted prompt');
+  assert.equal(h.grants.get(first.sessionId)?.[0], dirname(one.memory));
+  h.catalogRows.set(one.projectPath, [{ uuid: first.sessionId, title: 'Generated run' }]);
+  const context = await h.service.context('global');
+  assert.ok(context.sessions.some(row => row.uuid === first.sessionId));
+  const continued = await runClaim(h.service, h.globalSource, 'global-owned', task({ runMode: 'task_session', ownedSessionId: first.sessionId }));
+  assert.equal(continued.sessionId, first.sessionId);
+  assert.equal(h.background.at(-1)?.ref.projectPath, one.projectPath);
+  assert.equal(h.background.at(-1)?.empty, false);
+  assert.equal(h.managedSessions.size, 2);
+  await runClaim(h.service, h.globalSource, 'another-task-selected', { ...task({ runMode: 'selected_session', targetSessionId: first.sessionId }), id: 'another-task' });
+  assert.ok(!h.turns.at(-1)!.task.prompt.includes(one.memory), 'another task cannot take ownership of the original task memory');
+});
+
+
+test('brand discovery failures never fall back to an unrelated workspace', async t => {
+  const h = await harness(t);
+  h.catalog.productPaths = async () => { throw new Error('brand paths unavailable'); };
+  await assert.rejects(runClaim(h.service, h.globalSource, 'failed-discovery', task()), /brand paths unavailable/);
+  assert.equal(h.background.length, 0);
+  assert.equal(h.managedSessions.size, 0);
+  assert.deepEqual(await readdir(h.directory), ['scheduled-notifications.json']);
 });

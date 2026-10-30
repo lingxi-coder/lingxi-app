@@ -124,10 +124,7 @@ struct ProjectCronScopeProvider: CronScopeProviding, @unchecked Sendable {
     }
 
     func activeScopeID(for scopes: [CronScope]) async -> String {
-        let snapshot = await readProjects()
-        let active = snapshot.activeProjectID
-        return active.flatMap { id in scopes.contains(where: { $0.scopeID == id }) ? id : nil }
-            ?? globalCronScopeID
+        globalCronScopeID
     }
 }
 

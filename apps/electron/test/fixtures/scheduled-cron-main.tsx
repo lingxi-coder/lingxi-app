@@ -29,12 +29,13 @@ window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown
 }) as typeof window.setInterval;
 window.clearInterval = (id) => { if (id !== undefined) refreshCallbacks.delete(id); nativeClearInterval(id); };
 const requests: CronRequestDto[] = [];
-const manageCron = async (request: CronRequestDto): Promise<CronJobDto[]> => {
+const manageScheduledRequest = async (request: CronRequestDto): Promise<CronJobDto[]> => {
   requests.push(structuredClone(request));
   if (request.action !== 'list' && mutationGate) { const gate = mutationGate; mutationGate = null; await gate; }
   if (rejection) { const error = rejection; rejection = ''; throw new Error(error); }
   if (request.action === 'create') jobs.push({ id: `fixture-${nextId++}`, cron: request.cron!, prompt: request.prompt!, recurring: request.recurring ?? true, durable: true, permanent: false, created_at: Date.now(), session_id: 'fixture-session', automation: request.automation, ...(request.expires_at ? { expires_at: request.expires_at } : {}) });
   if (request.action === 'update') jobs = jobs.map((job) => job.id === request.id ? { ...job, automation: request.automation ?? job.automation, cron: request.cron ?? job.cron, prompt: request.prompt ?? job.prompt, recurring: request.recurring ?? job.recurring, ...(request.no_expiry ? { expires_at: undefined } : request.expires_at ? { expires_at: request.expires_at } : {}) } : job);
+  if (request.action === 'pause' || request.action === 'resume') jobs = jobs.map(job => job.id === request.id && job.automation ? { ...job, automation: { ...job.automation, status: request.action === 'pause' ? 'paused' : 'active' } } : job);
   if (request.action === 'delete') jobs = jobs.filter((job) => job.id !== request.id);
   return structuredClone(jobs);
 };
@@ -47,7 +48,7 @@ Object.assign(window, { scheduledCronFixture: {
   rejectNext: (message: string) => { rejection = message; },
   addExternal: () => { jobs.push({ id: 'external', cron: '0 12 * * *', prompt: 'External fixture task', recurring: true, durable: true, permanent: false, created_at: Date.now() }); },
 } });
-const bridge = { activeSession: { sessionId: 'fixture-session', projectPath: '/fixture/LingXi-Next' }, connected: true, sessionLoading: false, manageCron, scheduledScopes: [{id: 'global', label: 'None'}], manageScheduled: (_scope: string, request: CronRequestDto) => manageCron(request), scheduledContext: async () => ({ models: bridge.desktop.modelDetails, currentModel: 'openai/gpt-test', sessions: [{ uuid: 'fixture-session', title: 'Fixture chat' }] }), readScheduledHistory: async () => [], openScheduledSession: async () => {}, desktop: { ...emptyDesktopState(), currentModel: 'openai/gpt-test', modelDetails: [{reference: 'openai/gpt-test', display_name: 'Test Model', provider_label: 'OpenAI', reasoning: { options: [{selection: {type:'automatic'}, persistable: true}, {selection:{type:'level',id:'high'},persistable:true}], provider_default: {type:'automatic'} }}] } } as unknown as UseBridge;
+const bridge = { activeSession: { sessionId: 'fixture-session', projectPath: '/fixture/LingXi-Next' }, connected: true, sessionLoading: false, scheduledScopes: [{id: 'global', label: 'None'}], manageScheduled: (_scope: string, request: CronRequestDto) => manageScheduledRequest(request), scheduledContext: async () => ({ models: bridge.desktop.modelDetails, currentModel: 'openai/gpt-test', sessions: [{ uuid: 'fixture-session', title: 'Fixture chat' }] }), readScheduledHistory: async () => [], openScheduledSession: async () => {}, desktop: { ...emptyDesktopState(), currentModel: 'openai/gpt-test', modelDetails: [{reference: 'openai/gpt-test', display_name: 'Test Model', provider_label: 'OpenAI', reasoning: { options: [{selection: {type:'automatic'}, persistable: true}, {selection:{type:'level',id:'high'},persistable:true}], provider_default: {type:'automatic'} }}] } } as unknown as UseBridge;
 function Fixture() {
   const [visible, setVisible] = useState(true);
   const [dark, setDark] = useState(false);

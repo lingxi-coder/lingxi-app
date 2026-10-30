@@ -9,7 +9,7 @@ export type ScheduledScope = { id: string; projectPath?: string; label: string }
 export type ScheduledSession = { id: string; title: string; scopeId: string };
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 export function ScheduledTaskSetup({ initial, editingJob, scopeId, scopes, sessions, models, defaultModel, defaultReasoning, onBack, onSave, onDirtyChange, loadContext }: {
-  initial?: { title: string; schedule: string; description: string; draft?: Draft; preset?: Pick<Draft, 'frequency' | 'day' | 'time'> };
+  initial?: { title: string; description: string; draft?: Draft; preset?: Pick<Draft, 'frequency' | 'day' | 'time'> };
   editingJob?: ScheduledCronJob; scopeId: string; scopes: ScheduledScope[]; sessions: ScheduledSession[];
   loadContext: (scopeId: string) => Promise<{ models: ModelDetailsDto[]; currentModel: string; sessions: { uuid: string; title?: string }[] }>;
   models: readonly ModelDetailsDto[]; defaultModel?: string | null; defaultReasoning?: ReasoningSelectionDto;

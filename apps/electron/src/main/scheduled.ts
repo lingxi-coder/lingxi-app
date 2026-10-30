@@ -7,6 +7,7 @@ import type { ScheduledScope } from '../shared/scheduled.js';
 import type { SettingsStore } from './settings.js';
 import type { SessionRuntime } from './bridge.js';
 import { isSessionId } from './sessionIdentity.js';
+import { createScheduledRunWorkspace, scheduledWorkspaceInstructions } from './scheduled-workspaces.js';
 import { scheduledRunIdentity } from './scheduled-run-identity.js';
 import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import type { ProjectSessionCatalog } from './session-catalog.js';
@@ -61,6 +62,12 @@ export class ScheduledTaskService {
     if (id === 'global') return this.settings.scheduledWorkspace;
     if (!this.settings.hasProject(id)) throw new Error('Project is unavailable. Select an existing project.');
     return id;
+  }
+
+  resolveSession(scopeId: string, sessionId: string): SessionRef {
+    const path = this.resolveScope(scopeId);
+    const managed = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionWorkspace(sessionId) : undefined;
+    return { projectPath: managed?.projectPath ?? path, sessionId };
   }
 
   start(): void {
@@ -127,8 +134,24 @@ export class ScheduledTaskService {
   async context(scopeId: string) {
     const path = this.resolveScope(scopeId);
     const runtime = await this.controller(path);
-    const [models, catalog] = await Promise.all([runtime.scheduledModelCatalog(), this.catalog.list(path)]);
-    return { models: models.details ?? [], currentModel: models.current, sessions: catalog.sessions.filter((session) => !this.isControllerSession(path, session.uuid) && !this.settings.isSessionArchived({ projectPath: path, sessionId: session.uuid })).map((session) => ({ uuid: session.uuid, title: session.title })) };
+    const refs = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionRefs().slice(-200).reverse() : [];
+    // Generated workspaces are separate engine catalogs. Bound both the picker
+    // size and child-process concurrency; exact target validation stays unbounded.
+    const loadManaged = async () => {
+      const rows = [];
+      for (let offset = 0; offset < refs.length; offset += 8) {
+        const batch = await Promise.all(refs.slice(offset, offset + 8).map(async ref => {
+          if (this.settings.isSessionArchived(ref)) return undefined;
+          try { return await this.catalog.find(ref.projectPath, ref.sessionId); }
+          catch (error) { this.report(error); return undefined; }
+        }));
+        rows.push(...batch.filter((row): row is NonNullable<typeof row> => Boolean(row)));
+      }
+      return rows;
+    };
+    const [models, catalog, managed] = await Promise.all([runtime.scheduledModelCatalog(), this.catalog.list(path), loadManaged()]);
+    const sessions = [...catalog.sessions, ...managed];
+    return { models: models.details ?? [], currentModel: models.current, sessions: sessions.filter((session) => !this.isControllerSession(path, session.uuid) && !this.settings.isSessionArchived({ projectPath: path, sessionId: session.uuid })).map((session) => ({ uuid: session.uuid, title: session.title })) };
   }
 
   async manage(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]> {
@@ -217,6 +240,7 @@ export class ScheduledTaskService {
 
   private async validateTarget(path: string, sessionId?: string): Promise<void> {
     if (!isSessionId(sessionId)) throw new Error('paused: Select a valid target chat.');
+    path = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionWorkspace(sessionId)?.projectPath ?? path : path;
     if (this.settings.isSessionArchived({ projectPath: path, sessionId })) throw new Error('paused: The target chat was archived. Select another chat.');
     if (!(await this.catalog.find(path, sessionId))) throw new Error('paused: The target chat is unavailable. Select another chat.');
   }
@@ -279,7 +303,7 @@ export class ScheduledTaskService {
       this.assertRunAllowed();
       if (hostAdmitted) throw new Error('interrupted: This scheduled run was already started, but its completion is unavailable. Retry the task to start a new run.');
       const result = await this.execute(source, runId, task);
-      if (task.automation?.notificationPolicy === 'all') await this.notifyOnce(`${source.projectPath}:${occurrenceId}`, task.prompt.split('\n')[0].replace(/^# /, ''), result.summary.slice(0, 240) || 'Scheduled task completed.', { projectPath: source.projectPath, sessionId: result.sessionId });
+      if (task.automation?.notificationPolicy === 'all') await this.notifyOnce(`${source.projectPath}:${occurrenceId}`, task.prompt.split('\n')[0].replace(/^# /, ''), result.summary.slice(0, 240) || 'Scheduled task completed.', source.projectPath === this.settings.scheduledWorkspace ? this.resolveSession('global', result.sessionId) : { projectPath: source.projectPath, sessionId: result.sessionId });
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -296,7 +320,9 @@ export class ScheduledTaskService {
     const existing = config.runMode === 'selected_session' ? config.targetSessionId : config.runMode === 'task_session' ? config.ownedSessionId : undefined;
     if (existing) await this.validateTarget(path, existing);
     else if (config.runMode === 'selected_session') throw new Error('paused: Select a target chat.');
-    const ref = { projectPath: path, sessionId: existing ?? randomUUID() };
+    const sessionId = existing ?? randomUUID();
+    const managed = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionWorkspace(sessionId) : undefined;
+    const ref = { projectPath: managed?.projectPath ?? path, sessionId };
     const previous = this.sessionQueues.get(ref.sessionId) ?? Promise.resolve();
     const operation = previous.catch(() => undefined).then(async () => {
       // Revalidate after waiting: the service, projects and targets may disappear while queued.
@@ -304,9 +330,23 @@ export class ScheduledTaskService {
       if (!this.settings.isTrustedWorkspace(path)) throw new Error('paused: The project is unavailable.');
       if (existing) await this.validateTarget(path, existing);
       this.assertRunAllowed();
+      let executionTask = task;
+      if (path === this.settings.scheduledWorkspace && !existing) {
+        const { brandHome } = await this.catalog.productPaths();
+        this.assertRunAllowed();
+        const workspace = await createScheduledRunWorkspace(brandHome, task.id, ref.sessionId, config.name ?? task.prompt.split('\n')[0].replace(/^# /, ''));
+        ref.projectPath = workspace.directory;
+        this.settings.registerScheduledSession(ref, task.id, workspace.memory);
+        this.bridge.setSessionDirectoryGrants(ref.sessionId, [dirname(workspace.memory)]);
+        executionTask = { ...task, prompt: `${task.prompt}\n\n${scheduledWorkspaceInstructions(workspace)}` };
+      } else if (managed) {
+        if (managed.taskId === task.id) this.bridge.setSessionDirectoryGrants(ref.sessionId, [dirname(managed.memory)]);
+        executionTask = { ...task, prompt: `${task.prompt}\n\n${scheduledWorkspaceInstructions({ directory: ref.projectPath, work: join(ref.projectPath, 'work'), outputs: join(ref.projectPath, 'outputs'), memory: managed.taskId === task.id ? managed.memory : undefined })}` };
+      }
+      this.assertRunAllowed();
       return this.bridge.withBackgroundSession(ref, !existing, config.model, async (runtime) => {
         this.assertRunAllowed();
-        const summary = await runtime.runScheduledTurn(runId, task, () => {
+        const summary = await runtime.runScheduledTurn(runId, executionTask, () => {
           this.assertRunAllowed();
           return source.markCronRunStarted(runId, ref.sessionId);
         });

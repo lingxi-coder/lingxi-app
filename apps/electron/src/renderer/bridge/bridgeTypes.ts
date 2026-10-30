@@ -306,7 +306,6 @@ export interface UseBridge {
   manageScheduled(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]>;
   readScheduledHistory(scopeId: string, jobId: string): Promise<CronRunDto[]>;
   openScheduledSession(scopeId: string, sessionId: string): Promise<void>;
-  manageCron(request: CronRequestDto): Promise<CronJobDto[]>;
   skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop MCP administration with strict validation, revision/CAS, approval, and live reconcile. */
   mcpAdmin(command: McpAdminCommandDto): Promise<ConfigurationOperationEvent | void>;

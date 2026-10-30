@@ -749,9 +749,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     return undefined;
   });
   if (productPaths) {
-    const agentRoot = join(productPaths.configHome, 'local-apps', 'v2');
+    const agentRoot = join(productPaths.brandHome, 'local-apps', 'v2');
     const agentExecutor = new LocalAppAgentExecutor({
-      configHome: productPaths.configHome,
+      configHome: productPaths.brandHome,
       root: agentRoot,
       isPackaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
@@ -775,11 +775,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       question: (input, signal) => localApps!.promptAgentQuestion(input, signal),
     });
     localApps = new LocalAppHost({
-      configHome: productPaths.configHome,
+      configHome: productPaths.brandHome,
       onRemoteAccessEnded: quitIfNothingNeedsTheApp,
       accountToken: () => account.getIdToken(),
       accountId: () => account.snapshot().user?.uid ?? undefined,
-      core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.configHome, message => diagnostics.add('warn', 'host', message)),
+      core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.brandHome, message => diagnostics.add('warn', 'host', message)),
       resolveAuthoringBinding: async (_appId, session) => {
         const activeSession = settings.getPublic().activeSession ?? undefined;
         const liveDraft = bridge?.getActiveDraftSession(session, activeSession);

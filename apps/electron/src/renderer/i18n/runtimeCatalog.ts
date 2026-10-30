@@ -1,4 +1,57 @@
 export const runtimeCatalog: Record<string, Record<string, string>> = {
+  "desktop_scheduled_advice_ongoing": {
+    "en": "No expiry works well for ongoing summaries and routine checks. Set an end date for temporary work.",
+    "zh-Hans": "长期摘要与例行检查适合不设置到期日。临时工作请设置结束日期。",
+    "zh-Hant": "長期摘要與例行檢查適合不設定到期日。暫時性工作請設定結束日期。",
+    "ja": "継続的な要約や定期チェックには期限なしが適しています。一時的な作業には終了日時を設定してください。",
+    "ko": "지속적인 요약과 정기 점검에는 만료 없음이 적합합니다. 임시 작업에는 종료 날짜를 설정하세요."
+  },
+
+  "desktop_scheduled_advice_temporary": {
+    "en": "For a temporary task, choose an end date. Ongoing tasks can run without an expiry date.",
+    "zh-Hans": "临时任务建议设置结束日期。长期任务可以不设置到期日。",
+    "zh-Hant": "暫時性任務建議設定結束日期。長期任務可不設定到期日。",
+    "ja": "一時的なタスクには終了日時を設定してください。継続的なタスクは期限なしで実行できます。",
+    "ko": "임시 작업에는 종료 날짜를 설정하세요. 지속적인 작업은 만료일 없이 실행할 수 있습니다."
+  },
+
+  "desktop_scheduled_advice_once": {
+    "en": "This task runs once. An expiry date is optional and can prevent a late run.",
+    "zh-Hans": "此任务仅运行一次。可设置到期日以防止延迟执行。",
+    "zh-Hant": "此任務僅執行一次。可設定到期日以避免延遲執行。",
+    "ja": "このタスクは 1 回実行されます。必要に応じて期限を設定すると、遅れた実行を防げます。",
+    "ko": "이 작업은 한 번 실행됩니다. 만료일을 설정하면 지연된 실행을 방지할 수 있습니다."
+  },
+
+  "desktop_scheduled_advice_invalid": {
+    "en": "Choose a valid interval to see scheduling guidance.",
+    "zh-Hans": "请选择有效的间隔以查看计划建议。",
+    "zh-Hant": "請選擇有效的間隔以檢視排程建議。",
+    "ja": "有効な間隔を選択すると、スケジュールのヒントが表示されます。",
+    "ko": "유효한 간격을 선택하면 예약 안내가 표시됩니다."
+  },
+
+  "desktop_scheduled_welcome_title": {"en": "Schedule a task", "zh-Hans": "安排定时任务", "zh-Hant": "安排定時任務", "ja": "タスクをスケジュール", "ko": "작업 예약"},
+  "desktop_scheduled_welcome_description": {"en": "LingXi can take care of ongoing tasks so you don’t have to.", "zh-Hans": "将日常事务交给灵犀，按计划为你完成。", "zh-Hant": "將日常事務交給靈犀，按計畫為你完成。", "ja": "日々のタスクをLingXiに任せましょう。", "ko": "반복 작업은 LingXi에 맡기세요."},
+  "desktop_scheduled_prices_title": {"en": "Price alerts", "zh-Hans": "价格提醒", "zh-Hant": "價格提醒", "ja": "価格通知", "ko": "가격 알림"},
+  "desktop_scheduled_prices_description": {"en": "Check prices daily and alert me when my item costs less.", "zh-Hans": "每天查看商品价格，在降价时提醒我。", "zh-Hant": "每天查看商品價格，在降價時提醒我。", "ja": "毎日価格を確認し、値下がりしたら知らせてください。", "ko": "매일 가격을 확인하고 가격이 내려가면 알려 주세요."},
+  "desktop_scheduled_concerts_title": {"en": "Find concerts", "zh-Hans": "寻找演出", "zh-Hant": "尋找演出", "ja": "コンサートを探す", "ko": "공연 찾기"},
+  "desktop_scheduled_concerts_description": {"en": "Check weekly for new concerts that match my taste.", "zh-Hans": "每周寻找符合我喜好的新演出。", "zh-Hant": "每週尋找符合我喜好的新演出。", "ja": "好みに合う新しいコンサートを毎週探してください。", "ko": "취향에 맞는 새 공연을 매주 찾아 주세요."},
+  "desktop_scheduled_weekend_title": {"en": "Plan my weekend", "zh-Hans": "规划周末", "zh-Hant": "規劃週末", "ja": "週末の計画", "ko": "주말 계획"},
+  "desktop_scheduled_weekend_description": {"en": "Send me local weekend ideas every Thursday.", "zh-Hans": "每周四推荐本地周末活动。", "zh-Hant": "每週四推薦本地週末活動。", "ja": "毎週木曜日に近場の週末のお出かけ案を送ってください。", "ko": "매주 목요일에 주변 주말 활동을 추천해 주세요."},
+  "desktop_scheduled_finances_title": {"en": "Weekly finances update", "zh-Hans": "每周财务回顾", "zh-Hant": "每週財務回顧", "ja": "毎週の家計チェック", "ko": "주간 재무 검토"},
+  "desktop_scheduled_finances_description": {"en": "Review my recent spending, and anything that needs attention.", "zh-Hans": "回顾近期支出，关注需要留意的事项。", "zh-Hant": "回顧近期支出，關注需要留意的事項。", "ja": "最近の支出と注意が必要な項目を確認してください。", "ko": "최근 지출과 주의가 필요한 사항을 검토해 주세요."},
+  "desktop_scheduled_meals_title": {"en": "Weekly meal plan", "zh-Hans": "每周餐食计划", "zh-Hant": "每週餐食計畫", "ja": "一週間の献立", "ko": "주간 식단"},
+  "desktop_scheduled_meals_description": {"en": "Plan meals for the week and make a grocery list.", "zh-Hans": "安排一周餐食并准备采购清单。", "zh-Hant": "安排一週餐食並準備採購清單。", "ja": "一週間の献立と買い物リストを作ってください。", "ko": "일주일 식단과 장보기 목록을 만들어 주세요."},
+  "desktop_scheduled_flights_title": {"en": "Find flights for a trip", "zh-Hans": "寻找旅行机票", "zh-Hant": "尋找旅行機票", "ja": "旅行の航空券を探す", "ko": "여행 항공편 찾기"},
+  "desktop_scheduled_flights_description": {"en": "Find the best deal on flights for an upcoming trip.", "zh-Hans": "为即将到来的旅行寻找优惠机票。", "zh-Hant": "為即將到來的旅行尋找優惠機票。", "ja": "次の旅行に向けてお得な航空券を探してください。", "ko": "다가오는 여행을 위한 저렴한 항공편을 찾아 주세요."},
+
+  "desktop_scheduled_new_task": {"en": "New task", "zh-Hans": "新建任务", "zh-Hant": "新增任務", "ja": "新しいタスク", "ko": "새 작업"},
+  "desktop_scheduled_task_actions": {"en": "Actions for %s", "zh-Hans": "%s 的操作", "zh-Hant": "%s 的操作", "ja": "%s の操作", "ko": "%s 작업 메뉴"},
+  "desktop_scheduled_pause": {"en": "Pause", "zh-Hans": "暂停", "zh-Hant": "暫停", "ja": "一時停止", "ko": "일시 중지"},
+  "desktop_scheduled_resume": {"en": "Resume", "zh-Hans": "恢复", "zh-Hant": "繼續", "ja": "再開", "ko": "다시 시작"},
+  "desktop_scheduled_edit": {"en": "Edit", "zh-Hans": "编辑", "zh-Hant": "編輯", "ja": "編集", "ko": "편집"},
+
   "desktop_runtime_outputs": {"en": "Outputs", "zh-Hans": "产出", "zh-Hant": "產出", "ja": "成果物", "ko": "결과물"},
   "desktop_runtime_create_output": {"en": "Create a file or site", "zh-Hans": "创建文件或网站", "zh-Hant": "建立檔案或網站", "ja": "ファイルやサイトを作成", "ko": "파일 또는 사이트 만들기"},
   "desktop_runtime_create_output_prompt": {"en": "Help me create a file or site.", "zh-Hans": "帮我创建文件或网站。", "zh-Hant": "幫我建立檔案或網站。", "ja": "ファイルやサイトの作成を手伝ってください。", "ko": "파일 또는 사이트를 만들어 주세요."},
@@ -169,27 +222,6 @@ export const runtimeCatalog: Record<string, Record<string, string>> = {
     "ja": "LingXi が開いていて、このコンピューターが起動している間、タスクはローカルで実行されます。定期実行で現在のチャットやモデル設定は変更されません。",
     "ko": "LingXi가 열려 있고 컴퓨터가 깨어 있는 동안 작업이 로컬에서 실행됩니다. 예약 실행은 현재 대화나 모델 설정을 변경하지 않습니다."
   },
-  "desktop_scheduled_advice_invalid": {
-    "en": "Choose a valid interval to see scheduling guidance.",
-    "zh-Hans": "请选择有效的间隔以查看计划建议。",
-    "zh-Hant": "請選擇有效的間隔以檢視排程建議。",
-    "ja": "有効な間隔を選択すると、スケジュールのヒントが表示されます。",
-    "ko": "유효한 간격을 선택하면 예약 안내가 표시됩니다."
-  },
-  "desktop_scheduled_advice_once": {
-    "en": "This task runs once. An expiry date is optional and can prevent a late run.",
-    "zh-Hans": "此任务仅运行一次。可设置到期日以防止延迟执行。",
-    "zh-Hant": "此任務僅執行一次。可設定到期日以避免延遲執行。",
-    "ja": "このタスクは 1 回実行されます。必要に応じて期限を設定すると、遅れた実行を防げます。",
-    "ko": "이 작업은 한 번 실행됩니다. 만료일을 설정하면 지연된 실행을 방지할 수 있습니다."
-  },
-  "desktop_scheduled_advice_temporary": {
-    "en": "For a temporary task, choose an end date. Ongoing tasks can run without an expiry date.",
-    "zh-Hans": "临时任务建议设置结束日期。长期任务可以不设置到期日。",
-    "zh-Hant": "暫時性任務建議設定結束日期。長期任務可不設定到期日。",
-    "ja": "一時的なタスクには終了日時を設定してください。継続的なタスクは期限なしで実行できます。",
-    "ko": "임시 작업에는 종료 날짜를 설정하세요. 지속적인 작업은 만료일 없이 실행할 수 있습니다."
-  },
   "desktop_scheduled_advice_frequent": {
     "en": "This schedule can run %1$d times on an active day. Consider at least 15 minutes between runs and a 24-hour expiry for short-term monitoring.",
     "zh-Hans": "此计划在执行日最多运行 %1$d 次。短期监控建议至少间隔15分钟，并在24小时后到期。",
@@ -203,13 +235,6 @@ export const runtimeCatalog: Record<string, Record<string, string>> = {
     "zh-Hant": "此排程在執行日最多執行 %1$d 次。暫時性監控建議7天後到期；長期任務可選擇無到期日。",
     "ja": "このスケジュールは実行日に %1$d 回実行できます。一時的な監視には 7 日後の期限を検討し、継続的なタスクには期限なしを選択できます。",
     "ko": "실행일에 최대 %1$d회 실행될 수 있습니다. 임시 모니터링에는 7일 후 만료를 권장하며, 지속적인 작업에는 만료 없음을 선택할 수 있습니다."
-  },
-  "desktop_scheduled_advice_ongoing": {
-    "en": "No expiry works well for ongoing summaries and routine checks. Set an end date for temporary work.",
-    "zh-Hans": "长期摘要与例行检查适合不设置到期日。临时工作请设置结束日期。",
-    "zh-Hant": "長期摘要與例行檢查適合不設定到期日。暫時性工作請設定結束日期。",
-    "ja": "継続的な要約や定期チェックには期限なしが適しています。一時的な作業には終了日時を設定してください。",
-    "ko": "지속적인 요약과 정기 점검에는 만료 없음이 적합합니다. 임시 작업에는 종료 날짜를 설정하세요."
   },
   "desktop_scheduled_filter_aria": {
     "en": "Task status filter",
@@ -225,26 +250,12 @@ export const runtimeCatalog: Record<string, Record<string, string>> = {
     "ja": "スケジュールタスクを読み込み中…",
     "ko": "예약 작업 불러오는 중…"
   },
-  "desktop_scheduled_next_run": {
-    "en": "Next run %1$s",
-    "zh-Hans": "下次运行 %1$s",
-    "zh-Hant": "下次執行 %1$s",
-    "ja": "次回実行 %1$s",
-    "ko": "다음 실행 %1$s"
-  },
   "desktop_scheduled_local": {
     "en": "Scheduled locally",
     "zh-Hans": "已在本机安排",
     "zh-Hant": "已在本機排程",
     "ja": "ローカルで予定済み",
     "ko": "로컬에 예약됨"
-  },
-  "desktop_scheduled_latest": {
-    "en": "Latest: %1$s",
-    "zh-Hans": "最近：%1$s",
-    "zh-Hant": "最近：%1$s",
-    "ja": "最新：%1$s",
-    "ko": "최근: %1$s"
   },
   "desktop_scheduled_no_matches": {
     "en": "No matching tasks.",
@@ -294,69 +305,6 @@ export const runtimeCatalog: Record<string, Record<string, string>> = {
     "zh-Hant": "請等候目前任務變更完成。",
     "ja": "現在のタスクの変更が完了するまでお待ちください。",
     "ko": "현재 작업 변경이 완료될 때까지 기다리세요."
-  },
-  "desktop_scheduled_brief_title": {
-    "en": "Daily brief",
-    "zh-Hans": "每日简报",
-    "zh-Hant": "每日簡報",
-    "ja": "毎日のブリーフィング",
-    "ko": "일일 브리핑"
-  },
-  "desktop_scheduled_brief_schedule": {
-    "en": "Weekdays at 8:00 AM",
-    "zh-Hans": "工作日 08:00",
-    "zh-Hant": "平日 08:00",
-    "ja": "平日 8:00",
-    "ko": "평일 오전 8:00"
-  },
-  "desktop_scheduled_brief_description": {
-    "en": "Start each weekday with a summary of your calendar, unread email, and priorities",
-    "zh-Hans": "每个工作日开始时，汇总日历、未读邮件与优先事项",
-    "zh-Hant": "每個平日開始時，彙整行事曆、未讀郵件與優先事項",
-    "ja": "平日の朝にカレンダー、未読メール、優先事項を要約",
-    "ko": "평일 아침마다 캘린더, 읽지 않은 메일, 우선순위 요약"
-  },
-  "desktop_scheduled_review_title": {
-    "en": "Weekly review",
-    "zh-Hans": "每周回顾",
-    "zh-Hant": "每週回顧",
-    "ja": "週次レビュー",
-    "ko": "주간 검토"
-  },
-  "desktop_scheduled_review_schedule": {
-    "en": "Fridays at 4:00 PM",
-    "zh-Hans": "周五 16:00",
-    "zh-Hant": "週五 16:00",
-    "ja": "金曜日 16:00",
-    "ko": "금요일 오후 4:00"
-  },
-  "desktop_scheduled_review_description": {
-    "en": "Turn your recent work into a concise status update every Friday",
-    "zh-Hans": "每周五将最近的工作整理成简明进展",
-    "zh-Hant": "每週五將最近的工作整理成簡明進度",
-    "ja": "毎週金曜日に最近の作業を簡潔な進捗報告にまとめる",
-    "ko": "매주 금요일 최근 작업을 간결한 진행 상황으로 정리"
-  },
-  "desktop_scheduled_followup_title": {
-    "en": "Follow-up monitor",
-    "zh-Hans": "后续事项监控",
-    "zh-Hant": "後續事項監控",
-    "ja": "フォローアップ監視",
-    "ko": "후속 조치 모니터"
-  },
-  "desktop_scheduled_followup_schedule": {
-    "en": "Weekdays at 9:00 AM",
-    "zh-Hans": "工作日 09:00",
-    "zh-Hant": "平日 09:00",
-    "ja": "平日 9:00",
-    "ko": "평일 오전 9:00"
-  },
-  "desktop_scheduled_followup_description": {
-    "en": "Review recent email and calendar activity and flag anything that needs your attention",
-    "zh-Hans": "查看近期邮件与日历活动，标出需要关注的事项",
-    "zh-Hant": "檢視近期郵件與行事曆活動，標示需要關注的事項",
-    "ja": "最近のメールとカレンダーの予定を確認し、注意が必要な項目を表示",
-    "ko": "최근 메일과 캘린더 활동을 검토하고 주의가 필요한 항목 표시"
   },
   "desktop_scheduled_schedule": {
     "en": "%1$s at %2$s (%3$s)",

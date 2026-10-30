@@ -5,7 +5,6 @@ import type {
   ClientEvent,
   ComputerAccessResponseDto,
   ConfigurationDomainDto,
-  CronJobDto,
   CronRequestDto,
   CronRunDto,
   FusionAdminCommandDto,
@@ -108,7 +107,6 @@ import {
   slashCommandEchoesRequest,
 } from './conversation.js';
 import type { ConversationState } from './conversation.js';
-import { requestCronManagement } from './cronManagement.js';
 import { beginTaskRefresh, emptyDesktopState, reduceDesktopEvent } from './desktopState.js';
 import type {
   LingxiApi,
@@ -2409,13 +2407,6 @@ export function useBridge(): UseBridge {
     await host.scheduled.openSession(scopeId, sessionId);
     applyBootstrap(await host.bootstrap());
   }, [host, applyBootstrap]);
-  const manageCron = useCallback((request: CronRequestDto): Promise<CronJobDto[]> => {
-    const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !host || !sessionId) {
-      return Promise.reject(new Error('Open a connected session before managing scheduled tasks.'));
-    }
-    return requestCronManagement(host, sessionId, request);
-  }, [host]);
   const runConfigurationAdmin = useCallback(async (
     domain: ConfigurationDomainDto,
     envelope:
@@ -2479,7 +2470,6 @@ export function useBridge(): UseBridge {
   return {
     linkDraft, offerLinkDraft: setLinkDraft, clearLinkDraft: () => setLinkDraft(null),
     scheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
-    manageCron,
     uiSurfaceClientId: stableUiSurfaceClientId,
     updatePromptSuggestionContext, promptSuggestionFeedback,
     hosted,

@@ -29,7 +29,7 @@ export interface ProjectSessionCatalogResult {
 }
 
 export interface ProductPaths {
-  configHome: string;
+  brandHome: string;
   appProjectsRoot: string;
 }
 
@@ -129,11 +129,11 @@ export class ProjectSessionCatalog {
     catch { throw new Error('invalid product paths response'); }
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid product paths response');
     const input = value as Record<string, unknown>;
-    if (input['version'] !== 1 || [input['config_home'], input['app_projects_root']].some(path =>
+    if (input['version'] !== 1 || [input['brand_home'], input['app_projects_root']].some(path =>
       typeof path !== 'string' || !isAbsolute(path) || path.includes('\0') || path.length > 32_768)) {
       throw new Error('invalid product paths response');
     }
-    return { configHome: input['config_home'] as string, appProjectsRoot: input['app_projects_root'] as string };
+    return { brandHome: input['brand_home'] as string, appProjectsRoot: input['app_projects_root'] as string };
   }
 
   /** Read settings with the engine's merge rules before starting its process. */

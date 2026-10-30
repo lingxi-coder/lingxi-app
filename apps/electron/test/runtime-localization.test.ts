@@ -26,7 +26,7 @@ const escaped = (text: string) => renderToStaticMarkup(React.createElement(React
 test('translated scheduled suggestions preserve the weekly preset and machine values', () => {
   for (const locale of DESKTOP_LOCALES) {
     const html = render(locale, React.createElement(ScheduledTaskSetup, {
-      initial: { title: 'User task name', description: 'User instructions stay unchanged.', schedule: 'Localized schedule label',
+      initial: { title: 'User task name', description: 'User instructions stay unchanged.',
         preset: { frequency: 'Weekly', day: 'Friday', time: '16:00' } },
       scopeId: 'global', scopes: [{ id: 'global', label: 'User project' }], sessions: [], models: [], defaultModel: 'user-model',
       onBack: noop, onSave: async () => {}, onDirtyChange: noop,
@@ -48,7 +48,7 @@ test('scheduled list suggestions and runtime status controls render in every int
   const task = { task_id: 'task-1', task_type: 'local_bash', status: { type: 'failed' }, description: 'User description', stage: 'Raw execution stage' } as any;
   for (const locale of DESKTOP_LOCALES) {
     const list = render(locale, React.createElement(ScheduledTasks, { bridge, visible: true }));
-    assert.ok(list.includes(escaped(translate('desktop_scheduled_review_title', locale))), locale);
+    assert.ok(list.includes(escaped(translate('desktop_scheduled_finances_title', locale))), locale);
     assert.ok(list.includes(escaped(translate('cron_search_tasks', locale))), locale);
     const detail = render(locale, React.createElement(TaskDetail, { task, bridge: { desktop: { taskOutput: { 'task-1': { content: 'Raw CLI output', totalLines: 1, truncated: false } } } } as any }));
     assert.ok(detail.includes(escaped(translate('desktop_runtime_status_error', locale))), locale);

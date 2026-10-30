@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { chmodSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { initializeApp, deleteApp } from 'firebase/app';
@@ -11,7 +11,8 @@ import { TeamsService } from '../src/main/teams/service';
 import { AccountService } from '../src/main/account';
 import { TeamOwnerApprovalBroker } from '../src/main/remoteControl/teamApprovals';
 import { TeamConnector, type TeamHostApi } from '../src/main/teams/connector';
-import { TeamPrivateStore } from '../src/main/teams/privateStore';
+import { TeamPrivateStore, digest, type TeamModelRoute } from '../src/main/teams/privateStore';
+import { LocalAppAgentExecutor } from '../src/main/local-apps/agentExecutor';
 import { resolveTeamBinaries, runTeamHost, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult } from '../src/main/teams/process';
 import { BotContent } from '../src/main/bots/content';
 import { botFixture } from './bot-helpers';
@@ -19,12 +20,17 @@ import type { TeamBotCard } from '../../../packages/teams/bots';
 
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 const threadId = 'thread001', teamId = 'team00001';
+function syntheticRoute(overrides: Partial<TeamModelRoute> = {}): TeamModelRoute {
+  return { model_provider: 'anthropic', model_protocol: 'anthropic_messages', model_id: 'claude-synthetic',
+    model_endpoint: 'https://api.anthropic.com', credential_id: 'anthropic',
+    model_profile: { profile_name: 'anthropic', fixture: 'one frozen native SDK profile' }, ...overrides };
+}
 
 test('actual main discovery never SDK-reads Bot cards and a failed conversation watch falls back without a retry storm', async t => {
   const f = botFixture(t), privateStore = new TeamPrivateStore(f.userData);
   const bot = f.store.create({ name: 'HTTP-only Bot', model: 'anthropic/claude-synthetic' });
   const botKey = `bot:owner:${privateStore.hostId}:${bot.bot_id}`;
-  const snapshot = privateStore.saveSnapshot('owner', { instructions: 'Frozen', model_id: 'claude-synthetic', model_endpoint: 'https://api.anthropic.com' });
+  const snapshot = privateStore.saveSnapshot('owner', { instructions: 'Frozen', ...syntheticRoute() });
   f.store.setTeamBindings(bot.bot_id, [{ ownerUid: 'owner', teamId, generation: 1, botKey, revision: 1, snapshot, use: 'all', uids: [] }]);
   const app = initializeApp({ projectId: 'demo-teams-fallback', apiKey: 'synthetic', appId: 'synthetic' }, `teams-fallback-${Date.now()}`), db = getFirestore(app);
   let watchCalls = 0, heartbeatCalls = 0, requests = 0;
@@ -51,7 +57,7 @@ test('actual main discovery never SDK-reads Bot cards and a failed conversation 
   assert.equal(watchCalls, 0, 'raw Bot SDK reads are denied by policy and must never be attempted');
   const connector = new TeamConnector({ service, store: f.store, privateStore, content: new BotContent(f.store), platform: 'darwin', pollMs: 60_000,
     binaries: () => ({ host: '/unused', worker: '/unused' }), defaultModel: () => 'anthropic/claude-synthetic',
-    catalog: async () => ({ models: [] }), modelCredential: async () => 'synthetic', permission: async () => false,
+    modelRoute: async () => { throw new Error('unused'); }, modelCredential: async () => 'synthetic', permission: async () => false,
     run: async () => { throw new Error('no queued work'); } });
   service.attachHost(connector);
   t.after(async () => { service.close(); await terminate(db); await deleteApp(app); });
@@ -130,9 +136,10 @@ test('forged renderer host commands fail before SDK/auth transport', async () =>
   assert.equal(tokenCalls, 0); service.close();
 });
 
-function hostFixture(t: { after(fn: () => void): void }, options: { lostBind?: boolean; run?: (input: TeamHostProcessOptions) => Promise<TeamHostResult> } = {}) {
+function hostFixture(t: { after(fn: () => void): void }, options: { lostBind?: boolean; model?: string; route?: TeamModelRoute; credential?: () => Promise<string | undefined>; run?: (input: TeamHostProcessOptions) => Promise<TeamHostResult> } = {}) {
   const f = botFixture(t), content = new BotContent(f.store), privateStore = new TeamPrivateStore(f.userData);
-  const bot = f.store.create({ name: 'Team Bot', persona: 'Immutable persona', model: 'anthropic/claude-synthetic' });
+  const bot = f.store.create({ name: 'Team Bot', persona: 'Immutable persona', model: options.model ?? 'anthropic/claude-synthetic' });
+  let route = options.route ?? syntheticRoute(), routeCurrent = true; const credentialIds: string[] = [];
   let context = { uid: 'owner', epoch: 1 }, cards: TeamBotCard[] = [], cursor = 0;
   let queue = [{ id: 'trigger01', seq: 1 }, { id: 'trigger02', seq: 2 }], lostBind = options.lostBind;
   const events = new EventEmitter(), calls: Array<Record<string, unknown>> = [], runs: TeamHostProcessOptions[] = [];
@@ -161,8 +168,11 @@ function hostFixture(t: { after(fn: () => void): void }, options: { lostBind?: b
   };
   const make = () => new TeamConnector({ service, store: f.store, content, privateStore, platform: 'darwin', pollMs: 60_000,
     binaries: () => ({ host: '/fixed/host', worker: '/fixed/worker' }), defaultModel: () => 'wrong-default',
-    catalog: async () => ({ models: [{ providerId: 'anthropic', modelId: 'claude-synthetic', canSelect: true }] }),
-    modelCredential: async () => { credentialCalls++; return 'synthetic-model'; }, permission: async () => false,
+    modelRoute: async selected => {
+      if (selected !== `${route.model_provider}/${route.model_id}` && selected !== route.model_id) throw new Error('TEAM_MODEL_UNSUPPORTED');
+      return { route, assertCurrent: async () => { if (!routeCurrent) throw new Error('TEAM_MODEL_UNAVAILABLE'); } };
+    },
+    modelCredential: async id => { credentialCalls++; credentialIds.push(id); return options.credential ? options.credential() : 'synthetic-model'; }, permission: async () => false,
     run: async input => {
       assert.ok(privateStore.pending('owner').some(value => value.target.triggerId === input.bootstrap.target.triggerId), 'durable discovery must precede launching');
       runs.push(input);
@@ -171,7 +181,8 @@ function hostFixture(t: { after(fn: () => void): void }, options: { lostBind?: b
     } });
   const connector = make(); t.after(() => connector.close());
   const bind = () => connector.bindLocalBot('owner', { teamId, generation: 1, botId: bot.bot_id, use: 'all', uids: [], expectedRevision: 0 });
-  return { ...f, bot, content, privateStore, service, events, calls, runs, connector, bind, make,
+  return { ...f, bot, content, privateStore, service, events, calls, runs, connector, bind, make, credentialIds,
+    changeRoute: (value: TeamModelRoute) => { route = value; }, invalidateRoute: () => { routeCurrent = false; },
     revoke: () => { cards = []; events.emit('change', {}); },
     switchAccount: () => { context = { uid: 'replacement', epoch: 2 }; connector.invalidate(); },
     settle: () => { cursor = queue[0]!.seq; queue = queue.slice(1); }, credentialCalls: () => credentialCalls,
@@ -359,6 +370,137 @@ test('unsupported selected model fails explicitly without binding or fallback', 
   f.store.update(f.bot.bot_id, 1, { model: 'openai/other-model' });
   await assert.rejects(f.bind(), /TEAM_MODEL_UNSUPPORTED/u);
   assert.equal(f.calls.some(call => call.action === 'bindBot'), false);
+});
+
+test('OpenAI Responses freezes the selected native profile and resolves only its static credential slot', async t => {
+  const route = syntheticRoute({ model_provider: 'openai', model_protocol: 'open_ai_responses', model_id: 'gpt-6-luna',
+    model_endpoint: 'https://api.openai.com/v1', credential_id: 'openai-selected',
+    model_profile: { profile_name: 'openai', inference: { reasoning: 'native metadata' }, fixture: 'Responses, not Chat' } });
+  const f = hostFixture(t, { model: 'openai/gpt-6-luna', route });
+  await f.bind(); await f.connector.idle(); await tick();
+  const snapshot = f.runs[0]!.bootstrap.snapshot!;
+  assert.equal(snapshot.model_provider, 'openai'); assert.equal(snapshot.model_protocol, 'open_ai_responses');
+  assert.equal(snapshot.model_id, 'gpt-6-luna'); assert.equal(snapshot.model_endpoint, 'https://api.openai.com/v1');
+  assert.deepEqual(snapshot.model_profile, route.model_profile);
+  assert.deepEqual(f.credentialIds, ['openai-selected', 'openai-selected']);
+  assert.equal('credential_id' in snapshot, false, 'worker gets the selected key, not owner credential lookup capabilities');
+  const binding = f.store.get(f.bot.bot_id).teams![0]!;
+  const saved = f.privateStore.snapshot('owner', binding.snapshot);
+  assert.equal(saved.credential_id, 'openai-selected'); assert.equal('model_api_key' in saved, false);
+  f.changeRoute({ ...route, model_protocol: 'open_ai_chat', model_endpoint: 'https://other.example/v1', credential_id: 'sibling' });
+  f.connector.close(); const restarted = f.make(); t.after(() => restarted.close()); await restarted.idle(); await tick();
+  assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result'); assert.equal(f.runs[1]!.bootstrap.snapshot, undefined);
+  assert.deepEqual(f.credentialIds, ['openai-selected', 'openai-selected'], 'result recovery must never resolve an updated or sibling route');
+  assert.deepEqual(f.privateStore.snapshot('owner', binding.snapshot), saved);
+});
+
+test('configured connection and provider-local model identities survive without prefix inference', async t => {
+  const route = syntheticRoute({ model_provider: 'vendor:cn#primary', model_id: 'vendor/model-v2', credential_id: 'selected-cn-key',
+    model_endpoint: 'https://models.example/v2' });
+  const f = hostFixture(t, { model: 'vendor:cn#primary/vendor/model-v2', route });
+  await f.bind(); await f.connector.idle(); await tick();
+  assert.equal(f.runs[0]!.bootstrap.snapshot!.model_provider, 'vendor:cn#primary');
+  assert.equal(f.runs[0]!.bootstrap.snapshot!.model_id, 'vendor/model-v2');
+  assert.deepEqual(f.credentialIds, ['selected-cn-key', 'selected-cn-key']);
+});
+
+test('native connection profile identity preserves uppercase connection IDs', async t => {
+  const route = syntheticRoute({ model_provider: 'vendor:CN#0', credential_id: 'selected-cn-key' });
+  const f = hostFixture(t, { model: 'vendor:CN#0/claude-synthetic', route });
+  await f.bind(); await f.connector.idle(); await tick();
+  assert.equal(f.runs[0]!.bootstrap.snapshot!.model_provider, 'vendor:CN#0');
+  assert.equal(f.privateStore.snapshot('owner', f.store.get(f.bot.bot_id).teams![0]!.snapshot).model_provider, 'vendor:CN#0');
+  assert.deepEqual(f.credentialIds, ['selected-cn-key', 'selected-cn-key']);
+});
+
+test('route configuration changes while awaiting the selected credential reject binding', async t => {
+  let credential!: (value: string) => void, requested!: () => void;
+  const waiting = new Promise<void>(resolve => { requested = resolve; });
+  const f = hostFixture(t, { credential: () => new Promise(resolve => { credential = resolve; requested(); }) });
+  const binding = f.bind(); await waiting; f.invalidateRoute(); credential('selected-static');
+  await assert.rejects(binding, /TEAM_MODEL_UNAVAILABLE/u);
+  assert.equal(f.calls.some(call => call.action === 'bindBot'), false); assert.equal(f.store.get(f.bot.bot_id).teams?.length ?? 0, 0);
+});
+
+test('unsafe route endpoints fail closed before credential resolution', async t => {
+  for (const endpoint of ['http://api.openai.com/v1', 'http://localhost:1234/v1', 'http://2130706433/v1', 'https://user:secret@models.example', 'https://models.example/?key=secret', 'https://models.example/#secret', 'https://models.example/?', 'https://models.example/#']) {
+    const f = hostFixture(t, { route: syntheticRoute({ model_endpoint: endpoint }) });
+    await assert.rejects(f.bind(), /INVALID_TEAM_SNAPSHOT/u); assert.deepEqual(f.credentialIds, []);
+    assert.equal(f.calls.some(call => call.action === 'bindBot'), false);
+  }
+});
+
+test('legacy snapshot bytes remain untouched while indexed pending results use observation only', async t => {
+  const f = hostFixture(t); await f.bind(); await f.connector.idle(); await tick(); f.connector.close(); await tick();
+  const pending = f.privateStore.pending('owner')[0]!, binding = f.store.get(f.bot.bot_id).teams![0]!;
+  const bytes = JSON.stringify({ instructions: 'Legacy immutable persona', model_id: 'claude-synthetic', model_endpoint: 'https://api.anthropic.com' });
+  const snapshot = digest(bytes), path = join(f.privateStore.owner('owner').snapshots, snapshot);
+  writeFileSync(path, bytes, { mode: 0o600 });
+  f.privateStore.settlePending('owner', pending); f.privateStore.savePending('owner', { ...pending, snapshot });
+  f.store.setTeamBindings(f.bot.bot_id, [{ ...binding, snapshot }]);
+  const credentialCount = f.credentialCalls(), restarted = f.make(); t.after(() => restarted.close());
+  await restarted.idle(); await tick();
+  assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result'); assert.equal(f.runs[1]!.bootstrap.snapshot, undefined);
+  assert.equal(f.credentialCalls(), credentialCount); assert.equal(readFileSync(path, 'utf8'), bytes);
+  assert.throws(() => f.privateStore.snapshot('owner', snapshot), /INVALID_TEAM_SNAPSHOT/u, 'fresh execution requires a valid current immutable route');
+  restarted.close(); await tick();
+  f.privateStore.settlePending('owner', f.privateStore.pending('owner')[0]!);
+  const fresh = f.make(); t.after(() => fresh.close()); await fresh.idle(); await tick();
+  assert.equal(f.runs.length, 2, 'old unstarted bindings cannot launch a worker with the current default route');
+  assert.equal(f.credentialCalls(), credentialCount); assert.equal(readFileSync(path, 'utf8'), bytes);
+  assert.equal(fresh.runStatus('owner', teamId, threadId, 'trigger01'), 'storage_error');
+});
+
+function routeCatalogFixture(t: { after(fn: () => void): void }, rows: unknown[], configured: string[], gate?: () => Promise<void>) {
+  const f = botFixture(t), requested: string[][] = [];
+  const executor = new LocalAppAgentExecutor({ configHome: f.defaultConfigHome, root: join(f.root, 'agent'), serverBin: '/fixture/native-catalog',
+    environment: { HOME: f.home, PATH: '/usr/bin:/bin' }, credentials: async () => { throw new Error('metadata never reads keys'); },
+    credentialStatus: async ids => { requested.push(ids); await gate?.(); return new Set(configured); },
+    permission: async () => false, question: async () => null,
+    spawnProcess: (() => {
+      const child = fakeProcess();
+      child.stdin.once('data', () => child.stdout.write(`${JSON.stringify({ type: 'catalog', protocolVersion: 1,
+        models: rows, builtins: [], mcpTools: [], mcpConfigs: [], providerProfiles: { sibling: { secret: 'PRIVATE_ROUTER_DATA' } } })}\n`));
+      child.stdin.once('finish', () => { Object.assign(child, { exitCode: 0 }); child.emit('close', 0); });
+      return child;
+    }) as never });
+  return { ...f, executor, requested };
+}
+const catalogRow = (provider: string, model: string, route?: TeamModelRoute) => ({ provider_id: provider, request_model: model,
+  display_model: model, capabilities: { tools: true }, ...(route ? { team_route: route } : {}) });
+
+test('native selected route projection requests exactly its credential slot and stays out of public catalogs', async t => {
+  const route = syntheticRoute({ model_provider: 'openai-responses', model_protocol: 'open_ai_responses', model_id: 'gpt-6-luna',
+    model_endpoint: 'https://api.openai.com/v1', credential_id: 'openai-selected' });
+  const f = routeCatalogFixture(t, [catalogRow('openai', 'GPT 6 Luna', route), catalogRow('sibling', 'GPT 6 Luna', syntheticRoute({ credential_id: 'sibling-key' }))], ['openai-selected']);
+  const selection = await f.executor.teamModelRoute('openai/GPT 6 Luna');
+  assert.deepEqual(selection.route, route, 'native default-protocol resolution can select a different exact effective profile/wire model');
+  assert.deepEqual(f.requested, [['openai-selected']]);
+  const publicCatalog = JSON.stringify(await f.executor.catalog());
+  assert.ok(!publicCatalog.includes('model_profile') && !publicCatalog.includes('credential_id') && !publicCatalog.includes('PRIVATE_ROUTER_DATA'));
+  writeFileSync(join(f.defaultConfigHome, 'settings.json'), '{"changedRoute":true}');
+  await assert.rejects(selection.assertCurrent(), /TEAM_MODEL_UNAVAILABLE/u);
+});
+
+test('ambiguous, unsupported and unconfigured native routes never choose a fallback credential', async t => {
+  const route = syntheticRoute();
+  const ambiguous = routeCatalogFixture(t, [catalogRow('first', 'same', route), catalogRow('second', 'same', route)], ['anthropic']);
+  await assert.rejects(ambiguous.executor.teamModelRoute('same'), /TEAM_MODEL_UNAVAILABLE/u); assert.deepEqual(ambiguous.requested, []);
+  const unsupported = routeCatalogFixture(t, [catalogRow('cloud', 'model')], ['sibling-key']);
+  await assert.rejects(unsupported.executor.teamModelRoute('cloud/model'), /TEAM_MODEL_UNSUPPORTED/u); assert.deepEqual(unsupported.requested, []);
+  const unavailable = routeCatalogFixture(t, [catalogRow('anthropic', 'claude-synthetic', route)], ['sibling-key']);
+  await assert.rejects(unavailable.executor.teamModelRoute('anthropic/claude-synthetic'), /TEAM_MODEL_UNAVAILABLE/u);
+  assert.deepEqual(unavailable.requested, [['anthropic']]);
+});
+
+test('native route projection rejects configuration changes during credential metadata await', async t => {
+  let release!: () => void, requested!: () => void;
+  const waiting = new Promise<void>(resolve => { requested = resolve; });
+  const f = routeCatalogFixture(t, [catalogRow('anthropic', 'claude-synthetic', syntheticRoute())], ['anthropic'], () => new Promise(resolve => { release = resolve; requested(); }));
+  const selection = f.executor.teamModelRoute('anthropic/claude-synthetic');
+  await waiting;
+  writeFileSync(join(f.defaultConfigHome, 'settings.json'), '{"selectedConnection":"changed"}'); release();
+  await assert.rejects(selection, /TEAM_MODEL_UNAVAILABLE/u);
 });
 
 test('a stale bind revision cannot replace the immutable snapshot of an existing binding', async t => {

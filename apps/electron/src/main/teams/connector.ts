@@ -3,8 +3,7 @@ import type { TeamConversation } from '../../../../../packages/teams/messages';
 import type { TeamSummary } from '../../../../../packages/teams';
 import type { BotStore, BotTeamBinding } from '../bots/store';
 import type { BotContent } from '../bots/content';
-import { resolveProviderIdForModel } from '../credential-broker';
-import { TeamPrivateStore, type TeamPersonaSnapshot } from './privateStore';
+import { TeamPrivateStore, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot } from './privateStore';
 import { runTeamHost, TeamHostFailure, type TeamBotTarget, type TeamHostProcessOptions, type TeamHostResult } from './process';
 import type { LocalTeamHost, TeamAccountContext } from './service';
 
@@ -22,11 +21,10 @@ export interface TeamConnectorOptions {
   service: TeamHostApi; store: BotStore; content: Pick<BotContent, 'teamInstructions'>; privateStore: TeamPrivateStore;
   binaries(): { host: string; worker: string };
   defaultModel(): string | undefined;
-  catalog(): Promise<{ models: Array<{ providerId: string; modelId: string; canSelect: boolean }> }>;
-  /** Only the selected static Anthropic key. No account/OAuth/refresh credentials. */
-  modelCredential(): Promise<string | undefined>;
-  /** The selected catalog endpoint must also be supported; never silently reroute. */
-  modelEndpoint?(): string | undefined;
+  /** Resolve exactly one selectable native catalog route, including its static key slot. */
+  modelRoute(selected: string): Promise<TeamModelSelection>;
+  /** Only the frozen route's static key. No account/OAuth/ambient credentials. */
+  modelCredential(credentialId: string): Promise<string | undefined>;
   permission(input: Parameters<TeamHostProcessOptions['permission']>[0] & { accountEpoch: number; assertCurrent(): void }, signal: AbortSignal): Promise<boolean>;
   platform?: NodeJS.Platform;
   run?: (options: TeamHostProcessOptions) => Promise<TeamHostResult>;
@@ -90,18 +88,17 @@ export class TeamConnector implements LocalTeamHost {
     service.assertHostContext(context);
     if ((cards.bots.find(card => card.key === botKey)?.revision ?? 0) !== input.expectedRevision) throw new Error('BOT_REVISION_CONFLICT');
     const selected = bot.model ?? this.options.defaultModel();
-    if (!selected || resolveProviderIdForModel(selected) !== 'anthropic') throw new Error('TEAM_MODEL_UNSUPPORTED');
-    const endpoint = this.options.modelEndpoint?.() ?? 'https://api.anthropic.com';
-    if (endpoint !== 'https://api.anthropic.com') throw new Error('TEAM_MODEL_UNSUPPORTED');
-    const nativeModel = selected.includes('/') ? selected.slice(selected.indexOf('/') + 1) : selected;
-    const catalog = await this.options.catalog(); service.assertHostContext(context);
-    if (!catalog.models.some(model => model.providerId === 'anthropic' && model.modelId === nativeModel && model.canSelect)) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    if (!selected) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    const selection = await this.options.modelRoute(selected); service.assertHostContext(context);
+    const route = structuredClone(selection.route);
+    validateTeamModelRoute(route);
     const instructions = await this.options.content.teamInstructions(input.botId); service.assertHostContext(context);
     // A racing local edit cannot bind a mixture of two Bot configurations.
     if (this.options.store.get(input.botId).revision !== bot.revision) throw new Error('BOT_REVISION_CONFLICT');
-    const credential = await this.options.modelCredential(); service.assertHostContext(context);
+    const credential = await this.options.modelCredential(route.credential_id); service.assertHostContext(context);
     if (!credential) throw new Error('TEAM_MODEL_UNAVAILABLE');
-    const snapshot = this.options.privateStore.saveSnapshot(uid, { instructions, model_id: nativeModel, model_endpoint: 'https://api.anthropic.com' });
+    await selection.assertCurrent(); service.assertHostContext(context);
+    const snapshot = this.options.privateStore.saveSnapshot(uid, { instructions, ...route });
     this.stopBinding(input.teamId, botKey);
     // Save the intended revision first. A lost bind response can then be discovered,
     // while a rejected request never matches the server card and cannot execute.
@@ -261,7 +258,7 @@ export class TeamConnector implements LocalTeamHost {
     let snapshot: TeamPersonaSnapshot | undefined, key: string | undefined;
     if (!retry) {
       snapshot = this.options.privateStore.snapshot(context.uid, binding.snapshot);
-      key = await this.options.modelCredential().catch(() => undefined); assert();
+      key = await this.options.modelCredential(snapshot.credential_id).catch(() => undefined); assert();
     }
     if (controller.signal.aborted) throw new Error('INVALID_SESSION');
     const assertCurrent = () => {
@@ -273,7 +270,8 @@ export class TeamConnector implements LocalTeamHost {
     return (this.options.run ?? runTeamHost)({ executable: binaries.host, home: roots.home, tmp: roots.tmp,
       bootstrap: { version: 1, type: 'start', mode: retry ? 'retry_result' : 'run', owner_uid: context.uid, account_epoch: context.epoch,
         endpoint: 'https://lingxios.net/v1/teams/messages', journal_root: roots.journal, runtime_root: roots.runtime,
-        worker_executable: binaries.worker, target, ...(key && snapshot ? { snapshot: { ...snapshot, model_api_key: key,
+        worker_executable: binaries.worker, target, ...(key && snapshot ? { snapshot: { instructions: snapshot.instructions, model_provider: snapshot.model_provider, model_protocol: snapshot.model_protocol,
+          model_id: snapshot.model_id, model_endpoint: snapshot.model_endpoint, model_profile: snapshot.model_profile, model_api_key: key,
           max_turns: 8, max_input_bytes: 32 * 1024, output_tokens_per_request: 2048, physical_dispatches: 12 } } : {}) },
       signal: controller.signal, assertCurrent, token: () => this.options.service.hostToken(context),
       permission: async (input, signal) => {

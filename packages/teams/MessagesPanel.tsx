@@ -35,7 +35,7 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
     : /STORAGE|Quota|disk/iu.test(code) ? t('Local message storage is unavailable. Check free space and try again.', '本地消息存储不可用，请检查空间后重试。')
     : ['BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET'].includes(code) ? t('Bot access changed. Sync and check the selected Bots before sending again.', 'Bot 权限已变化，请同步并检查所选 Bot 后重试。')
     : ['QUESTION_RECIPIENT_REQUIRED', 'ANSWER_CONFLICT', 'INVALID_ANSWER'].includes(code) ? t('This answer cannot be accepted. Check the question and original requester.', '此答案无法接收，请检查问题与原始请求人身份。')
-    : code === 'TEAM_MODEL_UNSUPPORTED' ? t('This Bot’s selected model is not supported for Teams. Choose a supported Anthropic model on Desktop.', '此 Bot 所选模型暂不支持团队，请在 Desktop 选择受支持的 Anthropic 模型。')
+    : code === 'TEAM_MODEL_UNSUPPORTED' ? t('This model configuration cannot be used for Team Bots. Check the provider settings on Desktop or choose another model.', '当前模型配置不能用于团队 Bot，请检查 Desktop 的供应商配置或选择其他模型。')
     : code === 'TEAM_MODEL_UNAVAILABLE' ? t('This Bot’s model or API key is unavailable. Check its model and provider settings on Desktop.', '此 Bot 的模型或 API 密钥不可用，请检查 Desktop 的模型与供应商设置。')
     : code === 'TEAM_RUNTIME_UNAVAILABLE' ? t('The isolated Teams runtime is unavailable on this Desktop. Install a Desktop build that includes it.', '此 Desktop 缺少团队隔离运行时，请安装包含此运行时的 Desktop 版本。')
     : code === 'TEAM_HOST_MACOS_REQUIRED' ? t('Sharing a Team Bot currently requires macOS Desktop.', '共享团队 Bot 当前需要 macOS Desktop。')

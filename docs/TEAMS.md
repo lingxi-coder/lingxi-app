@@ -264,12 +264,17 @@ to Desktop to bind a local Bot. These are local source implementations; T3 is no
 marked complete or released by this document.
 
 The trusted macOS Desktop main process binds an existing local Bot and discovers
-its backend queues. Binding requires available trusted host/worker binaries, a
-selectable Anthropic model, the fixed `https://api.anthropic.com` endpoint and a
-selected static API key. Unsupported platforms, providers, endpoints and
-credential routes fail explicitly; they do not fall back to an ordinary Bot
-runtime. Persona/Skill instruction text and the model choice are saved as an
-immutable snapshot. Owner folders, MCP connections, plugins, startup helpers,
+its backend queues. Binding requires trusted host/worker binaries and one
+selectable native model route with an available static Credential Broker key.
+Teams reuses the existing SDK registry and protocol codecs, including OpenAI
+Responses for GPT-6 Luna. The native catalog supplies the resolved protocol,
+endpoint, sanitized singleton provider profile and exact credential slot; the
+main process checks that configuration is unchanged after asynchronous lookup.
+Unsupported platforms or credential routes fail explicitly. Persona/Skill text
+and the complete selected route are saved as an immutable snapshot. Old bindings
+without that route require an explicit owner rebind; pending saved results can
+still retry delivery without model credentials or execution. Owner folders,
+MCP connections, plugins, startup helpers,
 ordinary Bot memory and ambient credentials are not inherited.
 
 Each invocation uses a fresh `harness-team-host`/`harness-team-worker` process path

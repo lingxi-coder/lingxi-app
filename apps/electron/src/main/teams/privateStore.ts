@@ -3,7 +3,32 @@ import { constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openS
 import { dirname, join } from 'node:path';
 import type { TeamBotTarget } from './process';
 
-export interface TeamPersonaSnapshot { instructions: string; model_id: string; model_endpoint: string }
+export interface TeamModelRoute {
+  model_provider: string; model_protocol: string; model_id: string; model_endpoint: string;
+  credential_id: string; model_profile: Record<string, unknown>;
+}
+export interface TeamPersonaSnapshot extends TeamModelRoute { instructions: string }
+export interface TeamModelSelection { route: TeamModelRoute; assertCurrent(): Promise<void> }
+
+/** Native catalog descriptors contain one resolved static route, never owner routing. */
+export function validateTeamModelRoute(value: unknown): asserts value is TeamModelRoute {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_TEAM_SNAPSHOT');
+  const route = value as TeamModelRoute;
+  if (Object.keys(route).sort().join(',') !== 'credential_id,model_endpoint,model_id,model_profile,model_protocol,model_provider'
+    || typeof route.model_provider !== 'string' || !route.model_provider || Buffer.byteLength(route.model_provider) > 512
+    || /[\p{Cc}\p{White_Space}\/]/u.test(route.model_provider)
+    || typeof route.model_protocol !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/u.test(route.model_protocol)
+    || typeof route.model_id !== 'string' || !route.model_id || route.model_id.length > 256 || /[\s\u0000-\u001f\u007f]/u.test(route.model_id)
+    || typeof route.credential_id !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(route.credential_id)
+    || !route.model_profile || typeof route.model_profile !== 'object' || Array.isArray(route.model_profile)
+    || Buffer.byteLength(JSON.stringify(route.model_profile)) > 64 * 1024
+    || typeof route.model_endpoint !== 'string' || route.model_endpoint.length > 2048 || /\s/u.test(route.model_endpoint)) throw new Error('INVALID_TEAM_SNAPSHOT');
+  let endpoint: URL;
+  try { endpoint = new URL(route.model_endpoint); } catch { throw new Error('INVALID_TEAM_SNAPSHOT'); }
+  const loopbackHttp = /^http:\/\/(?:127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:\/|$)/u.test(route.model_endpoint);
+  if (endpoint.username || endpoint.password || route.model_endpoint.includes('?') || route.model_endpoint.includes('#')
+    || (endpoint.protocol !== 'https:' && !loopbackHttp)) throw new Error('INVALID_TEAM_SNAPSHOT');
+}
 export interface PendingTeamTarget { version: 1; target: TeamBotTarget; snapshot: string; sequence: number }
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 
@@ -101,6 +126,7 @@ export class TeamPrivateStore {
     try { fsyncSync(directory); } finally { closeSync(directory); }
   }
   saveSnapshot(uid: string, value: TeamPersonaSnapshot): string {
+    this.validateSnapshot(value);
     const text = JSON.stringify(value);
     if (Buffer.byteLength(text) > 192 * 1024) throw new Error('INVALID_TEAM_SNAPSHOT');
     const key = digest(text), path = join(this.owner(uid).snapshots, key);
@@ -114,10 +140,14 @@ export class TeamPrivateStore {
     const text = readPrivate(join(this.owner(uid).snapshots, key), 192 * 1024);
     if (digest(text) !== key) throw new Error('INVALID_TEAM_SNAPSHOT');
     const value = JSON.parse(text) as TeamPersonaSnapshot;
-    if (Object.keys(value).sort().join(',') !== 'instructions,model_endpoint,model_id' || typeof value.instructions !== 'string'
-      || !value.instructions.trim() || value.instructions.includes('\0') || Buffer.byteLength(value.instructions) > 64 * 1024
-      || typeof value.model_id !== 'string' || !/^[A-Za-z0-9._-]{1,256}$/u.test(value.model_id)
-      || value.model_endpoint !== 'https://api.anthropic.com') throw new Error('INVALID_TEAM_SNAPSHOT');
+    this.validateSnapshot(value);
     return value;
+  }
+  private validateSnapshot(value: TeamPersonaSnapshot): void {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_TEAM_SNAPSHOT');
+    const { instructions, ...route } = value;
+    validateTeamModelRoute(route);
+    if (typeof instructions !== 'string' || !instructions.trim() || instructions.includes('\0')
+      || Buffer.byteLength(instructions) > 64 * 1024) throw new Error('INVALID_TEAM_SNAPSHOT');
   }
 }

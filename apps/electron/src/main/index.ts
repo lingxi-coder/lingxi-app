@@ -891,9 +891,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           service: teamsService, store: teamBotStore, content: new BotContent(teamBotStore), privateStore: new TeamPrivateStore(userData),
           binaries: () => resolveTeamBinaries({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }),
           defaultModel: () => settings.getPublic().model,
-          catalog: () => agentExecutor.catalog(true),
-          modelEndpoint: () => settings.getPublic().apiBaseUrl,
-          modelCredential: () => resolveProviderCredential('anthropic', { credentialBroker }),
+          modelRoute: selected => agentExecutor.teamModelRoute(selected),
+          modelCredential: credentialId => resolveProviderCredential(credentialId, { credentialBroker, environment: {} }),
           permission: async (input, signal) => teamApprovalBroker!.request({ ...input, showLocal: async localSignal => {
             localSignal.throwIfAborted();
             const options = { type: 'question' as const, signal: localSignal, title: 'Team Bot permission',

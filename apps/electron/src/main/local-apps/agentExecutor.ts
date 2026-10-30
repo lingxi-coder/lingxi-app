@@ -9,6 +9,7 @@ import type { LocalAppAgentExecution, LocalAppAgentExecutorResult } from './agen
 import { LocalAppAgentError, sameAgentGrant } from './agentPolicy.js';
 import { buildBridgeEnvironment, buildCredentialEnvelope } from '../host-utils.js';
 import { resolveServerBin } from '../bridgeDiscovery.js';
+import { validateTeamModelRoute, type TeamModelSelection } from '../teams/privateStore.js';
 
 type Credentials = Parameters<typeof buildCredentialEnvelope>[0];
 interface WireTool {
@@ -18,6 +19,7 @@ interface WireTool {
 interface WireModel {
   provider_id: string; request_model: string; display_model: string;
   capabilities: { vision?: boolean; tools?: boolean; structured_output?: boolean };
+  team_route?: unknown;
 }
 interface WireCatalog {
   type: 'catalog'; protocolVersion: 1;
@@ -174,6 +176,23 @@ export class LocalAppAgentExecutor {
       canSelect: available.has(model.provider_id), supportsAttachments: true, supportsVision: model.capabilities.vision === true,
       // Harness validates StructuredOutput as a tool, independent of provider response_format support.
       supportsStructuredOutput: model.capabilities.tools === true })), tools, skills: [] };
+  }
+  /** Main-only immutable route projection; public Local App catalogs stay unchanged. */
+  async teamModelRoute(selected: string): Promise<TeamModelSelection> {
+    const catalog = await this.wireCatalog(true);
+    const version = this.cached?.wire === catalog ? this.cached.configVersion : undefined;
+    if (!version) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    const assertCurrent = async () => { if (await this.configVersion() !== version) throw new Error('TEAM_MODEL_UNAVAILABLE'); };
+    const models = catalog.models.filter(model => selected === `${model.provider_id}/${model.request_model}` || selected === model.request_model);
+    if (models.length !== 1) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    const model = models[0]!;
+    if (!model.team_route) throw new Error('TEAM_MODEL_UNSUPPORTED');
+    const route = structuredClone(model.team_route);
+    validateTeamModelRoute(route);
+    const configured = await this.options.credentialStatus([route.credential_id]);
+    if (!configured.has(route.credential_id)) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    await assertCurrent();
+    return { route, assertCurrent };
   }
   async execute(execution: LocalAppAgentExecution): Promise<LocalAppAgentExecutorResult> {
     const { owner, runId, authorization, input, signal } = execution;

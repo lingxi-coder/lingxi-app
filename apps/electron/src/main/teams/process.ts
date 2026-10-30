@@ -7,7 +7,8 @@ export interface TeamBotTarget {
   teamId: string; conversationId: string; botKey: string; triggerId: string;
 }
 export interface TeamRunSnapshot {
-  instructions: string; model_id: string; model_endpoint: string; model_api_key: string;
+  instructions: string; model_provider: string; model_protocol: string; model_id: string; model_endpoint: string;
+  model_profile: Record<string, unknown>; model_api_key: string;
   max_turns: number; max_input_bytes: number; output_tokens_per_request: number; physical_dispatches: number;
 }
 export interface TeamHostBootstrap {

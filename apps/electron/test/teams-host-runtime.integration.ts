@@ -364,7 +364,13 @@ async function startConnector(): Promise<void> {
   };
   connector = new TeamConnector({ service, store, content: new BotContent(store), privateStore, pollMs: 250,
     binaries: () => binaries, defaultModel: () => MODEL,
-    catalog: async () => ({ models: [{ providerId: 'anthropic', modelId: MODEL, canSelect: true }] }), modelCredential: async () => MODEL_KEY,
+    modelRoute: async () => ({ route: { model_provider: 'anthropic', model_protocol: 'anthropic_messages', model_id: MODEL,
+      model_endpoint: 'https://api.anthropic.com', credential_id: 'anthropic-api-key',
+      model_profile: { provider_id: 'anthropic', profile_name: 'anthropic', base_url: 'https://api.anthropic.com',
+        protocol: 'anthropic_messages', auth: 'api_key', credential: { source: 'host_managed', key: 'team-selected-model' },
+        models: [{ display_model: MODEL, request_model: MODEL, billing_model: MODEL,
+          capability_support: { streaming: 'supported', tools: 'supported' } }], extra: {} } }, assertCurrent: async () => {} }),
+    modelCredential: async credentialId => { assert.equal(credentialId, 'anthropic-api-key'); return MODEL_KEY; },
     permission: (input, signal) => approvalBroker.request({ ...input, showLocal: async () => {
       assert.equal(input.target.ownerUid, ownerUid); assert.equal(input.toolName, 'Bash');
       assert.equal(input.target.triggerId, desktopTriggerId); approvals.push({ triggerId: input.target.triggerId, toolName: input.toolName });
@@ -377,7 +383,8 @@ async function startConnector(): Promise<void> {
       // environment switch, account setting, renderer or deep link can select it.
       const modelAddress = modelServer.address(); assert.ok(modelAddress && typeof modelAddress !== 'string');
       const bootstrap = { ...input.bootstrap, endpoint,
-        ...(input.bootstrap.snapshot ? { snapshot: { ...input.bootstrap.snapshot, model_endpoint: `http://127.0.0.1:${modelAddress.port}` } } : {}) } as TeamHostBootstrap;
+        ...(input.bootstrap.snapshot ? { snapshot: { ...input.bootstrap.snapshot, model_endpoint: `http://127.0.0.1:${modelAddress.port}`,
+          model_profile: { ...input.bootstrap.snapshot.model_profile, base_url: `http://127.0.0.1:${modelAddress.port}` } } } : {}) } as TeamHostBootstrap;
       try {
         const result = await runTeamHost({ ...input, bootstrap, spawnProcess: (executable, args, options) => {
           assert.deepEqual(args, []); assert.equal(executable, binaries.host);

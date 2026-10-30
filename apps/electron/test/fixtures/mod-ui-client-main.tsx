@@ -38,6 +38,8 @@ interface FixtureApi {
     returnedClientEnvironmentEpoch?: number;
     handled?: boolean;
     workerFault?: boolean;
+    frameHeld?: boolean;
+    frameReleased?: boolean;
   }>;
   contextMentionHref(): string;
   contextMentionEvents(): unknown[];
@@ -63,9 +65,16 @@ interface FixtureApi {
   requestLateRerender(): void;
   releaseLateRenderAt(index: number): void;
   disableLateRender(): void;
-  holdNextFrameOperation(): void;
+  holdNextFrameOperation(runtimeId: string): void;
   releaseHeldFrameOperations(): void;
-  emitNewerAsyncFrame(): void;
+  releaseHeldSetProps(runtimeId: string): void;
+  holdSubsequentFrameOperations(runtimeId: string): void;
+  releaseHeldSubsequentFrameOperations(runtimeId: string): void;
+  emitNewerAsyncFrame(): { renderRevision: number; frameSequence: number };
+  observeStatusCommits(): void;
+  requestStatusCommitProbe(): number;
+  statusCommitProbe(token: number): { text: string; observedTexts: string[] } | null;
+  stopStatusCommitObservation(): void;
   emitHighSequenceFrameForFailedRuntime(runtimeId: string): void;
   reloadStatusPluginEnvironment(): void;
   emitAsyncWorkerFault(): void;
@@ -104,7 +113,8 @@ const runtimeFrames = new Map<string, UiClientFrameDto>();
 const frameIdentityByRuntime = new Map<string, Pick<UiClientFrameEventSnapshotDto, 'parent' | 'client'>>();
 const frameSequenceByRuntime = new Map<string, number>();
 const failedRuntimeIds = new Set<string>();
-const heldFrameOperationReleases: Array<() => void> = [];
+type HeldFrameOperationType = 'resize' | 'render' | 'setProps';
+const heldFrameOperationReleases: Array<{ runtimeId: string; type: HeldFrameOperationType; release: () => void }> = [];
 let revision = 1;
 let title = 'Ready';
 let clientRuntimeEpochs: Record<string, number> = { 'fixture-plugin': 1 };
@@ -117,7 +127,13 @@ let noParent = false;
 let statusPluginLoaded = true;
 let asyncFaultClientEnabled = false;
 let holdInitialResize = true;
-let holdNextFrame = false;
+let holdNextFrameRuntimeId: string | null = null;
+let holdSubsequentFramesRuntimeId: string | null = null;
+let nextStatusCommitProbe = 0;
+let setStatusCommitProbe!: (token: number) => void;
+const statusCommitProbes = new Map<number, { text: string; observedTexts: string[] }>();
+let statusCommitObserver: MutationObserver | null = null;
+let observedStatusTexts: string[] = [];
 let nextRuntimeId = 1;
 let setRapidInputEnabled!: (enabled: boolean) => void;
 let rapidInputValue = '';
@@ -272,8 +288,26 @@ function emitWorkerFaultFrame(sessionId: string, runtimeId: string, renderRevisi
   });
 }
 
-function holdFrameResult(frame: UiClientFrameDto): Promise<UiClientFrameDto> {
-  return new Promise((resolve) => heldFrameOperationReleases.push(() => resolve(frame)));
+function holdFrameResult(frame: UiClientFrameDto, call: FixtureApi['calls'][number], type: HeldFrameOperationType): Promise<UiClientFrameDto> {
+  call.frameHeld = true;
+  return new Promise((resolve) => heldFrameOperationReleases.push({
+    runtimeId: frame.runtimeId,
+    type,
+    release: () => { call.frameReleased = true; resolve(frame); },
+  }));
+}
+
+function releaseHeldFrames(type?: HeldFrameOperationType, runtimeId?: string): number {
+  let released = 0;
+  for (const held of heldFrameOperationReleases.splice(0)) {
+    if ((type && held.type !== type) || (runtimeId && held.runtimeId !== runtimeId)) {
+      heldFrameOperationReleases.push(held);
+      continue;
+    }
+    held.release();
+    released += 1;
+  }
+  return released;
 }
 
 const host: ModUiClientHostApi = {
@@ -477,19 +511,36 @@ const host: ModUiClientHostApi = {
     const frame = makeRuntimeFrame(runtimeId, request.render_revision, tree);
     call.returnedRevision = frame.renderRevision;
     call.returnedFrameSequence = frame.frameSequence;
-    if (request.type === 'resize' && holdInitialResize) {
+    if (request.type === 'resize' && runtimeId === 'runtime-status' && holdInitialResize) {
       holdInitialResize = false;
-      return await holdFrameResult(frame) as UiClientOperationResponseFor<T>;
+      return await holdFrameResult(frame, call, 'resize') as UiClientOperationResponseFor<T>;
     }
-    if (request.type === 'setProps' && holdNextFrame) {
-      holdNextFrame = false;
-      return await holdFrameResult(frame) as UiClientOperationResponseFor<T>;
+    if (request.type === 'setProps' && runtimeId === holdNextFrameRuntimeId) {
+      holdNextFrameRuntimeId = null;
+      return await holdFrameResult(frame, call, 'setProps') as UiClientOperationResponseFor<T>;
+    }
+    if (runtimeId === holdSubsequentFramesRuntimeId
+      && (request.type === 'resize' || request.type === 'render' || request.type === 'setProps')) {
+      return await holdFrameResult(frame, call, request.type) as UiClientOperationResponseFor<T>;
     }
     return frame as UiClientOperationResponseFor<T>;
   },
   onFrame(listener) { frameListeners.add(listener); return () => frameListeners.delete(listener); },
   onInvalidate(listener) { invalidationListeners.add(listener); return () => invalidationListeners.delete(listener); },
 };
+
+function StatusCommitProbe() {
+  const [token, setToken] = React.useState(0);
+  setStatusCommitProbe = setToken;
+  // Read the status DOM from a layout effect in the same React root, after the
+  // response queue barrier and before later host frames are released.
+  React.useLayoutEffect(() => {
+    if (token === 0) return;
+    const text = document.querySelector('[data-client="status"] .mod-ui-client-surface')?.textContent ?? '';
+    statusCommitProbes.set(token, { text, observedTexts: [...observedStatusTexts] });
+  }, [token]);
+  return null;
+}
 
 function Fixture() {
   const [enabled, updateEnabled] = React.useState(true);
@@ -515,6 +566,7 @@ function Fixture() {
   }, []);
   return <Theme.Provider value={tokens(false)}>
     <main className="desktop-main" style={{ width: 720, height: 480, padding: 12 }}>
+      <StatusCommitProbe />
       {identityClientsAttached && enabled && <ModUiSurfaceClientIdProvider clientId={primaryClientId}><ModUiAbovePrompt
         sessionId={sessionId}
         host={host}
@@ -601,6 +653,8 @@ window.__modUiClientFixture = {
   debugSnapshot() {
     return {
       currentStatusRuntimeId,
+      heldFrameCount: heldFrameOperationReleases.length,
+      frameSequences: [...frameSequenceByRuntime.entries()],
       statusEpochs: [...statusMountCountsByEpoch.entries()],
       statusDom: [...document.querySelectorAll('[data-client="status"]')].map((element) => ({
         text: element.textContent,
@@ -615,6 +669,8 @@ window.__modUiClientFixture = {
         returnedRevision: call.returnedRevision,
         returnedFrameSequence: call.returnedFrameSequence,
         workerFault: call.workerFault,
+        frameHeld: call.frameHeld,
+        frameReleased: call.frameReleased,
       })),
     };
   },
@@ -716,12 +772,46 @@ window.__modUiClientFixture = {
   },
   releaseLateRenderAt(index) { lateRenderResolvers.splice(index, 1)[0]?.resolve(); },
   disableLateRender() { setLateEnabled(false); },
-  holdNextFrameOperation() { holdNextFrame = true; },
-  releaseHeldFrameOperations() { for (const release of heldFrameOperationReleases.splice(0)) release(); },
+  holdNextFrameOperation(runtimeId) { holdNextFrameRuntimeId = runtimeId; },
+  releaseHeldFrameOperations() { releaseHeldFrames(); },
+  releaseHeldSetProps(runtimeId) {
+    if (releaseHeldFrames('setProps', runtimeId) !== 1) throw new Error('expected one held setProps frame');
+  },
+  holdSubsequentFrameOperations(runtimeId) { holdSubsequentFramesRuntimeId = runtimeId; },
+  releaseHeldSubsequentFrameOperations(runtimeId) {
+    if (holdSubsequentFramesRuntimeId !== runtimeId) throw new Error('unexpected held frame runtime');
+    holdSubsequentFramesRuntimeId = null;
+    if (releaseHeldFrames(undefined, runtimeId) !== 1) throw new Error('expected one held subsequent frame');
+  },
   emitNewerAsyncFrame() {
     const setPropsCall = [...calls].reverse().find((call) => call.kind === 'operation' && call.request.type === 'setProps' && call.request.runtimeId === 'runtime-status');
-    if (!setPropsCall || setPropsCall.kind !== 'operation' || setPropsCall.request.type !== 'setProps') return;
-    emitRuntimeFrame(sessionId, makeRuntimeFrame('runtime-status', setPropsCall.request.render_revision, surfaceTree('Newest asynchronous frame')));
+    if (!setPropsCall || setPropsCall.kind !== 'operation' || setPropsCall.request.type !== 'setProps' || !setPropsCall.frameHeld || setPropsCall.frameReleased) {
+      throw new Error('expected a held status setProps frame before emitting the newer frame');
+    }
+    const frame = makeRuntimeFrame('runtime-status', setPropsCall.request.render_revision, surfaceTree('Newest asynchronous frame'));
+    emitRuntimeFrame(sessionId, frame);
+    return { renderRevision: frame.renderRevision, frameSequence: frame.frameSequence };
+  },
+  observeStatusCommits() {
+    const status = document.querySelector('[data-client="status"]');
+    if (!status) throw new Error('status client is missing');
+    statusCommitObserver?.disconnect();
+    observedStatusTexts = [];
+    statusCommitObserver = new MutationObserver(() => { observedStatusTexts.push(status.textContent ?? ''); });
+    statusCommitObserver.observe(status, { childList: true, subtree: true, characterData: true });
+  },
+  requestStatusCommitProbe() {
+    const token = ++nextStatusCommitProbe;
+    setStatusCommitProbe(token);
+    return token;
+  },
+  statusCommitProbe(token) {
+    const result = statusCommitProbes.get(token);
+    return result ? { ...result, observedTexts: [...observedStatusTexts] } : null;
+  },
+  stopStatusCommitObservation() {
+    statusCommitObserver?.disconnect();
+    statusCommitObserver = null;
   },
   emitHighSequenceFrameForFailedRuntime(runtimeId) {
     if (!failedRuntimeIds.has(runtimeId)) return;

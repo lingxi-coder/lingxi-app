@@ -38,6 +38,12 @@ const CONTROL = /[\u0000-\u001f\u007f]/;
 
 export type BotWorkspaceMode = 'read' | 'write';
 
+/** Host-owned Team bindings. These never grant access to the ordinary Bot home. */
+export interface BotTeamBinding {
+  ownerUid: string; teamId: string; generation: number; botKey: string; revision: number;
+  snapshot: string; use: 'all' | 'listed'; uids: string[];
+}
+
 export interface BotWorkspace {
   /** The real path of an existing directory. */
   path: string;
@@ -61,6 +67,7 @@ export interface BotRecord {
   accept_from?: string[];
   /** Whether the owner's approved devices may reach this Bot's chats through Remote Control. Absent: they may not. */
   remote?: boolean;
+  teams?: BotTeamBinding[];
   workspaces: BotWorkspace[];
   /** Only the owner exists in this version. */
   audiences: Array<{ id: 'owner'; kind: 'owner' }>;
@@ -210,7 +217,7 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
   try { parsed = JSON.parse(text); } catch { throw new Error('bot.json is not valid JSON'); }
   const input = plainObject(parsed, 'bot.json');
   if (input['v'] !== BOT_RECORD_VERSION) throw new Error('bot.json has an unsupported version');
-  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model', 'permission_mode', 'accept_from', 'remote'], 'bot.json');
+  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model', 'permission_mode', 'accept_from', 'remote', 'teams'], 'bot.json');
   if (input['bot_id'] !== expectedId || !isBotId(input['bot_id'])) throw new Error('bot.json belongs to a different Bot');
   const name = botName(input['name']);
   if (name !== input['name']) throw new Error('invalid name');
@@ -240,9 +247,30 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
     ...(input['permission_mode'] !== undefined ? { permission_mode: botPermissionMode(input['permission_mode']) } : {}),
     ...(acceptFrom.length > 0 ? { accept_from: acceptFrom } : {}),
     ...(remote ? { remote } : {}),
+    ...(input['teams'] !== undefined ? { teams: parseTeamBindings(input['teams']) } : {}),
     workspaces,
     audiences: [{ id: 'owner', kind: 'owner' }],
   };
+}
+
+function parseTeamBindings(value: unknown): BotTeamBinding[] {
+  if (!Array.isArray(value) || value.length > 100) throw new Error('invalid Team bindings');
+  const entries = value.map(raw => {
+    const entry = plainObject(raw, 'Team binding');
+    exactKeys(entry, ['ownerUid', 'teamId', 'generation', 'botKey', 'revision', 'snapshot', 'use', 'uids'], [], 'Team binding');
+    if (typeof entry.ownerUid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(entry.ownerUid)
+      || typeof entry.teamId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/u.test(entry.teamId)
+      || typeof entry.botKey !== 'string' || !/^bot:[A-Za-z0-9_-]{1,128}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{22}$/u.test(entry.botKey)
+      || !Number.isSafeInteger(entry.generation) || (entry.generation as number) < 1
+      || !Number.isSafeInteger(entry.revision) || (entry.revision as number) < 1
+      || typeof entry.snapshot !== 'string' || !/^[a-f0-9]{64}$/u.test(entry.snapshot)
+      || !['all', 'listed'].includes(entry.use as string) || !Array.isArray(entry.uids) || entry.uids.length > 200
+      || !entry.uids.every(uid => typeof uid === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(uid))
+      || new Set(entry.uids).size !== entry.uids.length) throw new Error('invalid Team binding');
+    return entry as unknown as BotTeamBinding;
+  });
+  if (new Set(entries.map(entry => JSON.stringify([entry.ownerUid, entry.teamId]))).size !== entries.length) throw new Error('duplicate Team binding');
+  return entries;
 }
 
 function serialize(record: BotRecord): string {
@@ -288,6 +316,15 @@ export class BotStore {
   }
 
   get root(): string { return this.locations.root; }
+
+  /** Trusted main only: renderer Bot patches cannot manufacture Team bindings. */
+  setTeamBindings(botId: string, bindings: BotTeamBinding[]): void {
+    const record = this.get(botId);
+    const teams = parseTeamBindings(bindings);
+    const text = serialize({ ...record, teams, revision: record.revision + 1, updated_at: this.now() });
+    if (Buffer.byteLength(text) > MAX_RECORD_BYTES) throw new Error('TEAM_BINDING_LIMIT');
+    writeFileAtomic(this.recordPath(botId), text);
+  }
 
   botDir(botId: string): string { return join(this.root, this.checkedId(botId)); }
   recordPath(botId: string): string { return join(this.botDir(botId), 'bot.json'); }

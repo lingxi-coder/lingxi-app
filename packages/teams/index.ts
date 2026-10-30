@@ -1,4 +1,6 @@
 import type { MessageApi, MessageCommand } from './messages';
+import type { BindLocalTeamBotInput, LocalTeamBot } from './bots';
+export type { TeamBotCommand, TeamBotAnswer, TeamBotRecovery, TeamBotCard, TeamBotState, LocalTeamBot, BindLocalTeamBotInput } from './bots';
 export type TeamRole = 'owner' | 'admin' | 'member';
 export interface TeamSummary { id: string; name: string; memberCount: number; role: TeamRole; generation: number }
 export interface TeamMember { uid: string; displayName: string; role: TeamRole; generation: number }
@@ -15,6 +17,8 @@ export type TeamCommand =
   | { action: 'role'; teamId: string; uid: string; generation: number; role: 'admin' | 'member' };
 export interface TeamResult { teamId?: string; code?: string; generation?: number; alreadyMember?: boolean; ok?: boolean }
 export interface TeamsApi extends MessageApi {
+  localBots?(): Promise<LocalTeamBot[]>;
+  bindLocalBot?(input: BindLocalTeamBotInput): Promise<{ botKey: string; revision: number }>;
   list(): Promise<{ teams: TeamSummary[] }>;
   detail(teamId: string): Promise<TeamDetail>;
   execute(command: TeamCommand): Promise<TeamResult>;
@@ -22,6 +26,8 @@ export interface TeamsApi extends MessageApi {
   onChanged(callback: (event: { invalidated?: boolean }) => void): () => void;
 }
 export interface DesktopTeamsApi {
+  localBots(uid: string): Promise<LocalTeamBot[]>;
+  bindLocalBot(uid: string, input: BindLocalTeamBotInput): Promise<{ botKey: string; revision: number }>;
   list(uid: string): Promise<{ teams: TeamSummary[] }>;
   detail(uid: string, teamId: string): Promise<TeamDetail>;
   execute(uid: string, command: TeamCommand): Promise<TeamResult>;

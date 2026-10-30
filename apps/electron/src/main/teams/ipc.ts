@@ -11,6 +11,8 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
     if (typeof command.uid !== 'string' || !command.uid || command.uid.length > 128) throw new Error('Invalid account');
     try {
       const value = command.type === 'list' ? await service.list(command.uid)
+        : command.type === 'localBots' ? await service.localBots(command.uid)
+        : command.type === 'bindLocalBot' && command.input && typeof command.input === 'object' ? await service.bindLocalBot(command.uid, command.input as Parameters<TeamsService['bindLocalBot']>[1])
         : command.type === 'detail' && typeof command.teamId === 'string' ? await service.detail(command.teamId, command.uid)
         : command.type === 'messages' && command.command && typeof command.command === 'object' ? await service.messages(command.command as Parameters<TeamsService['messages']>[0], command.uid)
         : command.type === 'execute' && command.command && typeof command.command === 'object' ? await service.execute(command.command as Parameters<TeamsService['execute']>[0], command.uid)

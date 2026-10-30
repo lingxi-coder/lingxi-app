@@ -128,7 +128,10 @@ service cloud.firestore {
           && request.resource.data.lastActiveAt == request.time;
       }
       match /bots/{key} {
-        allow get, list: if isMember(tid);
+        // The authenticated API filters inactive/tombstoned cards for their
+        // owner. Direct reads would bypass that visibility boundary. Rules'
+        // internal get/getAfter checks still validate message Bot ACLs.
+        allow get, list: if false;
         // Binding revisions and owner generations are trusted API writes. In
         // particular, an SDK write cannot resurrect an old binding/trigger.
       }

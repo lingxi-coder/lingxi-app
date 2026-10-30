@@ -88,6 +88,47 @@ async function readHead(path: string): Promise<string> {
 export class BotContent {
   constructor(private readonly store: BotStore) {}
 
+  /** A bounded text-only copy. No memory, scripts, settings, attachments or links. */
+  async teamInstructions(botId: string): Promise<string> {
+    this.store.get(botId);
+    const home = this.store.homeDir(botId);
+    const directory = async (path: string) => {
+      const info = await lstat(path);
+      if (!info.isDirectory() || (process.getuid && info.uid !== process.getuid())) throw new Error('INVALID_TEAM_SNAPSHOT');
+    };
+    await directory(this.store.botDir(botId));
+    await directory(home);
+    const read = async (path: string): Promise<string> => {
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || info.nlink !== 1 || info.size > MAX_PERSONA_BYTES
+          || (process.getuid && info.uid !== process.getuid())) throw new Error('INVALID_TEAM_SNAPSHOT');
+        const bytes = Buffer.alloc(MAX_PERSONA_BYTES + 1);
+        const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+        if (bytesRead > MAX_PERSONA_BYTES) throw new Error('INVALID_TEAM_SNAPSHOT');
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, bytesRead));
+        if (text.includes('\0')) throw new Error('INVALID_TEAM_SNAPSHOT');
+        return text;
+      } finally { await handle.close(); }
+    };
+    const parts = [await read(join(home, 'LINGXI.md'))];
+    const skills = join(home, 'skills');
+    await directory(skills);
+    const entries = await readdir(skills, { withFileTypes: true });
+    if (entries.length > MAX_SKILLS) throw new Error('INVALID_TEAM_SNAPSHOT');
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      skillName(entry.name);
+      if (!entry.isDirectory()) throw new Error('INVALID_TEAM_SNAPSHOT');
+      await directory(join(skills, entry.name));
+      parts.push(`\n\n# Skill: ${entry.name}\n${await read(join(skills, entry.name, 'SKILL.md'))}`);
+      if (Buffer.byteLength(parts.join(''), 'utf8') > 64 * 1024) throw new Error('INVALID_TEAM_SNAPSHOT');
+    }
+    const instructions = parts.join('');
+    if (!instructions.trim()) throw new Error('INVALID_TEAM_SNAPSHOT');
+    return instructions;
+  }
+
   // Persona
 
   async persona(botId: string): Promise<string> {

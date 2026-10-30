@@ -14,6 +14,9 @@ import { installCrashReporting } from './crashReporting.js';
 import { AccountService } from './account.js';
 import { TeamsService } from './teams/service.js';
 import { installTeamsIpc } from './teams/ipc.js';
+import { TeamConnector } from './teams/connector.js';
+import { TeamPrivateStore } from './teams/privateStore.js';
+import { resolveTeamBinaries } from './teams/process.js';
 import { accountSessionStore } from './account-storage.js';
 import { brokerAccountSessionStore } from './account-broker-storage.js';
 import firebaseConfig from '../shared/firebaseConfig.json';
@@ -57,6 +60,7 @@ import { TaskChangeAnnouncer } from './bots/taskChanges.js';
 import { BotTasks } from './bots/taskService.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
+import { TeamOwnerApprovalBroker, TeamApprovalsGateway } from './remoteControl/teamApprovals.js';
 import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
 import { LocalAppRtc } from './local-apps/remoteRtc.js';
 import { PeerHost } from './remoteControl/peerHost.js';
@@ -130,6 +134,9 @@ let remoteUi: RemoteControlUi | null = null;
 /** Desktop Bots; absent until the product paths are known. */
 let bots: BotService | null = null;
 let stopTeams: (() => void) | undefined;
+let teamConnector: TeamConnector | undefined;
+let teamApprovalBroker: TeamOwnerApprovalBroker | undefined;
+let teamApprovalGateway: TeamApprovalsGateway | undefined;
 /** The endpoint through which Bots hand tasks to each other; made with the Bots. */
 let botRouter: BotRouter | null = null;
 let botTasks: BotTasks | null = null;
@@ -663,7 +670,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     ? brokerAccountSessionStore(credentialBroker)
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
   host.attachAccount(account);
-  stopTeams = installTeamsIpc(new TeamsService(account, firebaseConfig), () => [...mainWindows]);
+  const teamsService = new TeamsService(account, firebaseConfig);
+  const teamRemoteEnabled = (botId: string): boolean => { try { return bots?.get(botId).remote === true; } catch { return false; } };
+  teamApprovalBroker = new TeamOwnerApprovalBroker({ botRemoteEnabled: teamRemoteEnabled });
+  stopTeams = installTeamsIpc(teamsService, () => [...mainWindows]);
   // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
   const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
     diagnostics.add(level, 'host', `remote control: ${message}`);
@@ -714,10 +724,20 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     generation: viewer => `${remoteAccessGeneration}:${remoteOwnerGenerations.get(remoteOwnerKey({ accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id })) ?? 0}`,
     approvedDevice: deviceId => remoteControl?.listDevices().some(device => device.device_id === deviceId) ?? false,
   }));
+  teamApprovalGateway = new TeamApprovalsGateway(appsGateway, teamApprovalBroker, {
+    ownerContext: () => teamsService.hostContext(),
+    hostId: () => remoteControl?.status().host_id,
+    active: () => remoteControl?.status().state === 'online' && policy.allows(),
+    approvedViewer: viewer => remoteControl?.status().connections.some(connection => connection.conn_id === viewer.conn_id
+      && connection.device_id === viewer.device_id && connection.approved === true) === true
+      && remoteControl.listDevices().some(device => device.device_id === viewer.device_id),
+    generation: viewer => `${remoteAccessGeneration}:${remoteOwnerGenerations.get(remoteOwnerKey({ accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id })) ?? 0}`,
+    remoteEnabled: target => teamRemoteEnabled(target.botId),
+  });
   remoteControl = createRemoteControl({
     account,
     settings,
-    gateway: appsGateway,
+    gateway: teamApprovalGateway,
     deviceRevoked: owner => { const key = remoteOwnerKey(owner); remoteOwnerGenerations.set(key, (remoteOwnerGenerations.get(key) ?? 0) + 1); localApps?.remoteRevokeOwner(owner); },
     accessStopped: revokeRemoteAppAccess,
     policyAllows: () => policy.allows(),
@@ -791,9 +811,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     return undefined;
   });
   if (productPaths) {
+    let teamBotStore: BotStore | undefined;
     // The Bots live beside the app's other data and keep clear of the default configuration home.
     try {
       const botStore = new BotStore({ userData, home: app.getPath('home'), defaultConfigHome: productPaths.configHome });
+      teamBotStore = botStore;
       const manager = bridge;
       const botWarn = (message: string): void => { diagnostics.add('warn', 'host', `bots: ${message}`); };
       // Tasks between Bots, and the endpoint they are handed through. The router listens
@@ -823,7 +845,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         delegation: tasks,
         // Remote devices reach a Bot's chats by session id, and its switch decides whether they may.
         openProject: (sessionId) => manager.get(sessionId)?.projectPath,
-        changed: () => remotePolicy?.notifySessionsChanged(),
+        changed: () => { remotePolicy?.notifySessionsChanged(); teamConnector?.localChanged(); },
+        teamRevoking: () => teamConnector?.localChanged(),
         catalogFor: (configHome) => new ProjectSessionCatalog({ ...catalogOptions, configHome }),
         // The scheduler was made first; it learns of the Bots below, and is asked for these only when used.
         routines: {
@@ -862,6 +885,29 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       permission: (input, signal) => localApps!.promptAgentPermission(input, signal),
       question: (input, signal) => localApps!.promptAgentQuestion(input, signal),
     });
+    if (teamBotStore && process.platform === 'darwin') {
+      try {
+        teamConnector = new TeamConnector({
+          service: teamsService, store: teamBotStore, content: new BotContent(teamBotStore), privateStore: new TeamPrivateStore(userData),
+          binaries: () => resolveTeamBinaries({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }),
+          defaultModel: () => settings.getPublic().model,
+          catalog: () => agentExecutor.catalog(true),
+          modelEndpoint: () => settings.getPublic().apiBaseUrl,
+          modelCredential: () => resolveProviderCredential('anthropic', { credentialBroker }),
+          permission: async (input, signal) => teamApprovalBroker!.request({ ...input, showLocal: async localSignal => {
+            localSignal.throwIfAborted();
+            const options = { type: 'question' as const, signal: localSignal, title: 'Team Bot permission',
+              message: 'Allow this Team Bot to run one sandboxed command?',
+              detail: `Team: ${input.target.teamId}\nBot: ${input.target.botId}\nConversation: ${input.target.conversationId}\n\n${JSON.stringify(input.input, null, 2).slice(0, 16000)}`,
+              buttons: ['Deny', 'Allow once'], defaultId: 0, cancelId: 0 };
+            const parent = [...mainWindows].find(window => !window.isDestroyed());
+            const result = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+            return !localSignal.aborted && result.response === 1;
+          } }, signal),
+        });
+        teamsService.attachHost(teamConnector);
+      } catch { diagnostics.add('warn', 'host', 'Team Bot host is unavailable'); }
+    }
     localApps = new LocalAppHost({
       configHome: productPaths.configHome,
       onRemoteAccessEnded: quitIfNothingNeedsTheApp,
@@ -986,6 +1032,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   event.preventDefault();
   quitting = true;
   stopTeams?.(); stopTeams = undefined;
+  teamApprovalGateway?.close(); teamApprovalGateway = undefined;
+  teamApprovalBroker?.close(); teamApprovalBroker = undefined;
   desktopUpdates?.dispose();
   desktopUpdates = null;
   host?.dispose();

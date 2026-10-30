@@ -29,7 +29,7 @@ data class TeamsState(val uid: String? = null, val teams: List<TeamSummary> = em
 
 
 /** SDK listeners invalidate; only authenticated HTTP responses populate the UI. */
-class TeamsViewModel : ViewModel() {
+class TeamsViewModel internal constructor(private val apiRoot: String = "https://lingxios.net") : ViewModel() {
     private val auth = FirebaseAuth.getInstance()
     private val db = FirebaseFirestore.getInstance()
     private val mutableState = MutableStateFlow(TeamsState())
@@ -135,7 +135,7 @@ class TeamsViewModel : ViewModel() {
         val token = requireNotNull(user.getIdToken(false).await().token)
         check(auth.currentUser?.uid == uid)
         val result = withContext(Dispatchers.IO) {
-            val connection = URL("https://lingxios.net/v1/teams$path").openConnection() as HttpURLConnection
+            val connection = URL("$apiRoot/v1/teams$path").openConnection() as HttpURLConnection
             try {
                 connection.connectTimeout = 20000; connection.readTimeout = 20000; connection.instanceFollowRedirects = false; connection.useCaches = false
                 connection.setRequestProperty("Authorization", "Bearer $token")

@@ -461,6 +461,8 @@ const api: LingxiApi = {
     },
   },
   teams: {
+    localBots: uid => teamsRequest({ type: 'localBots', uid }),
+    bindLocalBot: (uid, input) => teamsRequest({ type: 'bindLocalBot', uid, input }),
     list: uid => teamsRequest({ type: 'list', uid }),
     detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
     messages: (uid, command) => teamsRequest({ type: 'messages', uid, command }),

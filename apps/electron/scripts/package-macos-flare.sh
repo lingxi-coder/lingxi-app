@@ -421,6 +421,9 @@ else
   )
 fi
 
+log 'building private Team host and worker from the authoritative Harness pin'
+node "${SCRIPT_DIR}/team-runtime.mjs"
+
 log 'packaging and signing the Electron app'
 (
   cd "$ELECTRON_DIR"

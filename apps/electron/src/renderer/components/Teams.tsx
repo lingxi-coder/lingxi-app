@@ -7,6 +7,7 @@ export function Teams({ zh, initialInvite, onInviteHandled }: { zh: boolean; ini
   const { state } = useAccountState();
   const desktop = window.lingxi?.teams, uid = state?.user?.uid;
   const api = useMemo<TeamsApi | undefined>(() => desktop && uid ? {
+    localBots: () => desktop.localBots(uid), bindLocalBot: input => desktop.bindLocalBot(uid, input),
     list: () => desktop.list(uid), detail: teamId => desktop.detail(uid, teamId), execute: command => desktop.execute(uid, command),
     messages: command => desktop.messages(uid, command), onMessagesChanged: callback => desktop.onMessagesChanged(callback),
     onChanged: callback => desktop.onChanged(callback),

@@ -1,12 +1,13 @@
 # Teams implementation contract
 
-Status: T0 validated; T1 and T2 implemented locally, with deployment and full native
-product/device acceptance still pending. T3 has locally validated backend,
-runtime and single-queue-item executor prerequisites; product host integration
-and the four-client UI are not implemented or enabled. This document refines the
-approved 2026-10-29 Team plan
-after review. It is the repository contract for subsequent phases; a phase is
-complete only when its stated checks pass on all four clients.
+Status: T1/T2 and the T3 backend, Desktop host integration and four-client UI are
+implemented in local source. Current browser and native feature journeys pass,
+as does the signed Desktop host/worker integration. Full-application package
+smoke, real-provider behavior and production publication remain open gates.
+Historical prerequisite reports describe their own
+snapshots, not the current product's acceptance status. This document refines the
+approved 2026-10-29 Team plan; a phase is complete only when its stated checks pass
+on all four clients.
 
 ## Product boundaries
 
@@ -251,206 +252,195 @@ messages older than the reconnect cursor.
 
 ## Bot isolation and authenticated triggers (T3)
 
-### T3 backend checkpoint (not an enabled Bot feature)
+### Current implementation and supported host
 
-The existing `/v1/teams/messages` endpoint now defines the following trusted
-protocol. It is local source work, not deployed. No client UI starts a Team Bot
-yet. All four clients must gain the corresponding UI together when the isolated
-host runtime is ready; the T3 phase remains open.
+Desktop, Web, iOS and Android implement Bot cards, presence/owner/privacy and use
+permissions, permitted Bot DM, explicit group/channel Bot targets, run status,
+original-human questions and owner manual recovery. Web and Mobile direct owners
+to Desktop to bind a local Bot. These are local source implementations; T3 is not
+marked complete or released by this document.
 
-- `bots`, `bindBot`, `unbindBot`, `heartbeatBot` list/manage a card. Binding is
-  authenticated as its owner, uses an expected revision, and captures the owner's
-  current membership generation. Unbinding retains a tombstone and increments
-  the revision. A new binding/policy revision cannot revive an old trigger.
-  There are at most 200 card identities per team, including tombstones. Presence
-  is a 60-second heartbeat hint, not proof that execution is available.
-- Conversation `create` additionally accepts `kind: bot_dm` and `botKeys` (up to
-  eight) for private/group/channel participants. The existing trusted constructor
-  derives the read ACL, includes each Bot owner, and validates the caller's current
-  permission. A Bot private thread has exactly one human and one Bot.
-- Human `mutate/create` additionally accepts explicit `targets` (up to eight).
-  A Bot private thread derives its target from the conversation. A group/channel
-  requires an explicit participating, permitted Bot target. A text `@name` or SDK
-  `mentions` entry alone never triggers execution. In the **same transaction** as
-  the message/change, the server creates an immutable `triggers` record and adds
-  Admin-only `executionIntent` evidence to the original create receipt. SDK rules
-  cannot create that evidence or read/write execution state. Retrying an ordinary
-  SDK message cannot upgrade it into execution. Retrying an edit/recall does not
-  create new work.
-- `botQueue` reads the server checkpoint; an ahead-of-server cursor is rejected.
-  `claimBot` transactionally reserves the earliest unresolved trigger in a
-  per-Bot/per-conversation slot. Its 30-second claim can be reclaimed **before**
-  execution starts, fencing the previous attempt. Concurrent hosts cannot skip
-  an earlier live or ambiguous invocation.
-- Only the transaction changing `claimed` to `running` returns `execute: true`
-  and a versioned execution snapshot from `startBot`. The snapshot binds target,
-  attempt, owner/binding revision, original message, human UID/generation and
-  exact text in that transaction. Repeated calls for the same still-running
-  attempt return `execute: false` without a snapshot. The caller must
-  never execute without that one-shot permit. A lost start response deliberately
-  needs owner recovery. The total running deadline is five minutes, including
-  permission/question waits; polling does not extend it. A host must enforce the
-  deadline and terminate its process independently of this server lease.
-- `finishBot` atomically writes a deterministic Bot reply, immutable change and
-  terminal receipt/checkpoint. Reply ACK loss can be retried with the exact result.
-  All trusted output message/change IDs use the reserved `bot_` prefix (64 chars).
-  Human HTTP mutations and all SDK writes reject that namespace so members cannot
-  preoccupy predictable outputs. Status and Bot replies never create triggers.
-- After a running lease expires, work becomes `recovery`; it is never automatically
-  executed again. `recoverBot` is an owner-only, idempotent manual settlement,
-  without tool execution. It also accepts an expired claimed run when a host's
-  durable start intent never reached the server; a renewed active claim fences
-  recovery. Claim/start/poll/finish/recovery recheck the source
-  human's generation, unchanged/unrecalled create, authenticated receipt evidence,
-  current owner generation and exact binding revision. Invalid work only becomes
-  `revoked`, without publishing a result. Requests older than 24 hours receive one
-  missed reply instead of executing. The checkpoint moves with the terminal write.
-- `botQuestion` binds unique question strings and a deterministic question identity
-  to the run/attempt and original human. `botAnswer` accepts only that current
-  human/generation, validates the binding/source again for a new answer, and keeps
-  an immutable answer ID/digest. The owner or another member cannot answer for the
-  human. `botPoll` exposes the answer to the current valid owner attempt. No tool
-  approval endpoint is exposed to members.
+The trusted macOS Desktop main process binds an existing local Bot and discovers
+its backend queues. Binding requires available trusted host/worker binaries, a
+selectable Anthropic model, the fixed `https://api.anthropic.com` endpoint and a
+selected static API key. Unsupported platforms, providers, endpoints and
+credential routes fail explicitly; they do not fall back to an ordinary Bot
+runtime. Persona/Skill instruction text and the model choice are saved as an
+immutable snapshot. Owner folders, MCP connections, plugins, startup helpers,
+ordinary Bot memory and ambient credentials are not inherited.
 
-The `triggers` query's `(botKey ASC, seq ASC)` collection index is declared only
-for `(default)` in `infra/firebase/firestore.teams.indexes.json`. Named databases
-retain their existing configuration. Deploying the index/rules/API still needs
-explicit authorization.
+Each invocation uses a fresh `harness-team-host`/`harness-team-worker` process path
+with private storage and the original human's memory scope described below.
+Firebase credentials stay in the trusted host; only the selected model key crosses
+the separate worker pipe. Account UID/epoch checks surround asynchronous work;
+logout, account changes, binding changes and shutdown cancel captured host work.
 
-Runtime preflight found two missing prerequisites in the current Desktop path.
-An isolated configuration home does not itself restrict native Read/Grep/Edit
-tools; owner approval cannot substitute for an unbypassable scope. The pinned
-Harness supports Bash `denyRead(parent)` plus `allowRead(scope)`, but retaining
-native file tools needs a trusted path restriction (or a complete restricted-tool
-profile that excludes them and all host capabilities). Also Harness
-`token_budget` is an auto-continuation target, not a token ceiling. Strict token
-limits require an actual trusted runtime budget; a usage event followed by
-`cancelTurn` does not prove a process has stopped. Team execution must stay
-disabled until these are implemented and tested, with owner-only approvals,
-original-human question routing and termination on revocation/deadline. Do not
-reuse the owner Bot's router token, MCP connections, workspaces or plugin secrets.
+### Binding, audience and public client commands
 
-The trusted backend checkpoint is recorded in
-`acceptance/teams-t3-20261029/report.md`.
+- A card identifies `(ownerUid, hostId, botId)` and captures the owner's current
+  membership generation and binding revision. `use: all|listed` controls who may
+  request it; the Bot owner may use their own enabled Bot. Presence is a
+  60-second heartbeat hint, not an execution guarantee.
+- Binding and policy updates compare an expected revision. An editable audience
+  draft keeps the revision with which it was loaded; a later card refresh cannot
+  upgrade a stale draft and regrant removed users. Unbinding increments the
+  revision and retains a tombstone. Only the owner receives inactive cards and
+  their revisions for rebind; disabled cards cannot be selected for new work.
+  There are at most 200 card identities per team, including tombstones.
+- Trusted conversation creation accepts `bot_dm` and up to eight `botKeys`.
+  A Bot DM has one human and one Bot. Group/channel membership includes explicit
+  Bot principals. The backend validates current use permission and derives the
+  read ACL, including each participating Bot's owner. The platform and Bot-owner
+  visibility disclosures remain part of every client.
+- Member-facing `/v1/teams/messages` commands add `bots`, `unbindBot`, `botState`,
+  `botAnswer` and `recoverBot`. Desktop exposes binding through a separate trusted
+  local-Bot operation. `botState` is available only to current conversation readers
+  and exposes public status, owner/Bot identity, original-human provenance,
+  lease/question identity and an answered flag; it exposes no answers or tool
+  traces. An optional `questionId` observes a historical question without changing
+  the active question. Claim/start/finish/poll/wait and tool approval are not
+  member-facing capabilities.
 
-A companion Harness checkout at `../harness-runtime`, branch
-`codex/teams-runtime`, now contains local commit
-`6ac2f6f4e617a21a71b57e479bf2b7e195adcaea` based on the existing product pin.
-Its host-owned `DesktopConfig.scope_output_quota` shares one finite physical
-dispatch budget and per-request output cap across the main service, retries,
-forks and auxiliary services. It checks the final sealed wire limit and rejects
-multiple completions or routes without an enforceable cap. Revocation is checked
-again after awaited host admission. Normal services leave the quota unset.
+### Authenticated triggers and one-shot execution
 
-This is an output limit, not an input/total-token or monetary budget, and
-revocation does not terminate already admitted work. The product still pins
-`eed08ca06c35371c1eb7ea5b02ebc10bcae63a12`; the companion commit is unpushed and
-not consumed or enabled by a Team product entry point. It closes one runtime
-prerequisite, with 1,440 model-layer tests and a default-feature engine library
-check passing. That historical check did not enable Desktop assembly. Full host
-process isolation, limits and termination, routing and four-client UI remain
-required. Evidence and exact boundaries are in
-`acceptance/teams-t3-runtime-20261029/report.md`. Neither checkpoint establishes
-T3 acceptance.
+Human message creation accepts up to eight explicit `targets`. A Bot DM derives
+its target from its immutable conversation; a group/channel requires a selected,
+participating, currently permitted Bot. Plain `@name`, SDK `mentions`, replies by
+Bots/status messages and later edits/recalls never create work by themselves.
 
-### T3 private-profile checkpoint (execution stays disabled)
+The human message/change, immutable trigger and Admin-only `executionIntent`
+receipt are committed together. A trigger binds the source create, exact text,
+human UID/generation, team/conversation and Bot revision. SDK rules cannot create
+that authority or read/write execution state, and an HTTP retry cannot upgrade an
+ordinary SDK message into an invocation.
 
-The same companion branch now has local commit
-`dfab0eb36bb20196534509298d88654fce008554`. Its nonserialized host profile uses
-private principal-specific home/workspace/tmp/transcripts/memory/output paths,
-immutable persona/Skill snapshots, a revocable tool lease and the shared output
-quota. Only selected provider configuration and memory credentials are retained.
-Owner folders, native tools, MCP, plugins, hooks, settings watchers, startup
-helpers and prompt shell expansion are withheld.
+`botQueue`/`claimBot` use a server checkpoint and the earliest unresolved trigger
+per Bot/conversation. An ahead-of-server cursor is rejected. A 30-second claim can
+be reclaimed only before execution starts. Only the transaction changing
+`claimed` to `running` returns `startBot execute: true` and the authenticated
+execution snapshot. Repeated starts provide no second execution permit. A lost
+start response or ambiguous worker interruption requires observation/owner
+recovery, never a new worker identity, quota or blind model/tool replay.
 
-The macOS-only Bash boundary clears inherited environment/startup files and
-requires a frozen sandbox with workspace/tmp writes and no network. It rejects
-background handoff, sandbox downgrade, forged Git grant expansion and unconfined
-cwd readback. Host Git probes in boot/prompt/transcript/classifier paths are also
-disabled: a model-controlled `.git` or `core.fsmonitor` must not run host code.
-Every Bash command requests host approval; no owner question channel is inherited.
-The actual authenticated owner and original-human brokers remain to be built.
+The host validates the one-shot snapshot against its exact target/attempt and
+checks current owner/human generations, binding permission, unchanged/unrecalled
+source and trusted receipt evidence. Invalid work is revoked. The original
+five-minute running deadline includes model work, approvals, questions and
+shutdown; polling or waiting cannot renew it. Requests older than 24 hours receive
+one missed reply instead of executing.
 
-Final checks: **721 tests pass**, including 13 real Desktop assembly/macOS shell
-profile cases, two same-group process cleanup cases, explicit memory-root and
-valid malicious-Git fixture controls. Desktop and Mobile-feature library checks
-pass on macOS; this is not signed product, iOS/Android device or live-model
-acceptance. Independent static review approved only this disabled prerequisite.
+`finishBot` atomically writes a deterministic Bot reply, immutable change,
+terminal receipt and checkpoint. Trusted output IDs occupy the reserved `bot_`
+namespace; human HTTP and SDK writes cannot preoccupy them. A cursor alone never
+asserts exactly-once external effects.
 
-The product pin remains unchanged and the companion is unpublished. Product
-integration of the clean-process capability below, live/other-auth request
-verification, reliable total five-minute termination including detached
-descendants, authenticated brokers, durable executor recovery and four-client
-T3 UI are still required. The byte
-input/output/turn bounds do not establish total tokens, billing or resource
-ceilings. Evidence: `acceptance/teams-t3-profile-20261029/report.md`.
+### Owner tool approval and original-human questions
 
-### T3 dedicated-process checkpoint (execution stays disabled)
+The broker-enabled runtime registers only the scoped Bash tool and the dedicated
+original-human question tool. Every Bash invocation, including reads, requires
+an explicit decision from that Bot's owner. The same single-use request may be
+resolved by the owner's Desktop dialog or the owner's independently approved
+Remote Control device when that Bot's RC switch is enabled. Both paths allow only
+**Allow once** or **Deny** for the unchanged original input. They cannot create
+Always/Auto rules, edit the command, start a chat or answer a human question.
+Current owner/account epoch, invocation, binding and RC connection/device grants
+are checked again around the wait; a Team role or membership is not approval
+authority. The default unbrokered worker still denies tools.
 
-Local companion commit `43031991ba7246b2f1b0f38e05632009334d3aaa` adds
-`harness-team-worker` and a host-owned single-use launch API. Each admitted turn
-uses a fresh macOS process, fixed private environment, anonymous credential pipe
-and closed inherited descriptors. A synced invocation tombstone prevents
-automatic replay after ambiguous startup/result loss; the captured backend lease
-is monotonic and cannot be extended by waiting or retrying. The worker shares
-the private profile/quota and denies every tool until the authenticated brokers
-exist. Only a selected static Anthropic API key is supported in this checkpoint.
+`botQuestion` binds a question identity and exact question-text keys to the
+run/attempt and original human UID/membership generation. Other readers can see
+the question, but neither the Bot owner nor another member can answer on that
+human's behalf. `botAnswer` persists an immutable answer ID and exact answer map;
+new answers revalidate the current run, source, binding and recipient. An exact
+receipt retry may acknowledge an earlier answered question after the worker has
+moved to its next question. An observed `answered: true` is not that receipt:
+another device may have supplied a different answer ID/content. Clients retry
+the saved answer unchanged and require the backend's exact ID/digest check.
+Historical observations do not overwrite active-question UI state. The valid
+owner attempt receives answers through the host-only question broker, under the
+same original lease and cancellation authority.
 
-**74 selected tests pass**: 15 actual worker/pinned-SDK loopback cases, 13 private
-profile cases, seven visible-text and 39 recovery cases. The 15-case suite also
-passes against the normal Desktop-feature standalone binary. Desktop/Mobile
-feature checks, worker build, formatting and independent ten-file static review
-pass. This includes a shared recovery fix for valid text with preserved unknown
-fields being incorrectly treated as empty, plus prevention of retracted/error
-text being published as a successful reply.
+### Offline persistence, result delivery and owner recovery
 
-The product does not consume this unpublished runtime. Authenticated backend
-start/fencing, owner tool approvals, original-human questions, result persistence,
-revocation/recovery, detached tool containment, other auth routes, live-provider
-acceptance and all four T3 UIs remain open. No push/deploy/native product test or
-real model/account session occurred. Evidence and exact limits:
-`acceptance/teams-t3-process-20261029/report.md`; companion API contract:
-`docs/TEAM_INVOCATION_PROCESS.md`.
+All four clients retain conversation Bot participants, explicit message targets,
+question metadata and exact answer/recovery intents across offline operation and
+restart. Intents are durably saved before mutating requests; ACK loss does not
+mint a new message, answer ID or settlement payload. A new owner recovery first
+checks current eligibility; retrying an already saved settlement preserves that
+same payload instead of creating a new request from current UI text.
 
-### T3 authenticated connector checkpoint (execution stays disabled)
+Desktop durably records queue discovery before launch, attempt intent before
+claim, a start marker before dispatch, and the verified permit/original deadline.
+Its stable journal key cannot change merely because a binding/generation changes.
+Saved permits or ambiguous start markers never authorize a restarted worker.
+A stale prelaunch index with no start/result can be cleared only after the host's
+observational `Unstarted` proof, which performs no model/tool execution.
 
-Local companion commit `e8adfe0785e1cceef630df475015ff1b1c180667` connects
-one backend queue identity on macOS to the actual
-dedicated worker. A trusted account/epoch port supplies Firebase ID tokens only
-to the parent HTTP client. Redirects, proxies and transport retries are disabled;
-request/response JSON bodies are bounded. Input and the private human principal
-come only from the authenticated one-shot start snapshot, never a claim body.
-The original-human UID validation now matches backend Unicode/punctuation rules
-without changing existing private scope hashes.
+The exact terminal result is synced before `finishBot`. Offline/429/5xx or lost
+finish ACK leaves a result-only retry; that path needs no model key and cannot
+claim, start or run tools again. Desktop distinguishes `result_pending` from
+recovery and preserves the saved result for delivery. Expired claimed/running or
+ambiguous runs can instead be explicitly settled by their owner with
+`recoverBot`, without tools; a renewed live lease rejects new recovery. Recovery
+is never invoked automatically. Private journal corruption or identity mismatch
+fails closed rather than replacing or deleting the invocation record.
 
-An owner-private append-only journal records the stable target/attempt/invocation
-identity before claiming and a start marker before dispatch. Ambiguous starts
-only observe the old attempt; they never mint a replacement worker or quota.
-Results are synced before `finishBot`; a dedicated result-only retry requires no
-model credential and cannot execute again. Expired claims can be manually settled
-by the owner, transactionally fencing late start/reclaim. No automatic recovery
-executes work. Live authorization polling, account cancellation, explicit cancel
-and future drop invoke worker cancellation/kill guards. Poll observation may take
-two seconds plus the five-second token/HTTP bound, followed by bounded cleanup;
-dropping a future does not await reaping or prove hard real-time termination.
+### Process containment and bounded authority
 
-**101 distinct selected tests pass**: 13 connector loopback cases, one separately
-invoked real Auth/Firestore/HTTP/worker emulator case, 15 original process and
-13 private-profile cases, 52 backend/rules emulator and seven Desktop/Web SDK
-cases. The ordinary connector suite intentionally ignores the emulator case;
-the same case passed explicitly under its isolated fixture. All process cases
-used the freshly built normal Desktop-feature worker. Desktop/Mobile-feature
-library checks, worker build, formatting/syntax and independent static review
-pass. These remain unsigned local macOS/debug and demo-emulator results.
+The private macOS sandbox grants the selected private scope and required system
+readables, denies network/owner resources and excludes inherited native file tools,
+owner MCP/plugins/hooks,
+settings watchers, startup work and shell expansion. Approved Bash uses fixed
+shell/environment settings and cannot disable sandboxing or expand grants via
+Git metadata. Explicit and automatic background handoff are disabled.
 
-**T3 remains disabled.** Product Cargo pins and runtime entry points are unchanged.
-This is a single-queue-item executor port: product account/queue integration,
-recovery UI, authenticated owner tool approvals and separate original-human
-questions remain open. Tools stay denied. Detached tool containment, resource/
-billing caps, other provider/auth routes, all four T3 UIs and signed/native/live
-acceptance also remain. No push/deploy/IAM, production account/session or real
-model was used. Evidence: `acceptance/teams-t3-connector-20261029/report.md`;
-companion API contract: `docs/TEAM_CONNECTOR.md`.
+A private per-command shell guardian holds the shell group under a worker-owned
+stdin lease. Worker death/EOF, cancellation, deadline and normal command return
+trigger group cleanup. The guardian pins the group with an unreaped leader,
+kills/verifies no live members remain, and only then permits a successful tool
+result. The sandbox denies admitted detach mechanisms (`setsid`, `setpgid` and
+`posix_spawn`), while ordinary fork/exec remain available. Cleanup and reaping
+are bounded; OS/scheduler/filesystem stalls prevent a hard real-time guarantee.
+
+Input/text/frame bounds, finite Agent turns, output-token caps and shared limits
+on physical model dispatches bound the admitted route without resetting authority
+on retries or forks. They are not a total-input-token, monetary, CPU, memory or disk ceiling.
+Other host platforms, provider/authentication routes and real-model memory
+behavior require their own implementation and acceptance.
+
+Runtime contracts live in the companion checkout:
+[private profile](../../harness-runtime/docs/TEAM_INVOCATION_PROFILE.md),
+[worker/guardian process](../../harness-runtime/docs/TEAM_INVOCATION_PROCESS.md)
+and [trusted connector](../../harness-runtime/docs/TEAM_CONNECTOR.md). Current
+source hashes, resolved product pins, commands/results and acceptance artifacts
+are recorded in the [current acceptance report](../acceptance/teams-t3-complete-20261029/report.md).
+Test definitions and historical counts are not proof of a current pass. Browser
+and native feature-harness journeys and the actual Flare-signed host/worker flow
+pass. The full Desktop smoke refuses to replace an already registered user
+credential Broker; that service is preserved. Full-product mobile/physical-device,
+live-provider/account and production publication evidence remain separate gates.
+No push, Firebase deployment or IAM change is authorized here.
+
+The `(botKey ASC, seq ASC)` trigger index is declared only for Firestore
+`(default)` in `infra/firebase/firestore.teams.indexes.json`; named databases keep
+their existing configuration. Publishing rules/index/API changes requires the
+user's explicit authorization.
+
+### Historical prerequisite evidence
+
+These reports preserve the source snapshots, commands, test counts and limits of
+the earlier prerequisites. Their statements about disabled entry points,
+all-tools-denied workers or missing client/broker integration describe those
+snapshots, not the current local implementation above. They do not establish
+current T3 completion or publication.
+
+| Historical checkpoint | Recorded evidence |
+| --- | --- |
+| Trusted backend | [Backend report](../acceptance/teams-t3-20261029/report.md) |
+| Shared output quota | [Runtime prerequisite report](../acceptance/teams-t3-runtime-20261029/report.md) |
+| Private principal profile | [Profile report](../acceptance/teams-t3-profile-20261029/report.md) |
+| Fresh dedicated worker | [Process report](../acceptance/teams-t3-process-20261029/report.md) |
+| Authenticated queue connector | [Connector report](../acceptance/teams-t3-connector-20261029/report.md) |
 
 ### Required isolated runtime
 

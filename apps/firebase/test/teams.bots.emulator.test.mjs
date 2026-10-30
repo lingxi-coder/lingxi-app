@@ -17,6 +17,7 @@ const scope = { teamId, generation: 1 }, thread = { ...scope, conversationId };
 const bind = { action: 'bindBot', ...scope, hostId, botId, expectedRevision: 0, name: 'Synthetic Bot', description: 'Test only', use: 'listed', uids: ['alice'] };
 const send = (more = {}) => ({ action: 'mutate', ...thread, operation: 'create', messageId: 'human-msg01', changeId: 'human-change01', text: 'Synthetic request', ...more });
 const run = (action, more = {}) => ({ action, ...thread, botKey, triggerId: triggerIdentity('human-msg01', botKey), attemptId: 'attempt-001', ...more });
+const status = (more = {}) => ({ action: 'botState', ...thread, triggerId: triggerIdentity('human-msg01', botKey), ...more });
 let app, db, env, messages, teams, now;
 const execute = (command, user = owner) => messages.execute(user, command);
 const root = () => db.doc(`teams/${teamId}/conversations/${conversationId}`);
@@ -170,6 +171,77 @@ test('T3 connector: an active reclaimed lease fences stale manual recovery', opt
   await assert.rejects(execute(recovery), { code: 'RECOVERY_NOT_REQUIRED' });
   await assert.rejects(execute(run('startBot')), { code: 'BOT_LEASE_REQUIRED' });
   assert.equal((await execute(run('startBot', { attemptId: 'reclaimed-attempt' }))).execute, true);
+});
+
+test('T3 UI: public state requires a reader and trusted trigger, with no executor or tool data', options, async () => {
+  await execute(send(), alice);
+  assert.deepEqual(await execute(status(), alice), { state: 'queued', ownerUid: owner.uid, botKey, origin: { uid: alice.uid, generation: 1 }, answered: false });
+  await assert.rejects(execute(status(), bob), { code: 'CONVERSATION_REQUIRED' });
+  await assert.rejects(execute(status({ triggerId: 'missing-trigger' }), alice), { code: 'TRIGGER_REQUIRED' });
+  await execute(run('claimBot')); const claimed = await execute(status(), alice);
+  assert.equal(claimed.state, 'claimed'); assert.equal(claimed.leaseUntil, now + 30000);
+  await execute(run('startBot'));
+  const visible = await execute(status(), alice);
+  assert.equal(visible.state, 'running'); assert.equal(visible.leaseUntil, now + 300000);
+  for (const forbidden of ['execute', 'execution', 'attemptId', 'text', 'toolName', 'input', 'answers']) assert.ok(!(forbidden in visible));
+  now += 300001; assert.equal((await execute(status(), alice)).state, 'recovery');
+});
+
+test('T3 UI: question observation confirms exact answer ACK without exposing its body', options, async () => {
+  await execute(send(), alice); await execute(run('claimBot')); await execute(run('startBot'));
+  await execute(run('botQuestion', { questionId: 'question-ui01', text: 'Choose one', questions: ['Which choice?'] }));
+  assert.equal((await execute(status(), alice)).answered, false);
+  await execute({ action: 'botAnswer', ...thread, triggerId: triggerIdentity('human-msg01', botKey), questionId: 'question-ui01', answerId: 'answer-ui01', answers: { 'Which choice?': 'Private synthetic choice' } }, alice);
+  const value = await execute(status()); assert.equal(value.answered, true); assert.equal(value.questionId, 'question-ui01');
+  assert.ok(!JSON.stringify(value).includes('Private synthetic choice'));
+  await execute(send({ operation: 'recall', changeId: 'recall-ui01', text: '' }), alice);
+  const revoked = await execute(status(), alice); assert.equal(revoked.state, 'revoked'); assert.equal(revoked.answered, false); assert.equal(revoked.questionId, undefined);
+});
+
+test('T3 owner approvals: status is fenced, bounded and idempotent without publishing tool traces', options, async () => {
+  await execute(send(), alice); await execute(run('claimBot')); await execute(run('startBot'));
+  const waiting = run('botWait', { waitId: 'approval-ui01', waiting: true });
+  await assert.rejects(execute(waiting, alice), { code: 'BOT_OWNER_REQUIRED' });
+  await assert.rejects(execute({ ...waiting, toolName: 'Bash', input: { command: 'private command' } }));
+  await execute(waiting); await execute(waiting);
+  assert.equal(await countMessages(), 3);
+  await execute({ ...waiting, waiting: false }); await execute({ ...waiting, waiting: false });
+  assert.equal(await countMessages(), 4);
+  const publicPage = await sync(); assert.ok(publicPage.messages.some(m => m.text.includes('owner’s approval')));
+  assert.ok(!JSON.stringify(publicPage).includes('private command'));
+  for (let index = 1; index < 32; index++) await execute(run('botWait', { waitId: `approval-${String(index).padStart(8, '0')}`, waiting: true }));
+  await assert.rejects(execute(run('botWait', { waitId: 'approval-overflow', waiting: true })), { code: 'BOT_APPROVAL_LIMIT' });
+  await execute(send({ operation: 'recall', changeId: 'recall-wait01', text: '' }), alice);
+  assert.equal((await execute({ ...waiting, waiting: false })).state, 'revoked');
+});
+
+test('T3 binding: owner sees disabled revision for safe rebind; other members do not', options, async () => {
+  await execute({ action: 'unbindBot', ...scope, botKey, expectedRevision: 1 });
+  const card = (await execute({ action: 'bots', ...scope })).bots[0];
+  assert.equal(card.revision, 2); assert.equal(card.enabled, false); assert.equal(card.permitted, false); assert.equal(card.online, false);
+  assert.deepEqual((await execute({ action: 'bots', ...scope }, alice)).bots, []);
+  await assertFails(getDoc(doc(env.authenticatedContext(alice.uid).firestore(), `teams/${teamId}/bots/${botKey}`)));
+  await assertFails(getDoc(doc(env.authenticatedContext(owner.uid).firestore(), `teams/${teamId}/bots/${botKey}`)));
+  assert.deepEqual((await execute({ ...bind, expectedRevision: card.revision })), { botKey, revision: 3 });
+  const rebound = (await execute({ action: 'bots', ...scope }, alice)).bots[0];
+  assert.equal(rebound.enabled, true); assert.equal(rebound.revision, 3); assert.equal(rebound.permitted, true);
+});
+
+test('T3 questions: an exact answer receipt survives a later question and terminal run', options, async () => {
+  await execute(send(), alice); await execute(run('claimBot')); await execute(run('startBot'));
+  await execute(run('botQuestion', { questionId: 'question-first', text: 'First', questions: ['First?'] }));
+  const answer = { action: 'botAnswer', ...thread, triggerId: triggerIdentity('human-msg01', botKey),
+    questionId: 'question-first', answerId: 'first-answer', answers: { 'First?': 'A' } };
+  await execute(answer, alice); // Its response can be lost while the Bot continues.
+  await execute(run('botQuestion', { questionId: 'question-second', text: 'Second', questions: ['Second?'] }));
+  assert.equal((await execute(status(), alice)).questionId, 'question-second');
+  const historical = await execute(status({ questionId: 'question-first' }), alice);
+  assert.equal(historical.questionId, 'question-first'); assert.equal(historical.answered, true);
+  await execute(answer, alice);
+  await assert.rejects(execute({ ...answer, answers: { 'First?': 'B' } }, alice), { code: 'ANSWER_CONFLICT' });
+  await execute(run('finishBot', { text: 'Done', outcome: 'completed' }));
+  await execute(answer, alice);
+  await assert.rejects(execute(status({ questionId: 'not-this-trigger' }), alice), { code: 'QUESTION_REQUIRED' });
 });
 
 test('T3 protocol: ambiguous execution needs owner recovery, and recovery reply is idempotent', options, async () => {

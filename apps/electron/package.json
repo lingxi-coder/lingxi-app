@@ -18,6 +18,7 @@
     "typecheck:local-app-agui": "tsc --noEmit --strict --skipLibCheck false --target ES2022 --module ESNext --moduleResolution Bundler --types node scripts/check-local-app-agui-types.ts",
     "package:mac": "node scripts/package-mac.mjs",
     "package:mac:flare": "bash scripts/package-macos-flare.sh",
+    "build:team-runtime": "node scripts/team-runtime.mjs",
     "package:desktop": "node scripts/package-desktop.mjs",
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
     "verify:desktop-sidecar": "node scripts/packaged-sidecar-smoke.mjs",

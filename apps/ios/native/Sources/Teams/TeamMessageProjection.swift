@@ -27,6 +27,10 @@ struct TeamMessage: Codable, Identifiable, Sendable {
     let recalled: Bool?
     let changeSeq: Int
     let changeId: String
+    var mentions: [String]? = nil
+    var triggerId: String? = nil
+    var origin: TeamBotOrigin? = nil
+    var question: TeamBotQuestion? = nil
 }
 struct TeamMessageChange: Decodable, Sendable { let id: String; let seq: Int; let messageId: String; let operation: String }
 struct TeamMessagePage: Decodable, Sendable { let conversation: TeamMessageConversation; let changes: [TeamMessageChange]; let messages: [TeamMessage]; let hasMore: Bool }
@@ -40,6 +44,7 @@ struct TeamMessageIntent: Codable, Identifiable, Sendable {
     let operation: String
     let text: String
     let replyTo: String?
+    var targets: [String]? = nil
     var error: String?
     var leaseUntil: Double?
     var attempted: Bool?
@@ -53,6 +58,7 @@ struct TeamMessageCreation: Codable, Sendable {
     let kind: String
     let title: String
     let participantUids: [String]
+    var botKeys: [String]? = nil
     var error: String?
     var leaseUntil: Double?
     var attempted: Bool?
@@ -67,6 +73,11 @@ struct TeamMessageProjection: Codable, Sendable {
     var threads: [String: Thread] = [:]
     var outbox: [TeamMessageIntent] = []
     var creation: TeamMessageCreation?
+    var botOutbox: [TeamBotIntent]? = nil
+    mutating func acknowledgeBotIntent(_ id: String) { botOutbox?.removeAll { $0.id == id } }
+    func hasPendingAnswer(for message: TeamMessage) -> Bool {
+        (botOutbox ?? []).contains { $0.action == "botAnswer" && $0.triggerId == message.triggerId && $0.questionId == message.question?.id }
+    }
     mutating func apply(_ page: TeamMessagePage) throws {
         let id = page.conversation.id
         var thread = threads[id] ?? Thread()
@@ -110,5 +121,13 @@ actor TeamMessageFiles {
         try JSONEncoder().encode(value).write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         return value
+    }
+}
+
+enum TeamBotTrigger {
+    static func identity(messageId: String, botKey: String) -> String {
+        // Both fields use the backend's ASCII URL-safe identity grammar.
+        let data = Data("[\"\(messageId)\",\"\(botKey)\"]".utf8)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

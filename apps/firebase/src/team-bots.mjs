@@ -13,7 +13,7 @@ const target = { ...scope, botKey: key };
 const thread = { ...target, conversationId: id };
 const run = { ...thread, triggerId: id, attemptId: id };
 const terminal = new Set(['completed', 'failed', 'missed', 'cancelled', 'recovered', 'revoked']);
-export const botActions = new Set(['bots', 'bindBot', 'unbindBot', 'heartbeatBot', 'botQueue', 'claimBot', 'startBot', 'finishBot', 'botQuestion', 'botAnswer', 'botPoll', 'recoverBot']);
+export const botActions = new Set(['bots', 'bindBot', 'unbindBot', 'heartbeatBot', 'botQueue', 'claimBot', 'startBot', 'finishBot', 'botQuestion', 'botAnswer', 'botPoll', 'recoverBot', 'botState', 'botWait']);
 export const botCommand = z.discriminatedUnion('action', [
   z.object({ action: z.literal('bots'), ...scope }).strict(),
   z.object({ action: z.literal('bindBot'), ...scope, hostId: localId, botId: localId, expectedRevision: cursor,
@@ -29,6 +29,8 @@ export const botCommand = z.discriminatedUnion('action', [
   z.object({ action: z.literal('botAnswer'), ...scope, conversationId: id, triggerId: id, questionId: id, answerId: id,
     answers: z.record(z.string().min(1).max(2000), z.string().min(1).max(2000)) }).strict(),
   z.object({ action: z.literal('botPoll'), ...run }).strict(),
+  z.object({ action: z.literal('botState'), ...scope, conversationId: id, triggerId: id, questionId: id.optional() }).strict(),
+  z.object({ action: z.literal('botWait'), ...run, waitId: id, waiting: z.boolean() }).strict(),
   // Recovery settles an ambiguous invocation. It NEVER executes its tools again.
   z.object({ action: z.literal('recoverBot'), ...thread, triggerId: id, text }).strict(),
 ]);
@@ -101,10 +103,13 @@ export class TeamBotsStore {
         const owners = cards.empty ? [] : await tx.getAll(...cards.docs.map(doc => team.collection('members').doc(doc.data().ownerUid)));
         return { bots: cards.docs.flatMap((doc, index) => {
           const b = doc.data();
-          if (b.enabled === false || owners[index].data()?.generation !== b.ownerGeneration) return [];
+          const enabled = b.enabled !== false && owners[index].data()?.generation === b.ownerGeneration;
+          // The owner needs tombstone revisions to rebind after disable/rejoin.
+          // Other members never receive inactive cards or their old allowlists.
+          if (!enabled && b.ownerUid !== user.uid) return [];
           return [{ key: doc.id, ownerUid: b.ownerUid, hostId: b.hostId, botId: b.botId, name: b.name, description: b.description,
-            revision: b.revision, use: b.use, uids: b.uids, permitted: botPermits(b, user.uid),
-            online: now.getTime() - (b.lastSeen?.toMillis?.() ?? 0) < 60000 }];
+            revision: b.revision, enabled, use: b.use, uids: b.uids, permitted: enabled && botPermits(b, user.uid),
+            online: enabled && now.getTime() - (b.lastSeen?.toMillis?.() ?? 0) < 60000 }];
         }) };
       }
       if (input.action === 'bindBot') {
@@ -121,6 +126,7 @@ export class TeamBotsStore {
         return { botKey, revision };
       }
       if (input.action === 'botAnswer') return this.answer(tx, team, user, input, now);
+      if (input.action === 'botState') return this.status(tx, team, user, input, now);
       const cardRef = team.collection('bots').doc(input.botKey), card = (await tx.get(cardRef)).data();
       if (!card || card.ownerUid !== user.uid || card.ownerGeneration !== input.generation) fail(403, 'BOT_OWNER_REQUIRED');
       if (input.action === 'unbindBot') {
@@ -210,6 +216,18 @@ export class TeamBotsStore {
         } };
       }
       if (state.state !== 'running') fail(409, 'BOT_LEASE_REQUIRED');
+      if (input.action === 'botWait') {
+        const waitRef = ref.collection('botWaits').doc(input.waitId), wait = (await tx.get(waitRef)).data();
+        if (wait && (wait.triggerId !== input.triggerId || wait.attemptId !== input.attemptId)) fail(409, 'QUESTION_CONFLICT');
+        if (wait?.[input.waiting ? 'requested' : 'resolved']) return { ok: true };
+        if (!wait && (state.approvalCount ?? 0) >= 32) fail(409, 'BOT_APPROVAL_LIMIT');
+        if (!input.waiting && !wait?.requested) fail(409, 'QUESTION_CONFLICT');
+        appendBotMessage(tx, ref, c, trigger, input.triggerId, `approval:${input.waitId}:${input.waiting ? 'requested' : 'resolved'}`,
+          input.waiting ? 'Waiting for the Bot owner’s approval.' : 'The Bot owner’s approval request has been resolved.', now);
+        tx.set(waitRef, { ...wait, triggerId: input.triggerId, attemptId: input.attemptId, [input.waiting ? 'requested' : 'resolved']: true });
+        if (!wait) tx.update(runRef, { approvalCount: (state.approvalCount ?? 0) + 1 });
+        return { ok: true };
+      }
       if (input.action === 'finishBot') {
         const replyId = appendBotMessage(tx, ref, c, trigger, input.triggerId, 'reply', input.text, now);
         tx.update(runRef, { state: input.outcome, replyId, resultDigest: botDigest(JSON.stringify([input.outcome, input.text])), finishedAt: now });
@@ -231,15 +249,44 @@ export class TeamBotsStore {
       fail(400, 'INVALID_INPUT');
     });
   }
+  async status(tx, team, user, input, now) {
+    const ref = team.collection('conversations').doc(input.conversationId);
+    const [conversation, triggerDoc, runDoc] = await tx.getAll(ref, ref.collection('triggers').doc(input.triggerId), ref.collection('botRuns').doc(input.triggerId));
+    const c = conversation.data(), trigger = triggerDoc.data(), run = runDoc.data();
+    if (!c?.memberUids.includes(user.uid)) fail(403, 'CONVERSATION_REQUIRED');
+    if (!trigger || !c.participants.includes(trigger.botKey)) fail(404, 'TRIGGER_REQUIRED');
+    const [cardDoc, owner, human, message, receipt] = await tx.getAll(team.collection('bots').doc(trigger.botKey),
+      team.collection('members').doc(trigger.ownerUid), team.collection('members').doc(trigger.actorUid),
+      ref.collection('messages').doc(trigger.messageId), ref.collection('changes').doc(trigger.changeId));
+    const card = cardDoc.data(), original = message.data(), change = receipt.data();
+    const valid = card?.enabled && card.ownerUid === trigger.ownerUid && card.ownerGeneration === owner.data()?.generation
+      && card.ownerGeneration === trigger.ownerGeneration && card.revision === trigger.botRevision
+      && trigger.botKey === `bot:${card.ownerUid}:${card.hostId}:${card.botId}` && card.hostId === trigger.hostId
+      && human.data()?.generation === trigger.generation && c.memberUids.includes(trigger.actorUid)
+      && c.participants.includes(`user:${trigger.actorUid}`) && botPermits(card, trigger.actorUid)
+      && !original?.recalled && original?.author?.kind === 'user' && original.author.uid === trigger.actorUid
+      && original.changeId === trigger.changeId && change?.generation === trigger.generation
+      && change.textDigest === trigger.textDigest && change.executionIntent?.targets.includes(trigger.botKey)
+      && change.executionIntent.triggerIds.includes(input.triggerId);
+    const state = !valid ? 'revoked' : run?.state === 'running' && run.leaseUntil <= now.getTime() ? 'recovery' : run?.state ?? 'queued';
+    const questionId = input.questionId ?? run?.questionId;
+    const question = valid && questionId ? (await tx.get(ref.collection('botQuestions').doc(questionId))).data() : null;
+    if (valid && input.questionId && (!question || question.triggerId !== input.triggerId || question.attemptId !== run?.attemptId)) fail(404, 'QUESTION_REQUIRED');
+    // Public observation contains no tool names, arguments, traces or answers.
+    return { state, ownerUid: trigger.ownerUid, botKey: trigger.botKey,
+      origin: { uid: trigger.actorUid, generation: trigger.generation },
+      ...(run?.leaseUntil ? { leaseUntil: run.leaseUntil } : {}),
+      ...(valid && questionId ? { questionId } : {}), answered: Boolean(question?.answerId) };
+  }
   async answer(tx, team, user, input, now) {
     const ref = team.collection('conversations').doc(input.conversationId);
     const [conversation, triggerDoc, questionDoc, runDoc] = await tx.getAll(ref, ref.collection('triggers').doc(input.triggerId), ref.collection('botQuestions').doc(input.questionId), ref.collection('botRuns').doc(input.triggerId));
     const trigger = triggerDoc.data(), question = questionDoc.data(), run = runDoc.data();
     if (!conversation.data()?.memberUids.includes(user.uid) || !trigger || trigger.actorUid !== user.uid || trigger.generation !== input.generation
-      || question?.triggerId !== input.triggerId || question.attemptId !== run?.attemptId || run?.questionId !== input.questionId) fail(403, 'QUESTION_RECIPIENT_REQUIRED');
+      || question?.triggerId !== input.triggerId || question.attemptId !== run?.attemptId) fail(403, 'QUESTION_RECIPIENT_REQUIRED');
     const digest = botDigest(JSON.stringify(Object.entries(input.answers).sort()));
     if (question.answerId) { if (question.answerId !== input.answerId || question.answerDigest !== digest) fail(409, 'ANSWER_CONFLICT'); return { ok: true }; }
-    if (run.state !== 'running' || run.leaseUntil <= now.getTime()) fail(403, 'QUESTION_RECIPIENT_REQUIRED');
+    if (run.state !== 'running' || run.questionId !== input.questionId || run.leaseUntil <= now.getTime()) fail(403, 'QUESTION_RECIPIENT_REQUIRED');
     const [card, owner, original] = await tx.getAll(team.collection('bots').doc(trigger.botKey), team.collection('members').doc(trigger.ownerUid), ref.collection('messages').doc(trigger.messageId));
     validateBot(card.data(), trigger.botKey, owner.data(), user.uid);
     if (card.data().revision !== trigger.botRevision || original.data()?.recalled || original.data()?.changeId !== trigger.changeId) fail(403, 'QUESTION_RECIPIENT_REQUIRED');

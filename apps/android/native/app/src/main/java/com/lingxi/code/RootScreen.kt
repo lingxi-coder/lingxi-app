@@ -1697,7 +1697,10 @@ fun RootScreen(
                                 ?: error(resources.getString(R.string.deep_link_workspace_missing))
                             projectPageId = project
                         }
-                        "market" -> { appsPageOpen = true; localAppDetailsId = null; marketInstallId = id }
+                        "market" -> {
+                            projectsPageOpen = false; projectPageId = null; sessionPanelOpen = false
+                            appsPageOpen = true; runtimeAppId = null; localAppDetailsId = null; marketInstallId = id
+                        }
                         "apps" -> {
                             // Initial library refresh can still be in flight
                             // when a cold-start link reaches this route.

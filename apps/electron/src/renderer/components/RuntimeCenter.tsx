@@ -30,6 +30,7 @@ import { statusLabel } from '../bridge/agentStatus';
 import { tr } from '../i18n/locale';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
+import { DesktopIcon } from './DesktopIcon';
 import { AgentAvatar } from './AgentAvatar';
 import { Stage } from './Stage';
 import { TurnFileReview } from './TurnFileSummary';
@@ -636,9 +637,9 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
   return (
     <>
       {center.inspectorOpen && topbarControls && createPortal(<>
-        <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('desktop_runtime_open_tools')} title={tr('desktop_runtime_open_tools')} onClick={() => setToolsOpen(true)}><Icon name="plus" size={18} /></button>
-        <button type="button" aria-label={expanded ? tr('desktop_runtime_restore_panel') : tr('desktop_runtime_expand_panel')} className="no-drag desktop-topbar-action" onClick={() => setExpanded(!expanded)} title={expanded ? tr('desktop_runtime_restore_panel') : tr('desktop_runtime_expand_panel')} aria-pressed={expanded}><Icon name={expanded ? 'collapse' : 'expand'} size={17} /></button>
-        <button type="button" aria-label={tr('desktop_runtime_hide_panel')} className="no-drag desktop-topbar-action" onClick={() => { bridge.setRuntimeInspectorOpen(false); window.requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-runtime-inspector-trigger="true"]')?.focus()); }} title={tr('desktop_runtime_hide_panel')} aria-expanded="true" aria-controls="runtime-inspector"><Icon name="panel-right" size={18} /></button>
+        <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('desktop_runtime_open_tools')} title={tr('desktop_runtime_open_tools')} onClick={() => setToolsOpen(true)}><DesktopIcon name="plus" size={18} /></button>
+        <button type="button" aria-label={expanded ? tr('desktop_runtime_restore_panel') : tr('desktop_runtime_expand_panel')} className="no-drag desktop-topbar-action" onClick={() => setExpanded(!expanded)} title={expanded ? tr('desktop_runtime_restore_panel') : tr('desktop_runtime_expand_panel')} aria-pressed={expanded}><DesktopIcon name={expanded ? 'collapse' : 'expand'} size={17} /></button>
+        <button type="button" aria-label={tr('desktop_runtime_hide_panel')} className="no-drag desktop-topbar-action" onClick={() => { bridge.setRuntimeInspectorOpen(false); window.requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-runtime-inspector-trigger="true"]')?.focus()); }} title={tr('desktop_runtime_hide_panel')} aria-expanded="true" aria-controls="runtime-inspector"><DesktopIcon name="topbar-inspector-closed" size={18} /></button>
       </>, topbarControls)}
     <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label={tr('desktop_runtime_inspector')} style={{ position: expanded ? 'absolute' : undefined, inset: expanded ? '0 0 0 0' : undefined, zIndex: expanded ? 46 : undefined, width: expanded ? '100%' : panelWidth, minWidth: expanded ? 0 : Math.min(panelWidth, 320), '--inspector-bg': t.dark ? t.windowBg : t.sidebarPanelBg, '--inspector-surface': t.surface, '--inspector-active': t.surfaceActive, '--inspector-text': t.text, '--inspector-muted': t.text3, '--inspector-border': t.border, background: t.sidebarBg, borderLeft: `0.5px solid ${t.border}` } as CSSProperties}>
       {!expanded && <div className="no-drag runtime-inspector-resize" role="separator" aria-label={tr('desktop_runtime_resize_panel')} aria-orientation="vertical" aria-valuenow={panelWidth} aria-valuemin={320} aria-valuemax={960} tabIndex={0} onKeyDown={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); resize(panelWidth + (e.key === 'ArrowLeft' ? 24 : -24)); } }} onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(window.innerWidth - e.clientX); }} onPointerUp={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); }} />}

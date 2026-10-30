@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import type { GitApi, GitBranch, GitCommit, GitConflict, GitDiff, GitFile, GitRequest, GitResult, GitScope, GitStash, GitStatus } from '../../shared/git';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
+import { DesktopIcon } from './DesktopIcon';
 import { EXPLICIT_HIGHLIGHT_MAX_CHARS, highlightCodeForDisplay } from './CodeBlock';
 import { reviewHunks, reviewLines, splitReviewLines, type ReviewLine } from './gitDiff';
 
@@ -83,7 +84,7 @@ export function GitChangesButton({ active }: { active: boolean }) {
     data-active={active || undefined} aria-current={active ? 'page' : undefined}
     aria-label={label} title={count ? `${label} · ${tr('desktop_git_changed_files', count)}` : label}
     disabled={!git} onClick={() => { git?.open('changes'); void git?.refresh(); }}>
-    <Icon name="branch" size={21} stroke={1.7} />
+    <DesktopIcon name="branch" size={20} />
     {count > 0 && <span className="desktop-rail-count" aria-hidden="true">{count > 99 ? '99+' : count}</span>}
   </button>;
 }

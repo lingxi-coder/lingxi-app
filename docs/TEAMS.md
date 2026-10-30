@@ -371,12 +371,40 @@ valid malicious-Git fixture controls. Desktop and Mobile-feature library checks
 pass on macOS; this is not signed product, iOS/Android device or live-model
 acceptance. Independent static review approved only this disabled prerequisite.
 
-The product pin remains unchanged and the companion is unpublished. Fresh
-clean-environment processes, actual provider request verification, reliable total
-five-minute termination including detached descendants, authenticated brokers,
-durable executor recovery and four-client T3 UI are still required. The byte
+The product pin remains unchanged and the companion is unpublished. Product
+integration of the clean-process capability below, live/other-auth request
+verification, reliable total five-minute termination including detached
+descendants, authenticated brokers, durable executor recovery and four-client
+T3 UI are still required. The byte
 input/output/turn bounds do not establish total tokens, billing or resource
 ceilings. Evidence: `acceptance/teams-t3-profile-20261029/report.md`.
+
+### T3 dedicated-process checkpoint (execution stays disabled)
+
+Local companion commit `43031991ba7246b2f1b0f38e05632009334d3aaa` adds
+`harness-team-worker` and a host-owned single-use launch API. Each admitted turn
+uses a fresh macOS process, fixed private environment, anonymous credential pipe
+and closed inherited descriptors. A synced invocation tombstone prevents
+automatic replay after ambiguous startup/result loss; the captured backend lease
+is monotonic and cannot be extended by waiting or retrying. The worker shares
+the private profile/quota and denies every tool until the authenticated brokers
+exist. Only a selected static Anthropic API key is supported in this checkpoint.
+
+**74 selected tests pass**: 15 actual worker/pinned-SDK loopback cases, 13 private
+profile cases, seven visible-text and 39 recovery cases. The 15-case suite also
+passes against the normal Desktop-feature standalone binary. Desktop/Mobile
+feature checks, worker build, formatting and independent ten-file static review
+pass. This includes a shared recovery fix for valid text with preserved unknown
+fields being incorrectly treated as empty, plus prevention of retracted/error
+text being published as a successful reply.
+
+The product does not consume this unpublished runtime. Authenticated backend
+start/fencing, owner tool approvals, original-human questions, result persistence,
+revocation/recovery, detached tool containment, other auth routes, live-provider
+acceptance and all four T3 UIs remain open. No push/deploy/native product test or
+real model/account session occurred. Evidence and exact limits:
+`acceptance/teams-t3-process-20261029/report.md`; companion API contract:
+`docs/TEAM_INVOCATION_PROCESS.md`.
 
 ### Required isolated runtime
 

@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 1,
+  "recordType": "teams-t3.real-provider-journey",
+  "result": "PASS",
+  "provider": "openai",
+  "model": "gpt-6-luna",
+  "scope": "Two real-provider journeys in the normal signed Desktop application; same-profile recovery and native iOS requester interaction.",
+  "directMessage": {
+    "triggerSentOnce": true,
+    "originalTaskCount": 1,
+    "ownerApproval": {
+      "surface": "native Desktop",
+      "decision": "AllowOnce",
+      "evidenceRefs": [
+        "dmNativeMarker"
+      ],
+      "decisionObserved": true
+    },
+    "originalRequesterQuestion": {
+      "visible": true,
+      "answer": "Blue",
+      "answerSubmittedOnce": true,
+      "answerReceived": true,
+      "answerSurface": "authenticated member browser",
+      "evidenceRefs": [
+        "dmMember"
+      ]
+    },
+    "finalReply": {
+      "count": 1,
+      "expectedReplyMatched": true
+    },
+    "marker": {
+      "fileCount": 1,
+      "lineCount": 1,
+      "sha256": "86d732848b6a3e57b959b5e61ab1840f1f1903348d1506dd12799bcb6cfa4165"
+    },
+    "evidenceRefs": [
+      "dmNativeMarker",
+      "dmMember"
+    ]
+  },
+  "offlineGroup": {
+    "offlineSubmission": {
+      "attemptedOnce": true,
+      "explicitTargetChecked": true,
+      "botOffline": true,
+      "queued": true,
+      "originalTaskCount": 1
+    },
+    "whileHostOffline": {
+      "questionCount": 0,
+      "finalReplyCount": 0,
+      "botMessageCount": 0,
+      "browserAnswered": false
+    },
+    "afterSameProfileReopen": {
+      "originalTaskCount": 1,
+      "questionCount": 1,
+      "ownerApproval": {
+        "surface": "native Desktop",
+        "decision": "AllowOnce",
+        "observedCount": 1
+      },
+      "ownerQuestionDisclosureIdentifiedOriginalRequester": true,
+      "ownerAnswerControlsAbsent": true,
+      "requesterAnswer": {
+        "surface": "native iOS",
+        "originalMember": true,
+        "answer": "Blue",
+        "submittedOnce": true,
+        "received": true,
+        "browserSubmittedAnswer": false
+      },
+      "finalReplyCount": 1,
+      "observerSentAnotherTrigger": false
+    },
+    "marker": {
+      "fileCount": 1,
+      "lineCount": 1,
+      "sha256": "4bccc39fc03b086a2c9e5b63a866a2d63a533c2320c2dab6dabc25090252d3e8"
+    },
+    "evidenceRefs": [
+      "offlineQueued",
+      "offlineNoEffects",
+      "offlineFinal",
+      "reopenObservation",
+      "nativeFinal"
+    ]
+  },
+  "sameProfileNoReplay": {
+    "sameOwnedProfile": true,
+    "previousDirectMessageFinalCount": 1,
+    "previousFinalMessageIdUnchanged": true,
+    "previousMarkerUnchanged": true,
+    "previousMarkerLineCount": 1,
+    "evidenceRefs": [
+      "offlineFinal",
+      "reopenObservation",
+      "nativeFinal"
+    ]
+  },
+  "phaseInterpretation": [
+    {
+      "phase": "initial live direct-message completion",
+      "result": "PASS",
+      "note": "The before-restart marker record proves first completion, not a completed restart."
+    },
+    {
+      "phase": "initial supervisor restart attempt",
+      "result": "NOT_A_RESTART_PASS",
+      "restartExecutedCount": 0,
+      "note": "Parent observed command refusal after the initial one-hour supervisor expired. No standalone refusal record exists; the supervisor state independently records zero restarts."
+    },
+    {
+      "phase": "separate normal same-profile reopen and fresh offline group",
+      "result": "PASS",
+      "note": "This was a separately reviewed normal reopen, not an extension of the expired run or a reset of a task deadline."
+    }
+  ],
+  "evidenceSources": {
+    "dmNativeMarker": {
+      "record": "live-marker-before-restart.json",
+      "sha256": "f862453469c69995a01baceedbfc229c51e6b09664eb24b590dde6bc955d67b5"
+    },
+    "dmMember": {
+      "record": "member-browser/journey-result.json",
+      "sha256": "04bcdf07733b9027bf85b274ae22a46caf9109e2b0fa408a1e4623944b6d97b1"
+    },
+    "offlineQueued": {
+      "record": "member-browser/offline-queued-result.json",
+      "sha256": "78535ef190f62b922d696339f04e8cb6d2b8b911210f1ea7dca87cf06132da93"
+    },
+    "offlineNoEffects": {
+      "record": "member-browser/offline-noeffects-result.json",
+      "sha256": "a72273754a6e1419c5d308f487d7002e207bae7f7e6353839633fd3a473b9632"
+    },
+    "offlineFinal": {
+      "record": "member-browser/offline-final-reopen-result.json",
+      "sha256": "3bef4d0043b4bbed680303cb46a7aff0977957cb3a122a87058f920b5947d786"
+    },
+    "reopenObservation": {
+      "record": "live-reopen-verification.json",
+      "sha256": "bae579ee6fe2420b84834ab1c2c38378c108d5f01e2cdc2b892b5f16763c9abf"
+    },
+    "nativeFinal": {
+      "record": "native-live-final.json",
+      "sha256": "28ff5665df6e862c4bc16812fd21c9c7435b9f5f7e82bb98e4b416c6ebfb867b"
+    },
+    "initialSupervisor": {
+      "record": "normal-live-r1/state.json",
+      "sha256": "4e278e298ff338c38d49363de884cce67a354f37ab4dc4f8ab688730921dd6cc"
+    }
+  },
+  "redaction": "No raw account, bot, task, message or invite identifiers; no profile paths, credentials, marker text or private-state copies. Marker evidence is counts and SHA256 only."
+}

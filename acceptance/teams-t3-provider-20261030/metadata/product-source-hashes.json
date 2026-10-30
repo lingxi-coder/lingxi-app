@@ -1,0 +1,14 @@
+{
+  "Cargo.toml": "91cf853d9aee6b821f8f56a140223d314e0477cb9ef8a92cba49974080ee375f",
+  "Cargo.lock": "7a50cd60b5d95f9c54dc1cdb5df3d5be640e105d912dc94925dc67d789572f34",
+  "apps/bridge-server/src/app_agent.rs": "ad24d200c46ef12e9f4cc98444c7429a2184acaf615bbf0418751641470b5660",
+  "apps/electron/src/main/index.ts": "3bc91204a0257b8f344ccf292133bade18fc67b221e2fd37df0eb70207a55d89",
+  "apps/electron/src/main/local-apps/agentExecutor.ts": "53c0de1ac0adf355bf9ae54f1189c0d70d177488ba53388db179588ce0789b37",
+  "apps/electron/src/main/teams/connector.ts": "26643ab6867c24b46142851ef31fc3aa7c13dd1dcebe1dbc35ba90d68258ea48",
+  "apps/electron/src/main/teams/privateStore.ts": "26feb818d1fdcb19c9eb1321f3c8c93bc1a2c2b851ede74b11fde5acd7caec55",
+  "apps/electron/src/main/teams/process.ts": "4c1c2a01d7f7b297c955223974cae5c86d0064ea62f833c0470ba63057331d3b",
+  "apps/electron/test/teams-host-runtime.integration.ts": "6c4debf0b67955d3dfbde5a4bdac95591ac8a3e6072a550f2ea5b7ff93266dd5",
+  "apps/electron/test/teams-host.test.ts": "2924aac6e3fb743550bce83aa715f3f856edf108ed981a65616047f108be1a55",
+  "docs/TEAMS.md": "24322d3c58b06c702e1fedcdd5ceb4bc1c3676c2ec8566e49db98319f784cd6d",
+  "packages/teams/MessagesPanel.tsx": "f3c4608ddc44d7a404575a53ba706b7dc2834e93c280154a42f43facaac4ec91"
+}

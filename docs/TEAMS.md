@@ -1,16 +1,19 @@
 # Teams implementation contract
 
-Status: T1/T2 and the T3 backend, Desktop host integration and four-client UI are
-implemented. The scoped production API, message trigger, default rules/index and
-Teams Web overlay were published on 2026-10-30. Browser/native feature journeys,
-signed Desktop host/worker integration and the full signed Desktop package smoke
-pass. Production two-account API/SDK and actual event delivery pass. Real-provider
-execution, full-product mobile/device acceptance and a separate signed Desktop
-test-account UI remain open; T3 is not marked complete.
-Historical prerequisite reports describe their own
-snapshots, not the current product's acceptance status. This document refines the
-approved 2026-10-29 Team plan; a phase is complete only when its stated checks pass
-on all four clients.
+Status: T1/T2 and T3 implementation and scoped acceptance pass. The production
+API, message trigger, default rules/index and Teams Web overlay were published
+on 2026-10-30. T3's real-account checks pass: an explicit member Bot request gets
+a real GPT-6 Luna reply, tool approval goes to its owner, only the original member
+answers its question, and host offline-to-online processing executes once.
+The official Flare-signed Desktop package, full iOS Simulator product and full
+Android Direct Debug product were built and checked. Mobile evidence uses an
+owned simulator/AVD; it does not establish physical-device or Store acceptance.
+The [current acceptance report](../acceptance/teams-t3-provider-20261030/report.md)
+separates source, package, native UI, live provider and publication evidence.
+This delivery pushes the two authorized feature branches without merging or
+pushing main. Historical prerequisite reports describe their own snapshots.
+This contract refines the approved 2026-10-29 Team plan; each phase requires its
+stated four-client checks.
 
 ## Product boundaries
 
@@ -144,7 +147,7 @@ expected generation are read in the same trusted transaction. RC is unchanged.
 | `read` | `lastReadSeq`; returns the monotonic confirmed watermark |
 
 T2 writes human text messages. Bot DM execution and authenticated Bot triggers
-remain T3. Only the author may edit/recall a message. Replies reference an existing
+are covered by T3. Only the author may edit/recall a message. Replies reference an existing
 message in the same conversation. Recall permanently clears the server body;
 receipts keep the digest rather than the plaintext. The trusted API is the shared
 mutation implementation for all four clients, with the same three-document
@@ -260,8 +263,8 @@ messages older than the reconnect cursor.
 Desktop, Web, iOS and Android implement Bot cards, presence/owner/privacy and use
 permissions, permitted Bot DM, explicit group/channel Bot targets, run status,
 original-human questions and owner manual recovery. Web and Mobile direct owners
-to Desktop to bind a local Bot. These are local source implementations; T3 is not
-marked complete or released by this document.
+to Desktop to bind a local Bot. Current T3 source, package and live acceptance
+are recorded below; native distribution remains separate from these checks.
 
 The trusted macOS Desktop main process binds an existing local Bot and discovers
 its backend queues. Binding requires trusted host/worker binaries and one
@@ -413,25 +416,35 @@ are bounded; OS/scheduler/filesystem stalls prevent a hard real-time guarantee.
 Input/text/frame bounds, finite Agent turns, output-token caps and shared limits
 on physical model dispatches bound the admitted route without resetting authority
 on retries or forks. They are not a total-input-token, monetary, CPU, memory or disk ceiling.
-Other host platforms, provider/authentication routes and real-model memory
-behavior require their own implementation and acceptance.
+Other execution-host platforms and unsupported authentication routes remain
+separate scopes. The existing admitted static protocol routes have source/codec
+coverage; real-network acceptance here covers the selected OpenAI route.
 
 Runtime contracts live in the companion checkout:
 [private profile](../../harness-runtime/docs/TEAM_INVOCATION_PROFILE.md),
 [worker/guardian process](../../harness-runtime/docs/TEAM_INVOCATION_PROCESS.md)
 and [trusted connector](../../harness-runtime/docs/TEAM_CONNECTOR.md). Current
 source hashes, resolved product pins, commands/results and acceptance artifacts
-are recorded in the [local acceptance report](../acceptance/teams-t3-complete-20261029/report.md)
-and [production publication record](../acceptance/teams-t3-live-20261030/report.md).
-Test definitions and historical counts are not proof of a current pass. Browser
-and native feature-harness journeys and the actual Flare-signed host/worker flow
-pass. After the user authorized a temporary interruption, the full signed Desktop
-smoke passed and the original application, Broker and URL handler were restored
-with unchanged executable/plist hashes. The two feature branches were pushed;
-main was not merged or changed. Production API/SDK/event acceptance does not
-establish real-model execution, a full signed mobile package or a signed Desktop
-test-account UI. The existing same-user Broker account slot is shared across
-user-data directories; a temporary HOME is not account-session isolation.
+are recorded in the [source and feature report](../acceptance/teams-t3-complete-20261029/report.md),
+[initial production publication](../acceptance/teams-t3-live-20261030/report.md)
+and [current provider/native acceptance](../acceptance/teams-t3-provider-20261030/report.md).
+The latter uses product source `ea59210a` and runtime `b09033fa`: the configured
+OpenAI GPT-6 Luna route passed a real Bot DM and a separate request queued while
+the host was offline. Reopening the same private Desktop profile processed the
+new request once while preserving the old final reply and marker. The original
+member answered through the full iOS app; the owner used native AllowOnce and
+had no question-answer controls. The full Android Direct Debug app passed its
+1,276 unit tests, normal member login, restart restoration and live history checks.
+
+The full official signed Desktop smoke passed in a separate guarded run after
+its initial active-Broker refusal. Original app, Broker and URL handler were
+restored with zero errors; normal UI verified the same cloud identity and
+configured OpenAI credential. The test Bot was unbound after completion, so new
+requests/answers are disabled while history remains. The two feature branches
+are published; this delivery does not merge, push or modify main. Mobile debug
+builds and simulator/AVD UI do not establish physical-device, Store or push-delivery
+acceptance. The same-user Broker account slot is shared across user-data
+folders; changing HOME is not account-session isolation.
 
 The `(botKey ASC, seq ASC)` trigger index is declared only for Firestore
 `(default)` in `infra/firebase/firestore.teams.indexes.json`; named databases keep
@@ -445,7 +458,8 @@ database read. Verify actual Admin-only message receipts after deployment; an
 HTTP 200 or ACTIVE function alone is insufficient. The published Hosting overlay
 preserves all 19,265 prior file hashes and adds only the reviewed Teams assets and
 routes. Current deployment identifiers and the minimal IAM audit are in the
-publication record.
+initial publication record; the current provider report records the refreshed
+Teams entry and asset version.
 
 ### Historical prerequisite evidence
 

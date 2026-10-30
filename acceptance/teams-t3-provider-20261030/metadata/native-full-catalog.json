@@ -1,0 +1,20 @@
+{
+  "pass": true,
+  "elapsedSeconds": 4.57,
+  "productCommit": "ea59210a827015d0ac316aee393bcb08f22f40f1",
+  "runtimePin": "b09033fa446dfdee48e71ea18ca16095b068a353",
+  "modelCount": 441,
+  "catalogBytes": 2368111,
+  "bridgeSha256": "869d850a805a2b57b35f1b4fb0af0b6feb7a4972487dc20b7f0e7f556f2268de",
+  "selected": {
+    "model_provider": "openai",
+    "model_protocol": "open_ai_responses",
+    "model_id": "gpt-6-luna",
+    "model_endpoint": "https://api.openai.com/v1",
+    "credential_id": "openai"
+  },
+  "singletonPrivateCredential": true,
+  "ownerConfigRead": false,
+  "providerSecretRead": false,
+  "modelRequestSent": false
+}

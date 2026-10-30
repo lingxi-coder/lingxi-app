@@ -18,7 +18,7 @@ test('Firestore: sharded payloads, concurrent draft conflict, immutable publicat
     assert.equal(attempts.find((r) => r.status === 'rejected').reason.status, 409);
     const draft = await store.draft(); assert.deepEqual(draft.catalog, seed); assert.equal(draft.revision, 1);
     const first = await store.publish(1, 'Initial', 'admin');
-    const edited = structuredClone(seed); edited.models[0].enabled = !edited.models[0].enabled;
+    const edited = structuredClone(seed); edited.models[1].status = 'deprecated';
     await store.save(edited, 1, 'admin');
     assert.deepEqual((await store.current()).catalog, seed, 'draft edits must not mutate the published snapshot');
     await assert.rejects(store.publish(1, 'Stale', 'admin'), { status: 409 });

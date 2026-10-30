@@ -83,7 +83,7 @@ import {
   CH_NATIVE_AUDIO_OPERATION,
   CH_NATIVE_AUDIO_REQUEST,
 } from '../shared/nativeAudio.js';
-import { PROVIDER_IDS, providerById } from '../shared/providers.js';
+import { PROVIDER_IDS, providerById, providersFromCatalog } from '../shared/providers.js';
 import { CODEX_PROVIDER_ID, loginCodex } from './codex-auth.js';
 import type { CodexTokenManager } from './codex-tokens.js';
 import type { SettingsStore } from './settings.js';
@@ -1896,7 +1896,7 @@ export class HostController {
 
   private requireProvider(providerId: unknown) {
     if (typeof providerId !== 'string') throw new Error('invalid provider id');
-    const provider = providerById(providerId);
+    const provider = providersFromCatalog(this.currentRuntime()?.officialProviderCatalog ?? []).find((p) => p.id === providerId) ?? providerById(providerId);
     if (!provider) throw new Error('unsupported provider');
     if (!provider.available) throw new Error(`${provider.label} sign-in is not available in this desktop build; use the CLI/TUI connect flow`);
     return provider;

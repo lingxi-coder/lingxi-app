@@ -623,3 +623,16 @@ test('cold credential helper may finish after the former process deadline but re
   await rejection;
   assert.equal(killed, true, 'a stalled helper must still be terminated');
 });
+
+
+test('a newly published official provider resolves only its declared model credential route', () => {
+  const directory = [{
+    provider_id: 'new-cloud', display_name: 'New Cloud',
+    models: [{ model_id: 'new-model', display_name: 'New model' }],
+    definition: { base_url: 'https://example.com/v1', protocol: 'open_ai', auth: 'bearer',
+      credential_env: 'NEW_CLOUD_KEY', default_model_id: 'new-model', description: '' },
+  }];
+  assert.deepEqual(resolveModelCredentialProviderIds('new-cloud/new-model', {}, directory), ['new-cloud']);
+  assert.deepEqual(resolveModelCredentialProviderIds('new-cloud/undeclared', {}, directory), []);
+  assert.deepEqual(resolveModelCredentialProviderIds('another-cloud/new-model', {}, directory), []);
+});

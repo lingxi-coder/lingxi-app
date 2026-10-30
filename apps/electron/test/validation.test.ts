@@ -601,3 +601,8 @@ test('suggestion feedback and composer context are bounded and allowed during a 
   assert.throws(() => validateClientCommand({ ...feedback, action: 'forged' }));
   assert.throws(() => validateClientCommand({ ...feedback, uuid: '' }));
 });
+
+test('provider catalog manual/settings refreshes cannot forge application lifecycle', () => {
+  for (const trigger of ['manual', 'settings']) assert.deepEqual(validateClientCommand({ type: 'refresh_provider_catalog', trigger }), { type: 'refresh_provider_catalog', trigger });
+  for (const trigger of ['background', 'foreground', 'network_lost', 'timer']) assert.throws(() => validateClientCommand({ type: 'refresh_provider_catalog', trigger }), /catalog refresh/);
+});

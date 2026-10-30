@@ -2170,6 +2170,7 @@ pub async fn assemble_with_credentials(
     let ask_user_question_broker = Arc::new(client::adapter::AskUserQuestionBroker::new(
         connection.event_sink(),
     ));
+    let official_catalog = cfg.startup_catalog.clone();
     let provider_model_catalog_listings = desktop_provider_catalog_listings(
         &cfg,
         harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed)
@@ -2494,6 +2495,7 @@ pub async fn assemble_with_credentials(
     .with_credentials(runtime.credentials.clone())
     .with_catalog_registry(runtime.catalog_registry.clone())
     .with_provider_model_catalog_listings(provider_model_catalog_listings)
+    .with_official_catalog(official_catalog)
     .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
     .with_openai_host_session(openai_host_session)
     .with_http(runtime.http.clone())

@@ -86,6 +86,7 @@ fun SettingsHost(
     // null 表示本宿主不提供切换能力，此时层选择器下不画切换入口。
     onSwitchProject: ((String) -> Unit)? = null,
 ) {
+    val catalogScope = androidx.compose.runtime.rememberCoroutineScope()
     val engineBridge = remember { SettingsEngineBridge() }
     val draftRegistry = remember(engineSource) { SettingsDraftRegistry() }
     val engineSettingsState by engineBridge.state.collectAsStateWithLifecycle()
@@ -344,12 +345,14 @@ fun SettingsHost(
                 }
                 page(SettingsRoutes.PROVIDER_LIST) {
                     val kind = providerKindArg(it)
+                    LaunchedEffect(kind, engineSource) { if (kind == ProviderKind.Llm) engineBridge.refresh() }
                     ProviderListPage(
                         kind = kind,
                         state = state,
                         store = resolvedStore,
                         onEdit = { id -> navController.navigate(SettingsRoutes.providerEdit(kind.name, id)) },
                         onAdd = { navController.navigate(SettingsRoutes.providerPicker(kind.name)) },
+                        onRefreshCatalog = { catalogScope.launch { engineBridge.refreshOfficialCatalog() } },
                         onReconnectEngine = reconnectSafely,
                         onNavigate = { navController.navigate(it) },
                     )

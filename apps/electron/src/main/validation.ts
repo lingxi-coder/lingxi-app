@@ -411,6 +411,10 @@ export function validateClientCommand(value: unknown, workspace?: string): Valid
         ...(offer_bypass === undefined ? {} : { offer_bypass }),
       };
     }
+    case 'refresh_provider_catalog':
+      exactKeys(input, ['type', 'trigger']);
+      if (input.trigger !== 'settings' && input.trigger !== 'manual') throw new Error('Invalid catalog refresh trigger');
+      return { type, trigger: input.trigger };
     case 'list_models':
       exactKeys(input, ['type']);
       return { type };

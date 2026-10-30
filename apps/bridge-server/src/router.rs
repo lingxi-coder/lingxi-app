@@ -594,6 +594,10 @@ pub struct EngineCommandRouter {
     /// Settings-visible provider model directory assembled from the full
     /// provider config, including providers not currently routable.
     provider_model_catalog_listings: Vec<lingxi_core::host::ModelListing>,
+    official_catalog: Option<harness_runtime::StartupCatalog>,
+    catalog_refresh: Option<provider_config::startup_catalog::CatalogRefreshGuard>,
+    catalog_observers:
+        std::sync::Mutex<HashMap<usize, provider_config::startup_catalog::CatalogRefreshGuard>>,
     /// Packaged Desktop owns persistence in its signed credential broker; in
     /// that mode bridge credential mutations update only this process cache.
     provider_credentials_ephemeral: bool,
@@ -944,6 +948,9 @@ impl EngineCommandRouter {
             realtime_audio: None,
             media_cloud_audio: None,
             provider_model_catalog_listings: Vec::new(),
+            official_catalog: None,
+            catalog_refresh: None,
+            catalog_observers: Default::default(),
             provider_credentials_ephemeral: false,
             openai_host_session: None,
             http: None,
@@ -1051,6 +1058,77 @@ impl EngineCommandRouter {
     ) -> Self {
         self.provider_model_catalog_listings = listings;
         self
+    }
+
+    pub fn with_official_catalog(
+        mut self,
+        source: Option<harness_runtime::StartupCatalog>,
+    ) -> Self {
+        self.catalog_refresh = source.as_ref().map(|source| source.prefetch());
+        self.official_catalog = source;
+        self
+    }
+
+    fn observe_catalog(&self, sink: Arc<dyn ClientEventSink>) {
+        let Some(source) = &self.official_catalog else {
+            return;
+        };
+        let key = Arc::as_ptr(&sink) as *const () as usize;
+        let mut observers = self
+            .catalog_observers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        observers.retain(|_, guard| !guard.0.is_finished());
+        if observers.contains_key(&key) {
+            return;
+        }
+        let sink = Arc::downgrade(&sink);
+        let source = source.clone();
+        let mut updates = source.subscribe();
+        let handle = self.handle.clone();
+        observers.insert(
+            key,
+            provider_config::startup_catalog::CatalogRefreshGuard(tokio::spawn(async move {
+                while updates.changed().await.is_ok() {
+                    let Some(sink) = sink.upgrade() else {
+                        break;
+                    };
+                    let catalog = source.snapshot();
+                    sink.emit(ClientEvent::ProviderModelCatalog {
+                        providers: harness_runtime::provider_directory::entries(&catalog),
+                    })
+                    .await;
+                    let listings = handle.list_model_listings().await;
+                    let snapshot = handle.get_status_snapshot().await;
+                    let available = handle.list_available_models().await;
+                    sink.emit(ClientEvent::ModelList {
+                        models: lingxi_core::host::curated_model_refs(
+                            &listings,
+                            &available,
+                            &snapshot.model,
+                            snapshot.model_profile.as_deref(),
+                        ),
+                        current: lingxi_core::host::qualified_model_ref(
+                            &snapshot.model,
+                            snapshot.model_profile.as_deref(),
+                        ),
+                        current_model_source: snapshot
+                            .model_source
+                            .as_ref()
+                            .and_then(|source| ClientTextDto::from_projection(source).ok()),
+                        details: lingxi_core::host::curated_model_listings(
+                            &listings,
+                            &snapshot.model,
+                            snapshot.model_profile.as_deref(),
+                        )
+                        .iter()
+                        .map(client::adapter::lowering::lower_model_details)
+                        .collect(),
+                    })
+                    .await;
+                }
+            })),
+        );
     }
 
     /// Keep provider credential writes process-local because the parent owns
@@ -1429,6 +1507,7 @@ impl CommandRouter for EngineCommandRouter {
     // be. (Same convention as `harness_runtime::desktop::build`.)
     #[allow(clippy::too_many_lines)]
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
+        self.observe_catalog(sink.clone());
         match command {
             ClientCommand::StartRealtimeAudio { request_json } => {
                 if let Some(controller) = &self.realtime_audio {
@@ -1999,6 +2078,15 @@ impl CommandRouter for EngineCommandRouter {
                         self.credentials.as_ref(),
                         self.http.as_ref(),
                         crate::provider_connection::ProviderConnectionProbe {
+                            protocol: self.official_catalog.as_ref().and_then(|source| {
+                                source
+                                    .snapshot()
+                                    .providers
+                                    .iter()
+                                    .find(|p| p.profile_name == provider_id)
+                                    .and_then(|p| serde_json::to_value(p.protocol).ok())
+                                    .and_then(|v| v.as_str().map(str::to_owned))
+                            }),
                             operation_id,
                             provider_id,
                             api_base,
@@ -2191,6 +2279,25 @@ impl CommandRouter for EngineCommandRouter {
                         .await;
                     }
                 }
+            }
+            ClientCommand::RefreshProviderCatalog { trigger } => {
+                if let Some(source) = &self.official_catalog {
+                    match trigger.parse() {
+                        Ok(trigger) => {
+                            if let Err(error) = source.trigger(trigger).await {
+                                tracing::warn!(%error, "official provider directory refresh failed");
+                            }
+                        }
+                        Err(error) => {
+                            sink.emit(ClientEvent::Error {
+                                kind: ErrorKindDto::Internal,
+                                message: error.into(),
+                            })
+                            .await;
+                        }
+                    }
+                }
+                self.emit_listing(ListingKindDto::Models, &*sink).await;
             }
             ClientCommand::ListModels => {
                 self.emit_listing(ListingKindDto::Models, &*sink).await;

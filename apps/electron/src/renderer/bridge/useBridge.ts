@@ -2242,9 +2242,9 @@ export function useBridge(): UseBridge {
     () => command({ type: 'refresh_listings', which: [{ type: 'slash_commands' }] }),
     [command],
   );
-  const refreshModelPicker = useCallback(async () => {
+  const refreshModelPicker = useCallback(async (trigger: 'settings' | 'manual' = 'settings') => {
     await Promise.all([
-      command({ type: 'list_models' }),
+      command({ type: 'refresh_provider_catalog', trigger }),
       command({ type: 'get_conversation_controls' }),
     ]);
   }, [command]);

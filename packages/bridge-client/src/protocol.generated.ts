@@ -2,7 +2,7 @@
 // Do not edit. Run scripts/checks/generate-client-protocol.py after updating the pin.
 // Nested DTOs and semantic validation remain in protocol.ts and validation.ts.
 
-// Custom Serde fingerprints (review changes): command=a398e5d275796fd6 event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=c75fd6cc9f4aa3a4 event_source=2bc9d9652c3ea156
+// Custom Serde fingerprints (review changes): command=a398e5d275796fd6 event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=0c19f45700362b93 event_source=2bc9d9652c3ea156
 
 import type {
   AgentDto,
@@ -197,6 +197,7 @@ export type ClientCommand =
   | { type: 'media_service_request'; request: MediaServiceRequestDto }
   | { type: 'media_control_response'; response: MediaControlResponseDto }
   | { type: 'update_media_session_modes'; modes: Array<MediaSessionModeDto> }
+  | { type: 'refresh_provider_catalog'; trigger: string }
 ;
 
 export type ClientEvent =
@@ -922,6 +923,7 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   media_service_request: true,
   media_control_response: true,
   update_media_session_modes: true,
+  refresh_provider_catalog: true,
 };
 
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {

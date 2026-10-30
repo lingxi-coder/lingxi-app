@@ -136,6 +136,10 @@ export class SessionRuntimeManager {
     any: () => [...this.runtimes.values()].find((runtime) => runtime.visualizationReady),
   });
 
+  refreshProviderCatalog(trigger: string): void {
+    for (const runtime of this.runtimes.values()) runtime.refreshProviderCatalog(trigger);
+  }
+
   constructor(private readonly opts: SessionRuntimeManagerOptions) {
     const requestedLimit = opts.maxCachedRuntimes ?? DEFAULT_MAX_CACHED_RUNTIMES;
     if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > MAX_CONFIGURED_CACHED_RUNTIMES) {

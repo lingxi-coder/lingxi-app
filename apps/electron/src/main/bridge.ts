@@ -18,6 +18,7 @@ import type {
   AudioOwnerDto,
   ClientCommand,
   ClientEvent,
+  ProviderModelCatalogEntryDto,
   ComputerAccessRequestDto,
   CronJobDto,
   CronRequestDto,
@@ -637,12 +638,15 @@ export class SessionRuntime {
   }
 
 
+  private latestOfficialProviderCatalog: ProviderModelCatalogEntryDto[] = [];
+  get officialProviderCatalog(): readonly ProviderModelCatalogEntryDto[] { return this.latestOfficialProviderCatalog; }
+
   get customProviderIds(): readonly string[] {
     return [...this.configuredCustomProviderIds];
   }
 
   get configuredCredentialIds(): readonly string[] {
-    return configuredCredentialProviderIds(this.credentialRoutingSettings);
+    return [...new Set([...configuredCredentialProviderIds(this.credentialRoutingSettings), ...this.latestOfficialProviderCatalog.map((entry) => entry.provider_id)])];
   }
 
   private replayEvents: SequencedRuntimeEventEnvelope<ClientEvent>[] = [];
@@ -2210,6 +2214,7 @@ export class SessionRuntime {
         }
         return;
       }
+      if (event.type === 'provider_model_catalog') this.latestOfficialProviderCatalog = event.providers.filter((entry) => entry.definition);
       if (event.type === 'model_list') for (const waiter of this.modelCatalogWaiters) waiter(event);
       if (event.type === 'scheduled_run_finished') {
         const pending = this.pendingScheduledTurns.get(event.run_id);
@@ -3150,7 +3155,7 @@ export class SessionRuntime {
     });
     if (!selection) return;
     if (generation !== this.generation || client !== this.client) throw new Error('Fusion credential loading was interrupted.');
-    await Promise.all(resolveFusionCredentialProviderIds(this.credentialRoutingSettings, selection, explicit)
+    await Promise.all(resolveFusionCredentialProviderIds(this.credentialRoutingSettings, selection, explicit, this.latestOfficialProviderCatalog)
       .filter((providerId) => providerId !== 'openai-chatgpt')
       .map((providerId) => this.ensureProviderCredentialCached(providerId)));
   }
@@ -3161,7 +3166,7 @@ export class SessionRuntime {
     const client = this.requireClient();
     if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
     if (generation !== this.generation || client !== this.client) throw new Error('Provider credential loading was interrupted.');
-    await Promise.all(resolveModelCredentialProviderIds(model, this.credentialRoutingSettings)
+    await Promise.all(resolveModelCredentialProviderIds(model, this.credentialRoutingSettings, this.latestOfficialProviderCatalog)
       .map((providerId) => this.ensureProviderCredentialCached(providerId)));
   }
 
@@ -3689,6 +3694,12 @@ export class SessionRuntime {
     if (launchDir) {
       try { rmSync(launchDir, { recursive: true, force: true }); } catch (error) { this.diagnostics.add('warn', 'host', error); }
     }
+  }
+
+  refreshProviderCatalog(trigger: string): void {
+    if (this.disposed || !this.client) return;
+    try { this.client.sendCommand({ type: 'refresh_provider_catalog', trigger }); }
+    catch (error) { this.diagnostics.add('warn', 'bridge', `catalog refresh: ${sanitizeDiagnostic(error)}`); }
   }
 
   async dispose(options?: { replacing?: boolean }): Promise<void> {

@@ -125,7 +125,11 @@ class SettingsEngineBridge {
             catalogUpdates = current.catalogUpdates + (domain to (current.catalogUpdates[domain] ?: 0) + 1),
         )
     }
-    suspend fun refresh() = dispatch(ClientCommand.RefreshListings(listOf(ListingKindDto.SETTINGS, ListingKindDto.MODELS)))
+    suspend fun refresh() {
+        dispatch(ClientCommand.RefreshProviderCatalog("settings"))
+        dispatch(ClientCommand.RefreshListings(listOf(ListingKindDto.SETTINGS, ListingKindDto.MODELS)))
+    }
+    suspend fun refreshOfficialCatalog() = dispatch(ClientCommand.RefreshProviderCatalog("manual"))
     suspend fun update(layer: String, patch: JSONObject) {
         val requestSource = source ?: error("Connect an engine to manage these settings")
         val requestGeneration = generation

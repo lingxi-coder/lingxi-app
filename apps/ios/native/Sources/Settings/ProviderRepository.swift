@@ -379,7 +379,7 @@ struct ProviderCatalogEntry: Identifiable, Equatable {
     let modelDetails: [String: ModelRuntimeDetails]
 
     var supportsOAuth: Bool {
-        authName == "ChatGptOAuth" || authName == "OAuthBearer"
+        authName == "chat_gpt_o_auth" || authName == "o_auth_bearer"
     }
 }
 
@@ -711,12 +711,22 @@ final class ProviderRepository {
         bumpSyncRevision()
     }
 
+    func acceptCatalog(_ entries: [ProviderCatalogEntry]) {
+        catalogEntries = entries
+        catalogLoadState = .loaded
+        bumpSyncRevision()
+    }
+
+    func refreshOfficialCatalog() async {
+        try? await commandSubmitter?(.refreshProviderCatalog(trigger: "manual"))
+        _ = await refreshCatalog()
+    }
+
     @discardableResult
     func refreshCatalog() async -> Bool {
         guard let catalogLoader else { return false }
         catalogGeneration &+= 1
         let requestGeneration = catalogGeneration
-        catalogEntries = []
         catalogLoadState = .idle
         do {
             let entries = try await catalogLoader()
@@ -745,21 +755,8 @@ final class ProviderRepository {
             return Presets.llm.filter { $0.id == "custom" }
         }
         guard !entries.isEmpty else { return Presets.llm }
-        let fallback = Dictionary(uniqueKeysWithValues: Presets.llm.map { ($0.id, $0) })
-        return entries.compactMap { entry in
-            let localPresetID = entry.id == "gemini" ? "google" : entry.id
-            guard let base = fallback[localPresetID], localPresetID != "custom" else { return nil }
-            return ProviderPreset(
-                id: base.id,
-                name: entry.displayName,
-                sub: base.sub,
-                color: base.color,
-                defaultUrl: entry.baseURL,
-                keyPrefix: base.keyPrefix,
-                models: entry.models,
-                needsCx: base.needsCx
-            )
-        } + (fallback["custom"].map { [$0] } ?? [])
+        return entries.filter { $0.id != "custom" }.map { preset(for: $0.id) }
+            + Presets.llm.filter { $0.id == "custom" }
     }
 
     /// The single projection consumed by settings UI.  It intentionally joins
@@ -2401,9 +2398,8 @@ final class ProviderRepository {
     }
 
     private func engineProfileID(for profile: ProviderStoredProfile) -> String {
-        if usesBuiltInProfile(presetID: profile.presetID, baseURL: profile.baseURL),
-           let builtInID = ProviderRepositoryDefaults.builtInProfileIDsByPreset[profile.presetID] {
-            return builtInID
+        if usesBuiltInProfile(presetID: profile.presetID, baseURL: profile.baseURL) {
+            return profile.presetID == "google" ? "gemini" : profile.presetID
         }
 
         let normalizedID = profile.id
@@ -2417,15 +2413,13 @@ final class ProviderRepository {
             .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
         let boundedID = String(normalizedID.prefix(64))
         let fallbackID = boundedID.isEmpty ? "mobile-provider" : boundedID
-        let reservedIDs = Set(ProviderRepositoryDefaults.builtInProfileIDsByPreset.values)
+        let reservedIDs = Set(catalogEntries.map { $0.id == "google" ? "gemini" : $0.id })
         return reservedIDs.contains(fallbackID) ? "\(fallbackID)-user" : fallbackID
     }
 
     private func usesBuiltInProfile(presetID: String, baseURL: String) -> Bool {
-        guard ProviderRepositoryDefaults.builtInProfileIDsByPreset[presetID] != nil else {
-            return false
-        }
-        let defaultURL = preset(for: presetID).defaultUrl
+        guard let catalog = catalogEntries.first(where: { $0.id == presetID }) else { return false }
+        let defaultURL = catalog.baseURL
         let configuredURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         return configuredURL.isEmpty || normalizedProviderURL(configuredURL) == normalizedProviderURL(defaultURL)
     }
@@ -2471,9 +2465,9 @@ final class ProviderRepository {
         if let catalog = catalogEntries.first(where: { $0.id == presetID }) {
             let providerType: String
             switch catalog.protocolName {
-            case "AnthropicMessages": providerType = "anthropic"
-            case "GeminiGenerateContent": providerType = "gemini"
-            case "OpenAiResponses": providerType = "openai-responses"
+            case "anthropic_messages": providerType = "anthropic"
+            case "gemini_generate_content": providerType = "gemini"
+            case "open_ai_responses": providerType = "openai-responses"
             default: providerType = "openai"
             }
             return .init(providerType: providerType, envVar: catalog.credentialEnv ?? "")

@@ -426,8 +426,25 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     onError: (message) => diagnostics.add('warn', 'host', message),
   });
   codexTokens.start();
+  app.on('browser-window-focus', () => bridge?.refreshProviderCatalog('foreground'));
+  app.on('browser-window-blur', () => {
+    setImmediate(() => {
+      if (!BrowserWindow.getFocusedWindow()) bridge?.refreshProviderCatalog('background');
+    });
+  });
+  let catalogOnline = net.isOnline();
+  const catalogConnectivity = setInterval(() => {
+    const online = net.isOnline();
+    if (online !== catalogOnline) {
+      catalogOnline = online;
+      bridge?.refreshProviderCatalog(online ? 'network_restored' : 'network_lost');
+    }
+  }, 5_000);
+  catalogConnectivity.unref();
+  app.once('before-quit', () => clearInterval(catalogConnectivity));
   powerMonitor.on('resume', () => {
     codexTokens.check();
+    bridge?.refreshProviderCatalog('foreground');
     remoteControl?.reconnect();
   });
   /**

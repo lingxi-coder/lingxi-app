@@ -105,6 +105,9 @@ data class GenericProvider(
      * describing the same one endpoint.
      */
     val connections: List<ProviderConnection> = emptyList(),
+    /** Setup facts captured from the official directory when this entry is added. */
+    val catalogBaseUrl: String? = null,
+    val catalogProtocol: String? = null,
 )
 
 data class Skill(

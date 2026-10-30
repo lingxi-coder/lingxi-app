@@ -354,10 +354,12 @@ fun RootScreen(
     LaunchedEffect(chatViewModel) {
         chatViewModel.engineSource.collect { onConversationSourceChanged(it) }
     }
+    val catalogLifecycleScope = androidx.compose.runtime.rememberCoroutineScope()
     DisposableEffect(chatViewModel, lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 chatViewModel.refreshExecutionStatus()
+                catalogLifecycleScope.launch { runCatching { chatViewModel.engineSource.value.submitClientCommand(ClientCommand.RefreshProviderCatalog("foreground")) } }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -634,6 +636,7 @@ fun RootScreen(
                 Lifecycle.Event.ON_STOP -> {
                     chatViewModel.sideChats.cancelCurrentTurns()
                     appInForeground = false
+                    catalogLifecycleScope.launch { runCatching { chatViewModel.engineSource.value.submitClientCommand(ClientCommand.RefreshProviderCatalog("background")) } }
                     flowVoiceController.pause()
                     cancelActiveHeldVoiceSession()
                     scope.launch { runCatching { AndroidAudioServiceProvider.invalidate(context) } }
@@ -863,6 +866,7 @@ fun RootScreen(
     var dismissedWhileOffline by remember { mutableStateOf(false) }
     LaunchedEffect(isOnline) {
         if (isOnline) dismissedWhileOffline = false
+        runCatching { chatViewModel.engineSource.value.submitClientCommand(ClientCommand.RefreshProviderCatalog(if (isOnline) "network_restored" else "network_lost")) }
     }
 
     fun closeDrawer() = scope.launch { drawerState.close() }

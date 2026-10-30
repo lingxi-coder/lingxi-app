@@ -322,6 +322,9 @@ struct ChatView: View {
         .environment(\.theme, t)
         .tint(t.accent)
         .buttonStyle(.plain)
+        .onChange(of: connectivity.isOffline) { _, offline in
+            Task { try? await source.submitEngineCommand(.refreshProviderCatalog(trigger: offline ? "network_lost" : "network_restored")) }
+        }
         .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)
         .animation(.spring(response: 0.3, dampingFraction: 0.86), value: voiceInteraction.isPresented)
         .onAppear {

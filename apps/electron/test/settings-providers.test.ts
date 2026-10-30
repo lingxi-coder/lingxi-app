@@ -1,3 +1,4 @@
+import { providersFromCatalog } from '../src/shared/providers';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
@@ -363,7 +364,10 @@ test('provider settings defaults to a clickable status list without mounting a c
         { providerId: 'openrouter', configured: false, encryptionAvailable: true, runtimeOnly: true },
       ],
     },
-    desktop: { currentModel: null },
+    desktop: { currentModel: null, providerModelCatalog: [
+      { provider_id: 'deepseek', provider_label: 'DeepSeek', models: [], definition: { base_url: 'https://api.deepseek.com', protocol: 'open_ai_chat', auth: 'api_key', credential_env: null, default_model_id: 'deepseek-flash', description: 'V4' } },
+      { provider_id: 'openrouter', provider_label: 'OpenRouter', models: [], definition: { base_url: 'https://openrouter.ai/api/v1', protocol: 'open_ai_chat', auth: 'api_key', credential_env: null, default_model_id: 'openrouter/auto', description: '' } },
+    ] },
     connected: true,
     running: false,
     openSession: async () => undefined,
@@ -395,6 +399,7 @@ test('provider settings defaults to a clickable status list without mounting a c
   assert.doesNotMatch(markup, /data-testid="provider-list-back"/);
   assert.doesNotMatch(markup, /aria-label="Anthropic API key"/);
   assert.doesNotMatch(markup, /正在编辑|>选择<|>当前</);
+  assert.doesNotMatch(markup, /data-testid="provider-list-item-openai"/, 'the local catalog must not resurrect unpublished providers');
 });
 
 test('configured provider detail shows only the masked suffix returned by the engine', () => {
@@ -710,4 +715,12 @@ test('Codex Auth blocks login and explains unavailable secure storage', () => {
     assert.match(markup.match(/<button[^>]*data-testid="codex-login"[^>]*>/)?.[0] ?? '', /disabled/);
     assert.doesNotMatch(markup, /本地回退模式/);
   }
+});
+
+test('official setup metadata supports a new provider without a desktop binary entry', () => {
+  const providers = providersFromCatalog([{ provider_id: 'new-provider', provider_label: 'New provider', models: [],
+    definition: { base_url: 'https://new.example/v1', protocol: 'open_ai_chat', auth: 'api_key', credential_env: 'NEW_KEY', default_model_id: 'new-model', description: 'Published provider' } }]);
+  assert.equal(providers[0].defaultApiBase, 'https://new.example/v1');
+  assert.equal(providers[0].defaultModel, 'new-provider/new-model');
+  assert.deepEqual(providersFromCatalog([]), []);
 });

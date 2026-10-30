@@ -353,7 +353,7 @@ export interface UseBridge {
    * either, so without this a single lost reply left the picker with nothing to
    * offer — and its Effort row dead — until the app was restarted.
    */
-  refreshModelPicker(): Promise<void>;
+  refreshModelPicker(trigger?: 'settings' | 'manual'): Promise<void>;
   refreshSessionAgents(): Promise<void>;
   loadSessionAgentTranscript(agentId: string): Promise<void>;
   openRuntimeItem(item: RuntimeCenterItemRef): void;

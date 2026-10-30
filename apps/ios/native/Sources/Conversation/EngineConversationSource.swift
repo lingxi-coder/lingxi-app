@@ -1682,8 +1682,14 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
+    func handleBackground() {
+        guard !isSideChat, handle != nil else { return }
+        Task { try? await submitEngineCommand(.refreshProviderCatalog(trigger: "background")) }
+    }
+
     func handleForeground() {
         guard !isSideChat else { return }
+        Task { try? await submitEngineCommand(.refreshProviderCatalog(trigger: "foreground")) }
         refreshBackgroundTasks()
         listSessionAgents()
         // A warm source keeps the durable checkpoint and listener alive,
@@ -1724,6 +1730,7 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func providerCatalog() async throws -> [ProviderCatalogEntry] {
+        try await submitEngineCommand(.refreshProviderCatalog(trigger: "settings"))
         if providerCatalogLoaded {
             return providerCatalogEntries
         }
@@ -3103,10 +3110,10 @@ final class EngineConversationSource: ConversationSource {
         return ProviderCatalogEntry(
             id: presetID,
             displayName: dto.providerLabel,
-            baseURL: preset?.defaultUrl ?? "",
-            protocolName: preset?.sub ?? "",
-            authName: "",
-            credentialEnv: nil,
+            baseURL: dto.definition?.baseUrl ?? preset?.defaultUrl ?? "",
+            protocolName: dto.definition?.protocol ?? preset?.sub ?? "",
+            authName: dto.definition?.auth ?? "",
+            credentialEnv: dto.definition?.credentialEnv,
             models: loweredModels.map(\.modelId),
             modelDetails: Dictionary(uniqueKeysWithValues: loweredModels.map { ($0.reference, $0) })
         )
@@ -4153,6 +4160,7 @@ final class EngineConversationSource: ConversationSource {
         case let .providerModelCatalog(providers):
             providerCatalogEntries = providers.map(Self.lowerProviderCatalogEntry)
             providerCatalogLoaded = true
+            if Self.settingsOwner === self { ProviderRepository.shared.acceptCatalog(providerCatalogEntries) }
             let waiters = providerCatalogWaiters
             providerCatalogWaiters.removeAll()
             for waiter in waiters {

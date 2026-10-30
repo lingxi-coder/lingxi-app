@@ -18,6 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) struct ProviderConnectionProbe {
     pub operation_id: u64,
     pub provider_id: String,
+    pub protocol: Option<String>,
     pub api_base: String,
     pub model: String,
     pub credential_override: Option<ProviderCredentialSecretDto>,
@@ -96,7 +97,12 @@ pub(crate) async fn test(
             used_stored_credential,
         );
     };
-    let endpoint = match models_endpoint(&probe.api_base, &probe.provider_id) {
+    let format_provider = match probe.protocol.as_deref() {
+        Some("anthropic_messages") => "anthropic",
+        Some("gemini_generate_content") => "gemini",
+        _ => probe.provider_id.as_str(),
+    };
+    let endpoint = match models_endpoint(&probe.api_base, format_provider) {
         Ok(endpoint) => endpoint,
         Err(message) => {
             return failure(
@@ -113,7 +119,7 @@ pub(crate) async fn test(
     let request = HttpRequest {
         method: HttpMethod::Get,
         url: endpoint,
-        headers: connection_headers(&probe.provider_id, &credential),
+        headers: connection_headers(format_provider, &credential),
         body: None,
         body_bytes: None,
         timeout: Some(TIMEOUT),
@@ -351,6 +357,7 @@ mod tests {
         ProviderConnectionProbe {
             operation_id: 7,
             provider_id: provider_id.to_string(),
+            protocol: None,
             api_base: api_base.to_string(),
             model: model.to_string(),
             credential_override: None,

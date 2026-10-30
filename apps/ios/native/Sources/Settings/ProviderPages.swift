@@ -57,6 +57,7 @@ struct ModelsSettingsPage: View {
         } message: {
             Text(removeError ?? "")
         }
+        .refreshable { await repository.refreshOfficialCatalog() }
         .task {
             retryMaxAttemptsText = String(repository.routingSettings.retryMaxAttempts)
             retryBackoffMsText = String(repository.routingSettings.retryBackoffMs)

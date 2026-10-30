@@ -1037,6 +1037,7 @@ export interface ModelDetailsDto {
 }
 
 export interface ProviderModelCatalogEntryDto {
+  definition?: { base_url: string; protocol: string; auth: string; credential_env: string | null; default_model_id: string; description: string };
   provider_id: string;
   provider_label: string;
   models: ModelDetailsDto[];

@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { SessionRef } from '../bridgeTypes.js';
+import { productEnvironmentKey, productNamespace } from '../productNamespace.js';
 
 /** The slice of `SettingsStore` the policy uses. */
 export interface RemotePolicySettings {
@@ -43,11 +44,11 @@ const MANAGED_FILE_MAX_BYTES = 1024 * 1024;
  * constants of the `branding` crate), unless `LINGXI_MANAGED_DIR` moves it.
  */
 export function managedSettingsDirectory(env: Readonly<Record<string, string | undefined>>, platform: NodeJS.Platform): string {
-  const override = env['LINGXI_MANAGED_DIR'];
+  const override = env[productEnvironmentKey('MANAGED_DIR')];
   if (override) return override;
-  if (platform === 'darwin') return '/Library/Application Support/LingXi';
-  if (platform === 'win32') return 'C:\\Program Files\\LingXi';
-  return '/etc/lingxi';
+  if (platform === 'darwin') return productNamespace.managedDirMacOS;
+  if (platform === 'win32') return productNamespace.managedDirWindows;
+  return productNamespace.managedDirUnix;
 }
 
 export class RemotePolicy {

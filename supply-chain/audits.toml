@@ -1,4 +1,188 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.askama_macros]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.16.0 -> 0.16.1"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/askama_macros-0.16.1.md (SHA-256 b67a2487c48f5efae1ee855d12be5396a1f2ea78a6417e37ff351e3b6067f47e). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.cfg-if]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "1.0.0 -> 1.0.4"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/cfg-if-1.0.4.md (SHA-256 db9e3067f57f9142816f099b347efa639589cffb8d1d9c8a9dac58e7855137fa). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.colorchoice]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.0.5"
+notes = "AI-assisted full source review; evidence: supply-chain/reviews/2026-10-30/colorchoice-1.0.5.md (SHA-256 b5b092bdbbe31ca4d25cad5765b05288b496d474b79c58051c104d0c78a67fb6). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.doc-comment]]
+who = "Codex AI-assisted"
+criteria = "safe-to-run"
+version = "0.3.4"
+notes = "AI-assisted full source review; evidence: supply-chain/reviews/2026-10-30/doc-comment-0.3.4.md (SHA-256 7f529a618329150e907a2d519a667f2608ca321f784efa33b4941ac64de4b764). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.futures-channel]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.32"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/futures-channel-0.3.32.md (SHA-256 e179b56e09c014e1c7ffe40ef11c0583185e1fae06da81d9f9a2035325dfef0e). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.futures-core]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.3.34 -> 0.3.32"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/futures-core-0.3.32.md (SHA-256 f9348d8e6e5bc1c557041b6cb6aa59c2a467a682917369683af33e24447005da). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.futures-executor]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.32"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/futures-executor-0.3.32.md (SHA-256 229fb7c717a39a3490857090d9064a603462bdc2f9c4d869e5ec4484d55b149d). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.futures-io]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.32"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/futures-io-0.3.32.md (SHA-256 70e44c8b5b8aed1ec6e68bdbc1cb4c6d45fb6d36ba839158eb9f3bdaa22c4a2e). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.futures-macro]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.32"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/futures-macro-0.3.32.md (SHA-256 5c39426c7ba8a7f301b524381ff51f14426690f60c6c155284b74f7d613b7ad1). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.futures-sink]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.32"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/futures-sink-0.3.32.md (SHA-256 3e2e1d2d281c667b34cbea8121bb2a6409f5167dd33a7f8a7b3b651b756c3655). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.home]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.5.11 -> 0.5.9"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/home-0.5.9.md (SHA-256 2adad04b1ae0770fc70ea24a5935106f3a706a264766dbf9674708b0eb15e581). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.icu_locale_fallback_data]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "2.3.0"
+notes = "AI-assisted full source review; evidence: supply-chain/reviews/2026-10-30/icu_locale_fallback_data-2.3.0.md (SHA-256 fd702f0450612676a79065d354513a9ad4970edf052552037a928638da568998). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.is_terminal_polyfill]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.70.2"
+notes = "AI-assisted complete source review; evidence: supply-chain/reviews/2026-10-30/is_terminal_polyfill-1.70.2.md (SHA-256 c56687e70f5fb126885a231c08938b06bef583e0f8a95ab6605cef492fec1716). Dependencies are reviewed separately."
+
+[[audits.new_debug_unreachable]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "1.0.4 -> 1.0.6"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/new_debug_unreachable-1.0.6.md (SHA-256 81e90d1536618f02bdc5ce38404e6b73155531d2045fa19d1ffb47cafa2222ae). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.num]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.4.3"
+notes = "AI-assisted full source review; evidence: supply-chain/reviews/2026-10-30/num-0.4.3.md (SHA-256 6b2493b02b18af9ed19b8358501102bd025753d935994015baa0b405f67eac0f). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.num-conv]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.2.1 -> 0.2.2"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/num-conv-0.2.2.md (SHA-256 fc8886d84dbea1c8b8cf10ee6c80891240cbe46136a7c10a6a5ffdd1cc3bcdf0). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.once_cell_polyfill]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.70.2"
+notes = "AI-assisted complete source review; evidence: supply-chain/reviews/2026-10-30/once_cell_polyfill-1.70.2.md (SHA-256 a5b989eaa5092d16a3d2c4d802d16177e70d1a0deacfd1e87957e5d4be7c8565). Dependencies are reviewed separately."
+
+[[audits.pin-project-lite]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.2.16 -> 0.2.17"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/pin-project-lite-0.2.17.md (SHA-256 5fc80af67dc65487eb37d5a6e33fad874fa122055c81b6ed12b37fd97fdd4b59). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.potential_utf]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.1.2 -> 0.1.6"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/potential_utf-0.1.6.md (SHA-256 ad4d6bbe025bbc1b5a895c8e5ee3e08be9b006e34cbc32134184f0c121d8599a). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.regex-syntax]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.8.5 -> 0.8.10"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/regex-syntax-0.8.10.md (SHA-256 b902ea3abf39a6501737ab9257a48f2cb53ca6126b100bc887df4770b8ee05a2). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.rustc-hash]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "2.1.1 -> 2.1.2"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/rustc-hash-2.1.2.md (SHA-256 da5dd1c825c7ed90cd4fbb78a3e3291bbf7e26ec3b4cea432a6f586c99f5e420). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.shell-words]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "1.1.0 -> 1.1.1"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/shell-words-1.1.1.md (SHA-256 7d506100bcfc2eb4e38094476d4f8164da03d1b07c4456c57f663394325968c3). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.stable_deref_trait]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "1.2.0 -> 1.2.1"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/stable_deref_trait-1.2.1.md (SHA-256 f6ffa86a2ed8dc6b16058774ec624b50d1cd2d2201e654883144fd2f63e8e0e7). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.url]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "2.5.7 -> 2.5.8"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/url-2.5.8.md (SHA-256 aa8ab54f2cbe421e1bbe3987b7d8959e396b210fecb86d13ab2dfdbc6febc36f). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.version_check]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.9.4 -> 0.9.5"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/version_check-0.9.5.md (SHA-256 b82136dc4d55fd6d8158614d2f1a8a0f9365a82bb8822173957d145021feeebe). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.visibility]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.1.1"
+notes = "AI-assisted full source review; evidence: supply-chain/reviews/2026-10-30/visibility-0.1.1.md (SHA-256 fd8aa043f8b4148e5a002bfdf3e21eebf373b739d7cb6609bb447b3ff3c719cf). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.want]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.3.0 -> 0.3.1"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/want-0.3.1.md (SHA-256 2d3e20bf91af7ffe287e2afb5eaa62182fb1977c72ee3c31a89e8d84db0af41b). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.wasm-bindgen-futures]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.4.72"
+notes = "AI-assisted complete source review; evidence: supply-chain/reviews/2026-10-30/wasm-bindgen-futures-0.4.72.md (SHA-256 d42503358d6211a8a587a5e03c8038062062e0d506b43764d5fc0eb836b5d793). Dependencies are reviewed separately."
+
+[[audits.wasm-bindgen-macro]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "0.2.122"
+notes = "AI-assisted full source review; evidence: supply-chain/reviews/2026-10-30/wasm-bindgen-macro-0.2.122.md (SHA-256 43367e9ab21134cbdf07223770807bb08e79cb1a9f3d613f22f76eef7d280421). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.zerofrom]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.1.6 -> 0.1.8"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/zerofrom-0.1.8.md (SHA-256 dc7fad9e6792ef2b158eed1b835bda9ff8ddd6af39b893db2a40337d5501430f). Dependencies are reviewed separately; scope is the frozen graph."
+
+[[audits.zerofrom-derive]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+delta = "0.1.5 -> 0.1.8"
+notes = "AI-assisted delta source review; evidence: supply-chain/reviews/2026-10-30/zerofrom-derive-0.1.8.md (SHA-256 ea0a4b7e09107f0e90a8096850c709d38f3cfdb8b22ec2b0a1ca8c403a9b5a66). Dependencies are reviewed separately; scope is the frozen graph."

@@ -11,8 +11,9 @@ mock data (later milestones).
 ## Requirements
 
 - macOS with Xcode 27+ (iOS 27 SDK or newer; the app deployment target is iOS 26.0)
-- Python 3.11+ for staging test fixtures. The test build selects an installed
-  interpreter with `tomllib`; set `LINGXI_PYTHON3` to override its path.
+- Python 3.11+ for staging the product namespace and test fixtures. The Xcode
+  build selects an installed interpreter with `tomllib`; set `LINGXI_PYTHON3`
+  to an absolute interpreter path to override its selection.
 - [XcodeGen](https://github.com/yonyz/XcodeGen): `brew install xcodegen`
 - Rust toolchain with the iOS std targets (`aarch64-apple-ios`,
   `aarch64-apple-ios-sim`, `x86_64-apple-ios`) — the build script adds any

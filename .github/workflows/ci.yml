@@ -15,6 +15,7 @@ jobs:
       - name: Test pinned-source rejection cases
         run: |
           python3 scripts/tests/test_runtime_source.py
+          python3 scripts/tests/test_product_namespace.py
           python3 scripts/tests/test_mobile_linux_source.py
           python3 scripts/tests/test_fetch_sdk_rootfs.py
           python3 scripts/tests/test_workspace_layout.py

@@ -5,8 +5,9 @@ import { constants, type Stats } from 'node:fs';
 import { copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, rmdir, stat, readdir, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { validateFileOffer, type FileOffer, type FileSink, type FileReceipt, type FileSource } from '@lingxi/bridge-client/remote';
+import { productNamespace } from '../productNamespace.js';
 
-export const REMOTE_ATTACHMENT_PREFIX = '.lingxi-remote-attachment-';
+export const REMOTE_ATTACHMENT_PREFIX = productNamespace.remoteAttachmentPrefix;
 
 export interface PromptFileReference {
   text: string;

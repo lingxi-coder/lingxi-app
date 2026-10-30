@@ -1,6 +1,7 @@
 import { localAppMarketUrl } from '../../shared/productConfig.js';
 import { MarketLinkInstaller } from './marketLinkInstaller.js';
 import { nativeTr } from '../../shared/nativeLocale.js';
+import { productEnvironmentKey } from '../productNamespace.js';
 import { BrowserWindow, dialog, session, net, shell, clipboard, Notification, ipcMain, systemPreferences, type IpcMainInvokeEvent } from 'electron';
 import { createServer, type Server } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -29,6 +30,9 @@ import { LocalAppRemoteGateway, type RemoteOwner, type RemoteRun } from './remot
 import type { LocalAppRtc } from './remoteRtc.js';
 import { LOCAL_APP_RTC_BROWSER_SOURCE } from './remoteRtcBrowser.js';
 import { webmcpPolyfillSource } from '../../../vendor/local-app-webmcp/dist/webmcp-polyfill.source.js';
+
+const REMOTE_ORIGIN_ENV = productEnvironmentKey('LOCAL_APP_REMOTE_ORIGIN');
+const GATEWAY_PORT_ENV = productEnvironmentKey('LOCAL_APP_GATEWAY_PORT');
 
 function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -854,9 +858,9 @@ export class LocalAppHost {
     } catch { return false; }
   }
   remoteConfiguration(): { configured: boolean; originTemplate?: string; port?: number; error?: string } {
-    const originTemplate = process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN, rawPort = process.env.LINGXI_LOCAL_APP_GATEWAY_PORT;
+    const originTemplate = process.env[REMOTE_ORIGIN_ENV], rawPort = process.env[GATEWAY_PORT_ENV];
     try {
-      if (!originTemplate || !rawPort || !/^\d+$/.test(rawPort)) throw new Error('Set LINGXI_LOCAL_APP_REMOTE_ORIGIN to an HTTPS origin using {appId}-{sessionId} as its first DNS label, and set LINGXI_LOCAL_APP_GATEWAY_PORT');
+      if (!originTemplate || !rawPort || !/^\d+$/.test(rawPort)) throw new Error(`Set ${REMOTE_ORIGIN_ENV} to an HTTPS origin using {appId}-{sessionId} as its first DNS label, and set ${GATEWAY_PORT_ENV}`);
       const port = Number(rawPort);
       new LocalAppRemoteGateway(originTemplate, port, { current: async () => false, resource: async () => new Response(null), invoke: async () => undefined, invokeGuard: () => () => false, socket: async () => undefined });
       return { configured: true, originTemplate, port };
@@ -871,7 +875,7 @@ export class LocalAppHost {
   }
   private gateway(): LocalAppRemoteGateway {
     if (!this.remoteGateway) {
-      const origin = process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN, rawPort = process.env.LINGXI_LOCAL_APP_GATEWAY_PORT;
+      const origin = process.env[REMOTE_ORIGIN_ENV], rawPort = process.env[GATEWAY_PORT_ENV];
       if (!origin || !rawPort || !/^\d+$/.test(rawPort)) throw new Error('Remote Local App gateway is not configured');
       this.remoteGateway = new LocalAppRemoteGateway(origin, Number(rawPort), {
         current: run => this.remoteCurrent(run), resource: (run, request) => this.remoteResource(run, request),

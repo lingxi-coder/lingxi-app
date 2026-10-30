@@ -8,10 +8,14 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/product-namespace.mjs",
     "dev": "electron-vite dev",
+    "prebuild": "node scripts/product-namespace.mjs",
     "build": "electron-vite build",
+    "postbuild": "node scripts/product-namespace.mjs --stage-build",
     "preview": "electron-vite preview",
     "remote:tunnel:config": "node scripts/local-app-remote-tunnel.mjs",
+    "pretest": "node scripts/product-namespace.mjs",
     "test": "node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 test/*.test.ts test/*.test.mjs",
     "sync:local-app-agui": "node scripts/sync-local-app-agui.mjs",
     "sync:local-app-webmcp": "node scripts/sync-local-app-webmcp.mjs",
@@ -24,6 +28,7 @@
     "verify:package:static": "node scripts/verify-package.mjs",
     "verify:package:smoke": "node scripts/packaged-app-smoke.mjs",
     "verify:package": "npm run verify:package:static && npm run verify:package:smoke",
+    "pretypecheck:node": "node scripts/product-namespace.mjs",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web"

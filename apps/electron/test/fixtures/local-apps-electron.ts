@@ -9,13 +9,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { LocalAppHost } from '../../src/main/local-apps/host';
 import { desktopTargets } from '../../src/main/local-apps/marketClient';
 import { LOCAL_APP_SERVICE_COOKIE_ORIGIN } from '../../src/main/local-apps/serviceCookies';
+import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
+import { productEnvironmentKey } from '../../src/main/productNamespace';
 
 if (!['darwin', 'win32', 'linux'].includes(process.platform)) throw new Error(`Unsupported Desktop fixture platform: ${process.platform}`);
 const nativeTarget = desktopTargets().find(target => target.environment === 'native');
 if (!nativeTarget) throw new Error(`Missing native Desktop fixture target for ${process.platform}`);
 const nativeTargets = [{ platform: nativeTarget.platform, environment: 'native' as const }];
 
-const root = process.env.LINGXI_TEST_USER_DATA!;
+const root = process.env[productEnvironmentKey('TEST_USER_DATA')]!;
 process.on('uncaughtException', error => { process.stderr.write(`Uncaught: ${error.stack}\n`); app.exit(1); });
 process.on('unhandledRejection', error => { process.stderr.write(`Unhandled: ${String(error)}\n`); app.exit(1); });
 app.setPath('userData', join(root, 'profile'));
@@ -47,15 +49,15 @@ async function main() {
   const startHost = async () => {
     host = createHost();
     await host.initialize();
-    host.registerMainWindow(library, process.env.LINGXI_TEST_LIBRARY_URL!);
+    host.registerMainWindow(library, process.env[productEnvironmentKey('TEST_LIBRARY_URL')]!);
     discovery = JSON.parse(await fs.readFile(join(configHome, 'desktop-local-app-host.json'), 'utf8'));
     url = `http://127.0.0.1:${discovery.port}/local-app`;
   };
   await startHost();
   trace('await host.initialize();');
-  await library.loadURL(process.env.LINGXI_TEST_LIBRARY_URL!);
+  await library.loadURL(process.env[productEnvironmentKey('TEST_LIBRARY_URL')]!);
   await library.webContents.executeJavaScript(`(()=>{window.__localAppChangeCount=0;window.lingxi.localApps.onChanged(()=>window.__localAppChangeCount++);return true})()`);
-  trace('await library.loadURL(process.env.LINGXI_TEST_LIBRARY_URL!);');
+  trace(`await library.loadURL(process.env.${productEnvironmentKey('TEST_LIBRARY_URL')}!);`);
   assert.equal((await fetch(url, { method: 'POST', body: '{}' })).status, 403);
   const toolResult = async (input: object) => {
     const response = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${discovery.token}` }, body: JSON.stringify(input) });
@@ -159,7 +161,7 @@ async function main() {
     return {result, remains, resourceStatus:resource.status, resourceType:resource.headers.get('content-type')};
   })()`);
   assert.deepEqual(webmcpResult, { result: '{"echo":"page input"}', remains: false, resourceStatus: 200, resourceType: 'text/javascript; charset=utf-8' });
-  assert.equal(await window.webContents.executeJavaScript(`typeof require + ':' + typeof window.lingxi`), 'undefined:undefined');
+  assert.equal(await window.webContents.executeJavaScript(`typeof require + ':' + typeof window[${JSON.stringify(DESKTOP_BRIDGE_GLOBAL)}]`), 'undefined:undefined');
   assert.equal(await window.webContents.executeJavaScript(`window.localApp.clipboard.read().then(()=>false,()=>true)`), true);
   await window.webContents.executeJavaScript(`localStorage.count='7'`);
   await host.open(first.id);
@@ -295,7 +297,7 @@ async function main() {
   } finally { foregroundCache.restore(); }
   await host.request({ action: 'background', id: first.id, enabled: false });
   assert.match(await window.webContents.executeJavaScript(`document.querySelector('h1').textContent`), /v2/);
-  const evidence = process.env.LINGXI_LOCAL_APP_EVIDENCE;
+  const evidence = process.env[productEnvironmentKey('LOCAL_APP_EVIDENCE')];
   if (evidence) { await fs.mkdir(evidence, { recursive: true }); await fs.writeFile(join(evidence, 'local-app-window.png'), (await window.webContents.capturePage()).toPNG()); }
   window.close(); await until(async () => (await host.list())[0]!.phase === 'stopped');
   await host.open(first.id); window = guest()!;
@@ -486,9 +488,9 @@ async function main() {
   await until(async () => host.runtime.phase(cancelApp.id) === 'stopped');
   // Optional acceptance project exercises real dependency installation and a
   // production Vite/TypeScript build; ordinary CI stays network-independent.
-  if (process.env.LINGXI_TEST_VITE_PROJECT) {
+  if (process.env[productEnvironmentKey('TEST_VITE_PROJECT')]) {
     const staged = join(host.store.importsRoot, 'vite');
-    await fs.cp(process.env.LINGXI_TEST_VITE_PROJECT, staged, { recursive: true });
+    await fs.cp(process.env[productEnvironmentKey('TEST_VITE_PROJECT')], staged, { recursive: true });
     const framework = await tool({ action: 'publish', staged_path: staged });
     await tool({ action: 'start', id: framework.id });
     const frameworkWindow = BrowserWindow.getAllWindows().find(w => w.webContents.getURL().startsWith(`lingxi-app://${framework.id}/`))!;
@@ -553,6 +555,6 @@ async function main() {
 
   await host.dispose(); library.destroy();
   trace('await host.dispose(); library.destroy();');
-  process.stdout.write(JSON.stringify({ passed: true, library: true, backend: true, updates: true, grants: true, framework: Boolean(process.env.LINGXI_TEST_VITE_PROJECT) }) + '\n');
+  process.stdout.write(JSON.stringify({ passed: true, library: true, backend: true, updates: true, grants: true, framework: Boolean(process.env[productEnvironmentKey('TEST_VITE_PROJECT')]) }) + '\n');
 }
 main().then(() => { trace('quitting completed fixture'); setTimeout(() => app.quit(), 20); }, async error => { console.error(error.stack ?? error); await host?.dispose().catch(() => undefined); app.exit(1); });

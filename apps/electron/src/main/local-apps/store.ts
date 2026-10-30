@@ -4,10 +4,11 @@ import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import type { DesktopLocalApp, DesktopAuthoringRef } from '../../shared/localApps.js';
 import { relativePath } from './manifest.js';
+import { productNamespace } from '../productNamespace.js';
 
 /** Runtime-owned preparation artifact names. */
-export const PREPARATION_MARKER = '.lingxi-prepared.json';
-export const PREPARATION_DATA_DIRECTORY = '.lingxi-prepare-data';
+export const PREPARATION_MARKER = productNamespace.localAppPreparationMarker;
+export const PREPARATION_DATA_DIRECTORY = productNamespace.localAppPreparationDataDirectory;
 
 export function appId(value: unknown): string {
   if (typeof value !== 'string' || !/^a[a-f0-9]{32}$/.test(value)) throw new Error('Invalid desktop application id');

@@ -14,6 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createPackagedSettings, runtimePathsForHome, sanitizePackagedAppEnvironment, runningAppCommands } from './packaged-app-smoke.mjs';
 import { BUNDLE_ID } from './package-support.mjs';
+import { packagedProductNamespace } from './product-namespace.mjs';
 
 const bridgeBundleId = `${BUNDLE_ID}.bridge-server.development`;
 const appBundleId = `${BUNDLE_ID}.development`;
@@ -33,6 +34,7 @@ assert.ok(options.app && options.root && options.fixtureRoot, 'Specify --app, --
 assert.ok(!existsSync(options.fixtureRoot), 'Fixture install root must be a new directory owned by this run.');
 options.app = realpathSync.native(options.app);
 assert.equal(process.platform, 'darwin');
+const namespace = packagedProductNamespace(options.app);
 assert.ok(!existsSync(options.root), 'Use a fresh run root; existing test/user data is never overwritten');
 mkdirSync(options.root, { recursive: true, mode: 0o700 });
 const root = options.root;
@@ -564,11 +566,11 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
     } catch (error) { traceUpdate({phase:'error',error:String(error.message ?? error)}); providerFailure=String(error.message ?? error); receipt.providerError = String(error.message ?? error); save(); if (!response.headersSent) response.writeHead(500); response.end(); }
   });
   await new Promise((resolvePromise, rejectPromise) => { provider.once('error', rejectPromise); provider.listen(0, '127.0.0.1', resolvePromise); });
-  const env = sanitizePackagedAppEnvironment(process.env, { HOME: home, TMPDIR: temp, LINGXI_CONFIG_DIR: join(home, '.lingxi') });
+  const env = sanitizePackagedAppEnvironment(process.env, { HOME: home, TMPDIR: temp, [namespace.configDirEnv]: join(home, namespace.dotDir) });
   for(const name of Object.keys(env))if(/(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(name))delete env[name];
   // LaunchServices creates the normal application responsibility boundary.
   // Directly spawning Contents/MacOS inherits the test runner's TCC identity.
-  const launchEnvironment=Object.fromEntries(['HOME','TMPDIR','TMP','TEMP','PATH','LANG','LC_ALL','LC_CTYPE','USER','LOGNAME','SHELL','LINGXI_CONFIG_DIR'].filter(name=>env[name]!==undefined).map(name=>[name,env[name]]));
+  const launchEnvironment=Object.fromEntries(['HOME','TMPDIR','TMP','TEMP','PATH','LANG','LC_ALL','LC_CTYPE','USER','LOGNAME','SHELL',namespace.configDirEnv].filter(name=>env[name]!==undefined).map(name=>[name,env[name]]));
   appLaunchConfiguration={env,launchEnvironment,paths,workspace};
   const port=await launchOwnedPackagedApp();
   const bootstrap = await invoke('bootstrap'); sessionId = (await invoke('newSession', bootstrap.workspace.path)).activeSession.sessionId;

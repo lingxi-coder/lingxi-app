@@ -172,25 +172,25 @@ final class LocalAppChatTransportDiagnosticUITests: XCTestCase {
         static func read(creating: Bool) throws -> Binding {
             let env = ProcessInfo.processInfo.environment
             guard env["SIMULATOR_DEVICE_NAME"] == nil else { throw XCTSkip("physical_device_required") }
-            guard let mode = Mode(rawValue: env["LINGXI_CHAT_DIAGNOSTIC_MODE"] ?? "observe"),
+            guard let mode = Mode(rawValue: env[ProductNamespace.environmentKey("CHAT_DIAGNOSTIC_MODE")] ?? "observe"),
                   creating == (mode == .createOnce) else { throw XCTSkip("diagnostic_mode_not_selected") }
-            guard let appID = env["LINGXI_AGENT_BROWSER_APP_ID"],
+            guard let appID = env[ProductNamespace.environmentKey("AGENT_BROWSER_APP_ID")],
                   appID.range(of: #"^a[0-9a-f]{32}$"#, options: .regularExpression) != nil,
-                  let revision = env["LINGXI_AGENT_BROWSER_REVISION"].flatMap(Int.init), revision > 0,
-                  let browserID = env["LINGXI_SYSTEM_BROWSER_BUNDLE_ID"],
+                  let revision = env[ProductNamespace.environmentKey("AGENT_BROWSER_REVISION")].flatMap(Int.init), revision > 0,
+                  let browserID = env[ProductNamespace.environmentKey("SYSTEM_BROWSER_BUNDLE_ID")],
                   browserID.range(of: #"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"#, options: .regularExpression) != nil else {
                 throw XCTSkip("explicit_app_revision_browser_binding_required")
             }
-            let requestID = env["LINGXI_EXISTING_CHAT_REQUEST_ID"]
+            let requestID = env[ProductNamespace.environmentKey("EXISTING_CHAT_REQUEST_ID")]
             if creating {
                 guard browserID == "com.apple.mobilesafari", requestID == nil,
-                      env["LINGXI_ALLOW_SINGLE_CHAT_CREATE"] == "\(appID):\(revision)" else {
+                      env[ProductNamespace.environmentKey("ALLOW_SINGLE_CHAT_CREATE")] == "\(appID):\(revision)" else {
                     throw XCTSkip("explicit_isolated_safari_creation_authorization_required")
                 }
             } else {
                 guard let requestID, diagnosticUUID(requestID) else { throw XCTSkip("existing_request_binding_required") }
             }
-            let statusMode = env["LINGXI_SINGLE_CREATE_STATUS_MODE"] ?? "observe"
+            let statusMode = env[ProductNamespace.environmentKey("SINGLE_CREATE_STATUS_MODE")] ?? "observe"
             guard ["observe", "query-once"].contains(statusMode) else { throw XCTSkip("unsupported_status_mode") }
             return Binding(appID: appID, revision: revision, browserID: browserID, mode: mode,
                            requestID: requestID, statusAfterCreate: creating && statusMode == "query-once")

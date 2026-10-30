@@ -188,6 +188,7 @@ fn state(value: RTCPeerConnectionState) -> PeerConnectionState {
         RTCPeerConnectionState::Disconnected => PeerConnectionState::Disconnected,
         RTCPeerConnectionState::Failed => PeerConnectionState::Failed,
         RTCPeerConnectionState::Closed => PeerConnectionState::Closed,
+        _ => PeerConnectionState::Failed,
     }
 }
 

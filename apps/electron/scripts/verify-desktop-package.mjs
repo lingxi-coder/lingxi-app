@@ -24,6 +24,7 @@ import { verifyProtocolRegistration } from './protocol-registration.mjs';
 import { modBunFilename, verifyModBun } from './mod-bun.mjs';
 import { verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
 import { verifyPortableGStreamerRuntime } from './gstreamer-portable.mjs';
+import { productNamespaceFromAsar } from './product-namespace.mjs';
 
 function requirePath(path, label) {
   if (!existsSync(path)) throw new Error(`${label} is missing: ${path}`);
@@ -41,6 +42,12 @@ function resourcesPath(paths) {
     : join(paths.payloadRoot, 'resources');
 }
 
+export function verifyDesktopProductNamespace(payloadRoot, platform) {
+  if (!['darwin', 'win32', 'linux'].includes(platform)) throw new Error('unsupported Desktop platform');
+  const resources = resourcesPath({ payloadRoot, platform });
+  return productNamespaceFromAsar(join(resources, 'app.asar'));
+}
+
 export function verifyDesktopPackage(root, platform, arch) {
   const paths = desktopArtifactPaths(root, platform, arch);
   requirePath(paths.payloadRoot, 'packaged payload');
@@ -52,6 +59,7 @@ export function verifyDesktopPackage(root, platform, arch) {
   const sidecar = join(resources, 'bin', platform === 'win32' ? 'bridge-server.exe' : 'bridge-server');
   const executable = executablePath(paths);
   requirePath(asar, 'application asar');
+  verifyDesktopProductNamespace(paths.payloadRoot, platform);
   requirePath(sidecar, 'bridge-server sidecar');
   requirePath(executable, 'Electron executable');
   requirePath(join(resources, 'icon.png'), 'LingXi application icon');

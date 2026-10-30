@@ -24,7 +24,7 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     @State private var pendingLatestAnimation: Bool?
     #if DEBUG
     @State private var diagnosticMetrics = ""
-    private let showsScrollDiagnostics = ProcessInfo.processInfo.environment["LINGXI_TRANSCRIPT_DIAGNOSTICS"] == "1"
+    private let showsScrollDiagnostics = ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("TRANSCRIPT_DIAGNOSTICS")] == "1"
     #endif
     @State private var lastRowRequest: TranscriptScrollRowRequest?
 

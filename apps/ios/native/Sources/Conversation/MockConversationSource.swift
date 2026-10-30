@@ -42,10 +42,10 @@ final class MockConversationSource: ConversationSource {
             askQuestion: Bool = false
         ) -> MockConversationSource {
             let source = MockConversationSource(sessionMode: sessionMode)
-            if let message = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_RUNTIME_ERROR"] {
+            if let message = ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("UI_TEST_RUNTIME_ERROR")] {
                 source.model.error = ConversationError(kind: .host, message: message)
             }
-            if let fixture = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"],
+            if let fixture = ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("UI_TEST_FILES")],
                fixture.hasPrefix("ui-files-"), fixture.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) {
                 let paths = WorkspaceDirectoryPaths.current()
                 let directory = paths.home.appendingPathComponent(fixture, isDirectory: true)
@@ -77,7 +77,7 @@ final class MockConversationSource: ConversationSource {
                 } catch { source.model.error = ConversationError(kind: .host, message: error.localizedDescription) }
                 return source
             }
-            if let title = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_SESSION_TITLE"] {
+            if let title = ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("UI_TEST_SESSION_TITLE")] {
                 source.model.messages = []
                 source.model.items = []
                 source.model.activeSessionId = "ui-named-session"
@@ -89,7 +89,7 @@ final class MockConversationSource: ConversationSource {
                 source.model.engineSessionsLoaded = true
                 return source
             }
-            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_COMPACT_TRANSCRIPT"] == "1" {
+            if ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("UI_TEST_COMPACT_TRANSCRIPT")] == "1" {
                 var prompt = Message(
                     role: .user,
                     text: "# Inline visualization\n\n" + String(repeating: "A compact interactive animation with a penguin riding a bicycle. ", count: 16)
@@ -334,7 +334,7 @@ final class MockConversationSource: ConversationSource {
                 ),
             ]
             source.model.slashCommandsLoaded = true
-            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_TRANSCRIPT_SCROLL"] == "1" {
+            if ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("UI_TEST_TRANSCRIPT_SCROLL")] == "1" {
                 let history = (0..<35).map { Message(role: .user, text: "Scroll history \($0)") }
                 source.model.messages = history
                 source.model.items = history.map(ConversationRenderItem.message)
@@ -481,7 +481,7 @@ final class MockConversationSource: ConversationSource {
         activeTurnToken = token
         model.activeTurnToken = token
         #if DEBUG
-            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_TRANSCRIPT_SCROLL"] == "1",
+            if ProcessInfo.processInfo.environment[ProductNamespace.environmentKey("UI_TEST_TRANSCRIPT_SCROLL")] == "1",
                text == "Stream scroll probe" {
                 streamScrollTestReply(generation: generation, token: token)
                 return token

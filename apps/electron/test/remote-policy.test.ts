@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { productNamespace } from '../src/main/productNamespace.js';
 
 import { MAX_REMOTE_SESSIONS, parseSettings } from '../src/main/host-utils.js';
 import { RemotePolicy, managedSettingsDirectory } from '../src/main/remoteControl/policy.js';
@@ -125,9 +126,9 @@ test('remoteControlAtStartup is off by default and saved; always-allow is read f
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('managed settings are looked for where the engine looks for them', () => {
-  assert.equal(managedSettingsDirectory({}, 'darwin'), '/Library/Application Support/LingXi');
-  assert.equal(managedSettingsDirectory({}, 'win32'), 'C:\\Program Files\\LingXi');
-  assert.equal(managedSettingsDirectory({}, 'linux'), '/etc/lingxi');
+  assert.equal(managedSettingsDirectory({}, 'darwin'), productNamespace.managedDirMacOS);
+  assert.equal(managedSettingsDirectory({}, 'win32'), productNamespace.managedDirWindows);
+  assert.equal(managedSettingsDirectory({}, 'linux'), productNamespace.managedDirUnix);
   assert.equal(managedSettingsDirectory({ LINGXI_MANAGED_DIR: '/custom' }, 'linux'), '/custom');
 });
 

@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import type { AskQuestionDto } from '@lingxi/bridge-client';
 import type { LocalAppAgentCatalog, LocalAppAgentToolChoice, LocalAppAgentUsage } from '../../shared/localAppAgent.js';
 import type { LocalAppAgentExecution, LocalAppAgentExecutorResult } from './agentBroker.js';
+import { productNamespace } from '../productNamespace.js';
 import { validChatCheckpoint } from './agentBroker.js';
 import { LocalAppAgentError, sameAgentGrant } from './agentPolicy.js';
 import { buildBridgeEnvironment, buildCredentialEnvelope } from '../host-utils.js';
@@ -127,7 +128,7 @@ export class LocalAppAgentExecutor {
   private async configVersion(): Promise<string> {
     const environment = this.options.environment ?? process.env;
     const paths = [join(this.options.configHome, 'settings.json'), join(this.options.configHome, '.config.json'),
-      join(environment.LINGXI_CONFIG_DIR ?? environment.HOME ?? homedir(), '.lingxi.json')];
+      join(environment[productNamespace.configDirEnv] ?? environment.HOME ?? homedir(), productNamespace.globalConfigFile)];
     const versions = await Promise.all(paths.map(async path => {
       try { const value = await fs.stat(path, { bigint: true }); return [path, String(value.ino), String(value.size), String(value.mtimeNs), String(value.ctimeNs)]; }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [path, 'absent']; throw error; }

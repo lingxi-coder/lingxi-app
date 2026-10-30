@@ -164,6 +164,9 @@ targets:
           FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-qtq162qv2bl6f5ft5pb2538ra9mmrf22
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"
     preBuildScripts:
+      - name: Stage product namespace
+        basedOnDependencyAnalysis: false
+        script: /bin/bash "${SRCROOT}/scripts/stage-product-namespace.sh" "${LINGXI_PYTHON3:-}"
       - name: Select Firebase application
         basedOnDependencyAnalysis: false
         script: |
@@ -338,12 +341,18 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: UITests
+      - path: Sources/RuntimeIntegration/ProductNamespace.swift
+    preBuildScripts:
+      - name: Stage product namespace
+        basedOnDependencyAnalysis: false
+        script: /bin/bash "${SRCROOT}/scripts/stage-product-namespace.sh" "${LINGXI_PYTHON3:-}"
     dependencies:
       - target: LingxiCode
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.uitests
         GENERATE_INFOPLIST_FILE: true
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
 
 # Run the unit tests under the app scheme so `xcodebuild -scheme LingxiCode test`
 # executes the engine round-trip suite.

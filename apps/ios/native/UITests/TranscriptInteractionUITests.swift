@@ -8,8 +8,8 @@ final class TranscriptInteractionUITests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(en)"]
-        app.launchEnvironment["LINGXI_UI_TESTING"] = "1"
-        app.launchEnvironment["LINGXI_UI_TEST_TRANSCRIPT_SCROLL"] = "1"
+        app.launchEnvironment[ProductNamespace.environmentKey("UI_TESTING")] = "1"
+        app.launchEnvironment[ProductNamespace.environmentKey("UI_TEST_TRANSCRIPT_SCROLL")] = "1"
         app.launch()
         XCTAssertTrue(transcript.waitForExistence(timeout: 15), app.debugDescription)
     }

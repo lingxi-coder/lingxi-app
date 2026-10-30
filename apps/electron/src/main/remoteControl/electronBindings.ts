@@ -15,7 +15,7 @@ import { app, dialog, net, safeStorage, type BrowserWindow } from 'electron';
 import type { AccountService } from '../account.js';
 import type { SettingsStore } from '../settings.js';
 import { ApprovalDialog } from './approvalDialog.js';
-import { hostDisplayName, remoteControlConfig } from './config.js';
+import { hostDisplayName, remoteControlConfig, REMOTE_CONTROL_ENV } from './config.js';
 import { DeviceRegistry } from './deviceRegistry.js';
 import type { RemoteDiagnostics } from './diagnostics.js';
 import type { RemoteSessionGateway } from './gateway.js';
@@ -51,7 +51,7 @@ export function createRemoteControl(bindings: RemoteControlBindings): RemoteCont
   const config = remoteControlConfig(process.env, app.isPackaged);
   for (const warning of config.warnings) diagnostics('warn', warning);
   if (config.rtdbUrl !== DEFAULT_RTDB_URL) diagnostics('info', `using the Realtime Database at ${config.rtdbUrl}`);
-  if (config.forceEnabled) diagnostics('info', 'enabled by LINGXI_REMOTE_CONTROL');
+  if (config.forceEnabled) diagnostics('info', `enabled by ${REMOTE_CONTROL_ENV.forceEnabled}`);
 
   const directory = join(bindings.userData, 'remote-control');
   const registry = new DeviceRegistry({ path: join(directory, 'devices.json'), diagnostics });

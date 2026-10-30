@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { desktopHost } from '../bridge/bridgeConnection';
 import type { ToolRunItem } from '../model/runItem';
 import { computerApplication } from './computerApplication';
 
@@ -10,7 +11,7 @@ export function ComputerApplicationIcon({ item, fallback }: { item?: ToolRunItem
   useEffect(() => {
     let current = true;
     if (bundleId && typeof window !== 'undefined') {
-      void window.lingxi?.applicationIcon?.get(bundleId).then(url => {
+      void desktopHost()?.applicationIcon?.get(bundleId).then(url => {
         if (current && url?.startsWith('data:image/png;base64,')) setIcon({ bundleId, url });
       }).catch(() => undefined);
     }

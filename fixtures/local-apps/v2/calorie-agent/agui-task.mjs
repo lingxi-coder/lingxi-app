@@ -68,7 +68,7 @@ export class MealAgentTask {
     if (!(file instanceof File)) throw new TypeError('请选择一张照片。');
     if (typeof prompt !== 'string' || !prompt.trim()) throw new TypeError('识别说明不能为空。');
     const part = await this.agent.file(file);
-    return {
+    const input = {
       threadId: crypto.randomUUID(),
       runId: crypto.randomUUID(),
       messages: [{
@@ -76,16 +76,24 @@ export class MealAgentTask {
         role: 'user',
         content: [{ type: 'text', text: prompt }, part],
       }],
-      forwardedProps: {
-        'com.lingxi.localApp': {
-          version: 1,
-          outputSchema,
-          tools: [],
-          maxTurns: options.maxTurns ?? 4,
-          timeoutMs: options.timeoutMs ?? 120000,
-        },
+    };
+    // Read the host extension from the official SDK's normalized request.
+    const normalize = globalThis.LingxiLocalAppAGUI?.validateLocalAppRunInput;
+    if (typeof normalize !== 'function') throw new Error('应用 Agent SDK 不可用，请重新打开应用。');
+    const entries = Object.entries(normalize(input).forwardedProps ?? {});
+    if (entries.length !== 1 || entries[0][1]?.version !== 1) {
+      throw new Error('应用 Agent 扩展不可用，请重新打开应用。');
+    }
+    input.forwardedProps = {
+      [entries[0][0]]: {
+        version: 1,
+        outputSchema,
+        tools: [],
+        maxTurns: options.maxTurns ?? 4,
+        timeoutMs: options.timeoutMs ?? 120000,
       },
     };
+    return input;
   }
 
   async submit(input) {

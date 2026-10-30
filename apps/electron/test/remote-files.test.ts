@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink,
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { FileChannel, FILE_CHUNK_BYTES, decodeFileFrame, encodeFileFrame, hashFile, validateFileOffer, type FragmentLink, type FileOffer, type FileSink } from '@lingxi/bridge-client/remote';
-import { RemoteFileStore } from '../src/main/remoteControl/fileStore.js';
+import { REMOTE_ATTACHMENT_PREFIX, RemoteFileStore } from '../src/main/remoteControl/fileStore.js';
 class Link implements FragmentLink {
   maxFragmentBytes = 16384;
   peer!: Link; handler?: (bytes: Uint8Array) => void; closers: Array<(reason: string) => void> = []; closed = false; max = 0;
@@ -288,7 +288,7 @@ test('gateway requires approval scope, shared attached session and original-file
   await f.call('prompt.send', { session_id: SESSION_A, text: 'Read this file', client_request_id: 'file-prompt-1', file_refs: [receipt.ref] }, who);
   assert.match(f.echoes.at(-1)!.text, /Local path:/);
   await f.call('prompt.send', { session_id: SESSION_A, text: 'Read this file', client_request_id: 'file-prompt-1', file_refs: [receipt.ref] }, who);
-  assert.equal((await readdir(path)).filter(name => name.startsWith('.lingxi-remote-attachment-')).length, 1, 'replayed prompts do not publish extra working copies');
+  assert.equal((await readdir(path)).filter(name => name.startsWith(REMOTE_ATTACHMENT_PREFIX)).length, 1, 'replayed prompts do not publish extra working copies');
   f.policy.setSessionEnabled({ projectPath: '/work/project-one', sessionId: SESSION_A }, false);
   await assert.rejects(f.call('file.list', { session_id: SESSION_A }, who));
   a.close(); b.close(); f.gateway.dispose();

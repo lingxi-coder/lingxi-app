@@ -6,6 +6,42 @@ import harness_runtimeFFI
 
 @MainActor
 final class IOSMediaDeviceCallbackTests: XCTestCase {
+    func testAttachedMediaOwnerDtoPreservesAttachmentAndLogicalOwner() throws {
+        let hostID = "4c1ca0d5-61cd-4c9d-9d9a-23c8832ebc8f"
+        let owner = try IOSMediaOwnerMapper.media(from: .attached(
+            attachmentHostId: hostID,
+            attachmentGeneration: 17,
+            logicalKind: .ui,
+            logicalOwnerId: "preview|camera"
+        ))
+        let attachment = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: hostID, generation: 17))
+        XCTAssertEqual(owner, .attached(
+            attachment: attachment,
+            logicalOwner: .ui(instanceID: "preview|camera")
+        ))
+    }
+
+    func testMediaOpenIdentityUsesTypedOwnerAndOperationTuple() throws {
+        let hostID = "4c1ca0d5-61cd-4c9d-9d9a-23c8832ebc8f"
+        let firstAttachment = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: hostID, generation: 17))
+        let replacementAttachment = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: hostID, generation: 18))
+        let operation = IOSAudioOperationIdentity(
+            id: "fdb72f73-cc3b-43df-a9a3-7d305f45cc00",
+            generation: 2,
+            serviceEpoch: 3
+        )
+        let first = IOSMediaDeviceService.OpenKey(
+            owner: .attached(attachment: firstAttachment, logicalOwner: .session(sessionID: "session-a")),
+            identity: operation
+        )
+        let replacement = IOSMediaDeviceService.OpenKey(
+            owner: .attached(attachment: replacementAttachment, logicalOwner: .session(sessionID: "session-a")),
+            identity: operation
+        )
+
+        XCTAssertNotEqual(first, replacement)
+    }
+
     func testNativeMediaAdapterAdvertisesOnlyItsImplementedSessionModes() {
         let callback = IOSMediaDeviceCallbackAdapter(service: .shared)
         XCTAssertEqual(callback.supportedSessionModes(), [.audio, .video, .audioVideo])
@@ -27,6 +63,23 @@ final class IOSMediaDeviceCallbackTests: XCTestCase {
         }
     }
 
+    func testNativeAudioCallbackFenceWaitsForAlreadyEnteredCallback() async throws {
+        let fence = IOSRealtimeAudioCallbackFence()
+        XCTAssertTrue(fence.enter())
+        fence.close()
+        XCTAssertFalse(fence.enter())
+        var settled = false
+        let waiter = Task { @MainActor in
+            await fence.wait()
+            settled = true
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertFalse(settled)
+        fence.leave()
+        await waiter.value
+        XCTAssertTrue(settled)
+    }
+
     func testUnknownLeaseCannotReadInputAndResponseEchoesRequestID() async {
         let requestID = UUID().uuidString.lowercased()
         let response = await IOSMediaDeviceService.shared.handle(
@@ -41,6 +94,26 @@ final class IOSMediaDeviceCallbackTests: XCTestCase {
             return XCTFail("An unknown lease must not expose a media frame")
         }
         XCTAssertEqual(error.kind, .notFound)
+    }
+
+    func testInvalidOpenRejectedBeforeNativeDispatchHasNoResourceReceipt() async {
+        let requestID = UUID().uuidString.lowercased()
+        let open = MediaDeviceOpenRequestDto(
+            identity: MediaOperationIdDto(id: UUID().uuidString.lowercased(), generation: 1, serviceEpoch: 1),
+            owner: .session(sessionId: "open-preflight"),
+            initiator: nil,
+            timeoutBudgetMs: nil,
+            maxPayloadBytes: 0,
+            request: MediaSessionRequestDto(mode: .audio, intent: .observation, audioSource: nil, videoSource: nil)
+        )
+        let response = await IOSMediaDeviceService.shared.handle(
+            MediaDeviceRequestEnvelopeDto(requestId: requestID, request: .open(request: open))
+        )
+        XCTAssertEqual(response.requestId, requestID)
+        guard case let .openFailedWithoutResource(error) = response.result else {
+            return XCTFail("Pre-dispatch rejection must return the explicit no-resource receipt")
+        }
+        XCTAssertEqual(error.kind, .invalidRequest)
     }
 
     func testUnknownVideoLeaseIsNotReportedAsRendered() async {
@@ -60,6 +133,18 @@ final class IOSMediaDeviceCallbackTests: XCTestCase {
             return XCTFail("Video write must not be acknowledged without a renderer")
         }
         XCTAssertEqual(error.kind, MediaErrorKindDto.notFound)
+    }
+
+    func testUnknownStopDoesNotClaimAClosedLeaseReceipt() async {
+        let requestID = UUID().uuidString.lowercased()
+        let response = await IOSMediaDeviceService.shared.handle(
+            MediaDeviceRequestEnvelopeDto(requestId: requestID, request: .stop(leaseId: UUID().uuidString.lowercased()))
+        )
+        XCTAssertEqual(response.requestId, requestID)
+        guard case let .error(error) = response.result else {
+            return XCTFail("An unknown lease has no confirmed stop receipt")
+        }
+        XCTAssertEqual(error.kind, .notFound)
     }
 
     func testMediaRuntimeReceivesBareV4AudioSettings() throws {

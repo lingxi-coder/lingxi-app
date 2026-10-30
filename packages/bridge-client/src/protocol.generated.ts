@@ -2,7 +2,7 @@
 // Do not edit. Run scripts/checks/generate-client-protocol.py after updating the pin.
 // Nested DTOs and semantic validation remain in protocol.ts and validation.ts.
 
-// Custom Serde fingerprints (review changes): command=a398e5d275796fd6 event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=0c19f45700362b93 event_source=2bc9d9652c3ea156
+// Custom Serde fingerprints (review changes): command=af88521a395dcbc9 event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=687222993966002c event_source=2f84ac6515662ada
 
 import type {
   AgentDto,
@@ -36,6 +36,7 @@ import type {
   MediaControlResponseDto,
   MediaDeviceRequestEnvelopeDto,
   MediaDeviceResponseDto,
+  MediaOwnerDto,
   MediaServiceRequestDto,
   MediaServiceResponseDto,
   MediaSessionModeDto,
@@ -113,7 +114,7 @@ export type ClientCommand =
   | { type: 'start_realtime_audio'; request_json: string }
   | { type: 'realtime_audio_input'; input_json: string }
   | { type: 'stop_realtime_audio' }
-  | { type: 'get_audio_session_context' }
+  | { type: 'get_audio_session_context'; request_id: string }
   | { type: 'send_prompt'; text: string; prompt_mode?: PromptModeDto | null; images: Array<ImageRefDto>; turn_id?: number | null; visualization_context?: VisualizationRefDto | null }
   | { type: 'cancel'; turn_id?: number | null }
   | { type: 'approve_permission'; request_id: number; response: PermissionResponseDto }
@@ -202,7 +203,7 @@ export type ClientCommand =
 
 export type ClientEvent =
   | { type: 'realtime_audio_event'; session_id: string; event_json: string }
-  | { type: 'audio_session_context'; session_id: string; profile_id: string; account_scope: string }
+  | { type: 'audio_session_context'; request_id: string; session_id?: string; profile_id?: string; account_scope?: string; media_owner?: MediaOwnerDto }
   | { type: 'error'; kind: ErrorKindDto; message: string }
   | { type: 'system_notice'; message: string; is_error: boolean }
   | { type: 'ask_user_question'; request: AskUserQuestionRequestDto }
@@ -325,9 +326,11 @@ const CLIENT_EVENT_FIELDS: Record<ClientEvent['type'], readonly BasicField[]> = 
     ['event_json', 'string', false, false, false],
   ],
   audio_session_context: [
-    ['session_id', 'string', false, false, false],
-    ['profile_id', 'string', false, false, false],
-    ['account_scope', 'string', false, false, false],
+    ['request_id', 'string', false, false, false],
+    ['session_id', 'string', true, false, true],
+    ['profile_id', 'string', true, false, true],
+    ['account_scope', 'string', true, false, true],
+    ['media_owner', 'opaque', true, false, true],
   ],
   error: [
     ['kind', 'opaque', false, false, false],

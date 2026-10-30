@@ -1420,6 +1420,7 @@ mod tests {
                 .string_at("/initial_project_root"),
             fresh_target.to_str()
         );
+        crate::boot::close_unserved_for_test(&bound).await;
         let report = bound.session_lifecycle().shutdown_and_drain().await;
         assert!(report.complete, "{:?}", report.errors);
     }

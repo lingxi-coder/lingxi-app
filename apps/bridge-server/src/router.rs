@@ -71,7 +71,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use audio_provider::media_cloud::AudioProviderCloudRegistry;
+use audio_provider::{media_cloud::AudioProviderCloudRegistry, AudioProviderHost};
 pub(crate) use client::adapter::controls::decode_reasoning_selection;
 use client::adapter::lowering::{
     lower_provider_model_catalog_entry, lower_status_snapshot, lower_task_output_chunk,
@@ -90,6 +90,8 @@ use lingxi_core::host::orchestrator::OrchestratorHandle;
 use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
 use lingxi_core::host::SlashCommandDispatcher;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use media_api::MediaOwner;
+use media_runtime::{MediaAttachmentHandle, MediaAttachmentPhase};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -273,6 +275,20 @@ pub trait CommandRouter: Send + Sync + 'static {
     fn abort_realtime_audio(&self) {}
     /// Wait for the native session to release tools and provider transport.
     async fn stop_realtime_audio(&self) {}
+    /// Current provider profile, if configured for the authoritative session.
+    async fn audio_session_context(&self) -> (Option<String>, Option<String>, Option<String>) {
+        (None, None, None)
+    }
+    /// Bind provider routes to a replacement before it becomes visible.
+    async fn prepare_media_attachment(
+        &self,
+        _attachment: &MediaAttachmentHandle,
+        _owner: &MediaOwner,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// Drop provider binding metadata only after its attachment is confirmed.
+    async fn cleanup_confirmed_media_binding(&self) {}
     /// Drain connection-owned in-memory child conversations before their event
     /// sink is released. Routers without such state need no close hook.
     async fn connection_closed(&self) {}
@@ -591,6 +607,10 @@ pub struct EngineCommandRouter {
     credentials: Option<Arc<secret::CredentialManager>>,
     realtime_audio: Option<Arc<crate::realtime_audio::RealtimeAudioController>>,
     media_cloud_audio: Option<Arc<AudioProviderCloudRegistry>>,
+    media_cloud_attachment_slot: Option<Arc<std::sync::RwLock<Option<MediaAttachmentHandle>>>>,
+    media_cloud_audio_provider: Option<Arc<AudioProviderHost>>,
+    media_cloud_audio_binding: std::sync::Mutex<Option<(MediaAttachmentHandle, String, u64)>>,
+    media_cloud_audio_refresh: tokio::sync::Mutex<()>,
     /// Settings-visible provider model directory assembled from the full
     /// provider config, including providers not currently routable.
     provider_model_catalog_listings: Vec<lingxi_core::host::ModelListing>,
@@ -825,7 +845,7 @@ impl EngineCommandRouter {
         presence_warning: Option<String>,
         sink: Arc<dyn ClientEventSink>,
     ) {
-        self.refresh_media_cloud_audio_binding().await;
+        let _ = self.refresh_media_cloud_audio_binding().await;
         sink.emit(ClientEvent::SessionResumed {
             session_id: uuid.to_string(),
             mode: SessionModeDto::Code,
@@ -947,6 +967,10 @@ impl EngineCommandRouter {
             credentials: None,
             realtime_audio: None,
             media_cloud_audio: None,
+            media_cloud_attachment_slot: None,
+            media_cloud_audio_provider: None,
+            media_cloud_audio_binding: std::sync::Mutex::new(None),
+            media_cloud_audio_refresh: tokio::sync::Mutex::new(()),
             provider_model_catalog_listings: Vec::new(),
             official_catalog: None,
             catalog_refresh: None,
@@ -993,44 +1017,175 @@ impl EngineCommandRouter {
         self
     }
 
-    /// Bind the same cloud route registry used by AppMediaHost so follow-session
-    /// operations track the current trusted profile after model/session changes.
+    /// Bind the app registry to the host's live attachment slot and the exact
+    /// provider host assembled from this Desktop runtime. Owner transitions
+    /// replace the slot only after old attachment drain is confirmed.
     pub fn with_media_cloud_audio_registry(
         mut self,
         registry: Arc<AudioProviderCloudRegistry>,
+        attachment_slot: Arc<std::sync::RwLock<Option<MediaAttachmentHandle>>>,
+        provider: Arc<AudioProviderHost>,
+        initial_binding: Option<(MediaAttachmentHandle, String, u64)>,
     ) -> Self {
         self.media_cloud_audio = Some(registry);
+        self.media_cloud_attachment_slot = Some(attachment_slot);
+        self.media_cloud_audio_provider = Some(provider);
+        *self
+            .media_cloud_audio_binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = initial_binding;
         self
     }
 
-    async fn refresh_media_cloud_audio_binding(&self) {
-        let Some(registry) = self.media_cloud_audio.as_ref() else {
+    async fn refresh_media_cloud_audio_binding(&self) -> Result<(String, String), String> {
+        let _refresh = self.media_cloud_audio_refresh.lock().await;
+        let result = match self.realtime_audio.as_ref() {
+            Some(controller) => controller.session_context().await,
+            None => Err("realtime audio controller is unavailable".to_owned()),
+        };
+        self.update_media_cloud_audio_binding_locked(result.clone())
+            .await;
+        result
+    }
+
+    async fn update_media_cloud_audio_binding_locked(
+        &self,
+        result: Result<(String, String), String>,
+    ) {
+        let (Some(registry), Some(attachment_slot)) = (
+            self.media_cloud_audio.as_ref(),
+            self.media_cloud_attachment_slot.as_ref(),
+        ) else {
             return;
         };
-        let session_id = self.handle.current_session_id().await.as_uuid().to_string();
-        let Some(controller) = self.realtime_audio.as_ref() else {
-            registry.unregister_session(&session_id);
+        let attachment = attachment_slot
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(attachment) = attachment else {
+            // No current handle means the host has closed admission. Retain the
+            // last route record until its confirmed owner teardown or host drop.
             return;
         };
-        match controller.session_context().await {
-            Ok((bound_session_id, profile_name)) if bound_session_id == session_id => {
-                if let Err(error) = registry.bind_session_to_profile(
-                    session_id,
-                    profile_name.clone(),
-                    format!("profile:{profile_name}"),
-                ) {
-                    tracing::debug!(%error, "current session has no configured media audio profile");
+        match attachment.phase() {
+            MediaAttachmentPhase::Revoking | MediaAttachmentPhase::Unknown => {
+                // Keep the current route available to already-admitted work
+                // while the attachment drain remains unconfirmed.
+                return;
+            }
+            MediaAttachmentPhase::Revoked => {
+                registry.unregister_attachment(attachment.id());
+                let mut current = self
+                    .media_cloud_audio_binding
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if current
+                    .as_ref()
+                    .is_some_and(|(bound, _, _)| bound.id() == attachment.id())
+                {
+                    current.take();
+                }
+                return;
+            }
+            MediaAttachmentPhase::Active => {}
+        }
+        let previous_binding = self
+            .media_cloud_audio_binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if previous_binding.as_ref().is_some_and(|(previous, _, _)| {
+            previous.id() != attachment.id() && previous.phase() != MediaAttachmentPhase::Revoked
+        }) {
+            // Never publish a replacement route while a different attachment's
+            // drain is unconfirmed, even if the slot was changed unexpectedly.
+            return;
+        }
+        let current_session_id = self.handle.current_session_id().await.as_uuid().to_string();
+        match result {
+            Ok((session_id, profile_name))
+                if session_id == current_session_id && !profile_name.trim().is_empty() =>
+            {
+                let owner = MediaOwner::Session {
+                    session_id: session_id.clone(),
+                };
+                let provider = self.media_cloud_audio_provider.as_ref().cloned();
+                match (attachment.authorize_owner(&owner), provider) {
+                    (Ok(permit), Some(provider)) => {
+                        let profile_result = registry
+                            .register_attached_shared_profiles(&permit)
+                            .and_then(|()| {
+                                registry.register_attached_profile(
+                                    &permit,
+                                    profile_name.clone(),
+                                    provider.clone(),
+                                )
+                            });
+                        let route_result = profile_result.and_then(|()| {
+                            registry.register_attached_session(
+                                &permit,
+                                profile_name.clone(),
+                                format!("profile:{profile_name}"),
+                                provider,
+                            )
+                        });
+                        match route_result {
+                            Ok(generation) => {
+                                let previous = self
+                                    .media_cloud_audio_binding
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .replace((attachment.clone(), session_id, generation));
+                                if let Some((old_attachment, old_session, old_generation)) =
+                                    previous
+                                {
+                                    if old_attachment.id() == attachment.id() {
+                                        registry.unregister_attached_session_if_generation(
+                                            old_attachment.id(),
+                                            &old_session,
+                                            old_generation,
+                                        );
+                                    } else if old_attachment.phase()
+                                        == MediaAttachmentPhase::Revoked
+                                    {
+                                        registry.unregister_attachment(old_attachment.id());
+                                    }
+                                }
+                                return;
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "current attachment has no configured media audio route")
+                            }
+                        }
+                    }
+                    (Err(error), _) => {
+                        tracing::debug!(%error, "current media attachment no longer admits provider routing")
+                    }
+                    (_, None) => tracing::debug!("desktop media provider host is unavailable"),
                 }
             }
             Ok(_) => {
-                registry.unregister_session(&session_id);
-                tracing::warn!(
-                    "realtime audio context returned a different active session identity"
-                );
+                tracing::warn!("realtime audio context does not match the current desktop session")
             }
             Err(message) => {
-                registry.unregister_session(&session_id);
-                tracing::debug!(%message, "current session has no authoritative media audio profile");
+                tracing::debug!(%message, "current session has no authoritative media audio profile")
+            }
+        }
+
+        let previous = self
+            .media_cloud_audio_binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some((old_attachment, session_id, generation)) = previous {
+            if old_attachment.id() == attachment.id() {
+                registry.unregister_attached_session_if_generation(
+                    old_attachment.id(),
+                    &session_id,
+                    generation,
+                );
+            } else if old_attachment.phase() == MediaAttachmentPhase::Revoked {
+                registry.unregister_attachment(old_attachment.id());
             }
         }
     }
@@ -1412,6 +1567,118 @@ impl CommandRouter for EngineCommandRouter {
     async fn stop_realtime_audio(&self) {
         if let Some(controller) = &self.realtime_audio {
             controller.stop().await;
+        }
+    }
+    async fn audio_session_context(&self) -> (Option<String>, Option<String>, Option<String>) {
+        let current = self.handle.current_session_id().await.as_uuid().to_string();
+        let profile = self
+            .refresh_media_cloud_audio_binding()
+            .await
+            .ok()
+            .and_then(|(session, profile)| (session == current).then_some(profile));
+        let scope = profile.as_ref().map(|profile| format!("profile:{profile}"));
+        (Some(current), profile, scope)
+    }
+    async fn prepare_media_attachment(
+        &self,
+        attachment: &MediaAttachmentHandle,
+        owner: &MediaOwner,
+    ) -> Result<(), String> {
+        let _refresh = self.media_cloud_audio_refresh.lock().await;
+        let (Some(registry), Some(controller), Some(provider)) = (
+            self.media_cloud_audio.as_ref(),
+            self.realtime_audio.as_ref(),
+            self.media_cloud_audio_provider.as_ref(),
+        ) else {
+            return Ok(());
+        };
+        let (session_id, profile_name) = match controller.session_context().await {
+            Ok(context) => context,
+            Err(_) => {
+                let mut current = self
+                    .media_cloud_audio_binding
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if current
+                    .as_ref()
+                    .is_some_and(|(old, _, _)| old.phase() == MediaAttachmentPhase::Revoked)
+                {
+                    current.take();
+                }
+                return Ok(()); // no configured cloud audio for this session
+            }
+        };
+        let expected = MediaOwner::Session {
+            session_id: session_id.clone(),
+        };
+        if owner != &expected
+            || self.handle.current_session_id().await.as_uuid().to_string() != session_id
+            || profile_name.trim().is_empty()
+        {
+            return Err("media provider context does not match the replacement session".into());
+        }
+        if self
+            .media_cloud_audio_binding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|(previous, _, _)| {
+                previous.id() != attachment.id()
+                    && previous.phase() != MediaAttachmentPhase::Revoked
+            })
+        {
+            return Err("previous media provider attachment remains unconfirmed".into());
+        }
+        let permit = attachment
+            .authorize_owner(owner)
+            .map_err(|e| e.to_string())?;
+        registry
+            .register_attached_shared_profiles(&permit)
+            .map_err(|e| e.to_string())?;
+        registry
+            .register_attached_profile(&permit, profile_name.clone(), provider.clone())
+            .map_err(|e| e.to_string())?;
+        let generation = registry
+            .register_attached_session(
+                &permit,
+                profile_name.clone(),
+                format!("profile:{profile_name}"),
+                provider.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+        let previous = self
+            .media_cloud_audio_binding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace((attachment.clone(), session_id, generation));
+        if let Some((old_attachment, old_session, old_generation)) = previous {
+            if old_attachment.id() == attachment.id() {
+                registry.unregister_attached_session_if_generation(
+                    old_attachment.id(),
+                    &old_session,
+                    old_generation,
+                );
+            } else if old_attachment.phase() == MediaAttachmentPhase::Revoked {
+                registry.unregister_attachment(old_attachment.id());
+            }
+        }
+        Ok(())
+    }
+    async fn cleanup_confirmed_media_binding(&self) {
+        let _refresh = self.media_cloud_audio_refresh.lock().await;
+        let mut current = self
+            .media_cloud_audio_binding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if current
+            .as_ref()
+            .is_some_and(|(old, _, _)| old.phase() == MediaAttachmentPhase::Revoked)
+        {
+            if let Some((old, _, _)) = current.take() {
+                if let Some(registry) = self.media_cloud_audio.as_ref() {
+                    registry.unregister_attachment(old.id());
+                }
+            }
         }
     }
     async fn connection_closed(&self) {
@@ -2180,42 +2447,16 @@ impl CommandRouter for EngineCommandRouter {
             },
 
             // ── Model ──────────────────────────────────────────────────────
-            ClientCommand::GetAudioSessionContext => {
-                let context = match &self.realtime_audio {
-                    Some(controller) => controller.session_context().await,
-                    None => Err("audio runtime is unavailable".into()),
-                };
-                match context {
-                    Ok((session_id, profile)) => {
-                        if let Some(registry) = self.media_cloud_audio.as_ref() {
-                            if let Err(error) = registry.bind_session_to_profile(
-                                session_id.clone(),
-                                profile.clone(),
-                                format!("profile:{profile}"),
-                            ) {
-                                tracing::debug!(%error, "desktop media audio route is unavailable for the selected profile");
-                            }
-                        }
-                        sink.emit(ClientEvent::AudioSessionContext {
-                            session_id,
-                            account_scope: format!("profile:{profile}"),
-                            profile_id: profile,
-                        })
-                        .await;
-                    }
-                    Err(message) => {
-                        // Desktop probes this optional metadata on every connection
-                        // and model change. An unavailable binding leaves native
-                        // audio unconfigured; it must not reject the text session.
-                        // Actual audio operations still validate their own route.
-                        tracing::debug!(%message, "audio session context unavailable");
-                        if let Some(registry) = self.media_cloud_audio.as_ref() {
-                            let session_id =
-                                self.handle.current_session_id().await.as_uuid().to_string();
-                            registry.unregister_session(&session_id);
-                        }
-                    }
-                }
+            ClientCommand::GetAudioSessionContext { request_id } => {
+                let (session_id, profile_id, account_scope) = self.audio_session_context().await;
+                sink.emit(ClientEvent::AudioSessionContext {
+                    request_id,
+                    session_id,
+                    profile_id,
+                    account_scope,
+                    media_owner: None,
+                })
+                .await;
             }
             ClientCommand::SetModel { model } => {
                 let listings = self.handle.list_model_listings().await;
@@ -2234,7 +2475,7 @@ impl CommandRouter for EngineCommandRouter {
                 {
                     Ok(()) => {
                         let current = self.handle.get_status_snapshot().await;
-                        self.refresh_media_cloud_audio_binding().await;
+                        let _ = self.refresh_media_cloud_audio_binding().await;
                         let selected = lingxi_core::host::qualified_model_ref(
                             &current.model,
                             current.model_profile.as_deref(),
@@ -2678,7 +2919,7 @@ impl CommandRouter for EngineCommandRouter {
                 }
                 let _ = self.restore_persisted_reasoning_selection().await;
 
-                self.refresh_media_cloud_audio_binding().await;
+                let _ = self.refresh_media_cloud_audio_binding().await;
                 let session_id = self.handle.current_session_id().await.to_string();
                 sink.emit(ClientEvent::SessionStarted {
                     session_id,
@@ -2866,15 +3107,15 @@ impl CommandRouter for EngineCommandRouter {
                 .await;
             }
 
-            // Durable turn recovery (`attach_turn` / `resume_turn` /
-            // `pause_turn`) is a MOBILE host capability: it needs the retained
+            // Durable turn recovery and queue inspection are MOBILE host
+            // capabilities: they need the retained
             // per-turn event log and the recovery state machine that
             // `harness-runtime::mobile`'s host owns (`host.rs`'s `AttachTurn` /
             // `ResumeTurn` / `PauseTurn` arms). This bridge keeps no retained
             // event window and no `TurnRecoverySnapshotDto` state, so there is
             // nothing here to attach to, resume, or pause.
             //
-            // Each of the three is a REQUEST-REPLY command on the mobile host —
+            // Each is a REQUEST-REPLY command on the mobile host —
             // the client sends it and waits for a `turn_recovery_state` (and,
             // for `attach_turn`, a `turn_event_replay` burst). Dropping them in
             // the catch-all below leaves such a client waiting forever for a

@@ -12,6 +12,7 @@ import { build } from 'esbuild';
 import test from 'node:test';
 import { LocalAppRemoteGateway } from '../src/main/local-apps/remoteGateway.ts';
 import { REMOTE_LOCAL_APP_SDK } from '../src/preload/localAppSdk.ts';
+import { withFakeChatCheckpoint } from './fixtures/local-app-chat-checkpoint.ts';
 
 // Opt in with an installed Playwright module. The test uses only a loopback gateway and test identities.
 const playwrightModule = process.env.LINGXI_TEST_PLAYWRIGHT_MODULE;
@@ -295,7 +296,7 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
       authorize: principal => host.authorizeAgent(principal), revalidate: (principal, authorization) => host.revalidateAgent(principal, authorization),
       execute: async execution => {
         executions.set(execution.runId, execution);
-        if (execution.runId === 'complete-remote-chat') return { result: { text: 'synthetic answer', attachments: [], chatId: execution.chat.chatId, messageId: 'assistant-remote' }, usage: { turns: 1 } };
+        if (execution.runId === 'complete-remote-chat') return withFakeChatCheckpoint(execution, { result: { text: 'synthetic answer', attachments: [], chatId: execution.chat.chatId, messageId: 'assistant-remote' }, usage: { turns: 1 } });
         await new Promise((_resolve, reject) => execution.signal.addEventListener('abort', () => reject(execution.signal.reason), { once: true }));
         throw new Error('cancelled synthetic executor');
       },
@@ -367,7 +368,7 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     const conflict = await page.evaluate(async input => (await (await fetch('/__lingxi_remote_invoke', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method: 'agent.chats.create', args: { ...input, title: 'Browser recovery' } }) })).json()).result, creation);
     assert.equal(conflict.ok, false); assert.equal(conflict.error.code, 'chat_create_conflict');
     const uncertainId = 'c8888888-8888-4888-8888-888888888888';
-    await mkdir(join(root, 'apps', appId, 'agent', 'chats', uncertainId));
+    await mkdir(join(root, 'apps', appId, 'agent', 'agui-v1', 'chats', uncertainId));
     assert.equal(await page.evaluate(async requestId => { try { await window.localApp.agent.chats.create({ requestId }); } catch (error) { return error.code; } }, uncertainId), 'chat_storage_uncertain');
     const list = await page.evaluate(() => window.localApp.agent.chats.list({ limit: 10 }));
     assert.deepEqual(list.chats.map(chat => chat.chatId), [creation.requestId]);

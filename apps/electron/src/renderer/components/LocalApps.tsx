@@ -1,4 +1,5 @@
 import { LocalAppMarket, LocalAppPublish } from './LocalAppMarket';
+import { desktopHost } from '../bridge/bridgeConnection';
 import { useI18n } from '../i18n/useI18n';
 import { tr } from '../i18n/locale';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
@@ -8,7 +9,7 @@ import { localAppReference } from '../model/localAppReference';
 import { useT } from '../theme/ThemeContext';
 import { LocalAppAgentQuestions, LocalAppAgentSettingsDialog } from './LocalAppAgentSettings';
 
-function appsApi() { const api = window.lingxi?.localApps; if (!api) throw new Error('Desktop application host is unavailable'); return api; }
+function appsApi() { const api = desktopHost()?.localApps; if (!api) throw new Error('Desktop application host is unavailable'); return api; }
 const phaseLabels: Record<LocalAppPhase, string> = { stopped: 'desktop_apps_ready', installing: 'desktop_apps_installing', building: 'desktop_apps_building', starting: 'desktop_apps_starting', running: 'desktop_apps_running', stopping: 'desktop_apps_stopping', failed: 'desktop_apps_attention' };
 export function AppsGlyph({ size = 20 }: { size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.8"/></svg>;
@@ -37,7 +38,7 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
     } catch (error) { if (request.current === token) setError(error instanceof Error ? error.message : String(error)); }
   }, [selected]);
   useEffect(() => {
-    if (!visible || !window.lingxi?.localApps) return;
+    if (!visible || !desktopHost()?.localApps) return;
     void refresh(); const unsubscribe = appsApi().onChanged(() => { void refresh(); });
     return () => { request.current++; unsubscribe(); };
   }, [visible, refresh]);

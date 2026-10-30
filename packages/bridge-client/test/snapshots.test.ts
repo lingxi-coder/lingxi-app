@@ -617,7 +617,8 @@ function validateAudioResult(v: unknown): void {
     }
     case 'owner_ended':
       break;
-    case 'failed': {
+    case 'failed':
+    case 'failed_without_resource': {
       const error = rec(o['error']);
       validateAudioErrorKind(error['kind']);
       assert.ok(isString(error['message']));
@@ -1004,6 +1005,9 @@ function validateCommand(name: string, v: unknown): void {
       validateConfigurationAdminCommand(o['command']);
       break;
     case 'get_audio_session_context':
+      exactObjectKeys(o, ['type', 'request_id']);
+      assert.ok(isString(o['request_id']));
+      break;
     case 'stop_realtime_audio':
       exactObjectKeys(o, ['type']);
       break;
@@ -1021,6 +1025,10 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'update_audio_capabilities':
       validateAudioCapabilities(o['capabilities']);
+      break;
+    case 'refresh_provider_catalog':
+      exactObjectKeys(o, ['type', 'trigger'], [], `command snapshot ${name}`);
+      assert.ok(isString(o['trigger']));
       break;
     case 'update_media_session_modes': {
       exactObjectKeys(o, ['type', 'modes']);
@@ -1597,8 +1605,8 @@ function validateEvent(name: string, v: unknown): void {
       );
       break;
     case 'audio_session_context':
-      exactObjectKeys(o, ['type', 'session_id', 'profile_id', 'account_scope']);
-      assert.ok(isString(o['session_id']) && isString(o['profile_id']) && isString(o['account_scope']));
+      exactObjectKeys(o, ['type', 'request_id'], ['session_id', 'profile_id', 'account_scope', 'media_owner']);
+      assert.ok(isString(o['request_id']));
       assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'realtime_audio_event':
@@ -2107,6 +2115,9 @@ test('audio_response covers every AudioOperationResultDto and structured error k
     const result = { type: 'failed', error: { kind, message: `${kind} happened` } };
     validateCommand(`audio_response(failed-${kind})`, { type: 'audio_response', identity, result });
     validateAudioResult(result);
+    const withoutResource = { type: 'failed_without_resource', error: result.error };
+    validateCommand(`audio_response(failed-without-resource-${kind})`, { type: 'audio_response', identity, result: withoutResource });
+    validateAudioResult(withoutResource);
   }
   assert.throws(
     () => validateAudioResult({ type: 'failed', error: { kind: 'invented', message: 'nope' } }),

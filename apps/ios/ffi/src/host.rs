@@ -30,7 +30,8 @@ use client::protocol::text::ClientTextDto;
 use harness_runtime::mobile::MobileConfig;
 #[cfg(feature = "uniffi")]
 use harness_runtime::mobile::{
-    ClientEventListener, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
+    ClientEventListener, MediaAttachmentHandle, MediaAttachmentHost, MediaAttachmentPhase,
+    MediaAttachmentRevocation, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
     PermissionRequestSink, SessionModeDto,
 };
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
@@ -57,39 +58,87 @@ use std::sync::Weak;
 #[cfg(feature = "uniffi")]
 struct MediaAudioSessionBindingGuard {
     registry: Arc<AudioProviderCloudRegistry>,
+    attachment: MediaAttachmentHandle,
     binding: std::sync::Mutex<Option<MediaAudioSessionBindingFfi>>,
     refresh: tokio::sync::Mutex<()>,
 }
 
 #[cfg(feature = "uniffi")]
 impl MediaAudioSessionBindingGuard {
-    fn new(registry: Arc<AudioProviderCloudRegistry>) -> Self {
+    fn new(registry: Arc<AudioProviderCloudRegistry>, attachment: MediaAttachmentHandle) -> Self {
         Self {
             registry,
+            attachment,
             binding: std::sync::Mutex::new(None),
             refresh: tokio::sync::Mutex::new(()),
         }
     }
 
-    fn update(&self, binding: MediaAudioSessionBindingFfi) {
+    fn identity(&self) -> (String, u64) {
+        (
+            self.attachment.id().host_id(),
+            self.attachment.id().generation(),
+        )
+    }
+
+    fn matches_attachment(&self, binding: &MediaAudioSessionBindingFfi) -> bool {
+        let (host_id, generation) = self.identity();
+        binding.attachment_host_id == host_id && binding.attachment_generation == generation
+    }
+
+    /// The caller holds an attachment admission permit until this update and
+    /// the matching registry writes are complete.
+    fn update(&self, binding: MediaAudioSessionBindingFfi) -> bool {
+        if !self.matches_attachment(&binding) {
+            return false;
+        }
+        replace_attached_audio_session_binding(
+            &self.registry,
+            self.attachment.id(),
+            &self.binding,
+            binding,
+        );
+        true
+    }
+
+    fn remove_session_context(&self, binding: &MediaAudioSessionBindingFfi) -> bool {
+        if !self.matches_attachment(binding) {
+            return false;
+        }
+        let owner = media_api::MediaOwner::Session {
+            session_id: binding.session_id.clone(),
+        };
+        let Ok(_permit) = self.attachment.authorize_owner(&owner) else {
+            // Revoking/Unknown keeps the route alive. The exact confirmed-drain
+            // callback releases this host-owned route entry.
+            return false;
+        };
         let mut current = self
             .binding
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(previous) = current.replace(binding) {
-            self.registry
-                .unregister_session_if_generation(&previous.session_id, previous.generation);
+        if current.as_ref() != Some(binding) {
+            return false;
         }
+        let removed = self.registry.unregister_attached_session_if_generation(
+            self.attachment.id(),
+            &binding.session_id,
+            binding.generation,
+        );
+        if removed {
+            *current = None;
+        }
+        removed
     }
 
     fn clear(&self) {
-        let mut current = self
+        let binding = self
             .binding
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(previous) = current.take() {
-            self.registry
-                .unregister_session_if_generation(&previous.session_id, previous.generation);
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(binding) = binding {
+            self.remove_session_context(&binding);
         }
     }
 }
@@ -97,14 +146,23 @@ impl MediaAudioSessionBindingGuard {
 #[cfg(feature = "uniffi")]
 impl Drop for MediaAudioSessionBindingGuard {
     fn drop(&mut self) {
+        if self.attachment.phase() == MediaAttachmentPhase::Revoked {
+            self.registry.unregister_attachment(self.attachment.id());
+            self.binding
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            return;
+        }
         if let Some(binding) = self
             .binding
             .get_mut()
             .unwrap_or_else(|error| error.into_inner())
-            .take()
+            .clone()
         {
-            self.registry
-                .unregister_session_if_generation(&binding.session_id, binding.generation);
+            // While an attachment is Revoking or Unknown, removal is rejected.
+            // It is normally held by `attachment_routes` until confirmed drain.
+            self.remove_session_context(&binding);
         }
     }
 }
@@ -121,8 +179,51 @@ fn retain_media_route_guard(
 #[cfg(feature = "uniffi")]
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct MediaAudioSessionBindingFfi {
+    pub attachment_host_id: String,
+    pub attachment_generation: u64,
     pub session_id: String,
     pub generation: u64,
+}
+
+fn replace_attached_audio_session_binding(
+    registry: &AudioProviderCloudRegistry,
+    attachment_id: &media_api::MediaAttachmentId,
+    current: &std::sync::Mutex<Option<MediaAudioSessionBindingFfi>>,
+    binding: MediaAudioSessionBindingFfi,
+) {
+    let mut current = current.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(previous) = current.replace(binding) {
+        registry.unregister_attached_session_if_generation(
+            attachment_id,
+            &previous.session_id,
+            previous.generation,
+        );
+    }
+}
+
+// Keep the unscoped helpers for legacy-only unit coverage. Engine production
+// routes use the attachment-aware helpers above.
+#[cfg(test)]
+fn replace_audio_session_binding(
+    registry: &AudioProviderCloudRegistry,
+    current: &std::sync::Mutex<Option<MediaAudioSessionBindingFfi>>,
+    binding: MediaAudioSessionBindingFfi,
+) {
+    let mut current = current.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(previous) = current.replace(binding) {
+        registry.unregister_session_if_generation(&previous.session_id, previous.generation);
+    }
+}
+
+#[cfg(test)]
+fn clear_audio_session_binding(
+    registry: &AudioProviderCloudRegistry,
+    current: &std::sync::Mutex<Option<MediaAudioSessionBindingFfi>>,
+) {
+    let mut current = current.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(previous) = current.take() {
+        registry.unregister_session_if_generation(&previous.session_id, previous.generation);
+    }
 }
 
 /// Create a RAM-only side using the same typed callbacks as the main chat.
@@ -176,8 +277,15 @@ pub struct IosNativeMediaHost {
     inner: Arc<AppMediaHost>,
     audio: Arc<dyn AudioService>,
     camera: Arc<dyn CameraControl>,
+    media_devices: Arc<IosMediaDevicePortsBridge>,
     audio_configuration_json: Arc<std::sync::RwLock<String>>,
-    conversation_attachment: Arc<AppMediaConversationAttachment>,
+    media_attachment_host: MediaAttachmentHost,
+    /// Keeps provider registries and attachment handles alive until confirmed
+    /// drain. Revoking/Unknown never removes an entry from this map.
+    attachment_routes:
+        Arc<std::sync::Mutex<HashMap<(String, u64), Arc<MediaAudioSessionBindingGuard>>>>,
+    orphaned_attachment_routes:
+        Arc<std::sync::Mutex<HashMap<usize, Arc<MediaAudioSessionBindingGuard>>>>,
     route_guards: std::sync::Mutex<HashMap<usize, Weak<MediaAudioSessionBindingGuard>>>,
 }
 
@@ -208,10 +316,11 @@ impl IosNativeMediaHost {
                 }
             })
             .collect();
-        let callback = Arc::new(IosMediaDevicePortsBridge {
+        let media_devices = Arc::new(IosMediaDevicePortsBridge {
             inner: media_devices,
         });
-        let ports: Arc<dyn MediaDevicePorts> = Arc::new(CallbackMediaDevicePorts::new(callback));
+        let ports: Arc<dyn MediaDevicePorts> =
+            Arc::new(CallbackMediaDevicePorts::new(media_devices.clone()));
         let settings = audio_routing_settings_from_v4_json_checked(&media_audio_configuration_json)
             .map_err(|error| {
                 MobileEngineError::Internal(format!(
@@ -235,26 +344,15 @@ impl IosNativeMediaHost {
         .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
         let audio_configuration_json =
             Arc::new(std::sync::RwLock::new(media_audio_configuration_json));
-        let configuration: AudioConfigurationSnapshot = {
-            let settings = audio_configuration_json.clone();
-            Arc::new(move || {
-                Ok(settings
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone())
-            })
-        };
-        let conversation_attachment = AppMediaConversationAttachment::new(
-            inner.cloud_audio_registry(),
-            inner.media_service(),
-            configuration,
-        );
         Ok(Arc::new(Self {
             inner,
             audio,
             camera,
+            media_devices,
             audio_configuration_json,
-            conversation_attachment,
+            media_attachment_host: MediaAttachmentHost::new(),
+            attachment_routes: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            orphaned_attachment_routes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             route_guards: std::sync::Mutex::new(HashMap::new()),
         }))
     }
@@ -295,22 +393,31 @@ impl IosNativeMediaHost {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(&engine_key)
-            .and_then(Weak::upgrade);
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| {
+                MobileEngineError::Internal(
+                    "iOS engine has no attachment issued by this media host".into(),
+                )
+            })?;
         // Serialize refreshes for this engine so an older unconfigured result
         // cannot retire a newer successful binding.
-        let _refresh = match guard.as_ref() {
-            Some(guard) => Some(guard.refresh.lock().await),
-            None => None,
-        };
+        let _refresh = guard.refresh.lock().await;
         let context = match engine.current_media_context().await {
             Ok(context) => context,
             Err(_) => {
-                if let Some(guard) = guard.as_ref() {
-                    guard.clear();
-                }
+                guard.clear();
                 return Ok(None);
             }
         };
+        let owner = media_api::MediaOwner::Session {
+            session_id: context.session_id.clone(),
+        };
+        // Admission fences the complete profile/session registry update against
+        // attachment revoke. A stale engine cannot reinstall provider routes.
+        let permit = guard
+            .attachment
+            .authorize_owner(&owner)
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
         let session_id = context.session_id.clone();
         let (services, credential_ids, _) = engine.audio_provider_services();
         let provider = Arc::new(AudioProviderHost::from_provider_services(
@@ -318,41 +425,196 @@ impl IosNativeMediaHost {
             credential_ids.clone(),
         ));
         for profile_name in credential_ids.keys() {
-            self.inner
-                .cloud_audio_registry()
-                .register_profile(profile_name.clone(), provider.clone())
+            guard
+                .registry
+                .register_attached_profile(&permit, profile_name.clone(), provider.clone())
                 .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
         }
-        let generation = self
-            .inner
-            .cloud_audio_registry()
-            .register_session(
-                context.session_id.clone(),
+        let generation = guard
+            .registry
+            .register_attached_session(
+                &permit,
                 context.profile_id.clone(),
                 context.account_scope.clone(),
                 provider.clone(),
             )
             .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+        let (attachment_host_id, attachment_generation) = guard.identity();
         let binding = MediaAudioSessionBindingFfi {
+            attachment_host_id,
+            attachment_generation,
             session_id,
             generation,
         };
-        if let Some(guard) = guard.as_ref() {
-            guard.update(binding.clone());
+        if !guard.update(binding.clone()) {
+            guard.registry.unregister_attached_session_if_generation(
+                guard.attachment.id(),
+                &binding.session_id,
+                binding.generation,
+            );
+            return Err(MobileEngineError::Internal(
+                "iOS media provider route does not match the engine attachment".into(),
+            ));
         }
         Ok(Some(binding))
     }
 
-    /// Remove a session's provider route when the Swift owner releases it.
-    pub fn remove_audio_session_context(&self, session_id: String, generation: u64) {
-        self.inner
-            .cloud_audio_registry()
-            .unregister_session_if_generation(&session_id, generation);
+    /// Remove a provider route only when the exact host-issued attachment and
+    /// session registration still match. Revoking/Unknown retains the route.
+    pub fn remove_audio_session_context(
+        &self,
+        engine: Arc<MobileEngineHandle>,
+        binding: MediaAudioSessionBindingFfi,
+    ) {
+        let engine_key = Arc::as_ptr(&engine) as usize;
+        let route = self
+            .route_guards
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&engine_key)
+            .and_then(Weak::upgrade);
+        if let Some(route) = route {
+            route.remove_session_context(&binding);
+        }
     }
 }
 
 #[cfg(feature = "uniffi")]
 impl IosNativeMediaHost {
+    fn create_engine_media_scope(
+        &self,
+    ) -> Result<
+        (
+            Arc<MediaAudioSessionBindingGuard>,
+            Arc<dyn harness_runtime::mobile::MediaConversationAttachment>,
+        ),
+        MobileEngineError,
+    > {
+        harness_runtime::mobile::initialize_mobile_lifecycle_runtime()
+            .map_err(MobileEngineError::Internal)?;
+        let (attachment, registry) = self
+            .inner
+            .create_mobile_media_attachment(&self.media_attachment_host)
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+        let binding = Arc::new(MediaAudioSessionBindingGuard::new(
+            registry.clone(),
+            attachment.clone(),
+        ));
+        let key = binding.identity();
+        let inserted = {
+            let mut routes = self
+                .attachment_routes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match routes.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(binding.clone());
+                    true
+                }
+                std::collections::hash_map::Entry::Occupied(_) => false,
+            }
+        };
+        if !inserted {
+            // The host promises unique generations. A collision is fatal and
+            // must not select or overwrite an existing engine's route.
+            self.orphaned_attachment_routes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(Arc::as_ptr(&binding) as usize, binding.clone());
+            self.revoke_unbuilt_attachment(binding);
+            return Err(MobileEngineError::Internal(
+                "iOS media attachment identity was already registered".into(),
+            ));
+        }
+
+        let configuration: AudioConfigurationSnapshot = {
+            let settings = self.audio_configuration_json.clone();
+            Arc::new(move || {
+                Ok(settings
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone())
+            })
+        };
+        let conversation_attachment =
+            AppMediaConversationAttachment::new(registry, attachment.clone(), configuration);
+        Ok((binding, conversation_attachment))
+    }
+
+    fn attachment_confirmed_callback(
+        &self,
+        binding: &Arc<MediaAudioSessionBindingGuard>,
+    ) -> Arc<dyn Fn() + Send + Sync> {
+        let routes = Arc::downgrade(&self.attachment_routes);
+        let orphaned_routes = Arc::downgrade(&self.orphaned_attachment_routes);
+        // Strongly retain the foreign callback in the drain receipt itself.
+        // The receipt is held by the engine lifecycle through late Confirmed;
+        // this avoids losing the Swift cleanup callback if the app composition
+        // is released while an Unknown drain is still running. The callback
+        // does not point back to this host, so this does not form a cycle.
+        let media_devices = self.media_devices.clone();
+        let key = binding.identity();
+        let binding_ptr = Arc::as_ptr(binding) as usize;
+        let attachment = binding.attachment.clone();
+        let registry = binding.registry.clone();
+        Arc::new(move || {
+            if attachment.phase() != MediaAttachmentPhase::Revoked {
+                return;
+            }
+            registry.unregister_attachment(attachment.id());
+            let (host_id, generation) = key.clone();
+            let callback = media_devices.clone();
+            if let Err(error) = harness_runtime::mobile::spawn_mobile_lifecycle_task(async move {
+                callback.attachment_drained(host_id, generation).await;
+            }) {
+                tracing::error!(%error, "could not schedule confirmed iOS attachment callback");
+                return;
+            }
+            if let Some(routes) = routes.upgrade() {
+                let mut routes = routes.lock().unwrap_or_else(|error| error.into_inner());
+                if routes
+                    .get(&key)
+                    .is_some_and(|current| Arc::as_ptr(current) as usize == binding_ptr)
+                {
+                    routes.remove(&key);
+                }
+            }
+            if let Some(orphaned_routes) = orphaned_routes.upgrade() {
+                orphaned_routes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(&binding_ptr);
+            }
+        })
+    }
+
+    fn revoke_unbuilt_attachment(&self, binding: Arc<MediaAudioSessionBindingGuard>) {
+        binding.attachment.begin_revoke();
+        let attachment = binding.attachment.clone();
+        let on_confirmed = self.attachment_confirmed_callback(&binding);
+        if let Err(error) = harness_runtime::mobile::spawn_mobile_lifecycle_task(async move {
+            match attachment.revoke(std::time::Duration::from_secs(5)).await {
+                MediaAttachmentRevocation::Confirmed => on_confirmed(),
+                MediaAttachmentRevocation::Unknown { reason }
+                    if attachment.phase() == MediaAttachmentPhase::Revoking =>
+                {
+                    tracing::warn!(%reason, "unbuilt iOS media drain remains in flight");
+                    if attachment.wait_for_drain_completion().await == MediaAttachmentPhase::Revoked
+                    {
+                        on_confirmed();
+                    }
+                }
+                MediaAttachmentRevocation::Unknown { reason } => {
+                    tracing::error!(%reason, "unbuilt iOS media attachment remains unknown");
+                }
+            }
+        }) {
+            // The strong attachment route remains in `attachment_routes`; the
+            // failure is visible and no caller may assume cleanup completed.
+            tracing::error!(%error, "could not schedule unbuilt iOS media attachment drain");
+        }
+    }
+
     fn track_engine_route(
         &self,
         engine: &Arc<MobileEngineHandle>,
@@ -388,12 +650,6 @@ impl IosNativeMediaHost {
 
     pub(crate) fn cloud_audio_registry(&self) -> Arc<AudioProviderCloudRegistry> {
         self.inner.cloud_audio_registry()
-    }
-
-    pub(crate) fn media_conversation_attachment(
-        &self,
-    ) -> Arc<dyn harness_runtime::mobile::MediaConversationAttachment> {
-        self.conversation_attachment.clone()
     }
 
     pub(crate) async fn attach_incoming_session(
@@ -602,14 +858,20 @@ pub fn build_ios_engine_with_config(
     location: Option<Box<dyn IosLocation>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     with_engine_media_host(config.app_agent_host, media_host, |media_host| {
-        let route_guard = media_host.as_ref().map(|host| {
-            Arc::new(MediaAudioSessionBindingGuard::new(
-                host.inner.cloud_audio_registry(),
-            ))
-        });
+        #[cfg(target_os = "ios")]
+        let route_scope = media_host
+            .as_ref()
+            .map(|host| host.create_engine_media_scope())
+            .transpose()?;
+        #[cfg(not(target_os = "ios"))]
+        let route_scope: Option<(
+            Arc<MediaAudioSessionBindingGuard>,
+            Arc<dyn harness_runtime::mobile::MediaConversationAttachment>,
+        )> = None;
+        let listener_guard = route_scope.as_ref().map(|(guard, _)| guard.clone());
         let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge {
             inner: listener,
-            _media_route_guard: retain_media_route_guard(route_guard.as_ref()),
+            _media_route_guard: retain_media_route_guard(listener_guard.as_ref()),
         });
         #[cfg(target_os = "ios")]
         let device_control = device_control.map(|inner| Arc::new(IosDeviceControlBridge { inner }));
@@ -635,75 +897,98 @@ pub fn build_ios_engine_with_config(
             let deep_link =
                 device_control.map(|service| service as Arc<dyn lingxi_core::host::DeepLinkOpener>);
 
-            let mut cfg = ios_mobile_config_from_launch_config(&config)?;
-            if let Some(host) = media_host.as_ref() {
-                cfg.media_service = Some(host.media_service());
-                cfg.media_conversation_attachment = Some(host.media_conversation_attachment());
-            }
-            let additional_workspace_mounts = ios_project_mount_grants(&config)?;
-            let (workspace_host_path, stable_workspace_id) = match config.mobile_linux.as_ref() {
-                Some(linux) => {
-                    let (workspace, stable_id) =
-                        validate_mobile_linux_workspace_config(&config.app_sandbox_root, linux)
-                            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
-                    (Some(workspace), Some(stable_id))
+            // Keep every fallible engine-construction step inside this result so a
+            // failure after attachment admission always starts the host-owned drain.
+            let build_result = (|| -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
+                let mut cfg = ios_mobile_config_from_launch_config(&config)?;
+                if let (Some(host), Some((route_guard, conversation_attachment))) =
+                    (media_host.as_ref(), route_scope.as_ref())
+                {
+                    cfg.media_service = Some(route_guard.attachment.service());
+                    cfg.media_attachment_handle = Some(route_guard.attachment.clone());
+                    cfg.media_attachment_confirmed_callback =
+                        Some(host.attachment_confirmed_callback(route_guard));
+                    cfg.media_conversation_attachment = Some(conversation_attachment.clone());
                 }
-                None if config.app_agent_host => (None, None),
-                None => {
-                    return Err(MobileEngineError::Internal(
-                        "iOS conversations require Mobile Linux".into(),
-                    ));
+                let additional_workspace_mounts = ios_project_mount_grants(&config)?;
+                let (workspace_host_path, stable_workspace_id) = match config.mobile_linux.as_ref()
+                {
+                    Some(linux) => {
+                        let (workspace, stable_id) =
+                            validate_mobile_linux_workspace_config(&config.app_sandbox_root, linux)
+                                .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+                        (Some(workspace), Some(stable_id))
+                    }
+                    None if config.app_agent_host => (None, None),
+                    None => {
+                        return Err(MobileEngineError::Internal(
+                            "iOS conversations require Mobile Linux".into(),
+                        ));
+                    }
+                };
+                let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
+                    brand_profile: cfg.brand_runtime_profile.clone(),
+                    app_sandbox_root: std::path::PathBuf::from(&config.app_sandbox_root),
+                    camera,
+                    audio,
+                    share: Arc::new(IosShareBridge { inner: share }),
+                    notifications: Some(Arc::new(IosNotificationBridge {
+                        inner: notifications,
+                    })),
+                    clipboard: Some(Arc::new(IosClipboardBridge { inner: clipboard })),
+                    device_status,
+                    haptics,
+                    deep_link,
+                    calendar,
+                    contacts,
+                    secure_storage: secure_storage.map(|s| {
+                        Arc::new(IosSecureStorageBridge { inner: s })
+                            as Arc<dyn lingxi_core::host::SecureStorage>
+                    }),
+                    location: location.map(|l| {
+                        Arc::new(IosLocationBridge { inner: l })
+                            as Arc<dyn lingxi_core::host::LocationProvider>
+                    }),
+                    mobile_linux: ios_mobile_linux_runtime_with_project_mounts(
+                        config.mobile_linux.as_ref(),
+                        additional_workspace_mounts.clone(),
+                    ),
+                    workspace_host_path,
+                    stable_workspace_id,
+                    additional_workspace_mounts,
+                }));
+                let permission_sink: Arc<dyn PermissionRequestSink> =
+                    Arc::new(IosPermissionSinkBridge { inner: permissions });
+                let engine = harness_runtime::mobile::build_mobile_engine(
+                    cfg,
+                    platform,
+                    listener,
+                    permission_sink,
+                )?;
+                if let (Some(host), Some((route_guard, _))) =
+                    (media_host.as_ref(), route_scope.as_ref())
+                {
+                    host.track_engine_route(&engine, route_guard);
+                    // This UniFFI constructor remains synchronous for its Swift callers.
+                    // It runs outside the engine runtime, so use the engine-owned runtime
+                    // for the initial trusted provider/session binding.
+                    engine
+                        .runtime()
+                        .block_on(host.update_audio_session_context(engine.clone()))?;
                 }
-            };
-            let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
-                brand_profile: cfg.brand_runtime_profile.clone(),
-                app_sandbox_root: std::path::PathBuf::from(&config.app_sandbox_root),
-                camera,
-                audio,
-                share: Arc::new(IosShareBridge { inner: share }),
-                notifications: Some(Arc::new(IosNotificationBridge {
-                    inner: notifications,
-                })),
-                clipboard: Some(Arc::new(IosClipboardBridge { inner: clipboard })),
-                device_status,
-                haptics,
-                deep_link,
-                calendar,
-                contacts,
-                secure_storage: secure_storage.map(|s| {
-                    Arc::new(IosSecureStorageBridge { inner: s })
-                        as Arc<dyn lingxi_core::host::SecureStorage>
-                }),
-                location: location.map(|l| {
-                    Arc::new(IosLocationBridge { inner: l })
-                        as Arc<dyn lingxi_core::host::LocationProvider>
-                }),
-                mobile_linux: ios_mobile_linux_runtime_with_project_mounts(
-                    config.mobile_linux.as_ref(),
-                    additional_workspace_mounts.clone(),
-                ),
-                workspace_host_path,
-                stable_workspace_id,
-                additional_workspace_mounts,
-            }));
-            let permission_sink: Arc<dyn PermissionRequestSink> =
-                Arc::new(IosPermissionSinkBridge { inner: permissions });
-            let engine = harness_runtime::mobile::build_mobile_engine(
-                cfg,
-                platform,
-                listener,
-                permission_sink,
-            )?;
-            if let Some((host, guard)) = media_host.as_ref().zip(route_guard.as_ref()) {
-                host.track_engine_route(&engine, guard);
-                // This UniFFI constructor remains synchronous for its Swift callers.
-                // It runs outside the engine runtime, so use the engine-owned runtime
-                // for the initial trusted provider/session binding.
-                engine
-                    .runtime()
-                    .block_on(host.update_audio_session_context(engine.clone()))?;
+                Ok(engine)
+            })();
+            match build_result {
+                Ok(engine) => Ok(engine),
+                Err(error) => {
+                    if let (Some(host), Some((route_guard, _))) =
+                        (media_host.as_ref(), route_scope.as_ref())
+                    {
+                        host.revoke_unbuilt_attachment(route_guard.clone());
+                    }
+                    Err(error)
+                }
             }
-            Ok(engine)
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -711,6 +996,8 @@ pub fn build_ios_engine_with_config(
                 config,
                 listener,
                 media_host,
+                route_scope,
+                listener_guard,
                 share,
                 notifications,
                 clipboard,
@@ -810,16 +1097,65 @@ pub fn build_ios_engine(
 mod media_host_policy_tests {
     use super::{retain_media_route_guard, with_engine_media_host, MediaAudioSessionBindingGuard};
     use audio_provider::media_cloud::AudioProviderCloudRegistry;
-    use harness_runtime::mobile::MobileEngineError;
+    use harness_runtime::mobile::{MediaAttachmentHost, MobileEngineError};
     use std::cell::Cell;
     use std::sync::Arc;
+
+    struct EmptyAttachmentMediaService;
+
+    #[async_trait::async_trait]
+    impl media_api::MediaService for EmptyAttachmentMediaService {
+        fn capabilities(&self) -> media_api::MediaCapabilities {
+            media_api::MediaCapabilities {
+                service_epoch: 1,
+                support_revision: 1,
+                supported_operations: Vec::new(),
+                supported_media_kinds: Vec::new(),
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: media_api::MediaOperationContext,
+            _operation: media_api::MediaOperation,
+        ) -> Result<media_api::MediaResult, media_api::MediaError> {
+            Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::Unsupported,
+                "empty attachment fixture",
+            ))
+        }
+
+        async fn read_media(
+            &self,
+            _context: media_api::MediaOperationContext,
+            _media: media_api::MediaRef,
+        ) -> Result<media_api::MediaContent, media_api::MediaError> {
+            Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::NotFound,
+                "empty attachment fixture",
+            ))
+        }
+
+        async fn cancel(
+            &self,
+            _context: media_api::MediaOperationContext,
+        ) -> Result<(), media_api::MediaError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn listener_guard_retains_the_route_until_listener_release() {
         assert!(retain_media_route_guard(None).is_none());
 
         let registry = Arc::new(AudioProviderCloudRegistry::new("wav"));
-        let guard = Arc::new(MediaAudioSessionBindingGuard::new(registry));
+        let attachment_host = MediaAttachmentHost::new();
+        let attachment = attachment_host
+            .attach(Arc::new(EmptyAttachmentMediaService))
+            .unwrap();
+        let guard = Arc::new(MediaAudioSessionBindingGuard::new(registry, attachment));
         let weak = Arc::downgrade(&guard);
         let retained = retain_media_route_guard(Some(&guard)).unwrap();
         assert!(retained.is::<MediaAudioSessionBindingGuard>());
@@ -894,31 +1230,271 @@ mod tests {
         let registry = Arc::new(AudioProviderCloudRegistry::new("audio/wav"));
         let provider =
             Arc::new(AudioProviderHost::new("{}", "international", None, BTreeMap::new()).unwrap());
-        let guard = MediaAudioSessionBindingGuard::new(registry.clone());
+        let current = std::sync::Mutex::new(None);
         let first = registry
             .register_session("session", "first", "profile:first", provider.clone())
             .unwrap();
-        guard.update(MediaAudioSessionBindingFfi {
-            session_id: "session".into(),
-            generation: first,
-        });
-        guard.clear();
+        replace_audio_session_binding(
+            &registry,
+            &current,
+            MediaAudioSessionBindingFfi {
+                attachment_host_id: "00000000-0000-4000-8000-000000000001".into(),
+                attachment_generation: 1,
+                session_id: "session".into(),
+                generation: first,
+            },
+        );
+        clear_audio_session_binding(&registry, &current);
         assert_eq!(registry.session_identity("session"), None);
 
         let old = registry
             .register_session("session", "old", "profile:old", provider.clone())
             .unwrap();
-        guard.update(MediaAudioSessionBindingFfi {
-            session_id: "session".into(),
-            generation: old,
-        });
+        replace_audio_session_binding(
+            &registry,
+            &current,
+            MediaAudioSessionBindingFfi {
+                attachment_host_id: "00000000-0000-4000-8000-000000000001".into(),
+                attachment_generation: 1,
+                session_id: "session".into(),
+                generation: old,
+            },
+        );
         registry
             .register_session("session", "new", "profile:new", provider)
             .unwrap();
-        guard.clear();
+        clear_audio_session_binding(&registry, &current);
         assert_eq!(
             registry.session_identity("session"),
             Some(("new".into(), "profile:new".into()))
         );
+    }
+
+    #[test]
+    fn same_session_routes_are_isolated_by_engine_attachment_registry() {
+        let first_registry = AudioProviderCloudRegistry::new("audio/wav");
+        let second_registry = AudioProviderCloudRegistry::new("audio/wav");
+        let provider =
+            Arc::new(AudioProviderHost::new("{}", "international", None, BTreeMap::new()).unwrap());
+        let first_generation = first_registry
+            .register_session("session", "first", "account:first", provider.clone())
+            .unwrap();
+        let second_generation = second_registry
+            .register_session("session", "second", "account:second", provider)
+            .unwrap();
+
+        first_registry.unregister_session_if_generation("session", first_generation);
+
+        assert_eq!(first_registry.session_identity("session"), None);
+        assert_eq!(
+            second_registry.session_identity("session"),
+            Some(("second".into(), "account:second".into()))
+        );
+        assert_eq!(first_generation, second_generation);
+    }
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod mobile_media_scope_tests {
+    use super::super::callbacks::{CameraFfiError, CapturedImageFfi, IosAudioFfiError};
+    use super::*;
+    use client::protocol::{audio as audio_dto, media as media_dto};
+    use media_api::{
+        MediaOperation, MediaOperationContext, MediaOperationId, MediaOperationKind, MediaOwner,
+        MediaResult,
+    };
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    struct Audio;
+    #[async_trait::async_trait]
+    impl IosAudioService for Audio {
+        fn capabilities(&self) -> audio_dto::AudioCapabilitySnapshotDto {
+            audio_dto::AudioCapabilitySnapshotDto {
+                service_epoch: 1,
+                support_revision: 1,
+                supported_operations: Vec::new(),
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+        async fn execute(
+            &self,
+            request: audio_dto::AudioOperationRequestDto,
+        ) -> audio_dto::AudioOperationResultDto {
+            match request.operation {
+                audio_dto::AudioOperationDto::Status { handle: None } => {
+                    audio_dto::AudioOperationResultDto::Status {
+                        status: audio_dto::AudioStatusDto {
+                            recording: false,
+                            playing: false,
+                        },
+                    }
+                }
+                _ => panic!("unexpected audio operation in idle media fixture"),
+            }
+        }
+        async fn cancel(&self, _: audio_dto::AudioOperationIdDto) -> Result<(), IosAudioFfiError> {
+            Ok(())
+        }
+    }
+    struct Camera;
+    #[async_trait::async_trait]
+    impl IosCamera for Camera {
+        async fn capture_photo(
+            &self,
+            _: bool,
+            _: bool,
+        ) -> Result<CapturedImageFfi, CameraFfiError> {
+            Err(CameraFfiError::DeviceUnavailable)
+        }
+        async fn pick_from_library(&self) -> Result<CapturedImageFfi, CameraFfiError> {
+            Err(CameraFfiError::DeviceUnavailable)
+        }
+        async fn capture_photo_sized(
+            &self,
+            _: bool,
+            _: bool,
+            _: u32,
+            _: f32,
+        ) -> Result<CapturedImageFfi, CameraFfiError> {
+            Err(CameraFfiError::DeviceUnavailable)
+        }
+        async fn pick_from_library_sized(
+            &self,
+            _: u32,
+            _: f32,
+        ) -> Result<CapturedImageFfi, CameraFfiError> {
+            Err(CameraFfiError::DeviceUnavailable)
+        }
+    }
+    struct Devices;
+    #[async_trait::async_trait]
+    impl IosMediaDevicePorts for Devices {
+        fn supported_session_modes(&self) -> Vec<media_dto::MediaSessionModeDto> {
+            Vec::new()
+        }
+        async fn request(
+            &self,
+            _: media_dto::MediaDeviceRequestEnvelopeDto,
+        ) -> media_dto::MediaDeviceResponseDto {
+            panic!("this fixture does not open devices")
+        }
+        async fn attachment_drained(&self, _: String, _: u64) {}
+    }
+
+    #[tokio::test]
+    async fn native_host_engine_scopes_share_service_without_sharing_owner_routes() {
+        let config = r#"{"schemaVersion":4,"recognition":{"source":"automatic","cloud":{"binding":"follow_session"}},"speech":{"source":"automatic","cloud":{"binding":"follow_session"}},"language":"auto","rate":1.0}"#;
+        let host = IosNativeMediaHost::new(
+            Box::new(Audio),
+            Box::new(Camera),
+            Box::new(Devices),
+            config.into(),
+        )
+        .unwrap();
+        let (first_binding, _) = host.create_engine_media_scope().unwrap();
+        let (second_binding, _) = host.create_engine_media_scope().unwrap();
+        let first = &first_binding.attachment;
+        let second = &second_binding.attachment;
+        assert_ne!(first.id(), second.id());
+        assert!(Arc::ptr_eq(
+            &first_binding.registry,
+            &second_binding.registry
+        ));
+        assert!(Arc::ptr_eq(
+            &first_binding.registry,
+            &host.inner.cloud_audio_registry()
+        ));
+        let owner = MediaOwner::Session {
+            session_id: "same-session".into(),
+        };
+        for (generation, attachment) in [(1, first), (2, second)] {
+            // Harness mobile assembly binds the platform audio service to the
+            // same attachment, even if the engine never uses direct audio.
+            let _audio = attachment.audio_service(host.audio_service()).unwrap();
+            let service = attachment.service();
+            let capabilities = service.capabilities_for(&owner);
+            assert!(capabilities.supports(MediaOperationKind::Sources));
+            let context = MediaOperationContext::new(
+                MediaOperationId::new(generation, capabilities.service_epoch),
+                owner.clone(),
+            );
+            assert!(matches!(
+                service
+                    .execute(
+                        context,
+                        MediaOperation::Sources {
+                            kind: None,
+                            usage: None
+                        }
+                    )
+                    .await,
+                Ok(MediaResult::Sources { .. })
+            ));
+        }
+        let provider = || {
+            Arc::new(AudioProviderHost::new("{}", "international", None, BTreeMap::new()).unwrap())
+        };
+        let first_provider = provider();
+        let second_provider = provider();
+        let registry = first_binding.registry.clone();
+        for (attachment, provider) in [(first, &first_provider), (second, &second_provider)] {
+            let permit = attachment.authorize_owner(&owner).unwrap();
+            registry
+                .register_attached_profile(&permit, "openai", provider.clone())
+                .unwrap();
+            registry
+                .bind_attached_session_to_profile(&permit, "openai", "profile:openai")
+                .unwrap();
+        }
+        let callback = host.attachment_confirmed_callback(&first_binding);
+        callback();
+        assert!(registry
+            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .is_ok());
+        let (idle, _) = host.create_engine_media_scope().unwrap();
+        let _idle_audio = idle.attachment.audio_service(host.audio_service()).unwrap();
+        let idle_key = idle.identity();
+        let idle_callback = host.attachment_confirmed_callback(&idle);
+        assert_eq!(
+            idle.attachment.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        idle_callback();
+        assert!(!host
+            .attachment_routes
+            .lock()
+            .unwrap()
+            .contains_key(&idle_key));
+        first.begin_revoke();
+        callback();
+        assert!(registry
+            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .is_ok());
+        assert_eq!(
+            first.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        callback();
+        assert!(registry
+            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .is_err());
+        assert!(Arc::ptr_eq(
+            &registry
+                .provider_for_attached_session(
+                    second.id(),
+                    "same-session",
+                    "openai",
+                    "profile:openai"
+                )
+                .unwrap(),
+            &second_provider
+        ));
+        assert_eq!(
+            second.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        host.attachment_confirmed_callback(&second_binding)();
     }
 }

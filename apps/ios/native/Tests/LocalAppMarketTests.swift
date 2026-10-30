@@ -61,8 +61,9 @@ final class LocalAppMarketTests: XCTestCase {
         XCTAssertEqual(LocalAppAgentModelHost.usesMobileLinuxRuntime, hasMobileLinuxTarget)
     }
     func testMobileAuthoringReferenceAndTaskWireShape() throws {
+        let configDirectory = MobileUserStorage.directories().configDirName
         let authoring = LocalAppAuthoring(
-            sourceDirectory: "/home/user/.lingxi/.apps/app-source",
+            sourceDirectory: "/home/user/\(configDirectory)/.apps/app-source",
             workspaceId: "12345678-1234-4abc-8def-1234567890ab",
             projectRef: .mobileProject("12345678-1234-4abc-8def-1234567890ab"),
             authoringSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -73,7 +74,7 @@ final class LocalAppMarketTests: XCTestCase {
         let project = try XCTUnwrap(object["projectRef"] as? [String: Any])
         XCTAssertEqual(project["kind"] as? String, "mobileProject")
         XCTAssertEqual(project["projectId"] as? String, "12345678-1234-4abc-8def-1234567890ab")
-        let incomplete = try JSONDecoder().decode(LocalAppAuthoring.self, from: Data(#"{"sourceDirectory":"/home/user/.lingxi/.apps/legacy"}"#.utf8))
+        let incomplete = try JSONDecoder().decode(LocalAppAuthoring.self, from: Data(#"{"sourceDirectory":"/home/user/\#(configDirectory)/.apps/legacy"}"#.utf8))
         XCTAssertNil(incomplete.workspaceId)
         XCTAssertNil(incomplete.projectRef)
 

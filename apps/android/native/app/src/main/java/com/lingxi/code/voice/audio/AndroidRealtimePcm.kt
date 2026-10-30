@@ -41,6 +41,7 @@ internal data class RealtimePcmCaptureFrame(
 
 internal class AndroidRealtimePcmCapture {
     val paused = AtomicBoolean(false)
+    val nativeAllocationAttempted = AtomicBoolean(false)
     private val stopped = AtomicBoolean(false)
     @Volatile private var recorder: AudioRecord? = null
     fun stop() { stopped.set(true); recorder?.let { runCatching { it.stop() } } }
@@ -54,10 +55,20 @@ internal class AndroidRealtimePcmCapture {
         format: RealtimePcmFormat,
         onChunk: suspend (RealtimePcmCaptureFrame) -> Unit,
         onReady: () -> Unit = {},
+        closeReceipt: AndroidMediaNativeCloseReceipt? = null,
     ) = withContext(Dispatchers.IO) {
-        format.requireSupported()
-        val min = AudioRecord.getMinBufferSize(format.sampleRateHz, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        if (min <= 0) throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "Realtime microphone is unavailable.")
+        val min = try {
+            format.requireSupported()
+            AudioRecord.getMinBufferSize(format.sampleRateHz, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        } catch (error: Throwable) {
+            closeReceipt?.confirmNoResource()
+            throw error
+        }
+        if (min <= 0) {
+            closeReceipt?.confirmNoResource()
+            throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "Realtime microphone is unavailable.")
+        }
+        nativeAllocationAttempted.set(true)
         val native = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, format.sampleRateHz, AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT, maxOf(min, format.sampleRateHz / 5))
         recorder = native
@@ -87,13 +98,21 @@ internal class AndroidRealtimePcmCapture {
             }
         } finally {
             recorder = null
-            runCatching { native.stop() }; native.release()
+            runCatching { native.stop() }
+            try {
+                native.release()
+                closeReceipt?.confirmNoResource()
+            } catch (error: Throwable) {
+                closeReceipt?.failNativeClose(error)
+                throw error
+            }
         }
     }
 }
 
 internal class AndroidRealtimePcmPlayback(private val context: android.content.Context) {
     private val stopped = AtomicBoolean(false)
+    val nativeAllocationAttempted = AtomicBoolean(false)
     private val activeWriteLock = Any()
     @Volatile private var track: AudioTrack? = null
     @Volatile private var sampleRateHz: Int = 0
@@ -188,10 +207,20 @@ internal class AndroidRealtimePcmPlayback(private val context: android.content.C
         format: RealtimePcmFormat,
         chunks: ReceiveChannel<RealtimePcmWrite>,
         onReady: () -> Unit = {},
+        closeReceipt: AndroidMediaNativeCloseReceipt? = null,
     ) = withContext(Dispatchers.IO) {
-        format.requireSupported()
-        val min = AudioTrack.getMinBufferSize(format.sampleRateHz, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        if (min <= 0) throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "Realtime speaker is unavailable.")
+        val min = try {
+            format.requireSupported()
+            AudioTrack.getMinBufferSize(format.sampleRateHz, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        } catch (error: Throwable) {
+            closeReceipt?.confirmNoResource()
+            throw error
+        }
+        if (min <= 0) {
+            closeReceipt?.confirmNoResource()
+            throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "Realtime speaker is unavailable.")
+        }
+        nativeAllocationAttempted.set(true)
         val native = AudioTrack.Builder().setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()).setAudioFormat(AudioFormat.Builder()
             .setSampleRate(format.sampleRateHz).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
@@ -277,9 +306,19 @@ internal class AndroidRealtimePcmPlayback(private val context: android.content.C
             }
             throw error
         } finally {
-            focus.unregister()
+            var cleanupFailure: Throwable? = null
+            try { focus.unregister() } catch (error: Throwable) { cleanupFailure = error }
             track = null
-            runCatching { native.stop() }; native.release()
+            runCatching { native.stop() }
+            try { native.release() }
+            catch (error: Throwable) {
+                if (cleanupFailure == null) cleanupFailure = error else cleanupFailure.addSuppressed(error)
+            }
+            cleanupFailure?.let {
+                closeReceipt?.failNativeClose(it)
+                throw it
+            }
+            closeReceipt?.confirmNoResource()
         }
     }
 

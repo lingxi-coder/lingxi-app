@@ -163,14 +163,13 @@ mod process_io {
                 if let Some(status) = self.child.try_wait().unwrap() {
                     return status;
                 }
-                if Instant::now() >= deadline {
-                    panic!(
-                        "headless process retained blocked IO after shutdown; pid={}; {}\n{}",
-                        self.child.id(),
-                        diagnostics(),
-                        process_thread_states(self.child.id()),
-                    );
-                }
+                assert!(
+                    Instant::now() < deadline,
+                    "headless process retained blocked IO after shutdown; pid={}; {}\n{}",
+                    self.child.id(),
+                    diagnostics(),
+                    process_thread_states(self.child.id()),
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
         }

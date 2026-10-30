@@ -140,6 +140,11 @@ pub trait IosMediaDevicePorts: Send + Sync {
         &self,
         request: client::protocol::media::MediaDeviceRequestEnvelopeDto,
     ) -> client::protocol::media::MediaDeviceResponseDto;
+
+    /// Called only after the host confirms that this attachment has drained.
+    /// Implementations must remove route state by the exact host-issued
+    /// attachment identity; Unknown teardown never invokes this callback.
+    async fn attachment_drained(&self, attachment_host_id: String, attachment_generation: u64);
 }
 
 #[cfg(feature = "uniffi")]
@@ -155,6 +160,19 @@ impl audio_provider::media_native::NativeMediaDeviceCallback for IosMediaDeviceP
         request: client::protocol::media::MediaDeviceRequestEnvelopeDto,
     ) -> client::protocol::media::MediaDeviceResponseDto {
         self.inner.request(request).await
+    }
+}
+
+#[cfg(feature = "uniffi")]
+impl IosMediaDevicePortsBridge {
+    pub(super) async fn attachment_drained(
+        &self,
+        attachment_host_id: String,
+        attachment_generation: u64,
+    ) {
+        self.inner
+            .attachment_drained(attachment_host_id, attachment_generation)
+            .await;
     }
 }
 

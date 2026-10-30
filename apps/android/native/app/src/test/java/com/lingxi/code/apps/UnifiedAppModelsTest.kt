@@ -55,7 +55,7 @@ class UnifiedAppModelsTest {
         val workspaceId = "123e4567-e89b-12d3-a456-426614174000"
         val projectId = "223e4567-e89b-12d3-a456-426614174000"
         val sessionId = "323e4567-e89b-12d3-a456-426614174000"
-        val source = "/tmp/.lingxi/.apps/calculator"
+        val source = "/tmp/.config/.apps/calculator"
         val record = JSONObject("""{"appId":"a0123456789abcdef0123456789abcdef","name":"Calculator","summary":"Offline","currentRevision":2,"latestRevision":3,"originPort":49123,"executionGrants":["digest"],"updatedAtMs":3,"authoring":{"workspaceId":"$workspaceId","sourceDirectory":"$source","projectRef":{"kind":"mobileProject","projectId":"$projectId"},"authoringSessionId":"$sessionId","appId":"a0123456789abcdef0123456789abcdef"},"marketOrigin":{"appId":"market-calculator","releaseId":"release-3","digest":"public-digest"}}""").appRecord()
         assertEquals(33, record.id.length)
         assertEquals("market-calculator", record.marketOrigin?.appId)

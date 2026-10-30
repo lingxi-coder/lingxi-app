@@ -1,4 +1,5 @@
 import { useI18n } from '../../../i18n/useI18n';
+import { desktopHost } from '../../../bridge/bridgeConnection';
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useT } from '../../../theme/ThemeContext';
 import { Icon } from '../../Icon';
@@ -11,7 +12,7 @@ function ApplicationIcon({ bundleId, fallback }: { bundleId: string; fallback: R
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
-    void window.lingxi?.applicationIcon?.get(bundleId).then((icon) => {
+    void desktopHost()?.applicationIcon?.get(bundleId).then((icon) => {
       if (active && icon?.startsWith('data:image/png;base64,')) setUrl(icon);
     }).catch(() => undefined);
     return () => { active = false; };

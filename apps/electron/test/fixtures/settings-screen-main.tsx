@@ -140,6 +140,10 @@ function Fixture() {
       models: [],
       modelDetails: [],
       currentModel: 'openai/gpt-5.4',
+      providerModelCatalog: [{
+        provider_id: 'deepseek', provider_label: 'DeepSeek', models: [],
+        definition: { base_url: 'https://api.deepseek.com', protocol: 'open_ai_chat', auth: 'api_key', credential_env: null, default_model_id: 'deepseek-flash', description: 'V4' },
+      }],
       conversationControls: null,
       fastMode: false,
       permissionMode: 'default',
@@ -291,6 +295,7 @@ function Fixture() {
       setProviderCredentials((values) => values.filter((entry) => entry.providerId !== providerId));
     },
     refreshProviderCredential: noopAsyncVoid,
+    refreshModelPicker: noopAsyncVoid,
     setModelPickerVisibility: noopAsyncVoid,
     updatePermissionRules,
     setDefaultPermissionMode: noopAsyncVoid,

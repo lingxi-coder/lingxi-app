@@ -76,12 +76,67 @@ final class VoiceAudioSessionCoordinatorTests: XCTestCase {
 
         await coordinator.release(currentLease)
     }
+
+    func testFailedDeactivationRetainsExactLeaseUntilConfirmedRetry() async throws {
+        let driver = RecordingVoiceAudioSessionDriver()
+        let coordinator = VoiceAudioSessionCoordinator(sessionDriver: driver)
+        let lease = try await coordinator.acquire(.recording)
+        driver.setDeactivationSucceeds(false)
+
+        let first = await coordinator.releaseWithReceipt(lease)
+        XCTAssertFalse(first)
+        let stillOwned = await coordinator.owns(lease)
+        XCTAssertTrue(stillOwned)
+        do {
+            _ = try await coordinator.acquire(.playback)
+            XCTFail("unconfirmed cleanup must retain its audio owner")
+        } catch VoiceAudioSessionCoordinator.CoordinationError.busy(.recording) {
+        }
+
+        driver.setDeactivationSucceeds(true)
+        let second = await coordinator.releaseWithReceipt(lease)
+        XCTAssertTrue(second)
+        let released = await coordinator.owns(lease)
+        XCTAssertFalse(released)
+        let replacement = try await coordinator.acquire(.playback)
+        await coordinator.release(replacement)
+    }
+
+    func testPartialMediaActivationRetainsLeaseUntilCloseIsConfirmed() async throws {
+        let driver = RecordingVoiceAudioSessionDriver()
+        driver.setActivationSucceeds(false)
+        driver.setDeactivationSucceeds(false)
+        let coordinator = VoiceAudioSessionCoordinator(sessionDriver: driver)
+        guard case let .activationFailed(lease, _) = await coordinator.acquireForMedia(.recording) else {
+            return XCTFail("an attempted but failed activation must retain its exact lease")
+        }
+        let first = await coordinator.releaseWithReceipt(lease)
+        XCTAssertFalse(first)
+        let stillOwned = await coordinator.owns(lease)
+        XCTAssertTrue(stillOwned)
+        driver.setDeactivationSucceeds(true)
+        let retry = await coordinator.releaseWithReceipt(lease)
+        XCTAssertTrue(retry)
+    }
+
+    func testBusyMediaAdmissionDoesNotCallNativeActivation() async throws {
+        let driver = RecordingVoiceAudioSessionDriver()
+        let coordinator = VoiceAudioSessionCoordinator(sessionDriver: driver)
+        let lease = try await coordinator.acquire(.recording)
+        guard case .notAdmitted(.recording) = await coordinator.acquireForMedia(.playback) else {
+            return XCTFail("busy admission must reject before dispatch")
+        }
+        XCTAssertEqual(driver.activationCount, 1)
+        await coordinator.release(lease)
+    }
 }
 
 private final class RecordingVoiceAudioSessionDriver: VoiceAudioSessionDriving, @unchecked Sendable {
     private let lock = NSLock()
     private var activations = 0
     private var deactivations = 0
+    private var deactivationSucceeds = true
+    private var activationSucceeds = true
 
     var activationCount: Int {
         lock.lock()
@@ -99,6 +154,7 @@ private final class RecordingVoiceAudioSessionDriver: VoiceAudioSessionDriving, 
         lock.lock()
         defer { lock.unlock() }
         activations += 1
+        if !activationSucceeds { throw TestActivationFailure() }
     }
 
     func deactivate() {
@@ -106,4 +162,25 @@ private final class RecordingVoiceAudioSessionDriver: VoiceAudioSessionDriving, 
         defer { lock.unlock() }
         deactivations += 1
     }
+
+    func setDeactivationSucceeds(_ succeeds: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        deactivationSucceeds = succeeds
+    }
+
+    func setActivationSucceeds(_ succeeds: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        activationSucceeds = succeeds
+    }
+
+    func deactivateWithReceipt() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        deactivations += 1
+        return deactivationSucceeds
+    }
 }
+
+private struct TestActivationFailure: Error {}

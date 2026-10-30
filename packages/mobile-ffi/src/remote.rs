@@ -2049,12 +2049,12 @@ impl RemoteControlCore {
         // Once admitted, keep both the Core and its host lock until the
         // platform delete finishes, even if the foreign caller cancels.
         tokio::spawn(async move {
-            let _guard = guard;
-            // The weak host registry must keep resolving to this gate while
-            // the detached transaction owns the lock.
-            let _gate = gate;
             core.parts.keys.unpair(&host_id).await;
             core.tunnel_memory.forget(&host_id);
+            // The weak host registry must resolve to this gate until the
+            // detached transaction releases its host lock.
+            drop(guard);
+            drop(gate);
         })
         .await
         .expect("forget transaction panicked");

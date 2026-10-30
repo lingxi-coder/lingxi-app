@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { validateLocalAppRunInput } from '../vendor/local-app-agui/dist/client.bundle.js';
 import { MealAgentTask, revisionStorage } from '../../../fixtures/local-apps/v2/calorie-agent/agui-task.mjs';
 import { nutritionSchema, recognitionPrompt } from '../../../fixtures/local-apps/v2/calorie-agent/nutrition.mjs';
+
+globalThis.LingxiLocalAppAGUI = { validateLocalAppRunInput };
 
 const fixtureRoot = new URL('../../../fixtures/local-apps/v2/calorie-agent/', import.meta.url);
 

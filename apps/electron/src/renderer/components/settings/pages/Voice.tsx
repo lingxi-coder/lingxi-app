@@ -283,7 +283,7 @@ export function Voice({ bridge }: PageContentProps) {
     try {
       const response = await bridge.audioExecute(operation, undefined, configurationOverride);
       setSnapshot(response.snapshot);
-      if (response.result.type === 'failed') setOperationError(`${response.result.error.kind}: ${response.result.error.message}`);
+      if (response.result.type === 'failed' || response.result.type === 'failed_without_resource') setOperationError(`${response.result.error.kind}: ${response.result.error.message}`);
     } catch (cause) {
       setOperationError(cause instanceof Error ? cause.message : tr("desktop_voice_operation_failed"));
     }

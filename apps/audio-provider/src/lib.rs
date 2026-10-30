@@ -116,6 +116,14 @@ impl AudioProviderHost {
         self.client.snapshot()
     }
 
+    /// Unbound standalone hosts have no dynamic owner catalog. A bound host
+    /// must continue to match its owner's scoped provider configuration.
+    pub(crate) fn profile_is_current(&self, profile: &str) -> bool {
+        self.bound_services
+            .as_ref()
+            .is_none_or(|services| services.profile_is_current(profile))
+    }
+
     /// Resolve a credential for an already pinned profile without exposing it
     /// to logs or native callback DTOs.
     pub(crate) async fn credential_for_profile(

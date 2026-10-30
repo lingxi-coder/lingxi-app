@@ -62,8 +62,11 @@ final class IOSNativeMediaHostComposition {
         try await nativeHost.updateAudioSessionContext(engine: engine)
     }
 
-    func removeAudioSessionContext(sessionID: String, generation: UInt64) {
-        nativeHost.removeAudioSessionContext(sessionId: sessionID, generation: generation)
+    func removeAudioSessionContext(
+        for engine: MobileEngineHandle,
+        binding: MediaAudioSessionBindingFfi
+    ) {
+        nativeHost.removeAudioSessionContext(engine: engine, binding: binding)
     }
 }
 

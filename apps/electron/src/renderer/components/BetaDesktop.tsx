@@ -2389,7 +2389,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   }), [activeSessionId]);
 
   const reportNativeAudioFailure = useCallback((result: AudioOperationResultDto): boolean => {
-    if (result.type !== 'failed') return false;
+    if (result.type !== 'failed' && result.type !== 'failed_without_resource') return false;
     setVoiceState(voiceStateAfterAudioFailure(result.error.kind));
     setAudioGuidance(audioSetupGuidance(result.error.kind, result.error.message));
     return true;

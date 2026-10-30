@@ -13,6 +13,11 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, symlin
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createPackagedSettings, runtimePathsForHome, sanitizePackagedAppEnvironment, runningAppCommands } from './packaged-app-smoke.mjs';
+import { BUNDLE_ID } from './package-support.mjs';
+
+const bridgeBundleId = `${BUNDLE_ID}.bridge-server.development`;
+const appBundleId = `${BUNDLE_ID}.development`;
+const escapeRegex = value => value.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&');
 
 const options = { app: '', root: '', fixtureRoot: '', swiftModuleCache: '', tccRoundtrip: false, tccScreenRoundtrip: false, explicitComputerRule: false };
 for (let i = 2; i < process.argv.length; i++) {
@@ -126,8 +131,8 @@ function currentOwnedBridgePids() {
 function parseOwnedTccAttribution(row, ownedBridgePids) {
   const message=row.eventMessage ?? '';
   const responsible=message.match(/responsible=\{TCCDProcess: identifier=([^,]+), pid=(\d+),[^}]*responsible_path=([^,}]+)/);
-  const accessing=message.match(/accessing=\{TCCDProcess: identifier=com\.lingxi\.code\.bridge-server\.development, pid=(\d+),[^}]*binary_path=([^}]+)/);
-  const requesting=message.match(/requesting=\{TCCDProcess: identifier=com\.lingxi\.code\.bridge-server\.development, pid=(\d+),[^}]*binary_path=([^}]+)/);
+  const accessing=message.match(new RegExp(String.raw`accessing=\{TCCDProcess: identifier=${escapeRegex(bridgeBundleId)}, pid=(\d+),[^}]*binary_path=([^}]+)`));
+  const requesting=message.match(new RegExp(String.raw`requesting=\{TCCDProcess: identifier=${escapeRegex(bridgeBundleId)}, pid=(\d+),[^}]*binary_path=([^}]+)`));
   const bridge=accessing ?? requesting, attributionRole=accessing ? 'accessing':'requesting';
   if(!responsible || !bridge || !ownedBridgePids.includes(Number(bridge[1])) || bridge[2].trim()!==bridgeExecutable)return null;
   const pathMatches=responsible[3].trim()===appExecutable;
@@ -206,7 +211,7 @@ async function launchOwnedPackagedApp() {
   const target = await waitFor(async () => { try { const response = await fetch(`http://127.0.0.1:${port}/json/list`); const targets = await response.json(); return targets.find(target => target.type === 'page' && target.url === rendererUrl); } catch { return false; } }, 'signed renderer target');
   page = new Cdp(target.webSocketDebuggerUrl); await page.send('Page.enable');
   await waitFor(async () => (await page.send('Page.getFrameTree')).frameTree.frame.url === rendererUrl, 'committed signed renderer');
-  await waitFor(() => evaluate('Boolean(window.lingxi?.computerSettings)'), 'real preload');
+  await waitFor(() => evaluate('Boolean(Reflect.get(window, "lingxi")?.computerSettings)'), 'real preload');
   receipt.applicationLaunches ??= [];receipt.applicationLaunches.push({applicationGeneration:appGeneration,pid:appProcessIdentity.pid,launchedAtUtc:attributionStarted.toISOString(),privateProfileReused:appGeneration>1});save();
   return port;
 }
@@ -459,7 +464,7 @@ try {
   phase('preflight');
   execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', options.app], { stdio: 'pipe' });
   const signature = spawnSync('/usr/bin/codesign', ['-dv', '--verbose=4', options.app], { encoding: 'utf8' });
-  assert.equal(signature.status, 0); assert.match(signature.stderr, /^TeamIdentifier=AZ4AX7J833$/m); assert.match(signature.stderr, /^Identifier=com\.lingxi\.code\.development$/m);
+  assert.equal(signature.status, 0); assert.match(signature.stderr, /^TeamIdentifier=AZ4AX7J833$/m); assert.match(signature.stderr, new RegExp(`^Identifier=${escapeRegex(appBundleId)}$`, 'm'));
   assert.deepEqual(runningAppCommands(), [], 'Close existing LingXi instances before this isolated acceptance; never terminate a user instance.');
   receipt.app = { path: options.app, signatureVerified: true, team: 'AZ4AX7J833', bundleId: 'com.lingxi.code.development' };
   const sidecar = join(options.app, 'Contents/Resources/bin/bridge-server');

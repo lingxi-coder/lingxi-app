@@ -713,6 +713,7 @@ mod tests {
     fn prepared() -> orchestrator::RealtimeAgentContext {
         orchestrator::RealtimeAgentContext {
             session_id: "current-session".into(),
+            attachment_id: None,
             profile_name: Some("current-profile".into()),
             account_scope: Some("profile:current-profile".into()),
             instructions: String::new(),

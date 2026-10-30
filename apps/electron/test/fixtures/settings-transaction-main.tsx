@@ -61,6 +61,7 @@ const bridge = {
     return new Promise<unknown>((resolve) => { resolvePersistence = resolve; });
   },
   restartBridge: async () => { restartCalls += 1; },
+  refreshModelPicker: async () => undefined,
   setModel: async () => undefined,
   clearProviderCredential: async () => ({ providerId: 'anthropic', configured: false, encryptionAvailable: true }),
   testProviderConnection: async () => {

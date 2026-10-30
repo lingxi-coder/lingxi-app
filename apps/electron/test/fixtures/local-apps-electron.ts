@@ -7,7 +7,13 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { LocalAppHost } from '../../src/main/local-apps/host';
+import { desktopTargets } from '../../src/main/local-apps/marketClient';
 import { LOCAL_APP_SERVICE_COOKIE_ORIGIN } from '../../src/main/local-apps/serviceCookies';
+
+if (!['darwin', 'win32', 'linux'].includes(process.platform)) throw new Error(`Unsupported Desktop fixture platform: ${process.platform}`);
+const nativeTarget = desktopTargets().find(target => target.environment === 'native');
+if (!nativeTarget) throw new Error(`Missing native Desktop fixture target for ${process.platform}`);
+const nativeTargets = [{ platform: nativeTarget.platform, environment: 'native' as const }];
 
 const root = process.env.LINGXI_TEST_USER_DATA!;
 process.on('uncaughtException', error => { process.stderr.write(`Uncaught: ${error.stack}\n`); app.exit(1); });
@@ -83,7 +89,7 @@ async function main() {
   const nonCodeSource = await nativeSource('chat-not-code', 'chat');
   await assert.rejects(host.request({ action: 'prepareAuthoring', session: nonCodeSource }), /Code session/);
   const appProject = join(host.store.importsRoot, 'native-created-source');
-  await fs.writeFile(join(firstSource.projectPath, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: [{ platform: 'macos', environment: 'native' }],
+  await fs.writeFile(join(firstSource.projectPath, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: nativeTargets,
     name: '识字花园', summary: '每天学习汉字，记录进步。', entry: { type: 'static', path: 'index.html' } }));
   await fs.writeFile(join(firstSource.projectPath, 'index.html'), html(1));
   await fs.rm(appProject, { recursive: true, force: true });
@@ -110,7 +116,7 @@ async function main() {
   const racingBinding = await host.request({ action: 'prepareAuthoring', session: racingSource }) as any;
   assert.equal(racingBinding.authoringSessionId, racingSource.sessionId);
   await fs.writeFile(join(racingSource.projectPath, 'lingxi-app.json'), JSON.stringify({ schema: 2,
-    targets: [{ platform: 'macos', environment: 'native' }], name: 'Concurrent publish probe',
+    targets: nativeTargets, name: 'Concurrent publish probe',
     entry: { type: 'static', path: 'index.html' } }));
   await fs.writeFile(join(racingSource.projectPath, 'index.html'), '<!doctype html><title>Concurrent publish probe</title>');
   const racingStage = join(host.store.importsRoot, 'concurrent-publish');
@@ -300,7 +306,7 @@ async function main() {
   let grants = 0;
   dialog.showMessageBox = (async (...args: any[]) => { const options = args.at(-1); assert.ok(options.detail.includes('local programs') || options.message.startsWith('Delete')); grants++; return { response: 1, checkboxChecked: false }; }) as typeof dialog.showMessageBox;
   const source = join(host.store.importsRoot, 'server'); await fs.mkdir(source);
-  await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Local backend', summary: 'Node service, installed and managed by LingXi', entry: { type: 'static', path: 'index.html' }, capabilities: ['files', 'clipboard'], install: [{ command: 'node -e "console.log(process.versions.node)"' }], processes: [{ name: 'api', command: 'node server.cjs', ready: { path: '/health', timeoutMs: 10000 } }] }));
+  await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: nativeTargets, name: 'Local backend', summary: 'Node service, installed and managed by LingXi', entry: { type: 'static', path: 'index.html' }, capabilities: ['files', 'clipboard'], install: [{ command: 'node -e "console.log(process.versions.node)"' }], processes: [{ name: 'api', command: 'node server.cjs', ready: { path: '/health', timeoutMs: 10000 } }] }));
   await fs.writeFile(join(source, 'index.html'), '<!doctype html><title>Local backend</title><h1 id="result">Loading…</h1><script>fetch("/__services/api/hello").then(r=>r.text()).then(t=>document.querySelector("h1").textContent=t)</script>');
   await fs.writeFile(join(source, 'server.cjs'), `const server=require('http').createServer((req,res)=>{
     if(req.url==='/exit'){res.end('bye');setTimeout(()=>process.exit(7),10)}
@@ -425,7 +431,7 @@ async function main() {
   // Server landing paths must retain their browser base URL. Exercise actual
   // relative scripts/fetches, URL escaping, compression and an in-place reload.
   const nestedSource = join(host.store.importsRoot, 'nested-server'); await fs.mkdir(nestedSource);
-  const nestedManifest = { schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Nested backend', entry: { type: 'server', process: 'web', path: '/ui nested/识字 #?.html' },
+  const nestedManifest = { schema: 2, targets: nativeTargets, name: 'Nested backend', entry: { type: 'server', process: 'web', path: '/ui nested/识字 #?.html' },
     processes: [{ name: 'web', command: 'node server.cjs', ready: { path: '/health', timeoutMs: 10000 } }] };
   await fs.writeFile(join(nestedSource, 'lingxi-app.json'), JSON.stringify(nestedManifest));
   await fs.writeFile(join(nestedSource, 'server.cjs'), `const http=require('http'),zlib=require('zlib');
@@ -471,7 +477,7 @@ async function main() {
 
   const cancelSource = join(host.store.importsRoot, 'cancel'); await fs.mkdir(cancelSource);
   await fs.writeFile(join(cancelSource, 'index.html'), '<!doctype html>cancel');
-  await fs.writeFile(join(cancelSource, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Canceled install', entry: { type: 'static', path: 'index.html' }, install: [{ command: `node -e "console.log('cancellable-begun');setInterval(()=>{},1000)"` }] }));
+  await fs.writeFile(join(cancelSource, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: nativeTargets, name: 'Canceled install', entry: { type: 'static', path: 'index.html' }, install: [{ command: `node -e "console.log('cancellable-begun');setInterval(()=>{},1000)"` }] }));
   const cancelApp = await tool({ action: 'publish', staged_path: cancelSource });
   const abort = new AbortController();
   const abandoned = assert.rejects(fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${discovery.token}` }, body: JSON.stringify({ action: 'start', id: cancelApp.id }), signal: abort.signal }));
@@ -516,7 +522,7 @@ async function main() {
   // after restart, while retaining the explicit app id in the error.
   const uncertainSource = await nativeSource('post-commit-retry');
   await fs.writeFile(join(uncertainSource.projectPath, 'lingxi-app.json'), JSON.stringify({ schema: 2,
-    targets: [{ platform: 'macos', environment: 'native' }], name: 'Committed before response',
+    targets: nativeTargets, name: 'Committed before response',
     entry: { type: 'static', path: 'index.html' } }));
   await fs.writeFile(join(uncertainSource.projectPath, 'index.html'), '<!doctype html><title>Commit probe</title>');
   await host.request({ action: 'prepareAuthoring', session: uncertainSource });

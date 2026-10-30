@@ -59,6 +59,7 @@ import {
   validateMediaConnectionRequest,
   validateMediaControlRequest,
   validateMediaDeviceRequestEnvelope,
+  validateMediaOwner,
   validateMediaServiceResponse,
 } from './mediaProtocol.js';
 
@@ -363,6 +364,8 @@ function audioIdentity(value: unknown): AudioOperationIdDto {
 function audioOwner(value: unknown): AudioOwnerDto {
   const input = object(value, 'audio owner');
   switch (input['type']) {
+    case 'attached':
+      return validateMediaOwner(input) as AudioOwnerDto;
     case 'session':
       exactKeys(input, ['type', 'session_id'], 'audio owner');
       return { type: 'session', session_id: string(input['session_id'], 'audio session id') };
@@ -1480,9 +1483,17 @@ export function validateClientEvent(value: unknown): ClientEvent {
     case 'realtime_audio_event':
       exactKeys(input, ['type', 'session_id', 'event_json'], 'client event');
       return { type, session_id: string(input['session_id'], 'realtime session id'), event_json: string(input['event_json'], 'realtime event JSON') };
-    case 'audio_session_context':
-      exactKeys(input, ['type', 'session_id', 'profile_id', 'account_scope'], 'client event');
-      return { type, session_id: string(input['session_id'], 'audio session id'), profile_id: string(input['profile_id'], 'audio profile id'), account_scope: string(input['account_scope'], 'audio account scope') };
+    case 'audio_session_context': {
+      exactKeys(input, ['type', 'request_id', 'session_id', 'profile_id', 'account_scope', 'media_owner'], 'client event');
+      const requestId = string(input['request_id'], 'audio context request id');
+      const sessionId = input['session_id'] == null ? undefined : string(input['session_id'], 'audio session id');
+      const profileId = input['profile_id'] == null ? undefined : string(input['profile_id'], 'audio profile id');
+      const accountScope = input['account_scope'] == null ? undefined : string(input['account_scope'], 'audio account scope');
+      const owner = input['media_owner'] == null ? undefined : validateMediaOwner(input['media_owner']);
+      return { type, request_id: requestId, ...(sessionId ? { session_id: sessionId } : {}),
+        ...(profileId ? { profile_id: profileId } : {}), ...(accountScope ? { account_scope: accountScope } : {}),
+        ...(owner ? { media_owner: owner } : {}) };
+    }
     case 'audio_request':
       exactKeys(input, ['type', 'request'], 'client event');
       return { type, request: audioOperationRequest(input['request']) };

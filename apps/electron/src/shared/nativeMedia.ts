@@ -4,7 +4,7 @@ import {
   type MediaDeviceRequestEnvelopeDto,
   type MediaDeviceResponseDto,
   type MediaOwnerDto,
-} from '@lingxi/bridge-client';
+} from '@lingxi/bridge-client/protocol';
 
 type ObjectValue = Record<string, unknown>;
 const U32_MAX = 0xffff_ffff;
@@ -52,14 +52,24 @@ function identity(value: unknown): void {
 }
 
 export function nativeMediaOwnerKey(value: unknown): string {
-  const input = object(value, ['type', 'session_id', 'instance_id']);
-  oneOf(input.type, ['session', 'ui', 'system']);
-  const id = input.type === 'session' ? input.session_id : input.instance_id;
-  identifier(id);
-  if (input.type === 'session' ? input.instance_id != null : input.session_id != null) {
-    throw new Error('Invalid native media owner');
+  const input = object(value, ['type', 'session_id', 'instance_id', 'attachment_host_id', 'attachment_generation', 'logical_kind', 'logical_owner_id']);
+  if (input.type === 'attached') {
+    object(value, ['type', 'attachment_host_id', 'attachment_generation', 'logical_kind', 'logical_owner_id']);
+    if (typeof input.attachment_host_id !== 'string' || input.attachment_host_id.length !== 36
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.attachment_host_id)) {
+      throw new Error('Invalid native media attachment host');
+    }
+    integer(input.attachment_generation, 1);
+    oneOf(input.logical_kind, ['session', 'ui', 'system']);
+    identifier(input.logical_owner_id);
+    return JSON.stringify([input.type, input.attachment_host_id, input.attachment_generation, input.logical_kind, input.logical_owner_id]);
   }
-  return `${input.type}:${id}`;
+  oneOf(input.type, ['session', 'ui', 'system']);
+  const session = input.type === 'session';
+  object(value, session ? ['type', 'session_id'] : ['type', 'instance_id']);
+  const id = session ? input.session_id : input.instance_id;
+  identifier(id);
+  return JSON.stringify([input.type, id]);
 }
 
 function bytes(value: unknown): number {
@@ -214,6 +224,7 @@ export function validateMediaDeviceResponse(value: unknown): MediaDeviceResponse
       oneOf(status.state, ['preparing', 'ready', 'reconnecting', 'ended', 'failed']);
       boolean(status.audio_enabled); boolean(status.video_enabled); break;
     }
+    case 'open_failed_without_resource':
     case 'error': {
       object(result, ['type', 'error']);
       const error = object(result.error, ['kind', 'message']);

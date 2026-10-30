@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { desktopHost } from '../../../bridge/bridgeConnection';
 import type { ComputerSettingsCommand, ComputerSettingsSnapshot } from '../../../../shared/computerSettings';
 
 export type ComputerSettingsMutation = Exclude<ComputerSettingsCommand, { action: 'get' }>;
@@ -21,7 +22,7 @@ export function useComputerSettings(): ComputerSettingsController {
   const reads = useRef(0);
 
   const refresh = useCallback(async () => {
-    const api = window.lingxi?.computerSettings;
+    const api = desktopHost()?.computerSettings;
     const read = ++reads.current;
     const observedEvents = events.current;
     if (!api) {
@@ -39,7 +40,7 @@ export function useComputerSettings(): ComputerSettingsController {
 
   useEffect(() => {
     alive.current = true;
-    const off = window.lingxi?.computerSettings?.onChanged((next) => {
+    const off = desktopHost()?.computerSettings?.onChanged((next) => {
       events.current += 1;
       if (alive.current) setState(next);
     });
@@ -48,7 +49,7 @@ export function useComputerSettings(): ComputerSettingsController {
   }, [refresh]);
 
   const execute = useCallback(async (command: ComputerSettingsMutation) => {
-    const api = window.lingxi?.computerSettings;
+    const api = desktopHost()?.computerSettings;
     if (!api || busy.current) return false;
     busy.current = true;
     setPending(true);

@@ -667,7 +667,9 @@ export class HostController {
       this.terminalDeliveries.delete(webContents);
     };
     const detachAudio = () => {
-      if (this.realtimeAudioWindow === webContents) void this.realtimeAudioController?.stop();
+      if (this.realtimeAudioWindow === webContents) void this.realtimeAudioController?.stop().catch((error) => {
+        this.diagnostics.add('warn', 'host', `realtime audio teardown failed: ${sanitizeDiagnostic(error)}`);
+      });
       void this.nativeAudio?.cancelUiAudioOperations(String(webContents.id), true).catch((error) => {
         this.diagnostics.add('warn', 'host', `desktop UI audio teardown failed: ${sanitizeDiagnostic(error)}`);
       });
@@ -2443,7 +2445,9 @@ export class HostController {
   }
 
   dispose(): void {
-    void this.realtimeAudioController?.stop();
+    void this.realtimeAudioController?.stop().catch((error) => {
+      this.diagnostics.add('warn', 'host', `realtime audio teardown failed: ${sanitizeDiagnostic(error)}`);
+    });
     this.scheduled?.dispose();
     this.offAccount?.();
     this.account?.dispose();

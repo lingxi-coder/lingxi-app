@@ -31,7 +31,7 @@ import type {
   UiInvalidateEventDto,
   UiJsonValue,
 } from '@lingxi/bridge-client';
-import { createNativeInputAck, ModUiClientTree, parseModUiClientTree, type ModUiClientIdentity, type ModUiSurfaceNode } from './modUiClientTree';
+import { createNativeInputAck, nativeInputSuperseded, ModUiClientTree, parseModUiClientTree, type ModUiClientIdentity, type ModUiSurfaceNode } from './modUiClientTree';
 import {
   ModUiParentTree,
   collectModUiClientElements,
@@ -111,6 +111,7 @@ interface RenderSite {
 interface ModUiClientParentContext {
   host: ModUiClientHostApi;
   site: RenderSite;
+  isRevisionCurrent(revision: number): boolean;
   registerFrame(runtimeId: string, revision: number, listener: (frame: ClientRuntimeFrame) => void): () => void;
   reportFault(client: ModUiClientIdentity, phase: 'load' | 'render' | 'run', reason: string): void;
 }
@@ -654,6 +655,7 @@ function ModUiParentSiteRuntime({
   const context = useMemo<ModUiClientParentContext | null>(() => site ? {
     host,
     site,
+    isRevisionCurrent: (revision) => latestRenderRevision.current === revision,
     registerFrame,
     reportFault,
   } : null, [host, registerFrame, reportFault, site]);
@@ -730,7 +732,6 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
   const previousClientStateTokenRef = useRef<string | null>(clientStateToken);
   const runtimeEpochAvailable = runtimeEpoch !== null;
   currentRevisionRef.current = site?.renderRevision ?? null;
-  frameRef.current = frame;
   const lastHostRef = useRef<ModUiClientHostApi | null>(context?.host ?? null);
   const lastSessionIdRef = useRef<string | null>(context?.site.sessionId ?? null);
   if (context) {
@@ -825,7 +826,8 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
   }, [context]);
 
   const reportCurrentFault = useCallback((phase: 'load' | 'render' | 'run', message: string, revision: number) => {
-    if (!context || currentRevisionRef.current !== revision || context.site.committedRevision !== revision) return;
+    if (!context || currentRevisionRef.current !== revision || context.site.committedRevision !== revision
+      || !context.isRevisionCurrent(revision)) return;
     showFault(phase, message, revision);
     context.reportFault(descriptor, phase, message);
   }, [context, descriptor, showFault]);
@@ -946,7 +948,10 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
             void queueOperation(cleanup).catch(() => undefined);
             return;
           }
-          if (runtimeIdRef.current !== response.runtimeId) latestFrameSequenceRef.current = 0;
+          if (runtimeIdRef.current !== response.runtimeId) {
+            latestFrameSequenceRef.current = 0;
+            frameRef.current = null;
+          }
           runtimeIdRef.current = response.runtimeId;
           mountedRevisionRef.current = revision;
           previousPropsSignature.current = propsSignature;
@@ -1002,7 +1007,10 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     const request = { type: 'unmount', runtimeId: id, render_revision: revision } satisfies UiClientOperation;
     void currentHost.operation(currentSession, request).catch(() => undefined);
   };
-  useEffect(() => () => {
+  useLayoutEffect(() => () => {
+    // Invalidate in-flight control calls at commit, before passive cleanup can
+    // run or a replacement instance can mount a runtime with the same id.
+    operationGeneration.current += 1;
     const currentRuntimeId = runtimeIdRef.current;
     const revision = mountedRevisionRef.current;
     if (!currentRuntimeId || revision === null) return;
@@ -1018,12 +1026,15 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     const runtimeAtStart = runtimeIdRef.current;
     const revision = site.renderRevision;
     const generation = operationGeneration.current;
+    const superseded = request.event.type === 'input' ? nativeInputSuperseded : undefined;
+    if (!context.isRevisionCurrent(revision)
+      || currentRevisionRef.current !== revision || frameRef.current?.renderRevision !== revision) return superseded;
     const result = await context.host.control(site.sessionId, request).catch(() => null);
     // The Native hook/policy dispatch happens before the local VM callback. A
     // failed host dispatch is not evidence that the Client callback failed.
-    if (!result) return;
-    if (!result.response.reached || runtimeIdRef.current !== runtimeAtStart
-      || operationGeneration.current !== generation || currentRevisionRef.current !== revision) return;
+    if (runtimeIdRef.current !== runtimeAtStart || operationGeneration.current !== generation
+      || currentRevisionRef.current !== revision || !context.isRevisionCurrent(revision)) return superseded;
+    if (!result?.response.reached) return;
     const currentFrame = frameRef.current;
     if (!currentFrame || currentFrame.renderRevision !== revision) return;
     const reachedElement = result.response.reached.element;
@@ -1050,8 +1061,16 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
       ...(event === undefined ? {} : { event }),
       handle: reachedHandle,
     } satisfies UiClientOperation;
-    const frameResult = await queueOperation(operation);
-    if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision) return;
+    let frameResult;
+    try {
+      frameResult = await queueOperation(operation);
+    } catch (error) {
+      if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
+        || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;
+      throw error;
+    }
+    if (runtimeIdRef.current !== runtimeAtStart || currentRevisionRef.current !== revision
+      || operationGeneration.current !== generation || !context.isRevisionCurrent(revision)) return superseded;
     if (isStaleOperation(frameResult)) return;
     if (isWorkerFault(frameResult)) {
       if (frameResult.renderRevision === revision
@@ -1060,14 +1079,36 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
       }
       return;
     }
+    if (isFrame(frameResult) && frameResult.runtimeId !== runtimeAtStart) {
+      throw new Error('Client module host returned a frame for a different runtime');
+    }
     if (isFrame(frameResult) && frameResult.renderRevision === revision) {
-      if (!acceptFrame(frameResult, revision, runtimeAtStart)) return;
+      if (!acceptFrame(frameResult, revision, runtimeAtStart)) {
+        const latest = frameRef.current;
+        // A later frame may arrive on the independent event channel while the
+        // successful runHeld response is in transit. Do not roll that frame
+        // back, but do acknowledge the completed callback. This relies on the
+        // Host contract that rejected runHeld handles return handled:false,
+        // and that a frame is returned only after acceptance and settlement
+        // of the callback's synchronous posts.
+        if (!latest || latest.renderRevision !== revision || latest.frameSequence < frameResult.frameSequence
+          || failedRuntimeEpochRef.current === runtimeEpochRef.current || failedRuntimeIdRef.current === runtimeAtStart) return;
+      }
       if (request.event.type !== 'input') return undefined;
       // The Host returns this frame only after the callback's UI posts have
       // settled. Its Input value is authoritative even when it transforms or
       // clears the value that Native reached. An omitted value means the
       // Input is uncontrolled and the local draft should be preserved.
-      return createNativeInputAck(inputValueForElement(frameResult.tree, request.element, descriptor.plugin));
+      const acknowledgedValue = inputValueForElement(frameResult.tree, request.element, descriptor.plugin);
+      return createNativeInputAck(acknowledgedValue, () => {
+        if (runtimeIdRef.current !== runtimeAtStart || operationGeneration.current !== generation
+          || currentRevisionRef.current !== revision || !context.isRevisionCurrent(revision)) return nativeInputSuperseded;
+        const latest = frameRef.current;
+        if (latest?.renderRevision === revision && latest.frameSequence > frameResult.frameSequence) {
+          return inputValueForElement(latest.tree, request.element, descriptor.plugin);
+        }
+        return acknowledgedValue;
+      });
     } else {
       throw new Error('Client module host returned an invalid run frame');
     }
@@ -1083,10 +1124,15 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
   if (visibleFault?.surfaceHeight !== null && visibleFault?.surfaceHeight !== undefined) {
     style.height = `${visibleFault.surfaceHeight}px`;
   }
+  const frameCurrent = frame?.renderRevision === site?.renderRevision
+    && site?.committedRevision === site?.renderRevision;
   return <div ref={elementRef} className="mod-ui-client-instance" data-client={descriptor.key} data-plugin={descriptor.plugin} data-module={descriptor.module} style={style}>
     {visibleFault || missingRuntimeEpoch ? <div className="mod-ui-client-fallback" role="status">{tr("desktop_ui_mod_unavailable")}</div>
-      : frame && frame.renderRevision === site?.renderRevision ? <ModUiClientTree
+      : frame ? <ModUiClientTree
         tree={frame.tree}
+        inputFrameVersion={`${runtimeId}:${frame.renderRevision}:${frame.frameSequence}`}
+        frameCurrent={frameCurrent}
+        dispatchEpoch={JSON.stringify([site?.sessionId, site?.instanceId, runtimeId, site?.renderRevision])}
         site={{ component: site?.component ?? 'AbovePrompt', instanceId: site?.instanceId ?? '' }}
         client={descriptor}
         onPress={onPress}

@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 import type { AllowedClientCommand } from '../../src/shared/clientCommands.js';
 import type {
   NativeUiControlRequest,
@@ -79,8 +80,24 @@ interface FixtureApi {
   holdRapidPostAt(ordinal: number): void;
   releaseRapidPostAt(ordinal: number): void;
   ignoreNextRapidRunAsStale(): void;
+  holdNextRapidRunResponse(): void;
+  releaseRapidRunResponse(): void;
   emitRapidExternalValue(value: string | undefined): void;
   rapidInputSnapshot(): unknown;
+  raceNextRapidAck(value: string): void;
+  captureRapidInput(): void;
+  invalidateRapidSite(value: string): void;
+  releaseRapidRevisionFrame(): void;
+  enableRapidSibling(): void;
+  misrouteNextRapidFrame(): void;
+  enableRapidGroups(): void;
+  swapRapidGroups(): void;
+  holdNextRapidControl(): void;
+  timeoutNextRapidControl(): void;
+  holdNextRapidRunRejection(): void;
+  releaseRapidRunRejection(): void;
+  replaceRapidSite(): void;
+  releaseRapidControl(): void;
 }
 
 type RapidInputMode = 'identity' | 'uppercase' | 'clear-on-submit' | 'uncontrolled';
@@ -141,9 +158,32 @@ const rapidHeldPostOrdinals = new Set<number>();
 const rapidHeldPostReleases = new Map<number, () => void>();
 const rapidHandleKinds = new Map<number, 'input' | 'button'>();
 const rapidInputCallbacks: Array<{ kind: string; value: string }> = [];
+const rapidOnInputCallbacks: string[] = [];
+const rapidOnSubmitCallbacks: string[] = [];
 const rapidButtonCallbacks: string[] = [];
 const rapidBackgroundPending: Array<{ ordinal: number; value: string | undefined }> = [];
 let rapidIgnoreNextRunAsStale = false;
+let rapidNextAckExternalValue: string | undefined;
+let rapidAckRaceFired = false;
+let holdNextRapidRunResponse = false;
+let rapidRunResponseRelease: (() => void) | null = null;
+let rapidRevision = 200;
+let holdRapidRevisionFrame = false;
+let rapidRevisionFrameRelease: (() => void) | null = null;
+let rapidNextRevisionValue = '';
+let capturedRapidInput: HTMLInputElement | null = null;
+let rapidSiblingEnabled = false;
+let rapidMisrouteNextFrame = false;
+let rapidGroupsEnabled = false;
+let rapidGroupsReversed = false;
+let rapidSiteInstanceId = 'rapid-input-site';
+let holdNextRapidControl = false;
+let timeoutNextRapidControl = false;
+let rapidControlTimeouts = 0;
+let rapidControlRelease: (() => void) | null = null;
+let holdNextRapidRunRejection = false;
+let rapidRunRejectionRelease: (() => void) | null = null;
+let rapidRunRejections = 0;
 const statusMountCountsByEpoch = new Map<number, number>();
 let asyncFaultMountCount = 0;
 let nextLateRevision = 100;
@@ -203,21 +243,29 @@ function rapidSurfaceTree(): UiClientFrameDto['tree'] {
   rapidButtonHandle = ++rapidNextHandle;
   rapidHandleKinds.set(rapidInputHandle, 'input');
   rapidHandleKinds.set(rapidButtonHandle, 'button');
+  const input: UiJsonValue = { type: 'Input', props: { key: 'rapid-message', label: 'Message', ...(rapidPropValue === undefined ? {} : { value: rapidPropValue }) }, press: { plugin: 'fixture-plugin', handle: rapidInputHandle } };
+  const button: UiJsonValue = { type: 'Button', props: { key: 'rapid-submit', label: 'Submit' }, press: { plugin: 'fixture-plugin', handle: rapidButtonHandle } };
+  const status: UiJsonValue = { type: 'Text', children: [rapidInputResult] };
+  const inputGroup: UiJsonValue = { type: 'Box', props: { key: 'rapid-input-group' }, children: [input] };
+  const controlGroup: UiJsonValue = { type: 'Box', props: { key: 'rapid-control-group' }, children: [button, status] };
   return {
     type: 'Box',
     props: { flexDirection: 'column', gap: 6 },
-    children: [
-      { type: 'Input', props: { key: 'rapid-message', label: 'Message', ...(rapidPropValue === undefined ? {} : { value: rapidPropValue }) }, press: { plugin: 'fixture-plugin', handle: rapidInputHandle } },
-      { type: 'Button', props: { key: 'rapid-submit', label: 'Submit' }, press: { plugin: 'fixture-plugin', handle: rapidButtonHandle } },
-      { type: 'Text', children: [rapidInputResult] },
-    ],
+    children: rapidGroupsEnabled
+      ? rapidGroupsReversed ? [controlGroup, inputGroup] : [inputGroup, controlGroup]
+      : [input, button, status],
   };
 }
 
-const rapidParentTree: NativeUiRenderResponseDto['tree'] = {
-  type: 'Box',
-  children: [{ type: 'Client', props: { key: 'rapid-input', module: 'surface/rapid-input.tsx', props: {} }, client: { plugin: 'fixture-plugin' } }],
-};
+function rapidParentTree(): NativeUiRenderResponseDto['tree'] {
+  return {
+    type: 'Box',
+    children: [
+      { type: 'Client', props: { key: 'rapid-input', module: 'surface/rapid-input.tsx', props: {} }, client: { plugin: 'fixture-plugin' } },
+      ...(rapidSiblingEnabled ? [{ type: 'Client', props: { key: 'rapid-sibling', module: 'surface/rapid-sibling.tsx', props: {} }, client: { plugin: 'fixture-plugin' } }] : []),
+    ],
+  };
+}
 
 const noop = async () => undefined;
 const composerBridge: any = {
@@ -254,9 +302,9 @@ function emitRuntimeFrame(sessionId: string, frame: UiClientFrameDto): void {
   for (const listener of frameListeners) listener({ sessionId, runtimeId, frame: { ...frameBody, ...identity } });
 }
 
-function emitRapidBackgroundFrame(value: string | undefined): void {
+function emitRapidBackgroundFrame(value: string | undefined, renderRevision = rapidRevision): void {
   rapidPropValue = value;
-  emitRuntimeFrame(rapidSessionId, makeRuntimeFrame('runtime-rapid-input', 200, rapidSurfaceTree()));
+  emitRuntimeFrame(rapidSessionId, makeRuntimeFrame('runtime-rapid-input', renderRevision, rapidSurfaceTree()));
 }
 
 function emitSnapshotFrame(
@@ -303,11 +351,20 @@ const host: ModUiClientHostApi = {
     let response: unknown;
     let metadata: { renderRevision: number; clientRuntimeEpochs?: Record<string, number>; clientStateToken?: string } | undefined;
     if (session === rapidSessionId && request.subtype === 'ui_render') {
-      response = { tree: rapidParentTree, props: {}, rewritten: false, hooked: false } satisfies NativeUiRenderResponseDto;
-      metadata = { renderRevision: 200, clientRuntimeEpochs: { 'fixture-plugin': 1 }, clientStateToken: 'rapid-state-1' };
+      response = { tree: rapidParentTree(), props: {}, rewritten: false, hooked: false } satisfies NativeUiRenderResponseDto;
+      metadata = { renderRevision: rapidRevision, clientRuntimeEpochs: { 'fixture-plugin': 1 }, clientStateToken: 'rapid-state-1' };
       call.returnedRevision = metadata.renderRevision;
     } else if (session === rapidSessionId && request.subtype === 'ui_client_press') {
       rapidControlOrdinal += 1;
+      if (timeoutNextRapidControl) {
+        timeoutNextRapidControl = false;
+        rapidControlTimeouts += 1;
+        throw new Error('fixture control timeout');
+      }
+      if (holdNextRapidControl) {
+        holdNextRapidControl = false;
+        await new Promise<void>((resolve) => { rapidControlRelease = resolve; });
+      }
       response = request.event.type === 'input'
         ? { handled: true, reached: { element: request.element, value: request.event.value } }
         : { handled: true, reached: { element: request.element } };
@@ -368,6 +425,8 @@ const host: ModUiClientHostApi = {
       let runtimeId: string;
       if (request.client === 'rapid-input') {
         runtimeId = 'runtime-rapid-input';
+      } else if (request.client === 'rapid-sibling') {
+        runtimeId = 'runtime-rapid-sibling';
       } else if (request.client === 'status') {
         const mountCount = (statusMountCountsByEpoch.get(statusEpoch) ?? 0) + 1;
         statusMountCountsByEpoch.set(statusEpoch, mountCount);
@@ -390,6 +449,7 @@ const host: ModUiClientHostApi = {
       }
       const mountTree = request.client === 'rapid-input'
         ? rapidSurfaceTree()
+        : request.client === 'rapid-sibling' ? { type: 'Text', children: ['Rapid sibling alive'] }
         : request.client === 'status'
         ? surfaceTree(statusEpoch === 1 ? 'Mount response frame' : 'Recovered after environment remount')
         : request.client === 'async-fault'
@@ -433,6 +493,12 @@ const host: ModUiClientHostApi = {
       rejectRunAtAdapter = false;
       throw new Error('fixture callback failed');
     }
+    if (session === rapidSessionId && request.type === 'runHeld' && holdNextRapidRunRejection) {
+      holdNextRapidRunRejection = false;
+      await new Promise<void>((resolve) => { rapidRunRejectionRelease = resolve; });
+      rapidRunRejections += 1;
+      throw new Error('fixture delayed stale run failure');
+    }
     if (session === rapidSessionId && request.type === 'runHeld' && rapidIgnoreNextRunAsStale) {
       rapidIgnoreNextRunAsStale = false;
       call.handled = false;
@@ -444,12 +510,14 @@ const host: ModUiClientHostApi = {
         const event = request.event as { kind?: string; value?: unknown } | undefined;
         const value = typeof event?.value === 'string' ? event.value : '';
         rapidInputCallbacks.push({ kind: typeof event?.kind === 'string' ? event.kind : 'unknown', value });
-        rapidInputValue = rapidInputMode === 'uppercase'
-          ? value.toUpperCase()
-          : rapidInputMode === 'clear-on-submit' && event?.kind === 'submit'
-            ? ''
-            : value;
-        if (event?.kind === 'submit') rapidInputSubmitCount += 1;
+        if (event?.kind === 'submit') {
+          rapidOnSubmitCallbacks.push(value);
+          rapidInputSubmitCount += 1;
+          if (rapidInputMode === 'clear-on-submit') rapidInputValue = '';
+        } else {
+          rapidOnInputCallbacks.push(value);
+          rapidInputValue = rapidInputMode === 'uppercase' ? value.toUpperCase() : value;
+        }
         const post = {
           ordinal: ++rapidPostOrdinal,
           value: rapidInputMode === 'uncontrolled' ? undefined : rapidInputValue,
@@ -462,7 +530,7 @@ const host: ModUiClientHostApi = {
         if (settledPostIndex !== -1) rapidBackgroundPending.splice(settledPostIndex, 1);
         // Model the independent ui.message path settling before Host returns
         // the authoritative follow-up runHeld frame.
-        emitRapidBackgroundFrame(post.value);
+        emitRapidBackgroundFrame(post.value, request.render_revision);
       } else if (kind === 'button') {
         rapidButtonCallbacks.push(rapidInputValue);
         rapidButtonSubmitCount += 1;
@@ -470,13 +538,52 @@ const host: ModUiClientHostApi = {
       } else {
         call.handled = false;
       }
-      const frame = makeRuntimeFrame(request.runtimeId, request.render_revision, rapidSurfaceTree());
+      let frame = makeRuntimeFrame(request.runtimeId, request.render_revision, rapidSurfaceTree());
+      if (rapidMisrouteNextFrame) {
+        rapidMisrouteNextFrame = false;
+        // Corrupt only this response. The live sibling's own frame must remain
+        // intact if it receives an independent resize while the test runs.
+        frame = { ...frame, runtimeId: 'runtime-rapid-sibling',
+          frameSequence: (frameSequenceByRuntime.get(request.runtimeId) ?? 0) + 10,
+          tree: { type: 'Text', children: ['Wrong runtime frame'] } };
+      }
+      if (kind === 'input' && rapidNextAckExternalValue !== undefined) {
+        const nextValue = rapidNextAckExternalValue;
+        rapidNextAckExternalValue = undefined;
+        const tree = frame.tree;
+        let injected = false;
+        Object.defineProperty(frame, 'tree', {
+          enumerable: true,
+          get() {
+            if (!injected) {
+              injected = true;
+              queueMicrotask(() => {
+                flushSync(() => emitRapidBackgroundFrame(nextValue));
+                rapidAckRaceFired = true;
+              });
+            }
+            return tree;
+          },
+        });
+      }
       call.returnedRevision = frame.renderRevision;
       call.returnedFrameSequence = frame.frameSequence;
+      call.returnedRuntimeId = frame.runtimeId;
+      if (holdNextRapidRunResponse) {
+        holdNextRapidRunResponse = false;
+        // The callback and its posts have settled, but a newer independent
+        // frame can arrive before the older successful RPC is delivered.
+        await new Promise<void>((resolve) => { rapidRunResponseRelease = resolve; });
+      }
       return frame as UiClientOperationResponseFor<T>;
     }
     if (session === rapidSessionId && request.runtimeId === 'runtime-rapid-input'
       && (request.type === 'resize' || request.type === 'render' || request.type === 'setProps')) {
+      if (holdRapidRevisionFrame && request.render_revision === rapidRevision && request.type !== 'resize') {
+        holdRapidRevisionFrame = false;
+        await new Promise<void>((resolve) => { rapidRevisionFrameRelease = resolve; });
+        rapidPropValue = rapidNextRevisionValue;
+      }
       const frame = makeRuntimeFrame(request.runtimeId, request.render_revision, rapidSurfaceTree());
       call.returnedRevision = frame.renderRevision;
       call.returnedFrameSequence = frame.frameSequence;
@@ -543,7 +650,7 @@ function Fixture() {
           instanceId="identity-probe-client-two" props={identityProbeProps} viewport={identityProbeViewport} />
       </ModUiSurfaceClientIdProvider></div>}
       {rapidEnabled && <ModUiParentSite sessionId={rapidSessionId} host={host} surface="desktop" component="AbovePrompt"
-        instanceId="rapid-input-site" props={{}} />}
+        instanceId={rapidSiteInstanceId} props={{}} />}
       <div style={{ display: 'none' }}>{lateEnabled && <ModUiAbovePrompt sessionId={lateSessionId} host={host} />}</div>
       <BetaComposer bridge={composerBridge} ready={false} onOpenSettings={() => undefined} onOpenSettingsPage={() => undefined}
         onSetTheme={() => undefined} onOpenProviderSettings={() => undefined} />
@@ -553,11 +660,48 @@ function Fixture() {
 
 window.__modUiClientFixture = {
   calls,
+  raceNextRapidAck(value) { rapidAckRaceFired = false; rapidNextAckExternalValue = value; },
+  captureRapidInput() { capturedRapidInput = document.querySelector<HTMLInputElement>('[data-client="rapid-input"] .mod-ui-client-input'); },
+  invalidateRapidSite(value) {
+    rapidRevision += 1;
+    rapidNextRevisionValue = value;
+    holdRapidRevisionFrame = true;
+    for (const listener of invalidationListeners) listener({
+      sessionId: rapidSessionId,
+      uuid: `rapid-revision-${rapidRevision}`,
+      instances: [{ surface: 'desktop', component: 'AbovePrompt', instance_id: rapidSiteInstanceId }],
+    });
+  },
+  releaseRapidRevisionFrame() { rapidRevisionFrameRelease?.(); rapidRevisionFrameRelease = null; },
+  enableRapidSibling() {
+    rapidSiblingEnabled = true;
+    rapidRevision += 1;
+    for (const listener of invalidationListeners) listener({
+      sessionId: rapidSessionId,
+      uuid: `rapid-sibling-${rapidRevision}`,
+      instances: [{ surface: 'desktop', component: 'AbovePrompt', instance_id: rapidSiteInstanceId }],
+    });
+  },
+  misrouteNextRapidFrame() { rapidMisrouteNextFrame = true; },
+  enableRapidGroups() { rapidGroupsEnabled = true; rapidGroupsReversed = false; emitRapidBackgroundFrame(rapidPropValue); },
+  swapRapidGroups() { rapidGroupsReversed = !rapidGroupsReversed; emitRapidBackgroundFrame(rapidPropValue); },
+  holdNextRapidControl() { holdNextRapidControl = true; },
+  timeoutNextRapidControl() { timeoutNextRapidControl = true; },
+  holdNextRapidRunRejection() { holdNextRapidRunRejection = true; },
+  releaseRapidRunRejection() { rapidRunRejectionRelease?.(); rapidRunRejectionRelease = null; },
+  replaceRapidSite() {
+    flushSync(() => setRapidInputEnabled(false));
+    rapidSiteInstanceId = 'rapid-input-site-replacement';
+    flushSync(() => setRapidInputEnabled(true));
+  },
+  releaseRapidControl() { rapidControlRelease?.(); rapidControlRelease = null; },
   startRapidInputScenario(mode = 'identity') { rapidInputMode = mode; setRapidInputEnabled(true); },
   setRapidInputMode(mode) { rapidInputMode = mode; },
   holdRapidPostAt(ordinal) { rapidHeldPostOrdinals.add(ordinal); },
   releaseRapidPostAt(ordinal) { rapidHeldPostReleases.get(ordinal)?.(); rapidHeldPostReleases.delete(ordinal); },
   ignoreNextRapidRunAsStale() { rapidIgnoreNextRunAsStale = true; },
+  holdNextRapidRunResponse() { holdNextRapidRunResponse = true; },
+  releaseRapidRunResponse() { rapidRunResponseRelease?.(); rapidRunResponseRelease = null; },
   emitRapidExternalValue(value) {
     rapidPropValue = value;
     emitRapidBackgroundFrame(value);
@@ -568,10 +712,24 @@ window.__modUiClientFixture = {
     return {
       value: input?.value ?? null,
       clientFocused: Boolean(input && document.activeElement === input),
+      sameInputNode: input !== null && input === capturedRapidInput,
+      inputReadOnly: input?.readOnly ?? null,
+      unconfirmedNotice: input?.closest('label')?.querySelector('[role="status"]')?.textContent ?? null,
+      originalSubmitValue: input?.closest('label')?.querySelector('[data-submitted-value]')?.textContent ?? null,
+      retryLabel: input?.closest('form')?.querySelector('.mod-ui-client-input-retry')?.textContent ?? null,
+      rapidRevision,
+      revisionFrameHeld: rapidRevisionFrameRelease !== null,
+      rapidControlHeld: rapidControlRelease !== null,
+      rapidControlTimeouts,
+      rapidRunRejectionHeld: rapidRunRejectionRelease !== null,
+      rapidRunResponseHeld: rapidRunResponseRelease !== null,
+      rapidRunRejections,
+      rapidSiteInstanceId,
       promptText: prompt?.textContent ?? null,
       mainPromptSubmitCount,
       rapidControlOrdinal,
       rapidPostOrdinal,
+      rapidAckRaceFired,
       rapidInputValue,
       rapidPropValue,
       rapidBackgroundPending: [...rapidBackgroundPending],
@@ -579,12 +737,14 @@ window.__modUiClientFixture = {
       rapidInputSubmitCount,
       rapidButtonSubmitCount,
       rapidInputCallbacks: [...rapidInputCallbacks],
+      rapidOnInputCallbacks: [...rapidOnInputCallbacks],
+      rapidOnSubmitCallbacks: [...rapidOnSubmitCallbacks],
       rapidButtonCallbacks: [...rapidButtonCallbacks],
       controlRequests: calls.filter((call) => call.kind === 'control' && call.sessionId === rapidSessionId
         && call.request.subtype === 'ui_client_press').map((call) => call.kind === 'control' ? call.request.event : null),
       runHeld: calls.filter((call) => call.kind === 'operation' && call.sessionId === rapidSessionId
         && call.request.type === 'runHeld').map((call) => call.kind === 'operation' && call.request.type === 'runHeld'
-          ? { handle: call.request.handle, event: call.request.event } : null),
+          ? { handle: call.request.handle, event: call.request.event, revision: call.request.render_revision } : null),
     };
   },
   contextMentionHref() { return fixtureContextMentionHref; },

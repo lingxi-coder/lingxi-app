@@ -45,6 +45,7 @@ test('terminal retains shells across hide and session switches, renders output, 
         ELECTRON_ENABLE_LOGGING: '0',
         ELECTRON_IS_DEV: '0',
         LINGXI_TEST_USER_DATA: temporaryUserData,
+        LINGXI_TERMINAL_SCREENSHOTS: join(viteCacheDir, 'screenshots'),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -86,6 +87,11 @@ test('terminal retains shells across hide and session switches, renders output, 
     assert.equal(result.nativeKeysWork, true);
     assert.equal(result.failedClosePreservesShell, true);
     assert.equal(result.migrationPreservesShell, true);
+    assert.equal(result.unknownSurvivesStaleSnapshot, true);
+    assert.equal(result.unknownDisablesInput, true);
+    assert.equal(result.unknownTailRendered, true);
+    assert.equal(result.unknownCloseWorks, true);
+    assert.equal(result.unknownSnapshotSurvivesStaleList, true);
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

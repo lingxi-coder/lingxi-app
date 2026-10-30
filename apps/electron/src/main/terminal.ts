@@ -187,7 +187,8 @@ export class TerminalManager {
   private disposed = false;
   private disposal?: Promise<void>;
   private rows = new Map<string, TerminalSnapshot>();
-  private brokerTerminalIds = new Set<string>();
+  private brokerOwners = new Map<string, ChildProcessWithoutNullStreams>();
+  private retiring = new Set<ChildProcessWithoutNullStreams>();
   private creating = new Map<string, AbortController>();
   private closing = new Map<string, Promise<void>>();
   private stopped = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>();
@@ -208,8 +209,8 @@ export class TerminalManager {
     else this.outputPauseOwners.delete(owner);
     if (this.outputPauseOwners.size === 0) { this.resumeOutput?.(); this.resumeOutput = undefined; }
   }
-  private async waitForOutput(): Promise<void> {
-    while (this.outputPauseOwners.size > 0 && !this.disposed) await new Promise<void>(resolve => { this.resumeOutput = resolve; });
+  private async waitForOutput(child: ChildProcessWithoutNullStreams): Promise<void> {
+    while (this.child === child && this.outputPauseOwners.size > 0 && !this.disposed) await new Promise<void>(resolve => { this.resumeOutput = resolve; });
   }
   private releaseOutput(): void {
     this.outputPauseOwners.clear(); this.resumeOutput?.(); this.resumeOutput = undefined;
@@ -241,11 +242,11 @@ export class TerminalManager {
         else command.shellLaunchCwd = context.cwd;
       }
       if (this.disposed || controller.signal.aborted || this.rows.get(id) !== row) throw new Error('Terminal creation cancelled');
-      this.brokerTerminalIds.add(id);
+      this.brokerOwners.set(id, this.start());
       await this.request(command);
       if (this.disposed || controller.signal.aborted || this.rows.get(id) !== row) throw new Error('Terminal creation cancelled');
     }
-    catch (error) { this.rows.delete(id); this.brokerTerminalIds.delete(id); throw error; }
+    catch (error) { this.rows.delete(id); this.brokerOwners.delete(id); throw error; }
     finally { this.creating.delete(id); }
     return clone(row);
   }
@@ -272,23 +273,24 @@ export class TerminalManager {
     const row = this.rows.get(id);
     if (!row) return;
     this.creating.get(id)?.abort(new Error('Terminal creation cancelled'));
-    const child = this.child;
+    const child = this.brokerOwners.get(id);
     try {
-      if (this.brokerTerminalIds.has(id)) await this.request({ kind: 'close', terminalId: id });
+      if (child && child === this.child) await this.request({ kind: 'close', terminalId: id });
+      else if (child) await this.waitForStop(child);
     }
     catch (error) {
       // Exited handles may already have been evicted by a later create. Any
       // other error leaves ownership uncertain, so stop the broker instead of
       // silently forgetting a potentially live terminal.
-      if (!(error instanceof Error && error.message === 'unknown terminal')) {
-        if (child) {
+      if (!(row.status === 'exited' && error instanceof Error && error.message === 'unknown terminal')) {
+        if (child && child === this.child) {
           this.fail(child, new Error('Terminal service close failed'));
           await this.waitForStop(child);
         }
         throw error;
       }
     }
-    this.brokerTerminalIds.delete(id);
+    this.brokerOwners.delete(id);
     this.rows.delete(id);
     this.emit({ kind: 'closed', terminalId: id });
   }
@@ -311,6 +313,7 @@ export class TerminalManager {
   private start(): ChildProcessWithoutNullStreams {
     if (this.disposed) throw new Error('Terminal manager is disposed');
     if (this.child) return this.child;
+    if (this.retiring.size) throw new Error('Previous terminal service stop could not be confirmed');
     if (this.options.isPackaged && process.platform === 'win32') this.windowsShellContext = { path: process.env.PATH, cwd: process.cwd() };
     const child = (this.options.spawnProcess ?? spawn)(resolveServerBin(this.options), ['--desktop-terminal'], { stdio: ['pipe', 'pipe', 'pipe'], ...terminalBrokerLaunchOptions(this.options), windowsHide: true }) as ChildProcessWithoutNullStreams;
     this.child = child;
@@ -335,7 +338,7 @@ export class TerminalManager {
     if (Buffer.byteLength(line) > MAX_REQUEST) return Promise.reject(new Error('Terminal service request exceeds limit'));
     const completion = new Promise<void>((resolve, reject) => {
       const onTimeout = () => {
-        if (this.outputPauseOwners.size > 0) {
+        if (this.outputPauseOwners.size > 0 && command.kind !== 'close') {
           const pending = this.pending.get(requestId);
           if (pending) { pending.timer = setTimeout(onTimeout, this.options.requestTimeoutMs ?? 15_000); pending.timer.unref?.(); }
         } else this.fail(child, new Error('Terminal service timed out'));
@@ -354,24 +357,33 @@ export class TerminalManager {
     const decoder = new StringDecoder('utf8');
     let buffer = '';
     try {
-      for await (const chunk of child.stdout) {
-        await this.waitForOutput();
-        if (this.child !== child) return;
+      // A retired broker can still emit its EOF cleanup receipt. Keep reading
+      // and discard its remaining output so shutdown cannot block on a full pipe.
+      for await (const chunk of child.stdout.iterator({ destroyOnReturn: false })) {
+        await this.waitForOutput(child);
+        if (this.child !== child) { buffer = ''; continue; }
         buffer += decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         let newline: number;
         while ((newline = buffer.indexOf('\n')) >= 0) {
-          await this.waitForOutput();
+          await this.waitForOutput(child);
+          if (this.child !== child) { buffer = ''; break; }
           if (newline > MAX_FRAME) throw new Error('Terminal service frame exceeds limit');
           const line = buffer.slice(0, newline);
           buffer = buffer.slice(newline + 1);
-          if (this.child !== child) return;
           if (line) this.message(JSON.parse(line));
         }
         if (buffer.length > MAX_FRAME) throw new Error('Terminal service frame exceeds limit');
       }
-      buffer += decoder.end();
-      if (buffer.trim()) throw new Error('Incomplete terminal service frame');
-    } catch { this.fail(child, new Error('Invalid terminal service output')); }
+      if (this.child === child) {
+        buffer += decoder.end();
+        if (buffer.trim()) throw new Error('Incomplete terminal service frame');
+      }
+    } catch {
+      this.fail(child, new Error('Invalid terminal service output'));
+      // The iterator no longer reads after a protocol error; drain what the
+      // retiring broker writes without interpreting it as terminal events.
+      child.stdout.resume();
+    }
   }
   private message(message: Record<string, unknown>): void {
     if (!message || typeof message !== 'object') throw new Error('Invalid terminal event');
@@ -392,14 +404,17 @@ export class TerminalManager {
     if (message.kind === 'output' && typeof message.data === 'string') {
       row.output = trimOutput(row.output + message.data); row.sequence++;
       this.emit({ kind: 'output', terminalId: row.id, data: message.data, sequence: row.sequence });
-    } else if (message.kind === 'exit' && (message.exitCode === null || Number.isSafeInteger(message.exitCode))) {
-      row.status = 'exited'; row.exitCode = message.exitCode as number | null;
+    } else if (message.kind === 'exit' && row.status === 'running' && Number.isSafeInteger(message.exitCode) && message.exitCode !== -1) {
+      row.status = 'exited'; row.exitCode = message.exitCode as number;
       this.emit({ kind: 'exit', terminalId: row.id, exitCode: row.exitCode });
+    } else if (message.kind === 'unknown' && row.status === 'running' && message.reason === 'exit-observation-unavailable') {
+      row.status = 'unknown'; row.exitCode = null; row.unknownReason = message.reason;
+      this.emit({ kind: 'unknown', terminalId: row.id, reason: message.reason });
     }
     // Anything else is a frame this build does not know how to render. Throwing
     // here reaches `read`'s catch, which calls `fail()` — killing the broker,
-    // rejecting every pending request and marking EVERY terminal in EVERY
-    // project exited. A broker that grows a frame kind (the protocol already
+    // rejecting every pending request and marking running terminals in EVERY
+    // project unknown. A broker that grows a frame kind (the protocol already
     // declares `reset`) must not be able to take the whole service down, so an
     // unrecognised frame is ignored. Genuinely corrupt framing is still caught
     // by the JSON/length checks in `read`.
@@ -417,9 +432,10 @@ export class TerminalManager {
     this.child = undefined;
     for (const controller of this.creating.values()) controller.abort(error);
     this.releaseOutput();
-    this.brokerTerminalIds.clear();
     // EOF gives the broker time to terminate/reap PTY process trees even after a protocol error.
     if (!alreadyClosed) {
+      this.retiring.add(child);
+      child.once('close', () => this.retiring.delete(child));
       const killTimer = setTimeout(() => child.kill(), 6000);
       killTimer.unref?.();
       child.once('close', () => clearTimeout(killTimer));
@@ -428,8 +444,8 @@ export class TerminalManager {
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
     this.pending.clear();
     for (const row of this.rows.values()) if (row.status === 'running') {
-      row.status = 'exited'; row.exitCode = null;
-      this.emit({ kind: 'exit', terminalId: row.id, exitCode: null });
+      row.status = 'unknown'; row.exitCode = null; row.unknownReason = 'service-unavailable';
+      this.emit({ kind: 'unknown', terminalId: row.id, reason: 'service-unavailable' });
     }
   }
   dispose(): Promise<void> {
@@ -445,14 +461,10 @@ export class TerminalManager {
     this.pending.clear();
     const child = this.child;
     if (child) {
-      // EOF is the broker's graceful shutdown protocol, which kills/reaps all PTY children.
-      child.stdin.end();
-      await new Promise<void>(resolve => {
-        const timer = setTimeout(() => { child.kill(); resolve(); }, 6000);
-        child.once('close', () => { clearTimeout(timer); resolve(); });
-      });
+      // A signal is only a request; wait for the broker process to close.
       this.fail(child, new Error('Terminal manager disposed'));
     }
-    this.rows.clear(); this.brokerTerminalIds.clear(); this.listeners.clear();
+    await Promise.all([...this.retiring].map(owner => this.waitForStop(owner)));
+    this.rows.clear(); this.brokerOwners.clear(); this.listeners.clear();
   }
 }

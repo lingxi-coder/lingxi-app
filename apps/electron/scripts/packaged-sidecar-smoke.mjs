@@ -2,14 +2,18 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BridgeClient } from '@lingxi/bridge-client';
+import { verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
 import { verifyPortableGStreamerRuntime } from './gstreamer-portable.mjs';
 
 import {
+  PACKAGE_OUTPUT_ROOT_ENV,
+  artifactPaths,
   desktopArtifactPaths,
   formatError,
   packageRoot,
@@ -18,6 +22,38 @@ import {
 } from './package-support.mjs';
 
 export const GSTREAMER_PLUGIN_ENV = 'LINGXI_GSTREAMER_PLUGIN_DIR';
+
+/** The signed Flare package and the generic Desktop stage use different roots. */
+export function parsePackagedSidecarSmokeArgs(argv) {
+  let signedMacPackage = false;
+  const targetArgs = [];
+  for (const arg of argv) {
+    if (arg === '--signed-mac-package') {
+      if (signedMacPackage) throw new Error('--signed-mac-package may only be supplied once');
+      signedMacPackage = true;
+    } else {
+      targetArgs.push(arg);
+    }
+  }
+  const target = parseDesktopTargetArgs(targetArgs);
+  if (signedMacPackage && target.id !== 'darwin-arm64') {
+    throw new Error('--signed-mac-package requires the darwin-arm64 target');
+  }
+  return { ...target, signedMacPackage };
+}
+
+export function packagedSidecarPayload(root, platform, arch, {
+  signedMacPackage = false,
+  outputRoot = process.env[PACKAGE_OUTPUT_ROOT_ENV],
+} = {}) {
+  const paths = desktopArtifactPaths(root, platform, arch);
+  if (!signedMacPackage) return paths.payloadRoot;
+  if (platform !== 'darwin' || arch !== 'arm64') {
+    throw new Error('--signed-mac-package requires the darwin-arm64 target');
+  }
+  // This is the same versioned app and output-root selection as verify:package.
+  return artifactPaths(root, undefined, outputRoot).appPath;
+}
 
 function delay(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
@@ -57,8 +93,141 @@ export function sanitizedEnvironment(tempRoot, resources, platform, source = pro
     }
     env.LD_LIBRARY_PATH = '$ORIGIN/../gstreamer/lib';
     env[GSTREAMER_PLUGIN_ENV] = join(resources, 'gstreamer', 'lib', 'gstreamer-1.0');
+  } else if (platform === 'darwin') {
+    for (const name of Object.keys(env)) {
+      if (/^(?:LD_|DYLD_|GST_|GSTREAMER_|LINGXI_GSTREAMER_SDK_)/.test(name)
+          || name === GSTREAMER_PLUGIN_ENV || name === 'PKG_CONFIG_PATH' || name === 'PKG_CONFIG_LIBDIR') delete env[name];
+    }
+    env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+    env[GSTREAMER_PLUGIN_ENV] = resolve(resources, '..', 'Frameworks', 'GStreamerPlugins');
+    env.GST_PLUGIN_PATH_1_0 = '';
+    env.GST_PLUGIN_SYSTEM_PATH_1_0 = '';
+    env.GST_REGISTRY_FORK = 'no';
+    env.GST_REGISTRY_1_0 = join(tempRoot, 'gst-registry.bin');
+    env.LINGXI_REMOTE_STUN = 'stun:127.0.0.1:9';
   }
   return env;
+}
+
+function within(parent, path) {
+  const rest = relative(parent, path);
+  return rest === '' || (rest !== '..' && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
+}
+
+/** Compile against SDK headers, but link and execute only the packaged runtime. */
+export function runPackagedMacMediaProbe(resources, tempRoot, arch, source = process.env) {
+  const appRoot = resolve(resources, '..', '..');
+  const frameworks = resolve(resources, '..', 'Frameworks');
+  const libraries = join(frameworks, 'GStreamerLibraries');
+  const plugins = join(frameworks, 'GStreamerPlugins');
+  if (lstatSync(appRoot).isSymbolicLink() || lstatSync(frameworks).isSymbolicLink()) {
+    throw new Error('packaged media probe application or Frameworks is a symbolic link');
+  }
+  const appReal = realpathSync(appRoot);
+  const frameworksReal = realpathSync(frameworks);
+  if (!within(appReal, frameworksReal)) throw new Error('packaged media probe Frameworks escapes its application');
+  for (const directory of [libraries, plugins]) {
+    if (lstatSync(directory).isSymbolicLink() || !within(frameworksReal, realpathSync(directory))) {
+      throw new Error(`packaged media probe directory escapes Frameworks: ${directory}`);
+    }
+  }
+  const sdkValue = source.LINGXI_GSTREAMER_SDK_MACOS?.trim();
+  if (!sdkValue) throw new Error('the pinned macOS GStreamer SDK is required to compile the media smoke probe');
+  const sdk = realpathSync(sdkValue);
+  const env = sanitizedEnvironment(tempRoot, resources, 'darwin', source);
+  const pkgEnv = { ...env, PATH: source.PATH, PKG_CONFIG_PATH: '', PKG_CONFIG_LIBDIR: join(sdk, 'lib', 'pkgconfig') };
+  const pkgConfig = source.PKG_CONFIG?.trim() || 'pkg-config';
+  const variable = (name, module) => {
+    const path = execFileSync(pkgConfig, [`--variable=${name}`, module], { env: pkgEnv, encoding: 'utf8' }).trim();
+    const real = realpathSync(path);
+    if (!within(sdk, real)) throw new Error(`media probe SDK path escapes the pinned SDK: ${real}`);
+    return real;
+  };
+  const gstInclude = join(variable('includedir', 'gstreamer-1.0'), 'gstreamer-1.0');
+  const glibInclude = join(variable('includedir', 'glib-2.0'), 'glib-2.0');
+  const glibConfig = join(variable('libdir', 'glib-2.0'), 'glib-2.0', 'include');
+  const library = (prefix) => {
+    const matches = readdirSync(libraries).filter((name) =>
+      new RegExp(`^lib${prefix}\\.(?:\\d+\\.)*dylib$`).test(name));
+    if (matches.length !== 1) throw new Error(`packaged media probe needs exactly one ${prefix} dylib`);
+    const path = join(libraries, matches[0]);
+    if (!within(realpathSync(libraries), realpathSync(path))) throw new Error(`packaged media probe library escapes its bundle: ${path}`);
+    return path;
+  };
+  const executable = join(tempRoot, 'packaged-media-probe');
+  const probeSource = join(dirname(fileURLToPath(import.meta.url)), 'packaged-macos-media-probe.c');
+  execFileSync('/usr/bin/clang', [
+    '-arch', arch === 'x64' ? 'x86_64' : 'arm64',
+    `-I${gstInclude}`, `-I${glibInclude}`, `-I${glibConfig}`,
+    '-o', executable, probeSource, library('gstreamer-1\\.0'),
+    library('gobject-2\\.0'), library('glib-2\\.0'),
+    '-Xlinker', '-rpath', '-Xlinker', libraries,
+  ], { cwd: tempRoot, env, stdio: 'pipe', timeout: 60_000 });
+  execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', executable], { stdio: 'pipe' });
+  const result = execFileSync(executable, [plugins, libraries], {
+    cwd: tempRoot, env, encoding: 'utf8', stdio: 'pipe', timeout: 60_000,
+  }).trim();
+  if (result !== 'packaged media plugins and audio/video pipelines OK') throw new Error(`unexpected packaged media probe result: ${result}`);
+}
+
+/** Reach the sidecar's native media initialization without a real viewer. */
+export async function runPackagedMacBridgeMediaSmoke(client) {
+  const route = randomUUID();
+  const cancellationMessage = 'packaged media smoke closes its test route';
+  await client.registerMediaConnection(route, 'packaged media smoke', ['audio_video'], ['microphone', 'camera']);
+  let offered = false;
+  let handlerError;
+  const handleOffer = (request) => {
+    try {
+      if (request.connection_id !== route || request.mode !== 'audio_video' || request.description?.kind !== 'offer') {
+        throw new Error('packaged media smoke received an unexpected offer');
+      }
+      offered = true;
+      client.sendCommand({ type: 'media_connection_response', response: {
+        request_id: request.request_id, connection_id: request.connection_id,
+        media_session_ref: request.media_session_ref,
+        error: { kind: 'cancelled', message: cancellationMessage },
+      } });
+    } catch (error) { handlerError = error; }
+  };
+  try {
+    const { result } = await client.executeMedia({ type: 'sources', usage: 'session' });
+    const audio = `remote_${route}_microphone`;
+    const video = `remote_${route}_camera`;
+    if (result.type !== 'sources' || !result.sources.some((source) => source.reference.id === audio)
+        || !result.sources.some((source) => source.reference.id === video)) {
+      throw new Error('packaged media smoke could not find its registered test sources');
+    }
+    client.on('mediaConnectionRequest', handleOffer);
+    let failure;
+    try {
+      await client.executeMedia({ type: 'session_start', request: {
+        mode: 'audio_video', intent: 'observation', audio_source: { id: audio }, video_source: { id: video },
+      } }, { timeout_budget_ms: 20_000 });
+    } catch (error) { failure = error; }
+    if (handlerError) throw handlerError;
+    if (!offered || failure?.name !== 'MediaServiceError:cancelled' || !failure.message.includes(cancellationMessage)) {
+      throw new Error(`packaged media initialization did not reach the test offer: ${failure?.message ?? 'unexpected success'}`);
+    }
+  } finally {
+    client.off('mediaConnectionRequest', handleOffer);
+    await client.unregisterMediaConnection(route);
+  }
+}
+
+/** Check the packaged link mode before exercising the native media offer. */
+export async function runPackagedMacMediaSmoke(resources, tempRoot, arch, client, {
+  verifyRuntime = verifyMacGStreamerRuntime,
+  runProbe = runPackagedMacMediaProbe,
+} = {}) {
+  const frameworks = resolve(resources, '..', 'Frameworks');
+  const sidecar = join(resources, 'bin', 'bridge-server');
+  const runtime = verifyRuntime(frameworks, sidecar, {
+    expectedArch: arch === 'x64' ? 'x86_64' : arch,
+    appRoot: resolve(resources, '..', '..'),
+  });
+  if (runtime.bundled) runProbe(resources, tempRoot, arch);
+  await runPackagedMacBridgeMediaSmoke(client);
 }
 
 /** Require every loaded manifest library to resolve to its exact packaged file. */
@@ -128,14 +297,14 @@ async function terminate(child, lockfilePath) {
   ]);
 }
 
-export async function runPackagedSidecarSmoke(root, platform, arch) {
+export async function runPackagedSidecarSmoke(root, platform, arch, options = {}) {
   if (process.platform !== platform || process.arch !== arch) {
     throw new Error(`native ${platform}-${arch} host required for packaged sidecar smoke`);
   }
-  const paths = desktopArtifactPaths(root, platform, arch);
+  const payloadRoot = packagedSidecarPayload(root, platform, arch, options);
   const resources = platform === 'darwin'
-    ? join(paths.payloadRoot, 'Contents', 'Resources')
-    : join(paths.payloadRoot, 'resources');
+    ? join(payloadRoot, 'Contents', 'Resources')
+    : join(payloadRoot, 'resources');
   const sidecar = join(resources, 'bin', platform === 'win32' ? 'bridge-server.exe' : 'bridge-server');
   if (!existsSync(sidecar)) throw new Error(`packaged sidecar is missing: ${sidecar}`);
 
@@ -176,6 +345,13 @@ export async function runPackagedSidecarSmoke(root, platform, arch) {
     );
     assert.ok(lockfile, 'packaged sidecar must publish a discovery lockfile');
     assert.equal(child.exitCode, null, `packaged sidecar exited early: ${stderr}`);
+    if (platform === 'darwin') {
+      const client = new BridgeClient({ lockfilePath: join(bridgeDir, lockfile) });
+      try {
+        await client.connect();
+        await runPackagedMacMediaSmoke(resources, tempRoot, arch, client);
+      } finally { client.close(); }
+    }
     await terminate(child, join(bridgeDir, lockfile));
     await waitFor(
       () => readdirSync(bridgeDir).every((entry) => !entry.endsWith('.lock') && !entry.startsWith('launch-')),
@@ -188,13 +364,14 @@ export async function runPackagedSidecarSmoke(root, platform, arch) {
     if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     rmSync(tempRoot, { recursive: true, force: true });
   }
+  return payloadRoot;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const target = parseDesktopTargetArgs(process.argv.slice(2));
-    await runPackagedSidecarSmoke(packageRoot, target.platform, target.arch);
-    process.stdout.write(`[verify:sidecar-smoke] OK ${target.id}\n`);
+    const target = parsePackagedSidecarSmokeArgs(process.argv.slice(2));
+    const payloadRoot = await runPackagedSidecarSmoke(packageRoot, target.platform, target.arch, target);
+    process.stdout.write(`[verify:sidecar-smoke] OK ${target.id} ${payloadRoot}\n`);
   } catch (error) {
     process.stderr.write(`[verify:sidecar-smoke] ERROR: ${formatError(error)}\n`);
     process.exitCode = 1;

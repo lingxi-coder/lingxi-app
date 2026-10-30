@@ -523,10 +523,16 @@ final class MockConversationSource: ConversationSource {
             initial.streamed = true
             model.messages.append(initial)
             model.items.append(.message(initial))
+            // The history-reading UI test may need several real scrolls on a
+            // short simulator viewport. Keep that test's stream active long
+            // enough to verify its position while new deltas continue.
+            let readingFixture = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_TRANSCRIPT_READING"] == "1"
+            let deltaCount = readingFixture ? 160 : 80
+            let deltaInterval: Duration = readingFixture ? .milliseconds(600) : .milliseconds(300)
             Task { @MainActor [weak self] in
                 var paragraphs: [String] = []
-                for index in 1...80 {
-                    try? await Task.sleep(for: .milliseconds(300))
+                for index in 1...deltaCount {
+                    try? await Task.sleep(for: deltaInterval)
                     guard let self, !Task.isCancelled,
                           self.turnToken == generation, self.activeTurnToken == token else { return }
                     paragraphs.append("Scroll delta \(index). A streamed paragraph keeps growing in this same message.")

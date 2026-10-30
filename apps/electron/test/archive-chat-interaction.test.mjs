@@ -23,7 +23,44 @@ test('archive chat dialog guards pending work, confirms once, and restores keybo
     configFile: false,
     logLevel: 'error',
     server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false },
-    plugins: [react()],
+    plugins: [{
+      // Simulate a busy renderer in which passive effects have not run yet.
+      // The modal must already own focus at the disabled-controls commit.
+      name: 'defer-archive-passive-effects',
+      enforce: 'pre',
+      transform(source, id) {
+        if (id.endsWith('/BetaDesktop.tsx') && process.env.LINGXI_TEST_DISABLE_ARCHIVE_OWNER_FENCE === '1') {
+          const guard = 'const ownsArchive = () => archiveRequest.current === version;';
+          assert.ok(source.includes(guard), 'negative control must remove archive request ownership');
+          return source.replace(guard, 'const ownsArchive = () => true;');
+        }
+        if (id.endsWith('/BetaDesktop.tsx') && process.env.LINGXI_TEST_DISABLE_ARCHIVE_ROW_RESTORE === '1') {
+          const callback = ' onRestoreFocus={restoreArchiveFocus}';
+          assert.ok(source.includes(callback), 'negative control must remove sidebar focus restoration');
+          return source.replace(callback, '');
+        }
+        if (!id.endsWith('/ArchiveChatDialog.tsx')) return null;
+        const original = "import { useEffect, useLayoutEffect, useRef } from 'react';";
+        assert.ok(source.includes(original), 'focus fixture must wrap the dialog passive effect');
+        let wrapped = source.replace(original, `import { useEffect as reactUseEffect, useLayoutEffect, useRef } from 'react';
+          const useEffect: typeof reactUseEffect = (effect, deps) => reactUseEffect(() => {
+            if (!deps?.length) return effect();
+            let cleanup: void | (() => void);
+            const timer = setTimeout(() => { cleanup = effect() as void | (() => void); }, 500);
+            return () => { clearTimeout(timer); if (typeof cleanup === 'function') cleanup(); };
+          }, deps);`);
+        if (process.env.LINGXI_TEST_ARCHIVE_PASSIVE_OPENER === '1') {
+          const capture = `  // Capture the opener before the busy-state layout effect moves focus.
+  useDialogLayoutEffect(() => {`;
+          assert.ok(wrapped.includes(capture), 'negative control must make opener capture passive');
+          wrapped = wrapped.replace(capture, '  useEffect(() => {');
+        }
+        if (process.env.LINGXI_TEST_DEFER_ARCHIVE_FOCUS !== '1') return wrapped;
+        const layout = "const useDialogLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;";
+        assert.ok(wrapped.includes(layout), 'negative control must replace the busy layout effect');
+        return wrapped.replace(layout, 'const useDialogLayoutEffect = useEffect;');
+      },
+    }, react()],
     resolve: {
       alias: { '@renderer': resolve(electronRoot, 'src/renderer') },
       dedupe: ['react', 'react-dom'],
@@ -72,12 +109,20 @@ test('archive chat dialog guards pending work, confirms once, and restores keybo
     assert.equal(result.sidebarHitTarget, true);
     assert.equal(result.retryEnabled, true);
     assert.equal(result.sidebarCalls, 2);
+    assert.equal(result.sidebarCancelRestored, true, 'keyboard menu cancellation must return focus to the session row');
+    assert.equal(result.switchDidNotRestoreOldRow, true, 'switching sessions must not restore the old archive row');
+    assert.equal(result.sidebarArchivedRowRemoved, true);
+    assert.equal(result.sidebarArchiveFocusedNeighbor, true, 'archiving a row must focus a surviving neighbor');
+    assert.equal(result.sidebarArchiveFocusedList, true, 'archiving the last row must focus the session list');
     assert.match(result.content, /Weekly project summary/);
     assert.match(result.content, /Archive and pause/);
     assert.match(result.content, /chat history will be kept/);
     assert.equal(result.loadingDisabled, true);
     assert.equal(result.afterCancel.confirms, 0);
     assert.equal(result.afterCancel.closes, 1);
+    assert.ok(result.busyFocusAtDisable.length > 0, 'the test must observe the busy controls becoming disabled');
+    assert.ok(result.busyFocusAtDisable.every(({ contained }) => contained),
+      `focus escaped at the disabled commit: ${JSON.stringify(result.busyFocusAtDisable)}`);
     assert.equal(result.busyFocusContained, true, 'busy dialog must retain focus when its controls are disabled');
     assert.equal(result.busyTabPrevented, true);
     assert.equal(result.busyAllDisabled, true);
@@ -85,6 +130,8 @@ test('archive chat dialog guards pending work, confirms once, and restores keybo
     assert.equal(result.forwardTrap, true);
     assert.equal(result.backwardTrap, true);
     assert.equal(result.escapeRestored, true);
+    assert.equal(result.initialBusyFocused, true, 'a dialog initially busy must own focus');
+    assert.equal(result.initialBusyRestored, true, 'closing an initially busy dialog must restore its opener');
     assert.equal(result.afterConfirm.confirms, 1);
     assert.equal(result.afterConfirm.open, false);
     assert.equal(result.errorDisabled, true);

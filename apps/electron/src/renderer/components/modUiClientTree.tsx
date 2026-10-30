@@ -1,7 +1,7 @@
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import * as React from 'react';
-import { Component, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
+import { Component, memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
 import type { CSSProperties, FormEvent, KeyboardEvent, ReactElement, ChangeEvent } from 'react';
 import type { NativeUiComponent, NativeUiControlRequest, NativeUiClientPressEventDto, UiJsonValue } from '@lingxi/bridge-client';
 import { useT } from '../theme/ThemeContext';
@@ -34,22 +34,34 @@ export type ModUiClientSurfaceEvent = NativeUiClientPressEventDto;
 export type NativeUiClientPressRequest = Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>;
 
 const nativeInputAckBrand = Symbol('native-input-ack');
-type NativeInputAck = { readonly [nativeInputAckBrand]: true; readonly value?: string };
+/** A request became stale before React received the new parent revision. */
+export const nativeInputSuperseded = Symbol('native-input-superseded');
+type NativeInputAckValue = string | undefined | null | typeof nativeInputSuperseded;
+type NativeInputAck = {
+  readonly [nativeInputAckBrand]: true;
+  readonly value?: string;
+  readonly latestValue?: () => NativeInputAckValue;
+};
 
 /** Internal success result for Input dispatches; this never crosses the bridge. */
-export function createNativeInputAck(value: string | undefined): NativeInputAck {
-  return value === undefined
-    ? { [nativeInputAckBrand]: true }
-    : { [nativeInputAckBrand]: true, value };
+export function createNativeInputAck(value: string | undefined, latestValue?: () => NativeInputAckValue): NativeInputAck {
+  return {
+    [nativeInputAckBrand]: true,
+    ...(value === undefined ? {} : { value }),
+    ...(latestValue === undefined ? {} : { latestValue }),
+  };
 }
 
 /** Read only acknowledgements created by the local Host adapter. */
-export function readNativeInputAck(result: unknown): string | undefined | null {
+export function readNativeInputAck(result: unknown): NativeInputAckValue {
+  if (result === nativeInputSuperseded) return nativeInputSuperseded;
   if (typeof result !== 'object' || result === null) return null;
-  const candidate = result as { [nativeInputAckBrand]?: unknown; value?: unknown };
+  const candidate = result as { [nativeInputAckBrand]?: unknown; value?: unknown; latestValue?: unknown };
   if (candidate[nativeInputAckBrand] !== true
-    || (candidate.value !== undefined && typeof candidate.value !== 'string')) return null;
-  return candidate.value as string | undefined;
+    || (candidate.value !== undefined && typeof candidate.value !== 'string')
+    || (candidate.latestValue !== undefined && typeof candidate.latestValue !== 'function')) return null;
+  const value = typeof candidate.latestValue === 'function' ? candidate.latestValue() : candidate.value;
+  return value === undefined || value === nativeInputSuperseded || typeof value === 'string' ? value : null;
 }
 
 export interface ModUiClientPressRef {
@@ -140,6 +152,12 @@ export type ModUiSurfaceNode =
 
 export interface ModUiClientTreeProps {
   tree: unknown;
+  /** Changes whenever the Host accepts a new authoritative Client frame. */
+  inputFrameVersion?: string | number;
+  /** False while the displayed frame belongs to a superseded parent revision. */
+  frameCurrent?: boolean;
+  /** Identifies the parent revision allowed to receive queued interactions. */
+  dispatchEpoch?: string | number;
   site: ModUiRenderSite;
   client: ModUiClientIdentity;
   /** Native ui_client_press request dispatcher. Runtime policy/VM handoff stays outside React. */
@@ -383,6 +401,14 @@ function validateProps(node: Record<string, unknown>, type: ModUiSurfaceNodeType
   }
 }
 
+function explicitNodeKey(node: ModUiSurfaceNode): string | null {
+  if (node.type === 'Button' || node.type === 'Input' || node.type === 'Select') return node.props.key;
+  if (node.type === 'Box' || node.type === 'Text' || node.type === 'Markdown') {
+    return typeof node.props?.key === 'string' ? node.props.key : null;
+  }
+  return null;
+}
+
 function validateNode(value: unknown, depth: number, state: { nodes: number }, expectedPlugin?: string): asserts value is ModUiSurfaceNode {
   if (depth > MAX_TREE_DEPTH) fail('tree exceeds the nesting limit');
   state.nodes += 1;
@@ -410,9 +436,15 @@ function validateNode(value: unknown, depth: number, state: { nodes: number }, e
   if (children !== undefined) {
     if (!Array.isArray(children)) fail(`${type}.children must be an array`);
     if (['Input', 'Select', 'Code', 'Markdown'].includes(type) && children.length > 0) fail(`${type} is a leaf`);
+    const siblingKeys = new Set<string>();
     for (const child of children) {
       if (typeof child === 'string') continue;
       validateNode(child, depth + 1, state, expectedPlugin);
+      const key = explicitNodeKey(child);
+      if (key !== null) {
+        if (siblingKeys.has(key)) fail('sibling keys must be unique');
+        siblingKeys.add(key);
+      }
     }
   }
 }
@@ -494,9 +526,9 @@ class ClientSurfaceErrorBoundary extends Component<{
 }
 
 /** React renderer for the bounded JSON tree returned by the Harness Node VM. It never imports or evaluates Mod source. */
-export const ModUiClientTree = memo(function ModUiClientTree({ tree, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true }: ModUiClientTreeProps) {
+export const ModUiClientTree = memo(function ModUiClientTree({ tree, inputFrameVersion, frameCurrent = true, dispatchEpoch, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true }: ModUiClientTreeProps) {
   useI18n();
-  const body = React.createElement(ModUiClientTreeBody, { tree, site, client, onPress, onRunFault, interactionsEnabled });
+  const body = React.createElement(ModUiClientTreeBody, { tree, inputFrameVersion, frameCurrent, dispatchEpoch, site, client, onPress, onRunFault, interactionsEnabled });
   return React.createElement(ClientSurfaceErrorBoundary, {
     key: modUiClientSurfaceIdentityKey(site, client),
     onFault: onRenderFault,
@@ -504,14 +536,18 @@ export const ModUiClientTree = memo(function ModUiClientTree({ tree, site, clien
   });
 });
 
-const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, client, onPress, onRunFault, interactionsEnabled = true }: Omit<ModUiClientTreeProps, 'onRenderFault'>) {
+const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, inputFrameVersion, frameCurrent = true, dispatchEpoch, site, client, onPress, onRunFault, interactionsEnabled = true }: Omit<ModUiClientTreeProps, 'onRenderFault'>) {
   const parsed = parseModUiClientTree(tree, client.plugin);
   const lifecycle = useRef(0);
   const onPressRef = useRef(onPress);
   const onRunFaultRef = useRef(onRunFault);
   const dispatchTail = useRef<Promise<void>>(Promise.resolve());
+  const dispatchEpochRef = useRef(dispatchEpoch);
+  const dispatchReadyRef = useRef(interactionsEnabled && frameCurrent);
   onPressRef.current = onPress;
   onRunFaultRef.current = onRunFault;
+  dispatchEpochRef.current = dispatchEpoch;
+  dispatchReadyRef.current = interactionsEnabled && frameCurrent;
 
   useClientLayoutEffect(() => {
     const activeGeneration = ++lifecycle.current;
@@ -521,29 +557,33 @@ const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, clie
   }, [site.component, site.instanceId, client.plugin, client.key, client.module]);
 
   const dispatch = useCallback((press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown> => {
-    if (!interactionsEnabled) return Promise.resolve(undefined);
+    if (!interactionsEnabled || !frameCurrent) return Promise.resolve(undefined);
     const request = buildNativeUiClientPressRequest(site, client, element, event, press.plugin);
     const activeGeneration = lifecycle.current;
+    const eventEpoch = dispatchEpoch;
     const queued = dispatchTail.current.catch(() => undefined).then(() => {
-      if (lifecycle.current !== activeGeneration) return undefined;
+      if (lifecycle.current !== activeGeneration || eventEpoch !== dispatchEpochRef.current || !dispatchReadyRef.current) return undefined;
       return onPressRef.current(request, press.handle);
     });
     dispatchTail.current = queued.then(() => undefined, () => undefined);
     return queued.catch((error: unknown) => {
-      if (lifecycle.current !== activeGeneration) return undefined;
+      if (lifecycle.current !== activeGeneration || eventEpoch !== dispatchEpochRef.current || !dispatchReadyRef.current) return undefined;
       const reason = error instanceof Error ? error.message : String(error);
       onRunFaultRef.current?.(request, reason);
       return undefined;
     });
-  }, [site.component, site.instanceId, client.plugin, client.key, client.module, interactionsEnabled]);
+  }, [site.component, site.instanceId, client.plugin, client.key, client.module, interactionsEnabled, frameCurrent, dispatchEpoch]);
 
   return <div className="mod-ui-client-surface" data-mod-client={client.key} data-mod-plugin={client.plugin} data-mod-module={client.module}>
-    {typeof parsed === 'string' ? parsed : <SurfaceNode node={parsed} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />}
+    {typeof parsed === 'string' ? parsed : <SurfaceNode node={parsed} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />}
   </div>;
 });
 
-const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnabled }: {
+const SurfaceNode = memo(function SurfaceNode({ node, inputFrameVersion, frameCurrent, dispatchEpoch, dispatch, interactionsEnabled }: {
   node: ModUiSurfaceNode;
+  inputFrameVersion?: string | number;
+  frameCurrent: boolean;
+  dispatchEpoch?: string | number;
   dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown>;
   interactionsEnabled: boolean;
 }): ReactElement {
@@ -551,7 +591,7 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
   useI18n();
   const children = node.children?.map((child, index) => typeof child === 'string'
     ? child
-    : <SurfaceNode key={childKey(child, index)} node={child} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />);
+    : <SurfaceNode key={childKey(child, index)} node={child} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />);
   const style = node.type === 'Box' ? modUiBoxStyle(node.props)
     : node.type === 'Text' ? modUiTextStyle(node.props) : undefined;
 
@@ -572,12 +612,12 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
         padding: plain ? '3px 6px' : '6px 10px',
         opacity: dimColor ? 0.72 : 1,
       };
-      return <button type="button" className="mod-ui-client-button" style={buttonStyle} autoFocus={autoFocus} disabled={!interactionsEnabled} aria-keyshortcuts={hotkey} aria-label={label} data-action={action} data-role={role} onClick={() => dispatch(node.press, key, { type: 'press' })}>{children?.length ? children : label}</button>;
+      return <button type="button" className="mod-ui-client-button" style={buttonStyle} autoFocus={autoFocus} disabled={!interactionsEnabled || !frameCurrent} aria-keyshortcuts={hotkey} aria-label={label} data-action={action} data-role={role} onClick={() => dispatch(node.press, key, { type: 'press' })}>{children?.length ? children : label}</button>;
     }
     case 'Input':
-      return <SurfaceInput node={node} dispatch={dispatch} disabled={!interactionsEnabled} />;
+      return <SurfaceInput node={node} inputFrameVersion={inputFrameVersion} frameCurrent={frameCurrent} dispatchEpoch={dispatchEpoch} dispatch={dispatch} disabled={!interactionsEnabled} />;
     case 'Select':
-      return <SurfaceSelect node={node} dispatch={dispatch} disabled={!interactionsEnabled} />;
+      return <SurfaceSelect node={node} dispatch={dispatch} disabled={!interactionsEnabled || !frameCurrent} />;
     case 'Link': {
       const href = safeLink(node.props.href);
       const content = children?.length ? children : node.props.label ?? node.props.href;
@@ -597,8 +637,11 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
   }
 });
 
-const SurfaceInput = memo(function SurfaceInput({ node, dispatch, disabled }: {
+const SurfaceInput = memo(function SurfaceInput({ node, inputFrameVersion, frameCurrent, dispatchEpoch, dispatch, disabled }: {
   node: Extract<ModUiSurfaceNode, { type: 'Input' }>;
+  inputFrameVersion?: string | number;
+  frameCurrent: boolean;
+  dispatchEpoch?: string | number;
   dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown>;
   disabled: boolean;
 }) {
@@ -606,52 +649,143 @@ const SurfaceInput = memo(function SurfaceInput({ node, dispatch, disabled }: {
   useI18n();
   const { key, label, placeholder, value, submitLabel, autoFocus } = node.props;
   const [draft, setDraft] = useState(value ?? '');
+  const noticeId = useId();
+  const inputElementRef = useRef<HTMLInputElement>(null);
+  const retryButtonRef = useRef<HTMLButtonElement>(null);
   const valueRef = useRef(value);
   const editSequence = useRef(0);
-  const localEditRef = useRef<{ sequence: number } | null>(null);
+  const localEditRef = useRef<{ sequence: number; epoch: string | number | undefined; kind: 'change' | 'submit'; value: string; retry: boolean } | null>(null);
+  const pendingEditsRef = useRef(new Map<number, { epoch: string | number | undefined; kind: 'change' | 'submit'; value: string }>());
+  const frameCurrentRef = useRef(frameCurrent);
+  const dispatchEpochRef = useRef(dispatchEpoch);
+  const unconfirmedDraftRef = useRef<'change' | 'submit' | null>(null);
+  const [unconfirmedDraft, setUnconfirmedDraft] = useState<'change' | 'submit' | null>(null);
+  const unconfirmedSubmitValueRef = useRef<string | null>(null);
+  const [unconfirmedSubmitValue, setUnconfirmedSubmitValue] = useState<string | null>(null);
+  const preserveNewDraftRef = useRef(false);
+  const submitPendingRef = useRef(false);
+  const [submitPending, setSubmitPending] = useState(false);
+  const retryPendingRef = useRef(false);
+  const [retryPending, setRetryPending] = useState(false);
   valueRef.current = value;
+  frameCurrentRef.current = frameCurrent;
+  dispatchEpochRef.current = dispatchEpoch;
+  const markUnconfirmed = useCallback((edit: { kind: 'change' | 'submit'; value: string }) => {
+    // A later change cannot prove that an earlier submit did not run.
+    if (unconfirmedDraftRef.current === 'submit') return;
+    const unconfirmed = edit.kind;
+    if (unconfirmed === 'submit') {
+      unconfirmedSubmitValueRef.current = edit.value;
+      setUnconfirmedSubmitValue(edit.value);
+    }
+    unconfirmedDraftRef.current = unconfirmed;
+    setUnconfirmedDraft(unconfirmed);
+  }, []);
   useEffect(() => {
-    if (localEditRef.current || value === undefined) return;
+    for (const edit of pendingEditsRef.current.values()) {
+      if (edit.epoch !== dispatchEpoch || !frameCurrent) markUnconfirmed(edit);
+    }
+  }, [dispatchEpoch, frameCurrent, markUnconfirmed]);
+  // A newer frame can return to the same value before React commits the
+  // intermediate frames. Its version still makes that value authoritative.
+  useEffect(() => {
+    if (!frameCurrent || localEditRef.current || unconfirmedDraftRef.current || preserveNewDraftRef.current || value === undefined) return;
     setDraft(value);
-  }, [key, value]);
-  const dispatchInput = useCallback((kind: 'change' | 'submit', nextValue: string) => {
-    const edit = { sequence: ++editSequence.current };
+  }, [key, value, inputFrameVersion, frameCurrent]);
+  const dispatchInput = useCallback((kind: 'change' | 'submit', nextValue: string, retry = false): Promise<void> => {
+    if (!frameCurrent) return Promise.resolve();
+    if (kind === 'submit') {
+      if (submitPendingRef.current) return Promise.resolve();
+      submitPendingRef.current = true;
+      setSubmitPending(true);
+    }
+    const edit = { sequence: ++editSequence.current, epoch: dispatchEpoch, kind, value: nextValue, retry };
     localEditRef.current = edit;
-    void dispatch(node.press, key, { type: 'input', kind, value: nextValue }).then((result) => {
+    pendingEditsRef.current.set(edit.sequence, edit);
+    return dispatch(node.press, key, { type: 'input', kind, value: nextValue }).then((result) => {
       const currentEdit = localEditRef.current;
+      pendingEditsRef.current.delete(edit.sequence);
+      const authoritativeValue = readNativeInputAck(result);
+      if (authoritativeValue === nativeInputSuperseded || edit.epoch !== dispatchEpochRef.current || !frameCurrentRef.current) {
+        // A superseded request cannot acknowledge or overwrite the draft.
+        // Its callback may already have run, so retry requires user action.
+        markUnconfirmed(edit);
+        if (currentEdit?.sequence === edit.sequence) localEditRef.current = null;
+        return;
+      }
       if (!currentEdit || currentEdit.sequence !== edit.sequence) return;
       localEditRef.current = null;
-      const authoritativeValue = readNativeInputAck(result);
       if (authoritativeValue !== null) {
-        if (authoritativeValue !== undefined) setDraft(authoritativeValue);
+        if (unconfirmedDraftRef.current !== 'submit' || edit.kind === 'submit') {
+          if (unconfirmedDraftRef.current && document.activeElement === retryButtonRef.current) {
+            inputElementRef.current?.focus({ preventScroll: true });
+          }
+          unconfirmedDraftRef.current = null;
+          setUnconfirmedDraft(null);
+          unconfirmedSubmitValueRef.current = null;
+          setUnconfirmedSubmitValue(null);
+        }
+        if (!(edit.retry && edit.kind === 'submit' && preserveNewDraftRef.current)) {
+          if (!unconfirmedDraftRef.current) preserveNewDraftRef.current = false;
+          if (authoritativeValue !== undefined) setDraft(authoritativeValue);
+        }
         return;
       }
       // Failed, stale, or cancelled dispatches release the draft lock. A newer
       // controlled value that arrived while pending is then authoritative.
-      if (valueRef.current !== undefined) setDraft(valueRef.current);
+      if (!unconfirmedDraftRef.current && !preserveNewDraftRef.current && valueRef.current !== undefined) setDraft(valueRef.current);
+    }).finally(() => {
+      if (edit.kind === 'submit') {
+        submitPendingRef.current = false;
+        setSubmitPending(false);
+      }
     });
-  }, [dispatch, key, node.press]);
+  }, [dispatch, key, markUnconfirmed, node.press, frameCurrent, dispatchEpoch]);
   const submit = useCallback((event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (unconfirmedDraftRef.current || submitPendingRef.current) return;
     const input = event.currentTarget.querySelector('input');
-    dispatchInput('submit', input?.value ?? draft);
+    void dispatchInput('submit', input?.value ?? draft);
   }, [dispatchInput, draft]);
   const onChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    if (retryPendingRef.current) return;
     const nextValue = event.currentTarget.value;
     setDraft(nextValue);
-    dispatchInput('change', nextValue);
+    void dispatchInput('change', nextValue);
   }, [dispatchInput]);
   const submitOnEnter = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    dispatchInput('submit', event.currentTarget.value);
+    if (unconfirmedDraftRef.current || submitPendingRef.current) return;
+    void dispatchInput('submit', event.currentTarget.value);
   }, [dispatchInput]);
+  const retryUnconfirmed = useCallback(() => {
+    const kind = unconfirmedDraftRef.current;
+    if (!kind || disabled || !frameCurrent || retryPendingRef.current || submitPendingRef.current) return;
+    const retryValue = kind === 'submit' ? unconfirmedSubmitValueRef.current : draft;
+    if (retryValue === null) return;
+    if (kind === 'submit') preserveNewDraftRef.current = retryValue !== draft;
+    retryPendingRef.current = true;
+    setRetryPending(true);
+    void dispatchInput(kind, retryValue, true).finally(() => {
+      retryPendingRef.current = false;
+      setRetryPending(false);
+    });
+  }, [disabled, dispatchInput, draft, frameCurrent]);
   return <form className="mod-ui-client-input-row" onSubmit={submit} style={{ display: 'flex', gap: 8, minWidth: 0 }}>
     <label className="mod-ui-client-input-label" style={{ display: 'grid', flex: 1, minWidth: 0, gap: 4, color: t.text2 }}>
       {label && <span>{label}</span>}
-      <input className="mod-ui-client-input" type="text" value={draft} placeholder={placeholder} autoFocus={autoFocus} disabled={disabled} maxLength={MAX_INPUT_VALUE} onChange={onChange} onKeyDown={submitOnEnter} style={{ minWidth: 0, border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 9px', background: t.windowBg, color: t.text, font: 'inherit' }} />
+      <input ref={inputElementRef} className="mod-ui-client-input" type="text" value={draft} placeholder={placeholder} autoFocus={autoFocus} disabled={disabled} readOnly={!frameCurrent || retryPending} maxLength={MAX_INPUT_VALUE} onChange={onChange} onKeyDown={submitOnEnter} style={{ minWidth: 0, border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 9px', background: t.windowBg, color: t.text, font: 'inherit' }} />
+      {unconfirmedDraft && <span id={noticeId} role="status">
+        {tr(unconfirmedDraft === 'change' ? 'desktop_ui_mod_input_unconfirmed_change' : 'desktop_ui_mod_input_unconfirmed_submit')}
+        {unconfirmedDraft === 'submit' && unconfirmedSubmitValue !== null && <>
+          {' '}{tr('desktop_ui_mod_input_original_submit_value')}
+          <code data-submitted-value tabIndex={0} style={{ display: 'block', maxHeight: '4.5em', overflow: 'auto', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{JSON.stringify(unconfirmedSubmitValue)}</code>
+        </>}
+      </span>}
     </label>
-    {submitLabel && <button type="submit" className="mod-ui-client-input-submit" disabled={disabled} style={{ alignSelf: 'end', border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 10px', background: t.surface, color: t.text, font: 'inherit', cursor: disabled ? 'not-allowed' : 'pointer' }}>{submitLabel}</button>}
+    {unconfirmedDraft && <button ref={retryButtonRef} type="button" className="mod-ui-client-input-retry" disabled={disabled || !frameCurrent} aria-describedby={noticeId} aria-disabled={retryPending || submitPending || undefined} aria-busy={retryPending || submitPending || undefined} onClick={retryUnconfirmed} style={{ alignSelf: 'end', border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 10px', background: t.surface, color: t.text, font: 'inherit' }}>{tr(unconfirmedDraft === 'change' ? 'desktop_ui_mod_input_retry_change' : 'desktop_ui_mod_input_retry_submit')}</button>}
+    {submitLabel && <button type="submit" className="mod-ui-client-input-submit" disabled={disabled || !frameCurrent || !!unconfirmedDraft || submitPending} style={{ alignSelf: 'end', border: `1px solid ${t.border}`, borderRadius: 7, padding: '7px 10px', background: t.surface, color: t.text, font: 'inherit', cursor: disabled || !frameCurrent || unconfirmedDraft || submitPending ? 'not-allowed' : 'pointer' }}>{submitLabel}</button>}
   </form>;
 });
 
@@ -680,9 +814,8 @@ const SurfaceSelect = memo(function SurfaceSelect({ node, dispatch, disabled }: 
 });
 
 function childKey(node: ModUiSurfaceNode, index: number): string {
-  if (node.type === 'Button' || node.type === 'Input' || node.type === 'Select') return `${node.type}:${node.props.key}`;
-  if (node.type === 'Markdown' && node.props.key) return `Markdown:${node.props.key}`;
-  return `${node.type}:${index}`;
+  const key = explicitNodeKey(node);
+  return key === null ? `index:${node.type}:${index}` : `key:${key}`;
 }
 
 export function modUiBoxStyle(props?: PrimitiveRecord): CSSProperties {

@@ -61,11 +61,11 @@ final class DeepLinkDeliveryUITests: XCTestCase {
         // Trigger XCTest's system interruption monitor after the OS has received
         // the link; a springboard-only alert lookup misses this system prompt.
         app.tap()
-        let approval = app.alerts["Open linked destination?"]
+        let approval = app.alerts["打开链接目标？"]
         XCTAssertTrue(approval.waitForExistence(timeout: 30), app.debugDescription)
         XCTAssertEqual(processIdentifier(), originalProcess, "OS warm delivery must retain the process and its draft")
         record("External-link-draft-approval")
-        approval.buttons["Keep editing"].tap()
+        approval.buttons["继续编辑"].tap()
         XCTAssertEqual(composer.value as? String, "Keep this external-link draft")
         XCTAssertFalse(app.navigationBars["通用"].exists)
     }
@@ -79,7 +79,7 @@ final class DeepLinkDeliveryUITests: XCTestCase {
         var link = URLComponents(string: "lingxi://import/mcp?scope=user")!
         link.percentEncodedFragment = fragment.percentEncodedQuery
         open(try XCTUnwrap(link.url))
-        XCTAssertTrue(app.navigationBars["Import preview"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.navigationBars["导入预览"].waitForExistence(timeout: 15), app.debugDescription)
         let confirm = app.buttons["deeplink.import.confirm"]
         XCTAssertTrue(confirm.exists)
         XCTAssertFalse(confirm.isEnabled, "the UI fixture has no connected engine and must never apply an import")
@@ -88,15 +88,15 @@ final class DeepLinkDeliveryUITests: XCTestCase {
 
     func testMissingRuntimeResourceShowsExplicitError() {
         open(URL(string: "lingxi://runtime/activity/deeplink-nonexistent-session")!)
-        XCTAssertTrue(app.staticTexts["Local item unavailable"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["本地项目不可用"].waitForExistence(timeout: 15), app.debugDescription)
         record("External-link-missing-runtime-resource")
     }
 
     func testCurrentSessionActivityOpensItsTimeline() {
         open(URL(string: "lingxi://runtime/activity/ui-session")!)
-        XCTAssertTrue(app.navigationBars["Activity"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.navigationBars["活动"].waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["deeplink.runtime.activity"].exists, app.debugDescription)
-        XCTAssertFalse(app.staticTexts["Local item unavailable"].exists)
+        XCTAssertFalse(app.staticTexts["本地项目不可用"].exists)
         record("External-link-exact-session-activity")
     }
 

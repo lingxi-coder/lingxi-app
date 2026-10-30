@@ -2,6 +2,7 @@ import XCTest
 
 final class TranscriptInteractionUITests: XCTestCase {
     private var app: XCUIApplication!
+    private var usesReadingStream = false
 
     override func setUp() {
         super.setUp()
@@ -10,8 +11,20 @@ final class TranscriptInteractionUITests: XCTestCase {
         app.launchArguments += ["-AppleLanguages", "(en)"]
         app.launchEnvironment["LINGXI_UI_TESTING"] = "1"
         app.launchEnvironment["LINGXI_UI_TEST_TRANSCRIPT_SCROLL"] = "1"
+        usesReadingStream = name.contains("testHistoryReadingSurvivesStreamingAndKeyboardThenQueuedSendRejoins")
+        if usesReadingStream {
+            app.launchEnvironment["LINGXI_UI_TEST_TRANSCRIPT_READING"] = "1"
+        }
         app.launch()
         XCTAssertTrue(transcript.waitForExistence(timeout: 15), app.debugDescription)
+    }
+
+    override func tearDown() {
+        if usesReadingStream, let app, app.state != .notRunning {
+            // Also ends the fixture task if an assertion aborted the test.
+            app.terminate()
+        }
+        super.tearDown()
     }
 
     private var transcript: XCUIElement { app.scrollViews["conversation.message-list"] }
@@ -65,37 +78,72 @@ final class TranscriptInteractionUITests: XCTestCase {
         assertTailVisible()
     }
 
-    func testHistoryReadingSurvivesStreamingAndKeyboardThenQueuedSendRejoins() {
+    func testHistoryReadingSurvivesStreamingAndKeyboardThenQueuedSendRejoins() throws {
         startStreaming()
-        transcript.swipeDown()
-        XCTAssertTrue(jump.waitForExistence(timeout: 5), app.debugDescription)
-        let markers = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Scroll history "))
-            .allElementsBoundByIndex.filter {
-                $0.isHittable && $0.frame.minY > self.transcript.frame.minY + 15
-                    && $0.frame.maxY < self.transcript.frame.midY
+        let stop = app.buttons["composer.stop"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 5), "The reply must still be streaming")
+        var markers: [XCUIElement] = []
+        for attempt in 0..<8 {
+            transcript.swipeDown()
+            if attempt == 0 {
+                XCTAssertTrue(jump.waitForExistence(timeout: 5), app.debugDescription)
             }
+            XCTAssertTrue(stop.exists, "The reply ended before history was reached")
+            markers = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Scroll history "))
+                .allElementsBoundByIndex.filter {
+                    $0.isHittable && $0.frame.minY > self.transcript.frame.minY + 15
+                        && $0.frame.maxY < self.transcript.frame.midY
+                }
+            if !markers.isEmpty { break }
+        }
         XCTAssertFalse(markers.isEmpty, app.debugDescription)
-        let marker = markers[0]
+        guard let firstMarker = markers.first else { return }
+        // Resolve by the unique history text, not the query's changing index.
+        let marker = app.staticTexts[firstMarker.label]
+        XCTAssertTrue(marker.isHittable, app.debugDescription)
         let offset = marker.frame.minY - transcript.frame.minY
+        let progressPrefix = "scroll-fixture-delta:"
+        func streamProgress() -> Int? {
+            guard let value = transcript.value as? String, value.hasPrefix(progressPrefix) else { return nil }
+            return Int(value.dropFirst(progressPrefix.count))
+        }
+        let progressBefore = try XCTUnwrap(streamProgress(), app.debugDescription)
         let settle = expectation(description: "more streaming deltas")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { settle.fulfill() }
         wait(for: [settle], timeout: 3)
+        let progressAfter = try XCTUnwrap(streamProgress(), app.debugDescription)
+        XCTAssertGreaterThan(progressAfter, progressBefore, "A real streamed delta must arrive while reading history")
+        XCTAssertTrue(stop.exists, "The reply must still be streaming while the reader is stationary")
+        XCTAssertTrue(marker.isHittable, app.debugDescription)
         XCTAssertEqual(marker.frame.minY - transcript.frame.minY, offset, accuracy: 2)
         XCTAssertTrue(jump.exists)
         input.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 4))
+        XCTAssertTrue(marker.isHittable, app.debugDescription)
         XCTAssertEqual(marker.frame.minY - transcript.frame.minY, offset, accuracy: 2)
+        XCTAssertTrue(stop.exists, "The follow-up must be queued during the active reply")
         input.typeText("Queued scroll prompt")
         app.buttons["composer.send"].tap()
+        XCTAssertTrue(stop.waitForExistence(timeout: 5), "The original reply must still be streaming after queueing")
+        let progressAfterSend = try XCTUnwrap(streamProgress(), app.debugDescription)
+        XCTAssertTrue(
+            waitUntil { (streamProgress() ?? -1) > progressAfterSend },
+            "The original reply must continue after the prompt is queued"
+        )
         XCTAssertTrue(waitUntil { self.app.staticTexts["Queued scroll prompt"].isHittable && !self.jump.exists })
         XCTAssertTrue(app.keyboards.firstMatch.exists)
+        stop.tap()
+        XCTAssertTrue(waitUntil { !stop.exists }, "Stopping the test reply must release the stream")
     }
 
     func testSendingFromHistoryReturnsToNewestMessage() {
         transcript.swipeDown()
         XCTAssertTrue(jump.waitForExistence(timeout: 5))
         send("Send after browsing history")
-        XCTAssertTrue(waitUntil { self.app.staticTexts["Send after browsing history"].isHittable && !self.jump.exists })
+        XCTAssertTrue(
+            waitUntil { self.app.staticTexts["Send after browsing history"].isHittable && !self.jump.exists },
+            app.debugDescription
+        )
         XCTAssertTrue(app.staticTexts["已记入。继续追问。"].waitForExistence(timeout: 5))
         XCTAssertFalse(jump.exists)
     }

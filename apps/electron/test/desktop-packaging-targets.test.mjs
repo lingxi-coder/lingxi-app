@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -12,6 +12,9 @@ import {
   desktopTarget,
   parseDesktopTargetArgs,
 } from '../scripts/package-support.mjs';
+import { assertBinaryArchitecture } from '../scripts/package-desktop.mjs';
+import { verifyDesktopPackage, verifyMacFrameworkArchitectures } from '../scripts/verify-desktop-package.mjs';
+import { verifyPackage } from '../scripts/verify-package.mjs';
 
 const electronRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -41,6 +44,124 @@ test('package target arguments are explicit and reject cross-matrix values', () 
   assert.throws(() => parseDesktopTargetArgs([]), /both --platform and --arch are required/);
   assert.throws(() => desktopTarget('win32', 'arm64'), /unsupported Desktop target/);
   assert.throws(() => parseDesktopTargetArgs(['--target', 'linux-x64']), /unknown package argument/);
+});
+
+test('macOS package architecture checks use real Mach-O slice names', { skip: process.platform !== 'darwin' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-desktop-arch-'));
+  try {
+    const source = join(root, 'main.c');
+    writeFileSync(source, 'int main(void) { return 0; }\n');
+    const intel = join(root, 'intel');
+    const arm = join(root, 'arm');
+    const universal = join(root, 'universal');
+    execFileSync('clang', ['-arch', 'x86_64', '-o', intel, source]);
+    execFileSync('clang', ['-arch', 'arm64', '-o', arm, source]);
+    execFileSync('/usr/bin/lipo', ['-create', intel, arm, '-output', universal]);
+    const intelTarget = { platform: 'darwin', arch: 'x64' };
+    const armTarget = { platform: 'darwin', arch: 'arm64' };
+    assert.doesNotThrow(() => assertBinaryArchitecture(intel, intelTarget, 'sidecar'));
+    assert.doesNotThrow(() => assertBinaryArchitecture(arm, armTarget, 'sidecar'));
+    assert.doesNotThrow(() => assertBinaryArchitecture(universal, intelTarget, 'sidecar'));
+    assert.doesNotThrow(() => assertBinaryArchitecture(universal, armTarget, 'sidecar'));
+    assert.throws(() => assertBinaryArchitecture(intel, armTarget, 'sidecar'), /x86_64; arm64 is required/);
+    assert.throws(() => assertBinaryArchitecture(arm, intelTarget, 'sidecar'), /arm64; x64 is required/);
+    chmodSync(arm, 0o644);
+    assert.throws(() => assertBinaryArchitecture(arm, armTarget, 'sidecar'), /not executable/);
+    const invalid = join(root, 'invalid');
+    writeFileSync(invalid, 'not a Mach-O', { mode: 0o755 });
+    assert.throws(() => assertBinaryArchitecture(invalid, intelTarget, 'sidecar'), /cannot inspect Mach-O/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the desktop packager still runs its preflight as a CLI', { skip: process.platform !== 'darwin' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-desktop-cli-'));
+  try {
+    const script = join(electronRoot, 'scripts', 'package-desktop.mjs');
+    const alias = join(root, 'package-desktop.mjs');
+    symlinkSync(script, alias);
+    for (const entry of [script, alias]) {
+      const result = spawnSync(process.execPath, [
+        entry, '--platform', 'darwin', '--arch', process.arch,
+      ], {
+        encoding: 'utf8',
+        env: { ...process.env, LINGXI_BRIDGE_SERVER_BIN: join(root, 'missing-bridge') },
+      });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /release bridge-server sidecar is missing/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('standalone desktop verification rejects executable and sidecar target mismatches', { skip: process.platform !== 'darwin' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-desktop-wrong-target-'));
+  try {
+    const paths = desktopArtifactPaths(root, 'darwin', 'arm64');
+    const contents = join(paths.payloadRoot, 'Contents');
+    const resources = join(contents, 'Resources');
+    const bin = join(resources, 'bin');
+    const executable = join(contents, 'MacOS', 'LingXi Code');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(dirname(executable), { recursive: true });
+    mkdirSync(join(contents, 'Frameworks'));
+    for (const path of [paths.artifactPath, paths.checksumPath, paths.metadataPath, join(resources, 'app.asar')]) {
+      writeFileSync(path, 'fixture');
+    }
+    copyFileSync(join(electronRoot, 'assets', 'icons', 'icon.png'), join(resources, 'icon.png'));
+    const source = join(root, 'main.c');
+    writeFileSync(source, 'int main(void) { return 0; }\n');
+    const arm = join(root, 'arm');
+    const intel = join(root, 'intel');
+    execFileSync('clang', ['-arch', 'arm64', '-o', arm, source]);
+    execFileSync('clang', ['-arch', 'x86_64', '-o', intel, source]);
+    copyFileSync(intel, executable);
+    copyFileSync(arm, join(bin, 'bridge-server'));
+    assert.throws(() => verifyDesktopPackage(root, 'darwin', 'arm64'), /Desktop executable has the wrong architecture/);
+    copyFileSync(arm, executable);
+    copyFileSync(intel, join(bin, 'bridge-server'));
+    assert.throws(() => verifyDesktopPackage(root, 'darwin', 'arm64'), /sidecar has architecture x86_64; expected arm64/);
+
+    copyFileSync(arm, join(bin, 'bridge-server'));
+    execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', join(bin, 'bridge-server')]);
+    const frameworks = join(contents, 'Frameworks');
+    const framework = join(frameworks, 'Electron Framework.framework', 'Versions', 'A', 'Electron Framework');
+    const helper = join(frameworks, 'Electron Helper.app', 'Contents', 'MacOS', 'Electron Helper');
+    mkdirSync(dirname(framework), { recursive: true });
+    mkdirSync(dirname(helper), { recursive: true });
+    copyFileSync(intel, framework);
+    copyFileSync(arm, helper);
+    assert.throws(() => verifyDesktopPackage(root, 'darwin', 'arm64'), /nested framework or helper has the wrong architecture.*Electron Framework/);
+    copyFileSync(arm, framework);
+    copyFileSync(intel, helper);
+    assert.throws(() => verifyDesktopPackage(root, 'darwin', 'arm64'), /nested framework or helper has the wrong architecture.*Electron Helper/);
+    const universal = join(root, 'universal');
+    execFileSync('/usr/bin/lipo', ['-create', intel, arm, '-output', universal]);
+    copyFileSync(universal, framework);
+    copyFileSync(universal, helper);
+    assert.equal(verifyMacFrameworkArchitectures(frameworks, 'arm64').length, 2);
+    assert.equal(verifyMacFrameworkArchitectures(frameworks, 'x86_64').length, 2);
+    rmSync(helper);
+    symlinkSync(intel, helper);
+    assert.throws(() => verifyMacFrameworkArchitectures(frameworks, 'arm64'), /framework symlink escapes Frameworks/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the signed-release verifier requires an explicit expected team', { skip: process.platform !== 'darwin' }, () => {
+  const previous = process.env.LINGXI_MAC_TEAM_ID;
+  try {
+    delete process.env.LINGXI_MAC_TEAM_ID;
+    assert.throws(() => verifyPackage('/nonexistent'), /LINGXI_MAC_TEAM_ID must identify the team/);
+    process.env.LINGXI_MAC_TEAM_ID = 'invalid';
+    assert.throws(() => verifyPackage('/nonexistent'), /LINGXI_MAC_TEAM_ID must identify the team/);
+  } finally {
+    if (previous === undefined) delete process.env.LINGXI_MAC_TEAM_ID;
+    else process.env.LINGXI_MAC_TEAM_ID = previous;
+  }
 });
 
 test('the Flare macOS wrapper pins the iOS team and isolated development identifiers', () => {
@@ -90,5 +211,49 @@ test('Flare wrapper parses and prints an explicit isolated output root', () => {
     assert.match(output, new RegExp(`^output_root=${outputRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
   } finally {
     rmSync(outputRoot, { recursive: true, force: true });
+  }
+});
+
+test('Flare build and reuse both verify the signed app media after package verification', (t) => {
+  const source = readFileSync(join(electronRoot, 'scripts', 'package-macos-flare.sh'), 'utf8');
+  const start = source.indexOf('verify_package_and_media() {');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(start >= 0 && end > start, 'wrapper has the shared verification function');
+  const helper = source.slice(start, end + 2);
+  const reuseStart = source.indexOf('if [[ "$reuse_existing" == true ]]; then');
+  const reuseEnd = source.indexOf('\nfi\n', reuseStart);
+  const buildStart = source.indexOf("log 'packaging and signing the Electron app'");
+  assert.match(source.slice(reuseStart, reuseEnd), /^\s*verify_package_and_media\s*$/m);
+  assert.match(source.slice(buildStart), /^verify_package_and_media\s*$/m);
+  assert.ok(source.indexOf('if [[ "$preflight_only" == true ]]; then') < start);
+
+  const root = mkdtempSync(join(tmpdir(), 'lingxi flare verification '));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  const trace = join(root, 'trace');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'npm'), '#!/bin/sh\nprintf "npm %s | output=%s\\n" "$*" "${LINGXI_PACKAGE_OUTPUT_ROOT:-}" >> "$TEST_TRACE"\nexit "${TEST_NPM_STATUS:-0}"\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'node'), '#!/bin/sh\nprintf "node %s | output=%s\\n" "$*" "${LINGXI_PACKAGE_OUTPUT_ROOT:-}" >> "$TEST_TRACE"\nexit "${TEST_NODE_STATUS:-0}"\n', { mode: 0o755 });
+  const command = `set -Eeuo pipefail\nELECTRON_DIR="$1"\n${helper}\nverify_package_and_media\n`;
+  for (const variant of [
+    { npm: 0, node: 0, output: '', status: 0 },
+    { npm: 0, node: 0, output: join(root, 'custom output'), status: 0 },
+    { npm: 17, node: 0, output: '', status: 17 },
+    { npm: 0, node: 19, output: '', status: 19 },
+  ]) {
+    rmSync(trace, { force: true });
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_TRACE: trace,
+      TEST_NPM_STATUS: String(variant.npm), TEST_NODE_STATUS: String(variant.node) };
+    if (variant.output) env.LINGXI_PACKAGE_OUTPUT_ROOT = variant.output;
+    else delete env.LINGXI_PACKAGE_OUTPUT_ROOT;
+    const result = spawnSync('/bin/bash', ['-c', command, '-', root], { env, encoding: 'utf8' });
+    assert.equal(result.status, variant.status, result.stderr);
+    const lines = readFileSync(trace, 'utf8').trim().split('\n');
+    assert.equal(lines[0], `npm run verify:package | output=${variant.output}`);
+    if (variant.npm !== 0) assert.equal(lines.length, 1);
+    else {
+      assert.equal(lines.length, 2);
+      assert.equal(lines[1], `node scripts/packaged-sidecar-smoke.mjs --platform darwin --arch arm64 --signed-mac-package | output=${variant.output}`);
+    }
   }
 });

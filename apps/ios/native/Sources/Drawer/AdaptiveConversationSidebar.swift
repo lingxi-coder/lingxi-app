@@ -72,13 +72,16 @@ private struct ConversationSideDrawer<Menu: View, Content: View>: View {
                     .allowsHitTesting(isOpen && drag.direction != .horizontal)
                     .disabled(drag.direction == .horizontal)
                     .accessibilityElement(children: .contain)
-                    .accessibilityAddTraits(.isModal)
+                    // An offscreen drawer can still be exposed as a modal by
+                    // the accessibility server. Make it modal only while it
+                    // is open or actively being dragged.
+                    .accessibilityAddTraits(isOpen || drag.direction == .horizontal ? .isModal : [])
                     .accessibilityHidden(reveal == 0)
                     .accessibilityFocused($menuFocused)
                     .accessibilityAction(.escape) { setOpen(false) }
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-            .contentShape(Rectangle())
+            // Native navigation chrome may extend into the system's trailing
+            // safe area. A fixed hit rectangle would exclude those controls.
             // Simultaneous recognition preserves scrolling and row taps. Lock
             // intent once; vertical drags never become drawer drags.
             .simultaneousGesture(

@@ -9,6 +9,8 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     /// Accepted local sends rejoin even when no transcript row changed yet.
     var latestRequestRevision: UInt64 = 0
     var accessibilityIdentifier: String?
+    /// Populated only by the DEBUG history-reading UI fixture.
+    var uiTestAccessibilityValue: String? = nil
     var maxContentWidth: CGFloat = 720
     let scrollScope: String
     var alignShortContentToTop = false
@@ -65,6 +67,7 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             }
         }
         .modifier(OptionalAccessibilityIdentifier(identifier: accessibilityIdentifier))
+        .modifier(OptionalAccessibilityValue(value: uiTestAccessibilityValue))
         .onAppear {
             if !consumeRowRequest() {
                 if pendingRowID != nil { performPendingRowScroll() }
@@ -309,5 +312,21 @@ private struct OptionalAccessibilityIdentifier: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+private struct OptionalAccessibilityValue: ViewModifier {
+    let value: String?
+
+    func body(content: Content) -> some View {
+        #if DEBUG
+        if let value {
+            content.accessibilityValue(value)
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
     }
 }

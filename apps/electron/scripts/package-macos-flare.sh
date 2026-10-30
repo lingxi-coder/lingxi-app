@@ -38,7 +38,8 @@ unless explicit paths are supplied through:
 For Electron-only changes, LINGXI_BRIDGE_SERVER_BIN may point to an existing
 portable release bridge-server built from the same Rust sources. This skips
 Cargo rebuilding; packaging still verifies its architecture and portability,
-signs the complete app, and runs static and runtime verification.
+signs the complete app, and runs static and runtime verification. Dynamic
+media verification requires LINGXI_GSTREAMER_SDK_MACOS to identify its SDK.
 
 Options:
   --channel CHANNEL  Credential namespace to package (default: development)
@@ -347,6 +348,14 @@ if [[ "$preflight_only" == true ]]; then
   exit 0
 fi
 
+verify_package_and_media() {
+  (
+    cd "$ELECTRON_DIR"
+    npm run verify:package
+    node scripts/packaged-sidecar-smoke.mjs --platform darwin --arch arm64 --signed-mac-package
+  )
+}
+
 if [[ "$reuse_existing" == true ]]; then
   (
     cd "$ELECTRON_DIR"
@@ -357,10 +366,7 @@ const metadata = readJson(join(packageRoot, 'package.json'));
 preparePackageOutputRoot(artifactPaths(packageRoot, metadata, process.argv[2]));
 NODE
   )
-  (
-    cd "$ELECTRON_DIR"
-    npm run verify:package
-  )
+  verify_package_and_media
   package_version="$(node -p "require('${ELECTRON_DIR}/package.json').version")"
   app_path="${LINGXI_PACKAGE_OUTPUT_ROOT}/LingXi-Code-${package_version}-mac-arm64/LingXi Code.app"
   [[ -d "$app_path" ]] || fail "verified app is missing: ${app_path}"
@@ -425,8 +431,8 @@ log 'packaging and signing the Electron app'
 (
   cd "$ELECTRON_DIR"
   npm run package:mac
-  npm run verify:package
 )
+verify_package_and_media
 
 package_version="$(node -p "require('${ELECTRON_DIR}/package.json').version")"
 release_root="${LINGXI_PACKAGE_OUTPUT_ROOT:-${ELECTRON_DIR}/dist}"

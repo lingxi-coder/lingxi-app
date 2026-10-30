@@ -1,16 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EventEmitter } from 'node:events';
+import { PassThrough, Writable } from 'node:stream';
 import { HostController } from '../src/main/host';
-import { DiagnosticBuffer } from '../src/main/host-utils';
+import { canonicalWorkspace, DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
-import { CH_TERMINAL_REQUEST, type TerminalScope, type TerminalSnapshot } from '../src/shared/terminal';
+import { TerminalManager } from '../src/main/terminal';
+import { CH_TERMINAL_EVENT, CH_TERMINAL_REQUEST, type TerminalScope, type TerminalSnapshot } from '../src/shared/terminal';
 
 test('terminal IPC validates sender, scope and window attachment without a connected model', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-terminal-host-'));
-  const project = realpathSync(directory);
+  const project = canonicalWorkspace(directory);
+  const untrustedProject = join(directory, 'not-in-project-list');
+  mkdirSync(untrustedProject);
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(project);
   const sessionId = '11111111-2222-4333-8444-555555555555';
@@ -36,9 +41,10 @@ test('terminal IPC validates sender, scope and window attachment without a conne
   const invoke = (request: object, from = event) => handlers.get(CH_TERMINAL_REQUEST)!(from, request);
   try {
     await assert.rejects(invoke({ kind: 'create', scope }, { ...event, senderFrame: { url: event.senderFrame.url } }), /unauthorized/);
+    await assert.rejects(invoke({ kind: 'create', scope: { ...scope, projectPath: untrustedProject } }), /project is not in the project list/);
     await assert.rejects(invoke({ kind: 'create', scope: { ...scope, sessionId: '22222222-3333-4444-8555-666666666666' } }), /different project/);
     await assert.rejects(invoke({ kind: 'create', scope: { ...scope, sessionId: '__draft__' } }), /active session/);
-    const terminal = await invoke({ kind: 'create', scope: { ...scope, shellProgram: '/injected', shellLaunchCwd: '/injected' }, shellSelection: true, shellProgram: '/injected', shellLaunchCwd: '/injected' });
+    const terminal = await invoke({ kind: 'create', scope: { ...scope, projectPath: directory, shellProgram: '/injected', shellLaunchCwd: '/injected' }, shellSelection: true, shellProgram: '/injected', shellLaunchCwd: '/injected' });
     assert.equal(terminal.scope.sessionId, sessionId);
     assert.deepEqual(creationScopes, [scope], 'renderer-provided shell selection never reaches the terminal manager');
     await assert.rejects(invoke({ kind: 'input', terminalId: terminal.id, data: 'pwd\r' }, second), /not attached/);
@@ -53,6 +59,57 @@ test('terminal IPC validates sender, scope and window attachment without a conne
   } finally { host.dispose(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('create watches a current snapshot when a broker lifecycle event follows the response', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lingxi-terminal-host-create-'));
+  const project = canonicalWorkspace(directory);
+  const settings = new SettingsStore(join(directory, 'settings')); settings.addProject(project);
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const scope = { projectPath: project, sessionId }; settings.setActiveSessionDraft(scope);
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const ipc = { handle: (name: string, fn: (...args: any[]) => any) => handlers.set(name, fn), removeHandler: (name: string) => handlers.delete(name) };
+  const bridge = { registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, get: () => ({ projectPath: project, connectionState: { status: 'idle' } }) };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
+  const frame = { url: 'http://127.0.0.1:4242' }; const delivered: any[] = [];
+  const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once() {}, send: (channel: string, event: unknown) => { if (channel === CH_TERMINAL_EVENT) delivered.push(event); } };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  try {
+    for (const scenario of ['unknown', 'exit', 'unknown+output', 'exit+output'] as const) {
+      const kind = scenario.startsWith('unknown') ? 'unknown' : 'exit';
+      const withOutput = scenario.endsWith('+output');
+      const child = new EventEmitter() as any;
+      child.stdout = new PassThrough(); child.stderr = new PassThrough();
+      child.stdin = new Writable({ write(chunk, _encoding, callback) {
+        const request = JSON.parse(chunk.toString());
+        const response = { kind: 'response', requestId: request.requestId };
+        if (request.kind === 'create') {
+          const lifecycle = kind === 'unknown'
+            ? { kind, terminalId: request.terminalId, reason: 'exit-observation-unavailable' }
+            : { kind, terminalId: request.terminalId, exitCode: 7 };
+          const output = { kind: 'output', terminalId: request.terminalId, data: 'creation tail' };
+          child.stdout.write(`${JSON.stringify(response)}\n${withOutput ? `${JSON.stringify(output)}\n` : ''}${JSON.stringify(lifecycle)}\n`);
+        } else child.stdout.write(`${JSON.stringify(response)}\n`);
+        callback();
+      } });
+      child.stdin.on('finish', () => { child.stdout.end(); child.emit('close', 0); });
+      child.kill = () => { child.stdout.end(); child.emit('close', 0); return true; };
+      const manager = new TerminalManager({ serverBin: '/fake', spawnProcess: (() => child) as any });
+      host.attachTerminals(manager); delivered.length = 0;
+      try {
+        const snapshot = await handlers.get(CH_TERMINAL_REQUEST)!({ sender, senderFrame: frame }, { kind: 'create', scope });
+        await new Promise(resolve => setTimeout(resolve, 30));
+        assert.equal(manager.get(snapshot.id)?.status, kind === 'exit' ? 'exited' : 'unknown');
+        assert.ok(snapshot.status === (kind === 'exit' ? 'exited' : 'unknown')
+          || delivered.some(event => event.terminalId === snapshot.id && event.kind === kind),
+        `${kind} must be in the returned snapshot or delivered after watch registration`);
+        if (withOutput) assert.ok(snapshot.output.includes('creation tail')
+          || delivered.some(event => event.terminalId === snapshot.id && event.kind === 'output' && event.data.includes('creation tail')),
+        'output must be in the returned snapshot or delivered after watch registration');
+        await assert.rejects(manager.input(snapshot.id, 'blocked'), /not running/);
+      } finally { await manager.dispose(); }
+    }
+  } finally { host.dispose(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 /**
  * A terminal outlives the turn that opened it, so nothing in the terminal
  * manager notices that its chat or project went away — the host has to say so.
@@ -63,7 +120,7 @@ test('terminal IPC validates sender, scope and window attachment without a conne
  */
 test('the host tells the terminal manager when a chat or project goes away', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-terminal-lifecycle-'));
-  const project = realpathSync(directory);
+  const project = canonicalWorkspace(directory);
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(project);
   const sessionId = '11111111-2222-4333-8444-555555555555';
@@ -129,7 +186,7 @@ test('the host tells the terminal manager when a chat or project goes away', asy
 
 test('a shell opened in the draft scope follows the chat the New-chat action creates', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-terminal-draft-'));
-  const project = realpathSync(directory);
+  const project = canonicalWorkspace(directory);
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(project);
   const created = { projectPath: project, sessionId: '33333333-4444-4555-8666-777777777777' };

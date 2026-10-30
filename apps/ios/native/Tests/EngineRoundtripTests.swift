@@ -15,8 +15,8 @@
 //   * `submit(.sendPrompt(...))` returns Ok — per the binding contract, a turn
 //     failure is NOT thrown from `submit`; the turn is spawned on the engine's
 //     runtime and `submit` returns once it is queued.
-//   * the keyless turn then fails at the model boundary and the adapter streams a
-//     TERMINAL `.error` or `.turnEnded(stopReason: "model_error")` back.
+//   * the keyless turn then fails at the model boundary and the adapter streams
+//     a correlated terminal turn replay with `stop_reason: "model_error"`.
 //
 // On the simulator `cfg(target_os = "ios")` is TRUE, so `buildIosEngine` builds
 // the REAL `IosPlatform` whose `http` handle is the shared `reqwest` + `rustls`
@@ -50,12 +50,16 @@ import XCTest
 #if canImport(harness_runtimeFFI)
 
     /// A test `IosEventListener` that records every inbound `ClientEvent` and
-    /// fulfils an expectation when a terminal event (`error` or `turnEnded`)
-    /// arrives.  Thread-safe: Rust delivers `onEvent` from the engine runtime.
+    /// waits for the terminal replay of the submitted session and turn.
+    /// Thread-safe: Rust delivers `onEvent` from the engine runtime.
     final class CollectingListener: IosEventListener, @unchecked Sendable {
         private let lock = NSLock()
         private var _events: [ClientEvent] = []
-        /// Fulfilled the first time a terminal event is observed.
+        private var expectedReplay: (sessionID: String, turnID: UInt64)?
+        private var sawExpectedTerminalReplay = false
+        private var sawTerminalError = false
+        private var terminalFulfilled = false
+        /// Fulfilled once both error evidence and the expected terminal replay arrive.
         let terminal: XCTestExpectation?
 
         init(terminal: XCTestExpectation? = nil) {
@@ -68,20 +72,52 @@ import XCTest
             return _events
         }
 
+        var hasTerminalReplayAndError: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return terminalFulfilled
+        }
+
+        func expectTerminalReplay(sessionID: String, turnID: UInt64) {
+            lock.lock(); defer { lock.unlock() }
+            expectedReplay = (sessionID, turnID)
+        }
+
+        static func replayedStopReason(
+            _ event: ClientEvent,
+            sessionID: String,
+            turnID: UInt64
+        ) -> String? {
+            guard case let .turnEventReplay(owner, turn, _, eventJSON) = event,
+                  owner == sessionID, turn == turnID,
+                  let data = eventJSON.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  json["type"] as? String == "turn_ended" else { return nil }
+            return json["stop_reason"] as? String
+        }
+
         func onEvent(event: ClientEvent) async {
-            lock.lock()
-            _events.append(event)
-            let isTerminal: Bool
-            switch event {
-            case .error, .turnEnded:
-                isTerminal = true
-            default:
-                isTerminal = false
+            let shouldFulfill = lock.withLock { () -> Bool in
+                _events.append(event)
+                guard let expectedReplay, !terminalFulfilled else { return false }
+                switch event {
+                case let .terminalApiError(_, reason, _):
+                    sawTerminalError = sawTerminalError || reason == "api_error"
+                case .error:
+                    sawTerminalError = true
+                default:
+                    break
+                }
+                if Self.replayedStopReason(event, sessionID: expectedReplay.sessionID,
+                                           turnID: expectedReplay.turnID) != nil {
+                    sawExpectedTerminalReplay = true
+                }
+                if sawTerminalError && sawExpectedTerminalReplay {
+                    terminalFulfilled = true
+                    return true
+                }
+                return false
             }
-            lock.unlock()
-            if isTerminal {
-                // Fulfil exactly once; XCTestExpectation tolerates extra fulfils
-                // only when assertForOverFulfill is off, so guard with a flag.
+            if shouldFulfill {
                 terminal?.fulfill()
             }
         }
@@ -98,6 +134,52 @@ import XCTest
             runId _: String,
             progress _: WorkflowProgressDto
         ) async {}
+    }
+
+    final class CollectingListenerContractTests: XCTestCase {
+        func testTerminalReplayRequiresMatchingOwnerAndStructuredOutcome() {
+            func replay(_ session: String, _ turn: UInt64, _ json: String) -> ClientEvent {
+                .turnEventReplay(sessionId: session, turnId: turn, sequence: 1, eventJson: json)
+            }
+            let terminal = #"{"type":"turn_ended","stop_reason":"model_error"}"#
+            let match: (ClientEvent) -> String? = {
+                CollectingListener.replayedStopReason($0, sessionID: "session-a", turnID: 7)
+            }
+            XCTAssertNil(match(replay("session-b", 7, terminal)))
+            XCTAssertNil(match(replay("session-a", 8, terminal)))
+            XCTAssertNil(match(replay("session-a", 7, "not json")))
+            XCTAssertNil(match(replay("session-a", 7, #"{"type":"text_delta","text":"turn_ended"}"#)))
+            XCTAssertNil(match(replay("session-a", 7, #"{"type":"turn_ended"}"#)))
+            XCTAssertEqual(match(replay("session-a", 7, terminal)), "model_error")
+        }
+
+        func testTerminalWaitRequiresErrorAndCorrelatedReplayInEitherOrder() async {
+            let terminal = ClientEvent.turnEventReplay(
+                sessionId: "session-a", turnId: 7, sequence: 1,
+                eventJson: #"{"type":"turn_ended","stop_reason":"model_error"}"#
+            )
+            let wrongOwner = ClientEvent.turnEventReplay(
+                sessionId: "session-b", turnId: 7, sequence: 1,
+                eventJson: #"{"type":"turn_ended","stop_reason":"model_error"}"#
+            )
+            let error = ClientEvent.terminalApiError(
+                apiErrorStatus: 401, terminalReason: "api_error", stopReason: "stop_sequence"
+            )
+            let first = CollectingListener()
+            first.expectTerminalReplay(sessionID: "session-a", turnID: 7)
+            await first.onEvent(event: error)
+            await first.onEvent(event: wrongOwner)
+            XCTAssertFalse(first.hasTerminalReplayAndError)
+            await first.onEvent(event: terminal)
+            XCTAssertTrue(first.hasTerminalReplayAndError)
+
+            let second = CollectingListener()
+            second.expectTerminalReplay(sessionID: "session-a", turnID: 7)
+            await second.onEvent(event: terminal)
+            XCTAssertFalse(second.hasTerminalReplayAndError)
+            await second.onEvent(event: error)
+            XCTAssertTrue(second.hasTerminalReplayAndError)
+        }
     }
 
     /// A no-op `IosPermissionSink` for the keyless round-trip: the keyless turn
@@ -292,9 +374,8 @@ import XCTest
         /// listener path without a network success and without a secret.
         @MainActor
         func testKeylessSendPromptDeliversTerminalEvent() async throws {
-            // The terminal-event expectation: the keyless turn streams a final
-            // `.error` (or, defensively, a `.turnEnded`) to the listener.
-            let terminal = expectation(description: "engine delivers a terminal ClientEvent to the listener")
+            // The durable turn stream carries the correlated terminal outcome.
+            let terminal = expectation(description: "engine delivers the terminal turn replay to the listener")
             terminal.assertForOverFulfill = false
             let listener = CollectingListener(terminal: terminal)
 
@@ -337,24 +418,25 @@ import XCTest
 
             // SUBMIT: per the binding contract this returns Ok — the turn is
             // spawned on the engine's owned runtime; a turn failure is NOT thrown
-            // here, it streams to the listener as a `ClientEvent.error`.
+            // here, it streams its error and terminal outcome to the listener.
             let sessionID = await handle.workspaceState().sessionId
             XCTAssertFalse(sessionID.isEmpty)
+            let turnID: UInt64 = 1
+            listener.expectTerminalReplay(sessionID: sessionID, turnID: turnID)
             try await handle.submit(command: .sendPrompt(
                 sessionId: sessionID,
                 text: ClientTextDto(codeUnits: Array("Reply with exactly: hello from lingxi".utf16)),
                 promptMode: nil,
                 images: [],
-                turnId: nil, visualizationContext: nil))
+                turnId: turnID, visualizationContext: nil))
 
             // Wait for the streamed terminal event to reach the listener over the
             // UniFFI callback.  Generous timeout: the engine spins up its runtime
             // and the keyless turn round-trips to the (rejecting) model endpoint.
             await fulfillment(of: [terminal], timeout: 60)
 
-            // PROOF: at least one real engine-originated event arrived on the
-            // listener, and the keyless turn surfaced either a terminal `.error`
-            // or the current adapter contract's `.turnEnded(model_error)`.
+            // PROOF: real engine-originated events arrived over UniFFI and the
+            // submitted turn's durable replay ended with `model_error`.
             let received = listener.events
             // Diagnostic: surface the real engine-originated event stream in the
             // test log (no secrets — these are ClientEvent kinds/messages).
@@ -367,19 +449,17 @@ import XCTest
                 if case let .error(kind, message) = ev { return (kind, message.displayText) }
                 return nil
             }
-            let modelErrorEnds = received.compactMap { ev -> String? in
-                if case let .turnEnded(_, stopReason, _) = ev,
-                   stopReason == "model_error" {
-                    return stopReason
-                }
+            let apiTerminalErrors = received.compactMap { ev -> (UInt16?, String)? in
+                if case let .terminalApiError(status, reason, _) = ev { return (status, reason) }
                 return nil
             }
-            XCTAssertFalse(errorEvents.isEmpty && modelErrorEnds.isEmpty,
-                           """
-                           keyless turn must deliver ClientEvent.error or turnEnded(model_error) \
-                           (proves SwiftUI→UniFFI→engine→listener end to end). \
-                           Received events: \(received.map { String(describing: $0) })
-                           """)
+            let replayedStopReasons = received.compactMap {
+                CollectingListener.replayedStopReason($0, sessionID: sessionID, turnID: turnID)
+            }
+            XCTAssertTrue(replayedStopReasons.contains("model_error"),
+                          "keyless turn must end with model_error: \(received)")
+            XCTAssertTrue(apiTerminalErrors.contains { $0.1 == "api_error" } || !errorEvents.isEmpty,
+                          "keyless turn must report its terminal API error: \(received)")
 
             // The error must carry a human-readable message (engine-originated,
             // not an empty placeholder).  We do NOT assert the key value or print
@@ -391,10 +471,14 @@ import XCTest
             // REAL-CLIENT PROOF.  The terminal error must come from the real
             // `reqwest`+`rustls` transport (`platform_common::http::ReqwestHttp`)
             // wired into `IosPlatform`, NOT the old `platform-posix-minimal` SSE
-            // stub.  We do this NEGATIVELY (hermetic-safe): assert the message is
-            // not the stub signature.  This passes whether the network returned a
-            // real `401` or a `connection failed: …` — both are the real client —
-            // and fails only if the engine is still wired to the stub.
+            // stub. A terminal HTTP error status proves an HTTP response; for a
+            // connection failure the error message must be present and must not
+            // contain the old stub's signature.
+            let hasHTTPErrorStatus = apiTerminalErrors.contains { status, reason in
+                reason == "api_error" && status.map { (400..<600).contains(Int($0)) } == true
+            }
+            XCTAssertTrue(hasHTTPErrorStatus || !errorEvents.isEmpty,
+                          "a real HTTP error status or transport error message is required: \(received)")
             for (_, message) in errorEvents {
                 assertRealHttpAttempt(message)
             }
@@ -442,7 +526,16 @@ import XCTest
                 share: ShareImpl(), notifications: NotificationImpl(),
                 clipboard: ClipboardImpl(), permissions: NoopPermissionSink(), mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
                 secureStorage: nil, deviceControl: nil)
-            try await handle.submit(command: .resumeSession(sessionId: sessionID, cwd: nil))
+            do {
+                try await handle.submit(command: .resumeSession(sessionId: sessionID, cwd: nil))
+            } catch {
+                // A previous test may have bound the process-wide iSH runtime to
+                // a different sandbox. Preserve the original failure and expose
+                // the runtime reason before this fixture is removed.
+                let capability = probeIosMobileLinux(config: runtime)
+                print("[history-resume] runtime available=\(capability.available), reason=\(capability.reason ?? "none")")
+                throw error
+            }
             var restoredMessages: [MessageDto]?
             for _ in 0..<200 {
                 restoredMessages = listener.events.compactMap { event -> [MessageDto]? in

@@ -71,7 +71,34 @@ jobs:
         run: python3 scripts/ci/build_gstreamer_linux.py --root "$RUNNER_TEMP/gstreamer-sdk/linux-static" --static-plugins
       - name: Test all retained product packages
         working-directory: .
-        run: cargo test --locked --workspace --all-features --no-fail-fast
+        run: |
+          diagnostic_dir=""
+          monitor_pid=""
+          if diagnostic_dir="$(mktemp -d "${RUNNER_TEMP}/lingxi-mcp-monitor.XXXXXXXX" 2>/dev/null)"; then
+            python3 scripts/ci/monitor_mcp_shutdown.py "$$" "$diagnostic_dir" </dev/null >/dev/null 2>&1 &
+            monitor_pid=$!
+          fi
+          if cargo test --locked --workspace --all-features --no-fail-fast; then
+            test_result=0
+          else
+            test_result=$?
+          fi
+          if [[ -n "$monitor_pid" ]]; then
+            if { : > "$diagnostic_dir/done"; } 2>/dev/null; then
+              wait "$monitor_pid" || true
+            fi
+          fi
+          if [[ "$test_result" != 0 ]]; then
+            if [[ -n "$diagnostic_dir" && -f "$diagnostic_dir/report" ]]; then
+              cat "$diagnostic_dir/report" >&2 || true
+            else
+              printf '%s\n' 'MCP runtime shutdown diagnostics unavailable.' >&2
+            fi
+          fi
+          if [[ -n "$diagnostic_dir" ]]; then
+            rm -rf -- "$diagnostic_dir" || true
+          fi
+          exit "$test_result"
 
   lint:
     # Match the GStreamer API baseline used by unit-tests and bridge-server.

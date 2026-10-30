@@ -89,6 +89,36 @@ async function main() {
     await run(`window.terminalFixture.migrate('${remaining}', 'session-migrated'); document.querySelector('#composer').focus(); window.terminalFixture.session('session-migrated')`);
     await delay(80);
     result.migrationPreservesShell = (await state()).selected === remaining && (await state()).open && await run('document.activeElement.id === "composer"');
+    // Hold an old running snapshot while the unknown event and late output
+    // arrive, then ensure the stale snapshot cannot restore input admission.
+    await run('window.terminalFixture.session("session-a")'); await delay(80);
+    await run('window.terminalFixture.holdList(); window.terminalFixture.session("session-migrated")');
+    await wait('window.terminalFixture.state().listHeld');
+    await run(`window.terminalFixture.unknown('${remaining}')`);
+    await wait('document.body.innerText.includes("Terminal status could not be confirmed")');
+    await run(`window.terminalFixture.output('${remaining}', '\\r\\nunknown tail 中文\\r\\n')`);
+    await wait(`document.querySelector('.terminal-surface:not([hidden]) .xterm-rows')?.innerText.includes('unknown tail 中文')`);
+    await run('window.terminalFixture.releaseList()'); await delay(80);
+    result.unknownSurvivesStaleSnapshot = await run('document.body.innerText.includes("Terminal status could not be confirmed") && !document.body.innerText.includes("Shell exited")');
+    const inputCount = (await state()).inputs.length;
+    await run('document.querySelector(".terminal-surface:not([hidden]) .xterm-helper-textarea").focus()');
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'A' }); window.webContents.sendInputEvent({ type: 'char', keyCode: 'a' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'A' });
+    await delay(80);
+    result.unknownDisablesInput = (await state()).inputs.length === inputCount;
+    result.unknownTailRendered = await run(`document.querySelector('.terminal-surface:not([hidden]) .xterm-rows')?.innerText.includes('unknown tail 中文')`);
+    await click('.terminal-tab .terminal-icon-button');
+    await wait(`window.terminalFixture.state().closed.includes('${remaining}')`);
+    result.unknownCloseWorks = true;
+    // The broker event can predate window watch registration, so a create
+    // snapshot itself must protect unknown against later stale list results.
+    await run('window.terminalFixture.createUnknownNext()');
+    await click('[aria-label="New terminal"]');
+    await wait('document.body.innerText.includes("Terminal status could not be confirmed")');
+    const snapshotOnly = (await state()).selected;
+    await run('window.terminalFixture.session("session-a")'); await delay(80);
+    await run('window.terminalFixture.staleNextList(); window.terminalFixture.session("session-migrated")'); await delay(80);
+    result.unknownSnapshotSurvivesStaleList = (await state()).selected === snapshotOnly && await run('document.body.innerText.includes("Terminal status could not be confirmed")');
+    await click('.terminal-tab .terminal-icon-button'); await wait(`window.terminalFixture.state().closed.includes('${snapshotOnly}')`);
     trace(`result: ${JSON.stringify(result)}`);
     await new Promise(resolve => process.stdout.write(`${JSON.stringify(result)}\n`, resolve));
   } finally { trace('destroying window'); window.destroy(); }

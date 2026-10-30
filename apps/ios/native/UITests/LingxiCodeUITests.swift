@@ -715,6 +715,36 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
     }
 
+    func testCompactSidebarReleasesConversationControlsWhenClosed() {
+        let open = app.buttons["drawer.open"]
+        let summary = app.buttons["conversation.summary-menu"]
+        let newChat = app.buttons["conversation.new-chat"]
+        XCTAssertTrue(waitUntilHittable(open, timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(summary, timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(newChat, timeout: 5), app.debugDescription)
+
+        open.tap()
+        let close = app.buttons["drawer.close"]
+        XCTAssertTrue(waitUntilHittable(close, timeout: 5), app.debugDescription)
+        XCTAssertFalse(summary.isHittable, app.debugDescription)
+        close.tap()
+
+        XCTAssertTrue(waitUntilHittable(open, timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(summary, timeout: 5), app.debugDescription)
+        summary.tap()
+        let tools = app.buttons["conversation.summary.category.tools"]
+        XCTAssertTrue(tools.waitForExistence(timeout: 5), app.debugDescription)
+        tools.tap()
+        let sheet = app.descendants(matching: .any)["conversation.summary-sheet.tools"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 8), app.debugDescription)
+        app.buttons["关闭"].tap()
+        XCTAssertTrue(waitUntilGone(sheet, timeout: 8), app.debugDescription)
+
+        XCTAssertTrue(waitUntilHittable(newChat, timeout: 5), app.debugDescription)
+        newChat.tap()
+        XCTAssertTrue(app.buttons["newchat.workspace"].waitForExistence(timeout: 8), app.debugDescription)
+    }
+
     /// The drawer supports edge opening while leaving the chat visible.
     func testEdgeSwipeOpensTheSidebar() {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 8), app.debugDescription)

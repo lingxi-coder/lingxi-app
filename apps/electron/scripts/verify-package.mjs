@@ -34,14 +34,14 @@ import {
 import {
   BROKER_RESOURCE_DIRNAME,
   brokerIdentifiers,
-  findMachOFiles,
   validateProvisioningProfile,
   verifyIdentifier,
   verifySignedEntitlements,
   verifyTeamIdentifier,
 } from './credential-broker.mjs';
 import { verifyModBun } from './mod-bun.mjs';
-import { verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { verifyMacAppSignature, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { verifyMacFrameworkArchitectures } from './verify-desktop-package.mjs';
 
 function requirePath(path, kind = 'path') {
   if (!existsSync(path)) throw new Error(`required ${kind} is missing: ${path}`);
@@ -82,6 +82,11 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   if (process.platform !== 'darwin') {
     throw new Error(`package verification requires macOS; received ${process.platform}`);
   }
+  const teamId = process.env['LINGXI_MAC_TEAM_ID']?.trim();
+  if (!teamId || !/^[A-Z0-9]{10}$/.test(teamId)) {
+    throw new Error('LINGXI_MAC_TEAM_ID must identify the team expected for the signed macOS package');
+  }
+  if (!commandAvailable('/usr/bin/codesign')) throw new Error('codesign is required for macOS package verification');
   const metadata = readJson(join(root, 'package.json'));
   const paths = artifactPaths(root, metadata, outputRoot);
   requirePath(paths.appPath, 'application bundle');
@@ -144,7 +149,11 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   assertArm64Executable(join(resources, 'bin', 'bridge-server'), 'packaged bridge-server sidecar');
   assertArm64Executable(join(resources, 'bin', 'bun'), 'packaged Mod compiler');
   verifyModBun(resources, 'darwin', 'arm64');
-  verifyMacGStreamerRuntime(join(contents, 'Frameworks'), join(resources, 'bin', 'bridge-server'));
+  verifyMacGStreamerRuntime(join(contents, 'Frameworks'), join(resources, 'bin', 'bridge-server'), {
+    expectedArch: 'arm64',
+    appRoot: paths.appPath,
+  });
+  const nestedFrameworkBinaries = verifyMacFrameworkArchitectures(join(contents, 'Frameworks'), 'arm64');
   assertArm64Executable(
     join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE),
     'packaged audio helper app',
@@ -255,7 +264,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   if (checksumLine !== expectedChecksumLine) throw new Error('SHA-256 file does not match ZIP artifact');
 
   if (commandAvailable('/usr/bin/codesign')) {
-    execFileSync('/usr/bin/codesign', ['--verify', '--strict', paths.appPath], { stdio: 'pipe' });
+    verifyMacAppSignature(paths.appPath);
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, 'bin', 'bridge-server')], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, 'bin', 'bun')], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, AUDIO_HELPER_APP)], { stdio: 'pipe' });
@@ -273,7 +282,6 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     if (externalDependency) {
       throw new Error(`audio helper has an unbundled dynamic dependency: ${externalDependency}`);
     }
-    const teamId = process.env['LINGXI_MAC_TEAM_ID']?.trim();
     if (teamId) {
       verifyIdentifier(paths.appPath, identifiers.desktopBundleId, teamId);
       verifyIdentifier(join(resources, 'bin', 'bridge-server'), identifiers.bridgeServerIdentifier, teamId);
@@ -295,7 +303,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
         'com.apple.security.device.camera': true,
       });
       verifyTeamIdentifier(join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE), teamId);
-      for (const path of findMachOFiles(join(contents, 'Frameworks'))) {
+      for (const path of nestedFrameworkBinaries) {
         verifyTeamIdentifier(path, teamId);
       }
     }

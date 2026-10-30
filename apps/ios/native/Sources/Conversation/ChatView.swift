@@ -678,6 +678,7 @@ struct ChatView: View {
             focused: showsSelectedAgent ? false : composerFocused,
             latestRequestRevision: showsSelectedAgent ? 0 : latestMessageRequestRevision,
             accessibilityIdentifier: showsSelectedAgent ? "conversation.agent-message-list" : "conversation.message-list",
+            uiTestAccessibilityValue: transcriptReadingTestProgress(visibleRenderItems),
             maxContentWidth: 860,
             scrollScope: "\(session.id):\(showsSelectedAgent ? convo.selectedAgentID : ConversationModel.mainAgentID)",
             alignShortContentToTop: true,
@@ -735,6 +736,25 @@ struct ChatView: View {
         .sheet(item: $convo.deepLinkRuntimeTarget) { target in
             DeepLinkRuntimeDetail(target: target, source: source, convo: convo)
         }
+    }
+
+    /// Expose the mock's actual streamed delta count to the UI test even when
+    /// its assistant row is outside LazyVStack's instantiated viewport.
+    private func transcriptReadingTestProgress(_ items: [ConversationRenderItem]) -> String? {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["LINGXI_UI_TEST_TRANSCRIPT_READING"] == "1" else { return nil }
+        let marker = "Scroll stream tail "
+        for item in items.reversed() {
+            guard case let .message(message) = item,
+                  message.streamed,
+                  let range = message.text.range(of: marker, options: .backwards),
+                  let index = Int(message.text[range.upperBound...]) else { continue }
+            return "scroll-fixture-delta:\(index)"
+        }
+        return "scroll-fixture-delta:0"
+        #else
+        return nil
+        #endif
     }
 
     /// The four signals this screen treats as "new content", collapsed into one

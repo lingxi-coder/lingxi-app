@@ -319,6 +319,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Test iOS CI storage guard
+        run: python3 scripts/tests/test_ios_ci_storage.py
+
       # The three iOS rust targets the XCFramework is assembled from: device,
       # Apple-silicon simulator, and Intel simulator.
       - uses: dtolnay/rust-toolchain@1.94.0
@@ -347,12 +350,27 @@ jobs:
       - name: Install the pinned macOS GStreamer SDK for host bindings
         run: python3 scripts/ci/gstreamer_sdk.py macos --root "$RUNNER_TEMP/gstreamer-sdk/macos"
 
+      # Cargo's three release slices and the host bindgen build are scratch
+      # inputs to the XCFramework, not inputs to the later Xcode test.
+      - name: Allocate private iOS build storage
+        id: ios-storage
+        run: |
+          target_dir="$(python3 scripts/ci/ios_ci_storage.py prepare)"
+          printf 'target=%s\n' "$target_dir" >> "$GITHUB_OUTPUT"
+
       # Build the gitignored Generated/ Swift bindings + the
       # LingxiCodeFFI.xcframework that the Xcode project links against.
       - name: Build XCFramework + Swift bindings
         env:
           LINGXI_REUSE_STAGED_LINUX_RUNTIME: "1"
+          CARGO_TARGET_DIR: ${{ steps.ios-storage.outputs.target }}
+          LINGXI_XCFRAMEWORK_BUILD_DIR: ${{ steps.ios-storage.outputs.target }}/xcframework-work
         run: bash apps/ios/native/scripts/build-xcframework.sh
+
+      - name: Release verified iOS build intermediates
+        env:
+          IOS_CI_TARGET: ${{ steps.ios-storage.outputs.target }}
+        run: python3 scripts/ci/ios_ci_storage.py release "$IOS_CI_TARGET"
 
       - name: Generate Xcode project
         working-directory: apps/ios/native
@@ -381,3 +399,9 @@ jobs:
           xcodebuild test \
             -scheme LingxiCode \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}"
+
+      - name: Report iOS runner storage
+        if: always() && steps.ios-storage.outcome == 'success'
+        env:
+          IOS_CI_TARGET: ${{ steps.ios-storage.outputs.target }}
+        run: python3 scripts/ci/ios_ci_storage.py report "$IOS_CI_TARGET"

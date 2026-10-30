@@ -6,6 +6,7 @@ import { join, dirname } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { LocalAppStore } from './fixtures/local-app-store.ts';
 import { LocalAppRuntime, appEnvironment, shellQuote } from '../src/main/local-apps/runtime.ts';
+import { PREPARATION_DATA_DIRECTORY } from '../src/main/local-apps/store.ts';
 import { parseManifest } from '../src/main/local-apps/manifest.ts';
 import { permissionCapabilities } from '../src/main/local-apps/permissions.ts';
 import { CancellationTombstones, createInvocationRef, InvocationRegistry } from '../src/main/local-apps/upstream/dyadInvocation.ts';
@@ -73,7 +74,7 @@ test('install runs once, a real local backend becomes ready, and stop releases i
   const url = runtime.service(row.id, 'api')!.url;
   assert.equal(await (await fetch(url)).text(), 'ready');
   await runtime.stop(row.id); await assert.rejects(fetch(url));
-  await runtime.start(row.id); assert.equal(await fs.readFile(join(runtime.workspace(row.id)!, '.lingxi-prepare-data', 'installs'), 'utf8'), 'x');
+  await runtime.start(row.id); assert.equal(await fs.readFile(join(runtime.workspace(row.id)!, PREPARATION_DATA_DIRECTORY, 'installs'), 'utf8'), 'x');
 });
 test('stop before queue admission cancels startup and does not publish late readiness', async t => {
   const { store, runtime } = await fixture(t);
@@ -96,7 +97,7 @@ test('explicit background invocation resume restarts services without rerunning 
   await runtime.resume(row.id, row.revision, invocation);
   assert.equal(runtime.invocationId(row.id), invocation);
   assert.equal(await (await fetch(runtime.service(row.id, 'api')!.url)).text(), 'ready');
-  assert.equal(await fs.readFile(join(store.workspacePath(row.id, row.revision), '.lingxi-prepare-data', 'installs'), 'utf8'), 'x');
+  assert.equal(await fs.readFile(join(store.workspacePath(row.id, row.revision), PREPARATION_DATA_DIRECTORY, 'installs'), 'utf8'), 'x');
   await assert.rejects(fs.access(join(store.dataPath(row.id), 'installs')));
   await runtime.stop(row.id);
   await assert.rejects(runtime.resume(row.id, row.revision, 'forged'), /invocation changed/);

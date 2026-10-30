@@ -293,6 +293,7 @@ struct AudioHelperEncodingTests {
             for: stop,
             operation: "stop_recording",
             owner: recordingOwner,
+            targetRecordingOrigin: origin,
             recordingOrigin: origin,
             recordingOwner: recordingOwner
         ) == origin)
@@ -300,6 +301,7 @@ struct AudioHelperEncodingTests {
             for: stop,
             operation: "listen",
             owner: recordingOwner,
+            targetRecordingOrigin: origin,
             recordingOrigin: origin,
             recordingOwner: recordingOwner
         ) == nil)
@@ -307,13 +309,24 @@ struct AudioHelperEncodingTests {
             for: stop,
             operation: "stop_recording",
             owner: otherOwner,
+            targetRecordingOrigin: origin,
             recordingOrigin: origin,
             recordingOwner: recordingOwner
+        ) == nil)
+        let newerOrigin = HelperAudioOperationIdentity(id: "new-recording", generation: 3, serviceEpoch: 7)
+        #expect(recordingOriginToRollback(
+            for: stop, operation: "stop_recording", owner: recordingOwner,
+            targetRecordingOrigin: origin, recordingOrigin: newerOrigin, recordingOwner: recordingOwner
+        ) == nil)
+        #expect(recordingOriginToRollback(
+            for: stop, operation: "stop_recording", owner: recordingOwner,
+            recordingOrigin: origin, recordingOwner: recordingOwner
         ) == nil)
         #expect(recordingOriginToRollback(
             for: origin,
             operation: "start_recording",
             owner: recordingOwner,
+            targetRecordingOrigin: origin,
             recordingOrigin: origin,
             recordingOwner: recordingOwner
         ) == origin)
@@ -772,6 +785,9 @@ struct AudioHelperEncodingTests {
             "service_epoch": serviceEpoch,
         ]
         let owner: [String: Any] = ["type": "session", "session_id": "session-1"]
+        let closeContext: [String: Any] = ["helper_instance": try #require(serviceSnapshot.helper.instanceId),
+            "connection_id": UUID().uuidString.lowercased(), "resource_incarnation": UUID().uuidString.lowercased(),
+            "flight_id": UUID().uuidString.lowercased()]
         let configuration: [String: Any] = [
             "schemaVersion": 4,
             "recognition": ["source": "automatic"],
@@ -783,6 +799,7 @@ struct AudioHelperEncodingTests {
         let request: [String: Any] = [
             "id": "engine-request-1",
             "kind": "engine_request",
+            "closeContext": closeContext,
             "configuration": configuration,
             "configurationRevision": 37,
             "request": [
@@ -796,7 +813,7 @@ struct AudioHelperEncodingTests {
         let cancel: [String: Any] = [
             "id": "cancel-request-1",
             "kind": "command",
-            "command": ["type": "cancel_operation", "identity": identity],
+            "command": ["type": "cancel_operation", "identity": identity, "owner": owner, "closeContext": closeContext],
         ]
         let (lines, continuation) = AsyncStream<String>.makeStream()
         let dispatcher = Task {
@@ -804,13 +821,19 @@ struct AudioHelperEncodingTests {
                 lines,
                 handle: { await handleHelperInputEnvelope($0, state: state) },
                 cancel: { await cancelHelperInputEnvelope($0, state: state) },
-                reject: { await state.rejectOverloaded($0) }
+                reject: { await state.rejectOverloaded($0, reason: $1) }
             )
         }
         var startedIterator = started.makeAsyncIterator()
         continuation.yield(String(data: try JSONSerialization.data(withJSONObject: request), encoding: .utf8)!)
         #expect(await startedIterator.next() != nil)
         continuation.yield(String(data: try JSONSerialization.data(withJSONObject: cancel), encoding: .utf8)!)
+        for _ in 0..<100 {
+            if output.values.contains(where: { data in
+                ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["id"] as? String) == "cancel-request-1"
+            }) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         continuation.finish()
         await dispatcher.value
 
@@ -874,7 +897,7 @@ struct AudioHelperEncodingTests {
                 lines,
                 handle: { await handleHelperInputEnvelope($0, state: state) },
                 cancel: { await cancelHelperInputEnvelope($0, state: state) },
-                reject: { await state.rejectOverloaded($0) }
+                reject: { await state.rejectOverloaded($0, reason: $1) }
             )
         }
         for (requestID, generation) in [("reconnect-old", 12), ("reconnect-new", 1)] {
@@ -954,7 +977,7 @@ struct AudioHelperEncodingTests {
                 lines,
                 handle: { await handleHelperInputEnvelope($0, state: state) },
                 cancel: { await cancelHelperInputEnvelope($0, state: state) },
-                reject: { await state.rejectOverloaded($0) }
+                reject: { await state.rejectOverloaded($0, reason: $1) }
             )
         }
         continuation.yield(String(data: try JSONSerialization.data(withJSONObject: request), encoding: .utf8)!)
@@ -1238,28 +1261,29 @@ struct AudioHelperEncodingTests {
         }
         var signalIterator = signals.makeAsyncIterator()
         let identity: [String: Any] = ["id": "long-listen", "generation": 4, "service_epoch": 9]
+        let owner: [String: Any] = ["type": "session", "session_id": "session-1"]
+        let context: [String: Any] = ["helper_instance": UUID().uuidString.lowercased(), "connection_id": UUID().uuidString.lowercased(),
+            "resource_incarnation": UUID().uuidString.lowercased(), "flight_id": UUID().uuidString.lowercased()]
         let request: [String: Any] = [
-            "id": "helper-request-1",
-            "kind": "engine_request",
-            "request": ["identity": identity],
+            "id": "helper-request-1", "kind": "engine_request", "closeContext": context,
+            "request": ["identity": identity, "owner": owner],
         ]
         let cancel: [String: Any] = [
-            "id": "helper-cancel-1",
-            "kind": "command",
-            "command": ["type": "cancel_operation", "identity": identity],
+            "id": "helper-cancel-1", "kind": "command",
+            "command": ["type": "cancel_operation", "identity": identity, "owner": owner, "closeContext": context],
         ]
         lineContinuation.yield(String(data: try! JSONSerialization.data(withJSONObject: request), encoding: .utf8)!)
 
         let started = await signalIterator.next()
         #expect(started == "started")
         lineContinuation.yield(String(data: try! JSONSerialization.data(withJSONObject: cancel), encoding: .utf8)!)
-        lineContinuation.finish()
-        await dispatcher.value
         var received: [String] = []
         while !(received.contains("cancel_acknowledged") && received.contains("cancelled")) {
             guard let signal = await signalIterator.next() else { break }
             received.append(signal)
         }
+        lineContinuation.finish()
+        await dispatcher.value
         #expect(received.contains("cancel_acknowledged"))
         #expect(received.contains("cancelled"))
         signalContinuation.finish()
@@ -1367,7 +1391,7 @@ struct AudioHelperEncodingTests {
             lines,
             handle: { _ in calls.increment() },
             cancel: { _ in },
-            reject: { _ in rejectedContinuation.yield(()) }
+            reject: { _, _ in rejectedContinuation.yield(()) }
         )
     }
     let envelope: [String: Any] = ["id": "invalid-open-envelope", "kind": "media_request", "request": raw]

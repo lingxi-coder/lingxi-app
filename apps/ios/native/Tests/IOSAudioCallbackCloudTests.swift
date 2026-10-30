@@ -3,6 +3,30 @@ import XCTest
 
 @MainActor
 final class IOSAudioCallbackCloudTests: XCTestCase {
+    func testAttachedAudioOwnerDtoPreservesAttachmentAndLogicalOwner() throws {
+        let hostID = "4c1ca0d5-61cd-4c9d-9d9a-23c8832ebc8f"
+        let owner = try IOSAudioServiceCallbackAdapter.localOwner(.attached(
+            attachmentHostId: hostID,
+            attachmentGeneration: 17,
+            logicalKind: .session,
+            logicalOwnerId: "session-a"
+        ))
+        let attachment = try XCTUnwrap(IOSMediaAttachmentIdentity(hostID: hostID, generation: 17))
+        XCTAssertEqual(owner, .attached(
+            attachment: attachment,
+            logicalOwner: .session(sessionID: "session-a")
+        ))
+    }
+
+    func testMalformedAttachedAudioOwnerDtoIsRejected() {
+        XCTAssertThrowsError(try IOSAudioServiceCallbackAdapter.localOwner(.attached(
+            attachmentHostId: "not-a-uuid",
+            attachmentGeneration: 17,
+            logicalKind: .session,
+            logicalOwnerId: "session-a"
+        )))
+    }
+
     func testCallbackSynthesisUsesProviderAndRetainsActualUsageContext() async throws {
         let host = CallbackCloudHost()
         let fixture = try makeFixture(host: host)

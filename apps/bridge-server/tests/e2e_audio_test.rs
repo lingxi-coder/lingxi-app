@@ -66,15 +66,14 @@ fn audio_capabilities() -> AudioCapabilitySnapshotDto {
 }
 
 fn context() -> AudioOperationContext {
-    AudioOperationContext {
-        identity: AudioOperationId::new(1, 7),
-        owner: AudioOwner::Session {
+    AudioOperationContext::new(
+        AudioOperationId::new(1, 7),
+        AudioOwner::Session {
             session_id: "session-audio-test".into(),
         },
-        initiator: None,
-        timeout_budget_ms: Some(5_000),
-        max_payload_bytes: 1024,
-    }
+    )
+    .with_timeout_budget_ms(5_000)
+    .with_max_payload_bytes(1024)
 }
 
 /// Open an authenticated WS connection to `port` and complete the handshake.

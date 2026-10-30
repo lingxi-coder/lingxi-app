@@ -1,5 +1,12 @@
 import type { LingxiApi } from './lingxi.js';
 
+/** Access the optional preload host without importing main-process modules. */
+export function desktopHost(): LingxiApi | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const { lingxi } = window;
+  return lingxi;
+}
+
 /** Stop explicit agent aliases through the session they belong to, even across UI navigation. */
 export async function stopSessionSubagents(
   host: Pick<LingxiApi, 'command'>,

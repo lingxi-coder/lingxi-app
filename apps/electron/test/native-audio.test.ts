@@ -26,6 +26,7 @@ class FakeHelperProcess extends EventEmitter {
     super();
     this.stdin.write = ((chunk: string | Uint8Array) => {
       this.writes.push(Buffer.from(chunk).toString('utf8'));
+      try { currentFakeHelperWrites.push(JSON.parse(Buffer.from(chunk).toString('utf8'))); } catch { /* malformed writes are tested elsewhere */ }
       return true;
     }) as typeof this.stdin.write;
   }
@@ -39,7 +40,7 @@ class FakeHelperProcess extends EventEmitter {
 
 function snapshot(overrides: Partial<NativeAudioSnapshot> = {}): NativeAudioSnapshot {
   return {
-    helper: { state: 'running' },
+    helper: { state: 'running', instanceId: '7a269634-4dc7-4270-a2df-23bd7df64582' },
     permissions: { microphone: 'granted', speech: 'authorized' },
     owner: null,
     activity: 'idle',
@@ -115,6 +116,13 @@ test('snapshots and events accept every engine owner kind emitted by the Swift h
     });
   }
 });
+
+function unknownClose(envelope: { id: string }): unknown {
+  const request = currentFakeHelperWrites.find((value) => value.id === envelope.id);
+  assert.ok(request?.command?.closeContext, 'expected a bound cleanup command');
+  return { disposition: 'unknown', context: request.command.closeContext, identity: request.command.identity, owner: request.command.owner };
+}
+const currentFakeHelperWrites: any[] = [];
 
 function lastEnvelope(process: FakeHelperProcess): { id: string; kind: string } {
   const raw = process.writes.at(-1);
@@ -766,7 +774,7 @@ test('cancellation while packaged Speech permission is pending prevents later na
 
     await manager.cancelAudioRequest(request.identity);
     assert.deepEqual(await listenResult, {
-      type: 'failed', error: { kind: 'cancelled', message: 'the audio operation was cancelled' },
+      type: 'failed_without_resource', error: { kind: 'cancelled', message: 'the audio operation was cancelled' },
     });
 
     finishSpeechPermission();
@@ -818,7 +826,7 @@ test('Listen deadline includes packaged microphone permission and prevents late 
       new Promise<'permission-dialog-still-blocking'>((resolve) => setTimeout(() => resolve('permission-dialog-still-blocking'), 250)),
     ]);
     assert.deepEqual(result, {
-      type: 'failed', error: { kind: 'timeout', message: 'the audio operation deadline expired before native admission' },
+      type: 'failed_without_resource', error: { kind: 'timeout', message: 'the audio operation deadline expired before native admission' },
     });
 
     finishPermission('granted');
@@ -1589,7 +1597,7 @@ test('helper restart refreshes capabilities and rejects a request carrying the o
       operation: { type: 'speak', text: 'must not be admitted' },
     });
     assert.deepEqual(await staleOperation, {
-      type: 'failed',
+      type: 'failed_without_resource',
       error: { kind: 'cancelled', message: 'the audio service changed before this request started' },
     });
     assert.equal(restartedHelper.writes.length, 2, 'a stale identity must not reach the restarted helper');
@@ -1709,7 +1717,7 @@ test('window suspension stops the helper when native owner teardown fails', asyn
         result: { type: 'failed', error: { kind: 'native_failure', message: 'native stop failed' } },
       },
     })}\n`);
-    await suspended;
+    await assert.rejects(suspended, /cleanup remains unconfirmed/);
     assert.equal(helper.killCount, 1);
   } finally {
     await manager.dispose();
@@ -1745,7 +1753,7 @@ test('window suspension bounds an unresponsive cancellation command', async () =
     assert.equal(cancel.command?.type, 'cancel_operation');
     assert.strictEqual(manager.suspend('window-minimized'), suspended,
       'overlapping window events share one teardown and keep admission suspended');
-    await suspended;
+    await assert.rejects(suspended, /cleanup remains unconfirmed/);
     assert.equal(helper.killCount, 1);
     assert.equal((await operation).type, 'failed');
   } finally {
@@ -1780,7 +1788,7 @@ test('suspension cancels a request waiting for helper capabilities before native
       type: 'response',
       result: { type: 'snapshot', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }) },
     })}\n`);
-    assert.equal((await result).type, 'failed');
+    assert.equal((await result).type, 'failed_without_resource');
     assert.equal(helper.writes.length, 1, 'the hidden window must not admit the queued operation');
   } finally {
     await manager.dispose();
@@ -1840,11 +1848,13 @@ test('window suspension cancels pending owners and tears down owners beyond a st
     helper.stdout.write(`${JSON.stringify({
       id: cancellation.id,
       type: 'response',
-      result: { type: 'cancelled', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }) },
+      result: { type: 'close_receipt', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }), closeReceipt: unknownClose(cancellation) },
     })}\n`);
 
     const endedOwners = new Set<string>();
-    for (const index of [4, 5]) {
+    // Owner B has an unconfirmed cancellation; never issue a broad teardown
+    // and pretend its response proves that particular flight closed.
+    for (const index of [4]) {
       const teardown = await envelopeAt(helper, index) as {
         id: string;
         kind: string;
@@ -1873,11 +1883,12 @@ test('window suspension cancels pending owners and tears down owners beyond a st
         },
       })}\n`);
     }
-    await suspended;
-    assert.deepEqual([...endedOwners].sort(), [ownerA.instance_id, ownerB.instance_id]);
+    await assert.rejects(suspended, /cleanup remains unconfirmed/);
+    assert.deepEqual([...endedOwners], [ownerA.instance_id]);
     assert.deepEqual(await ownerBOperation, {
-      type: 'failed', error: { kind: 'cancelled', message: 'the audio operation was cancelled' },
+      type: 'failed', error: { kind: 'unavailable', message: 'native audio cancellation was requested; cleanup remains unconfirmed' },
     });
+    assert.equal(helper.killCount, 1, 'an ACK and owner response do not prove native cleanup');
   } finally {
     await manager.dispose();
     helper.stdin.end();
@@ -2094,7 +2105,7 @@ test('zero audio deadline expires before helper startup or microphone permission
     });
 
     assert.deepEqual(result, {
-      type: 'failed', error: { kind: 'timeout', message: 'the audio operation deadline expired before native admission' },
+      type: 'failed_without_resource', error: { kind: 'timeout', message: 'the audio operation deadline expired before native admission' },
     });
     assert.equal(permissionRequests, 0);
     assert.equal(spawnCount, 0);
@@ -2150,7 +2161,7 @@ test('an audio deadline after native admission cancels the helper operation with
     helper.stdout.write(`${JSON.stringify({
       id: cancellation.id,
       type: 'response',
-      result: { type: 'cancelled', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }) },
+      result: { type: 'close_receipt', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }), closeReceipt: unknownClose(cancellation) },
     })}\n`);
     await new Promise((resolve) => setImmediate(resolve));
   } finally {
@@ -2208,7 +2219,7 @@ test('an inner helper timeout that wins first still sends targeted operation can
     helper.stdout.write(`${JSON.stringify({
       id: cancellation.id,
       type: 'response',
-      result: { type: 'cancelled', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }) },
+      result: { type: 'close_receipt', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }), closeReceipt: unknownClose(cancellation) },
     })}\n`);
     await new Promise((resolve) => setImmediate(resolve));
   } finally {
@@ -2248,7 +2259,7 @@ test('stopping a committed recording does not need a fresh saved configuration r
       operation: { type: 'start_recording', sample_rate_hz: 16_000, format: 'wav' },
     } as const;
     const startResult = manager.executeAudioRequest(startRequest);
-    const startEnvelope = await envelopeAt(helper, 1) as { id: string; kind: string; configurationRevision?: number };
+    const startEnvelope = await envelopeAt(helper, 1) as { id: string; kind: string; configurationRevision?: number; closeContext: unknown };
     assert.equal(startEnvelope.kind, 'engine_request');
     assert.equal(startEnvelope.configurationRevision, 37);
     helper.stdout.write(`${JSON.stringify({
@@ -2290,6 +2301,7 @@ test('stopping a committed recording does not need a fresh saved configuration r
           currentOperation: { identity: stopRequest.identity, owner },
         }),
         result: { type: 'recording', audio_base64: 'AQI=', mime_type: 'audio/wav' },
+        closeReceipt: { disposition: 'closed', context: startEnvelope.closeContext, identity: startRequest.identity, owner, handle: 'recording-handle' },
       },
     })}\n`);
     assert.deepEqual(await stopResult, { type: 'recording', audio_base64: 'AQI=', mime_type: 'audio/wav' });
@@ -2302,7 +2314,7 @@ test('stopping a committed recording does not need a fresh saved configuration r
   }
 });
 
-test('failed completed-recording cancellation retains the origin for retry', async () => {
+test('failed completed-recording cancellation retains the owner and fences retry', async () => {
   const helper = new FakeHelperProcess();
   const manager = new NativeAudioManager({
     isPackaged: false,
@@ -2343,18 +2355,12 @@ test('failed completed-recording cancellation retains the origin for retry', asy
       type: 'response',
       result: { type: 'error', error: { code: 'native-error', message: 'native cancellation failed' }, snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }) },
     })}\n`);
-    await firstCancellation;
+    await assert.rejects(firstCancellation, /remains unconfirmed/);
 
     const retry = manager.cancelAudioRequest(identity);
-    const retriedCancel = await envelopeAt(helper, 3);
-    assert.equal(retriedCancel.command?.type, 'cancel_operation');
-    assert.deepEqual(retriedCancel.command?.identity, identity);
-    helper.stdout.write(`${JSON.stringify({
-      id: retriedCancel.id,
-      type: 'response',
-      result: { type: 'cancelled', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }) },
-    })}\n`);
-    await retry;
+    const retryEnvelope = await envelopeAt(helper, 3);
+    helper.stdout.write(`${JSON.stringify({ id: retryEnvelope.id, type: 'response', result: { type: 'close_receipt', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }), closeReceipt: unknownClose(retryEnvelope) } })}\n`);
+    await assert.rejects(retry, /remains unconfirmed/);
   } finally {
     await manager.dispose();
     helper.stdin.end();
@@ -2396,74 +2402,28 @@ test('failed public owner teardown stops the helper and reports failure', async 
   }
 });
 
-test('identity cancellation settles once and ignores an old recording response after a new start', async () => {
+test('an admitted identity cancellation keeps the same owner fenced despite a late start response', async () => {
   const helper = new FakeHelperProcess();
-  const manager = new NativeAudioManager({
-    isPackaged: false,
-    resourcesPath: '/resources',
-    userDataPath: '/tmp/lingxi-audio-tests',
-    helperPath: '/tmp/LingXiAudioHelper',
-    diagnostics: new DiagnosticBuffer(),
-    spawnHelper: () => helper as any,
-  });
+  const manager = new NativeAudioManager({ isPackaged: false, resourcesPath: '/resources', userDataPath: '/tmp/lingxi-audio-tests',
+    helperPath: '/tmp/LingXiAudioHelper', diagnostics: new DiagnosticBuffer(), spawnHelper: () => helper as any });
   try {
     await primeEngineCapabilities(manager, helper);
     const owner = { type: 'session', session_id: 'session-1' } as const;
-    const oldRequest = {
-      identity: { id: '00000000-0000-4000-8000-000000000002', generation: 1, service_epoch: 9 }, owner,
-      max_payload_bytes: 8_000_000,
-      operation: { type: 'start_recording', sample_rate_hz: 16_000, format: 'wav' },
-    } as const;
-    const staleStart = manager.executeAudioRequest(oldRequest);
-    const oldStartEnvelope = await envelopeAt(helper, 1);
-
-    const cancel = manager.cancelAudioRequest(oldRequest.identity);
-    const cancelEnvelope = await envelopeAt(helper, 2);
-    assert.equal(cancelEnvelope.kind, 'command');
-    helper.stdout.write(`${JSON.stringify({
-      id: cancelEnvelope.id,
-      type: 'response',
-      result: { type: 'cancelled', snapshot: snapshot() },
-    })}\n`);
-    await cancel;
-    assert.deepEqual(await staleStart, {
-      type: 'failed', error: { kind: 'cancelled', message: 'the audio operation was cancelled' },
-    });
-
-    const currentRequest = {
-      identity: { id: '00000000-0000-4000-8000-000000000003', generation: 2, service_epoch: 9 }, owner,
-      max_payload_bytes: 8_000_000,
-      operation: { type: 'start_recording', sample_rate_hz: 16_000, format: 'wav' },
-    } as const;
-    const currentStart = manager.executeAudioRequest(currentRequest);
-    const newStartEnvelope = await envelopeAt(helper, 3);
-    const currentSnapshot = snapshot({
-      owner: { kind: 'engine', id: 'new-session' },
-      activity: 'listening',
-      capabilities: AUDIO_CAPABILITIES,
-      currentOperation: { identity: currentRequest.identity, owner },
-    });
-    helper.stdout.write(`${JSON.stringify({
-      id: newStartEnvelope.id,
-      type: 'response',
-      result: { type: 'engine_result', snapshot: currentSnapshot, result: { type: 'recording_started', handle: 'new-handle' } },
-    })}\n`);
-    assert.deepEqual(await currentStart, { type: 'recording_started', handle: 'new-handle' });
-
-    // The helper can finish work after its cancellation response. Its old
-    // snapshot must not undo the new recording that now owns the microphone.
-    helper.stdout.write(`${JSON.stringify({
-      id: oldStartEnvelope.id,
-      type: 'response',
-      result: { type: 'engine_result', snapshot: snapshot({ owner: { kind: 'engine', id: 'old' }, activity: 'listening' }), result: { type: 'recording_started', handle: 'old-handle' } },
-    })}\n`);
-    assert.deepEqual(manager.getSnapshot(), currentSnapshot);
-  } finally {
-    await manager.dispose();
-    helper.stdin.end();
-    helper.stdout.end();
-    helper.stderr.end();
-  }
+    const oldRequest = { identity: { id: '00000000-0000-4000-8000-000000000002', generation: 1, service_epoch: 9 }, owner,
+      max_payload_bytes: 8_000_000, operation: { type: 'start_recording', sample_rate_hz: 16_000, format: 'wav' } } as const;
+    const staleStart = manager.executeAudioRequest(oldRequest); const oldEnvelope = await envelopeAt(helper, 1);
+    const cancel = manager.cancelAudioRequest(oldRequest.identity); const cancelEnvelope = await envelopeAt(helper, 2);
+    let settled = false; void staleStart.then(() => { settled = true; });
+    await new Promise((resolve) => setImmediate(resolve)); assert.equal(settled, false);
+    helper.stdout.write(`${JSON.stringify({ id: cancelEnvelope.id, type: 'response', result: { type: 'close_receipt', snapshot: snapshot(), closeReceipt: unknownClose(cancelEnvelope) } })}\n`);
+    await assert.rejects(cancel, /remains unconfirmed/);
+    assert.deepEqual(await staleStart, { type: 'failed', error: { kind: 'unavailable', message: 'native audio cancellation was requested; cleanup remains unconfirmed' } });
+    const currentRequest = { ...oldRequest, identity: { id: '00000000-0000-4000-8000-000000000003', generation: 2, service_epoch: 9 } };
+    const currentStart = await manager.executeAudioRequest(currentRequest);
+    assert.equal(currentStart.type, 'failed_without_resource'); if (currentStart.type === 'failed_without_resource') assert.match(currentStart.error.message, /remains unconfirmed/);
+    helper.stdout.write(`${JSON.stringify({ id: oldEnvelope.id, type: 'response', result: { type: 'engine_result', snapshot: snapshot({ activity: 'listening' }), result: { type: 'recording_started', handle: 'old-handle' } } })}\n`);
+    assert.equal(helper.writes.length, 3);
+  } finally { await manager.dispose(); helper.stdin.end(); helper.stdout.end(); helper.stderr.end(); }
 });
 
 test('cancellation while packaged permission is pending prevents later native admission', async () => {
@@ -2496,7 +2456,7 @@ test('cancellation while packaged permission is pending prevents later native ad
     await started;
     await manager.cancelAudioRequest(request.identity);
     assert.deepEqual(await resultPromise, {
-      type: 'failed', error: { kind: 'cancelled', message: 'the audio operation was cancelled' },
+      type: 'failed_without_resource', error: { kind: 'cancelled', message: 'the audio operation was cancelled' },
     });
 
     finishPermission('granted');
@@ -2593,8 +2553,8 @@ for (const budgets of [[1000, 10], [10, 1000]]) {
       let longSettled = false;
       void long.then(() => { longSettled = true; });
       const shortResult = await short;
-      assert.equal(shortResult.type, 'failed');
-      if (shortResult.type === 'failed') assert.equal(shortResult.error.kind, 'timeout');
+      assert.equal(shortResult.type, 'failed_without_resource');
+      if (shortResult.type === 'failed_without_resource') assert.equal(shortResult.error.kind, 'timeout');
       assert.equal(longSettled, false);
       assert.equal(helper.writes.length, 1);
       helper.stdout.write(`${JSON.stringify({ id: capability.id, type: 'response', result: { type: 'snapshot', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }) } })}\n`);
@@ -2678,8 +2638,8 @@ test('host-local policy rejects Provider and Automatic-plus-Provider-voice snaps
         operation: { type: 'synthesize', text: 'hello' },
         max_payload_bytes: 1024,
       });
-      assert.equal(result.type, 'failed');
-      if (result.type === 'failed') assert.equal(result.error.kind, 'invalid_request');
+      assert.equal(result.type, 'failed_without_resource');
+      if (result.type === 'failed_without_resource') assert.equal(result.error.kind, 'invalid_request');
       assert.equal(helper.writes.length, 0);
     } finally {
       await manager.dispose();
@@ -2766,8 +2726,8 @@ test('cloud cancellation aborts the same host operation and cannot fall through 
     } } as any,
   });
   const promise = manager.executeAudioRequest({ identity, owner: { type: 'ui', instance_id: 'preview' }, operation: { type: 'synthesize', text: 'hello' }, max_payload_bytes: 1024 });
-  await admitted.promise; await manager.cancelAudioRequest(identity);
-  const result = await promise; assert.equal(result.type, 'failed'); if (result.type === 'failed') assert.equal(result.error.kind, 'cancelled');
+  await admitted.promise; await assert.rejects(manager.cancelAudioRequest(identity), /remains unconfirmed/);
+  const result = await promise; assert.equal(result.type, 'failed'); if (result.type === 'failed') assert.equal(result.error.kind, 'unavailable');
   assert.equal(manager.getSnapshot().activeOperationCount, 0);
 });
 

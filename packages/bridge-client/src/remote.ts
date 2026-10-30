@@ -17,7 +17,7 @@ export {
   REMOTE_PROTOCOL,
   /** Major sent as `initialize.protocol`; a different major is refused. */
   REMOTE_PROTOCOL_MAJOR,
-  /** Major of the `client-protocol` contract (29), derived from `CLIENT_PROTOCOL_VERSION`. */
+  /** Major of the `client-protocol` contract (30), derived from `CLIENT_PROTOCOL_VERSION`. */
   CLIENT_PROTOCOL_MAJOR,
   /** Label of the DataChannel that carries RPC fragments, `'lingxi-agent'`. */
   DATA_CHANNEL_LABEL,

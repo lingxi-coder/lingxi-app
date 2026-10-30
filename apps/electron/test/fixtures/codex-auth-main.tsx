@@ -8,6 +8,8 @@ import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 
 setLanguagePreference('zh-Hans');
 
+const refreshModelPicker = async () => {};
+
 function Fixture() {
   const [configured, setConfigured] = useState(false);
   const [open, setOpen] = useState(true);
@@ -39,6 +41,7 @@ function Fixture() {
       calls.current.logout++; setConfigured(false); return credential(false);
     },
     setModel: async (model: string) => { calls.current.apply++; setCurrentModel(model); },
+    refreshModelPicker,
     setModelPickerVisibility: async () => {},
   };
   (window as any).__codexAuthTest = {

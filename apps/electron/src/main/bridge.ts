@@ -13,6 +13,7 @@ import {
 } from '@lingxi/bridge-client';
 import type {
   AskUserQuestionRequestDto,
+  AudioOperationIdDto,
   AudioOperationRequestDto,
   AudioOperationResultDto,
   AudioOwnerDto,
@@ -201,6 +202,8 @@ const MAX_PENDING_COMPUTER_ACCESS = 1_000;
 const MAX_PENDING_ASK_USER_QUESTION = 1_000;
 
 const MAX_TRACKED_AUDIO_REQUESTS_PER_RUNTIME = 256;
+// The manager can be shared by multiple runtimes; reserve before either waits.
+const sharedMediaOpenReservations = new WeakMap<object, Map<string, object>>();
 
 // Remote Control's memory of what the engine's event stream does not hold.
 const MAX_PROMPT_JOURNAL = 500;
@@ -475,7 +478,7 @@ export class SessionRuntime {
   executeMedia(
     operation: MediaOperationDto,
     limits?: { timeout_budget_ms?: number; max_payload_bytes?: number },
-  ): Promise<{ operation_id: MediaOperationIdDto; result: MediaResultDto }> {
+  ): Promise<{ operation_id: MediaOperationIdDto; incarnation: string; result: MediaResultDto }> {
     return this.requireClient().executeMedia(operation, limits);
   }
 
@@ -483,8 +486,8 @@ export class SessionRuntime {
     return this.requireClient().readMedia(mediaRef);
   }
 
-  cancelMedia(operationId: MediaOperationIdDto): Promise<void> {
-    return this.requireClient().cancelMedia(operationId);
+  cancelMedia(operationId: MediaOperationIdDto, incarnation: string): Promise<void> {
+    return this.requireClient().cancelMedia(operationId, incarnation);
   }
 
   registerMediaConnection(
@@ -518,35 +521,113 @@ export class SessionRuntime {
     this.requireClient().sendCommand({ type: 'media_control_response', response });
   }
 
-  private updateNativeMediaOwner(sessionId?: string): Promise<void> {
-    const update = this.nativeMediaDeviceUpdate.catch(() => undefined).then(async () => {
-      if (sessionId && this.nativeMediaOwner === sessionId && this.nativeMediaDevices) return;
-      const previous = this.nativeMediaDevices;
-      this.nativeMediaDevices = undefined;
-      this.nativeMediaOwner = undefined;
-      if (previous) {
-        this.retiringNativeMediaDevices.add(previous);
-        try {
-          await previous.dispose();
-          this.retiringNativeMediaDevices.delete(previous);
-        } catch (error) {
-          // Keep the closed wrapper retained until every native lease cleanup
-          // is acknowledged; later cleanup may still resolve a quarantined lease.
-          this.diagnostics.add('warn', 'bridge', `native media owner cleanup is still pending: ${sanitizeDiagnostic(error)}`);
+  private invalidateNativeMediaBinding(): void {
+    const pending = this.pendingAudioSessionContext;
+    this.pendingAudioSessionContext = undefined;
+    if (pending) { clearTimeout(pending.timer); pending.controller.abort(); pending.resolve(); }
+    this.cachedAudioSessionContext = undefined;
+    const audioOwner = this.attachedAudioBinding;
+    this.attachedAudioBinding = undefined;
+    if (audioOwner) this.retiringAttachedAudioOwners.set(audioOwnerKey(audioOwner), audioOwner);
+    const previous = this.nativeMediaDevices;
+    this.nativeMediaDevices = undefined;
+    if (!previous) return;
+    this.retiringNativeMediaDevices.add(previous);
+    // dispose marks the old wrapper closed synchronously, before any await.
+    this.startNativeMediaRetirement(previous);
+  }
+
+  private startNativeMediaRetirement(previous: NativeMediaDevices): void {
+    if (this.nativeMediaRetirements.has(previous)) return;
+    const cleanup = previous.dispose().then(() => {
+      this.retiringNativeMediaDevices.delete(previous);
+    }, (error: unknown) => {
+      this.diagnostics.add('warn', 'bridge', `native media owner cleanup is still pending: ${sanitizeDiagnostic(error)}`);
+    }).finally(() => { if (this.nativeMediaRetirements.get(previous) === cleanup) this.nativeMediaRetirements.delete(previous); });
+    this.nativeMediaRetirements.set(previous, cleanup);
+  }
+
+  private requestAudioSessionContext(client: BridgeClient, generation: number): void {
+    this.invalidateNativeMediaBinding();
+    if (generation !== this.generation || client !== this.client || client !== this.nativeMediaClient || this.disposed) return;
+    let resolve!: () => void;
+    const done = new Promise<void>((finish) => { resolve = finish; });
+    const requestId = randomUUID();
+    const pending = { client, generation, requestId, done, resolve, received: false, controller: new AbortController(),
+      timer: setTimeout(() => {
+        if (this.pendingAudioSessionContext === pending) {
+          this.pendingAudioSessionContext = undefined;
+          pending.controller.abort();
+          resolve();
         }
+      }, 5_000),
+    };
+    pending.timer.unref();
+    this.pendingAudioSessionContext = pending;
+    try { client.sendCommand({ type: 'get_audio_session_context', request_id: requestId }); }
+    catch (error) {
+      if (this.pendingAudioSessionContext === pending) this.pendingAudioSessionContext = undefined;
+      clearTimeout(pending.timer); pending.controller.abort(); resolve();
+      this.diagnostics.add('warn', 'bridge', `audio session context request failed: ${sanitizeDiagnostic(error)}`);
+    }
+  }
+
+  private installAudioSessionContext(client: BridgeClient, generation: number, event: Extract<ClientEvent, { type: 'audio_session_context' }>): void {
+    const pending = this.pendingAudioSessionContext;
+    if (!pending || pending.received || pending.client !== client || pending.generation !== generation
+      || pending.requestId !== event.request_id || generation !== this.generation || client !== this.client
+      || client !== this.nativeMediaClient || this.disposed) return;
+    pending.received = true;
+    if (event.session_id === this.sessionId && event.profile_id && event.account_scope) {
+      this.cachedAudioSessionContext = { sessionId: event.session_id, profileId: event.profile_id, accountScope: event.account_scope };
+      void this.opts.audioService?.refreshHostedCapabilities?.().catch(() => undefined);
+    }
+    const update = this.nativeMediaDeviceUpdate.then(async () => {
+      for (const retired of this.retiringNativeMediaDevices) this.startNativeMediaRetirement(retired);
+      while (this.retiringNativeMediaDevices.size > 0) {
+        if (this.pendingAudioSessionContext !== pending
+          || [...this.retiringNativeMediaDevices].some((retired) => !this.nativeMediaRetirements.has(retired))) return;
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
       }
+      const owner = event.media_owner;
       const service = this.opts.audioService;
-      if (!sessionId || this.disposed || !service?.executeMediaDevice) return;
+      if (this.pendingAudioSessionContext !== pending || generation !== this.generation || client !== this.client
+        || client !== this.nativeMediaClient || this.disposed || event.session_id !== this.sessionId
+        || !owner || owner.type !== 'attached' || owner.logical_kind !== 'session'
+        || owner.logical_owner_id !== this.sessionId || !service?.executeMediaDevice || !service.drainMediaOpenFlights) return;
+      // Keep a same-owner refresh alive. A different attachment may only
+      // replace it after every exact old audio owner is confirmed ended.
+      const nextAudioKey = audioOwnerKey(owner);
+      for (const [oldKey, oldOwner] of this.retiringAttachedAudioOwners) {
+        if (oldKey === nextAudioKey) { this.retiringAttachedAudioOwners.delete(oldKey); continue; }
+        for (const gate of this.waitingAttachedAudio.values()) {
+          if (audioOwnerKey(gate.owner) === oldKey) {
+            gate.cancelled = true;
+            if (gate.token) gate.proved = service.cancelReservedAudioAdmission?.(gate.identity, gate.token) === true;
+            gate.wake();
+          }
+        }
+        try { await service.endAudioOwner(oldOwner); }
+        catch { return; }
+        if (this.retiringAttachedAudioOwners.get(oldKey) === oldOwner) this.retiringAttachedAudioOwners.delete(oldKey);
+        if (this.pendingAudioSessionContext !== pending) return;
+      }
+      // A timed-out open can outlive the wrapper's promise. A manager must
+      // confirm its exact native cleanup before another binding can be used.
+      await Promise.race([service.drainMediaOpenFlights(pending.controller.signal), pending.done]);
+      if (this.pendingAudioSessionContext !== pending || generation !== this.generation || client !== this.client
+        || client !== this.nativeMediaClient || this.disposed) return;
       this.nativeMediaDevices = new NativeMediaDevices({
-        audio: { executeMediaDevice: request => service.executeMediaDevice!(request) },
-        owner: { type: 'session', session_id: sessionId },
+        audio: { executeMediaDevice: request => service.executeMediaDevice!(request) }, owner,
       });
-      this.nativeMediaOwner = sessionId;
+      this.attachedAudioBinding = owner;
     });
     this.nativeMediaDeviceUpdate = update.catch((error: unknown) => {
-      this.diagnostics.add('warn', 'bridge', `native media owner update failed: ${sanitizeDiagnostic(error)}`);
+      if (this.pendingAudioSessionContext === pending) this.diagnostics.add('warn', 'bridge', `native media owner install failed: ${sanitizeDiagnostic(error)}`);
+    }).finally(() => {
+      if (this.pendingAudioSessionContext === pending) this.pendingAudioSessionContext = undefined;
+      clearTimeout(pending.timer); pending.controller.abort(); pending.resolve();
     });
-    return update;
   }
 
   private async dispatchMediaDeviceRequest(
@@ -554,31 +635,72 @@ export class SessionRuntime {
     generation: number,
     request: MediaDeviceRequestEnvelopeDto,
   ): Promise<void> {
+    // Reserve before waiting on context: a duplicate must never manufacture
+    // a no-resource proof for a request still held by an old wrapper/helper.
+    const openId = request.request.type === 'open' ? request.request_id : undefined;
+    if (generation !== this.generation || client !== this.client || client !== this.nativeMediaClient || this.disposed) return;
+    const token = openId ? {} : undefined;
+    const service = this.opts.audioService;
+    if (openId && token) {
+      if (this.unsettledMediaOpenIds.has(openId) || this.completedMediaOpenIds.has(openId)) return;
+      const shared = service ? sharedMediaOpenReservations.get(service) ?? new Map<string, object>() : undefined;
+      if (service?.hasMediaRequestId?.(openId) || shared?.has(openId)
+        || this.unsettledMediaOpenIds.size >= 4096 || (shared?.size ?? 0) >= 4096) return;
+      if (service && shared) { shared.set(openId, token); sharedMediaOpenReservations.set(service, shared); }
+      this.unsettledMediaOpenIds.set(openId, token);
+    }
+    let forwarded = false;
+    try {
     // Lifecycle events must remain ordered even if an old native lease is
     // still closing. Wait for the latest owner update here instead, and do not
     // dispatch against a superseded connection or owner transition.
-    while (generation === this.generation && client === this.client && !this.disposed) {
-      const update = this.nativeMediaDeviceUpdate;
-      await update;
-      if (update === this.nativeMediaDeviceUpdate) break;
+    if (!this.nativeMediaDevices && !this.pendingAudioSessionContext && client === this.nativeMediaClient) {
+      this.requestAudioSessionContext(client, generation);
     }
-    if (generation !== this.generation || client !== this.client || this.disposed) return;
+    while (generation === this.generation && client === this.client && client === this.nativeMediaClient && !this.disposed) {
+      const context = this.pendingAudioSessionContext;
+      if (context) { await context.done; continue; }
+      const update = this.nativeMediaDeviceUpdate;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settled = await Promise.race([
+        update.then(() => true),
+        new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), 5_000); timer.unref(); }),
+      ]);
+      if (timer) clearTimeout(timer);
+      if (!settled) break;
+      if (update === this.nativeMediaDeviceUpdate && !this.pendingAudioSessionContext) break;
+    }
+    if (generation !== this.generation || client !== this.client || client !== this.nativeMediaClient || this.disposed) return;
     const devices = this.nativeMediaDevices;
     let response: MediaDeviceResponseDto;
     if (devices) {
-      response = await devices.request(request);
+      forwarded = true;
+      response = await devices.request(request, openId && token ? () => this.finishMediaOpenRequest(openId, token) : undefined);
     } else {
       response = {
         request_id: request.request_id,
-        result: { type: 'error', error: { kind: 'unavailable', message: 'The attached session has no native media device host' } },
+        result: { type: openId && (!service?.executeMediaDevice || (service.hasMediaRequestId && !service.hasMediaRequestId(openId))) ? 'open_failed_without_resource' : 'error', error: { kind: 'unavailable', message: 'The attached session has no native media device host' } },
       };
     }
-    if (generation !== this.generation || client !== this.client || this.disposed) return;
+    if (openId && token && response.result.type === 'open_failed_without_resource') this.finishMediaOpenRequest(openId, token);
+    if (generation !== this.generation || client !== this.client || client !== this.nativeMediaClient || this.disposed) return;
     try {
       client.sendCommand({ type: 'media_device_response', response });
     } catch (error) {
       this.diagnostics.add('warn', 'bridge', `native media response could not be returned: ${sanitizeDiagnostic(error)}`);
     }
+    } finally {
+      if (openId && token && !forwarded) this.finishMediaOpenRequest(openId, token);
+    }
+  }
+
+  private finishMediaOpenRequest(id: string, token: object): void {
+    if (this.unsettledMediaOpenIds.get(id) !== token) return;
+    this.unsettledMediaOpenIds.delete(id);
+    const shared = this.opts.audioService && sharedMediaOpenReservations.get(this.opts.audioService);
+    if (shared?.get(id) === token) shared.delete(id);
+    this.completedMediaOpenIds.add(id);
+    if (this.completedMediaOpenIds.size > 4096) this.completedMediaOpenIds.delete(this.completedMediaOpenIds.values().next().value!);
   }
 
   private cachedAudioSessionContext?: { sessionId: string; profileId: string; accountScope: string };
@@ -658,13 +780,27 @@ export class SessionRuntime {
   private readonly unsubscribeAudioService?: () => void;
   private readonly audioRequestsByGeneration = new Map<number, Map<string, AudioOperationRequestDto>>();
   private readonly audioStartsByGeneration = new Map<number, Map<string, AudioOperationRequestDto>>();
+  private readonly audioUnconfirmedByGeneration = new Map<number, Map<string, AudioOperationRequestDto>>();
+  private readonly audioCancelProofsByGeneration = new Map<number, Map<string, { responseSent: boolean; proved: boolean; delivered: boolean }>>();
   private readonly audioOwnersByGeneration = new Map<number, Map<string, AudioOwnerDto>>();
   private readonly audioCleanupGenerations = new Map<number, Promise<void>>();
   private readonly closedAudioGenerations = new Set<number>();
   private nativeMediaDevices?: NativeMediaDevices;
-  private nativeMediaOwner?: string;
+  private attachedAudioBinding?: Extract<AudioOwnerDto, { type: 'attached' }>;
+  private readonly retiringAttachedAudioOwners = new Map<string, Extract<AudioOwnerDto, { type: 'attached' }>>();
+  private readonly waitingAttachedAudio = new Map<string, { cancelled: boolean; proved: boolean; token?: object; owner: AudioOwnerDto; identity: AudioOperationIdDto; wake(): void }>();
+  private readonly audioAdmissionTokens = new WeakMap<AudioOperationRequestDto, object>();
+  // Persist unresolved IDs across wrapper and connection rotations.
+  private readonly unsettledMediaOpenIds = new Map<string, object>();
+  private readonly completedMediaOpenIds = new Set<string>();
+  private nativeMediaClient?: BridgeClient;
   private nativeMediaDeviceUpdate: Promise<void> = Promise.resolve();
   private readonly retiringNativeMediaDevices = new Set<NativeMediaDevices>();
+  private readonly nativeMediaRetirements = new Map<NativeMediaDevices, Promise<void>>();
+  private pendingAudioSessionContext?: {
+    client: BridgeClient; generation: number; requestId: string; done: Promise<void>;
+    resolve(): void; received: boolean; controller: AbortController; timer: ReturnType<typeof setTimeout>;
+  };
   private readonly mediaConnectionRequestListeners = new Set<(request: MediaConnectionRequestDto) => void>();
   private readonly mediaControlRequestListeners = new Set<(request: MediaControlRequestDto) => void>();
 
@@ -1390,6 +1526,8 @@ export class SessionRuntime {
     if (!lockfilePath) throw new Error('The running bridge has no known connection endpoint; no replacement was started.');
     validateBridgeLockfile(JSON.parse(readFileSync(lockfilePath, 'utf8')), pid, this.projectPath || this.activeWorkspace || '');
     const client = this.client;
+    this.nativeMediaClient = undefined;
+    this.invalidateNativeMediaBinding();
     this.client = null;
     if (client) this.closeDetachedClient(client);
     const previousGeneration = this.generation++;
@@ -1648,6 +1786,8 @@ export class SessionRuntime {
       const exitGeneration = this.generation;
       this.diagnostics.add('info', 'host', childExitDiagnostic(code, signal, exitGeneration));
       this.child = null;
+      this.nativeMediaClient = undefined;
+      this.invalidateNativeMediaBinding();
       void this.teardownAudioGeneration(exitGeneration);
       if (!this.disposed) {
         this.setState({ status: 'disconnected', reason: `bridge-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})` });
@@ -1655,6 +1795,8 @@ export class SessionRuntime {
     });
     child.once('error', (error) => {
       if (this.child !== child) return;
+      this.nativeMediaClient = undefined;
+      this.invalidateNativeMediaBinding();
       void this.teardownAudioGeneration(this.generation);
       if (!this.disposed) this.fail(`failed to spawn bridge-server: ${error.message}`);
     });
@@ -1708,7 +1850,7 @@ export class SessionRuntime {
     this.cachedAudioSessionContext = undefined;
     this.verifiedRealtimeAudio = false;
     this.wireClient(client, generation);
-    await this.updateNativeMediaOwner(this.sessionId);
+    this.invalidateNativeMediaBinding();
     const assertCurrentConnection = (): void => {
       if (generation !== this.generation || client !== this.client || this.disposed) {
         this.closeDetachedClient(client);
@@ -1737,7 +1879,7 @@ export class SessionRuntime {
       this.diagnostics.add('warn', 'bridge', `saved media audio settings were not applied: ${sanitizeDiagnostic(error)}`);
     }
     assertCurrentConnection();
-    client.sendCommand({ type: 'get_audio_session_context' });
+    this.requestAudioSessionContext(client, generation);
     const currentAudioCapabilities = this.opts.audioService?.getCapabilities();
     if (
       currentAudioCapabilities
@@ -2113,11 +2255,19 @@ export class SessionRuntime {
   }
 
   private wireClient(client: BridgeClient, generation: number): void {
-    if (generation === this.generation && !this.disposed) this.client = client;
+    if (generation === this.generation && !this.disposed) {
+      this.client = client;
+      this.nativeMediaClient = client;
+    }
     // Restored usage is explicitly marked by the engine and may be separated
     // from SessionResumed by other connection events. Live deltas still need a turn.
     client.on('event', async (event: ClientEvent) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
+      // Attachment binding metadata is host-private and is not a renderer event.
+      if (event.type === 'audio_session_context') {
+        this.installAudioSessionContext(client, generation, event);
+        return;
+      }
       this.telemetry?.onEvent(event);
       if (event.type === 'side_chat_created') { this.pendingSideCreates.delete(event.request_id); this.liveSideChats.add(event.side_id); }
       if (event.type === 'side_chat_error' && event.request_id) this.pendingSideCreates.delete(event.request_id);
@@ -2159,15 +2309,8 @@ export class SessionRuntime {
         if (event.session_id === this.sessionId) for (const callback of this.realtimeAudioSubscribers) callback(event.event_json);
         return;
       }
-      if (event.type === 'audio_session_context') {
-        if (event.session_id === this.sessionId) {
-          this.cachedAudioSessionContext = { sessionId: event.session_id, profileId: event.profile_id, accountScope: event.account_scope };
-          void this.opts.audioService?.refreshHostedCapabilities?.().catch(() => undefined);
-        }
-      }
       if (event.type === 'model_changed') {
-        this.cachedAudioSessionContext = undefined;
-        client.sendCommand({ type: 'get_audio_session_context' });
+        this.requestAudioSessionContext(client, generation);
       }
       if (event.type === 'audio_request') {
         void this.dispatchAudioRequest(client, generation, event.request);
@@ -2175,14 +2318,37 @@ export class SessionRuntime {
       }
       if (event.type === 'audio_cancel') {
         const identityKey = audioIdentityKey(event.identity);
-        const start = this.audioStartsByGeneration.get(generation)?.get(identityKey);
-        if (start) this.audioStartsByGeneration.get(generation)?.delete(identityKey);
-        this.audioRequestsByGeneration.get(generation)?.delete(audioIdentityKey(event.identity));
-        void this.opts.audioService?.cancelAudioRequest(event.identity).catch((error) => {
+        const waiting = this.waitingAttachedAudio.get(`${generation}:${identityKey}`);
+        const tracked = this.audioRequestsByGeneration.get(generation)?.get(identityKey)
+          ?? this.audioStartsByGeneration.get(generation)?.get(identityKey)
+          ?? this.audioUnconfirmedByGeneration.get(generation)?.get(identityKey);
+        if (!tracked) return;
+        if (waiting) {
+          waiting.cancelled = true;
+          if (waiting.token) waiting.proved = this.opts.audioService?.cancelReservedAudioAdmission?.(event.identity, waiting.token) === true;
+          waiting.wake();
+        }
+        if (!this.opts.audioService) return;
+        const proofs = this.audioCancelProofsByGeneration.get(generation) ?? new Map();
+        if (proofs.size >= MAX_TRACKED_AUDIO_REQUESTS_PER_RUNTIME && !proofs.has(identityKey)) {
+          // The cancellation is still attempted, but no untracked proof may
+          // be emitted for a result whose ordering cannot be coordinated.
+          if (!waiting) void this.cancelTrackedAudioRequest(tracked)?.catch(() => undefined);
+          return;
+        }
+        this.audioCancelProofsByGeneration.set(generation, proofs);
+        const proof = proofs.get(identityKey) ?? { responseSent: !this.audioRequestsByGeneration.get(generation)?.has(identityKey), proved: false, delivered: false };
+        proofs.set(identityKey, proof);
+        const cancellation = waiting ? Promise.resolve(waiting.proved ? 'verified' as const : undefined)
+          : this.cancelTrackedAudioRequest(tracked) ?? Promise.resolve(undefined);
+        void cancellation.then((receipt) => {
+          if (proofs.get(identityKey) !== proof) return;
+          if (receipt !== 'verified') { proofs.delete(identityKey); return; }
+          proof.proved = true;
+          if (proof.responseSent) this.deliverAudioCleanupProof(client, generation, event.identity, proof);
+        }).catch((error) => {
+          if (proofs.get(identityKey) === proof) proofs.delete(identityKey);
           this.diagnostics.add('warn', 'bridge', `native audio cancellation failed: ${sanitizeDiagnostic(error)}`);
-        });
-        if (start) void this.opts.audioService?.endAudioOwner(start.owner).catch((error) => {
-          this.diagnostics.add('warn', 'bridge', `cancelled recording rollback failed: ${sanitizeDiagnostic(error)}`);
         });
         return;
       }
@@ -2321,7 +2487,7 @@ export class SessionRuntime {
           this.fail('engine resumed a different session id');
           return;
         }
-        void this.updateNativeMediaOwner(event.session_id);
+        this.requestAudioSessionContext(client, generation);
         this.sessionHasHistory = true;
         this.sessionIdentityCommitted = true;
         if (this.pendingSessionResume) {
@@ -2330,7 +2496,8 @@ export class SessionRuntime {
         }
       }
       if (event.type === 'session_started') {
-        void this.updateNativeMediaOwner(event.session_id);
+        if (event.session_id === this.sessionId) this.requestAudioSessionContext(client, generation);
+        else this.invalidateNativeMediaBinding();
       }
       if (event.type === 'permission_mode_changed' && event.mode === this.pendingPermissionSwitch?.mode) {
         this.pendingPermissionSwitch.complete();
@@ -2382,7 +2549,7 @@ export class SessionRuntime {
         this.cancellingTurn = false;
         this.clearTurnInteractions(event.type === 'session_ended');
       }
-      if (event.type === 'session_ended') void this.updateNativeMediaOwner();
+      if (event.type === 'session_ended') this.invalidateNativeMediaBinding();
       if (event.type === 'slash_command_result' && this.pendingModelSwitch?.slash && this.pendingModelSwitch.sent && event.turn_id === this.pendingModelSwitch.turnId) {
         const pending = this.pendingModelSwitch;
         if (event.is_error) pending.fail(new Error('Model switch failed.'));
@@ -2506,14 +2673,16 @@ export class SessionRuntime {
     client.on('close', (code, reason) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
       this.permissionScopeChecks.clear();
-      void this.updateNativeMediaOwner();
+      this.nativeMediaClient = undefined;
+      this.invalidateNativeMediaBinding();
       void this.teardownAudioGeneration(generation);
       this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
     });
     client.on('error', (error) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
       this.permissionScopeChecks.clear();
-      void this.updateNativeMediaOwner();
+      this.nativeMediaClient = undefined;
+      this.invalidateNativeMediaBinding();
       void this.teardownAudioGeneration(generation);
       this.fail(error);
     });
@@ -2525,61 +2694,120 @@ export class SessionRuntime {
     request: AudioOperationRequestDto,
   ): Promise<void> {
     const unavailable: AudioOperationResultDto = {
-      type: 'failed',
+      type: 'failed_without_resource',
       error: { kind: 'unavailable', message: 'the desktop audio service is unavailable' },
     };
     const requestKey = audioIdentityKey(request.identity);
     const requests = this.audioRequestsByGeneration.get(generation) ?? new Map<string, AudioOperationRequestDto>();
-    if (requests.size >= MAX_TRACKED_AUDIO_REQUESTS_PER_RUNTIME && !requests.has(requestKey)) {
+    const starts = this.audioStartsByGeneration.get(generation) ?? new Map<string, AudioOperationRequestDto>();
+    const unconfirmed = this.audioUnconfirmedByGeneration.get(generation) ?? new Map<string, AudioOperationRequestDto>();
+    if (requests.has(requestKey) || starts.has(requestKey) || unconfirmed.has(requestKey)) {
+      // A duplicate response would be indistinguishable from the active
+      // incarnation, so leave the original request untouched.
+      this.diagnostics.add('warn', 'bridge', 'ignored duplicate active audio operation identity');
+      return;
+    }
+    if (requests.size + starts.size + unconfirmed.size >= MAX_TRACKED_AUDIO_REQUESTS_PER_RUNTIME) {
+      const neverDispatched = this.rejectUnadmittedAudioRequest(request.identity);
       try {
         client.sendCommand({ type: 'audio_response', identity: request.identity, result: {
-          type: 'failed', error: { kind: 'busy', message: 'too many audio operations are pending for this runtime' },
+          type: neverDispatched ? 'failed_without_resource' : 'failed',
+          error: { kind: 'busy', message: 'too many audio operations are pending for this runtime' },
         } });
       } catch { /* The connection is already gone. */ }
       return;
     }
     requests.set(requestKey, request);
     this.audioRequestsByGeneration.set(generation, requests);
-    const starts = this.audioStartsByGeneration.get(generation) ?? new Map<string, AudioOperationRequestDto>();
     this.audioStartsByGeneration.set(generation, starts);
+    this.audioUnconfirmedByGeneration.set(generation, unconfirmed);
     const owners = this.audioOwnersByGeneration.get(generation) ?? new Map<string, AudioOwnerDto>();
-    owners.set(audioOwnerKey(request.owner), request.owner);
     this.audioOwnersByGeneration.set(generation, owners);
     let result: AudioOperationResultDto = unavailable;
+    const audioService = this.opts.audioService;
+    const waitKey = `${generation}:${requestKey}`;
+    let wake!: () => void;
+    const wakeup = new Promise<void>(resolve => { wake = resolve; });
+    let gate: { cancelled: boolean; proved: boolean; token?: object; owner: AudioOwnerDto; identity: AudioOperationIdDto; wake(): void } | undefined;
+    let reserving = request.owner.type === 'attached';
     try {
-      result = this.opts.audioService
-        ? await this.opts.audioService.executeAudioRequest(request)
-        : unavailable;
+      if (reserving) {
+        gate = { cancelled: false, proved: false, token: audioService?.reserveAudioAdmission?.(request), owner: request.owner, identity: request.identity, wake };
+        if (gate.token) this.audioAdmissionTokens.set(request, gate.token);
+        this.waitingAttachedAudio.set(waitKey, gate);
+        reserving = false;
+      }
+      if (gate && (!audioService || gate.token)) {
+        if (!this.attachedAudioBinding && !this.pendingAudioSessionContext && client === this.nativeMediaClient) this.requestAudioSessionContext(client, generation);
+        const pending = this.pendingAudioSessionContext;
+        if (pending) await Promise.race([pending.done, wakeup]);
+      }
+      const bound = !gate || (!gate.cancelled && (!audioService || gate.token) && generation === this.generation && client === this.client
+        && client === this.nativeMediaClient && !this.disposed && this.attachedAudioBinding
+        && audioOwnerKey(this.attachedAudioBinding) === audioOwnerKey(request.owner));
+      if (!bound) {
+        const fresh = !audioService || gate?.proved === true || (!!gate?.token && audioService.cancelReservedAudioAdmission?.(request.identity, gate.token) === true);
+        result = { type: fresh ? 'failed_without_resource' : 'failed', error: { kind: 'cancelled', message: 'The audio attachment is not currently admitted' } };
+      } else if (gate && audioService && (!gate.token || !audioService.executeAudioRequestWithCloseReceipt)) {
+        result = { type: 'failed', error: { kind: 'unavailable', message: 'The audio attachment cannot be admitted' } };
+      } else {
+        if (gate && this.waitingAttachedAudio.get(waitKey) === gate) this.waitingAttachedAudio.delete(waitKey);
+        if (audioService) owners.set(audioOwnerKey(request.owner), request.owner);
+        result = audioService
+          ? await (audioService.executeAudioRequestWithCloseReceipt
+            ? audioService.executeAudioRequestWithCloseReceipt(request, () => this.observeAudioCleanupProof(client, generation, request.identity), gate?.token)
+            : audioService.executeAudioRequest(request))
+          : unavailable;
+      }
     } catch (error) {
-      result = {
-        type: 'failed',
-        error: { kind: 'native_failure', message: sanitizeDiagnostic(error) },
-      };
+      const neverDispatched = reserving && this.rejectUnadmittedAudioRequest(request.identity);
+      result = { type: neverDispatched ? 'failed_without_resource' : 'failed',
+        error: { kind: reserving ? 'invalid_request' : 'native_failure', message: sanitizeDiagnostic(error) } };
+    } finally {
+      if (gate && this.waitingAttachedAudio.get(waitKey) === gate) this.waitingAttachedAudio.delete(waitKey);
+      // If a service returned or threw before consuming this exact reservation,
+      // it never reached native admission and the token can be retired safely.
+      try {
+        if (gate?.token && audioService?.cancelReservedAudioAdmission?.(request.identity, gate.token) === true && result.type === 'failed') {
+          result = { type: 'failed_without_resource', error: result.error };
+        }
+      } catch { /* A failed reservation release remains unconfirmed. */ }
     }
+    if (result.type === 'failed') unconfirmed.set(requestKey, request);
+    else if (result.type === 'failed_without_resource') unconfirmed.delete(requestKey);
     requests.delete(requestKey);
     if (generation !== this.generation || client !== this.client || this.disposed || this.closedAudioGenerations.has(generation)) {
-      await this.opts.audioService?.cancelAudioRequest(request.identity).catch(() => undefined);
+      if (!gate || (gate.token && !gate.cancelled && this.attachedAudioBinding && audioOwnerKey(this.attachedAudioBinding) === audioOwnerKey(request.owner))) {
+        await this.cancelTrackedAudioRequest(request)?.catch(() => undefined);
+      }
       if (request.operation.type === 'start_recording' && result.type === 'recording_started') {
         await this.opts.audioService?.endAudioOwner(request.owner).catch(() => undefined);
       }
       return;
     }
     if (
-      result.type !== 'failed'
+      result.type !== 'failed' && result.type !== 'failed_without_resource'
       && (request.operation.type === 'end_owner'
         || request.operation.type === 'stop_recording'
         || request.operation.type === 'listen')
     ) {
       const ownerKey = audioOwnerKey(request.owner);
-      owners.delete(ownerKey);
-      for (const [identity, start] of starts) if (audioOwnerKey(start.owner) === ownerKey) starts.delete(identity);
+      if (![...starts.values(), ...unconfirmed.values()].some((item) => audioOwnerKey(item.owner) === ownerKey)) owners.delete(ownerKey);
     }
     if (request.operation.type === 'start_recording' && result.type === 'recording_started') starts.set(requestKey, request);
     try {
       client.sendCommand({ type: 'audio_response', identity: request.identity, result });
+      const proofs = this.audioCancelProofsByGeneration.get(generation);
+      const proof = proofs?.get(requestKey);
+      if (proof) {
+        proof.responseSent = true;
+        proof.delivered = result.type === 'failed_without_resource';
+        if (proof.delivered) proofs!.delete(requestKey);
+        else if (proof.proved) this.deliverAudioCleanupProof(client, generation, request.identity, proof);
+      }
     } catch (error) {
       this.diagnostics.add('warn', 'bridge', `failed to return native audio result: ${sanitizeDiagnostic(error)}`);
-      const rollbacks = [() => this.opts.audioService?.cancelAudioRequest(request.identity)];
+      const rollbacks = [() => this.cancelTrackedAudioRequest(request)];
       if (request.operation.type === 'start_recording' && result.type === 'recording_started') {
         rollbacks.push(() => this.opts.audioService?.endAudioOwner(request.owner));
       }
@@ -2595,6 +2823,56 @@ export class SessionRuntime {
     }
   }
 
+  private cancelTrackedAudioRequest(request: AudioOperationRequestDto): Promise<void | 'verified'> | undefined {
+    const token = this.audioAdmissionTokens.get(request);
+    if (request.owner.type === 'attached' && !token) return undefined;
+    return this.opts.audioService?.cancelAudioRequest(request.identity, token);
+  }
+
+  private rejectUnadmittedAudioRequest(identity: AudioOperationIdDto): boolean {
+    if (!this.opts.audioService) return true;
+    try { return this.opts.audioService.rejectAudioRequestBeforeDispatch?.(identity) === true; }
+    catch { return false; }
+  }
+
+  private observeAudioCleanupProof(client: BridgeClient, generation: number, identity: AudioOperationIdDto): void {
+    const key = audioIdentityKey(identity);
+    const requests = this.audioRequestsByGeneration.get(generation);
+    const tracked = requests?.has(key) || this.audioStartsByGeneration.get(generation)?.has(key)
+      || this.audioUnconfirmedByGeneration.get(generation)?.has(key);
+    const proofs = this.audioCancelProofsByGeneration.get(generation) ?? new Map();
+    const existing = proofs.get(key);
+    if (!tracked && !existing) return;
+    if (!existing && proofs.size >= MAX_TRACKED_AUDIO_REQUESTS_PER_RUNTIME) return;
+    this.audioCancelProofsByGeneration.set(generation, proofs);
+    const proof = existing ?? { responseSent: !requests?.has(key), proved: false, delivered: false };
+    proofs.set(key, proof);
+    proof.proved = true;
+    if (proof.responseSent) this.deliverAudioCleanupProof(client, generation, identity, proof);
+  }
+
+  private deliverAudioCleanupProof(
+    client: BridgeClient, generation: number, identity: AudioOperationIdDto,
+    proof: { responseSent: boolean; proved: boolean; delivered: boolean },
+  ): void {
+    const key = audioIdentityKey(identity);
+    const proofs = this.audioCancelProofsByGeneration.get(generation);
+    if (proofs?.get(key) !== proof || !proof.proved || proof.delivered) return;
+    if (generation !== this.generation || client !== this.client || this.disposed || this.closedAudioGenerations.has(generation)) {
+      proofs.delete(key); return;
+    }
+    try {
+      client.sendCommand({ type: 'audio_response', identity, result: { type: 'failed_without_resource',
+        error: { kind: 'cancelled', message: 'the native audio operation has closed' } } });
+      proof.delivered = true;
+      this.audioStartsByGeneration.get(generation)?.delete(key);
+      this.audioUnconfirmedByGeneration.get(generation)?.delete(key);
+    } catch (error) {
+      this.diagnostics.add('warn', 'bridge', `failed to return native audio cleanup proof: ${sanitizeDiagnostic(error)}`);
+    }
+    proofs.delete(key);
+  }
+
   private async teardownAudioGeneration(generation: number): Promise<void> {
     this.closedAudioGenerations.add(generation);
     if (this.closedAudioGenerations.size > 64) this.closedAudioGenerations.delete(this.closedAudioGenerations.values().next().value!);
@@ -2602,13 +2880,23 @@ export class SessionRuntime {
     if (existing) return existing;
     const requests = this.audioRequestsByGeneration.get(generation);
     const starts = this.audioStartsByGeneration.get(generation);
+    const unconfirmed = this.audioUnconfirmedByGeneration.get(generation);
     const owners = this.audioOwnersByGeneration.get(generation);
+    for (const [key, gate] of this.waitingAttachedAudio) {
+      if (!key.startsWith(`${generation}:`)) continue;
+      gate.cancelled = true;
+      if (gate.token) gate.proved = this.opts.audioService?.cancelReservedAudioAdmission?.(gate.identity, gate.token) === true;
+      gate.wake();
+    }
     this.audioRequestsByGeneration.delete(generation);
     this.audioStartsByGeneration.delete(generation);
+    this.audioUnconfirmedByGeneration.delete(generation);
+    this.audioCancelProofsByGeneration.delete(generation);
     this.audioOwnersByGeneration.delete(generation);
     const cleanup = Promise.allSettled([
-      ...[...(requests?.values() ?? [])].map((request) => this.opts.audioService?.cancelAudioRequest(request.identity)),
-      ...[...(starts?.values() ?? [])].map((request) => this.opts.audioService?.cancelAudioRequest(request.identity)),
+      ...[...(requests?.values() ?? [])].map((request) => this.cancelTrackedAudioRequest(request)),
+      ...[...(starts?.values() ?? [])].map((request) => this.cancelTrackedAudioRequest(request)),
+      ...[...(unconfirmed?.values() ?? [])].map((request) => this.cancelTrackedAudioRequest(request)),
       ...[...(owners?.values() ?? [])].map((owner) => this.opts.audioService?.endAudioOwner(owner)),
     ]).then(() => undefined);
     this.audioCleanupGenerations.set(generation, cleanup);
@@ -3569,20 +3857,29 @@ export class SessionRuntime {
   }
 
   private async stopBridge(): Promise<void> {
+    this.nativeMediaClient = undefined;
+    this.invalidateNativeMediaBinding();
     await this.telemetry?.shutdown();
     this.telemetry = undefined;
     const stoppingGeneration = this.generation;
     ++this.generation;
     await this.teardownAudioGeneration(stoppingGeneration);
-    await this.updateNativeMediaOwner();
-    for (const retired of [...this.retiringNativeMediaDevices]) {
+    await this.nativeMediaDeviceUpdate;
+    const cleanup = Promise.all([...this.retiringNativeMediaDevices].map(async (retired) => {
       try {
         await retired.dispose();
         this.retiringNativeMediaDevices.delete(retired);
       } catch (error) {
         this.diagnostics.add('warn', 'bridge', `native media cleanup remains unacknowledged: ${sanitizeDiagnostic(error)}`);
       }
-    }
+    }));
+    let mediaStopTimer: ReturnType<typeof setTimeout> | undefined;
+    const mediaStopped = await Promise.race([
+      cleanup.then(() => true),
+      new Promise<false>((resolve) => { mediaStopTimer = setTimeout(() => resolve(false), 2_000); mediaStopTimer.unref(); }),
+    ]);
+    if (mediaStopTimer) clearTimeout(mediaStopTimer);
+    if (!mediaStopped) this.diagnostics.add('warn', 'bridge', 'native media cleanup is still awaiting confirmation');
     await this.oauthPersistence;
     this.servedCodexToken = undefined;
     this.liveSideChats.clear();

@@ -90,7 +90,7 @@ test('revoked queued chat mutations and admissions do not commit after the ledge
   await Promise.all([deleteResult,archiveResult,runResult,lockOwner]);
   assert.equal((await broker.getChat(owner,chat.chatId)).archived,false);
   assert.equal((await broker.list(owner)).tasks.some(task=>task.runId==='revoked-task'),false);
-  assert.ok((await fs.stat(join(root,'apps',owner.appId,'agent','chats',chat.chatId,'chat.json'))).isFile());
+  assert.ok((await fs.stat(join(root,'apps',owner.appId,'agent','agui-v1','chats',chat.chatId,'chat.json'))).isFile());
 });
 
 test('session revocation aborts its active executor without waiting for the ledger lock', async t => {
@@ -135,7 +135,7 @@ test('revoked chat creation removes its incomplete directory and remains restart
   const controller=new AbortController();
   const pending=assert.rejects(broker.createChat(owner,chatCreation('Revoked'),controller.signal),/revoked/);
   await waiting;controller.abort(new Error('revoked'));release();await pending;
-  assert.deepEqual(await fs.readdir(join(root,'apps',owner.appId,'agent','chats')),[]);
+  assert.deepEqual(await fs.readdir(join(root,'apps',owner.appId,'agent','agui-v1','chats')),[]);
   const restarted=new LocalAppAgentBroker(options);
   try {await restarted.initialize();assert.deepEqual((await restarted.listChats(owner)).chats,[]);}
   finally {await restarted.dispose();}
@@ -147,7 +147,7 @@ test('revocation before an archive rename preserves the original chat', async t 
   const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>({result:{text:'done',attachments:[],messageId:'m'},usage:{turns:1}})});
   t.after(async()=>{await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
   const chat=await broker.createChat(owner,chatCreation('Keep this chat'));
-  const target=join(root,'apps',owner.appId,'agent','chats',chat.chatId,'chat.json');
+  const target=join(root,'apps',owner.appId,'agent','agui-v1','chats',chat.chatId,'chat.json');
   const before=await fs.readFile(target,'utf8');
   let release!:()=>void, entered!:()=>void;
   const blocked=new Promise<void>(resolve=>{release=resolve;});
@@ -159,7 +159,7 @@ test('revocation before an archive rename preserves the original chat', async t 
     await waiting;controller.abort(new Error('revoked'));release();await pending;
     assert.equal((await broker.getChat(owner,chat.chatId)).archived,false);
     assert.equal(await fs.readFile(target,'utf8'),before);
-    assert.deepEqual((await fs.readdir(join(root,'apps',owner.appId,'agent','chats',chat.chatId))).sort(),['assets','chat.json']);
+    assert.deepEqual((await fs.readdir(join(root,'apps',owner.appId,'agent','agui-v1','chats',chat.chatId))).sort(),['assets','chat.json']);
   } finally { release();restore(); }
 });
 
@@ -251,13 +251,13 @@ test('app withdrawal before task commit prevents durable admission', async t => 
   const gate=new Promise<void>(resolve=>{release=resolve;}), waiting=new Promise<void>(resolve=>{entered=resolve;});
   t.after(async()=>{release();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
   await broker.initialize();
-  const restore=holdAgentWrites(path=>path.includes('/agent/tasks/') && path.endsWith('.tmp'),async()=>{entered();await gate;});
+  const restore=holdAgentWrites(path=>path.includes('/agent/agui-v1/tasks/') && path.endsWith('.tmp'),async()=>{entered();await gate;});
   try {
     const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
     const pending=assert.rejects(broker.run(owner,input,new AbortController().signal));
     await waiting;const cancellation=broker.cancelApp(owner.appId);release();await Promise.all([cancellation,pending]);
     assert.deepEqual((await broker.list(owner)).tasks,[]);
-    assert.deepEqual(await fs.readdir(join(root,'apps',owner.appId,'agent','tasks')),[]);
+    assert.deepEqual(await fs.readdir(join(root,'apps',owner.appId,'agent','agui-v1','tasks')),[]);
   } finally {release();restore();}
 });
 
@@ -269,12 +269,12 @@ test('app withdrawal before chat rename cancels creation and archive', async t =
   await broker.initialize();
   let release!:()=>void, entered!:()=>void, gate:Promise<void>, waiting:Promise<void>;
   const block=()=>{gate=new Promise<void>(resolve=>{release=resolve;});waiting=new Promise<void>(resolve=>{entered=resolve;});};
-  let restore=holdAgentWrites(path=>path.includes('/agent/chats/') && path.includes('/chat.json.') && path.endsWith('.tmp'),async()=>{entered();await gate;});
+  let restore=holdAgentWrites(path=>path.includes('/agent/agui-v1/chats/') && path.includes('/chat.json.') && path.endsWith('.tmp'),async()=>{entered();await gate;});
   try {
     block();const creation=assert.rejects(broker.createChat(owner,chatCreation('Revoked')));
     await waiting!;const creatingCancellation=broker.cancelApp(owner.appId);release();await Promise.all([creatingCancellation,creation]);
     assert.deepEqual((await broker.listChats(owner)).chats,[]);
-    assert.deepEqual(await fs.readdir(join(root,'apps',owner.appId,'agent','chats')),[]);
+    assert.deepEqual(await fs.readdir(join(root,'apps',owner.appId,'agent','agui-v1','chats')),[]);
     restore();
     const chat=await broker.createChat(owner,chatCreation('Keep'));
     block();restore=holdAgentWrites(path=>path.includes('/chat.json.') && path.endsWith('.tmp'),async()=>{entered();await gate;});
@@ -291,7 +291,7 @@ test('broker shutdown aborts pending and future mutations before commit', async 
   const chat=await broker.createChat(owner,chatCreation('Keep'));
   let releaseWrite!:()=>void, writeEntered!:()=>void;
   const writeGate=new Promise<void>(resolve=>{releaseWrite=resolve;}), writing=new Promise<void>(resolve=>{writeEntered=resolve;});
-  const restore=holdAgentWrites(path=>path.includes('/agent/chats/') && path.includes('/chat.json.') && path.endsWith('.tmp'),async()=>{writeEntered();await writeGate;});
+  const restore=holdAgentWrites(path=>path.includes('/agent/agui-v1/chats/') && path.includes('/chat.json.') && path.endsWith('.tmp'),async()=>{writeEntered();await writeGate;});
   t.after(async()=>{releaseWrite();restore();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
   const create=assert.rejects(broker.createChat(owner,chatCreation('Revoked')));await writing;
   const archive=assert.rejects(broker.archiveChat(owner,chat.chatId));
@@ -330,7 +330,7 @@ for (const kind of ['admission', 'chat creation'] as const) {
     await broker.initialize();
     let release!:()=>void, entered!:()=>void;
     const gate=new Promise<void>(resolve=>{release=resolve;}), waiting=new Promise<void>(resolve=>{entered=resolve;});
-    const restore=holdAgentWrites(path=>path.endsWith('.tmp') && (kind==='admission' ? path.includes('/agent/tasks/') : path.includes('/agent/chats/') && path.includes('/chat.json.')),async()=>{entered();await gate;});
+    const restore=holdAgentWrites(path=>path.endsWith('.tmp') && (kind==='admission' ? path.includes('/agent/agui-v1/tasks/') : path.includes('/agent/agui-v1/chats/') && path.includes('/chat.json.')),async()=>{entered();await gate;});
     t.after(async()=>{release();restore();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
     const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
     const rejected=assert.rejects(kind==='admission' ? broker.run(owner,input) : broker.createChat(owner,chatCreation('Revoked')));
@@ -339,7 +339,7 @@ for (const kind of ['admission', 'chat creation'] as const) {
     await new Promise(resolve=>setImmediate(resolve));const returnedBeforeRollback=disposed;
     release();await Promise.all([rejected,disposing]);
     assert.equal(returnedBeforeRollback,false);
-    const directory=join(root,'apps',owner.appId,'agent',kind==='admission'?'tasks':'chats');
+    const directory=join(root,'apps',owner.appId,'agent','agui-v1',kind==='admission'?'tasks':'chats');
     assert.deepEqual(await fs.readdir(directory),[]);
   });
 }
@@ -362,7 +362,7 @@ test('remote Chat identities survive session and release replacement, remain App
   const broker = new LocalAppAgentBroker(options);
   t.after(async () => { await broker.dispose(); await fs.rm(root, { recursive: true, force: true }); });
   assert.equal(await broker.chatCreationStatus(principal, missing), null);
-  await assert.rejects(fs.stat(join(root, 'apps', principal.appId, 'agent', 'chats', missing.requestId)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', missing.requestId)), { code: 'ENOENT' });
   const [first, duplicate] = await Promise.all([broker.createChat(principal, admitted), broker.createChat(reopened, admitted)]);
   assert.equal(first.chatId, admitted.requestId);
   assert.deepEqual(duplicate, first);
@@ -373,10 +373,10 @@ test('remote Chat identities survive session and release replacement, remain App
   const isolated = await broker.createChat(otherApp, admitted);
   assert.equal(isolated.chatId, first.chatId, 'the same requestId in another App names a distinct resource');
   assert.equal(allocations, 2);
-  const privateSession = async (appId: string) => JSON.parse(await fs.readFile(join(root, 'apps', appId, 'agent', 'chats', admitted.requestId, 'chat.json'), 'utf8')).sessionId;
+  const privateSession = async (appId: string) => JSON.parse(await fs.readFile(join(root, 'apps', appId, 'agent', 'agui-v1', 'chats', admitted.requestId, 'chat.json'), 'utf8')).sessionId;
   assert.notEqual(await privateSession(principal.appId), await privateSession(otherApp.appId));
 
-  await fs.mkdir(join(root, 'apps', principal.appId, 'agent', 'chats', uncertain.requestId));
+  await fs.mkdir(join(root, 'apps', principal.appId, 'agent', 'agui-v1', 'chats', uncertain.requestId));
   await assert.rejects(broker.createChat(reopened, uncertain), { code: 'chat_storage_uncertain' });
   await assert.rejects(broker.chatCreationStatus(reopened, uncertain), { code: 'chat_storage_uncertain' });
   const page = await broker.listChats(reopened);
@@ -489,7 +489,7 @@ for (const revokedBy of ['session', 'app'] as const) {
     const writable = fs as any, rename = writable.rename;
     t.after(async () => { release(); restore(); writable.rename = rename; await broker.dispose(); await fs.rm(root, { recursive: true, force: true }); });
     const original = await broker.createChat(owner, creation);
-    const directory = join(root, 'apps', owner.appId, 'agent', 'chats', original.chatId), target = join(directory, 'chat.json');
+    const directory = join(root, 'apps', owner.appId, 'agent', 'agui-v1', 'chats', original.chatId), target = join(directory, 'chat.json');
     const before = await fs.readFile(target, 'utf8');
     await fs.writeFile(join(directory, 'assets', 'must-survive'), 'private Chat asset');
     let renames = 0;
@@ -537,7 +537,7 @@ for (const failureAt of ['rename', 'directory-sync'] as const) {
     const writable = fs as any, rename = writable.rename, open = writable.open;
     t.after(async () => { release(); writable.rename = rename; writable.open = open; await broker.dispose(); await fs.rm(root, { recursive: true, force: true }); });
     const original = await broker.createChat(owner, creation);
-    const directory = join(root, 'apps', owner.appId, 'agent', 'chats', original.chatId), target = join(directory, 'chat.json');
+    const directory = join(root, 'apps', owner.appId, 'agent', 'agui-v1', 'chats', original.chatId), target = join(directory, 'chat.json');
     const before = await fs.readFile(target, 'utf8');
     await fs.writeFile(join(directory, 'assets', 'preserve-until-confirmed'), 'private Chat asset');
     if (failureAt === 'rename') {

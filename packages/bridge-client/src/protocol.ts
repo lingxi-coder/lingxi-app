@@ -74,7 +74,7 @@ export type {
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '29.0.0';
+export const CLIENT_PROTOCOL_VERSION = '30.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -190,7 +190,8 @@ export interface AudioOperationIdDto {
 export type AudioOwnerDto =
   | { type: 'session'; session_id: string }
   | { type: 'ui'; instance_id: string }
-  | { type: 'system'; instance_id: string };
+  | { type: 'system'; instance_id: string }
+  | { type: 'attached'; attachment_host_id: string; attachment_generation: number; logical_kind: 'session' | 'ui' | 'system'; logical_owner_id: string };
 
 export interface AudioInitiatorDto {
   agent_id?: string;
@@ -239,7 +240,7 @@ export interface AudioStatusDto {
   playing: boolean;
 }
 
-/** Successful service outcomes or one structured terminal failure. */
+/** A failed_without_resource result proves only this request owns no native resource or in-flight callback. */
 export type AudioOperationResultDto =
   | { type: 'recording_started'; handle: string }
   | { type: 'recording'; audio_base64: string; mime_type: string }
@@ -248,7 +249,8 @@ export type AudioOperationResultDto =
   | { type: 'playback_completed'; duration_ms: number }
   | { type: 'status'; status: AudioStatusDto }
   | { type: 'owner_ended' }
-  | { type: 'failed'; error: AudioErrorDto };
+  | { type: 'failed'; error: AudioErrorDto }
+  | { type: 'failed_without_resource'; error: AudioErrorDto };
 
 export type AudioOperationKindDto = 'record' | 'listen' | 'synthesize' | 'speak';
 

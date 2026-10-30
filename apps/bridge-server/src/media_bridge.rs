@@ -48,7 +48,7 @@ impl DesktopRemoteMediaConfigProvider {
             .iter()
             .map(|url| (*url).to_owned())
             .collect::<Vec<_>>();
-        let urls = std::env::var("LINGXI_REMOTE_STUN")
+        let urls = std::env::var(format!("{}REMOTE_STUN", branding::ENV_PREFIX))
             .ok()
             .map(|value| {
                 value
@@ -98,7 +98,10 @@ impl RemoteMediaHostConfigProvider for DesktopRemoteMediaConfigProvider {
         _route_id: &str,
         _request: &media_api::MediaSessionRequest,
     ) -> Result<RemoteMediaConfig, MediaError> {
-        if !matches!(context.owner, media_api::MediaOwner::Session { .. }) {
+        if !matches!(
+            context.owner.logical_owner(),
+            media_api::MediaOwner::Session { .. }
+        ) {
             return Err(MediaError::new(
                 MediaErrorKind::InvalidRequest,
                 "Remote Control media requires an authenticated session owner",
@@ -646,7 +649,7 @@ impl BridgeMediaDeviceCallback {
         request: MediaDeviceRequestEnvelopeDto,
         timeout: Duration,
     ) -> MediaDeviceResponseDto {
-        self.request_with_capacity(request, timeout, None, false)
+        self.request_with_capacity(request, timeout, None, false, false)
             .await
     }
 
@@ -656,15 +659,17 @@ impl BridgeMediaDeviceCallback {
         timeout: Duration,
         expected_generation: Option<&Arc<Semaphore>>,
         cleanup: bool,
+        retain_open_response: bool,
     ) -> MediaDeviceResponseDto {
+        let is_open = matches!(&request.request, MediaDeviceRequestDto::Open { .. });
         if let Err(message) = request.validate() {
-            return device_error(
+            return device_rejection(
                 request.request_id,
                 MediaErrorKindDto::InvalidRequest,
                 message,
+                retain_open_response && is_open,
             );
         }
-        let is_open = matches!(&request.request, MediaDeviceRequestDto::Open { .. });
         let is_stop = matches!(&request.request, MediaDeviceRequestDto::Stop { .. });
         let request_id = request.request_id.clone();
         let (tx, rx) = oneshot::channel();
@@ -673,10 +678,11 @@ impl BridgeMediaDeviceCallback {
         let send_guard = self.send_gate.lock().await;
         let generation = self.open_slots.lock().unwrap().clone();
         if expected_generation.is_some_and(|expected| !Arc::ptr_eq(expected, &generation)) {
-            return device_error(
+            return device_rejection(
                 request_id,
                 MediaErrorKindDto::Unavailable,
                 "native media connection was replaced before the lease operation".into(),
+                retain_open_response && is_open,
             );
         }
         let token = Arc::new(());
@@ -699,20 +705,22 @@ impl BridgeMediaDeviceCallback {
                 MAX_PENDING_MEDIA_CALLBACKS
             };
             if pending.len() >= limit {
-                return device_error(
+                return device_rejection(
                     request_id,
                     MediaErrorKindDto::Busy,
                     "native media callback capacity is full".into(),
+                    retain_open_response && is_open,
                 );
             }
             let open_permit = if is_open {
                 match generation.clone().try_acquire_owned() {
                     Ok(permit) => Some(permit),
                     Err(_) => {
-                        return device_error(
+                        return device_rejection(
                             request_id,
                             MediaErrorKindDto::Busy,
                             "native media open cleanup capacity is full".into(),
+                            retain_open_response && is_open,
                         );
                     }
                 }
@@ -741,13 +749,27 @@ impl BridgeMediaDeviceCallback {
             .await;
         if !emitted {
             self.pending.lock().unwrap().remove(&request_id);
-            return device_error(
+            return device_rejection(
                 request_id,
                 MediaErrorKindDto::Unavailable,
                 "the native device host is not attached".into(),
+                retain_open_response && is_open,
             );
         }
         drop(send_guard);
+        if is_open && retain_open_response {
+            // The ports adapter owns this future on its process-lifetime
+            // executor after the caller times out or drops. Keep the original
+            // response channel until an exact receipt or disconnection.
+            return match rx.await {
+                Ok(response) => response.into_response(),
+                Err(_) => device_error(
+                    request_id,
+                    MediaErrorKindDto::Unavailable,
+                    "the Bridge connection ended before the native media response arrived".into(),
+                ),
+            };
+        }
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => response.into_response(),
             Ok(Err(_)) => device_error(
@@ -789,6 +811,7 @@ impl NativeMediaDeviceCallback for BridgeBoundCallback {
                 DEVICE_CALLBACK_TIMEOUT,
                 Some(&self.generation),
                 false,
+                true,
             )
             .await
     }
@@ -803,8 +826,27 @@ impl NativeMediaDeviceCallback for BridgeCleanupCallback {
                 DEVICE_CALLBACK_TIMEOUT,
                 Some(&self.generation),
                 true,
+                false,
             )
             .await
+    }
+}
+
+fn device_rejection(
+    request_id: String,
+    kind: MediaErrorKindDto,
+    message: String,
+    before_open_dispatch: bool,
+) -> MediaDeviceResponseDto {
+    if before_open_dispatch {
+        MediaDeviceResponseDto {
+            request_id,
+            result: MediaDeviceResultDto::OpenFailedWithoutResource {
+                error: MediaErrorDto { kind, message },
+            },
+        }
+    } else {
+        device_error(request_id, kind, message)
     }
 }
 
@@ -832,7 +874,117 @@ mod tests {
         MediaDevicePorts, MediaOperationContext, MediaOperationId, MediaOwner, MediaSessionIntent,
         MediaSessionMode, MediaSessionRequest, MediaSourceId, MediaSourceRef,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
+
+    #[derive(Debug, Default)]
+    struct NativeWitnessState {
+        pending: AtomicUsize,
+        confirmed: AtomicUsize,
+        unknown: AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    struct TestNativeTracker(Arc<NativeWitnessState>);
+
+    impl media_api::MediaNativeWorkTracker for TestNativeTracker {
+        fn begin(&self) -> Result<Box<dyn media_api::MediaNativeWork>, MediaError> {
+            self.0.pending.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(TestNativeWork {
+                state: self.0.clone(),
+                confirmed: false,
+            }))
+        }
+    }
+
+    struct TestNativeWork {
+        state: Arc<NativeWitnessState>,
+        confirmed: bool,
+    }
+
+    impl media_api::MediaNativeWork for TestNativeWork {
+        fn confirm(mut self: Box<Self>) {
+            self.confirmed = true;
+        }
+    }
+
+    impl Drop for TestNativeWork {
+        fn drop(&mut self) {
+            self.state.pending.fetch_sub(1, Ordering::SeqCst);
+            if self.confirmed {
+                self.state.confirmed.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.state.unknown.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    async fn wait_for_native_witness(state: &NativeWitnessState) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.pending.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("native witness must settle");
+    }
+
+    fn tracked_open_args(
+        state: Arc<NativeWitnessState>,
+    ) -> (MediaOperationContext, MediaSessionRequest) {
+        let context = MediaOperationContext::new(
+            MediaOperationId::new(1, 1),
+            MediaOwner::Session {
+                session_id: "tracked-open".into(),
+            },
+        )
+        .with_native_work_tracker(Arc::new(TestNativeTracker(state)));
+        let request = MediaSessionRequest {
+            mode: MediaSessionMode::Audio,
+            intent: MediaSessionIntent::Observation,
+            audio_source: Some(MediaSourceRef(MediaSourceId::from(
+                "media-runtime:microphone",
+            ))),
+            video_source: None,
+        };
+        (context, request)
+    }
+
+    #[tokio::test]
+    async fn remote_config_accepts_only_logical_session_owners_inside_attachment() {
+        let provider = DesktopRemoteMediaConfigProvider::from_process_environment();
+        let issuer = media_api::MediaAttachmentIssuer::new();
+        let attachment = issuer.issue().unwrap();
+        let request = MediaSessionRequest {
+            intent: MediaSessionIntent::Conversation,
+            mode: MediaSessionMode::Audio,
+            audio_source: None,
+            video_source: None,
+        };
+        let session = MediaOwner::Session {
+            session_id: "session".into(),
+        };
+        let context = MediaOperationContext::new(
+            MediaOperationId::new(1, 7),
+            session.in_attachment(attachment.clone()),
+        );
+        assert!(provider.resolve(&context, "route", &request).await.is_ok());
+        let ui = MediaOperationContext::new(
+            MediaOperationId::new(2, 7),
+            MediaOwner::Ui {
+                instance_id: "ui".into(),
+            }
+            .in_attachment(attachment),
+        );
+        assert_eq!(
+            provider
+                .resolve(&ui, "route", &request)
+                .await
+                .err()
+                .map(|error| error.kind),
+            Some(MediaErrorKind::InvalidRequest)
+        );
+    }
 
     struct RecordingSink(mpsc::UnboundedSender<MediaDeviceRequestEnvelopeDto>);
 
@@ -961,6 +1113,107 @@ mod tests {
         assert!(responder.resolve(opened("timed-out-open")).await);
         acknowledge_cleanup(&responder, &mut events).await;
         assert_eq!(responder.pending_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn bound_open_keeps_the_same_response_after_its_observer_deadline() {
+        let (callback, responder, mut events) = fixture();
+        let generation = open_slots(&callback);
+        let request = open_request("retained-open");
+        let mut call = tokio::spawn(async move {
+            callback
+                .request_with_capacity(
+                    request,
+                    Duration::from_millis(10),
+                    Some(&generation),
+                    false,
+                    true,
+                )
+                .await
+        });
+        let sent = events.recv().await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut call)
+            .await
+            .is_err());
+        assert!(
+            responder
+                .resolve(MediaDeviceResponseDto {
+                    request_id: sent.request_id.clone(),
+                    result: MediaDeviceResultDto::OpenFailedWithoutResource {
+                        error: MediaErrorDto {
+                            kind: MediaErrorKindDto::Timeout,
+                            message: "native open ended without a lease".into(),
+                        }
+                    },
+                })
+                .await
+        );
+        let response = call.await.unwrap();
+        assert_eq!(response.request_id, sent.request_id);
+        assert!(matches!(
+            response.result,
+            MediaDeviceResultDto::OpenFailedWithoutResource { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn abandoned_bound_open_waits_for_correlated_late_stop_before_confirming() {
+        let (callback, responder, mut events) = fixture();
+        let state = Arc::new(NativeWitnessState::default());
+        let ports = Arc::new(audio_provider::media_native::CallbackMediaDevicePorts::new(
+            callback,
+        ));
+        let (context, request) = tracked_open_args(state.clone());
+        let call = tokio::spawn(async move { ports.open(context, request).await });
+        let sent = events.recv().await.unwrap();
+        assert_eq!(state.pending.load(Ordering::SeqCst), 1);
+        call.abort();
+        assert!(matches!(call.await, Err(error) if error.is_cancelled()));
+        assert!(responder.resolve(opened(&sent.request_id)).await);
+        let stop = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(stop.request, MediaDeviceRequestDto::Stop { .. }));
+        assert_eq!(state.confirmed.load(Ordering::SeqCst), 0);
+        assert_eq!(state.pending.load(Ordering::SeqCst), 1);
+        assert!(
+            !responder
+                .resolve(MediaDeviceResponseDto {
+                    request_id: "wrong-stop-id".into(),
+                    result: MediaDeviceResultDto::Stopped,
+                })
+                .await
+        );
+        assert!(
+            responder
+                .resolve(MediaDeviceResponseDto {
+                    request_id: stop.request_id,
+                    result: MediaDeviceResultDto::Stopped,
+                })
+                .await
+        );
+        wait_for_native_witness(&state).await;
+        assert_eq!(state.confirmed.load(Ordering::SeqCst), 1);
+        assert_eq!(state.unknown.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_bound_open_keeps_native_outcome_unknown() {
+        let (callback, responder, mut events) = fixture();
+        let state = Arc::new(NativeWitnessState::default());
+        let ports = Arc::new(audio_provider::media_native::CallbackMediaDevicePorts::new(
+            callback,
+        ));
+        let (context, request) = tracked_open_args(state.clone());
+        let call = tokio::spawn(async move { ports.open(context, request).await });
+        events.recv().await.unwrap();
+        call.abort();
+        assert!(matches!(call.await, Err(error) if error.is_cancelled()));
+        assert_eq!(responder.drain().await, 1);
+        wait_for_native_witness(&state).await;
+        assert_eq!(state.confirmed.load(Ordering::SeqCst), 0);
+        assert_eq!(state.unknown.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

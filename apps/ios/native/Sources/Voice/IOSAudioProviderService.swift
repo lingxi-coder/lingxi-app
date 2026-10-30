@@ -3,10 +3,97 @@ import Observation
 
 /// A trusted, native session identity. Audio never infers a profile from a
 /// chat-model suffix or substitutes the repository's default profile.
-struct IOSAudioSessionContext: Codable, Equatable, Sendable {
+struct IOSAudioSessionContext: Equatable, Sendable {
     let sessionId: String
     let profileId: String
     let accountScope: String?
+    /// Must come from a separate trusted engine-attachment binding. A matching
+    /// value copied from an operation DTO is not sufficient.
+    let engineAttachmentIdentity: IOSMediaAttachmentIdentity?
+}
+
+/// Per-engine follow-session contexts. The attachment identity is the map key;
+/// equal logical session IDs from distinct engines never replace one another.
+struct IOSAudioAttachmentSessionRoutes {
+    private struct Entry: Equatable {
+        let ownerID: String
+        var context: IOSAudioSessionContext?
+    }
+
+    private var entries: [IOSMediaAttachmentIdentity: Entry] = [:]
+    private var insertionOrder: [IOSMediaAttachmentIdentity] = []
+
+    mutating func register(attachment: IOSMediaAttachmentIdentity, ownerID: String) -> Bool {
+        if let current = entries[attachment] {
+            return current.ownerID == ownerID
+        }
+        entries[attachment] = Entry(ownerID: ownerID, context: nil)
+        insertionOrder.append(attachment)
+        return true
+    }
+
+    mutating func update(
+        attachment: IOSMediaAttachmentIdentity,
+        ownerID: String,
+        context: IOSAudioSessionContext?
+    ) -> Bool {
+        guard var current = entries[attachment], current.ownerID == ownerID else { return false }
+        if let context,
+           context.sessionId.isEmpty || context.engineAttachmentIdentity != attachment {
+            return false
+        }
+        current.context = context
+        entries[attachment] = current
+        return true
+    }
+
+    @discardableResult
+    mutating func remove(attachment: IOSMediaAttachmentIdentity, ownerID: String) -> Bool {
+        guard entries[attachment]?.ownerID == ownerID else { return false }
+        entries.removeValue(forKey: attachment)
+        insertionOrder.removeAll { $0 == attachment }
+        return true
+    }
+
+    /// A host-issued confirmed-drain receipt authorizes removal by identity
+    /// alone; no DTO-provided owner field participates in this cleanup.
+    @discardableResult
+    mutating func removeConfirmed(attachment: IOSMediaAttachmentIdentity) -> String? {
+        guard let entry = entries.removeValue(forKey: attachment) else { return nil }
+        insertionOrder.removeAll { $0 == attachment }
+        return entry.ownerID
+    }
+
+    mutating func removeAll(ownerID: String) -> [IOSMediaAttachmentIdentity] {
+        let removed = entries.compactMap { identity, entry in
+            entry.ownerID == ownerID ? identity : nil
+        }
+        for identity in removed { entries.removeValue(forKey: identity) }
+        insertionOrder.removeAll { entries[$0] == nil }
+        return removed
+    }
+
+    func ownerID(for attachment: IOSMediaAttachmentIdentity) -> String? {
+        entries[attachment]?.ownerID
+    }
+
+    func context(for attachment: IOSMediaAttachmentIdentity) -> IOSAudioSessionContext? {
+        entries[attachment]?.context
+    }
+
+    func context(for owner: IOSAudioOwner?) -> IOSAudioSessionContext? {
+        guard let owner,
+              case let .attached(attachment, logicalOwner) = owner,
+              case let .session(sessionID) = logicalOwner,
+              let context = entries[attachment]?.context,
+              context.sessionId == sessionID,
+              context.engineAttachmentIdentity == attachment else { return nil }
+        return context
+    }
+
+    func latestAttachment(ownerID: String) -> IOSMediaAttachmentIdentity? {
+        insertionOrder.reversed().first { entries[$0]?.ownerID == ownerID }
+    }
 }
 
 @MainActor
@@ -62,13 +149,23 @@ final class IOSAudioProviderService {
         let modelID: String?
     }
 
+    @MainActor
+    private final class WeakSessionEngine {
+        weak var value: MobileEngineHandle?
+
+        init(_ value: MobileEngineHandle) {
+            self.value = value
+        }
+    }
+
     private var hostBuilder: HostBuilder? = { try IOSAudioProviderHost(profilesJSON: $0, region: $1) }
     private var host: (any IOSAudioProviderHostDriving)?
-    private var sessionEngine: MobileEngineHandle?
-    private var sessionHost: (any IOSAudioProviderHostDriving)?
+    private var sessionRoutes = IOSAudioAttachmentSessionRoutes()
+    private var sessionEngines: [IOSMediaAttachmentIdentity: WeakSessionEngine] = [:]
     private var hostRegion: String?
     private var profilesJSON: String?
     private var sessionContextOwnerID: String?
+    private var selectedSessionAttachmentIdentity: IOSMediaAttachmentIdentity?
     private var contextRegion: String?
     private var refreshEpoch: UInt64 = 0
     private var latestConfigurationRevision: UInt64?
@@ -81,7 +178,6 @@ final class IOSAudioProviderService {
 
     func installHostBuilder(_ builder: @escaping HostBuilder) {
         hostBuilder = builder
-        sessionHost = nil
         host = nil
         profilesJSON = nil
         invalidateCapabilities()
@@ -90,48 +186,140 @@ final class IOSAudioProviderService {
     func claimSessionContext(ownerID: String) {
         guard sessionContextOwnerID != ownerID else { return }
         sessionContextOwnerID = ownerID
-        sessionContext = nil
-        sessionEngine = nil
-        sessionHost = nil
+        selectLatestSessionRoute(ownerID: ownerID)
         contextRegion = nil
-        usageRecords.removeAll()
+        invalidateCapabilities()
+    }
+
+    /// Deselect the settings UI without revoking this engine's callback route.
+    /// Engine routes outlive a settings panel and are removed only for their
+    /// host-issued attachment after confirmed teardown.
+    func releaseSessionContextSelection(ownerID: String) {
+        guard sessionContextOwnerID == ownerID else { return }
+        sessionContextOwnerID = nil
+        selectedSessionAttachmentIdentity = nil
+        sessionContext = nil
+        contextRegion = nil
         invalidateCapabilities()
     }
 
     func clearSessionContext(ownerID: String) {
-        guard sessionContextOwnerID == ownerID else { return }
-        sessionContext = nil
-        sessionEngine = nil
-        sessionHost = nil
-        contextRegion = nil
-        usageRecords.removeAll()
-        invalidateCapabilities()
+        let removed = sessionRoutes.removeAll(ownerID: ownerID)
+        for identity in removed {
+            sessionEngines.removeValue(forKey: identity)
+        }
+        if sessionContextOwnerID == ownerID {
+            sessionContextOwnerID = nil
+            selectedSessionAttachmentIdentity = nil
+            sessionContext = nil
+            contextRegion = nil
+            invalidateCapabilities()
+        }
     }
 
-    func attach(engine: MobileEngineHandle, ownerID: String) {
-        guard sessionContextOwnerID == ownerID, sessionEngine !== engine else { return }
-        sessionEngine = engine
-        sessionHost = nil
-        invalidateCapabilities()
+    @discardableResult
+    func clearSessionRouteContext(
+        attachment: IOSMediaAttachmentIdentity,
+        ownerID: String,
+        engine: MobileEngineHandle
+    ) -> Bool {
+        guard sessionRoutes.ownerID(for: attachment) == ownerID,
+              sessionEngines[attachment]?.value === engine else { return false }
+        guard sessionRoutes.update(attachment: attachment, ownerID: ownerID, context: nil) else { return false }
+        if sessionContextOwnerID == ownerID, selectedSessionAttachmentIdentity == attachment {
+            sessionContext = nil
+            invalidateCapabilities()
+        }
+        return true
     }
 
-    func setSessionContext(sessionID: String?, profileID: String?, accountScope: String? = nil, region: String? = nil, ownerID: String? = nil) {
-        if let ownerID, sessionContextOwnerID != ownerID { return }
+    /// Consume a host-issued confirmed-drain receipt and remove only that
+    /// attachment's Swift route and weak engine entry.
+    @discardableResult
+    func removeConfirmedSessionRoute(attachment: IOSMediaAttachmentIdentity) -> Bool {
+        guard let ownerID = sessionRoutes.removeConfirmed(attachment: attachment) else { return false }
+        sessionEngines.removeValue(forKey: attachment)
+        if sessionContextOwnerID == ownerID, selectedSessionAttachmentIdentity == attachment {
+            selectLatestSessionRoute(ownerID: ownerID)
+            invalidateCapabilities()
+        }
+        return true
+    }
+
+    /// Bind the exact native engine attachment supplying follow-session calls.
+    /// `engineAttachmentIdentity` must be obtained independently from the
+    /// engine/host binding, never copied from an incoming owner DTO.
+    @discardableResult
+    func attach(
+        engine: MobileEngineHandle,
+        ownerID: String,
+        engineAttachmentIdentity: IOSMediaAttachmentIdentity
+    ) -> Bool {
+        guard !ownerID.isEmpty,
+              sessionRoutes.register(attachment: engineAttachmentIdentity, ownerID: ownerID) else { return false }
+        if let existing = sessionEngines[engineAttachmentIdentity] {
+            return existing.value === engine
+        }
+        sessionEngines[engineAttachmentIdentity] = WeakSessionEngine(engine)
+        if sessionContextOwnerID == ownerID {
+            selectedSessionAttachmentIdentity = engineAttachmentIdentity
+            sessionContext = sessionRoutes.context(for: engineAttachmentIdentity)
+        }
+        invalidateCapabilities()
+        return true
+    }
+
+    @discardableResult
+    func setSessionContext(
+        sessionID: String?,
+        profileID: String?,
+        accountScope: String? = nil,
+        region: String? = nil,
+        ownerID: String? = nil,
+        engineAttachmentIdentity: IOSMediaAttachmentIdentity? = nil,
+        engine: MobileEngineHandle? = nil
+    ) -> Bool {
+        let next: IOSAudioSessionContext?
+        if let sessionID, !sessionID.isEmpty, let profileID, !profileID.isEmpty {
+            next = IOSAudioSessionContext(
+                sessionId: sessionID,
+                profileId: profileID,
+                accountScope: accountScope,
+                engineAttachmentIdentity: engineAttachmentIdentity
+            )
+        } else { next = nil }
+        if let ownerID {
+            guard let engineAttachmentIdentity,
+                  let engine,
+                  sessionRoutes.ownerID(for: engineAttachmentIdentity) == ownerID,
+                  sessionEngines[engineAttachmentIdentity]?.value === engine,
+                  sessionRoutes.update(attachment: engineAttachmentIdentity, ownerID: ownerID, context: next) else {
+                // Repeated identity or owner collisions fail closed without
+                // mutating the bucket already registered for that identity.
+                return false
+            }
+            if sessionContextOwnerID == ownerID {
+                selectedSessionAttachmentIdentity = engineAttachmentIdentity
+                sessionContext = next
+                if let region, contextRegion != region {
+                    contextRegion = region
+                    host = nil
+                    profilesJSON = nil
+                }
+                invalidateCapabilities()
+            }
+            return true
+        }
         if let region, contextRegion != region {
             contextRegion = region
             host = nil
             profilesJSON = nil
-            sessionHost = nil
             invalidateCapabilities()
         }
-        let next: IOSAudioSessionContext?
-        if let sessionID, !sessionID.isEmpty, let profileID, !profileID.isEmpty {
-            next = IOSAudioSessionContext(sessionId: sessionID, profileId: profileID, accountScope: accountScope)
-        } else { next = nil }
-        guard next != sessionContext else { return }
+        guard next != sessionContext else { return true }
         sessionContext = next
-        sessionHost = nil
         invalidateCapabilities()
+        return true
     }
 
     var routeContext: AudioProviderContext? {
@@ -143,6 +331,10 @@ final class IOSAudioProviderService {
         return sessionContext
     }
 
+    func sessionContext(for owner: IOSAudioOwner?) -> IOSAudioSessionContext? {
+        sessionRoutes.context(for: owner)
+    }
+
     var routeCapabilities: [AudioProviderCapability] { capabilities.values.map(\.route) }
 
     func profileID(for binding: AudioCloudBinding) -> String? {
@@ -151,6 +343,11 @@ final class IOSAudioProviderService {
         case "explicit_profile": binding.profileId
         default: nil
         }
+    }
+
+    private func profileID(for binding: AudioCloudBinding, owner: IOSAudioOwner?) -> String? {
+        guard binding.binding == "follow_session" else { return profileID(for: binding) }
+        return sessionRoutes.context(for: owner)?.profileId
     }
 
     func refresh(snapshot: AudioConfigurationSnapshot) async {
@@ -235,12 +432,16 @@ final class IOSAudioProviderService {
     func pin(kind: AudioProviderKind, snapshot: AudioConfigurationSnapshot, voice: String? = nil, owner: IOSAudioOwner? = nil, operationID: String? = nil, maximumBytes: UInt64? = nil, timeoutBudgetMs: UInt64? = nil) async throws -> PinnedOperation {
         let binding = kind == .recognition ? snapshot.configuration.recognition.cloud : snapshot.configuration.speech.cloud
         try validateOwner(owner, binding: binding)
-        let host = try obtainHost(binding: binding)
-        guard let profile = profileID(for: binding), !profile.isEmpty else {
+        let host = try obtainHost(binding: binding, owner: owner)
+        guard let profile = profileID(for: binding, owner: owner), !profile.isEmpty else {
             throw AudioServiceFailure.nativeFailure("Choose a provider profile or open a session before using cloud audio.")
         }
         let id = operationID ?? UUID().uuidString.lowercased()
-        let request = try requestJSON(binding: binding, kind: kind.rawValue, operationID: id, snapshot: snapshot, voice: voice, maximumBytes: maximumBytes, timeoutBudgetMs: timeoutBudgetMs)
+        let request = try requestJSON(
+            binding: binding, kind: kind.rawValue, operationID: id, snapshot: snapshot,
+            voice: voice, maximumBytes: maximumBytes, timeoutBudgetMs: timeoutBudgetMs,
+            sessionContext: sessionRoutes.context(for: owner)
+        )
         let capability = try Self.parseCapability(try await host.capabilities(requestJson: request), kind: kind, profileID: profile)
         guard capability.route.supported else { throw AudioServiceFailure.unsupported }
         guard capability.route.readiness == "ready" else {
@@ -261,47 +462,124 @@ final class IOSAudioProviderService {
         return PinnedOperation(id: id, host: host, requestJSON: pinnedJSON, profileID: profile, modelID: model)
     }
 
-    func transcribe(_ operation: PinnedOperation, recording: IOSAudioRecording) async throws -> IOSCloudTranscript {
-        try await withTaskCancellationHandler {
-            let response = try await operation.host.transcribe(requestJson: operation.requestJSON, audio: recording.audioBytes, mimeType: recording.mimeType)
-            let object = try Self.object(response)
-            recordUsage(object, operation: operation)
-            try Task.checkCancellation()
-            guard let text = object["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw AudioServiceFailure.noSpeech
-            }
-            let confidence = (object["confidence"] as? NSNumber)?.floatValue
-            return IOSCloudTranscript(text: text, language: object["language"] as? String,
-                confidence: confidence.flatMap { $0.isFinite && (0 ... 1).contains($0) ? $0 : nil })
+    func transcribe(
+        _ operation: PinnedOperation,
+        recording: IOSAudioRecording,
+        cancellationManagedExternally: Bool = false
+    ) async throws -> IOSCloudTranscript {
+        if cancellationManagedExternally {
+            return try await transcribeBody(operation, recording: recording)
+        }
+        return try await withTaskCancellationHandler {
+            try await transcribeBody(operation, recording: recording)
         } onCancel: {
             Task { @MainActor in try? await operation.host.cancel(operationId: operation.id) }
         }
     }
 
-    func synthesize(_ operation: PinnedOperation, text: String, maximumBytes: UInt64) async throws -> AudioPcmOutput {
-        try await withTaskCancellationHandler {
-            let response = try await operation.host.synthesize(requestJson: operation.requestJSON, text: text)
-            let object = try Self.object(response)
-            recordUsage(object, operation: operation)
-            try Task.checkCancellation()
-            guard let base64 = object["pcmBase64"] as? String,
-                  UInt64(base64.utf8.count) <= (maximumBytes + 2) / 3 * 4,
-                  let pcm = Data(base64Encoded: base64),
-                  let rate = object["sampleRateHz"] as? NSNumber else {
-                throw AudioServiceFailure.nativeFailure("The provider returned an invalid audio payload.")
-            }
-            _ = try IOSPcmPlayback.wave(pcm: pcm, sampleRateHz: rate.uint32Value, maximumBytes: maximumBytes)
-            return AudioPcmOutput(pcm: pcm, sampleRateHz: rate.uint32Value)
+    private func transcribeBody(
+        _ operation: PinnedOperation,
+        recording: IOSAudioRecording
+    ) async throws -> IOSCloudTranscript {
+        let response = try await operation.host.transcribe(requestJson: operation.requestJSON, audio: recording.audioBytes, mimeType: recording.mimeType)
+        let object = try Self.object(response)
+        recordUsage(object, operation: operation)
+        try Task.checkCancellation()
+        guard let text = object["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AudioServiceFailure.noSpeech
+        }
+        let confidence = (object["confidence"] as? NSNumber)?.floatValue
+        return IOSCloudTranscript(text: text, language: object["language"] as? String,
+            confidence: confidence.flatMap { $0.isFinite && (0 ... 1).contains($0) ? $0 : nil })
+    }
+
+    func synthesize(
+        _ operation: PinnedOperation,
+        text: String,
+        maximumBytes: UInt64,
+        cancellationManagedExternally: Bool = false
+    ) async throws -> AudioPcmOutput {
+        if cancellationManagedExternally {
+            return try await synthesizeBody(operation, text: text, maximumBytes: maximumBytes)
+        }
+        return try await withTaskCancellationHandler {
+            try await synthesizeBody(operation, text: text, maximumBytes: maximumBytes)
         } onCancel: {
             Task { @MainActor in try? await operation.host.cancel(operationId: operation.id) }
         }
+    }
+
+    private func synthesizeBody(
+        _ operation: PinnedOperation,
+        text: String,
+        maximumBytes: UInt64
+    ) async throws -> AudioPcmOutput {
+        let response = try await operation.host.synthesize(requestJson: operation.requestJSON, text: text)
+        let object = try Self.object(response)
+        recordUsage(object, operation: operation)
+        try Task.checkCancellation()
+        guard let base64 = object["pcmBase64"] as? String,
+              UInt64(base64.utf8.count) <= (maximumBytes + 2) / 3 * 4,
+              let pcm = Data(base64Encoded: base64),
+              let rate = object["sampleRateHz"] as? NSNumber else {
+            throw AudioServiceFailure.nativeFailure("The provider returned an invalid audio payload.")
+        }
+        _ = try IOSPcmPlayback.wave(pcm: pcm, sampleRateHz: rate.uint32Value, maximumBytes: maximumBytes)
+        return AudioPcmOutput(pcm: pcm, sampleRateHz: rate.uint32Value)
     }
 
     func validateOwner(_ owner: IOSAudioOwner?, binding: AudioCloudBinding) throws {
-        guard binding.binding == "follow_session", let owner else { return }
-        guard case let .session(sessionID) = owner, sessionContext?.sessionId == sessionID, sessionContext?.accountScope?.isEmpty == false else {
+        guard binding.binding == "follow_session" else { return }
+        guard let owner,
+              case let .attached(attachmentIdentity, _) = owner,
+              let context = sessionRoutes.context(for: owner),
+              let engine = sessionEngines[attachmentIdentity]?.value else {
             throw AudioServiceFailure.nativeFailure("This audio owner has no matching trusted session route. Choose an explicit provider profile.")
         }
+        guard Self.matchesTrustedFollowSessionOwner(
+            owner: owner,
+            context: context,
+            engineAttachmentIdentity: attachmentIdentity,
+            engineIsAttached: sessionEngines[attachmentIdentity]?.value === engine
+        ) else {
+            throw AudioServiceFailure.nativeFailure("This audio owner has no matching trusted session route. Choose an explicit provider profile.")
+        }
+    }
+
+    /// Turn only a host-returned route binding for the same session into the
+    /// provider's trusted engine pin. Incoming operation DTO owner fields are
+    /// intentionally not accepted by this function.
+    static func trustedAttachmentIdentity(
+        routeSessionID: String?,
+        ownerSessionID: String,
+        attachmentHostID: String?,
+        attachmentGeneration: UInt64?
+    ) -> IOSMediaAttachmentIdentity? {
+        guard routeSessionID == ownerSessionID,
+              let attachmentHostID,
+              let attachmentGeneration else { return nil }
+        return IOSMediaAttachmentIdentity(
+            hostID: attachmentHostID,
+            generation: attachmentGeneration
+        )
+    }
+
+    static func matchesTrustedFollowSessionOwner(
+        owner: IOSAudioOwner?,
+        context: IOSAudioSessionContext?,
+        engineAttachmentIdentity: IOSMediaAttachmentIdentity?,
+        engineIsAttached: Bool
+    ) -> Bool {
+        guard engineIsAttached,
+              let owner,
+              case let .attached(ownerAttachment, logicalOwner) = owner,
+              case let .session(sessionID) = logicalOwner,
+              let context,
+              let accountScope = context.accountScope,
+              !accountScope.isEmpty,
+              let engineAttachmentIdentity,
+              context.engineAttachmentIdentity == engineAttachmentIdentity else { return false }
+        return ownerAttachment == engineAttachmentIdentity && context.sessionId == sessionID
     }
 
     private func recordUsage(_ response: [String: Any], operation: PinnedOperation) {
@@ -350,16 +628,21 @@ final class IOSAudioProviderService {
         if usageRecords.count > 128 { usageRecords.removeFirst(usageRecords.count - 128) }
     }
 
-    private func obtainHost(binding: AudioCloudBinding? = nil) throws -> any IOSAudioProviderHostDriving {
+    private func obtainHost(
+        binding: AudioCloudBinding? = nil,
+        owner: IOSAudioOwner? = nil
+    ) throws -> any IOSAudioProviderHostDriving {
         if binding?.binding == "follow_session" {
-            guard let sessionEngine, let context = sessionContext,
+            let routeOwner = owner ?? selectedFollowSessionOwner()
+            guard let routeOwner,
+                  case let .attached(engineAttachmentIdentity, _) = routeOwner,
+                  let sessionEngine = sessionEngines[engineAttachmentIdentity]?.value,
+                  let context = sessionRoutes.context(for: routeOwner),
+                  context.engineAttachmentIdentity == engineAttachmentIdentity,
                   let accountScope = context.accountScope, !accountScope.isEmpty else {
                 throw AudioServiceFailure.nativeFailure("Open a session before using its cloud audio profile.")
             }
-            if let sessionHost { return sessionHost }
-            let built = IOSAudioProviderHost(engine: sessionEngine)
-            sessionHost = built
-            return built
+            return IOSAudioProviderHost(engine: sessionEngine)
         }
         let snapshot = ProviderRepository.shared.makeLaunchSnapshot()
         let configuredRegion = contextRegion ?? (DesktopSettingsRepository.shared.effective["providerRegion"] as? String)
@@ -385,7 +668,30 @@ final class IOSAudioProviderService {
         realtimeCapability = nil
     }
 
-    private func requestJSON(binding: AudioCloudBinding, kind: String, operationID: String, snapshot: AudioConfigurationSnapshot, voice: String? = nil, maximumBytes: UInt64? = nil, timeoutBudgetMs: UInt64? = nil) throws -> String {
+    private func selectedFollowSessionOwner() -> IOSAudioOwner? {
+        guard let selectedSessionAttachmentIdentity,
+              let context = sessionRoutes.context(for: selectedSessionAttachmentIdentity) else { return nil }
+        return .attached(
+            attachment: selectedSessionAttachmentIdentity,
+            logicalOwner: .session(sessionID: context.sessionId)
+        )
+    }
+
+    private func selectLatestSessionRoute(ownerID: String) {
+        selectedSessionAttachmentIdentity = sessionRoutes.latestAttachment(ownerID: ownerID)
+        sessionContext = selectedSessionAttachmentIdentity.flatMap { sessionRoutes.context(for: $0) }
+    }
+
+    private func requestJSON(
+        binding: AudioCloudBinding,
+        kind: String,
+        operationID: String,
+        snapshot: AudioConfigurationSnapshot,
+        voice: String? = nil,
+        maximumBytes: UInt64? = nil,
+        timeoutBudgetMs: UInt64? = nil,
+        sessionContext requestedSessionContext: IOSAudioSessionContext? = nil
+    ) throws -> String {
         var object: [String: Any] = [
             "operationId": operationID,
             "kind": kind,
@@ -394,7 +700,10 @@ final class IOSAudioProviderService {
             "timeoutMs": min(timeoutBudgetMs ?? 120_000, 120_000),
             "maxPayloadBytes": maximumBytes ?? IOSAudioService.shared.maximumPayloadBytes ?? maxAudioPayloadBytes(),
         ]
-        if let context = sessionContext, let accountScope = context.accountScope, !accountScope.isEmpty {
+        let routeContext = binding.binding == "follow_session"
+            ? (requestedSessionContext ?? sessionContext)
+            : nil
+        if let context = routeContext, let accountScope = context.accountScope, !accountScope.isEmpty {
             object["session"] = ["sessionId": context.sessionId, "profileId": context.profileId, "accountScope": accountScope]
         }
         if kind == "speech" { object["rate"] = snapshot.configuration.rate }

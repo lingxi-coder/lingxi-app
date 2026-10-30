@@ -6,6 +6,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -139,6 +140,16 @@ internal interface AndroidAudioDeviceDriver {
             onChunk(RealtimePcmCaptureFrame(pcm, System.currentTimeMillis()))
         }, onReady)
     }
+    suspend fun streamMediaCapture(
+        lease: AudioLease,
+        format: RealtimePcmFormat,
+        onChunk: suspend (RealtimePcmCaptureFrame) -> Unit,
+        onReady: () -> Unit,
+        closeReceipt: AndroidMediaNativeCloseReceipt,
+    ) {
+        // A driver that does not implement a native receipt remains Unknown.
+        streamCaptureTimestamped(lease, format, onChunk, onReady)
+    }
     fun pauseStreamCapture(lease: AudioLease, paused: Boolean) = Unit
     fun setStreamPlaybackGain(lease: AudioLease, gain: Float): Unit =
         throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Realtime playback gain control is unsupported")
@@ -151,6 +162,15 @@ internal interface AndroidAudioDeviceDriver {
         chunks: kotlinx.coroutines.channels.ReceiveChannel<RealtimePcmWrite>,
         onReady: () -> Unit,
     ): Unit = throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Acknowledged PCM playback is unsupported")
+    suspend fun streamMediaPlayback(
+        lease: AudioLease,
+        format: RealtimePcmFormat,
+        chunks: kotlinx.coroutines.channels.ReceiveChannel<RealtimePcmWrite>,
+        onReady: () -> Unit,
+        closeReceipt: AndroidMediaNativeCloseReceipt,
+    ) {
+        streamPlaybackAcknowledged(lease, format, chunks, onReady)
+    }
     fun interruptStreamPlayback(lease: AudioLease, throughGeneration: Long): RealtimePcmWriteReceipt =
         throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Realtime playback interruption is unsupported")
     suspend fun captureWav(lease: AudioLease, maxPayloadBytes: Int, untilSilence: Boolean, onReady: () -> Unit): DeviceAudioCapture =
@@ -336,8 +356,11 @@ internal class AndroidAudioServiceCore(
     private data class RenderedSpeech(val pcm: ByteArray, val sampleRateHz: Int, val lease: AudioLease)
 
     private val operationMutex = Mutex()
+    private val mediaPortOpenMutex = Mutex()
+    private val pendingMediaPortCleanups = AndroidMediaOpenCleanupRegistry()
     private val serviceOperationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val coordinator = AudioResourceCoordinator(initialEpoch)
+    private val mediaOpenAdmission = AudioOwnerMediaOpenAdmission()
     private val mediaPortGeneration = AtomicLong(0L)
     private val recordings = AudioRecordingRegistry()
     private val operations = ConcurrentHashMap<AudioOperationIdentity, OperationState>()
@@ -391,7 +414,8 @@ internal class AndroidAudioServiceCore(
         val registered = operationMutex.withLock {
             when {
                 invalidating || request.identity.serviceEpoch != epoch -> false
-                request.operation != DeviceAudioOperation.EndOwner && request.owner in endingOwners -> false
+                request.operation != DeviceAudioOperation.EndOwner &&
+                    (request.owner in endingOwners || mediaOpenAdmission.isEnding(request.owner)) -> false
                 else -> registerOperation(state)
             }
         }
@@ -399,7 +423,8 @@ internal class AndroidAudioServiceCore(
             operationScope.cancel()
             return when {
                 invalidating || request.identity.serviceEpoch != epoch -> failure(DeviceAudioErrorKind.Cancelled, "audio service instance has changed")
-                request.operation != DeviceAudioOperation.EndOwner && request.owner in endingOwners -> failure(DeviceAudioErrorKind.Cancelled, "audio owner is ending")
+                request.operation != DeviceAudioOperation.EndOwner &&
+                    (request.owner in endingOwners || mediaOpenAdmission.isEnding(request.owner)) -> failure(DeviceAudioErrorKind.Cancelled, "audio owner is ending")
                 request.identity in cancelledOperations -> failure(DeviceAudioErrorKind.Cancelled, "audio operation was cancelled before admission")
                 else -> failure(DeviceAudioErrorKind.InvalidRequest, "audio operation identity has already been used")
             }
@@ -446,47 +471,132 @@ internal class AndroidAudioServiceCore(
         playback: Boolean,
         sampleRateHz: Int = 24_000,
     ): AndroidMediaAudioPortSession {
+        val callerContext = currentCoroutineContext()
+        val parentJob = callerContext[Job]
+        if (parentJob == null) {
+            throw AudioOperationException(DeviceAudioErrorKind.InvalidRequest, "media audio open has no cancellable job")
+        }
+        val openScope = CoroutineScope(callerContext + SupervisorJob(parentJob))
+        lateinit var openToken: AudioOwnerMediaOpenAdmission.OpenToken
+        val openWork = openScope.async(start = CoroutineStart.LAZY) {
+            mediaPortOpenMutex.withLock {
+                if (!mediaOpenAdmission.isAdmitted(openToken)) {
+                    throw CancellationException("media audio owner is ending")
+                }
+                pendingMediaPortCleanups.retryPending()
+                openMediaAudioPortLocked(owner, capture, playback, sampleRateHz, openToken)
+            }
+        }
+        // Register the cancellable transaction job (not its caller) before waiting for the global
+        // open mutex or acquiring a device lease.
+        val admittedOpen = mediaOpenAdmission.beginOpen(owner, openWork) {
+            !invalidating && owner !in endingOwners
+        }
+        if (admittedOpen == null) {
+            openScope.cancel()
+            throw AudioOperationException(DeviceAudioErrorKind.Cancelled, "media audio owner is ending")
+        }
+        openToken = admittedOpen
+        try {
+            openWork.start()
+            return awaitMediaOpenResult(
+                openWork = openWork,
+                admission = mediaOpenAdmission,
+                token = openToken,
+                onUnhanded = { closeAction ->
+                    // If await is cancelled after publish but before it hands the result back,
+                    // keep the close action in the app-scoped retry registry and start cleanup
+                    // independently of the cancelled caller. The admission record also retains
+                    // the same action until every lease has a stop receipt.
+                    serviceOperationScope.launch {
+                        try {
+                            pendingMediaPortCleanups.retainAndRetry(
+                                AndroidMediaOpenCleanup { closeAction() },
+                            )
+                        } catch (_: Throwable) {
+                            // Failed cleanup remains retained by the registry/admission record.
+                        }
+                    }
+                    Unit
+                },
+            )
+        } finally {
+            openScope.cancel()
+        }
+    }
+
+    private suspend fun openMediaAudioPortLocked(
+        owner: AudioOwnerKey,
+        capture: Boolean,
+        playback: Boolean,
+        sampleRateHz: Int,
+        openToken: AudioOwnerMediaOpenAdmission.OpenToken,
+    ): AndroidMediaAudioPortSession {
         if (!capture && !playback) {
             throw AudioOperationException(DeviceAudioErrorKind.InvalidRequest, "media audio port needs capture or playback")
         }
-        if (invalidating || owner in endingOwners) {
+        if (invalidating || owner in endingOwners || !mediaOpenAdmission.isAdmitted(openToken)) {
             throw AudioOperationException(DeviceAudioErrorKind.Cancelled, "media audio owner is ending")
         }
         val format = RealtimePcmFormat(sampleRateHz, 1, "pcm16")
         format.requireSupported()
         val leases = ArrayList<AudioLease>(2)
+        val closeReceipts = ArrayList<AndroidMediaNativeCloseReceipt>(2)
+        var input: kotlinx.coroutines.channels.Channel<RealtimePcmCaptureFrame>? = null
+        var output: kotlinx.coroutines.channels.Channel<RealtimePcmWrite>? = null
+        var captureJob: Job? = null
+        var playbackJob: Job? = null
+        var session: AndroidMediaAudioPortSession? = null
         try {
-            if (capture) leases += acquireMediaPortLease(owner, AudioResource.Capture)
-            if (playback) leases += acquireMediaPortLease(owner, AudioResource.Playback)
+            if (capture) {
+                val lease = acquireMediaPortLease(owner, AudioResource.Capture)
+                leases += lease
+                closeReceipts += AndroidMediaNativeCloseReceipt(lease)
+            }
+            if (playback) {
+                val lease = acquireMediaPortLease(owner, AudioResource.Playback)
+                leases += lease
+                closeReceipts += AndroidMediaNativeCloseReceipt(lease)
+            }
             val captureLease = leases.firstOrNull { it.resource == AudioResource.Capture }
             val playbackLease = leases.firstOrNull { it.resource == AudioResource.Playback }
-            val input = kotlinx.coroutines.channels.Channel<RealtimePcmCaptureFrame>(capacity = 8)
-            val output = kotlinx.coroutines.channels.Channel<RealtimePcmWrite>(capacity = 8)
+            val captureClose = closeReceipts.firstOrNull { it.lease == captureLease }
+            val playbackClose = closeReceipts.firstOrNull { it.lease == playbackLease }
+            val createdInput = kotlinx.coroutines.channels.Channel<RealtimePcmCaptureFrame>(capacity = 8)
+            val createdOutput = kotlinx.coroutines.channels.Channel<RealtimePcmWrite>(capacity = 8)
+            input = createdInput
+            output = createdOutput
             val captureReady = CompletableDeferred<Unit>()
             val playbackReady = CompletableDeferred<Unit>()
-            val captureJob = captureLease?.let { lease ->
+            val createdCaptureJob = captureLease?.let { lease ->
                 serviceOperationScope.launch {
+                    val closeReceipt = checkNotNull(captureClose)
+                    closeReceipt.markDispatched()
                     try {
-                        driver.streamCaptureTimestamped(lease, format, { frame ->
-                            val sent = input.trySend(frame)
+                        driver.streamMediaCapture(lease, format, { frame ->
+                            val sent = createdInput.trySend(frame)
                             if (sent.isFailure) throw AudioOperationException(DeviceAudioErrorKind.Busy, "media audio input queue is full")
-                        }, { captureReady.complete(Unit) })
-                        input.close()
+                        }, { captureReady.complete(Unit) }, closeReceipt)
+                        createdInput.close()
                     } catch (error: Throwable) {
-                        input.close(error)
+                        createdInput.close(error)
                         captureReady.completeExceptionally(error)
                         throw error
                     }
                 }
             }
-            val playbackJob = playbackLease?.let { lease ->
+            createdCaptureJob?.invokeOnCompletion { captureClose?.confirmIfNeverDispatched() }
+            captureJob = createdCaptureJob
+            val createdPlaybackJob = playbackLease?.let { lease ->
                 serviceOperationScope.launch {
+                    val closeReceipt = checkNotNull(playbackClose)
+                    closeReceipt.markDispatched()
                     try {
-                        driver.streamPlaybackAcknowledged(lease, format, output) { playbackReady.complete(Unit) }
+                        driver.streamMediaPlayback(lease, format, createdOutput, { playbackReady.complete(Unit) }, closeReceipt)
                     } catch (error: Throwable) {
-                        output.close(error)
+                        createdOutput.close(error)
                         while (true) {
-                            val pending = output.tryReceive().getOrNull() ?: break
+                            val pending = createdOutput.tryReceive().getOrNull() ?: break
                             pending.completion.completeExceptionally(error)
                         }
                         playbackReady.completeExceptionally(error)
@@ -494,30 +604,84 @@ internal class AndroidAudioServiceCore(
                     }
                 }
             }
-            val session = AndroidMediaAudioPortSession(
+            createdPlaybackJob?.invokeOnCompletion { playbackClose?.confirmIfNeverDispatched() }
+            playbackJob = createdPlaybackJob
+            val createdSession = AndroidMediaAudioPortSession(
                 core = this,
                 owner = owner,
                 format = format,
-                input = input,
-                output = output,
+                input = createdInput,
+                output = createdOutput,
                 leases = leases.toList(),
-                captureJob = captureJob,
-                playbackJob = playbackJob,
+                closeReceipts = closeReceipts.toList(),
+                captureJob = createdCaptureJob,
+                playbackJob = createdPlaybackJob,
             )
-            try {
-                if (capture) captureReady.await()
-                if (playback) playbackReady.await()
-            } catch (error: Throwable) {
-                session.stop()
-                throw error
+            session = createdSession
+            if (capture) captureReady.await()
+            if (playback) playbackReady.await()
+            if (invalidating || !mediaOpenAdmission.publish(openToken, leases.map { it.leaseId }) { createdSession.stop() }) {
+                throw CancellationException("media audio owner ended while opening")
             }
-            return session
+            return createdSession
         } catch (error: Throwable) {
-            for (lease in leases.asReversed()) {
-                runCatching { admission.release(lease) }
-                retireLeaseMetadata(lease)
+            val failedSession = session
+            val retainedLeases = leases.toList()
+            val retainedCloseReceipts = closeReceipts.toList()
+            val retainedInput = input
+            val retainedOutput = output
+            val retainedCaptureJob = captureJob
+            val retainedPlaybackJob = playbackJob
+            val cleanup = AndroidMediaOpenCleanup {
+                if (failedSession != null) {
+                    failedSession.stop()
+                } else {
+                    retainedInput?.cancel(CancellationException("media audio open failed"))
+                    retainedOutput?.close(CancellationException("media audio open failed"))
+                    retainedCaptureJob?.cancel()
+                    retainedPlaybackJob?.cancel()
+
+                    var cleanupFailure: Throwable? = null
+                    for (lease in retainedLeases.asReversed()) {
+                        try {
+                            stopMediaPortLeaseNative(lease)
+                        } catch (closeError: Throwable) {
+                            if (cleanupFailure == null) cleanupFailure = closeError
+                        }
+                    }
+                    cleanupFailure?.let { throw it }
+
+                    try {
+                        withTimeout(MEDIA_PORT_STOP_JOIN_TIMEOUT_MS) {
+                            retainedCaptureJob?.join()
+                            retainedPlaybackJob?.join()
+                            for (receipt in retainedCloseReceipts) {
+                                receipt.confirmIfNeverDispatched()
+                                receipt.awaitClosed()
+                            }
+                        }
+                    } catch (_: TimeoutCancellationException) {
+                        throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "media audio open rollback is waiting for stream shutdown")
+                    }
+
+                    for (lease in retainedLeases.asReversed()) {
+                        try { releaseStoppedMediaPortLease(lease) }
+                        catch (closeError: Throwable) { if (cleanupFailure == null) cleanupFailure = closeError }
+                    }
+                    cleanupFailure?.let { throw it }
+                }
             }
-            throw error
+            try {
+                pendingMediaPortCleanups.retainAndRetry(cleanup)
+            } catch (cleanupError: Throwable) {
+                if (error is CancellationException) {
+                    error.addSuppressed(cleanupError)
+                    throw error
+                }
+                throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "media audio open failed and resource cleanup remains unconfirmed")
+            }
+            if (error is CancellationException) throw error
+            throw AndroidMediaAudioOpenClosed(error)
         }
     }
 
@@ -543,6 +707,55 @@ internal class AndroidAudioServiceCore(
         retireLeaseMetadata(lease)
     }
 
+    internal suspend fun stopMediaPortLeaseNative(lease: AudioLease): Boolean =
+        admission.stopNativeRetainingLease(lease)
+
+    internal suspend fun releaseStoppedMediaPortLease(lease: AudioLease) {
+        if (!admission.releaseAlreadyStopped(lease) && coordinator.isActive(lease)) {
+            throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "media audio device lease could not be released")
+        }
+        retireLeaseMetadata(lease)
+        mediaOpenAdmission.leaseStopped(lease.leaseId)
+    }
+
+    private suspend fun retryPendingMediaOpenCleanupBounded() {
+        val cleanup = serviceOperationScope.async { pendingMediaPortCleanups.retryPending() }
+        try {
+            withTimeout(MEDIA_PORT_OWNER_DRAIN_TIMEOUT_MS) { cleanup.await() }
+        } catch (_: TimeoutCancellationException) {
+            throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "media audio open cleanup remains unconfirmed")
+        } catch (error: Throwable) {
+            if (error is AudioOperationException) throw error
+            throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "media audio open cleanup remains unconfirmed")
+        }
+    }
+
+    private suspend fun endOwnerLeasesBounded(owner: AudioOwnerKey): List<AudioLease> {
+        val cleanup = serviceOperationScope.async { admission.endOwner(owner) }
+        val ended = try {
+            withTimeout(MEDIA_PORT_OWNER_DRAIN_TIMEOUT_MS) { cleanup.await() }
+        } catch (_: TimeoutCancellationException) {
+            throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "audio owner close remains unconfirmed")
+        } catch (error: Throwable) {
+            if (error is AudioOperationException) throw error
+            throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "audio owner close remains unconfirmed")
+        }
+        return ended ?: throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "audio resources could not be stopped")
+    }
+
+    private suspend fun invalidateLeasesBounded(nextEpoch: Long): List<AudioLease> {
+        val cleanup = serviceOperationScope.async { admission.invalidate(nextEpoch) }
+        val ended = try {
+            withTimeout(MEDIA_PORT_OWNER_DRAIN_TIMEOUT_MS) { cleanup.await() }
+        } catch (_: TimeoutCancellationException) {
+            throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "audio resource invalidation remains unconfirmed")
+        } catch (error: Throwable) {
+            if (error is AudioOperationException) throw error
+            throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "audio resource invalidation remains unconfirmed")
+        }
+        return ended ?: throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "audio resources could not be stopped")
+    }
+
     internal fun setMediaCaptureEnabled(lease: AudioLease, enabled: Boolean) {
         driver.pauseStreamCapture(lease, paused = !enabled)
     }
@@ -560,15 +773,48 @@ internal class AndroidAudioServiceCore(
             operations[identity]
         }
         operation?.cancel()
-        if (operation != null) withContext(NonCancellable) { operation.done.await() }
-        val session = recordingSessions.entries.firstOrNull { it.value.originIdentity == identity } ?: return
-        val handle = session.key
-        val ownerSession = session.value
-        val stopped = withContext(NonCancellable) { admission.release(ownerSession.lease) }
-        if (!stopped) return
-        recordingSessions.remove(handle, ownerSession)
-        recordings.remove(handle, ownerSession.owner, ownerSession.epoch)
-        retireLeaseMetadata(ownerSession.lease)
+        withContext(NonCancellable) {
+            operation?.done?.await()
+
+            recordingSessions.entries
+                .filter { it.value.originIdentity == identity }
+                .forEach { (handle, session) ->
+                    session.stopMutex.withLock {
+                        releaseCancellationLease(session.lease)
+                        recordingSessions.remove(handle, session)
+                        recordings.remove(handle, session.owner, session.epoch)
+                    }
+                }
+
+            offloadMedia.values
+                .filter { it.lease.identity == identity }
+                .forEach { session -> stopOffloadMedia(session) }
+
+            // A cancelled one-shot can finish its coroutine after a native
+            // stop failed. Its lease remains in both the coordinator and this
+            // identity-bound map even though `operations` has removed it.
+            val residualLeases = coordinator.allLeases()
+                .filter { lease ->
+                    lease.identity == identity ||
+                        leaseOperations[lease.leaseId]?.request?.identity == identity
+                }
+            for (lease in residualLeases) releaseCancellationLease(lease)
+        }
+    }
+
+    private suspend fun releaseCancellationLease(lease: AudioLease) {
+        val released = admission.release(lease)
+        val stillActive = coordinator.allLeases().any { it.leaseId == lease.leaseId }
+        if (stillActive) {
+            val detail = if (released) "lease remained active after stop" else "native stop was not confirmed"
+            throw AudioOperationException(
+                DeviceAudioErrorKind.NativeFailure,
+                "Android audio cancellation could not confirm resource release: $detail",
+            )
+        }
+        // A false release is successful only when another serialized teardown
+        // already removed the same lease after confirming its native close.
+        retireLeaseMetadata(lease)
     }
 
     /** Starts a UI-owned live recognizer while retaining the same Capture lease as service Listen. */
@@ -918,13 +1164,32 @@ internal class AndroidAudioServiceCore(
         invalidating = true
         val nextEpoch = epoch + 1L
         val pending = operations.values.toList()
+        val mediaOpenDrain = mediaOpenAdmission.beginInvalidation()
+        var invalidationSucceeded = false
         try {
             pending.forEach { state ->
                 rememberCancelled(state.request.identity)
                 state.cancel()
             }
-            val ended = withContext(NonCancellable) { admission.invalidate(nextEpoch) }
-                ?: throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "audio resources could not be stopped")
+            val ended = withContext(NonCancellable) {
+                try {
+                    mediaOpenAdmission.cancelAndAwait(mediaOpenDrain, MEDIA_PORT_OWNER_DRAIN_TIMEOUT_MS, serviceOperationScope)
+                } catch (error: Throwable) {
+                    throw AudioOperationException(
+                        DeviceAudioErrorKind.NativeFailure,
+                        error.message ?: "media audio open cleanup remains unconfirmed",
+                    )
+                }
+                try {
+                    retryPendingMediaOpenCleanupBounded()
+                } catch (error: Throwable) {
+                    throw AudioOperationException(
+                        DeviceAudioErrorKind.NativeFailure,
+                        "media audio open cleanup remains unconfirmed",
+                    )
+                }
+                invalidateLeasesBounded(nextEpoch)
+            }
             ended.forEach(::retireLeaseMetadata)
             recordingSessions.clear()
             recordings.invalidate(nextEpoch)
@@ -943,8 +1208,10 @@ internal class AndroidAudioServiceCore(
             epoch = nextEpoch
             endingOwners.clear()
             supportRevision += 1L
+            invalidationSucceeded = true
             epoch
         } finally {
+            mediaOpenAdmission.finishInvalidation(invalidationSucceeded)
             try {
                 withContext(NonCancellable) { pending.forEach { it.job.join() } }
             } finally {
@@ -1550,38 +1817,67 @@ internal class AndroidAudioServiceCore(
 
     private suspend fun endOwner(state: OperationState): DeviceAudioResult {
         val owner = state.request.owner
+        lateinit var mediaEnd: AudioOwnerMediaOpenAdmission.EndToken
         val pending = operationMutex.withLock {
             endingOwners.add(owner)
-            operations.values.filter { it !== state && it.request.owner == owner }.also { owned ->
-                owned.forEach { pendingState ->
-                    rememberCancelled(pendingState.request.identity)
-                    pendingState.cancel()
-                }
+            val owned = operations.values.filter { it !== state && it.request.owner == owner }
+            owned.forEach { pendingState ->
+                rememberCancelled(pendingState.request.identity)
+                pendingState.cancel()
             }
+            mediaEnd = mediaOpenAdmission.beginEnd(owner)
+            owned
         }
+        var endedSuccessfully = false
         try {
-            val ended = admission.endOwner(owner)
-                ?: throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "audio resources could not be stopped")
-            ended.forEach(::retireLeaseMetadata)
-            withContext(NonCancellable) { pending.forEach { it.job.join() } }
-            recordings.endOwner(owner, epoch).forEach { handle -> recordingSessions.remove(handle) }
-            playbackByOwner.remove(owner)
-            offloadMedia.values.filter { it.key.owner == owner }.forEach { session ->
-                session.terminal.set(true)
-                session.started.complete(Unit)
-                offloadMedia.remove(session.key, session)
-            }
-            synchronized(offloadMediaFailureOrder) {
-                offloadMediaFailureOrder.filter { it.owner == owner }.forEach { key ->
-                    offloadMediaFailures.remove(key)
-                    offloadMediaFailureOrder.remove(key)
+            withContext(NonCancellable) {
+                try {
+                    mediaOpenAdmission.cancelAndAwait(mediaEnd, MEDIA_PORT_OWNER_DRAIN_TIMEOUT_MS, serviceOperationScope)
+                } catch (error: Throwable) {
+                    throw AudioOperationException(
+                        DeviceAudioErrorKind.NativeFailure,
+                        error.message ?: "media audio open cleanup remains unconfirmed",
+                    )
                 }
+                try {
+                    // A cancelled open may have transferred an unconfirmed close to this registry.
+                    // Do not report OwnerEnded until that retained cleanup has acknowledged close.
+                    retryPendingMediaOpenCleanupBounded()
+                } catch (error: Throwable) {
+                    throw AudioOperationException(
+                        DeviceAudioErrorKind.NativeFailure,
+                        "media audio open cleanup remains unconfirmed",
+                    )
+                }
+                val ended = endOwnerLeasesBounded(owner)
+                ended.forEach(::retireLeaseMetadata)
+                try {
+                    withTimeout(MEDIA_PORT_OWNER_DRAIN_TIMEOUT_MS) { pending.forEach { it.job.join() } }
+                } catch (_: TimeoutCancellationException) {
+                    throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "audio owner operation cleanup remains unconfirmed")
+                }
+                recordings.endOwner(owner, epoch).forEach { handle -> recordingSessions.remove(handle) }
+                playbackByOwner.remove(owner)
+                offloadMedia.values.filter { it.key.owner == owner }.forEach { mediaSession ->
+                    mediaSession.terminal.set(true)
+                    mediaSession.started.complete(Unit)
+                    offloadMedia.remove(mediaSession.key, mediaSession)
+                }
+                synchronized(offloadMediaFailureOrder) {
+                    offloadMediaFailureOrder.filter { it.owner == owner }.forEach { key ->
+                        offloadMediaFailures.remove(key)
+                        offloadMediaFailureOrder.remove(key)
+                    }
+                }
+                endedSuccessfully = true
             }
             return DeviceAudioResult.OwnerEnded
         } finally {
-            // The fence is concurrent; reacquiring operationMutex here could block invalidation
-            // while it waits for this cancelled EndOwner operation to settle.
-            endingOwners.remove(owner)
+            // Failed or timed out drains leave this owner fenced and retryable. Do not allow a new
+            // media open or audio operation to overtake a close whose physical state is unknown.
+            if (withContext(NonCancellable) { mediaOpenAdmission.finishEnd(mediaEnd, endedSuccessfully) }) {
+                endingOwners.remove(owner)
+            }
         }
     }
 
@@ -1897,5 +2193,47 @@ internal class AndroidAudioServiceCore(
         const val CANCELLED_IDENTITY_HISTORY_LIMIT = 2_048
         const val MAX_MEDIA_LABEL_LENGTH = 256
         const val MAX_MEDIA_TARGET_LENGTH = 4_096
+        const val MEDIA_PORT_STOP_JOIN_TIMEOUT_MS = 5_000L
+        const val MEDIA_PORT_OWNER_DRAIN_TIMEOUT_MS = 5_000L
+    }
+}
+
+/**
+ * Await and transfer an opened resource to its caller. `Deferred.await()` is
+ * cancellable even after the deferred completed, so publish alone is not a
+ * handoff. If the waiter loses that race, queue the retained owner close action
+ * before finishing the open transaction.
+ */
+internal suspend fun <T> awaitMediaOpenResult(
+    openWork: Deferred<T>,
+    admission: AudioOwnerMediaOpenAdmission,
+    token: AudioOwnerMediaOpenAdmission.OpenToken,
+    onUnhanded: (suspend () -> Unit) -> Unit,
+): T {
+    var handedOff = false
+    var failure: Throwable? = null
+    try {
+        val result = openWork.await()
+        if (!admission.commitOpenResult(token)) {
+            throw CancellationException("media audio owner ended before open could be returned")
+        }
+        handedOff = true
+        return result
+    } catch (error: Throwable) {
+        failure = error
+        throw error
+    } finally {
+        withContext(NonCancellable) {
+            openWork.join()
+            try {
+                if (!handedOff) {
+                    admission.unhandedCloseAction(token)?.let(onUnhanded)
+                }
+            } catch (cleanupError: Throwable) {
+                failure?.addSuppressed(cleanupError) ?: throw cleanupError
+            } finally {
+                admission.finishOpen(token)
+            }
+        }
     }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { desktopHost } from '../bridge/bridgeConnection';
 import type { DesktopLocalApp, LocalAppMarketPublication } from '../../shared/localApps';
-function api() { const value = window.lingxi?.localApps; if (!value) throw new Error('Application host is unavailable'); return value; }
+function api() { const value = desktopHost()?.localApps; if (!value) throw new Error('Application host is unavailable'); return value; }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export function LocalAppPublish({ app, onClose }: { app: DesktopLocalApp; onClose: () => void }) {

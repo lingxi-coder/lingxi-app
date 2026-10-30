@@ -31,10 +31,9 @@ use lingxi_llm_client::realtime::{
 };
 use media_api::{
     MediaAudioChannel, MediaCapabilities, MediaContent, MediaError, MediaErrorKind, MediaKind,
-    MediaOperation, MediaOperationContext, MediaOperationId, MediaOperationKind,
-    MediaOperationReadiness, MediaOwner, MediaReadinessState, MediaRef, MediaRenderReceipt,
-    MediaResult, MediaService, MediaSessionMode, MediaSessionRef, MediaSessionRequest,
-    MediaSessionState, MediaSessionStatus,
+    MediaOperation, MediaOperationContext, MediaOperationKind, MediaOperationReadiness, MediaOwner,
+    MediaReadinessState, MediaRef, MediaRenderReceipt, MediaResult, MediaService, MediaSessionMode,
+    MediaSessionRef, MediaSessionRequest, MediaSessionState, MediaSessionStatus,
 };
 use orchestrator::test_support::{
     content_block_start_tool_use, content_block_stop, input_json_delta, message_delta_stop,
@@ -197,8 +196,11 @@ impl MediaService for FakeMediaService {
         ))
     }
 
-    async fn cancel(&self, _identity: MediaOperationId) -> Result<(), MediaError> {
-        Ok(())
+    async fn cancel(&self, _context: MediaOperationContext) -> Result<(), MediaError> {
+        Err(MediaError::new(
+            MediaErrorKind::Unsupported,
+            "fixture does not track in-flight operation cancellation",
+        ))
     }
 }
 
@@ -573,22 +575,20 @@ fn build_orchestrator(
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![
         first, second, third,
     ]));
-    let orchestrator =
-        ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig {
-                interactive_permissions: true,
-                ..OrchestratorConfig::default()
-            },
-            Arc::new(MockApiClient::new(Vec::new())),
-            streaming,
-            tools,
-            orchestrator::test_support::noop_hook_executor(),
-            gate as Arc<dyn permission::gate::PermissionGate>,
-            output,
-            Arc::new(StaticMemoryProvider::empty()),
-            std::env::temp_dir(),
-        ));
-    orchestrator
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig {
+            interactive_permissions: true,
+            ..OrchestratorConfig::default()
+        },
+        Arc::new(MockApiClient::new(Vec::new())),
+        streaming,
+        tools,
+        orchestrator::test_support::noop_hook_executor(),
+        gate as Arc<dyn permission::gate::PermissionGate>,
+        output,
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ))
 }
 
 async fn build_rig(

@@ -14,7 +14,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { DesktopLocalApp, DesktopAppManifest, LocalAppLog, LocalAppPhase, LocalAppStep, LocalAppProcess } from '../../shared/localApps.js';
 import { CoreLocalAppStore } from './coreStore.js';
 import { guardedProcessArguments } from './processGuardian.js';
-import { LocalAppStore, atomicJson, containedFile } from './store.js';
+import { LocalAppStore, PREPARATION_DATA_DIRECTORY, PREPARATION_MARKER, atomicJson, containedFile } from './store.js';
 
 interface Invocation {
   id: string; operationId: string; revision: number; releaseDigest?: string; controller: AbortController; phase: LocalAppPhase;
@@ -268,7 +268,7 @@ export class LocalAppRuntime {
       try {
         run.workspace = await (this.store instanceof CoreLocalAppStore ? this.store.prepareWorkspace(row, repair) : this.store.prepareWorkspace(row));
         if (this.store instanceof CoreLocalAppStore) { run.id = this.store.run(id)!.runId; run.preparationDataPath = this.store.preparationDataPath(id); }
-        const marker = join(run.workspace, '.lingxi-prepared.json');
+        const marker = join(run.workspace, PREPARATION_MARKER);
         let prepared = false;
         try { prepared = JSON.parse(await fs.readFile(marker, 'utf8')).revision === row.revision; } catch { /* first install */ }
         if (repair || !prepared) {
@@ -421,7 +421,7 @@ export class LocalAppRuntime {
   private async launch(id: string, run: Invocation, step: LocalAppStep, name: string, extra: NodeJS.ProcessEnv, createEnvironment: boolean): Promise<ChildProcess> {
     const cwd = await containedFile(run.workspace, step.cwd ?? '.');
     const preparing = name === 'installing' || name === 'building';
-    const dataDirectory = preparing ? run.preparationDataPath ?? join(run.workspace, '.lingxi-prepare-data') : this.store.dataPath(id);
+    const dataDirectory = preparing ? run.preparationDataPath ?? join(run.workspace, PREPARATION_DATA_DIRECTORY) : this.store.dataPath(id);
     if (preparing) await fs.mkdir(dataDirectory, { recursive: true, mode: 0o700 });
     const env: NodeJS.ProcessEnv = { ...appEnvironment(this.options.environment), ...step.env, ...extra, LOCAL_APP_DATA_DIR: dataDirectory, LOCAL_APP_ID: id, LOCAL_APP_RUN_ID: run.id, LOCAL_APP_BASE_PATH: '/' };
     // Build scripts get a disposable preparation location, never the live data alias.

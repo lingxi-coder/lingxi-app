@@ -1,4 +1,5 @@
 import { tr } from '../i18n/locale';
+import { desktopHost } from './bridgeConnection';
 /**
  * What the renderer shows of Remote Control: the pure rules for the settings
  * page, the session toggle, the top-bar indicator and `/remote-control`, and
@@ -206,7 +207,7 @@ export class RemoteControlStore {
   }
 }
 
-const sharedStore = new RemoteControlStore(() => (typeof window === 'undefined' ? undefined : window.lingxi?.remoteControl));
+const sharedStore = new RemoteControlStore(() => desktopHost()?.remoteControl);
 
 /** Live Remote Control status and the sessions viewers may see; both `null` until first read or when the app has no Remote Control. */
 export function useRemoteControl(): RemoteControlSnapshot {
@@ -215,7 +216,7 @@ export function useRemoteControl(): RemoteControlSnapshot {
 
 /** The app's Remote Control API, when this build has one. */
 export function remoteControlApi(): RemoteControlApi | undefined {
-  return typeof window === 'undefined' ? undefined : window.lingxi?.remoteControl;
+  return desktopHost()?.remoteControl;
 }
 
 /** Re-read after a change the events do not report. */

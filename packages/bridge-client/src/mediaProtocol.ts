@@ -14,7 +14,9 @@ export interface MediaOperationIdDto { id: string; generation: number; service_e
 export type MediaOwnerDto =
   | { type: 'session'; session_id: string }
   | { type: 'ui'; instance_id: string }
-  | { type: 'system'; instance_id: string };
+  | { type: 'system'; instance_id: string }
+  | { type: 'attached'; attachment_host_id: string; attachment_generation: number;
+      logical_kind: 'session' | 'ui' | 'system'; logical_owner_id: string };
 export interface MediaInitiatorDto { agent_id?: string; tool_use_id?: string; request_id?: string }
 export type MediaKindDto = 'audio' | 'image' | 'video';
 export type MediaSourceKindDto = 'microphone' | 'camera' | 'screen' | 'speaker' | 'library' | 'remote';
@@ -38,7 +40,7 @@ export type MediaResourceRefDto =
   | { type: 'recording'; recording_id: string }
   | { type: 'session'; session_id: string }
   | { type: 'media'; media_ref: string }
-  | { type: 'operation'; operation_id: MediaOperationIdDto };
+  | { type: 'operation'; operation_id: MediaOperationIdDto; incarnation: string };
 export interface MediaSourceDto {
   reference: MediaSourceRefDto;
   kind: MediaSourceKindDto;
@@ -149,13 +151,13 @@ export type MediaResultDto =
 export type MediaServiceActionDto =
   | { type: 'execute'; operation: MediaOperationDto; timeout_budget_ms?: number | null; max_payload_bytes?: number | null }
   | { type: 'read_media'; media_ref: string }
-  | { type: 'cancel'; operation_id: MediaOperationIdDto }
+  | { type: 'cancel'; operation_id: MediaOperationIdDto; incarnation: string }
   | { type: 'update_audio_settings'; configuration_json: string }
   | { type: 'register_connection'; connection_id: string; label: string; supported_modes: MediaSessionModeDto[]; source_kinds: Array<'microphone' | 'camera' | 'screen'> }
   | { type: 'unregister_connection'; connection_id: string };
 export interface MediaServiceRequestDto { request_id: string; action: MediaServiceActionDto }
 export type MediaServiceResultDto =
-  | { type: 'operation'; operation_id: MediaOperationIdDto; result: MediaResultDto }
+  | { type: 'operation'; operation_id: MediaOperationIdDto; incarnation: string; result: MediaResultDto }
   | { type: 'content'; content: MediaContentDto }
   | { type: 'cancelled' }
   | { type: 'settings_updated' }
@@ -216,6 +218,7 @@ export type MediaDeviceResultDto =
   | { type: 'video_written' }
   | { type: 'updated'; status: MediaSessionStatusDto }
   | { type: 'stopped' }
+  | { type: 'open_failed_without_resource'; error: MediaErrorDto }
   | { type: 'error'; error: MediaErrorDto };
 export interface MediaDeviceResponseDto { request_id: string; result: MediaDeviceResultDto }
 
@@ -314,6 +317,41 @@ function mediaOperationId(value: unknown): MediaOperationIdDto {
   };
 }
 
+function mediaOperationIncarnation(value: unknown): string {
+  if (typeof value !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)) {
+    throw new Error('invalid media operation incarnation');
+  }
+  return value;
+}
+
+function mediaResourceRef(value: unknown): MediaResourceRefDto {
+  const resource = record(value, 'media resource reference');
+  switch (resource['type']) {
+    case 'source':
+      exact(resource, ['type', 'source'], [], 'media source resource');
+      return { type: 'source', source: mediaSourceRef(resource['source']) };
+    case 'recording':
+      exact(resource, ['type', 'recording_id'], [], 'media recording resource');
+      return { type: 'recording', recording_id: identifier(resource['recording_id'], 'media recording reference') };
+    case 'session':
+      exact(resource, ['type', 'session_id'], [], 'media session resource');
+      return { type: 'session', session_id: identifier(resource['session_id'], 'media session reference') };
+    case 'media':
+      exact(resource, ['type', 'media_ref'], [], 'stored media resource');
+      return { type: 'media', media_ref: identifier(resource['media_ref'], 'media reference') };
+    case 'operation':
+      exact(resource, ['type', 'operation_id', 'incarnation'], [], 'media operation resource');
+      return {
+        type: 'operation',
+        operation_id: mediaOperationId(resource['operation_id']),
+        incarnation: mediaOperationIncarnation(resource['incarnation']),
+      };
+    default:
+      throw new Error('invalid media resource reference type');
+  }
+}
+
 function mediaContent(value: unknown): MediaContentDto {
   const content = record(value, 'media content');
   exact(content, ['media_ref', 'metadata', 'bytes'], [], 'media content');
@@ -339,7 +377,12 @@ function byteArray(value: unknown, name: string): number[] {
 function mediaSourceRef(value: unknown): MediaSourceRefDto {
   const source = record(value, 'media source reference');
   exact(source, ['id'], [], 'media source reference');
-  return { id: identifier(source['id'], 'media source reference') };
+  const id = source['id'];
+  // Rust MediaSourceRefDto uses validate_identifier: non-empty, <= 256 UTF-8 bytes.
+  if (typeof id !== 'string' || !id || new TextEncoder().encode(id).byteLength > 256) {
+    throw new Error('invalid media source reference');
+  }
+  return { id };
 }
 
 function mediaPcmFrame(value: unknown): MediaPcmFrameDto {
@@ -426,22 +469,39 @@ function mediaSessionRequest(value: unknown): MediaSessionRequestDto {
   };
 }
 
+export function validateMediaOwner(value: unknown): MediaOwnerDto {
+  const owner = record(value, 'media owner');
+  if (owner['type'] === 'session') { exact(owner, ['type', 'session_id'], [], 'media owner'); identifier(owner['session_id'], 'media owner session'); }
+  else if (owner['type'] === 'ui' || owner['type'] === 'system') { exact(owner, ['type', 'instance_id'], [], 'media owner'); identifier(owner['instance_id'], 'media owner instance'); }
+  else if (owner['type'] === 'attached') {
+    exact(owner, ['type', 'attachment_host_id', 'attachment_generation', 'logical_kind', 'logical_owner_id'], [], 'media owner');
+    if (typeof owner['attachment_host_id'] !== 'string' || owner['attachment_host_id'].length !== 36
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(owner['attachment_host_id'])) throw new Error('invalid media attachment host');
+    if (safeInteger(owner['attachment_generation'], 'media attachment generation') === 0) throw new Error('invalid media attachment generation');
+    if (typeof owner['logical_kind'] !== 'string' || !['session', 'ui', 'system'].includes(owner['logical_kind'])) {
+      throw new Error('invalid media logical owner kind');
+    }
+    const logicalId = owner['logical_owner_id'];
+    if (typeof logicalId !== 'string' || !logicalId || logicalId.includes('\0')
+      || new TextEncoder().encode(logicalId).byteLength > 256) throw new Error('invalid media logical owner');
+  }
+  else throw new Error('invalid media owner');
+  return owner as unknown as MediaOwnerDto;
+}
+
 function mediaDeviceOpenRequest(value: unknown): MediaDeviceOpenRequestDto {
   const request = record(value, 'media device open request');
   exact(request, ['identity', 'owner', 'max_payload_bytes', 'request'], ['initiator', 'timeout_budget_ms'], 'media device open request');
   const identity = mediaOperationId(request['identity']);
   const max_payload_bytes = safeInteger(request['max_payload_bytes'], 'media device payload cap');
   if (max_payload_bytes === 0 || max_payload_bytes > MAX_MEDIA_DEVICE_FRAME_BYTES) throw new Error('invalid media device payload cap');
-  const owner = record(request['owner'], 'media owner');
-  if (owner['type'] === 'session') { exact(owner, ['type', 'session_id'], [], 'media owner'); identifier(owner['session_id'], 'media owner session'); }
-  else if (owner['type'] === 'ui' || owner['type'] === 'system') { exact(owner, ['type', 'instance_id'], [], 'media owner'); identifier(owner['instance_id'], 'media owner instance'); }
-  else throw new Error('invalid media owner');
+  const owner = validateMediaOwner(request['owner']);
   const initiator = request['initiator'] === undefined || request['initiator'] === null
     ? request['initiator']
     : record(request['initiator'], 'media initiator') as unknown as MediaInitiatorDto;
   return {
     identity,
-    owner: owner as unknown as MediaOwnerDto,
+    owner,
     ...(initiator === undefined ? {} : { initiator }),
     ...(request['timeout_budget_ms'] === undefined ? {} : { timeout_budget_ms: optionalNullable(request['timeout_budget_ms'], (value) => safeInteger(value, 'media timeout')) }),
     max_payload_bytes,
@@ -528,9 +588,10 @@ export function validateMediaDeviceResponse(value: unknown): MediaDeviceResponse
       exact(result, ['type', 'status'], [], 'media device update result');
       normalized = { type: 'updated', status: mediaSessionStatus(result['status']) };
       break;
+    case 'open_failed_without_resource':
     case 'error':
       exact(result, ['type', 'error'], [], 'media device error result');
-      normalized = { type: 'error', error: mediaError(result['error']) };
+      normalized = { type: result['type'], error: mediaError(result['error']) };
       break;
     default:
       throw new Error('invalid media device result type');
@@ -567,17 +628,59 @@ function mediaServiceResult(value: unknown): MediaServiceResultDto {
     return { type: 'content', content: mediaContent(result['content']) };
   }
   if (result['type'] === 'operation') {
-    exact(result, ['type', 'operation_id', 'result'], [], 'media operation result');
+    exact(result, ['type', 'operation_id', 'incarnation', 'result'], [], 'media operation result');
     const operationId = mediaOperationId(result['operation_id']);
+    const incarnation = mediaOperationIncarnation(result['incarnation']);
     const operationResult = record(result['result'], 'media operation result value');
     const operationTypes: readonly string[] = [
       'sources', 'status', 'captured', 'recording_started', 'recording_stopped', 'transcript', 'synthesized',
       'playback_completed', 'speech_completed', 'session_started', 'session_updated', 'events', 'stopped',
     ];
     if (typeof operationResult['type'] !== 'string' || !operationTypes.includes(operationResult['type'])) throw new Error('invalid media operation result type');
-    return { type: 'operation', operation_id: operationId, result: operationResult as unknown as MediaResultDto };
+    validateMediaResultResourceRefs(operationResult);
+    return { type: 'operation', operation_id: operationId, incarnation, result: operationResult as unknown as MediaResultDto };
   }
   throw new Error('invalid media service result type');
+}
+
+function validateMediaResultResourceRefs(result: JsonObject): void {
+  switch (result['type']) {
+    case 'status': {
+      const resources = result['resources'];
+      if (!Array.isArray(resources)) throw new Error('invalid media status resources');
+      for (const value of resources) {
+        const status = record(value, 'media resource status');
+        mediaResourceRef(status['resource']);
+      }
+      break;
+    }
+    case 'events': {
+      const batch = record(result['batch'], 'media event batch');
+      const target = mediaResourceRef(batch['target']);
+      if (!Array.isArray(batch['events'])) throw new Error('invalid media event batch');
+      for (const value of batch['events']) {
+        const event = record(value, 'media event');
+        const eventTarget = mediaResourceRef(event['target']);
+        if (JSON.stringify(eventTarget) !== JSON.stringify(target)) {
+          throw new Error('media event batch contains another target');
+        }
+        if (event['operation_id'] !== undefined && event['operation_id'] !== null) {
+          mediaOperationId(event['operation_id']);
+        }
+        const kind = record(event['kind'], 'media event kind');
+        if (kind['type'] === 'state_changed') {
+          const resource = mediaResourceRef(kind['resource']);
+          if (JSON.stringify(resource) !== JSON.stringify(eventTarget)) {
+            throw new Error('media state event resource must match its target');
+          }
+        }
+      }
+      break;
+    }
+    case 'stopped':
+      mediaResourceRef(result['resource']);
+      break;
+  }
 }
 
 function mediaOperation(value: unknown): MediaOperationDto {
@@ -595,6 +698,7 @@ function mediaOperation(value: unknown): MediaOperationDto {
     }
     case 'status':
       exact(operation, ['type'], ['target'], 'status operation');
+      if (operation['target'] !== undefined && operation['target'] !== null) mediaResourceRef(operation['target']);
       return operation as unknown as MediaOperationDto;
     case 'capture':
       exact(operation, ['type', 'source', 'options'], [], 'capture operation');
@@ -631,15 +735,18 @@ function mediaOperation(value: unknown): MediaOperationDto {
       return operation as unknown as MediaOperationDto;
     case 'observe':
       exact(operation, ['type', 'target', 'limit'], ['after_sequence'], 'observe operation');
+      mediaResourceRef(operation['target']);
       safeInteger(operation['limit'], 'media event limit');
       return operation as unknown as MediaOperationDto;
     case 'wait':
       exact(operation, ['type', 'target', 'timeout_ms', 'limit'], ['after_sequence'], 'wait operation');
+      mediaResourceRef(operation['target']);
       safeInteger(operation['timeout_ms'], 'media wait timeout');
       safeInteger(operation['limit'], 'media event limit');
       return operation as unknown as MediaOperationDto;
     case 'stop':
       exact(operation, ['type', 'target'], [], 'stop operation');
+      mediaResourceRef(operation['target']);
       return operation as unknown as MediaOperationDto;
     default:
       throw new Error('invalid media operation type');
@@ -669,8 +776,12 @@ export function validateMediaServiceRequest(value: unknown): MediaServiceRequest
     return { request_id, action: { type, media_ref: identifier(action['media_ref'], 'media reference') } };
   }
   if (type === 'cancel') {
-    exact(action, ['type', 'operation_id'], [], 'media cancel action');
-    return { request_id, action: { type, operation_id: mediaOperationId(action['operation_id']) } };
+    exact(action, ['type', 'operation_id', 'incarnation'], [], 'media cancel action');
+    return { request_id, action: {
+      type,
+      operation_id: mediaOperationId(action['operation_id']),
+      incarnation: mediaOperationIncarnation(action['incarnation']),
+    } };
   }
   if (type === 'update_audio_settings') {
     exact(action, ['type', 'configuration_json'], [], 'audio settings action');

@@ -3413,6 +3413,15 @@ impl BridgeConnection {
         match cell.as_ref() {
             Some(active) => active.same_channel(out),
             None => {
+                if let Some(rpc) = self.media_service_rpc.as_ref() {
+                    match rpc.reopen(self.router.as_ref()).await {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "media cleanup prevents Bridge reconnect");
+                            return false;
+                        }
+                    }
+                }
                 *cell = Some(out.clone());
                 true
             }
@@ -3808,7 +3817,39 @@ impl BridgeConnection {
                 self.resolve_media_connection(response).await;
             }
             ClientCommand::MediaServiceRequest { request } => {
-                self.dispatch_media_service_request(request);
+                self.dispatch_media_service_request(request).await;
+            }
+            ClientCommand::GetAudioSessionContext { request_id } => {
+                // This is an ordinary frame, so a prior New/Resume callback has
+                // finished its owner transition before the snapshot is read.
+                let session_id = match self.driver.as_ref() {
+                    Some(driver) => driver.current_session_id().await,
+                    None => None,
+                };
+                let (router_session, profile_id, account_scope) = match self.router.as_ref() {
+                    Some(router) => router.audio_session_context().await,
+                    None => (None, None, None),
+                };
+                let (profile_id, account_scope) =
+                    if session_id.is_some() && session_id == router_session {
+                        (profile_id, account_scope)
+                    } else {
+                        (None, None)
+                    };
+                let media_owner = match (self.media_service_rpc.as_ref(), session_id.as_deref()) {
+                    (Some(rpc), Some(session_id)) => rpc.media_owner_for_session(session_id).await,
+                    _ => None,
+                };
+                let event = ClientEvent::AudioSessionContext {
+                    request_id,
+                    session_id,
+                    profile_id,
+                    account_scope,
+                    media_owner,
+                };
+                if let Some(sink) = self.out.lock().await.as_ref() {
+                    let _ = sink.send(Frame::Event(event));
+                }
             }
             ClientCommand::MediaControlResponse { response } => {
                 self.resolve_media_control(response).await;
@@ -4025,6 +4066,32 @@ impl BridgeConnection {
                     return;
                 }
                 let _transition = TransitionScope::begin(&self.transition_active);
+                // Close media admission before the router can change sessions.
+                // If that change fails, update_owner below restores the same
+                // logical owner using a freshly drained attachment.
+                if let Some(rpc) = self.media_service_rpc.as_ref() {
+                    if self.router.is_none() || self.driver.is_none() {
+                        self.unscoped_event_sink()
+                            .emit(ClientEvent::Error {
+                                kind: ErrorKindDto::Internal,
+                                message:
+                                    "media session transition requires a bound router and driver"
+                                        .into(),
+                            })
+                            .await;
+                        return;
+                    }
+                    if let Err(error) = rpc.prepare_owner_transition().await {
+                        self.unscoped_event_sink()
+                            .emit(ClientEvent::Error {
+                                kind: ErrorKindDto::Internal,
+                                message: format!("media owner transition could not begin: {error}")
+                                    .into(),
+                            })
+                            .await;
+                        return;
+                    }
+                }
                 // Only an admitted replacement owns timer teardown.
                 if let Some(router) = &self.router {
                     router.stop_realtime_audio().await;
@@ -4041,8 +4108,27 @@ impl BridgeConnection {
                     (self.media_service_rpc.as_ref(), self.driver.as_ref())
                 {
                     if let Some(session_id) = driver.current_session_id().await {
-                        rpc.update_owner(media_api::MediaOwner::Session { session_id })
-                            .await;
+                        if let Err(error) = rpc
+                            .update_owner_with_router(
+                                media_api::MediaOwner::Session { session_id },
+                                self.router.as_ref(),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                "media owner transition remains fail-closed after session change"
+                            );
+                            self.unscoped_event_sink()
+                                .emit(ClientEvent::Error {
+                                    kind: ErrorKindDto::Internal,
+                                    message: format!(
+                                        "media owner transition is pending and owner-bound media requests remain unavailable: {error}"
+                                    )
+                                    .into(),
+                                })
+                                .await;
+                        }
                     }
                 }
                 self.refresh_permission_session().await;
@@ -4712,31 +4798,36 @@ impl BridgeConnection {
         }
     }
 
-    fn dispatch_media_service_request(
+    async fn dispatch_media_service_request(
         &self,
         request: client::protocol::media::MediaServiceRequestDto,
     ) {
+        // Capture both the exact originating socket and media epoch before
+        // spawning. A delayed response or task must never target a reconnect.
+        let sink = self.out.lock().await.clone();
         let Some(rpc) = self.media_service_rpc.clone() else {
-            let sink = self.unscoped_event_sink();
-            let response = client::protocol::media::MediaServiceResponseDto {
-                request_id: request.request_id,
-                result: None,
-                error: Some(client::protocol::media::MediaErrorDto {
-                    kind: client::protocol::media::MediaErrorKindDto::Unavailable,
-                    message: "the app-scoped media host is unavailable".into(),
-                }),
-            };
-            tokio::spawn(async move {
-                sink.emit(ClientEvent::MediaServiceResponse { response })
-                    .await;
-            });
+            if let Some(sink) = sink {
+                let response = client::protocol::media::MediaServiceResponseDto {
+                    request_id: request.request_id,
+                    result: None,
+                    error: Some(client::protocol::media::MediaErrorDto {
+                        kind: client::protocol::media::MediaErrorKindDto::Unavailable,
+                        message: "the app-scoped media host is unavailable".into(),
+                    }),
+                };
+                let _ = sink.send(Frame::Event(ClientEvent::MediaServiceResponse { response }));
+            }
             return;
         };
-        let sink = self.unscoped_event_sink();
+        let connection = rpc.connection_token();
+        let attachment_epoch = rpc.request_attachment_epoch();
         tokio::spawn(async move {
-            let response = rpc.handle(request).await;
-            sink.emit(ClientEvent::MediaServiceResponse { response })
+            let response = rpc
+                .handle_for_connection(request, connection, attachment_epoch)
                 .await;
+            if let Some(sink) = sink {
+                let _ = sink.send(Frame::Event(ClientEvent::MediaServiceResponse { response }));
+            }
         });
     }
 
@@ -4807,6 +4898,9 @@ impl FramePump for BridgeConnection {
         ) {
             return self.handshaken.load(Ordering::SeqCst);
         }
+        // A client-initiated MediaServiceRequest stays in the ordinary FIFO so
+        // it cannot cross New/Resume while waiting in a separate priority lane.
+        // Device and audio replies still bypass the ordinary lane for cleanup.
         match deserialize_source::<ClientCommand>(&request.params) {
             // A cancel for a prompt still queued behind a slow control must
             // remain behind that prompt. Otherwise it is ignored before the
@@ -4825,7 +4919,6 @@ impl FramePump for BridgeConnection {
                 | ClientCommand::UpdateMediaSessionModes { .. }
                 | ClientCommand::MediaConnectionResponse { .. }
                 | ClientCommand::MediaDeviceResponse { .. }
-                | ClientCommand::MediaServiceRequest { .. }
                 | ClientCommand::MediaControlResponse { .. },
             ) => self.handshaken.load(Ordering::SeqCst),
             Ok(
@@ -4848,7 +4941,7 @@ impl FramePump for BridgeConnection {
             if let Frame::Request(request) = frame {
                 let _ = out.send(Self::error_response(
                     request.id,
-                    "bridge-server already has an active client",
+                    "bridge-server is unavailable or already has an active client",
                 ));
             }
             return;
@@ -5177,6 +5270,9 @@ impl FramePump for BridgeConnection {
         // parked; a deferred replay can contain more than one pending tool.
         self.handshaken.store(false, Ordering::SeqCst);
         self.resume_interactions.cancel(None);
+        if let Some(rpc) = self.media_service_rpc.as_ref() {
+            rpc.begin_close();
+        }
         drop(active);
         self.drain_parked_interactions().await;
     }
@@ -5287,6 +5383,12 @@ impl BridgeConnection {
         self.tool_names.lock().await.clear();
 
         self.drain_parked_interactions().await;
+        if let Some(rpc) = self.media_service_rpc.as_ref() {
+            rpc.close().await;
+        }
+        if let Some(router) = self.router.as_ref() {
+            router.cleanup_confirmed_media_binding().await;
+        }
     }
 
     async fn drain_parked_interactions(&self) {
@@ -5369,9 +5471,6 @@ impl BridgeConnection {
                     "bridge-server: drained pending media output barriers on close"
                 );
             }
-        }
-        if let Some(rpc) = self.media_service_rpc.as_ref() {
-            rpc.close().await;
         }
     }
 }

@@ -974,6 +974,8 @@ test('plain Chat sends no output schema and verifies its new messages against ca
     chatSendHandler: async input => { submitted = JSON.parse(JSON.stringify(input)); return result; },
     chatHistoryHandler: async () => ({messages: submitted ? [...submitted.messages, ...result.newMessages] : []}),
   });
+  vm.runInContext(sdkBrowserSource, browser.context);
+  browser.window.LingxiLocalAppAGUI = {validateLocalAppRunInput: browser.context.LingxiLocalAppAGUI.validateLocalAppRunInput};
   await waitFor(() => browser.elements.get('status')?.textContent.includes('Host Agent ready'), 'bootstrap did not finish');
   await browser.elements.get('open-chat').handlers.get('click')();
   browser.context.crypto = {randomUUID: () => runId};

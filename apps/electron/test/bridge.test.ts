@@ -21,8 +21,15 @@ import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversat
 
 function audioContextEventClient(): EventEmitter & { sendCommand(command: unknown): void } {
   const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
-  client.sendCommand = (command) => assert.deepEqual(command, { type: 'get_audio_session_context' });
+  client.sendCommand = assertAudioContextCommand;
   return client;
+}
+
+function assertAudioContextCommand(value: unknown): void {
+  const command = value as { type: string; request_id: string };
+  assert.deepEqual(Object.keys(command).sort(), ['request_id', 'type']);
+  assert.equal(command.type, 'get_audio_session_context');
+  assert.match(command.request_id, /^[0-9a-f-]{36}$/);
 }
 
 function temporaryDirectory(): string {
@@ -290,11 +297,14 @@ test('owned resume loads the restored model provider credential before becoming 
   assert.deepEqual(commands.map((command) => (command as { type: string }).type), [
     'resume_session',
     'get_audio_session_context',
+    'get_audio_session_context',
     'refresh_listings',
     'set_provider_credential',
   ]);
-  assert.deepEqual(commands[1], { type: 'get_audio_session_context' });
-  assert.equal((commands[3] as { credential: string }).credential, 'or-resumed-secret');
+  assertAudioContextCommand(commands[1]);
+  assertAudioContextCommand(commands[2]);
+  assert.notEqual((commands[1] as { request_id: string }).request_id, (commands[2] as { request_id: string }).request_id);
+  assert.equal((commands[4] as { credential: string }).credential, 'or-resumed-secret');
 });
 
 test('a restored model whose credential cannot be read still opens the chat and refuses the prompt', async () => {
@@ -383,11 +393,14 @@ test('owned resume resolves a cold custom routing alias before becoming ready', 
   assert.deepEqual(commands.map((command) => (command as { type: string }).type), [
     'resume_session',
     'get_audio_session_context',
+    'get_audio_session_context',
     'refresh_listings',
     'set_provider_credential',
   ]);
-  assert.deepEqual(commands[1], { type: 'get_audio_session_context' });
-  assert.equal((commands[3] as { credential: string }).credential, 'or-resumed-secret');
+  assertAudioContextCommand(commands[1]);
+  assertAudioContextCommand(commands[2]);
+  assert.notEqual((commands[1] as { request_id: string }).request_id, (commands[2] as { request_id: string }).request_id);
+  assert.equal((commands[4] as { credential: string }).credential, 'or-resumed-secret');
 });
 
 test('session runtime manager launches a restored session with its catalog model hint', async () => {
@@ -851,7 +864,7 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
   let launchCalls = 0;
   let telemetryRevocations = 0;
   BridgeClient.prototype.connect = async function () {
-    this.sendCommand = (command) => assert.deepEqual(command, { type: 'get_audio_session_context' });
+    this.sendCommand = assertAudioContextCommand;
     this.disableTelemetry = async () => { telemetryRevocations += 1; };
     return {
       server_name: 'lingxi-bridge-server/0.9.0',
@@ -3404,4 +3417,33 @@ test('computer policy failure still tears down when revocation transport has fai
   await runtime.stopForComputerPolicyFailure();
   assert.equal(stopped, true);
   assert.equal((runtime as any).state.status, 'error');
+});
+
+test('audio queue rejection proves no dispatch only after reserving the exact identity', async () => {
+  const commands: any[] = [];
+  const checked: string[] = [];
+  const service = {
+    getCapabilities: () => ({ service_epoch: 3, support_revision: 1, supported_operations: [], readiness: [], max_payload_bytes: 1024 }),
+    initializeCapabilities: async () => {},
+    executeAudioRequest: async () => { throw new Error('queue-full request must not be dispatched'); },
+    rejectAudioRequestBeforeDispatch: (identity: { id: string }) => { checked.push(identity.id); return identity.id === 'fresh'; },
+    cancelAudioRequest: async () => {}, endAudioOwner: async () => {}, onEvent: () => () => {},
+  };
+  const runtime = new SessionRuntime({ launchConfig: { workspace: '/workspace', sessionId: 'session', trusted: true },
+    sessionId: 'session', projectPath: '/workspace', audioService: service } as any);
+  const client = { sendCommand: (value: unknown) => commands.push(value), close: () => undefined };
+  (runtime as any).client = client; (runtime as any).generation = 4;
+  const active = new Map<string, unknown>();
+  for (let index = 0; index < 256; index++) active.set(`3:1:active-${index}`, {});
+  (runtime as any).audioRequestsByGeneration.set(4, active);
+  const request = (id: string) => ({ identity: { id, generation: 1, service_epoch: 3 },
+    owner: { type: 'session', session_id: 'session' }, max_payload_bytes: 1024, operation: { type: 'status' } });
+  await (runtime as any).dispatchAudioRequest(client, 4, request('fresh'));
+  await (runtime as any).dispatchAudioRequest(client, 4, request('previously-seen'));
+  await (runtime as any).dispatchAudioRequest(client, 4, request('active-0'));
+  assert.deepEqual(checked, ['fresh', 'previously-seen']);
+  assert.equal(commands.length, 2);
+  assert.equal(commands[0].result.type, 'failed_without_resource');
+  assert.equal(commands[1].result.type, 'failed');
+  active.clear(); await runtime.dispose();
 });

@@ -137,7 +137,6 @@
     const CHAT_CREATION_ENTRY_PREFIX = `${STORAGE_PREFIX}.chatCreation.`;
     const CHAT_CREATION_FINISHED_PREFIX = `${STORAGE_PREFIX}.chatCreationFinished.`;
     const CHAT_LOOKUP_FAILURE_PREFIX = `${STORAGE_PREFIX}.chatLookupFailure.`;
-    const EXTENSION_KEY = 'com.lingxi.localApp';
     const MAX_PAGES = 128;
     const MAX_EVENTS = 20000;
     const IMAGE_PRELOAD_TIMEOUT_MS = 10000;
@@ -830,20 +829,22 @@
     }
 
     function makeInput(threadId, messages, outputSchema) {
-      const input = {
-        protocolVersion: '1.0',
-        threadId,
-        runId: newId(),
-        messages,
-        forwardedProps: {
-          [EXTENSION_KEY]: {
-            version: 1,
-            tools: [],
-            skills: [],
-            ...(outputSchema === undefined ? {} : {outputSchema}),
-            maxTurns: 8,
-            timeoutMs: 180000,
-          },
+      const input = {protocolVersion: '1.0', threadId, runId: newId(), messages};
+      // The official SDK supplies its host extension when normalizing a request.
+      const normalize = window.LingxiLocalAppAGUI?.validateLocalAppRunInput;
+      if (typeof normalize !== 'function') throw new Error('The Local App Agent SDK is unavailable.');
+      const entries = Object.entries(normalize(input).forwardedProps ?? {});
+      if (entries.length !== 1 || entries[0][1]?.version !== 1) {
+        throw new Error('The Local App Agent extension is unavailable.');
+      }
+      input.forwardedProps = {
+        [entries[0][0]]: {
+          version: 1,
+          tools: [],
+          skills: [],
+          ...(outputSchema === undefined ? {} : {outputSchema}),
+          maxTurns: 8,
+          timeoutMs: 180000,
         },
       };
       const validate = window.LingxiLocalAppAGUI?.validateRunAgentInput;

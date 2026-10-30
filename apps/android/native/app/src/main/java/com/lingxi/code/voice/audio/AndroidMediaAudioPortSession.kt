@@ -4,12 +4,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -39,12 +38,18 @@ internal class AndroidMediaAudioPortSession(
     private val input: Channel<RealtimePcmCaptureFrame>,
     private val output: Channel<RealtimePcmWrite>,
     private val leases: List<AudioLease>,
+    private val closeReceipts: List<AndroidMediaNativeCloseReceipt>,
     private val captureJob: Job?,
     private val playbackJob: Job?,
 ) {
-    private val stopped = AtomicBoolean(false)
+    init {
+        require(closeReceipts.size == leases.size && closeReceipts.map { it.lease }.toSet() == leases.toSet()) {
+            "each media audio lease requires its own native close receipt"
+        }
+    }
+
     private val acceptingWrites = AtomicBoolean(true)
-    private val stopMutex = Mutex()
+    private val stopGate = AndroidMediaStopGate()
     private val outputGeneration = AtomicLong(1L)
     private val pendingWrites = ConcurrentLinkedQueue<PendingMediaWrite>()
     private val barrierLock = Any()
@@ -55,6 +60,8 @@ internal class AndroidMediaAudioPortSession(
     }
 
     fun stableOwner(): AudioOwnerKey = owner
+
+    val stopState: AndroidMediaStopState get() = stopGate.state
 
     fun setInputEnabled(enabled: Boolean) {
         if (!enabled) inputDropBeforeUnixMs = System.currentTimeMillis()
@@ -71,7 +78,7 @@ internal class AndroidMediaAudioPortSession(
     }
 
     suspend fun nextInput(): RealtimePcmCaptureFrame? {
-        if (stopped.get()) return null
+        if (stopGate.state == AndroidMediaStopState.STOPPED) return null
         while (true) {
             val result = input.receiveCatching()
             result.exceptionOrNull()?.let { throw it }
@@ -81,14 +88,14 @@ internal class AndroidMediaAudioPortSession(
     }
 
     suspend fun writeAudio(pcm16le: ByteArray, sampleRateHz: Int, channels: Int): AndroidMediaAudioWriteReceipt {
-        if (stopped.get() || !acceptingWrites.get()) throw CancellationException("media audio session has ended")
+        if (stopGate.state != AndroidMediaStopState.ACTIVE || !acceptingWrites.get()) throw CancellationException("media audio session has ended")
         if (sampleRateHz !in 8_000..192_000 || channels !in 1..2 || pcm16le.isEmpty() || pcm16le.size % (channels * 2) != 0) {
             throw AudioOperationException(DeviceAudioErrorKind.InvalidRequest, "media audio output must be bounded PCM16LE with a supported sample layout")
         }
         val sourceSampleFrames = pcm16le.size / (channels * 2)
         val normalized = normalizeToDeviceFormat(pcm16le, sampleRateHz, channels, format.sampleRateHz)
         val pending = synchronized(barrierLock) {
-            if (stopped.get() || !acceptingWrites.get()) throw CancellationException("media audio session has ended")
+            if (stopGate.state != AndroidMediaStopState.ACTIVE || !acceptingWrites.get()) throw CancellationException("media audio session has ended")
             val frame = RealtimePcmWrite(
                 bytes = normalized,
                 generation = outputGeneration.get(),
@@ -113,7 +120,7 @@ internal class AndroidMediaAudioPortSession(
     }
 
     suspend fun interruptAudio(): AndroidMediaAudioWriteReceipt = withContext(NonCancellable) {
-        if (stopped.get()) return@withContext AndroidMediaAudioWriteReceipt(0, 0, null)
+        if (stopGate.state == AndroidMediaStopState.STOPPED) return@withContext AndroidMediaAudioWriteReceipt(0, 0, null)
         val claim = AndroidMediaBarrierToken()
         val (throughGeneration, snapshot) = synchronized(barrierLock) {
             val through = outputGeneration.incrementAndGet()
@@ -161,11 +168,8 @@ internal class AndroidMediaAudioPortSession(
     }
 
     suspend fun stop() = withContext(NonCancellable) {
-        stopMutex.withLock {
-            if (stopped.get()) return@withLock
+        stopGate.stop(close = {
             synchronized(barrierLock) { acceptingWrites.set(false) }
-            val interruptFailure = runCatching { interruptAudio() }.exceptionOrNull()
-            if (!stopped.compareAndSet(false, true)) return@withLock
             input.cancel(CancellationException("media audio session stopped"))
             output.close(CancellationException("media audio session stopped"))
             while (true) {
@@ -174,16 +178,43 @@ internal class AndroidMediaAudioPortSession(
             }
             pendingWrites.forEach { it.frame.completion.complete(RealtimePcmWriteReceipt(0, null)) }
             pendingWrites.clear()
-            captureJob?.cancelAndJoin()
-            playbackJob?.cancelAndJoin()
+
+            // Request native stop before joining AudioRecord's blocking read. The
+            // logical lease remains active until both stream jobs have exited.
+            captureJob?.cancel()
+            playbackJob?.cancel()
             var failure: Throwable? = null
             for (lease in leases.asReversed()) {
-                try { core.releaseMediaPortLease(lease) }
+                try {
+                    core.stopMediaPortLeaseNative(lease)
+                }
                 catch (error: Throwable) { if (failure == null) failure = error }
             }
             if (failure != null) throw failure!!
-            if (interruptFailure != null) throw interruptFailure
-        }
+
+            try {
+                withTimeout(STOP_JOIN_TIMEOUT_MS) {
+                    captureJob?.join()
+                    playbackJob?.join()
+                    for (receipt in closeReceipts) {
+                        receipt.confirmIfNeverDispatched()
+                        receipt.awaitClosed()
+                    }
+                }
+            } catch (_: TimeoutCancellationException) {
+                throw AudioOperationException(DeviceAudioErrorKind.NativeFailure, "media audio stream did not stop after native close")
+            }
+
+            for (lease in leases.asReversed()) {
+                try { core.releaseStoppedMediaPortLease(lease) }
+                catch (error: Throwable) { if (failure == null) failure = error }
+            }
+            if (failure != null) throw failure!!
+        })
+    }
+
+    private companion object {
+        const val STOP_JOIN_TIMEOUT_MS = 5_000L
     }
 }
 

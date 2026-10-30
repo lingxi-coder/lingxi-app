@@ -60,6 +60,59 @@ use crate::settings_bridge::{
 };
 use media_api::MediaOwner;
 
+/// Keep a boot-created attachment host-owned if later assembly fails.
+/// Dropping the guard closes admission synchronously and performs the drain on
+/// the runtime; an unconfirmed drain remains in the process registry.
+struct BootMediaAttachmentGuard {
+    attachment: Option<media_runtime::MediaAttachmentHandle>,
+    cloud: Arc<AudioProviderCloudRegistry>,
+}
+
+impl BootMediaAttachmentGuard {
+    fn new(
+        attachment: media_runtime::MediaAttachmentHandle,
+        cloud: Arc<AudioProviderCloudRegistry>,
+    ) -> Self {
+        Self {
+            attachment: Some(attachment),
+            cloud,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.attachment = None;
+    }
+}
+
+impl Drop for BootMediaAttachmentGuard {
+    fn drop(&mut self) {
+        let Some(attachment) = self.attachment.take() else {
+            return;
+        };
+        attachment.begin_revoke();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let cloud = self.cloud.clone();
+        runtime.spawn(async move {
+            use media_runtime::{MediaAttachmentPhase, MediaAttachmentRevocation};
+            let receipt = attachment.revoke(std::time::Duration::from_secs(1)).await;
+            let confirmed = match receipt {
+                MediaAttachmentRevocation::Confirmed => true,
+                MediaAttachmentRevocation::Unknown { .. }
+                    if attachment.phase() == MediaAttachmentPhase::Revoking =>
+                {
+                    attachment.wait_for_drain_completion().await == MediaAttachmentPhase::Revoked
+                }
+                MediaAttachmentRevocation::Unknown { .. } => false,
+            };
+            if confirmed {
+                cloud.unregister_attachment(attachment.id());
+            }
+        });
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "boot/workspace_resume_tests.rs"]
 mod workspace_resume_tests;
@@ -2142,18 +2195,36 @@ pub async fn assemble_with_credentials(
         client::protocol::media::MAX_MEDIA_DEVICE_FRAME_BYTES as u64,
     )
     .map_err(|error| format!("could not compose the app-scoped media host: {error}"))?;
+    // initialize_live_session canonicalized the configured session before
+    // DesktopRuntime is built; use that same ID as the initial media owner.
+    let media_owner = MediaOwner::Session {
+        session_id: cfg
+            .session_id_override
+            .clone()
+            .ok_or_else(|| "bridge session ID was not initialized before media setup".to_owned())?,
+    };
+    let media_attachment = media_host
+        .create_media_attachment()
+        .map_err(|error| format!("could not create the Bridge media attachment: {error}"))?;
+    let mut media_attachment_guard =
+        BootMediaAttachmentGuard::new(media_attachment.clone(), cloud_audio.clone());
+    media_host
+        .set_current_media_attachment(Some(media_attachment.clone()))
+        .map_err(|error| format!("could not publish the Bridge media attachment: {error}"))?;
     let media_configuration_host = media_host.clone();
     let media_configuration_snapshot: audio_provider::AudioConfigurationSnapshot =
         Arc::new(move || media_configuration_host.audio_configuration_json());
-    cfg.media_conversation_attachment = Some(AppMediaConversationAttachment::new(
-        media_host.cloud_audio_registry(),
-        media_host.media_service(),
-        media_configuration_snapshot,
-    ));
+    cfg.media_conversation_attachment =
+        Some(AppMediaConversationAttachment::new_for_attachment_slot(
+            media_host.cloud_audio_registry(),
+            media_host.media_attachment_slot(),
+            media_configuration_snapshot,
+        ));
     cfg.media_service = Some(media_host.media_service());
-    // Computer Use and public media tools share the same routed service object.
+    // Computer Use uses the app host's attachment-bound AudioService facade;
+    // it shares routing with MediaService without bypassing owner teardown.
     cfg.audio = Some(DesktopAudio {
-        service: media_host.audio_service(),
+        service: media_host.desktop_audio_service(),
     });
     let (media_connection_channel, media_connection_responder) =
         connection.media_connection_channel();
@@ -2162,7 +2233,6 @@ pub async fn assemble_with_credentials(
         Arc::new(DesktopRemoteMediaConfigProvider::from_process_environment()),
         media_host.resource_store(),
     );
-    remote_media_connector.bind_media_service(media_host.media_service());
     media_host.install_connector(remote_media_connector.clone(), []);
     let (ask_user_question_tx, ask_user_question_rx) =
         tokio::sync::mpsc::channel::<tool_api::ask_user_question::AskUserQuestionExchange>(8);
@@ -2440,13 +2510,6 @@ pub async fn assemble_with_credentials(
         audio_services,
         audio_credential_ids.clone(),
     ));
-    for profile_name in audio_credential_ids.keys() {
-        if let Err(error) =
-            cloud_audio.register_profile(profile_name.clone(), audio_provider.clone())
-        {
-            tracing::warn!(%error, "could not register a configured provider profile for media audio");
-        }
-    }
     let realtime_audio = Arc::new(
         crate::realtime_audio::RealtimeAudioController::new(
             runtime.orchestrator.clone(),
@@ -2458,14 +2521,50 @@ pub async fn assemble_with_credentials(
             ask_user_question_broker.clone(),
         )),
     );
+    // Preserve app-shared explicit-profile routes for non-session owners.
+    // Attached conversation sessions additionally receive an exact provider
+    // entry below and never fall back to this table.
+    for profile_name in audio_credential_ids.keys() {
+        if let Err(error) =
+            cloud_audio.register_profile(profile_name.clone(), audio_provider.clone())
+        {
+            tracing::warn!(%error, "could not register a configured provider profile for media audio");
+        }
+    }
+    let mut initial_media_audio_binding = None;
     if let Ok((session_id, profile_name)) = realtime_audio.session_context().await {
-        if let Err(error) = cloud_audio.register_session(
-            session_id,
-            profile_name.clone(),
-            format!("profile:{profile_name}"),
-            audio_provider,
-        ) {
-            tracing::warn!(%error, "could not register the current desktop session for media audio");
+        let owner = MediaOwner::Session {
+            session_id: session_id.clone(),
+        };
+        match media_attachment.authorize_owner(&owner) {
+            Ok(permit) => {
+                for profile_name in audio_credential_ids.keys() {
+                    if let Err(error) = cloud_audio.register_attached_profile(
+                        &permit,
+                        profile_name.clone(),
+                        audio_provider.clone(),
+                    ) {
+                        tracing::warn!(%error, "could not register an attachment-scoped media audio profile");
+                    }
+                }
+                match cloud_audio.register_attached_session(
+                    &permit,
+                    profile_name.clone(),
+                    format!("profile:{profile_name}"),
+                    audio_provider.clone(),
+                ) {
+                    Ok(generation) => {
+                        initial_media_audio_binding =
+                            Some((media_attachment.clone(), session_id, generation));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not register the current desktop attachment for media audio");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not authorize the current desktop attachment for media audio");
+            }
         }
     }
 
@@ -2515,7 +2614,12 @@ pub async fn assemble_with_credentials(
     .with_file_changed_watcher(runtime.file_changed_watcher.controller());
     router = router
         .with_realtime_audio(realtime_audio)
-        .with_media_cloud_audio_registry(cloud_audio.clone());
+        .with_media_cloud_audio_registry(
+            cloud_audio.clone(),
+            media_host.media_attachment_slot(),
+            audio_provider.clone(),
+            initial_media_audio_binding,
+        );
     let router = Arc::new(router);
     spawn_mcp_startup_publisher(
         runtime.watch_mcp_startup(),
@@ -2523,21 +2627,14 @@ pub async fn assemble_with_credentials(
         connection.loop_wakeup_event_sink(),
     );
 
-    let media_owner = MediaOwner::Session {
-        session_id: runtime
-            .orchestrator
-            .current_session_id()
-            .await
-            .as_uuid()
-            .to_string(),
-    };
     let media_service_rpc = MediaServiceRpc::for_app_host_with_remote_connector(
         media_host.clone(),
         media_owner,
         remote_media_connector,
         media_connection_channel.clone(),
         media_control_channel.clone(),
-    );
+    )
+    .map_err(|error| format!("could not bind the Bridge media owner attachment: {error}"))?;
     let connection = connection
         .with_policy_helper_refusal(runtime.policy_helper_refusal.clone())
         .bind(gate, driver)
@@ -2556,6 +2653,7 @@ pub async fn assemble_with_credentials(
     let connection = connection
         .with_task_notification_registry(runtime.task_registry.clone())
         .with_queue_wakeup();
+    media_attachment_guard.disarm();
     Ok(BoundServer {
         connection,
         runtime,
@@ -2691,7 +2789,53 @@ pub fn publish_lockfile_recoverable(
 }
 
 #[cfg(test)]
+pub(crate) async fn close_unserved_for_test(bound: &BoundServer) {
+    let attachment = bound
+        .media_host
+        .current_media_attachment()
+        .expect("assembled bridge has a media attachment");
+    bridge::FramePump::on_close(&bound.connection).await;
+    assert_eq!(
+        attachment.phase(),
+        media_runtime::MediaAttachmentPhase::Revoked,
+        "the unserved bridge must finish its real media cleanup"
+    );
+    assert!(bound
+        .media_host
+        .media_attachment_host()
+        .attachment(attachment.id())
+        .is_none());
+}
+
+#[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn failed_boot_guard_closes_and_drains_its_attachment() {
+        use media_runtime::{MediaAttachmentHost, MediaAttachmentPhase, MediaRuntimeBuilder};
+        use std::{sync::Arc, time::Duration};
+        let host = MediaAttachmentHost::new();
+        let service = MediaRuntimeBuilder::new(Arc::new(
+            audio_provider::media_store::BoundedMediaResourceStore::default(),
+        ))
+        .build();
+        let attachment = host.attach(service).unwrap();
+        let cloud = Arc::new(audio_provider::media_cloud::AudioProviderCloudRegistry::new("wav"));
+        drop(super::BootMediaAttachmentGuard::new(
+            attachment.clone(),
+            cloud,
+        ));
+        assert_ne!(attachment.phase(), MediaAttachmentPhase::Active);
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                attachment.wait_for_drain_completion()
+            )
+            .await
+            .unwrap(),
+            MediaAttachmentPhase::Revoked
+        );
+        assert!(host.attachment(attachment.id()).is_none());
+    }
     use super::*;
     use lingxi_core::host::live_sessions::LiveSessionDir;
 
@@ -4321,6 +4465,7 @@ mod tests {
             refusal.is_none(),
             "ordinary RequestExit is not a policy refusal"
         );
+        close_unserved_for_test(&bound).await;
         let report = bound.session_lifecycle().shutdown_and_drain().await;
         assert!(report.complete, "shutdown errors: {:?}", report.errors);
     }

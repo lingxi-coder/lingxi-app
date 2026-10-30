@@ -6,6 +6,8 @@ import { copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, 
 import { dirname, join, resolve } from 'node:path';
 import { validateFileOffer, type FileOffer, type FileSink, type FileReceipt, type FileSource } from '@lingxi/bridge-client/remote';
 
+export const REMOTE_ATTACHMENT_PREFIX = '.lingxi-remote-attachment-';
+
 export interface PromptFileReference {
   text: string;
   discard(): Promise<void>;
@@ -168,7 +170,7 @@ export class RemoteFileStore {
       const cwdCurrent = await lstat(cwd);
       if (!cwdCurrent.isDirectory() || cwdCurrent.isSymbolicLink() || !same(cwdCurrent, cwdIdentity)) throw new Error('attachment workspace changed');
       authorize();
-      const published = join(cwd, `.lingxi-remote-attachment-${randomBytes(16).toString('hex')}`);
+      const published = join(cwd, `${REMOTE_ATTACHMENT_PREFIX}${randomBytes(16).toString('hex')}`);
       await rename(directory, published);
       directory = published;
       path = join(directory, receipt.name);

@@ -151,37 +151,46 @@ test('media device requests wait for the latest session owner during cleanup', a
   let reportCleanupStarted!: () => void;
   const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
   const cleanupStarted = new Promise<void>((resolve) => { reportCleanupStarted = resolve; });
-  (runtime as any).nativeMediaOwner = SESSION_A;
   (runtime as any).nativeMediaDevices = {
     dispose: () => { reportCleanupStarted(); return cleanup; },
   };
-  const openedOwners: string[] = [];
+  const attached = (generation: number) => ({ type: 'attached', attachment_host_id: '12345678-1234-4234-8234-123456789abc',
+    attachment_generation: generation, logical_kind: 'session', logical_owner_id: SESSION_A });
+  const openedOwners: unknown[] = [];
   (runtime as any).opts.audioService = {
+    hasMediaRequestId: () => false,
+    drainMediaOpenFlights: async () => {},
+    endAudioOwner: async () => {},
     executeMediaDevice: async (request: any) => {
       if (request.request.type === 'open') {
-        openedOwners.push(request.request.request.owner.session_id);
+        openedOwners.push(request.request.request.owner);
         return { request_id: request.request_id, result: { type: 'opened', lease: { lease_id: 'lease-c' } } };
       }
       return { request_id: request.request_id, result: { type: 'stopped' } };
     },
   };
-  const openFor = (requestId: string, sessionId: string) => ({
+  const openFor = (requestId: string, generation: number) => ({
     request_id: requestId,
     request: { type: 'open', request: {
       identity: { id: `operation-${requestId}`, generation: 1, service_epoch: 10 },
-      owner: { type: 'session', session_id: sessionId },
+      owner: attached(generation),
       max_payload_bytes: 1024,
       request: { mode: 'audio', intent: 'conversation', audio_source: { id: 'microphone' } },
     } },
   });
 
-  client.emitEvent({ type: 'session_started', session_id: SESSION_B });
+  client.emitEvent({ type: 'session_started', session_id: SESSION_A });
   await cleanupStarted;
-  client.emit('mediaDeviceRequest', openFor('old', SESSION_B));
-  client.emitEvent({ type: 'session_started', session_id: SESSION_C });
-  client.emit('mediaDeviceRequest', openFor('current', SESSION_C));
+  client.emit('mediaDeviceRequest', openFor('old', 1));
+  client.emitEvent({ type: 'model_changed', model: 'latest' });
+  const queries = client.sent as any[];
+  assert.deepEqual(queries.map((item) => item.type), ['get_audio_session_context', 'get_audio_session_context']);
+  assert.notEqual(queries[0].request_id, queries[1].request_id);
+  client.emitEvent({ type: 'audio_session_context', request_id: queries[0].request_id, session_id: SESSION_A, media_owner: attached(1) });
+  client.emitEvent({ type: 'audio_session_context', request_id: queries[1].request_id, session_id: SESSION_A, media_owner: attached(2) });
+  client.emit('mediaDeviceRequest', openFor('current', 2));
   await Promise.resolve();
-  assert.deepEqual(client.sent, [], 'requests stay pending until owner cleanup settles');
+  assert.deepEqual((client.sent as any[]).map((item) => item.type), ['get_audio_session_context', 'get_audio_session_context'], 'only context queries may be sent before cleanup settles');
   assert.deepEqual(openedOwners, []);
 
   releaseCleanup();
@@ -189,9 +198,9 @@ test('media device requests wait for the latest session owner during cleanup', a
   await new Promise<void>((resolve) => setImmediate(resolve));
   const responses = client.sent.filter((item: any) => item.type === 'media_device_response') as any[];
   assert.equal(responses.length, 2);
-  assert.equal(responses.find((item) => item.response.request_id === 'old').response.result.type, 'error');
+  assert.equal(responses.find((item) => item.response.request_id === 'old').response.result.type, 'open_failed_without_resource');
   assert.equal(responses.find((item) => item.response.request_id === 'current').response.result.type, 'opened');
-  assert.deepEqual(openedOwners, [SESSION_C]);
+  assert.deepEqual(openedOwners, [attached(2)]);
   await runtime.dispose();
 });
 
@@ -201,32 +210,45 @@ test('a media request waiting for owner cleanup cannot reach a replacement conne
   let reportCleanupStarted!: () => void;
   const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
   const cleanupStarted = new Promise<void>((resolve) => { reportCleanupStarted = resolve; });
-  (runtime as any).nativeMediaOwner = SESSION_A;
   (runtime as any).nativeMediaDevices = {
     dispose: () => { reportCleanupStarted(); return cleanup; },
   };
   let opens = 0;
+  const attached = { type: 'attached', attachment_host_id: '12345678-1234-4234-8234-123456789abc',
+    attachment_generation: 1, logical_kind: 'session', logical_owner_id: SESSION_A };
   (runtime as any).opts.audioService = {
+    hasMediaRequestId: () => false,
+    drainMediaOpenFlights: async () => {},
+    endAudioOwner: async () => {},
     executeMediaDevice: async (request: any) => {
       opens++;
       return { request_id: request.request_id, result: { type: 'opened', lease: { lease_id: 'unexpected' } } };
     },
   };
-  client.emitEvent({ type: 'session_started', session_id: SESSION_B });
+  client.emitEvent({ type: 'session_started', session_id: SESSION_A });
   await cleanupStarted;
   client.emit('mediaDeviceRequest', {
     request_id: 'stale', request: { type: 'open', request: {
       identity: { id: 'operation-stale', generation: 1, service_epoch: 10 },
-      owner: { type: 'session', session_id: SESSION_B }, max_payload_bytes: 1024,
+      owner: attached, max_payload_bytes: 1024,
       request: { mode: 'audio', intent: 'conversation', audio_source: { id: 'microphone' } },
     } },
   });
+  const oldContext = (client.sent[0] as any).request_id;
+  (runtime as any).invalidateNativeMediaBinding();
   (runtime as any).generation = 2;
+  const replacement = new FakeClient();
+  (runtime as any).wireClient(replacement, 2);
+  (runtime as any).requestAudioSessionContext(replacement, 2);
+  const newContext = (replacement.sent[0] as any).request_id;
+  client.emitEvent({ type: 'audio_session_context', request_id: oldContext, session_id: SESSION_A, media_owner: attached });
+  replacement.emitEvent({ type: 'audio_session_context', request_id: newContext, session_id: SESSION_A, media_owner: attached });
   releaseCleanup();
   await (runtime as any).nativeMediaDeviceUpdate;
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(opens, 0);
-  assert.deepEqual(client.sent, []);
+  assert.deepEqual(client.sent, [{ type: 'get_audio_session_context', request_id: oldContext }]);
+  assert.deepEqual(replacement.sent, [{ type: 'get_audio_session_context', request_id: newContext }]);
   await runtime.dispose();
 });
 

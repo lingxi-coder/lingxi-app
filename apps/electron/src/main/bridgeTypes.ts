@@ -27,9 +27,18 @@ export interface DesktopAudioService {
   getMediaSessionModes?(): MediaSessionModeDto[];
   initializeCapabilities(): Promise<void>;
   executeAudioRequest(request: AudioOperationRequestDto): Promise<AudioOperationResultDto>;
+  /** Callback is bound to this exact helper/resource/owner flight. */
+  executeAudioRequestWithCloseReceipt?(request: AudioOperationRequestDto, onExactClose: () => void, admissionToken?: object): Promise<AudioOperationResultDto>;
+  reserveAudioAdmission?(request: AudioOperationRequestDto): object | undefined;
+  cancelReservedAudioAdmission?(identity: AudioOperationIdDto, token: object): boolean;
+  /** Fence and prove this identity has not been dispatched to native audio. */
+  rejectAudioRequestBeforeDispatch?(identity: AudioOperationIdDto): boolean;
   /** Native media lease callback shares the same helper's physical-device coordinator. */
   executeMediaDevice?(request: MediaDeviceRequestEnvelopeDto): Promise<MediaDeviceResponseDto>;
-  cancelAudioRequest(identity: AudioOperationIdDto): Promise<void>;
+  hasMediaRequestId?(requestId: string): boolean;
+  /** Resolve only after every prior native open flight has a confirmed terminal cleanup receipt. */
+  drainMediaOpenFlights?(signal?: AbortSignal): Promise<void>;
+  cancelAudioRequest(identity: AudioOperationIdDto, admissionToken?: object): Promise<void | 'verified'>;
   endAudioOwner(owner: AudioOwnerDto): Promise<void>;
   onEvent(callback: (event: { type: string; snapshot?: { capabilities?: AudioCapabilitySnapshotDto; mediaSessionModes?: MediaSessionModeDto[] } }) => void): () => void;
 }

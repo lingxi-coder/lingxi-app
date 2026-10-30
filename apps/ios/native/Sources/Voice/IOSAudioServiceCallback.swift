@@ -27,20 +27,31 @@ final class IOSAudioServiceCallbackAdapter: IosAudioService, @unchecked Sendable
     }
 
     func execute(request: AudioOperationRequestDto) async -> AudioOperationResultDto {
-        let result = await service.execute(Self.localRequest(request))
+        let result: IOSAudioOperationResult
+        do {
+            result = await service.execute(try Self.localRequest(request))
+        } catch {
+            result = .failed(IOSAudioError(
+                kind: .invalidRequest,
+                message: "The audio owner attachment identity is invalid."
+            ))
+        }
         await service.publishCapabilitySnapshot()
         return Self.dtoResult(result)
     }
 
     func cancel(identity: AudioOperationIdDto) async throws {
-        await service.cancel(Self.localIdentity(identity))
+        let cancellationFailure = await service.cancel(Self.localIdentity(identity))
         await service.publishCapabilitySnapshot()
+        if let cancellationFailure {
+            throw AudioServiceFailure.nativeFailure(cancellationFailure.message)
+        }
     }
 
-    private static func localRequest(_ request: AudioOperationRequestDto) -> IOSAudioOperationRequest {
+    private static func localRequest(_ request: AudioOperationRequestDto) throws -> IOSAudioOperationRequest {
         IOSAudioOperationRequest(
             identity: localIdentity(request.identity),
-            owner: localOwner(request.owner),
+            owner: try localOwner(request.owner),
             initiator: request.initiator.map {
                 IOSAudioInitiator(agentID: $0.agentId, toolUseID: $0.toolUseId, requestID: $0.requestId)
             },
@@ -59,12 +70,8 @@ final class IOSAudioServiceCallbackAdapter: IosAudioService, @unchecked Sendable
         )
     }
 
-    private static func localOwner(_ owner: AudioOwnerDto) -> IOSAudioOwner {
-        switch owner {
-        case let .session(sessionId): .session(sessionID: sessionId)
-        case let .ui(instanceId): .ui(instanceID: instanceId)
-        case let .system(instanceId): .system(instanceID: instanceId)
-        }
+    static func localOwner(_ owner: AudioOwnerDto) throws -> IOSAudioOwner {
+        try IOSMediaOwnerMapper.audio(from: owner)
     }
 
     private static func localOperation(_ operation: AudioOperationDto) -> IOSAudioOperation {

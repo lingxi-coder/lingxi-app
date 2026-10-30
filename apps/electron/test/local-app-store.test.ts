@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { copySource } from '../src/main/local-apps/store.ts';
+import { PREPARATION_MARKER, copySource } from '../src/main/local-apps/store.ts';
 import { LocalAppStore } from './fixtures/local-app-store.ts';
 
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
@@ -56,13 +56,13 @@ test('a copied preparation marker cannot skip installation in a fresh workspace'
   await fs.mkdir(source, { recursive: true });
   await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Prepared source', entry: { type: 'static', path: 'index.html' } }));
   await fs.writeFile(join(source, 'index.html'), '<!doctype html>');
-  await fs.writeFile(join(source, '.lingxi-prepared.json'), '{"revision":1}');
+  await fs.writeFile(join(source, PREPARATION_MARKER), '{"revision":1}');
   const row = await store.publish({ staged_path: source });
-  await assert.rejects(fs.access(join(store.revisionPath(row.id, 1), '.lingxi-prepared.json')));
+  await assert.rejects(fs.access(join(store.revisionPath(row.id, 1), PREPARATION_MARKER)));
   // Also defend workspace preparation against an older source snapshot.
-  await fs.writeFile(join(store.revisionPath(row.id, 1), '.lingxi-prepared.json'), '{"revision":1}');
+  await fs.writeFile(join(store.revisionPath(row.id, 1), PREPARATION_MARKER), '{"revision":1}');
   const workspace = await store.prepareWorkspace(row);
-  await assert.rejects(fs.access(join(workspace, '.lingxi-prepared.json')));
+  await assert.rejects(fs.access(join(workspace, PREPARATION_MARKER)));
 });
 
 test('custom Python environments are excluded using a regular marker without skipping the project root', { skip: process.platform === 'win32' }, async t => {

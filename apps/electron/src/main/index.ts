@@ -383,7 +383,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     diagnostics.add('warn', 'host', `browser integration startup failed: ${sanitizeDiagnostic(error)}`);
   }
   const audioSessionContext = (owner?: import('@lingxi/bridge-client').AudioOwnerDto) => {
-    const sessionId = owner?.type === 'session' ? owner.session_id : settings.getPublic().activeSession?.sessionId;
+    const sessionId = owner?.type === 'session' ? owner.session_id : owner?.type === 'attached' && owner.logical_kind === 'session' ? owner.logical_owner_id : settings.getPublic().activeSession?.sessionId;
     return sessionId ? bridge?.get(sessionId)?.audioSessionContext : undefined;
   };
   const providerAudio = new ProviderAudioHost({

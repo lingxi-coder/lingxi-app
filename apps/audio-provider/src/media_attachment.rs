@@ -5,33 +5,39 @@
 
 use crate::{
     media_cloud::AudioProviderCloudRegistry,
-    realtime::{prepare_provider_realtime, PreparedRealtimeProvider},
+    realtime::{prepare_provider_realtime, PreparedRealtimeProvider, Registration},
     AudioProviderHost, AudioRequest, CloudSelection, SessionContext,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use llm_runtime::services::sdk;
 use llm_runtime::services::sdk::realtime::{
-    RealtimeAudioFormat, RealtimeClose, RealtimeEvent, RealtimeInput,
+    RealtimeAudioFormat, RealtimeClose, RealtimeControl, RealtimeDriver, RealtimeEvent,
+    RealtimeEvents, RealtimeInput,
 };
 use media_api::{
-    MediaAudioChannel, MediaEventCursor, MediaEventKind, MediaFrame, MediaFramePayload, MediaKind,
-    MediaOperation, MediaOperationContext, MediaOperationId, MediaOperationKind, MediaOwner,
-    MediaPcmFrame, MediaResourceRef, MediaResult, MediaService, MediaSessionRef, MediaSource,
-    MediaSourceKind, MediaSourceRef, MediaSourceUsage,
+    MediaAttachmentId, MediaAudioChannel, MediaEventCursor, MediaEventKind, MediaFrame,
+    MediaFramePayload, MediaKind, MediaOperation, MediaOperationContext, MediaOperationId,
+    MediaOperationKind, MediaOwner, MediaPcmFrame, MediaResourceRef, MediaResult, MediaService,
+    MediaSessionRef, MediaSource, MediaSourceKind, MediaSourceRef, MediaSourceUsage,
 };
 use media_runtime::audio::Pcm16StreamConverter;
+use media_runtime::{MediaAttachmentHandle, MediaAttachmentPermit};
 use orchestrator::{
     MediaAgentCapabilityContext, MediaAgentHandoffRequest, MediaConversationAttachment,
     RealtimeAgentContext, RealtimeAgentInput, RealtimeAgentLimits, RealtimeAgentSessionIo,
+    ScheduledMediaChild, ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 use serde::Deserialize;
 use std::{
     collections::VecDeque,
+    future::Future,
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
+    task::{Context, Poll},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
@@ -58,12 +64,162 @@ static NEXT_MEDIA_OPERATION: AtomicU64 = AtomicU64::new(1);
 /// Synchronous read of the saved, bare audio-v4 settings snapshot.
 pub type AudioConfigurationSnapshot = Arc<dyn Fn() -> Result<String, String> + Send + Sync>;
 
+type AttachmentResolver = dyn Fn(&MediaAttachmentId) -> Option<MediaAttachmentHandle> + Send + Sync;
+
+struct MediaPreparedProvider {
+    control: RealtimeControl,
+    events: RealtimeEvents,
+    driver: RealtimeDriver,
+    inputs: mpsc::Receiver<RealtimeAgentInput>,
+    input: mpsc::Sender<RealtimeAgentInput>,
+    input_format: RealtimeAudioFormat,
+    output_format: RealtimeAudioFormat,
+    max_chunk_bytes: usize,
+    image_input_supported: bool,
+    cancel: CancellationToken,
+    registration: Option<Arc<Registration>>,
+}
+
+impl From<PreparedRealtimeProvider> for MediaPreparedProvider {
+    fn from(value: PreparedRealtimeProvider) -> Self {
+        let PreparedRealtimeProvider {
+            control,
+            events,
+            driver,
+            inputs,
+            input,
+            input_format,
+            output_format,
+            max_chunk_bytes,
+            image_input_supported,
+            cancel,
+            _registration,
+            ..
+        } = value;
+        Self {
+            control,
+            events,
+            driver,
+            inputs,
+            input,
+            input_format,
+            output_format,
+            max_chunk_bytes,
+            image_input_supported,
+            cancel,
+            registration: Some(_registration),
+        }
+    }
+}
+
+#[cfg(test)]
+type TestProviderConnector = dyn Fn(
+        Arc<AudioProviderHost>,
+        AudioRequest,
+        RealtimeAgentContext,
+    )
+        -> Pin<Box<dyn Future<Output = Result<MediaPreparedProvider, serde_json::Value>> + Send>>
+    + Send
+    + Sync;
+
+// `work` must be dropped before the permit when this future is cancelled.
+// In particular, dropping a provider connect or driver releases its transport.
+struct AttachmentFencedFuture<F> {
+    work: Option<Pin<Box<F>>>,
+    permit: Option<MediaAttachmentPermit>,
+}
+
+impl<F> AttachmentFencedFuture<F> {
+    fn new(work: F, permit: MediaAttachmentPermit) -> Self {
+        Self {
+            work: Some(Box::pin(work)),
+            permit: Some(permit),
+        }
+    }
+}
+
+impl<F: Future> Future for AttachmentFencedFuture<F> {
+    type Output = (F::Output, MediaAttachmentPermit);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let result = match this
+            .work
+            .as_mut()
+            .expect("fenced future polled twice")
+            .as_mut()
+            .poll(cx)
+        {
+            Poll::Ready(result) => result,
+            Poll::Pending => return Poll::Pending,
+        };
+        // A completed future may still retain transport state until dropped.
+        drop(this.work.take());
+        Poll::Ready((result, this.permit.take().expect("fence permit present")))
+    }
+}
+
+// Once connected, dropping this value must release the provider before the
+// attachment permit if a validation branch returns early.
+struct AttachmentFencedValue<T> {
+    value: T,
+    permit: MediaAttachmentPermit,
+}
+
+async fn prepare_with_attachment_fence<F: Future>(
+    attachment: &MediaAttachmentHandle,
+    permit: MediaAttachmentPermit,
+    work: F,
+) -> Option<AttachmentFencedValue<F::Output>> {
+    // Biased selection stops polling the connector once closed admission is
+    // observed. A connector poll already executing concurrently with revoke
+    // cannot be preempted; the permit prevents a confirmed drain until its
+    // future or resulting driver has released its local transport.
+    let work = async {
+        tokio::select! {
+            biased;
+            _ = attachment.wait_for_admission_closed() => None,
+            result = work => Some(result),
+        }
+    };
+    let (result, permit) = AttachmentFencedFuture::new(work, permit).await;
+    result.map(|value| AttachmentFencedValue { value, permit })
+}
+
+// The revocation watcher lives with the driver, independently of the output
+// supervisor. Poll both futures together: `abort` waits for the driver to
+// acknowledge, so awaiting it while the driver is unpolled would deadlock.
+async fn run_driver_until_closed(
+    driver: RealtimeDriver,
+    control: RealtimeControl,
+    attachment: MediaAttachmentHandle,
+) -> Result<(), sdk::realtime::RealtimeError> {
+    let driver = driver.run();
+    let revoke = async {
+        attachment.wait_for_admission_closed().await;
+        let _ = control
+            .abort(RealtimeClose::normal("media attachment admission closed"))
+            .await;
+    };
+    tokio::pin!(driver);
+    tokio::pin!(revoke);
+    tokio::select! {
+        biased;
+        _ = &mut revoke => driver.await,
+        result = &mut driver => result,
+    }
+}
+
 /// Connects the selected native realtime provider to a media session that
 /// Harness has already opened for the current trusted Agent owner.
 pub struct AppMediaConversationAttachment {
     providers: Arc<AudioProviderCloudRegistry>,
-    media: Arc<dyn MediaService>,
+    attachment_for_id: Arc<AttachmentResolver>,
     configuration: AudioConfigurationSnapshot,
+    #[cfg(test)]
+    test_provider_connector: Option<Arc<TestProviderConnector>>,
+    #[cfg(test)]
+    test_supervisor_observed_output: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl AppMediaConversationAttachment {
@@ -72,20 +228,89 @@ impl AppMediaConversationAttachment {
     #[must_use]
     pub fn new(
         providers: Arc<AudioProviderCloudRegistry>,
-        media: Arc<dyn MediaService>,
+        attachment: MediaAttachmentHandle,
         configuration: AudioConfigurationSnapshot,
     ) -> Arc<Self> {
+        let attachment_for_id = Arc::new(move |attachment_id: &MediaAttachmentId| {
+            if attachment.id() != attachment_id || !attachment.admission_is_open() {
+                return None;
+            }
+            Some(attachment.clone())
+        });
         Arc::new(Self {
             providers,
-            media,
+            attachment_for_id,
             configuration,
+            #[cfg(test)]
+            test_provider_connector: None,
+            #[cfg(test)]
+            test_supervisor_observed_output: None,
         })
+    }
+
+    /// Compose against the live host attachment slot. Each operation receives
+    /// the exact scoped service matching its trusted context ID; a stale context
+    /// cannot follow the slot to a replacement attachment.
+    #[must_use]
+    pub fn new_for_attachment_slot(
+        providers: Arc<AudioProviderCloudRegistry>,
+        attachment_slot: Arc<std::sync::RwLock<Option<MediaAttachmentHandle>>>,
+        configuration: AudioConfigurationSnapshot,
+    ) -> Arc<Self> {
+        let attachment_for_id = Arc::new(move |attachment_id: &MediaAttachmentId| {
+            let attachment = attachment_slot
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()?;
+            if attachment.id() != attachment_id || !attachment.admission_is_open() {
+                return None;
+            }
+            Some(attachment)
+        });
+        Arc::new(Self {
+            providers,
+            attachment_for_id,
+            configuration,
+            #[cfg(test)]
+            test_provider_connector: None,
+            #[cfg(test)]
+            test_supervisor_observed_output: None,
+        })
+    }
+
+    fn media_for_attachment(
+        &self,
+        attachment_id: &MediaAttachmentId,
+    ) -> Option<Arc<dyn MediaService>> {
+        (self.attachment_for_id)(attachment_id)
+            .map(|attachment| attachment.service())
+            .filter(|media| media.attachment_id().as_ref() == Some(attachment_id))
+    }
+
+    async fn prepare_realtime_provider(
+        &self,
+        provider: Arc<AudioProviderHost>,
+        request: AudioRequest,
+        prepared: RealtimeAgentContext,
+    ) -> Result<MediaPreparedProvider, serde_json::Value> {
+        #[cfg(test)]
+        if let Some(connector) = &self.test_provider_connector {
+            return connector(provider, request, prepared).await;
+        }
+        prepare_provider_realtime(&provider, request, prepared)
+            .await
+            .map(MediaPreparedProvider::from)
     }
 
     fn configured_route(
         &self,
         context: &MediaAgentCapabilityContext,
-    ) -> Option<(Arc<AudioProviderHost>, AudioRequest, bool)> {
+    ) -> Option<(
+        Arc<AudioProviderHost>,
+        AudioRequest,
+        bool,
+        Arc<dyn MediaService>,
+    )> {
         let profile_name = context.profile_name.as_deref()?.trim();
         let account_scope = context.account_scope.as_deref()?.trim();
         if profile_name.is_empty()
@@ -94,9 +319,16 @@ impl AppMediaConversationAttachment {
         {
             return None;
         }
+        let attachment_id = context.attachment_id.as_ref()?;
+        let media = self.media_for_attachment(attachment_id)?;
         let provider = self
             .providers
-            .provider_for_session(&context.session_id, profile_name, account_scope)
+            .provider_for_attached_session(
+                attachment_id,
+                &context.session_id,
+                profile_name,
+                account_scope,
+            )
             .ok()?;
         let configuration = (self.configuration)().ok()?;
         if configuration.len() > 512 * 1024 {
@@ -106,6 +338,7 @@ impl AppMediaConversationAttachment {
         let identity = MediaOperationId::new(0, 0);
         let prepared = RealtimeAgentContext {
             session_id: context.session_id.clone(),
+            attachment_id: context.attachment_id.clone(),
             profile_name: context.profile_name.clone(),
             account_scope: context.account_scope.clone(),
             instructions: String::new(),
@@ -120,14 +353,14 @@ impl AppMediaConversationAttachment {
         )
         .ok()?;
         let image_input_supported = image_input_supported_for_request(&provider, &request)?;
-        Some((provider, request, image_input_supported))
+        Some((provider, request, image_input_supported, media))
     }
 
-    fn media_supports_live_video(&self, session_id: &str) -> bool {
+    fn media_supports_live_video(media: &dyn MediaService, session_id: &str) -> bool {
         let owner = MediaOwner::Session {
             session_id: session_id.to_owned(),
         };
-        let capabilities = self.media.capabilities_for(&owner);
+        let capabilities = media.capabilities_for(&owner);
         capabilities.supports(MediaOperationKind::SessionStart)
             && capabilities.supports(MediaOperationKind::Sources)
             && capabilities.supports(MediaOperationKind::Wait)
@@ -136,11 +369,11 @@ impl AppMediaConversationAttachment {
                 .contains(&MediaKind::Video)
     }
 
-    fn media_supports_live_audio(&self, session_id: &str) -> bool {
+    fn media_supports_live_audio(media: &dyn MediaService, session_id: &str) -> bool {
         let owner = MediaOwner::Session {
             session_id: session_id.to_owned(),
         };
-        let capabilities = self.media.capabilities_for(&owner);
+        let capabilities = media.capabilities_for(&owner);
         capabilities.supports(MediaOperationKind::SessionStart)
             && capabilities
                 .supported_media_kinds
@@ -327,8 +560,80 @@ fn request_from_snapshot(
     })
 }
 
+struct AppScheduledMediaChildRoute {
+    providers: Arc<AudioProviderCloudRegistry>,
+    parent: MediaAttachmentHandle,
+    child: MediaAttachmentHandle,
+}
+
+impl ScheduledMediaChildRoute for AppScheduledMediaChildRoute {
+    fn bind_session(
+        &self,
+        parent_session_id: &str,
+        child_session_id: &str,
+        profile_name: &str,
+        account_scope: &str,
+        parent_is_current: ScheduledMediaParentCheck,
+    ) -> Result<(), String> {
+        let parent_owner = MediaOwner::Session {
+            session_id: parent_session_id.to_owned(),
+        };
+        let child_owner = MediaOwner::Session {
+            session_id: child_session_id.to_owned(),
+        };
+        // Both permits fence the registry update against either attachment's
+        // revocation; neither string can select a different host attachment.
+        let parent_permit = self
+            .parent
+            .authorize_owner(&parent_owner)
+            .map_err(|_| "the scheduled media parent is no longer active".to_owned())?;
+        let child_permit = self
+            .child
+            .authorize_owner(&child_owner)
+            .map_err(|_| "the scheduled media child is no longer active".to_owned())?;
+        self.providers
+            .register_scheduled_child_session(
+                &parent_permit,
+                &child_permit,
+                profile_name,
+                account_scope,
+                parent_is_current,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn release_after_media_drain(&self) -> Result<(), String> {
+        if !self.child.media_drain_confirmed() {
+            return Err("the scheduled media child drain is unconfirmed".into());
+        }
+        self.providers.unregister_attachment(self.child.id());
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl MediaConversationAttachment for AppMediaConversationAttachment {
+    fn fork_scheduled_child(
+        &self,
+        parent: &MediaAttachmentHandle,
+    ) -> Result<Option<ScheduledMediaChild>, String> {
+        // Resolve the exact parent owned by this host adapter; mint the child
+        // from that handle here so callers cannot substitute an unrelated scope.
+        let parent = (self.attachment_for_id)(parent.id())
+            .ok_or_else(|| "the scheduled media parent is no longer active".to_owned())?;
+        let child = parent.fork_child().map_err(|error| error.to_string())?;
+        let route = Arc::new(AppScheduledMediaChildRoute {
+            providers: self.providers.clone(),
+            parent,
+            child: child.clone(),
+        });
+        Ok(Some(ScheduledMediaChild {
+            attachment: child,
+            route,
+        }))
+    }
+
     fn supported_modes(&self) -> Vec<media_api::MediaSessionMode> {
         // This is the structural union. The exact current session and selected
         // provider are checked by `supports_mode` at tool preflight time.
@@ -342,14 +647,16 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
         &self,
         context: &MediaAgentCapabilityContext,
     ) -> Vec<media_api::MediaSessionMode> {
-        let Some((_, _, image_input_supported)) = self.configured_route(context) else {
+        let Some((_, _, image_input_supported, media)) = self.configured_route(context) else {
             return Vec::new();
         };
-        if !self.media_supports_live_audio(&context.session_id) {
+        if !Self::media_supports_live_audio(media.as_ref(), &context.session_id) {
             return Vec::new();
         }
         let mut modes = vec![media_api::MediaSessionMode::Audio];
-        if image_input_supported && self.media_supports_live_video(&context.session_id) {
+        if image_input_supported
+            && Self::media_supports_live_video(media.as_ref(), &context.session_id)
+        {
             modes.push(media_api::MediaSessionMode::AudioVideo);
         }
         modes
@@ -363,15 +670,17 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
         match mode {
             media_api::MediaSessionMode::Video => false,
             media_api::MediaSessionMode::Audio => {
-                self.configured_route(context).is_some()
-                    && self.media_supports_live_audio(&context.session_id)
-            }
-            media_api::MediaSessionMode::AudioVideo => {
                 self.configured_route(context)
-                    .is_some_and(|(_, _, image_input_supported)| {
-                        image_input_supported && self.media_supports_live_video(&context.session_id)
+                    .is_some_and(|(_, _, _, media)| {
+                        Self::media_supports_live_audio(media.as_ref(), &context.session_id)
                     })
             }
+            media_api::MediaSessionMode::AudioVideo => self.configured_route(context).is_some_and(
+                |(_, _, image_input_supported, media)| {
+                    image_input_supported
+                        && Self::media_supports_live_video(media.as_ref(), &context.session_id)
+                },
+            ),
         }
     }
 
@@ -381,10 +690,21 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
         prepared: RealtimeAgentContext,
         audio: Arc<dyn MediaAudioChannel>,
     ) -> Result<RealtimeAgentSessionIo, String> {
+        let attachment_id = prepared.attachment_id.as_ref().ok_or_else(|| {
+            "the current Agent engine attachment identity is unavailable".to_owned()
+        })?;
+        let attachment = (self.attachment_for_id)(attachment_id)
+            .ok_or_else(|| "the current Agent attachment is no longer active".to_owned())?;
         let owner = MediaOwner::Session {
             session_id: prepared.session_id.clone(),
         };
-        let capabilities = self.media.capabilities_for(&owner);
+        // Admission is atomic with begin_revoke. Hold this permit across the
+        // entire provider connection and the spawned transport driver.
+        let permit = attachment
+            .authorize_owner(&owner)
+            .map_err(|_| "the current Agent attachment is no longer active".to_owned())?;
+        let media = attachment.service();
+        let capabilities = media.capabilities_for(&owner);
         if request.operation_id.service_epoch != capabilities.service_epoch {
             return Err("media Agent handoff belongs to a stale service epoch".into());
         }
@@ -416,8 +736,15 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
             .ok_or_else(|| "the current Agent account scope is unavailable".to_owned())?;
         let provider = self
             .providers
-            .provider_for_session(&prepared.session_id, profile_name, account_scope)
-            .map_err(|_| "the current Agent session has no matching provider binding".to_owned())?;
+            .provider_for_attached_session(
+                attachment_id,
+                &prepared.session_id,
+                profile_name,
+                account_scope,
+            )
+            .map_err(|_| {
+                "the current Agent attachment has no matching provider binding".to_owned()
+            })?;
         let image_input_supported = image_input_supported_for_request(&provider, &request_context)
             .ok_or_else(|| "the selected realtime profile or model is unsupported".to_owned())?;
         if requests_video && !image_input_supported {
@@ -433,11 +760,20 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
         {
             return Err("the media host cannot observe video for this Conversation session".into());
         }
-        let first_frame = timeout(Duration::from_secs(2), audio.read())
-            .await
-            .map_err(|_| "native media audio input did not become available".to_owned())?
-            .map_err(|error| error.message)?
-            .ok_or_else(|| "native media audio input ended before realtime setup".to_owned())?;
+        let first_read = async {
+            tokio::select! {
+                biased;
+                _ = attachment.wait_for_admission_closed() => {
+                    Err("the current Agent attachment is no longer active".to_owned())
+                }
+                result = timeout(Duration::from_secs(2), audio.read()) => result
+                    .map_err(|_| "native media audio input did not become available".to_owned())?
+                    .map_err(|error| error.message)?
+                    .ok_or_else(|| "native media audio input ended before realtime setup".to_owned()),
+            }
+        };
+        let (first_frame, permit) = AttachmentFencedFuture::new(first_read, permit).await;
+        let first_frame = first_frame?;
         validate_capture_frame(&first_frame, capabilities.max_payload_bytes)?;
         let interaction = if request_context.interaction.as_deref() == Some("interruptible") {
             InteractionMode::Interruptible
@@ -446,24 +782,38 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
         };
         let media_session = request.session.clone();
         let max_media_payload_bytes = capabilities.max_payload_bytes;
-        let connected = prepare_provider_realtime(&provider, request_context, prepared)
-            .await
-            .map_err(|error| {
-                error["error"]["message"]
-                    .as_str()
-                    .unwrap_or("native realtime provider setup failed")
-                    .to_owned()
-            })?;
-        if requests_video && !connected.image_input_supported {
-            let _ = connected
-                .control
-                .abort(RealtimeClose::normal(
-                    "selected realtime provider cannot accept images",
-                ))
-                .await;
+        let connected = prepare_with_attachment_fence(
+            &attachment,
+            permit,
+            self.prepare_realtime_provider(provider, request_context, prepared),
+        )
+        .await
+        .ok_or_else(|| "the current Agent attachment is no longer active".to_owned())?;
+        let AttachmentFencedValue { value, permit } = connected;
+        let connected = value.map_err(|error| {
+            error["error"]["message"]
+                .as_str()
+                .unwrap_or("native realtime provider setup failed")
+                .to_owned()
+        })?;
+        let connected = AttachmentFencedValue {
+            value: connected,
+            permit,
+        };
+        if !attachment.admission_is_open() {
+            // Dropping the unstarted driver releases its provider connection.
+            return Err("the current Agent attachment is no longer active".into());
+        }
+        if requests_video && !connected.value.image_input_supported {
+            // No driver is running yet; awaiting control.abort here would
+            // wait forever for an acknowledgement that cannot be produced.
             return Err("the selected realtime provider cannot accept live video frames".into());
         }
-        let PreparedRealtimeProvider {
+        let AttachmentFencedValue {
+            value: connected,
+            permit,
+        } = connected;
+        let MediaPreparedProvider {
             control,
             events,
             driver,
@@ -474,11 +824,20 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
             max_chunk_bytes,
             image_input_supported,
             cancel,
-            _registration: registration,
-            ..
+            registration,
         } = connected;
         let (output, output_rx) = mpsc::channel(AGENT_OUTPUT_CAPACITY);
-        let driver = tokio::spawn(driver.run());
+        // Construct the fence before spawning: even an unpolled or aborted task
+        // drops the driver (and its connection) before releasing the permit.
+        let driver_work = AttachmentFencedFuture::new(
+            run_driver_until_closed(driver, control.clone(), attachment.clone()),
+            permit,
+        );
+        let driver = tokio::spawn(async move {
+            let (result, permit) = driver_work.await;
+            drop(permit);
+            result
+        });
         let input_paused = Arc::new(AtomicBool::new(false));
         let playback = Arc::new(Mutex::new(PlaybackState::default()));
         let io_gate = Arc::new(AsyncMutex::new(()));
@@ -518,7 +877,7 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
             })
         };
         let video_task = if requests_video {
-            let media = self.media.clone();
+            let media = media.clone();
             let input = input.clone();
             let owner = owner.clone();
             let session = media_session;
@@ -557,7 +916,7 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
         let output_gate = io_gate.clone();
         let output_cancel = cancel.child_token();
         let cleanup_audio = audio.clone();
-        let output_task = tokio::spawn(async move {
+        let mut output_task = tokio::spawn(async move {
             render_agent_output(
                 output_rx,
                 audio,
@@ -576,22 +935,39 @@ impl MediaConversationAttachment for AppMediaConversationAttachment {
 
         let supervisor_cancel = cancel.clone();
         let supervisor_control = control.clone();
+        #[cfg(test)]
+        let test_supervisor_observed_output = self.test_supervisor_observed_output.clone();
         tokio::spawn(async move {
-            let output_result = output_task.await;
+            let output_result = tokio::select! {
+                biased;
+                _ = attachment.wait_for_admission_closed() => None,
+                result = &mut output_task => Some(result),
+            };
+            #[cfg(test)]
+            if matches!(&output_result, Some(Ok(Ok(())))) {
+                if let Some(observed) = test_supervisor_observed_output {
+                    observed.notify_one();
+                }
+            }
             supervisor_cancel.cancel();
-            if !matches!(output_result, Ok(Ok(()))) {
-                let _ = cleanup_audio.interrupt().await;
+            if !matches!(&output_result, Some(Ok(Ok(())))) {
                 let _ = supervisor_control
                     .abort(RealtimeClose::normal("media Agent realtime closed"))
                     .await;
+                let _ = cleanup_audio.interrupt().await;
+            }
+            if output_result.is_none() {
+                wait_or_abort(output_task).await;
             }
             wait_or_abort(capture_task).await;
             if let Some(video_task) = video_task {
                 wait_or_abort(video_task).await;
             }
             wait_or_abort(driver).await;
-            registration.unregister();
-            if !matches!(output_result, Ok(Ok(()))) {
+            if let Some(registration) = registration {
+                registration.unregister();
+            }
+            if !matches!(&output_result, Some(Ok(Ok(())))) {
                 tracing::debug!("media Agent realtime output pump ended with an error");
             }
         });
@@ -1614,8 +1990,1399 @@ async fn wait_or_abort<T: 'static>(task: JoinHandle<T>) {
 mod tests {
     use super::*;
     use media_api::{MediaError, MediaSourceId, MediaSourceRef};
+    use media_runtime::MediaAttachmentHost;
     use std::sync::atomic::AtomicU32;
     use tokio::sync::{Mutex as TokioMutex, Notify};
+
+    #[derive(Default)]
+    struct ScheduledAudioWire {
+        requests: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl sdk::Transport for ScheduledAudioWire {
+        async fn send(
+            &self,
+            request: sdk::HttpRequest,
+        ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+            self.transcript(request.url)
+        }
+        async fn send_stream(
+            &self,
+            mut request: sdk::HttpStreamRequest,
+        ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+            use futures::StreamExt;
+            while let Some(chunk) = request.body.next().await {
+                let _ = chunk?;
+            }
+            self.transcript(request.url)
+        }
+    }
+
+    impl ScheduledAudioWire {
+        fn transcript(&self, url: String) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+            use futures::StreamExt;
+            assert!(url.ends_with("/audio/transcriptions"));
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Ok(sdk::StreamResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: futures::stream::once(async {
+                    Ok(bytes::Bytes::from_static(
+                        br#"{"text":"scheduled child transcript"}"#,
+                    ))
+                })
+                .boxed(),
+            })
+        }
+    }
+
+    async fn scheduled_test_transcribe(
+        store: &crate::media_store::BoundedMediaResourceStore,
+        attachment: &MediaAttachmentHandle,
+        owner: &MediaOwner,
+        operation_id: u64,
+    ) -> Result<MediaResult, MediaError> {
+        use media_api::MediaResourceStore;
+        let payload = media_api::MediaPayload {
+            metadata: media_api::MediaMetadata {
+                kind: MediaKind::Audio,
+                mime_type: "audio/wav".into(),
+                byte_len: 3,
+                captured_at_unix_ms: None,
+                duration_ms: None,
+                width_px: None,
+                height_px: None,
+                sample_rate_hz: None,
+                channels: None,
+            },
+            bytes: vec![1, 2, 3],
+        };
+        let scoped_context = MediaOperationContext::new(
+            MediaOperationId::new(operation_id, 1),
+            owner.clone().in_attachment(attachment.id().clone()),
+        );
+        let asset = store.put(&scoped_context, payload).await?;
+        attachment
+            .service()
+            .execute(
+                MediaOperationContext::new(
+                    MediaOperationId::new(operation_id + 1, 1),
+                    owner.clone(),
+                ),
+                MediaOperation::Transcribe {
+                    input: media_api::TranscriptionInput::StoredMedia(asset.reference),
+                    language: None,
+                },
+            )
+            .await
+    }
+
+    struct IdleScheduledAudio;
+
+    #[async_trait::async_trait]
+    impl media_api::audio::AudioService for IdleScheduledAudio {
+        fn capabilities(&self) -> media_api::audio::AudioCapabilitySnapshot {
+            media_api::audio::AudioCapabilitySnapshot {
+                service_epoch: 1,
+                support_revision: 1,
+                supported_operations: Vec::new(),
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _: media_api::audio::AudioOperationContext,
+            operation: media_api::audio::AudioOperation,
+        ) -> Result<media_api::audio::AudioOperationSuccess, media_api::audio::AudioError> {
+            match operation {
+                media_api::audio::AudioOperation::Status { .. } => {
+                    Ok(media_api::audio::AudioOperationSuccess::Status {
+                        status: media_api::audio::AudioStatus::default(),
+                    })
+                }
+                media_api::audio::AudioOperation::EndOwner => {
+                    Ok(media_api::audio::AudioOperationSuccess::OwnerEnded)
+                }
+                _ => Err(media_api::audio::AudioError::new(
+                    media_api::audio::AudioErrorKind::Unsupported,
+                    "scheduled media fixture only supports idle status",
+                )),
+            }
+        }
+
+        async fn cancel(
+            &self,
+            _: media_api::audio::AudioOperationContext,
+        ) -> Result<(), media_api::audio::AudioError> {
+            Ok(())
+        }
+    }
+
+    struct NoScheduledDevices;
+
+    #[async_trait::async_trait]
+    impl media_api::MediaDevicePorts for NoScheduledDevices {
+        async fn open(
+            &self,
+            _: MediaOperationContext,
+            _: media_api::MediaSessionRequest,
+        ) -> Result<Arc<dyn media_api::MediaDeviceSession>, MediaError> {
+            Err(MediaError::new(
+                media_api::MediaErrorKind::Unavailable,
+                "scheduled media fixture does not open devices",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_child_uses_parent_authority_with_independent_route_and_drain() {
+        use media_api::audio::AudioOperationKind;
+        use media_api::MediaReadinessState;
+        use media_runtime::{
+            AudioRouteMode, AudioRoutingSettings, CloudAudioHost, CloudBinding,
+            MediaAttachmentRevocation,
+        };
+
+        let registry = Arc::new(AudioProviderCloudRegistry::new("wav"));
+        let mut routing = AudioRoutingSettings::default();
+        routing.operations.insert(
+            AudioOperationKind::Transcribe,
+            AudioRouteMode::Cloud {
+                binding: CloudBinding::FollowSession,
+                model: None,
+            },
+        );
+        let store = Arc::new(crate::media_store::BoundedMediaResourceStore::default());
+        let app_host = crate::media_host::AppMediaHost::new(
+            store.clone(),
+            Arc::new(IdleScheduledAudio),
+            None,
+            Arc::new(NoScheduledDevices),
+            Vec::new(),
+            registry.clone(),
+            Vec::new(),
+            routing,
+            1,
+            1024,
+        )
+        .unwrap();
+        let host = MediaAttachmentHost::new();
+        let (parent, shared_registry) = app_host.create_mobile_media_attachment(&host).unwrap();
+        assert!(Arc::ptr_eq(&registry, &shared_registry));
+        let parent_owner = MediaOwner::Session {
+            session_id: "parent-session".into(),
+        };
+        let wire = Arc::new(ScheduledAudioWire::default());
+        let profiles = sdk::builtin_providers()
+            .unwrap()
+            .into_iter()
+            .filter(|profile| profile.profile_name == "openai")
+            .collect::<Vec<_>>();
+        let client = sdk::LlmClientBuilder::with_transport(wire.clone(), &profiles)
+            .with_region(sdk::protocol::Region::International)
+            .build()
+            .unwrap();
+        let provider = Arc::new(AudioProviderHost {
+            client,
+            credential_ids: std::collections::BTreeMap::from([("openai".into(), "openai".into())]),
+            storage: None,
+            bound_services: None,
+            keys: std::collections::BTreeMap::from([(
+                "openai".into(),
+                sdk::protocol::Secret::new("host-test-key".into()),
+            )]),
+            pending: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+        });
+        let parent_permit = parent.authorize_owner(&parent_owner).unwrap();
+        registry
+            .register_attached_session(&parent_permit, "openai", "profile:openai", provider.clone())
+            .unwrap();
+        drop(parent_permit);
+        let configuration: AudioConfigurationSnapshot = Arc::new(|| Ok("{}".into()));
+        let adapter =
+            AppMediaConversationAttachment::new(registry.clone(), parent.clone(), configuration);
+        let (other_engine, _) = app_host.create_mobile_media_attachment(&host).unwrap();
+        assert!(adapter.fork_scheduled_child(&other_engine).is_err());
+        registry
+            .register_profile("other", provider.clone())
+            .unwrap();
+        let ScheduledMediaChild {
+            attachment: child,
+            route,
+        } = adapter.fork_scheduled_child(&parent).unwrap().unwrap();
+        let ScheduledMediaChild {
+            attachment: sibling,
+            route: sibling_route,
+        } = adapter.fork_scheduled_child(&parent).unwrap().unwrap();
+        let mut child_fence = child.retain_for_host_cleanup().unwrap();
+        let mut sibling_fence = sibling.retain_for_host_cleanup().unwrap();
+        let child_owner = MediaOwner::Session {
+            session_id: "parent-session".into(),
+        };
+        let sibling_owner = MediaOwner::Session {
+            session_id: "new-scheduled-session".into(),
+        };
+        let readiness = |attachment: &MediaAttachmentHandle, owner: &MediaOwner| {
+            attachment
+                .service()
+                .capabilities_for(owner)
+                .readiness
+                .into_iter()
+                .find(|entry| entry.operation == MediaOperationKind::Transcribe)
+                .map(|entry| entry.state)
+        };
+        assert_eq!(
+            readiness(&child, &child_owner),
+            Some(MediaReadinessState::Unavailable)
+        );
+        assert!(route
+            .bind_session(
+                "parent-session",
+                "parent-session",
+                "other",
+                "profile:other",
+                Arc::new(|| true)
+            )
+            .is_err());
+        assert!(route
+            .bind_session(
+                "wrong-parent-session",
+                "parent-session",
+                "openai",
+                "profile:openai",
+                Arc::new(|| true),
+            )
+            .is_err());
+        assert!(route
+            .bind_session(
+                "parent-session",
+                "parent-session",
+                "openai",
+                "profile:other",
+                Arc::new(|| true),
+            )
+            .is_err());
+        let parent_current = Arc::new(AtomicBool::new(true));
+        let current_check: ScheduledMediaParentCheck = {
+            let parent_current = parent_current.clone();
+            Arc::new(move || parent_current.load(Ordering::SeqCst))
+        };
+        route
+            .bind_session(
+                "parent-session",
+                "parent-session",
+                "openai",
+                "profile:openai",
+                current_check.clone(),
+            )
+            .unwrap();
+        sibling_route
+            .bind_session(
+                "parent-session",
+                "new-scheduled-session",
+                "openai",
+                "profile:openai",
+                current_check,
+            )
+            .unwrap();
+        assert_eq!(
+            readiness(&parent, &parent_owner),
+            Some(MediaReadinessState::Ready)
+        );
+        assert_eq!(
+            readiness(&child, &child_owner),
+            Some(MediaReadinessState::Ready)
+        );
+        assert_eq!(
+            readiness(&sibling, &sibling_owner),
+            Some(MediaReadinessState::Ready)
+        );
+        for (generation, attachment, owner) in
+            [(1, &child, &child_owner), (2, &sibling, &sibling_owner)]
+        {
+            let service = attachment.service();
+            let capabilities = service.capabilities_for(owner);
+            assert!(matches!(
+                service
+                    .execute(
+                        MediaOperationContext::new(
+                            MediaOperationId::new(generation, capabilities.service_epoch),
+                            owner.clone()
+                        ),
+                        MediaOperation::Sources {
+                            kind: None,
+                            usage: None
+                        },
+                    )
+                    .await,
+                Ok(MediaResult::Sources { .. })
+            ));
+            assert!(CloudAudioHost::resolve(
+                registry.as_ref(),
+                &owner.clone().in_attachment(attachment.id().clone()),
+                &CloudBinding::FollowSession,
+            )
+            .is_ok());
+        }
+        assert!(matches!(
+            scheduled_test_transcribe(&store, &child, &child_owner, 10).await,
+            Ok(MediaResult::Transcript { .. })
+        ));
+        assert_eq!(wire.requests.load(Ordering::SeqCst), 1);
+        assert!(CloudAudioHost::resolve(
+            registry.as_ref(),
+            &child_owner.clone().in_attachment(child.id().clone()),
+            &CloudBinding::ExplicitProfile {
+                profile_name: "other".into()
+            },
+        )
+        .is_err());
+        child.begin_revoke();
+        assert!(route.release_after_media_drain().is_err());
+        assert!(
+            registry
+                .provider_for_attached_session(
+                    child.id(),
+                    "parent-session",
+                    "openai",
+                    "profile:openai",
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            child.drain_media(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        route.release_after_media_drain().unwrap();
+        child_fence.confirm().unwrap();
+        assert_eq!(
+            child.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        assert!(
+            registry
+                .provider_for_attached_session(
+                    child.id(),
+                    "parent-session",
+                    "openai",
+                    "profile:openai",
+                )
+                .is_err()
+        );
+        assert!(registry
+            .provider_for_attached_session(
+                parent.id(),
+                "parent-session",
+                "openai",
+                "profile:openai",
+            )
+            .is_ok());
+        assert!(registry
+            .provider_for_attached_session(
+                sibling.id(),
+                "new-scheduled-session",
+                "openai",
+                "profile:openai",
+            )
+            .is_ok());
+        assert_eq!(
+            readiness(&sibling, &sibling_owner),
+            Some(MediaReadinessState::Ready)
+        );
+
+        assert!(matches!(
+            scheduled_test_transcribe(&store, &parent, &parent_owner, 20).await,
+            Ok(MediaResult::Transcript { .. })
+        ));
+        assert_eq!(wire.requests.load(Ordering::SeqCst), 2);
+
+        // Even a route resolved before the change cannot fetch credentials
+        // after its exact parent binding generation has been replaced.
+        let cached_sibling_route = CloudAudioHost::resolve(
+            registry.as_ref(),
+            &sibling_owner.clone().in_attachment(sibling.id().clone()),
+            &CloudBinding::FollowSession,
+        )
+        .unwrap();
+        let stale_context = MediaOperationContext::new(
+            MediaOperationId::new(3, 1),
+            sibling_owner.clone().in_attachment(sibling.id().clone()),
+        );
+        let wrong_context = MediaOperationContext::new(
+            MediaOperationId::new(4, 1),
+            parent_owner.clone().in_attachment(parent.id().clone()),
+        );
+        let Err(wrong_error) = cached_sibling_route.request_options(&wrong_context).await else {
+            panic!("a child route must not provide credentials for a different owner");
+        };
+        assert_eq!(
+            wrong_error.kind,
+            media_api::audio::AudioErrorKind::InvalidRequest
+        );
+        parent_current.store(false, Ordering::SeqCst);
+        assert_eq!(
+            readiness(&sibling, &sibling_owner),
+            Some(MediaReadinessState::Unavailable)
+        );
+        assert_eq!(
+            readiness(&parent, &parent_owner),
+            Some(MediaReadinessState::Ready)
+        );
+        assert!(cached_sibling_route
+            .request_options(&stale_context)
+            .await
+            .is_err());
+        parent_current.store(true, Ordering::SeqCst);
+        assert_eq!(
+            readiness(&sibling, &sibling_owner),
+            Some(MediaReadinessState::Ready)
+        );
+        // Rebinding the parent invalidates the previously derived child route,
+        // even if the logical profile strings happen to remain the same.
+        let permit = parent.authorize_owner(&parent_owner).unwrap();
+        registry
+            .register_attached_session(&permit, "openai", "profile:openai", provider)
+            .unwrap();
+        drop(permit);
+        assert!(registry
+            .provider_for_attached_session(
+                sibling.id(),
+                "new-scheduled-session",
+                "openai",
+                "profile:openai",
+            )
+            .is_err());
+        assert_eq!(
+            readiness(&sibling, &sibling_owner),
+            Some(MediaReadinessState::Unavailable)
+        );
+        let Err(stale_error) = cached_sibling_route.request_options(&stale_context).await else {
+            panic!("rebound parent must invalidate the cached scheduled route");
+        };
+        assert_eq!(
+            stale_error.kind,
+            media_api::audio::AudioErrorKind::Unavailable
+        );
+        sibling.begin_revoke();
+        assert_eq!(
+            sibling.drain_media(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        sibling_route.release_after_media_drain().unwrap();
+        sibling_fence.confirm().unwrap();
+        assert_eq!(
+            sibling.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        assert!(registry
+            .provider_for_attached_session(
+                parent.id(),
+                "parent-session",
+                "openai",
+                "profile:openai",
+            )
+            .is_ok());
+        assert_eq!(
+            parent.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        registry.unregister_attachment(parent.id());
+        assert_eq!(
+            other_engine.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_child_timeout_retains_its_exact_route_until_confirmed_drain() {
+        use media_runtime::MediaAttachmentRevocation;
+        let fixture = open_fixture(false, false, false);
+        let parent = fixture.attachment;
+        let adapter = fixture.adapter;
+        let ScheduledMediaChild {
+            attachment: child,
+            route,
+        } = adapter.fork_scheduled_child(&parent).unwrap().unwrap();
+        let mut fence = child.retain_for_host_cleanup().unwrap();
+        route
+            .bind_session(
+                "open-session",
+                "child-session",
+                "openai",
+                "profile:openai",
+                Arc::new(|| true),
+            )
+            .unwrap();
+        let owner = MediaOwner::Session {
+            session_id: "child-session".into(),
+        };
+        let permit = child.authorize_owner(&owner).unwrap();
+        child.begin_revoke();
+        assert!(matches!(
+            child.drain_media(Duration::from_millis(20)).await,
+            MediaAttachmentRevocation::Unknown { .. }
+        ));
+        assert!(route.release_after_media_drain().is_err());
+        assert!(adapter
+            .providers
+            .provider_for_attached_session(child.id(), "child-session", "openai", "profile:openai",)
+            .is_ok());
+        drop(permit);
+        assert_eq!(
+            child.drain_media(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        route.release_after_media_drain().unwrap();
+        fence.confirm().unwrap();
+        assert_eq!(
+            child.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+        assert!(adapter
+            .providers
+            .provider_for_attached_session(child.id(), "child-session", "openai", "profile:openai",)
+            .is_err());
+        assert!(adapter
+            .providers
+            .provider_for_attached_session(parent.id(), "open-session", "openai", "profile:openai",)
+            .is_ok());
+        assert_eq!(
+            parent.revoke(Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+    }
+
+    struct FailingScheduledStatus;
+
+    #[async_trait::async_trait]
+    impl MediaService for FailingScheduledStatus {
+        fn capabilities(&self) -> media_api::MediaCapabilities {
+            EmptyMediaService.capabilities()
+        }
+        async fn execute(
+            &self,
+            _: MediaOperationContext,
+            _: MediaOperation,
+        ) -> Result<MediaResult, MediaError> {
+            Err(MediaError::new(
+                media_api::MediaErrorKind::Unavailable,
+                "status failed",
+            ))
+        }
+        async fn read_media(
+            &self,
+            _: MediaOperationContext,
+            _: media_api::MediaRef,
+        ) -> Result<media_api::MediaContent, MediaError> {
+            Err(MediaError::new(
+                media_api::MediaErrorKind::Unavailable,
+                "unused",
+            ))
+        }
+        async fn cancel(&self, _: MediaOperationContext) -> Result<(), MediaError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_child_unknown_drain_keeps_parent_and_child_routes() {
+        let host = MediaAttachmentHost::new();
+        let parent = host.attach(Arc::new(FailingScheduledStatus)).unwrap();
+        let registry = Arc::new(AudioProviderCloudRegistry::new("wav"));
+        let provider = Arc::new(
+            AudioProviderHost::new(
+                "{}",
+                "international",
+                None,
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+        let parent_owner = MediaOwner::Session {
+            session_id: "parent-session".into(),
+        };
+        let permit = parent.authorize_owner(&parent_owner).unwrap();
+        registry
+            .register_attached_session(&permit, "openai", "profile:openai", provider)
+            .unwrap();
+        drop(permit);
+        let adapter = AppMediaConversationAttachment::new(
+            registry.clone(),
+            parent.clone(),
+            Arc::new(|| Ok("{}".into())),
+        );
+        let ScheduledMediaChild {
+            attachment: child,
+            route,
+        } = adapter.fork_scheduled_child(&parent).unwrap().unwrap();
+        let mut fence = child.retain_for_host_cleanup().unwrap();
+        route
+            .bind_session(
+                "parent-session",
+                "child-session",
+                "openai",
+                "profile:openai",
+                Arc::new(|| true),
+            )
+            .unwrap();
+        let owner = MediaOwner::Session {
+            session_id: "child-session".into(),
+        };
+        assert!(child
+            .service()
+            .execute(
+                MediaOperationContext::new(MediaOperationId::new(1, 1), owner),
+                MediaOperation::Status { target: None },
+            )
+            .await
+            .is_err());
+        child.begin_revoke();
+        assert!(matches!(
+            child.drain_media(Duration::from_secs(2)).await,
+            media_runtime::MediaAttachmentRevocation::Unknown { .. }
+        ));
+        assert_eq!(child.phase(), media_runtime::MediaAttachmentPhase::Unknown);
+        assert!(route.release_after_media_drain().is_err());
+        assert!(fence.confirm().is_err());
+        assert!(registry
+            .provider_for_attached_session(child.id(), "child-session", "openai", "profile:openai",)
+            .is_ok());
+        assert!(registry
+            .provider_for_attached_session(
+                parent.id(),
+                "parent-session",
+                "openai",
+                "profile:openai",
+            )
+            .is_ok());
+    }
+
+    struct EmptyMediaService;
+
+    #[async_trait::async_trait]
+    impl media_api::MediaService for EmptyMediaService {
+        fn capabilities(&self) -> media_api::MediaCapabilities {
+            media_api::MediaCapabilities {
+                service_epoch: 1,
+                support_revision: 1,
+                supported_operations: vec![
+                    MediaOperationKind::SessionStart,
+                    MediaOperationKind::Status,
+                ],
+                supported_media_kinds: vec![MediaKind::Audio],
+                readiness: Vec::new(),
+                max_payload_bytes: 1024 * 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: MediaOperationContext,
+            operation: MediaOperation,
+        ) -> Result<MediaResult, MediaError> {
+            if matches!(operation, MediaOperation::Status { .. }) {
+                return Ok(MediaResult::Status {
+                    resources: Vec::new(),
+                });
+            }
+            Err(MediaError::new(
+                media_api::MediaErrorKind::Unsupported,
+                "empty test media service",
+            ))
+        }
+
+        async fn read_media(
+            &self,
+            _context: MediaOperationContext,
+            _media: media_api::MediaRef,
+        ) -> Result<media_api::MediaContent, MediaError> {
+            Err(MediaError::new(
+                media_api::MediaErrorKind::Unsupported,
+                "empty test media service",
+            ))
+        }
+
+        async fn cancel(&self, _context: MediaOperationContext) -> Result<(), MediaError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn desktop_media_resolver_does_not_follow_old_handoff_after_slot_rotation() {
+        let host = MediaAttachmentHost::new();
+        let service: Arc<dyn MediaService> = Arc::new(EmptyMediaService);
+        let old = host.attach(service.clone()).expect("old attachment");
+        let replacement = host.attach(service).expect("replacement attachment");
+        let slot = Arc::new(std::sync::RwLock::new(Some(old.clone())));
+        let configuration: AudioConfigurationSnapshot = Arc::new(|| Ok("{}".to_owned()));
+        let providers = Arc::new(AudioProviderCloudRegistry::new("wav"));
+        let adapter = AppMediaConversationAttachment::new_for_attachment_slot(
+            providers.clone(),
+            slot.clone(),
+            configuration.clone(),
+        );
+        let fixed_adapter =
+            AppMediaConversationAttachment::new(providers, old.clone(), configuration);
+
+        let fixed_old_service = fixed_adapter
+            .media_for_attachment(old.id())
+            .expect("mobile binding resolves its exact active handle");
+        assert_eq!(fixed_old_service.attachment_id().as_ref(), Some(old.id()));
+        let old_service = adapter
+            .media_for_attachment(old.id())
+            .expect("current context resolves the old exact service");
+        assert_eq!(old_service.attachment_id().as_ref(), Some(old.id()));
+
+        old.begin_revoke();
+        *slot.write().unwrap() = Some(replacement.clone());
+        assert!(fixed_adapter.media_for_attachment(old.id()).is_none());
+        assert!(adapter.media_for_attachment(old.id()).is_none());
+        let replacement_service = adapter
+            .media_for_attachment(replacement.id())
+            .expect("new context resolves the replacement exact service");
+        assert_eq!(
+            replacement_service.attachment_id().as_ref(),
+            Some(replacement.id()),
+        );
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    struct ControlledAudioChannel {
+        first: TokioMutex<Option<MediaFrame>>,
+        pending_read_started: Notify,
+        pending_read_dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl MediaAudioChannel for ControlledAudioChannel {
+        async fn read(&self) -> Result<Option<MediaFrame>, MediaError> {
+            if let Some(frame) = self.first.lock().await.take() {
+                return Ok(Some(frame));
+            }
+            let _read = DropFlag(self.pending_read_dropped.clone());
+            self.pending_read_started.notify_one();
+            std::future::pending::<Result<Option<MediaFrame>, MediaError>>().await
+        }
+
+        async fn write(
+            &self,
+            _frame: MediaPcmFrame,
+        ) -> Result<media_api::MediaRenderReceipt, MediaError> {
+            Ok(media_api::MediaRenderReceipt {
+                accepted_sample_frames: 0,
+                played_sample_frames: 0,
+                rendered_at_unix_ms: Some(unix_now_ms()),
+            })
+        }
+
+        async fn flush(&self) -> Result<media_api::MediaRenderReceipt, MediaError> {
+            self.write(MediaPcmFrame {
+                sample_rate_hz: 24_000,
+                channels: 1,
+                pcm16le: Vec::new(),
+            })
+            .await
+        }
+
+        async fn interrupt(&self) -> Result<media_api::MediaRenderReceipt, MediaError> {
+            self.flush().await
+        }
+    }
+
+    struct ProviderTestState {
+        cancel: CancellationToken,
+        supervisor_observed_output: Arc<Notify>,
+        hold_connect: bool,
+        connect_started: Notify,
+        connect_release: Notify,
+        connect_resumed: AtomicBool,
+        connect_dropped: Arc<AtomicBool>,
+        send_started: Notify,
+        abort_started: Notify,
+        abort_called: AtomicBool,
+        abort_release: std::sync::Condvar,
+        abort_allowed: Mutex<bool>,
+        sink_dropped: AtomicBool,
+    }
+
+    impl ProviderTestState {
+        fn new(hold_connect: bool, hold_abort: bool) -> Arc<Self> {
+            Arc::new(Self {
+                cancel: CancellationToken::new(),
+                supervisor_observed_output: Arc::new(Notify::new()),
+                hold_connect,
+                connect_started: Notify::new(),
+                connect_release: Notify::new(),
+                connect_resumed: AtomicBool::new(false),
+                connect_dropped: Arc::new(AtomicBool::new(false)),
+                send_started: Notify::new(),
+                abort_started: Notify::new(),
+                abort_called: AtomicBool::new(false),
+                abort_release: std::sync::Condvar::new(),
+                abort_allowed: Mutex::new(!hold_abort),
+                sink_dropped: AtomicBool::new(false),
+            })
+        }
+
+        fn release_abort(&self) {
+            *self.abort_allowed.lock().unwrap() = true;
+            self.abort_release.notify_all();
+        }
+    }
+
+    struct TestRealtimeSink(Arc<ProviderTestState>);
+
+    impl Drop for TestRealtimeSink {
+        fn drop(&mut self) {
+            self.0.sink_dropped.store(true, Ordering::Release);
+        }
+    }
+
+    #[async_trait]
+    impl sdk::realtime::RealtimeSink for TestRealtimeSink {
+        async fn send(
+            &mut self,
+            _frame: sdk::realtime::RealtimeFrame,
+        ) -> Result<(), sdk::realtime::RealtimeError> {
+            self.0.send_started.notify_one();
+            Ok(())
+        }
+        async fn ping(&mut self, _payload: Bytes) -> Result<(), sdk::realtime::RealtimeError> {
+            Ok(())
+        }
+        async fn close(
+            &mut self,
+            _close: RealtimeClose,
+        ) -> Result<(), sdk::realtime::RealtimeError> {
+            Ok(())
+        }
+        fn abort(&mut self) {
+            self.0.abort_called.store(true, Ordering::Release);
+            self.0.abort_started.notify_one();
+            let mut allowed = self.0.abort_allowed.lock().unwrap();
+            while !*allowed {
+                allowed = self.0.abort_release.wait(allowed).unwrap();
+            }
+        }
+    }
+
+    struct TestRealtimeTransport(Arc<ProviderTestState>);
+
+    #[async_trait]
+    impl sdk::realtime::RealtimeTransport for TestRealtimeTransport {
+        async fn connect(
+            &self,
+            _request: sdk::realtime::RealtimeConnectRequest,
+        ) -> Result<sdk::realtime::RealtimeConnection, sdk::realtime::RealtimeError> {
+            use futures::StreamExt;
+            let _connect = DropFlag(self.0.connect_dropped.clone());
+            self.0.connect_started.notify_one();
+            if self.0.hold_connect {
+                self.0.connect_release.notified().await;
+                self.0.connect_resumed.store(true, Ordering::Release);
+            }
+            Ok(sdk::realtime::RealtimeConnection {
+                outbound: Box::new(TestRealtimeSink(self.0.clone())),
+                inbound: futures::stream::pending().boxed(),
+            })
+        }
+    }
+
+    struct TestRealtimeCodec;
+
+    impl sdk::realtime::RealtimeCodec for TestRealtimeCodec {
+        fn encode(
+            &self,
+            _input: &RealtimeInput,
+        ) -> Result<Vec<sdk::realtime::RealtimeFrame>, sdk::realtime::RealtimeError> {
+            Ok(vec![sdk::realtime::RealtimeFrame::text("test-frame")])
+        }
+        fn decode(
+            &self,
+            _frame: sdk::realtime::RealtimeFrame,
+        ) -> Result<Vec<RealtimeEvent>, sdk::realtime::RealtimeError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct OpenFixture {
+        attachment: MediaAttachmentHandle,
+        adapter: Arc<AppMediaConversationAttachment>,
+        request: MediaAgentHandoffRequest,
+        prepared: RealtimeAgentContext,
+        audio: Arc<ControlledAudioChannel>,
+        provider: Arc<ProviderTestState>,
+    }
+
+    fn open_fixture(hold_first_frame: bool, hold_connect: bool, hold_abort: bool) -> OpenFixture {
+        let host = MediaAttachmentHost::new();
+        let attachment = host.attach(Arc::new(EmptyMediaService)).unwrap();
+        let providers = Arc::new(AudioProviderCloudRegistry::new("wav"));
+        let owner = MediaOwner::Session {
+            session_id: "open-session".into(),
+        };
+        let permit = attachment.authorize_owner(&owner).unwrap();
+        let provider_host = Arc::new(
+            AudioProviderHost::new(
+                "{}",
+                "international",
+                None,
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+        providers
+            .register_attached_session(&permit, "openai", "profile:openai", provider_host)
+            .unwrap();
+        drop(permit);
+        let configuration: AudioConfigurationSnapshot = Arc::new(|| {
+            Ok(
+            r#"{"schemaVersion":4,"language":"auto","rate":1.0,"conversation":{"mode":"realtime","interaction":"turn_based","cloud":{"binding":"follow_session"}}}"#.into()
+        )
+        });
+        let mut adapter =
+            AppMediaConversationAttachment::new(providers, attachment.clone(), configuration);
+        let provider = ProviderTestState::new(hold_connect, hold_abort);
+        Arc::get_mut(&mut adapter)
+            .unwrap()
+            .test_supervisor_observed_output = Some(provider.supervisor_observed_output.clone());
+        let provider_for_connect = provider.clone();
+        Arc::get_mut(&mut adapter).unwrap().test_provider_connector = Some(Arc::new(
+            move |_host: Arc<AudioProviderHost>,
+                  _request: AudioRequest,
+                  _prepared: RealtimeAgentContext|
+                  -> Pin<
+                Box<dyn Future<Output = Result<MediaPreparedProvider, serde_json::Value>> + Send>,
+            > {
+                let provider = provider_for_connect.clone();
+                Box::pin(async move {
+                    let transport = TestRealtimeTransport(provider.clone());
+                    let (session, driver) = sdk::realtime::RealtimeSession::connect(
+                        &transport,
+                        sdk::realtime::RealtimeConnectRequest {
+                            endpoint: "wss://test.invalid".into(),
+                            headers: Vec::new(),
+                            max_frame_bytes: 1024 * 1024,
+                        },
+                        Arc::new(TestRealtimeCodec),
+                        sdk::realtime::RealtimeLimits::default(),
+                    )
+                    .await
+                    .map_err(|error| crate::failure("provider_error", &error.to_string()))?;
+                    let (control, events) = session.into_parts();
+                    let (input, inputs) = mpsc::channel(32);
+                    Ok(MediaPreparedProvider {
+                        control,
+                        events,
+                        driver,
+                        input,
+                        inputs,
+                        input_format: RealtimeAudioFormat::Pcm16 {
+                            sample_rate_hz: 24_000,
+                        },
+                        output_format: RealtimeAudioFormat::Pcm16 {
+                            sample_rate_hz: 24_000,
+                        },
+                        max_chunk_bytes: MAX_NATIVE_AUDIO_CHUNK_BYTES,
+                        image_input_supported: true,
+                        cancel: provider.cancel.clone(),
+                        registration: None,
+                    })
+                })
+            },
+        ));
+        let request = MediaAgentHandoffRequest {
+            operation_id: MediaOperationId::new(1, 1),
+            session: MediaSessionRef(media_api::MediaSessionId::from("open-session-media")),
+            mode: media_api::MediaSessionMode::Audio,
+        };
+        let prepared = RealtimeAgentContext {
+            session_id: "open-session".into(),
+            profile_name: Some("openai".into()),
+            account_scope: Some("profile:openai".into()),
+            attachment_id: Some(attachment.id().clone()),
+            instructions: String::new(),
+            history: Vec::new(),
+            tools: Vec::new(),
+        };
+        let audio = Arc::new(ControlledAudioChannel {
+            first: TokioMutex::new((!hold_first_frame).then(|| captured_audio(1, 8_000))),
+            pending_read_started: Notify::new(),
+            pending_read_dropped: Arc::new(AtomicBool::new(false)),
+        });
+        OpenFixture {
+            attachment,
+            adapter,
+            request,
+            prepared,
+            audio,
+            provider,
+        }
+    }
+
+    #[tokio::test]
+    async fn real_open_cancels_a_held_first_frame_before_any_provider_connect() {
+        let fixture = open_fixture(true, false, false);
+        let OpenFixture {
+            attachment,
+            adapter,
+            request,
+            prepared,
+            audio,
+            provider,
+        } = fixture;
+        let open_audio = audio.clone();
+        let open = tokio::spawn(async move { adapter.open(request, prepared, open_audio).await });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            audio.pending_read_started.notified(),
+        )
+        .await
+        .expect("open must start the first audio read");
+        attachment.begin_revoke();
+        assert!(tokio::time::timeout(Duration::from_secs(1), open)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        assert!(audio.pending_read_dropped.load(Ordering::Acquire));
+        assert!(!provider.connect_dropped.load(Ordering::Acquire));
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(1)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn real_open_cancels_a_held_sdk_connect_when_attachment_revokes() {
+        let fixture = open_fixture(false, true, false);
+        let OpenFixture {
+            attachment,
+            adapter,
+            request,
+            prepared,
+            audio,
+            provider,
+        } = fixture;
+        let open = tokio::spawn(async move { adapter.open(request, prepared, audio).await });
+        tokio::time::timeout(Duration::from_secs(1), provider.connect_started.notified())
+            .await
+            .expect("open must enter the held provider connect");
+        attachment.begin_revoke();
+        assert!(tokio::time::timeout(Duration::from_secs(1), open)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        assert!(provider.connect_dropped.load(Ordering::Acquire));
+        assert!(!provider.sink_dropped.load(Ordering::Acquire));
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(1)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn real_open_prioritizes_revoke_when_connect_also_becomes_ready() {
+        let fixture = open_fixture(false, true, false);
+        let OpenFixture {
+            attachment,
+            adapter,
+            request,
+            prepared,
+            audio,
+            provider,
+        } = fixture;
+        let mut open = Box::pin(adapter.open(request, prepared, audio));
+        assert!(futures::poll!(open.as_mut()).is_pending());
+        attachment.begin_revoke();
+        provider.connect_release.notify_one();
+        assert!(open.await.is_err());
+        assert!(!provider.connect_resumed.load(Ordering::Acquire));
+        assert!(provider.connect_dropped.load(Ordering::Acquire));
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(1)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_open_revoke_waits_until_the_sdk_driver_aborts_and_drops_its_sink() {
+        let fixture = open_fixture(false, false, true);
+        let OpenFixture {
+            attachment,
+            adapter,
+            request,
+            prepared,
+            audio,
+            provider,
+        } = fixture;
+        let io = adapter.open(request, prepared, audio).await.unwrap();
+        attachment.begin_revoke();
+        let abort_started =
+            tokio::time::timeout(Duration::from_secs(1), provider.abort_started.notified()).await;
+        let pending = attachment.revoke(Duration::from_millis(20)).await;
+        let sink_was_live = !provider.sink_dropped.load(Ordering::Acquire);
+        // Always release the deliberately stalled fake before assertions, so a
+        // failing assertion cannot strand a Tokio worker in a synchronous hook.
+        provider.release_abort();
+        assert!(abort_started.is_ok());
+        assert!(matches!(
+            pending,
+            media_runtime::MediaAttachmentRevocation::Unknown { .. }
+        ));
+        assert!(sink_was_live);
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(2)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+        assert!(provider.abort_called.load(Ordering::Acquire));
+        assert!(provider.sink_dropped.load(Ordering::Acquire));
+        drop(io);
+    }
+
+    #[tokio::test]
+    async fn real_open_revocation_aborts_driver_after_output_already_finished() {
+        let fixture = open_fixture(false, false, false);
+        let OpenFixture {
+            attachment,
+            adapter,
+            request,
+            prepared,
+            audio,
+            provider,
+        } = fixture;
+        let io = adapter.open(request, prepared, audio).await.unwrap();
+
+        // Cancelling the provider-side token causes render_agent_output to
+        // return Ok. The test hook fires only once the supervisor has chosen
+        // that output-completed branch, before revoke is requested.
+        provider.cancel.cancel();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            provider.supervisor_observed_output.notified(),
+        )
+        .await
+        .expect("supervisor must first observe normal output completion");
+
+        // The still-running SDK driver can send after the output task ended.
+        // This ensures the test actually exercises the gap in the old design.
+        io.control
+            .send(RealtimeInput::Text("after output ended".into()))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), provider.send_started.notified())
+            .await
+            .expect("the live driver must dispatch the test frame");
+        assert!(!provider.sink_dropped.load(Ordering::Acquire));
+
+        attachment.begin_revoke();
+        tokio::time::timeout(Duration::from_secs(1), provider.abort_started.notified())
+            .await
+            .expect("revoke must abort before the two-second cleanup timeout");
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(1)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+        assert!(provider.abort_called.load(Ordering::Acquire));
+        assert!(provider.sink_dropped.load(Ordering::Acquire));
+        drop(io);
+    }
+
+    #[tokio::test]
+    async fn real_open_revoke_joins_driver_when_another_abort_has_already_started() {
+        let fixture = open_fixture(false, false, false);
+        let OpenFixture {
+            attachment,
+            adapter,
+            request,
+            prepared,
+            audio,
+            provider,
+        } = fixture;
+        let io = adapter.open(request, prepared, audio).await.unwrap();
+
+        // This first poll sends abort but does not yield to the driver. The
+        // revocation watcher will see an already-consumed abort sender and
+        // must still poll and join the same driver to release the fence.
+        let mut abort = Box::pin(io.control.abort(RealtimeClose::normal("other owner")));
+        assert!(futures::poll!(abort.as_mut()).is_pending());
+        attachment.begin_revoke();
+        assert!(tokio::time::timeout(Duration::from_secs(1), abort)
+            .await
+            .expect("driver must acknowledge the first abort")
+            .is_ok());
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(1)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+        assert!(provider.abort_called.load(Ordering::Acquire));
+        assert!(provider.sink_dropped.load(Ordering::Acquire));
+        drop(io);
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_drops_real_open_driver_before_confirming_revoke() {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let fixture = open_fixture(false, false, false);
+            let OpenFixture {
+                attachment,
+                adapter,
+                request,
+                prepared,
+                audio,
+                provider,
+            } = fixture;
+            let io = runtime
+                .block_on(adapter.open(request, prepared, audio))
+                .unwrap();
+            ready_tx.send((attachment, provider)).ok().unwrap();
+            shutdown_rx.recv().unwrap();
+            // Keep the returned IO alive until after runtime shutdown so the
+            // driver is not closed merely by dropping the output sender.
+            runtime.shutdown_background();
+            drop(io);
+        });
+        let (attachment, provider) = ready_rx.await.unwrap();
+        attachment.begin_revoke();
+        assert!(matches!(
+            attachment.revoke(Duration::from_millis(20)).await,
+            media_runtime::MediaAttachmentRevocation::Unknown { .. }
+        ));
+        assert!(!provider.sink_dropped.load(Ordering::Acquire));
+        shutdown_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(2)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+        assert!(provider.sink_dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn held_provider_connect_fences_revoke_until_the_future_is_cancelled() {
+        let host = MediaAttachmentHost::new();
+        let attachment = host.attach(Arc::new(EmptyMediaService)).unwrap();
+        let owner = MediaOwner::Session {
+            session_id: "held-connect".into(),
+        };
+        let permit = attachment.authorize_owner(&owner).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let drop_flag = dropped.clone();
+        let mut connect = Box::pin(prepare_with_attachment_fence(
+            &attachment,
+            permit,
+            async move {
+                let _transport = DropFlag(drop_flag);
+                std::future::pending::<()>().await;
+            },
+        ));
+
+        // Poll exactly once, then hold the connect without polling it again.
+        assert!(futures::poll!(connect.as_mut()).is_pending());
+        attachment.begin_revoke();
+        assert!(matches!(
+            attachment.revoke(Duration::from_millis(10)).await,
+            media_runtime::MediaAttachmentRevocation::Unknown { .. }
+        ));
+        assert!(!dropped.load(Ordering::Acquire));
+        drop(connect);
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(1)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed,
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_cancels_a_held_provider_connect_without_waiting_for_turn_cleanup() {
+        let host = MediaAttachmentHost::new();
+        let attachment = host.attach(Arc::new(EmptyMediaService)).unwrap();
+        let owner = MediaOwner::Session {
+            session_id: "held-connect".into(),
+        };
+        let permit = attachment.authorize_owner(&owner).unwrap();
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let connect_started = started.clone();
+        let drop_flag = dropped.clone();
+        let task_attachment = attachment.clone();
+        let task = tokio::spawn(async move {
+            prepare_with_attachment_fence(&task_attachment, permit, async move {
+                let _transport = DropFlag(drop_flag);
+                connect_started.notify_one();
+                std::future::pending::<()>().await;
+            })
+            .await
+            .is_none()
+        });
+        started.notified().await;
+        attachment.begin_revoke();
+        assert!(tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap());
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(1)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed,
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_waits_for_spawned_provider_driver_to_drop_its_connection() {
+        let host = MediaAttachmentHost::new();
+        let attachment = host.attach(Arc::new(EmptyMediaService)).unwrap();
+        let owner = MediaOwner::Session {
+            session_id: "held-driver".into(),
+        };
+        let permit = attachment.authorize_owner(&owner).unwrap();
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let driver_started = started.clone();
+        let drop_flag = dropped.clone();
+        let work = AttachmentFencedFuture::new(
+            async move {
+                let _connection = DropFlag(drop_flag);
+                driver_started.notify_one();
+                std::future::pending::<()>().await;
+            },
+            permit,
+        );
+        let driver = tokio::spawn(async move {
+            let (_, permit) = work.await;
+            drop(permit);
+        });
+        started.notified().await;
+        attachment.begin_revoke();
+        assert!(matches!(
+            attachment.revoke(Duration::from_millis(10)).await,
+            media_runtime::MediaAttachmentRevocation::Unknown { .. }
+        ));
+        assert!(!dropped.load(Ordering::Acquire));
+        driver.abort();
+        assert!(driver.await.unwrap_err().is_cancelled());
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(1)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed,
+        );
+    }
 
     struct FakeAudioChannel {
         frames: TokioMutex<VecDeque<media_api::MediaFrame>>,

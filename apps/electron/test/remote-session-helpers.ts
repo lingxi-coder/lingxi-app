@@ -278,7 +278,7 @@ export class FakeRuntime implements RemoteRuntime {
     if (this.failSend) throw this.failSend;
   }
 
-  async executeMedia(_operation: MediaOperationDto, _limits?: { timeout_budget_ms?: number; max_payload_bytes?: number }): Promise<{ operation_id: MediaOperationIdDto; result: MediaResultDto }> {
+  async executeMedia(_operation: MediaOperationDto, _limits?: { timeout_budget_ms?: number; max_payload_bytes?: number }): Promise<{ operation_id: MediaOperationIdDto; incarnation: string; result: MediaResultDto }> {
     throw new Error('unused media operation in FakeRuntime');
   }
 
@@ -286,7 +286,7 @@ export class FakeRuntime implements RemoteRuntime {
     throw new Error('unused media read in FakeRuntime');
   }
 
-  async cancelMedia(_operationId: MediaOperationIdDto): Promise<void> {
+  async cancelMedia(_operationId: MediaOperationIdDto, _incarnation: string): Promise<void> {
     throw new Error('unused media cancellation in FakeRuntime');
   }
 

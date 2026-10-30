@@ -1,12 +1,12 @@
-import { useEffect, useReducer, useRef, useState } from 'react';
-import type { TeamDetail, TeamSummary, TeamsApi } from './index';
-import { TeamMessaging, recoveryKey, type TeamMessage } from './messages';
-import { indexedDbMessageStorage } from './message-storage';
-import { canRecoverBot, isQuestionRecipient, teamBotTriggerId, teamBotUsable, type TeamBotCard, type TeamBotState, type LocalTeamBot } from './bots';
+import { useEffect, useReducer, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { canRecoverBot, isQuestionRecipient, teamBotTriggerId, teamBotUsable, type LocalTeamBot, type TeamBotCard, type TeamBotState } from './bots.js';
+import type { TeamDetail, TeamsApi, TeamSummary } from './index.js';
+import { indexedDbMessageStorage } from './message-storage.js';
+import { recoveryKey, TeamMessaging, type TeamMessage } from './messages.js';
 
 export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
   api: TeamsApi; uid: string; team: TeamSummary; members: TeamDetail['members']; zh: boolean; onClose(): void;
-}) {
+}): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const submitting = useRef(false);
   const [, render] = useReducer(value => value + 1, 0);
@@ -30,22 +30,49 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
   // The controller owns one account and one membership generation.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, uid, team.id, team.generation]);
-  const errorText = (code: string) => ['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED'].includes(code)
-    ? t('Access changed. Return to members and refresh before continuing.', '访问权限已变化，请返回成员页并刷新。')
-    : /STORAGE|Quota|disk/iu.test(code) ? t('Local message storage is unavailable. Check free space and try again.', '本地消息存储不可用，请检查空间后重试。')
-    : ['BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET'].includes(code) ? t('Bot access changed. Sync and check the selected Bots before sending again.', 'Bot 权限已变化，请同步并检查所选 Bot 后重试。')
-    : ['QUESTION_RECIPIENT_REQUIRED', 'ANSWER_CONFLICT', 'INVALID_ANSWER'].includes(code) ? t('This answer cannot be accepted. Check the question and original requester.', '此答案无法接收，请检查问题与原始请求人身份。')
-    : code === 'TEAM_MODEL_UNSUPPORTED' ? t('This model configuration cannot be used for Team Bots. Check the provider settings on Desktop or choose another model.', '当前模型配置不能用于团队 Bot，请检查 Desktop 的供应商配置或选择其他模型。')
-    : code === 'TEAM_MODEL_UNAVAILABLE' ? t('This Bot’s model or API key is unavailable. Check its model and provider settings on Desktop.', '此 Bot 的模型或 API 密钥不可用，请检查 Desktop 的模型与供应商设置。')
-    : code === 'TEAM_RUNTIME_UNAVAILABLE' ? t('The isolated Teams runtime is unavailable on this Desktop. Install a Desktop build that includes it.', '此 Desktop 缺少团队隔离运行时，请安装包含此运行时的 Desktop 版本。')
-    : code === 'TEAM_HOST_MACOS_REQUIRED' ? t('Sharing a Team Bot currently requires macOS Desktop.', '共享团队 Bot 当前需要 macOS Desktop。')
-    : code === 'TEAM_HOST_UNAVAILABLE' ? t('The Desktop Bot host is unavailable. Check the Desktop service and try again.', 'Desktop Bot 主机不可用，请检查 Desktop 服务后重试。')
-    : code === 'RECOVERY_NOT_REQUIRED' ? t('The run is not eligible for a new settlement. Refresh and review its current status.', '此运行当前无法创建新的处理结果，请刷新并检查状态。')
-    : code === 'BOT_RESULT_CONFLICT' ? t('A different settlement is already saved for this request. Retry the saved result unchanged.', '此请求已保存不同的处理结果，请重试原始结果。')
-    : code === 'BOT_REVISION_CONFLICT' ? t('Bot settings changed. Refresh before saving again.', 'Bot 设置已变化，请刷新后重试。')
-    : ['MESSAGE_RECALLED', 'MESSAGE_ID_CONFLICT', 'MESSAGE_AUTHOR_REQUIRED', 'PARTICIPANT_REQUIRED', 'CONVERSATION_REJECTED', 'INVALID_INPUT'].includes(code)
-      ? t('This pending change was rejected. Discard it and try again.', '此待发操作未被接受，请丢弃后重试。')
-      : t('Could not sync messages. Check your connection and try again.', '消息同步未完成，请检查网络后重试。');
+  function errorText(code: string): string {
+    if (['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED'].includes(code)) {
+      return t('Access changed. Return to members and refresh before continuing.', '访问权限已变化，请返回成员页并刷新。');
+    }
+    if (/STORAGE|Quota|disk/iu.test(code)) {
+      return t('Local message storage is unavailable. Check free space and try again.', '本地消息存储不可用，请检查空间后重试。');
+    }
+    switch (code) {
+      case 'BOT_USE_REQUIRED':
+      case 'BOT_PARTICIPANT_REQUIRED':
+      case 'INVALID_BOT_TARGET':
+        return t('Bot access changed. Sync and check the selected Bots before sending again.', 'Bot 权限已变化，请同步并检查所选 Bot 后重试。');
+      case 'QUESTION_RECIPIENT_REQUIRED':
+      case 'ANSWER_CONFLICT':
+      case 'INVALID_ANSWER':
+        return t('This answer cannot be accepted. Check the question and original requester.', '此答案无法接收，请检查问题与原始请求人身份。');
+      case 'TEAM_MODEL_UNSUPPORTED':
+        return t('This model configuration cannot be used for Team Bots. Check the provider settings on Desktop or choose another model.', '当前模型配置不能用于团队 Bot，请检查 Desktop 的供应商配置或选择其他模型。');
+      case 'TEAM_MODEL_UNAVAILABLE':
+        return t('This Bot’s model or API key is unavailable. Check its model and provider settings on Desktop.', '此 Bot 的模型或 API 密钥不可用，请检查 Desktop 的模型与供应商设置。');
+      case 'TEAM_RUNTIME_UNAVAILABLE':
+        return t('The isolated Teams runtime is unavailable on this Desktop. Install a Desktop build that includes it.', '此 Desktop 缺少团队隔离运行时，请安装包含此运行时的 Desktop 版本。');
+      case 'TEAM_HOST_MACOS_REQUIRED':
+        return t('Sharing a Team Bot currently requires macOS Desktop.', '共享团队 Bot 当前需要 macOS Desktop。');
+      case 'TEAM_HOST_UNAVAILABLE':
+        return t('The Desktop Bot host is unavailable. Check the Desktop service and try again.', 'Desktop Bot 主机不可用，请检查 Desktop 服务后重试。');
+      case 'RECOVERY_NOT_REQUIRED':
+        return t('The run is not eligible for a new settlement. Refresh and review its current status.', '此运行当前无法创建新的处理结果，请刷新并检查状态。');
+      case 'BOT_RESULT_CONFLICT':
+        return t('A different settlement is already saved for this request. Retry the saved result unchanged.', '此请求已保存不同的处理结果，请重试原始结果。');
+      case 'BOT_REVISION_CONFLICT':
+        return t('Bot settings changed. Refresh before saving again.', 'Bot 设置已变化，请刷新后重试。');
+      case 'MESSAGE_RECALLED':
+      case 'MESSAGE_ID_CONFLICT':
+      case 'MESSAGE_AUTHOR_REQUIRED':
+      case 'PARTICIPANT_REQUIRED':
+      case 'CONVERSATION_REJECTED':
+      case 'INVALID_INPUT':
+        return t('This pending change was rejected. Discard it and try again.', '此待发操作未被接受，请丢弃后重试。');
+      default:
+        return t('Could not sync messages. Check your connection and try again.', '消息同步未完成，请检查网络后重试。');
+    }
+  }
   const selected = model?.selected ?? '';
   useEffect(() => { setEditing(undefined); setReply(undefined); setRecall(undefined); setText(''); setShown(100); setTargets([]); }, [selected]);
   const attempt = async (action: () => Promise<unknown>) => {
@@ -59,7 +86,14 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
   const messages = model?.state.threads[selected]?.messages ?? [];
   const pending = model?.state.outbox.filter(value => value.conversationId === selected) ?? [];
   const states = runStates.conversationId === selected ? runStates.values : {};
-  const triggerSources = JSON.stringify(messages.slice(-shown).flatMap<{ messageId: string; triggerId?: string; botKey?: string }>(message => message.triggerId ? [{ messageId: message.id, triggerId: message.triggerId }] : message.author.kind === 'user' && !message.recalled ? (conversation?.kind === 'bot_dm' ? conversation.participants.filter(value => value.startsWith('bot:')) : message.mentions ?? []).map(botKey => ({ messageId: message.id, botKey })) : []));
+  const triggerSources = JSON.stringify(messages.slice(-shown).flatMap<{ messageId: string; triggerId?: string; botKey?: string }>(message => {
+    if (message.triggerId) return [{ messageId: message.id, triggerId: message.triggerId }];
+    if (message.author.kind !== 'user' || message.recalled) return [];
+    const botKeys = conversation?.kind === 'bot_dm'
+      ? conversation.participants.filter(value => value.startsWith('bot:'))
+      : message.mentions ?? [];
+    return botKeys.map(botKey => ({ messageId: message.id, botKey }));
+  }));
   const [triggerMap, setTriggerMap] = useState<{ conversationId: string; values: Record<string, string[]> }>({ conversationId: '', values: {} });
   useEffect(() => {
     let closed = false;
@@ -134,7 +168,11 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
       <details><summary>{t('New conversation', '新建会话')}</summary><form onSubmit={event => { event.preventDefault(); void attempt(async () => { if (botParties.some(key => !bots.some(bot => bot.key === key && teamBotUsable(bot)))) throw new Error('BOT_USE_REQUIRED'); await model?.create(kind, title.trim(), [uid, ...parties], botParties); setTitle(''); setParties([]); setBotParties([]); }); }}>
         <label>{t('Title', '标题')}<input value={title} onChange={event => setTitle(event.target.value)} maxLength={120} required /></label>
         <label>{t('Type', '类型')}<select value={kind} onChange={event => { setKind(event.target.value as typeof kind); setParties([]); setBotParties([]); }}><option value="dm">{t('Direct message', '私聊')}</option><option value="group">{t('Group', '群聊')}</option><option value="channel">{t('Channel', '频道')}</option></select></label>
-        <fieldset><legend>{t('Participants', '参与成员')}</legend>{members.filter(member => member.uid !== uid).map(member => <label key={member.uid} className="team-party"><input type={kind === 'dm' ? 'radio' : 'checkbox'} name="participants" checked={parties.includes(member.uid)} onChange={event => setParties(kind === 'dm' ? [member.uid] : event.target.checked ? [...parties, member.uid] : parties.filter(id => id !== member.uid))} />{member.displayName}</label>)}</fieldset>
+        <fieldset><legend>{t('Participants', '参与成员')}</legend>{members.filter(member => member.uid !== uid).map(member => <label key={member.uid} className="team-party"><input type={kind === 'dm' ? 'radio' : 'checkbox'} name="participants" checked={parties.includes(member.uid)} onChange={event => {
+          if (kind === 'dm') setParties([member.uid]);
+          else if (event.target.checked) setParties([...parties, member.uid]);
+          else setParties(parties.filter(id => id !== member.uid));
+        }} />{member.displayName}</label>)}</fieldset>
         {kind !== 'dm' ? <fieldset><legend>{t('Participating Bots', '参与的 Bot')}</legend>{bots.filter(teamBotUsable).map(bot => <label key={bot.key} className="team-party"><input type="checkbox" checked={botParties.includes(bot.key)} disabled={!botParties.includes(bot.key) && botParties.length >= 8} onChange={event => setBotParties(event.target.checked ? [...botParties, bot.key] : botParties.filter(key => key !== bot.key))} />{bot.name} · {name(bot.ownerUid)}</label>)}</fieldset> : null}
         <button disabled={busy || !title.trim() || (parties.length === 0 && botParties.length === 0) || Boolean(model?.offline)}>{t('Create conversation', '创建会话')}</button>
       </form></details>
@@ -166,7 +204,7 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
 function BotDirectory({ api, uid, team, members, bots, zh, busy, status, attempt, onOpen, onChanged }: {
   api: TeamsApi; uid: string; team: TeamSummary; members: TeamDetail['members']; bots: TeamBotCard[]; zh: boolean; busy: boolean; status: string;
   attempt(action: () => Promise<unknown>): Promise<void>; onOpen(bot: TeamBotCard): Promise<void>; onChanged(): Promise<void>;
-}) {
+}): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const [local, setLocal] = useState<LocalTeamBot[]>([]), [loaded, setLoaded] = useState(false);
   const [botId, setBotId] = useState(''), [use, setUse] = useState<'all' | 'listed'>('listed'), [uids, setUids] = useState<string[]>([]);
@@ -174,12 +212,38 @@ function BotDirectory({ api, uid, team, members, bots, zh, busy, status, attempt
   const [draftRevision, setDraftRevision] = useState(0);
   const owner = (id: string) => members.find(member => member.uid === id)?.displayName ?? id;
   const existing = bots.find(bot => bot.ownerUid === uid && bot.botId === botId);
+  let bindingLabel: string;
+  if (existing?.enabled === false) bindingLabel = t('Rebind Bot', '重新绑定 Bot');
+  else if (existing) bindingLabel = t('Save permissions', '保存权限');
+  else bindingLabel = t('Bind Bot', '绑定 Bot');
   return <section className="team-bots" aria-label={t('Team Bots', '团队 Bot')}><h3>{t('Team Bots', '团队 Bot')}</h3>
     <p className="teams-hint">{t('Bots run on their owner’s Desktop. The owner can read every conversation containing their Bot. Team members cannot approve its tools.', 'Bot 在所有者的 Desktop 上运行。所有者可阅读包含其 Bot 的所有会话。团队成员无法批准其工具操作。')}</p>
     {status ? <p role="status">{status}</p> : null}
-    <ul className="team-bot-grid">{bots.map(bot => <li key={bot.key} className="teams-card"><header><b>{bot.name}</b><span className="team-bot-presence" data-online={bot.enabled !== false && bot.online}>{bot.enabled === false ? t('Disabled', '已停用') : bot.online ? t('Online', '在线') : t('Offline', '离线')}</span></header><p>{bot.description}</p><small>{t('Owner', '所有者')}: {owner(bot.ownerUid)}</small><p className="teams-hint">{bot.enabled === false ? t('Not shared. Rebind on Desktop to enable new requests.', '尚未共享。在 Desktop 重新绑定后可接收新请求。') : bot.use === 'all' ? t('All team members may use', '全体团队成员可用') : t('Only owner and listed members may use', '仅所有者与指定成员可用')}{bot.use === 'listed' && bot.uids.length ? ` · ${bot.uids.map(owner).join(', ')}` : ''}</p><div className="teams-row-actions"><button disabled={busy || !teamBotUsable(bot)} onClick={() => void attempt(() => onOpen(bot))}>{bot.enabled === false ? t('Disabled', '已停用') : bot.permitted ? t('Message Bot', '与 Bot 对话') : t('Not permitted', '无使用权限')}</button>{bot.ownerUid === uid && bot.enabled !== false ? <button disabled={busy} className="teams-danger" onClick={() => setRemoving(bot)}>{t('Unbind', '解除绑定')}</button> : null}</div></li>)}</ul>
+    <ul className="team-bot-grid">{bots.map(bot => {
+      let presenceLabel: string;
+      let audienceLabel: string;
+      let messageLabel: string;
+      if (bot.enabled === false) {
+        presenceLabel = t('Disabled', '已停用');
+        audienceLabel = t('Not shared. Rebind on Desktop to enable new requests.', '尚未共享。在 Desktop 重新绑定后可接收新请求。');
+        messageLabel = t('Disabled', '已停用');
+      } else {
+        presenceLabel = bot.online ? t('Online', '在线') : t('Offline', '离线');
+        audienceLabel = bot.use === 'all' ? t('All team members may use', '全体团队成员可用') : t('Only owner and listed members may use', '仅所有者与指定成员可用');
+        messageLabel = bot.permitted ? t('Message Bot', '与 Bot 对话') : t('Not permitted', '无使用权限');
+      }
+      return <li key={bot.key} className="teams-card">
+        <header><b>{bot.name}</b><span className="team-bot-presence" data-online={bot.enabled !== false && bot.online}>{presenceLabel}</span></header>
+        <p>{bot.description}</p><small>{t('Owner', '所有者')}: {owner(bot.ownerUid)}</small>
+        <p className="teams-hint">{audienceLabel}{bot.use === 'listed' && bot.uids.length ? ` · ${bot.uids.map(owner).join(', ')}` : ''}</p>
+        <div className="teams-row-actions">
+          <button disabled={busy || !teamBotUsable(bot)} onClick={() => void attempt(() => onOpen(bot))}>{messageLabel}</button>
+          {bot.ownerUid === uid && bot.enabled !== false ? <button disabled={busy} className="teams-danger" onClick={() => setRemoving(bot)}>{t('Unbind', '解除绑定')}</button> : null}
+        </div>
+      </li>;
+    })}</ul>
     {!bots.length && !status ? <p>{t('No Bots are shared with this team yet.', '此团队尚未共享 Bot。')}</p> : null}
-    {api.localBots && api.bindLocalBot ? <details><summary>{t('Share a Desktop Bot / change permissions', '共享 Desktop Bot / 修改权限')}</summary><button disabled={busy} onClick={() => void attempt(async () => { const result = await api.localBots!(); setLocal(result); setLoaded(true); })}>{t('Load local Bots', '加载本机 Bot')}</button>{loaded ? <form onSubmit={event => { event.preventDefault(); void attempt(async () => { await api.bindLocalBot!({ teamId: team.id, generation: team.generation, botId, use, uids: use === 'listed' ? uids : [], expectedRevision: draftRevision }); setBotId(''); setDraftRevision(0); setUids([]); await onChanged(); }); }}><label>{t('Local Bot', '本机 Bot')}<select required value={botId} onChange={event => { const id = event.target.value, card = bots.find(bot => bot.ownerUid === uid && bot.botId === id); setBotId(id); setDraftRevision(card?.revision ?? 0); setUse(card?.use ?? 'listed'); setUids([...(card?.uids ?? [])]); }}><option value="">{t('Choose a Bot', '选择 Bot')}</option>{local.map(bot => <option key={bot.botId} value={bot.botId}>{bot.name}{bot.model ? ` · ${bot.model}` : ''}</option>)}</select></label>{!local.length ? <p>{t('Create a Bot on this Desktop first.', '请先在此 Desktop 创建 Bot。')}</p> : null}{botId && draftRevision !== (existing?.revision ?? 0) ? <div role="status"><p>{t('Permissions changed in another window. Reload the current audience before editing again.', '其他窗口已更改权限，请重新加载当前使用范围后再编辑。')}</p><button type="button" disabled={busy} onClick={() => { setDraftRevision(existing?.revision ?? 0); setUse(existing?.use ?? 'listed'); setUids([...(existing?.uids ?? [])]); }}>{t('Reload current permissions', '重新加载当前权限')}</button></div> : null}<label>{t('Who may use this Bot?', '谁可使用此 Bot？')}<select value={use} onChange={event => setUse(event.target.value as typeof use)}><option value="listed">{t('Owner and selected members', '所有者与指定成员')}</option><option value="all">{t('All team members', '全体团队成员')}</option></select></label>{use === 'listed' ? <fieldset><legend>{t('Allowed members', '允许的成员')}</legend>{members.filter(member => member.uid !== uid).map(member => <label key={member.uid} className="team-party"><input type="checkbox" checked={uids.includes(member.uid)} onChange={event => setUids(event.target.checked ? [...uids, member.uid] : uids.filter(id => id !== member.uid))} />{member.displayName}</label>)}</fieldset> : null}<button disabled={busy || !botId}>{existing?.enabled === false ? t('Rebind Bot', '重新绑定 Bot') : existing ? t('Save permissions', '保存权限') : t('Bind Bot', '绑定 Bot')}</button></form> : null}</details> : <p className="teams-hint">{t('Open Teams in LingXi Desktop to share a local Bot or change its permissions.', '在灵犀 Desktop 的团队页面共享本机 Bot 或修改使用权限。')}</p>}
+    {api.localBots && api.bindLocalBot ? <details><summary>{t('Share a Desktop Bot / change permissions', '共享 Desktop Bot / 修改权限')}</summary><button disabled={busy} onClick={() => void attempt(async () => { const result = await api.localBots!(); setLocal(result); setLoaded(true); })}>{t('Load local Bots', '加载本机 Bot')}</button>{loaded ? <form onSubmit={event => { event.preventDefault(); void attempt(async () => { await api.bindLocalBot!({ teamId: team.id, generation: team.generation, botId, use, uids: use === 'listed' ? uids : [], expectedRevision: draftRevision }); setBotId(''); setDraftRevision(0); setUids([]); await onChanged(); }); }}><label>{t('Local Bot', '本机 Bot')}<select required value={botId} onChange={event => { const id = event.target.value, card = bots.find(bot => bot.ownerUid === uid && bot.botId === id); setBotId(id); setDraftRevision(card?.revision ?? 0); setUse(card?.use ?? 'listed'); setUids([...(card?.uids ?? [])]); }}><option value="">{t('Choose a Bot', '选择 Bot')}</option>{local.map(bot => <option key={bot.botId} value={bot.botId}>{bot.name}{bot.model ? ` · ${bot.model}` : ''}</option>)}</select></label>{!local.length ? <p>{t('Create a Bot on this Desktop first.', '请先在此 Desktop 创建 Bot。')}</p> : null}{botId && draftRevision !== (existing?.revision ?? 0) ? <div role="status"><p>{t('Permissions changed in another window. Reload the current audience before editing again.', '其他窗口已更改权限，请重新加载当前使用范围后再编辑。')}</p><button type="button" disabled={busy} onClick={() => { setDraftRevision(existing?.revision ?? 0); setUse(existing?.use ?? 'listed'); setUids([...(existing?.uids ?? [])]); }}>{t('Reload current permissions', '重新加载当前权限')}</button></div> : null}<label>{t('Who may use this Bot?', '谁可使用此 Bot？')}<select value={use} onChange={event => setUse(event.target.value as typeof use)}><option value="listed">{t('Owner and selected members', '所有者与指定成员')}</option><option value="all">{t('All team members', '全体团队成员')}</option></select></label>{use === 'listed' ? <fieldset><legend>{t('Allowed members', '允许的成员')}</legend>{members.filter(member => member.uid !== uid).map(member => <label key={member.uid} className="team-party"><input type="checkbox" checked={uids.includes(member.uid)} onChange={event => setUids(event.target.checked ? [...uids, member.uid] : uids.filter(id => id !== member.uid))} />{member.displayName}</label>)}</fieldset> : null}<button disabled={busy || !botId}>{bindingLabel}</button></form> : null}</details> : <p className="teams-hint">{t('Open Teams in LingXi Desktop to share a local Bot or change its permissions.', '在灵犀 Desktop 的团队页面共享本机 Bot 或修改使用权限。')}</p>}
     {removing ? <div className="teams-modal"><section role="alertdialog" aria-modal="true" aria-label={t('Unbind Bot?', '解除 Bot 绑定？')}><h2>{t(`Unbind ${removing.name}?`, `解除 ${removing.name} 的绑定？`)}</h2><p>{t('New Bot requests will stop. Existing conversation history remains.', '将停止新的 Bot 请求，现有会话历史保留。')}</p><div><button autoFocus disabled={busy} onClick={() => setRemoving(undefined)}>{t('Cancel', '取消')}</button><button disabled={busy} className="teams-danger" onClick={() => void attempt(async () => { await api.messages({ action: 'unbindBot', teamId: team.id, generation: team.generation, botKey: removing.key, expectedRevision: removing.revision }); setRemoving(undefined); await onChanged(); })}>{t('Unbind', '解除绑定')}</button></div></section></div> : null}
   </section>;
 }
@@ -187,20 +251,41 @@ function BotDirectory({ api, uid, team, members, bots, zh, busy, status, attempt
 function BotQuestion({ message, uid, generation, state, model, busy, zh, attempt }: {
   message: TeamMessage; uid: string; generation: number; state?: TeamBotState; model: TeamMessaging; busy: boolean; zh: boolean;
   attempt(action: () => Promise<unknown>): Promise<void>;
-}) {
+}): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const pending = model.state.answerOutbox?.find(value => value.conversationId === model.selected && value.questionId === message.question!.id);
   const answered = state?.questionId === message.question!.id && state.answered || model.state.answerReceipts?.includes(JSON.stringify([model.selected, message.question!.id]));
   const recipient = isQuestionRecipient(message, uid, generation);
   const active = state?.state === 'running' && state.questionId === message.question!.id && state.origin.uid === uid && state.origin.generation === generation && (state.leaseUntil ?? 0) > Date.now();
-  return <section className="team-bot-question"><h4>{t('Bot question', 'Bot 提问')}</h4>{answered ? <p role="status">{t('Answer received.', '答案已接收。')}</p> : pending ? <><p role="status">{pending.error ? t('Answer was rejected. It was not changed or resent with a new identity.', '答案被拒绝，未更改内容或使用新身份重发。') : t('Answer saved. Waiting for confirmation; reconnect retries this exact answer.', '答案已保存，等待确认；重新连接后将重试相同答案。')}</p>{message.question!.questions.map(question => <p key={question}><b>{question}</b><br />{pending.answers[question]}</p>)}{pending.error ? <button disabled={busy} onClick={() => void attempt(() => model.discardAnswer(pending.answerId))}>{t('Discard rejected answer', '丢弃被拒绝的答案')}</button> : null}</> : recipient ? <form onSubmit={event => { event.preventDefault(); void attempt(() => model.answer(message, answers)); }}>{message.question!.questions.map(question => <label key={question}>{question}<textarea maxLength={2000} required disabled={busy || !active} value={answers[question] ?? ''} onChange={event => setAnswers(old => ({ ...old, [question]: event.target.value }))} /></label>)}<button disabled={busy || !active || message.question!.questions.some(question => !answers[question]?.trim())}>{t('Send answer', '发送答案')}</button>{!active ? <p className="teams-hint">{state ? t('This question is no longer active.', '此问题已无法回答。') : t('Waiting to verify this question is still active.', '正在确认此问题是否仍可回答。')}</p> : null}</form> : <><ul>{message.question!.questions.map(question => <li key={question}>{question}</li>)}</ul><p className="teams-hint">{t('Only the original requester in the same membership can answer.', '仅同一次成员身份的原始请求人可回答。')}</p></>}</section>;
+  let content: ReactNode;
+  if (answered) {
+    content = <p role="status">{t('Answer received.', '答案已接收。')}</p>;
+  } else if (pending) {
+    content = <>
+      <p role="status">{pending.error ? t('Answer was rejected. It was not changed or resent with a new identity.', '答案被拒绝，未更改内容或使用新身份重发。') : t('Answer saved. Waiting for confirmation; reconnect retries this exact answer.', '答案已保存，等待确认；重新连接后将重试相同答案。')}</p>
+      {message.question!.questions.map(question => <p key={question}><b>{question}</b><br />{pending.answers[question]}</p>)}
+      {pending.error ? <button disabled={busy} onClick={() => void attempt(() => model.discardAnswer(pending.answerId))}>{t('Discard rejected answer', '丢弃被拒绝的答案')}</button> : null}
+    </>;
+  } else if (recipient) {
+    content = <form onSubmit={event => { event.preventDefault(); void attempt(() => model.answer(message, answers)); }}>
+      {message.question!.questions.map(question => <label key={question}>{question}<textarea maxLength={2000} required disabled={busy || !active} value={answers[question] ?? ''} onChange={event => setAnswers(old => ({ ...old, [question]: event.target.value }))} /></label>)}
+      <button disabled={busy || !active || message.question!.questions.some(question => !answers[question]?.trim())}>{t('Send answer', '发送答案')}</button>
+      {!active ? <p className="teams-hint">{state ? t('This question is no longer active.', '此问题已无法回答。') : t('Waiting to verify this question is still active.', '正在确认此问题是否仍可回答。')}</p> : null}
+    </form>;
+  } else {
+    content = <>
+      <ul>{message.question!.questions.map(question => <li key={question}>{question}</li>)}</ul>
+      <p className="teams-hint">{t('Only the original requester in the same membership can answer.', '仅同一次成员身份的原始请求人可回答。')}</p>
+    </>;
+  }
+  return <section className="team-bot-question"><h4>{t('Bot question', 'Bot 提问')}</h4>{content}</section>;
 }
 
 function BotRun({ state, triggerId, conversationId, model, uid, zh, busy, attempt }: {
   state: TeamBotState; triggerId: string; conversationId: string; model: TeamMessaging; uid: string; zh: boolean; busy: boolean;
   attempt(action: () => Promise<unknown>): Promise<void>;
-}) {
+}): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const [text, setText] = useState(''), [confirmed, setConfirmed] = useState(false);
   const key = recoveryKey(conversationId, triggerId);
@@ -215,5 +300,23 @@ function BotRun({ state, triggerId, conversationId, model, uid, zh, busy, attemp
     runtime_unavailable: ['The isolated Teams runtime is unavailable on Desktop. Check the installed Desktop build.', 'Desktop 的团队隔离运行时不可用，请检查已安装版本。'],
     storage_error: ['Desktop could not save the request state. Check local storage before retrying.', 'Desktop 无法保存请求状态，请检查本地存储后重试。'],
   };
-  return <div className="team-bot-run"><p role="status">Bot · {done ? t('Recovered by owner', '所有者已恢复') : labels[state.state]?.[zh ? 1 : 0] ?? state.state}</p>{uid === state.ownerUid && state.hostStatus ? <p role="status" className="teams-hint">{hostLabels[state.hostStatus][zh ? 1 : 0]}</p> : null}{pending ? <div className="team-pending"><p role="status">{pending.error ? t('Settlement was rejected. Review the run before creating a new settlement.', '处理结果被拒绝，请检查运行状态后再创建新的处理结果。') : t('Settlement saved. Reconnecting retries this exact result without running tools.', '处理结果已保存，重新连接后将重试交付原始结果，不会运行工具。')}</p><p>{pending.text}</p>{pending.error ? <button disabled={busy} onClick={() => void attempt(() => model.discardRejectedRecovery(conversationId, triggerId))}>{t('Discard rejected settlement', '丢弃被拒绝的处理结果')}</button> : null}</div> : !done && canRecoverBot(state, uid) ? <details><summary>{t('Resolve interrupted request', '处理已中断请求')}</summary><p>{t('This settles the request without running its tools again. Check any external effects before writing the result.', '此操作会结束该请求，不会重新执行工具。请先检查外部操作结果。')}</p><form onSubmit={event => { event.preventDefault(); void attempt(() => model.recover(conversationId, triggerId, text)); }}><label>{t('Result for the conversation', '发送到会话的处理结果')}<textarea required value={text} maxLength={8192} onChange={event => setText(event.target.value)} /></label><label className="team-party"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />{t('I checked the interrupted request and want to settle it.', '我已检查中断请求并确认结束。')}</label><button disabled={busy || !confirmed || !text.trim() || new TextEncoder().encode(text).length > 8192}>{t('Settle request', '结束请求')}</button></form></details> : null}</div>;
+  let recovery: ReactNode = null;
+  if (pending) {
+    recovery = <div className="team-pending">
+      <p role="status">{pending.error ? t('Settlement was rejected. Review the run before creating a new settlement.', '处理结果被拒绝，请检查运行状态后再创建新的处理结果。') : t('Settlement saved. Reconnecting retries this exact result without running tools.', '处理结果已保存，重新连接后将重试交付原始结果，不会运行工具。')}</p>
+      <p>{pending.text}</p>
+      {pending.error ? <button disabled={busy} onClick={() => void attempt(() => model.discardRejectedRecovery(conversationId, triggerId))}>{t('Discard rejected settlement', '丢弃被拒绝的处理结果')}</button> : null}
+    </div>;
+  } else if (!done && canRecoverBot(state, uid)) {
+    recovery = <details>
+      <summary>{t('Resolve interrupted request', '处理已中断请求')}</summary>
+      <p>{t('This settles the request without running its tools again. Check any external effects before writing the result.', '此操作会结束该请求，不会重新执行工具。请先检查外部操作结果。')}</p>
+      <form onSubmit={event => { event.preventDefault(); void attempt(() => model.recover(conversationId, triggerId, text)); }}>
+        <label>{t('Result for the conversation', '发送到会话的处理结果')}<textarea required value={text} maxLength={8192} onChange={event => setText(event.target.value)} /></label>
+        <label className="team-party"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />{t('I checked the interrupted request and want to settle it.', '我已检查中断请求并确认结束。')}</label>
+        <button disabled={busy || !confirmed || !text.trim() || new TextEncoder().encode(text).length > 8192}>{t('Settle request', '结束请求')}</button>
+      </form>
+    </details>;
+  }
+  return <div className="team-bot-run"><p role="status">Bot · {done ? t('Recovered by owner', '所有者已恢复') : labels[state.state]?.[zh ? 1 : 0] ?? state.state}</p>{uid === state.ownerUid && state.hostStatus ? <p role="status" className="teams-hint">{hostLabels[state.hostStatus][zh ? 1 : 0]}</p> : null}{recovery}</div>;
 }

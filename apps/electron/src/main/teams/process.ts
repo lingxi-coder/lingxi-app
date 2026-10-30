@@ -31,22 +31,30 @@ export interface TeamHostProcessOptions {
 /** Packaged paths are fixed. Source checkout overrides require an explicit validation switch. */
 export function resolveTeamBinaries(options: { isPackaged: boolean; resourcesPath?: string; environment?: NodeJS.ProcessEnv }): { host: string; worker: string } {
   const environment = options.environment ?? process.env;
-  const binary = (name: 'host' | 'worker') => {
-    const path = options.isPackaged ? join(options.resourcesPath ?? process.resourcesPath, 'bin', `harness-team-${name}`)
-      : environment.LINGXI_TEAM_RUNTIME_VALIDATION === '1' ? environment[`LINGXI_TEAM_${name.toUpperCase()}_BIN`] : undefined;
+  function binary(name: 'host' | 'worker'): string {
+    let path: string | undefined;
+    if (options.isPackaged) {
+      path = join(options.resourcesPath ?? process.resourcesPath, 'bin', `harness-team-${name}`);
+    } else if (environment.LINGXI_TEAM_RUNTIME_VALIDATION === '1') {
+      path = environment[`LINGXI_TEAM_${name.toUpperCase()}_BIN`];
+    }
     if (!path || !isAbsolute(path) || !existsSync(path)) throw new Error('TEAM_RUNTIME_UNAVAILABLE');
     const info = lstatSync(path);
     if (!info.isFile() || (info.mode & 0o111) === 0) throw new Error('TEAM_RUNTIME_UNAVAILABLE');
     return path;
-  };
+  }
   return { host: binary('host'), worker: binary('worker') };
 }
 
-const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+function object(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 function exact(value: Record<string, unknown>, required: string[], optional: string[] = []): void {
   if (required.some(key => !(key in value)) || Object.keys(value).some(key => !required.includes(key) && !optional.includes(key))) throw new Error('TEAM_HOST_PROTOCOL');
 }
-const identifier = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(value);
+function identifier(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(value);
+}
 
 /** Anonymous JSONL pipes only; neither credentials nor untrusted output enter logs. */
 export async function runTeamHost(options: TeamHostProcessOptions): Promise<TeamHostResult> {

@@ -17,14 +17,24 @@ const team = { id: 'test-team', name: 'Fixture team', generation: 7, role: 'memb
 const members = ['alice', 'owner', 'reader'].map(uid => ({ uid, displayName: uid, generation: 7, role: 'member' as const }));
 const question: TeamMessage = { id: 'question-message', seq: 1, author: { kind: 'bot', uid: 'owner', botKey }, kind: 'question', text: 'Choose a value',
   triggerId: 'trigger01', origin: { uid: 'alice', generation: 7 }, question: { id: 'question01', questions: ['Which value?'] }, createdAt: null, changeSeq: 1, changeId: 'change001' };
-function loadPanel(storage: MessageStorage) {
+function loadPanel(storage: MessageStorage): typeof import('../../../packages/teams/MessagesPanel.js').MessagesPanel {
   // Shared packages have no standalone React install. Resolve rendering dependencies
   // through this Web package, as Vite does, without changing application resolution.
   const source = readFileSync(new URL('../../../packages/teams/MessagesPanel.tsx', import.meta.url), 'utf8');
   const compiled = transpileModule(source, { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2020, jsx: JsxEmit.ReactJSX } });
   const module = { exports: {} as Pick<typeof import('../../../packages/teams/MessagesPanel'), 'MessagesPanel'> };
-  const resolve = (id: string) => id === './messages' ? messagesModule : id === './bots' ? botsModule
-    : id === './message-storage' ? { indexedDbMessageStorage: () => storage } : require(id);
+  function resolve(id: string): unknown {
+    switch (id) {
+      case './messages.js':
+        return messagesModule;
+      case './bots.js':
+        return botsModule;
+      case './message-storage.js':
+        return { indexedDbMessageStorage: () => storage };
+      default:
+        return require(id);
+    }
+  }
   new Function('require', 'module', 'exports', compiled.outputText)(resolve, module, module.exports);
   return module.exports.MessagesPanel;
 }

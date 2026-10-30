@@ -1,11 +1,11 @@
-import type { BindLocalTeamBotInput, LocalTeamBot, TeamBotCard } from '../../../../../packages/teams/bots';
-import type { TeamConversation } from '../../../../../packages/teams/messages';
-import type { TeamSummary } from '../../../../../packages/teams';
-import type { BotStore, BotTeamBinding } from '../bots/store';
-import type { BotContent } from '../bots/content';
-import { TeamPrivateStore, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot } from './privateStore';
-import { runTeamHost, TeamHostFailure, type TeamBotTarget, type TeamHostProcessOptions, type TeamHostResult } from './process';
-import type { LocalTeamHost, TeamAccountContext } from './service';
+import type { BindLocalTeamBotInput, LocalTeamBot, TeamBotCard } from '../../../../../packages/teams/bots.js';
+import type { TeamSummary } from '../../../../../packages/teams/index.js';
+import type { TeamConversation } from '../../../../../packages/teams/messages.js';
+import type { BotContent } from '../bots/content.js';
+import type { BotStore, BotTeamBinding } from '../bots/store.js';
+import { TeamPrivateStore, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot } from './privateStore.js';
+import { runTeamHost, TeamHostFailure, type TeamBotTarget, type TeamHostProcessOptions, type TeamHostResult } from './process.js';
+import type { LocalTeamHost, TeamAccountContext } from './service.js';
 
 export interface TeamHostApi {
   hostContext(): TeamAccountContext | undefined;
@@ -32,7 +32,9 @@ export interface TeamConnectorOptions {
   now?: () => number;
 }
 interface Active { signature: string; controller: AbortController; promise: Promise<void> }
-const scopeKey = (teamId: string, botKey: string) => JSON.stringify([teamId, botKey]);
+function scopeKey(teamId: string, botKey: string): string {
+  return JSON.stringify([teamId, botKey]);
+}
 
 /** Discovery is a hint. The transactional server queue and Rust journal own execution. */
 export class TeamConnector implements LocalTeamHost {
@@ -236,12 +238,31 @@ export class TeamConnector implements LocalTeamHost {
             }
           }).catch(error => {
             if (controller.signal.aborted) return;
-            const code = error instanceof TeamHostFailure ? error.code : error instanceof Error ? error.message : '';
+            let code = '';
+            if (error instanceof TeamHostFailure) code = error.code;
+            else if (error instanceof Error) code = error.message;
             // Journal-lock contention is an observation delay, not evidence
             // that a saved result or required recovery disappeared.
-            if (code === 'BUSY') return;
-            this.status(target, code === 'RESULT_PENDING' ? 'result_pending' : code === 'MODEL_UNAVAILABLE' ? 'model_unavailable'
-              : code === 'TEAM_RUNTIME_UNAVAILABLE' ? 'runtime_unavailable' : ['STORAGE', 'UNSAFE_TEAM_STORAGE', 'INVALID_TEAM_SNAPSHOT'].includes(code) ? 'storage_error' : 'retrying');
+            switch (code) {
+              case 'BUSY':
+                return;
+              case 'RESULT_PENDING':
+                this.status(target, 'result_pending');
+                break;
+              case 'MODEL_UNAVAILABLE':
+                this.status(target, 'model_unavailable');
+                break;
+              case 'TEAM_RUNTIME_UNAVAILABLE':
+                this.status(target, 'runtime_unavailable');
+                break;
+              case 'STORAGE':
+              case 'UNSAFE_TEAM_STORAGE':
+              case 'INVALID_TEAM_SNAPSHOT':
+                this.status(target, 'storage_error');
+                break;
+              default:
+                this.status(target, 'retrying');
+            }
             // Same journal + queue head on retry; never invent a new attempt.
           }).finally(() => {
             if (this.active.get(key) === record) this.active.delete(key);

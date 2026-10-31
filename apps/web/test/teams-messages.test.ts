@@ -1,117 +1,107 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { TeamMessaging, applyMessagePage, emptyProjection, mergeConversation, type MessageApi, type MessageCommand, type MessagePage, type MessageProjection, type MessageStorage, type TeamConversation, type TeamMessage } from '../../../packages/teams/messages';
-const scope = { teamId: 'test-team', generation: 1 };
-const conversation: TeamConversation = { id: 'test-chat', kind: 'dm', title: 'Fixture', participants: ['user:owner', 'user:alice'], lastSeq: 1, lastChangeSeq: 1, lastReadSeq: 0 };
-const message: TeamMessage = { id: 'message01', seq: 1, author: { kind: 'user', uid: 'owner' }, kind: 'text', text: 'Synthetic', createdAt: null, changeSeq: 1, changeId: 'change001' };
-const page: MessagePage = { conversation, changes: [{ id: 'change001', seq: 1, messageId: 'message01', operation: 'create' }], messages: [message], hasMore: false };
-const clone = <T>(value: T): T => structuredClone(value);
-function memoryStorage() {
-  const records = new Map<string, MessageProjection>();
-  let failure = false;
-  return { records, fail() { failure = true; }, async update(key, reduce) { const value = reduce(clone(records.get(key))); if (failure) { failure = false; throw new Error('STORAGE_FAILED'); } records.set(key, clone(value)); return clone(value); } } satisfies MessageStorage & { records: Map<string, MessageProjection>; fail(): void };
+import { TeamMessaging, applyMessageSnapshot, emptyProjection, pendingCommands, type MessageApi, type MessageSnapshot, type PendingCommands, type CommandStorage, type TeamConversation, type TeamMessage } from '../../../packages/teams/messages.js';
+const scope = { teamId: 'test-team', generation: 1 }, uid = 'owner';
+const conversation: TeamConversation = { id: 'test-chat', kind: 'dm', title: 'Fixture', participants: ['user:owner'], lastSeq: 1, lastChangeSeq: 1, lastReadSeq: 0 };
+const message: TeamMessage = { id: 'message01', seq: 1, author: { kind: 'user', uid }, kind: 'text', text: 'Synthetic', createdAt: null, changeSeq: 1, changeId: 'change001' };
+function memoryStorage(): CommandStorage & { records: Map<string, PendingCommands> } {
+  const records = new Map<string, PendingCommands>();
+  return { records, async load(key) { return structuredClone(records.get(key)); }, async update(key, reduce) { const value = pendingCommands(reduce(structuredClone(records.get(key)))); records.set(key, structuredClone(value)); return value; } };
 }
 const until = async (condition: () => boolean) => { const end = Date.now() + 3000; while (!condition()) { if (Date.now() > end) throw new Error('Condition timed out'); await new Promise(resolve => setTimeout(resolve, 5)); } };
+function fixture(write: MessageApi['messages'] = async () => { throw new Error('Unexpected HTTP read'); }) {
+  const listeners = new Set<(snapshot: MessageSnapshot) => void>();
+  const api: MessageApi = { messages: write, onMessagesChanged: () => () => {}, watchMessages(current, id, next) {
+    listeners.add(next);
+    queueMicrotask(() => { if (!listeners.has(next)) return; next({ uid, ...current, fromCache: false, kind: 'directory', conversations: [conversation] }); if (id) next({ uid, ...current, fromCache: false, kind: 'messages', conversationId: id, messages: [message] }); });
+    return () => { listeners.delete(next); };
+  } };
+  return { api, listeners, emit(value: MessageSnapshot) { for (const next of listeners) next(value); } };
+}
 
-test('T2 projection applies contiguous changes once and old pages cannot restore recalled plaintext or regress cursors', () => {
-  let state = applyMessagePage(emptyProjection('owner', scope), conversation.id, page);
-  assert.deepEqual(applyMessagePage(state, conversation.id, page), state);
-  state = applyMessagePage(state, conversation.id, { ...page, conversation: { ...conversation, lastChangeSeq: 2, lastReadSeq: 1 }, changes: [{ id: 'change002', seq: 2, messageId: message.id, operation: 'recall' }], messages: [{ ...message, text: '', recalled: true, changeSeq: 2, changeId: 'change002' }] });
-  const replay = applyMessagePage(state, conversation.id, page);
-  assert.equal(replay.threads[conversation.id]!.cursor, 2); assert.equal(replay.threads[conversation.id]!.messages[0]!.text, ''); assert.equal(replay.conversations[0]!.lastChangeSeq, 2); assert.equal(replay.conversations[0]!.lastReadSeq, 1);
-  assert.throws(() => applyMessagePage(state, conversation.id, { ...page, changes: [{ id: 'gap', seq: 4, messageId: message.id, operation: 'edit' }] }), /CHANGE_GAP/);
-});
-test('T2 stale conversation list retains confirmed read and message watermarks', () => {
-  const newer = { ...conversation, lastSeq: 10, lastChangeSeq: 12, lastReadSeq: 10 };
-  assert.deepEqual(mergeConversation(newer, conversation), newer);
-});
-test('T2 failed local commit leaves both body and cursor unchanged, then replay succeeds', async () => {
-  const storage = memoryStorage(), key = 'synthetic';
-  await storage.update(key, () => emptyProjection('owner', scope)); storage.fail();
-  await assert.rejects(storage.update(key, old => applyMessagePage(old!, conversation.id, page)), /STORAGE_FAILED/);
-  assert.deepEqual(storage.records.get(key)!.threads, {});
-  await storage.update(key, old => applyMessagePage(old!, conversation.id, page));
-  assert.equal(storage.records.get(key)!.threads[conversation.id]!.cursor, 1);
-});
-test('T2 durable outbox survives an ambiguous response and retries the same identity after restart', async () => {
-  const storage = memoryStorage(); let online = true, drop = true, calls: MessageCommand[] = [];
-  const api: MessageApi = { onMessagesChanged: () => () => {}, async messages<T>(command: MessageCommand): Promise<T> {
-    if (!online) throw new Error('SERVICE_UNAVAILABLE');
-    if (command.action === 'list') return { conversations: [conversation], next: null } as T;
-    if (command.action === 'sync') return { ...page, changes: command.after ? [] : page.changes } as T;
-    if (command.action === 'mutate') { calls.push(command); if (drop) { drop = false; online = false; throw new Error('SERVICE_UNAVAILABLE'); } return { changeSeq: 1 } as T; }
-    return {} as T;
-  } };
-  const first = new TeamMessaging(api, storage, 'owner', scope); await first.start(); await until(() => !first.offline); first.select(conversation.id);
-  await first.queue('create', 'Retained intent'); await until(() => calls.length === 1 && first.offline); first.close();
-  const intent = calls[0]; online = true;
-  const second = new TeamMessaging(api, storage, 'owner', scope); await second.start();
-  await until(() => calls.length === 2 && second.state.outbox.length === 0);
-  assert.deepEqual(calls[1], intent); second.close();
-});
-test('T2 pending intent can be discarded; an attempted intent stays protected after lease expiry', async context => {
-  const storage = memoryStorage(); let send: (() => void) | undefined; const sent: string[] = [];
-  const initial = emptyProjection('owner', scope);
-  initial.outbox = [1, 2].map(i => ({ action: 'mutate', ...scope, conversationId: conversation.id, messageId: `message0${i}`, changeId: `change00${i}`, operation: 'create', text: `Pending ${i}` }));
-  await storage.update(JSON.stringify(['owner', scope.teamId, 1]), () => initial);
-  const api: MessageApi = { onMessagesChanged: () => () => {}, async messages<T>(value: MessageCommand): Promise<T> {
-    if (value.action === 'list') return { conversations: [conversation], next: null } as T;
-    if (value.action === 'mutate') { sent.push(value.changeId); if (sent.length === 1) await new Promise<void>(resolve => { send = resolve; }); }
-    return {} as T;
-  } };
-  const model = new TeamMessaging(api, storage, 'owner', scope); await model.start(); await until(() => Boolean(send));
-  await assert.rejects(model.discard('change001'), /MESSAGE_IN_FLIGHT/); const later = Date.now() + 31000; context.mock.method(Date, 'now', () => later); await assert.rejects(model.discard('change001'), /MESSAGE_IN_FLIGHT/); context.mock.restoreAll(); await model.discard('change002'); send!();
-  await until(() => model.state.outbox.length === 0); assert.deepEqual(sent, ['change001']); model.close();
-});
-test('T2 concurrent tabs share durable claims and never regress read watermarks', async () => {
-  const storage = memoryStorage(); let release: (() => void) | undefined; let stale = false;
-  const api: MessageApi = { onMessagesChanged: () => () => {}, async messages<T>(value: MessageCommand): Promise<T> {
-    if (value.action === 'list') { if (stale) await new Promise<void>(resolve => { release = resolve; }); return { conversations: [conversation], next: null } as T; }
-    if (value.action === 'sync') return { ...page, changes: value.after ? [] : page.changes } as T;
-    if (value.action === 'read') return { lastReadSeq: 1 } as T;
-    return {} as T;
-  } };
-  const model = new TeamMessaging(api, storage, 'owner', scope); await model.start(); await until(() => !model.offline); model.select(conversation.id); await until(() => Boolean(model.state.threads[conversation.id]));
-  stale = true; const pending = model.refresh(); await until(() => Boolean(release)); await model.markRead(); release!(); await pending;
-  assert.equal(model.state.conversations[0]!.lastReadSeq, 1); model.close();
+test('SDK deltas preserve unchanged rows and apply old edits, recalls, and removals', () => {
+  const second = { ...message, id: 'message02', seq: 2, text: 'Second' };
+  const initial: MessageSnapshot = { uid, ...scope, kind: 'messages', conversationId: conversation.id, fromCache: true, replace: true, messages: [message, second] };
+  const state = applyMessageSnapshot(emptyProjection(uid, scope), initial);
+  assert.equal(applyMessageSnapshot(state, { ...initial, replace: false, fromCache: false, messages: [] }), state);
+  const edited = applyMessageSnapshot(state, { ...initial, replace: false, messages: [{ ...message, text: '', recalled: true, changeSeq: 7 }] });
+  assert.equal(edited.threads[conversation.id]!.messages[1], second);
+  assert.equal(edited.threads[conversation.id]!.messages[0]!.text, '');
+  assert.equal(edited.threads[conversation.id]!.messages[0]!.recalled, true);
+  const removed = applyMessageSnapshot(edited, { ...initial, replace: false, messages: [], removed: [second.id] });
+  assert.deepEqual(removed.threads[conversation.id]!.messages.map(value => value.id), [message.id]);
+  assert.equal(applyMessageSnapshot(removed, { ...initial, messages: [] }).threads[conversation.id]!.messages.length, 0);
 });
 
-test('T2 a permanently rejected conversation creation cannot block existing message synchronization', async () => {
-  const storage = memoryStorage(); let creates = 0;
-  const api: MessageApi = { onMessagesChanged: () => () => {}, async messages<T>(value: MessageCommand): Promise<T> {
-    if (value.action === 'create') { creates++; throw new Error('PARTICIPANT_REQUIRED'); }
-    if (value.action === 'list') return { conversations: [conversation], next: null } as T;
-    if (value.action === 'sync') return { ...page, changes: value.after ? [] : page.changes } as T;
-    return {} as T;
-  } };
-  const model = new TeamMessaging(api, storage, 'owner', scope); await model.start(); await until(() => !model.offline);
-  await model.create('dm', 'Unavailable recipient', ['owner', 'removed']);
-  await until(() => model.state.creation?.error === 'PARTICIPANT_REQUIRED');
-  model.select(conversation.id); await until(() => Boolean(model.state.threads[conversation.id]));
-  assert.equal(creates, 1); assert.equal(model.offline, false); await model.discardCreation(); assert.equal(model.state.creation, undefined); model.close();
-});
-test('T2 revoked access clears the view and stops sending even when durable storage fails', async () => {
-  const backing = memoryStorage(); let denied = false, clearing = false;
-  const storage: MessageStorage = { async update(key, reduce) { if (clearing) throw new Error('STORAGE_FAILED'); return backing.update(key, reduce); } };
-  const api: MessageApi = { onMessagesChanged: () => () => {}, async messages<T>(value: MessageCommand): Promise<T> {
-    if (denied) { clearing = true; throw new Error('MEMBERSHIP_REQUIRED'); }
-    if (value.action === 'list') return { conversations: [conversation], next: null } as T;
-    if (value.action === 'sync') return { ...page, changes: value.after ? [] : page.changes } as T;
-    return {} as T;
-  } };
-  const model = new TeamMessaging(api, storage, 'owner', scope); await model.start(); await until(() => !model.offline); model.select(conversation.id); await until(() => Boolean(model.state.threads[conversation.id]));
-  denied = true; await model.refresh(); await until(() => model.error === 'MEMBERSHIP_REQUIRED');
-  assert.deepEqual(model.state.threads, {}); assert.deepEqual(model.state.outbox, []); assert.equal(model.selected, '');
-  await assert.rejects(model.queue('create', 'Must not send'), /INVALID_INPUT/); await model.refresh();
+test('SDK message snapshots update views without any HTTP reads or durable history writes', async context => {
+  const storage = memoryStorage(), source = fixture();
+  let timers = 0;
+  context.mock.method(globalThis, 'setInterval', () => { timers++; throw new Error('Unexpected fixed polling'); });
+  const model = new TeamMessaging(source.api, storage, uid, scope); context.after(() => model.close()); await model.start(); model.select(conversation.id);
+  await until(() => !!model.state.threads[conversation.id]); await model.refresh();
+  assert.equal(model.state.threads[conversation.id]!.messages[0]!.text, 'Synthetic');
+  assert.equal(storage.records.size, 0); assert.equal(timers, 0);
+  source.emit({ uid, ...scope, kind: 'messages', conversationId: conversation.id, fromCache: true, messages: [{ ...message, text: '', recalled: true, changeSeq: 10 }] });
+  assert.equal(model.offline, true); assert.equal(model.state.threads[conversation.id]!.messages[0]!.text, '');
+  source.emit({ uid, ...scope, kind: 'messages', conversationId: conversation.id, fromCache: false, messages: [{ ...message, text: '', recalled: true, changeSeq: 10 }] });
+  assert.equal(model.offline, false);
 });
 
-test('T2 mark-read authorization failure clears a visible conversation immediately', async () => {
-  const api: MessageApi = { onMessagesChanged: () => () => {}, async messages<T>(value: MessageCommand): Promise<T> {
-    if (value.action === 'list') return { conversations: [conversation], next: null } as T;
-    if (value.action === 'sync') return { ...page, changes: value.after ? [] : page.changes } as T;
-    if (value.action === 'read') throw new Error('MEMBERSHIP_REQUIRED');
-    return {} as T;
+test('cross-device read snapshots are monotonic; wrong UID/generation and late selection are ignored', async context => {
+  const source = fixture(), model = new TeamMessaging(source.api, memoryStorage(), uid, scope); context.after(() => model.close());
+  await model.start(); model.select(conversation.id); await until(() => !!model.state.threads[conversation.id]);
+  source.emit({ uid, ...scope, kind: 'read', conversationId: conversation.id, fromCache: false, lastReadSeq: 1 });
+  source.emit({ uid, ...scope, kind: 'read', conversationId: conversation.id, fromCache: true, lastReadSeq: 0 });
+  assert.equal(model.state.conversations[0]!.lastReadSeq, 1);
+  for (const wrong of [{ uid: 'bob', generation: 1 }, { uid, generation: 2 }]) source.emit({ ...scope, ...wrong, kind: 'messages', conversationId: conversation.id, fromCache: false, messages: [] });
+  assert.equal(model.state.threads[conversation.id]!.messages.length, 1);
+  model.select('other-chat'); source.emit({ uid, ...scope, kind: 'messages', conversationId: conversation.id, fromCache: false, messages: [] });
+  assert.equal(model.state.threads[conversation.id], undefined);
+});
+
+test('HTTP outbox survives ACK loss and restart; SDK history never enters the command journal', async context => {
+  const storage = memoryStorage(); let drop = true; const calls: unknown[] = [];
+  const source = fixture(async command => { assert.equal(command.action, 'mutate'); if (drop && calls.length) throw new Error('SERVICE_UNAVAILABLE'); calls.push(structuredClone(command)); if (drop) throw new Error('SERVICE_UNAVAILABLE'); return {} as never; });
+  const first = new TeamMessaging(source.api, storage, uid, scope); context.after(() => first.close()); await first.start(); first.select(conversation.id);
+  await until(() => !first.offline); await first.queue('create', 'Retained pending text'); await until(() => calls.length === 1 && first.offline); first.close(); drop = false;
+  assert.ok([...storage.records.values()].every(value => !('threads' in value) && !('conversations' in value)));
+  const second = new TeamMessaging(source.api, storage, uid, scope); context.after(() => second.close()); await second.start();
+  await until(() => calls.length === 2 && !second.state.outbox.length); assert.deepEqual(calls[1], calls[0]);
+});
+
+test('revocation clears messages immediately even if command-journal cleanup fails', async context => {
+  const source = fixture(), storage: CommandStorage = { async load() { return undefined; }, async update() { throw new Error('STORAGE_FAILED'); } };
+  const model = new TeamMessaging(source.api, storage, uid, scope); context.after(() => model.close()); await model.start(); model.select(conversation.id); await until(() => !!model.state.threads[conversation.id]);
+  source.emit({ uid, ...scope, kind: 'error', fromCache: false, error: 'MEMBERSHIP_REQUIRED' });
+  assert.equal(model.selected, ''); assert.deepEqual(model.state.threads, {}); assert.equal(source.listeners.size, 0);
+  await assert.rejects(model.queue('create', 'Must not send'), /INVALID_INPUT/);
+});
+
+test('pending command claims coordinate windows and an attempted identity cannot be discarded', async context => {
+  const storage = memoryStorage(); let release: (() => void) | undefined, sends = 0;
+  const pending = emptyProjection(uid, scope);
+  pending.outbox = [{ action: 'mutate', ...scope, conversationId: conversation.id, messageId: message.id, changeId: 'pending001', operation: 'create', text: 'Queued' }];
+  await storage.update(JSON.stringify([uid, scope.teamId, 1]), () => pending);
+  const source = fixture(async () => { sends++; await new Promise<void>(resolve => { release = resolve; }); return {} as never; });
+  const first = new TeamMessaging(source.api, storage, uid, scope), second = new TeamMessaging(source.api, storage, uid, scope);
+  context.after(() => { first.close(); second.close(); release?.(); }); await Promise.all([first.start(), second.start()]); await until(() => !!release);
+  await assert.rejects(second.discard('pending001'), /MESSAGE_IN_FLIGHT/); assert.equal(sends, 1); release!(); await until(() => !first.state.outbox.length || !second.state.outbox.length); assert.equal(sends, 1);
+});
+
+test('command notifications coordinate durable backoff across tabs without a retry storm', async context => {
+  const memory = memoryStorage(), listeners = new Set<() => void>();
+  const storage: CommandStorage = { load: memory.load, onChanged(_key, callback) { listeners.add(callback); return () => { listeners.delete(callback); }; }, async update(key, reduce) {
+    const before = JSON.stringify(memory.records.get(key)), value = await memory.update(key, reduce);
+    if (JSON.stringify(value) !== before) queueMicrotask(() => listeners.forEach(callback => callback()));
+    return value;
   } };
-  const model = new TeamMessaging(api, memoryStorage(), 'owner', scope); await model.start(); await until(() => !model.offline); model.select(conversation.id); await until(() => Boolean(model.state.threads[conversation.id]));
-  await assert.rejects(model.markRead(), /MEMBERSHIP_REQUIRED/); assert.equal(model.selected, ''); assert.deepEqual(model.state.threads, {});
+  let online = false; const calls: unknown[] = [];
+  const source = fixture(async command => { calls.push(structuredClone(command)); if (!online) throw new Error('SERVICE_UNAVAILABLE'); return {} as never; });
+  const first = new TeamMessaging(source.api, storage, uid, scope), second = new TeamMessaging(source.api, storage, uid, scope);
+  context.after(() => { first.close(); second.close(); });
+  await Promise.all([first.start(), second.start()]); first.select(conversation.id); await first.queue('create', 'Shared durable intent');
+  await until(() => calls.length > 0); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(calls.length, 1);
+  first.close(); online = true; const future = Date.now() + 2000; context.mock.method(Date, 'now', () => future);
+  await second.refresh(); await until(() => !second.state.outbox.length);
+  assert.equal(calls.length, 2); assert.deepEqual(calls[1], calls[0]);
 });

@@ -12,7 +12,9 @@ export async function onTeamMessageCreated({ db, pushStore, messaging, teamId, c
   const team = db.doc(`teams/${teamId}`), thread = team.collection('conversations').doc(conversationId);
   const c = (await thread.get()).data();
   if (!c || !Array.isArray(c.memberUids)) return;
-  for (const uid of c.memberUids.filter(uid => uid !== original.author.uid)) {
+  const recipients = c.memberUids.filter(uid => uid !== original.author.uid);
+  let index = 0;
+  async function deliver(uid) {
     const attempt = thread.collection('pushAttempts').doc(hash(JSON.stringify([messageId, uid])));
     const value = await db.runTransaction(async tx => {
       const [t, conversation, live, receipt, sender, recipient, prior] = await tx.getAll(team, thread,
@@ -33,7 +35,7 @@ export async function onTeamMessageCreated({ db, pushStore, messaging, teamId, c
       tx.create(attempt, { state: 'attempted', generation: recipient.data().generation, at: new Date(clock()) });
       return { title: typeof title === 'string' && title.trim() ? title.trim().slice(0, 80) : 'LingXi', generation: recipient.data().generation };
     });
-    if (!value) continue;
+    if (!value) return;
     const result = await sendTeamPush(pushStore, messaging, { uid, title: value.title, notificationId: hash(JSON.stringify([teamId, conversationId, messageId, uid])),
       collapseKey: `team:${hash(JSON.stringify([teamId, conversationId])).slice(0, 32)}` }, async () => {
       const [t, member] = await Promise.all([team.get(), team.collection('members').doc(uid).get()]);
@@ -41,4 +43,16 @@ export async function onTeamMessageCreated({ db, pushStore, messaging, teamId, c
     }, clock);
     await attempt.update({ state: 'finished', ...result, finishedAt: new Date(clock()) });
   }
+  // Finish every admitted recipient before returning a failure. An ambiguous
+  // send keeps its existing durable attempt and is never replayed automatically.
+  const outcomes = await Promise.allSettled(Array.from({ length: Math.min(4, recipients.length) }, async () => {
+    let failure;
+    while (index < recipients.length) {
+      const uid = recipients[index++];
+      try { await deliver(uid); } catch (error) { failure ??= error; }
+    }
+    if (failure) throw failure;
+  }));
+  const failure = outcomes.find(outcome => outcome.status === 'rejected');
+  if (failure) throw failure.reason;
 }

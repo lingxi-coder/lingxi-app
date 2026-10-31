@@ -1,6 +1,11 @@
 # Teams implementation contract
 
-Status: T1/T2 and T3 implementation and scoped acceptance pass. The production
+Status: the SDK message-cache revision below is a local source change pending release.
+Deploy its trusted backend invalidation writes and default-database rules/indexes
+before updating clients. Its four-client evidence is recorded separately in
+[SDK cache acceptance](../acceptance/teams-firestore-cache-20261030/report.md).
+
+Published baseline: T1/T2 and T3 implementation and scoped acceptance pass. The production
 API, message trigger, default rules/index and Teams Web overlay were published
 on 2026-10-30. T3's real-account checks pass: an explicit member Bot request gets
 a real GPT-6 Luna reply, tool approval goes to its owner, only the original member
@@ -10,8 +15,8 @@ Android Direct Debug product were built and checked. Mobile evidence uses an
 owned simulator/AVD; it does not establish physical-device or Store acceptance.
 The [current acceptance report](../acceptance/teams-t3-provider-20261030/report.md)
 separates source, package, native UI, live provider and publication evidence.
-This delivery pushes the two authorized feature branches without merging or
-pushing main. Historical prerequisite reports describe their own snapshots.
+That baseline delivery pushed the two authorized feature branches without
+merging or pushing main. The SDK cache revision does not publish either branch. Historical prerequisite reports describe their own snapshots.
 This contract refines the approved 2026-10-29 Team plan; each phase requires its
 stated four-client checks.
 
@@ -68,7 +73,7 @@ is a separate gate. There are no Remote Control authorization changes.
 | --- | --- |
 | `GET /v1/teams` | Current teams from the caller's private index, revalidated against team state and membership |
 | `GET /v1/teams/{teamId}` | Current team, members and (for managers) invite metadata |
-| `POST /v1/teams/session` | Empty object; custom token for the authenticated UID, Desktop main only |
+| `POST /v1/teams/session` | Empty object; custom token for the authenticated UID, requested by Desktop main for its private SDK sessions |
 | `POST /v1/teams` | Strict action object, as below |
 
 Actions: `create {teamId,name}`, `delete {teamId}`, `invite
@@ -111,15 +116,18 @@ the local conversation and do not need its engine; a pending invite survives the
 login page. The Web removes the code from its address bar after capturing it and
 uses `no-referrer` on invitation/Teams pages.
 
-Desktop/Web share `packages/teams/TeamsPanel.tsx`; Firestore remains in Desktop
-main and renderer IPC is bound to the panel's expected account UID. Browser and
-native clients use their existing Firebase account. SDK listeners invalidate the
-team/member views, while authenticated HTTP responses populate them. Cached SDK
-snapshots do not grant access. Account changes and listener permission failures
-clear stale views; request/lifecycle versions discard late responses and prevent
-reattachment after a native page closes. Failed listeners do not retry continuously
-and can attach for a later membership generation. T1 member administration requires a network connection. T2 message views retain
-previously loaded local history and pending intents while offline, as described below.
+Desktop/Web share `packages/teams/TeamsPanel.tsx`. Membership administration uses
+authenticated HTTP, with SDK listeners invalidating its views. Ordinary message
+views consume SDK snapshots directly. Web and native clients use their existing
+Firebase account. Desktop main owns the account lifecycle, HTTP credentials and
+metadata SDK; a bundled, sandboxed Chromium data page owns the persistent message
+SDK cache in a project/UID-private partition. Only scoped DTOs cross its private
+MessagePort and UI IPC. Provider credentials never enter that page or the UI.
+
+Cached snapshots do not grant fresh access. Account changes and listener
+permission failures clear stale views; UID, membership generation and lifecycle
+checks reject late responses. T1 member administration requires a network
+connection. T2 can display recently loaded SDK-cached messages offline.
 
 Dedicated real Firebase owner/member test users were explicitly authorized and
 created on 2026-10-29 without admin claims or verification emails. After separate
@@ -140,9 +148,9 @@ expected generation are read in the same trusted transaction. RC is unchanged.
 
 | Action | Additional fields / result |
 | --- | --- |
-| `list` | Optional `after` conversation ID; returns up to 100 authorized conversations, read watermarks and `next` |
+| `list` (Bot context) | Optional `after` conversation ID; returns up to 100 authorized conversations, read watermarks and `next` |
 | `create` | Stable `conversationId`, human `participantUids`, `kind: dm|group|channel`, nonempty `title`; caller must participate and every participant must be a current member |
-| `sync` | `after` change sequence; returns up to 100 contiguous immutable changes, the latest referenced messages, current conversation/read watermarks and `hasMore` in one consistent transaction |
+| `sync` (Bot context) | `after` change sequence; returns up to 100 contiguous immutable changes, the latest referenced messages, current conversation/read watermarks and `hasMore` in one consistent transaction |
 | `mutate` | Stable `messageId`, `changeId`, `operation: create|edit|recall`, `text`, optional create-only `replyTo`; returns the acknowledged change identity |
 | `read` | `lastReadSeq`; returns the monotonic confirmed watermark |
 
@@ -154,14 +162,27 @@ mutation implementation for all four clients, with the same three-document
 transaction invariants exercised by the client SDK rules. The message endpoint
 accepts at most 64 KiB of JSON; membership endpoints retain their 16 KiB limit.
 
-Desktop/Web use the shared `TeamMessaging` projection and one IndexedDB read/write
-transaction for message bodies, change cursor and pending intents. Native clients
-use an atomic, account/team/generation-scoped JSON file excluded from backup;
-iOS serializes disk work on a separate actor and Android uses IO dispatch plus
-atomic replacement. A failed local commit cannot advance the durable cursor.
-Overlapping pages merge by message `changeSeq`; late list/page responses retain
-the maximum confirmed message, change and read watermarks. Unread is always
-`max(0,lastSeq-lastReadSeq)`, never a delivery counter. Mark read is explicit.
+All four clients listen to authorized conversation documents, the caller's read
+marks, and the selected conversation's messages ordered by `seq`. Snapshot
+changes update an ephemeral UI projection; metadata-only events reuse existing
+rows. Old edits and recalls arrive through the same SDK query, including after
+reconnection. Selecting another conversation releases its message listener and
+retains only that conversation's in-memory rows.
+
+The Firestore SDK owns durable message caching. Apple and Android use its native
+persistent cache. Web explicitly enables `persistentLocalCache` with multi-tab
+coordination; Desktop uses the browser SDK in its private Chromium partition.
+Cache availability covers previously loaded documents and remains subject to SDK
+eviction. `fromCache` is observed with metadata changes. An empty cache does not
+prove the server has no messages.
+
+`CommandStorage` (IndexedDB on Web/Desktop) and the native atomic command files
+persist only pending HTTP command identities, payloads, claim/attempt metadata
+and acknowledgement receipts. Known obsolete history fields are removed from
+existing records while exact pending command IDs are retained. No ordinary
+message body, conversation replica or message cursor is written there. Bot
+execution journals, immutable snapshots and result receipts remain separate.
+Unread is `max(0,lastSeq-lastReadSeq)`; marking read is explicit.
 
 The local queue saves a stable intent before transport, including conversation
 creation. A response lost after server commit retries the same identity. A
@@ -175,23 +196,28 @@ cannot be discarded until acknowledged or definitively rejected. Unattempted
 queued work can be discarded. Submission locks prevent rapid repeated taps from
 creating multiple intents; completing a save does not erase a newly typed draft.
 
-Firestore conversation/read listeners wake authenticated HTTP synchronization;
-a 15-second fallback handles reconnects and missed invalidations while the page
-is active. Cached data is explicitly labelled as this device's saved history and
-does not grant fresh membership. Revocation/account changes immediately clear the
-visible projection and stop sending, even if local storage fails. A fresh rejoin
-uses a new generation and a separate local namespace; the old queue cannot replay.
-The existing authorized conversation history remains available after rejoin, with
-a fresh generation's read watermark starting at zero. Native page exit removes
-its listeners/tasks; Desktop credentials/SDK remain exclusively in main and IPC
-is bound to the expected account UID.
+There is no application-level fixed ordinary-message polling or HTTP list/sync
+read path. The SDK owns reconnect/retry and cache reconciliation. Pending HTTP
+commands retain bounded backoff and durable claims, with online/focus or
+command-journal changes waking recovery. Bot metadata uses sanitized SDK
+invalidation stamps and the next known presence/claim expiry; raw Bot run and
+question documents remain denied to clients. Control-plane lease renewal and
+execution observation are still required for a running Bot.
 
-`onTeamMessage` is a locally defined, undeployed default-database create trigger
+Revocation/account changes immediately clear the visible projection and stop
+sending, even if command-storage cleanup fails. A fresh rejoin uses a new
+generation and a separate command namespace. Native page exit removes listeners
+and tasks. Desktop main serializes data-page open/close operations, retains
+UID-matched SDK authentication for offline app reopen, and signs it out on an
+account reset. UI IPC remains bound to the expected account UID.
+
+`onTeamMessage` is the default-database create trigger
 using the existing push identity and installation helpers. It excludes the author,
 rechecks team/membership/conversation/recalled state and sender generation, and
 claims one durable attempt per message/recipient before FCM. Push is a best-effort
-notification; ambiguous attempts are not blindly repeated. Reliable history comes
-from `changes`, not push. Payloads contain the sender/Bot name and generic new
+notification; ambiguous attempts are not blindly repeated. Reliable message views come
+from Firestore SDK listeners/cache; immutable `changes` receipts preserve mutation
+idempotency and Bot execution context. Payloads contain the sender/Bot name and generic new
 message text, with no message plaintext or credentials. After the member check,
 the final awaited read rechecks the installation UID/revision before sending.
 Notifications open `team/inbox` on native clients through the existing guarded
@@ -201,7 +227,8 @@ Local evidence is in `acceptance/teams-t2-20261029/`. The browser's actual offli
 period was over ten minutes; message ordering/deduplication, an old edit, an old
 recall, queue replay, IndexedDB reload, cross-tab reads and removal/rejoin passed.
 This does not establish full native packages, physical-device offline runs or
-production FCM delivery. T1/T2 release acceptance and deployment remain open.
+production FCM delivery. Those historical reports predate the published T3
+baseline and the SDK-cache acceptance report linked above.
 
 ## Message identity and mutation catch-up (T0/T2)
 
@@ -238,14 +265,11 @@ can be committed without its matching message mutation. Edits/recalls preserve
 `lastSeq`, so they do not increase unread counts. `lastMessage` is an identity
 pointer, not a cached plaintext preview; clients resolve the current message.
 
-Reconnect listens to and pages through `changes where seq > lastAppliedChangeSeq
-orderBy seq`, not just new messages. A client fetches the latest referenced
-message, upserts by message ID using the newest `changeSeq`, and commits the local
-projection and cursor together. Advance only through contiguous change sequences.
-Overlapping pages/listener deliveries are harmless. A crash before this local
-commit replays the same receipt. Keep receipts without pruning until a separately
-validated snapshot/retention protocol exists. Persisting message text while only
-persisting an in-memory cursor is not sufficient.
+Ordinary clients listen directly to the full selected message query. The SDK
+maintains its own persistent cache and resume state; there is no application
+message cursor or separate body replica. Backend `list`/`sync` endpoints and
+immutable change receipts remain available to the trusted Bot execution/context
+protocol and its idempotent replay. Receipts are not pruned by this change.
 
 A retry of an acknowledged mutation reads its existing receipt and verifies
 message ID, operation, author UID and the intended text digest. For creation it

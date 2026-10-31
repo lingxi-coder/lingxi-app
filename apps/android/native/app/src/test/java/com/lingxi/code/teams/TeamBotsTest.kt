@@ -26,20 +26,20 @@ class TeamBotsTest {
         listOf("completed", "revoked", "recovery", "failed", "queued").forEach { state -> assertFalse(run().copy(state = state).canAnswer(message(), "human", 4, 100)) }
     }
 
-    @Test fun durableAnswerAndBotMetadataSurviveRestartWithoutCrossGenerationLeak() {
+    @Test fun durableAnswerAndTargetsSurviveRestartWithoutHistoryOrCrossGenerationLeak() {
         val directory = Files.createTempDirectory("team-bot-answer-").toFile()
         try {
             val answer = intent()
             val conversation = TeamMessageConversation("chat0001", "bot_dm", "Bot", listOf("user:human", key), 2, 2, 0, listOf(key))
-            TeamMessageStorage(directory).update("human", "team0001", 4) { it.copy(conversations = listOf(conversation), threads = mapOf("chat0001" to TeamMessageThread(2, listOf(message()))), answers = listOf(answer), outbox = listOf(JSONObject().put("targets", JSONArray(listOf(key))))) }
-            val restored = TeamMessageStorage(directory).update("human", "team0001", 4) { it }
+            TeamCommandStorage(directory).update("human", "team0001", 4) { it.copy(conversations = listOf(conversation), threads = mapOf("chat0001" to TeamMessageThread(listOf(message()))), answers = listOf(answer), outbox = listOf(JSONObject().put("targets", JSONArray(listOf(key))))) }
+            val restored = TeamCommandStorage(directory).update("human", "team0001", 4) { it }
             assertEquals(answer.toString(), restored.answers.single().toString())
             assertEquals("answer001", restored.answers.single().getString("answerId"))
-            assertEquals(message(), restored.threads.getValue("chat0001").messages.single())
-            assertEquals(listOf(key), restored.conversations.single().botKeys)
+            assertTrue(restored.threads.isEmpty())
+            assertTrue(restored.conversations.isEmpty())
             assertEquals(key, restored.outbox.single().getJSONArray("targets").getString(0))
-            assertTrue(TeamMessageStorage(directory).update("human", "team0001", 5) { it }.answers.isEmpty())
-            assertTrue(TeamMessageStorage(directory).update("other", "team0001", 4) { it }.answers.isEmpty())
+            assertTrue(TeamCommandStorage(directory).update("human", "team0001", 5) { it }.answers.isEmpty())
+            assertTrue(TeamCommandStorage(directory).update("other", "team0001", 4) { it }.answers.isEmpty())
         } finally { directory.deleteRecursively() }
     }
 
@@ -62,7 +62,7 @@ class TeamBotsTest {
         assertEquals(teamBotTriggers(explicit, group), teamBotTriggers(human, group.copy(kind = "bot_dm")))
         assertEquals(64, teamBotTriggers(explicit, group).single().length)
         assertTrue(teamBotTriggers(explicit.copy(authorKind = "bot"), group).isEmpty())
-        val wire = human.json().also { it.remove("targets"); it.put("mentions", JSONArray(listOf(key, "user:other"))) }
+        val wire = JSONObject().put("id", human.id).put("seq", human.seq).put("author", JSONObject().put("uid", human.authorUid).put("kind", human.authorKind)).put("text", human.text).put("changeSeq", human.changeSeq).put("changeId", human.changeId).put("mentions", JSONArray(listOf(key, "user:other")))
         assertEquals(listOf(key), TeamMessage.parse(wire).targets)
     }
 
@@ -153,8 +153,8 @@ class TeamBotsTest {
             val exactBody = pending.getJSONObject("body").toString()
             assertFalse(pending.getJSONObject("body").has("settlementId"))
             assertEquals("recoverBot", pending.getJSONObject("body").getString("action"))
-            TeamMessageStorage(directory).update("owner", "team0001", 4) { it.copy(settlements = listOf(JSONObject(pending.toString()).put("attempted", true).put("leaseUntil", 1000))) }
-            val restored = TeamMessageStorage(directory).update("owner", "team0001", 4) { it }
+            TeamCommandStorage(directory).update("owner", "team0001", 4) { it.copy(settlements = listOf(JSONObject(pending.toString()).put("attempted", true).put("leaseUntil", 1000))) }
+            val restored = TeamCommandStorage(directory).update("owner", "team0001", 4) { it }
             val retry = restored.settlements.single()
             assertEquals("settlement001", retry.getString("settlementId"))
             assertEquals(exactBody, retry.getJSONObject("body").toString())
@@ -164,8 +164,8 @@ class TeamBotsTest {
             assertFalse(canDiscardTeamBotIntent(JSONObject(retry.toString()).put("error", "BOT_RESULT_CONFLICT"), 999))
             assertTrue(canDiscardTeamBotIntent(JSONObject(retry.toString()).put("error", "BOT_RESULT_CONFLICT"), 1001))
             try { teamBotSettlementIntent(restored, "chat0001", "trigger001", run().copy(state = "recovery"), "Different text", "replacement", 100); fail("Duplicate settlement") } catch (expected: TeamMessageFailure) { assertEquals("MESSAGE_IN_FLIGHT", expected.code) }
-            assertTrue(TeamMessageStorage(directory).update("owner", "team0001", 5) { it }.settlements.isEmpty())
-            assertTrue(TeamMessageStorage(directory).update("another", "team0001", 4) { it }.settlements.isEmpty())
+            assertTrue(TeamCommandStorage(directory).update("owner", "team0001", 5) { it }.settlements.isEmpty())
+            assertTrue(TeamCommandStorage(directory).update("another", "team0001", 4) { it }.settlements.isEmpty())
         } finally { directory.deleteRecursively() }
     }
 
@@ -174,8 +174,8 @@ class TeamBotsTest {
         try {
             val original = intent()
             val attempted = JSONObject(original.toString()).put("attempted", true)
-            TeamMessageStorage(directory).update("human", "team0001", 4) { it.copy(answers = listOf(attempted)) }
-            val restored = TeamMessageStorage(directory).update("human", "team0001", 4) { it }
+            TeamCommandStorage(directory).update("human", "team0001", 4) { it.copy(answers = listOf(attempted)) }
+            val restored = TeamCommandStorage(directory).update("human", "team0001", 4) { it }
             // ACK was lost, then the owner unbound/rebound or the source was
             // recalled. Public status deliberately hides the old question.
             val revoked = run().copy(state = "revoked", questionId = null, answered = false)
@@ -185,7 +185,7 @@ class TeamBotsTest {
             try { teamBotAnswerRetryBody(restored, original, revoked, 2000); fail("A new answer cannot use revoked state") } catch (expected: TeamMessageFailure) { assertEquals("QUESTION_RECIPIENT_REQUIRED", expected.code) }
             try { teamBotAnswerRetryBody(restored.copy(generation = 5), attempted, null, 2000); fail("Generation changed") } catch (expected: TeamMessageFailure) { assertEquals("INVALID_SESSION", expected.code) }
             try { teamBotAnswerRetryBody(restored.copy(teamId = "other-team"), attempted, null, 2000); fail("Team changed") } catch (expected: TeamMessageFailure) { assertEquals("INVALID_SESSION", expected.code) }
-            assertTrue(TeamMessageStorage(directory).update("other-human", "team0001", 4) { it }.answers.isEmpty())
+            assertTrue(TeamCommandStorage(directory).update("other-human", "team0001", 4) { it }.answers.isEmpty())
         } finally { directory.deleteRecursively() }
     }
 }

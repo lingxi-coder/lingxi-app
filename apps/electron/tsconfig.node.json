@@ -10,7 +10,16 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["node", "electron-vite/node"]
+    "types": [
+      "node",
+      "electron-vite/node"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "firebase/*": [
+        "./node_modules/firebase/*"
+      ]
+    }
   },
   "include": [
     "src/main/**/*.ts",

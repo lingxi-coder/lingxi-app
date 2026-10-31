@@ -1,8 +1,8 @@
-import { useEffect, useReducer, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { canRecoverBot, isQuestionRecipient, teamBotTriggerId, teamBotUsable, type LocalTeamBot, type TeamBotCard, type TeamBotState } from './bots.js';
 import type { TeamDetail, TeamsApi, TeamSummary } from './index.js';
-import { indexedDbMessageStorage } from './message-storage.js';
-import { recoveryKey, TeamMessaging, type TeamMessage } from './messages.js';
+import { indexedDbCommandStorage } from './command-storage.js';
+import { recoveryKey, TeamMessaging, type TeamConversation, type TeamMessage } from './messages.js';
 
 export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
   api: TeamsApi; uid: string; team: TeamSummary; members: TeamDetail['members']; zh: boolean; onClose(): void;
@@ -20,13 +20,13 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
   const [runStates, setRunStates] = useState<{ conversationId: string; values: Record<string, TeamBotState> }>({ conversationId: '', values: {} });
   const [editing, setEditing] = useState<TeamMessage>(), [reply, setReply] = useState<TeamMessage>();
   const [recall, setRecall] = useState<TeamMessage>();
-  const [error, setError] = useState(''), [busy, setBusy] = useState(false), [shown, setShown] = useState(100);
+  const [error, setError] = useState(''), [busy, setBusy] = useState(false), [historyEnd, setHistoryEnd] = useState<number>();
   useEffect(() => {
-    const current = new TeamMessaging(api, indexedDbMessageStorage(), uid, { teamId: team.id, generation: team.generation });
+    const current = new TeamMessaging(api, indexedDbCommandStorage(), uid, { teamId: team.id, generation: team.generation });
     const stop = current.onChanged(render); setModel(current);
     void current.start().catch(() => setError(t('Local message storage is unavailable. Retry after freeing space.', '本地消息存储不可用，请检查空间后重试。')));
-    const online = () => void current.refresh(); window.addEventListener('online', online);
-    return () => { stop(); current.close(); window.removeEventListener('online', online); };
+    const online = () => void current.refresh(); window.addEventListener('online', online); window.addEventListener('focus', online);
+    return () => { stop(); current.close(); window.removeEventListener('online', online); window.removeEventListener('focus', online); };
   // The controller owns one account and one membership generation.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, uid, team.id, team.generation]);
@@ -74,7 +74,7 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
     }
   }
   const selected = model?.selected ?? '';
-  useEffect(() => { setEditing(undefined); setReply(undefined); setRecall(undefined); setText(''); setShown(100); setTargets([]); }, [selected]);
+  useEffect(() => { setEditing(undefined); setReply(undefined); setRecall(undefined); setText(''); setHistoryEnd(undefined); setTargets([]); }, [selected]);
   const attempt = async (action: () => Promise<unknown>) => {
     if (submitting.current) return; submitting.current = true;
     setBusy(true); setError('');
@@ -83,17 +83,21 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
   };
   const conversation = model?.state.conversations.find(value => value.id === selected);
   const botDmPermitted = conversation?.kind !== 'bot_dm' || bots.some(bot => teamBotUsable(bot) && conversation.participants.includes(bot.key));
-  const messages = model?.state.threads[selected]?.messages ?? [];
+  const messages = model?.state.threads[selected]?.messages ?? EMPTY_MESSAGES;
+  const end = Math.min(historyEnd ?? messages.length, messages.length), start = Math.max(0, end - 100);
+  const visibleMessages = useMemo(() => messages.slice(start, end), [messages, start, end]);
+  const messageById = useMemo(() => new Map(messages.map(message => [message.id, message])), [messages]);
+  const selectConversation = useCallback((id: string) => model?.select(id), [model]);
   const pending = model?.state.outbox.filter(value => value.conversationId === selected) ?? [];
   const states = runStates.conversationId === selected ? runStates.values : {};
-  const triggerSources = JSON.stringify(messages.slice(-shown).flatMap<{ messageId: string; triggerId?: string; botKey?: string }>(message => {
+  const triggerSources = useMemo(() => JSON.stringify(visibleMessages.flatMap<{ messageId: string; triggerId?: string; botKey?: string }>(message => {
     if (message.triggerId) return [{ messageId: message.id, triggerId: message.triggerId }];
     if (message.author.kind !== 'user' || message.recalled) return [];
     const botKeys = conversation?.kind === 'bot_dm'
       ? conversation.participants.filter(value => value.startsWith('bot:'))
       : message.mentions ?? [];
     return botKeys.map(botKey => ({ messageId: message.id, botKey }));
-  }));
+  })), [visibleMessages, conversation]);
   const [triggerMap, setTriggerMap] = useState<{ conversationId: string; values: Record<string, string[]> }>({ conversationId: '', values: {} });
   useEffect(() => {
     let closed = false;
@@ -109,44 +113,70 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
     return () => { closed = true; };
   }, [selected, triggerSources]);
   const messageTriggers = triggerMap.conversationId === selected ? triggerMap.values : {};
+  const latestMessageByTrigger = useMemo(() => {
+    const latest = new Map<string, string>();
+    for (const message of visibleMessages) for (const trigger of messageTriggers[message.id] ?? []) latest.set(trigger, message.id);
+    return latest;
+  }, [visibleMessages, messageTriggers]);
+  useEffect(() => { for (const [key, value] of checkedRuns.current) if (!value) checkedRuns.current.delete(key); }, [triggerSources]);
   const triggers = [...new Set(Object.values(messageTriggers).flat())].sort().join(',');
   useEffect(() => {
-    let closed = false, running = false;
+    let closed = false, running = false, again = false;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     const refresh = async () => {
-      if (running) return; running = true;
+      if (running) { again = true; return; } running = true;
       try {
         const result = await api.messages<{ bots: TeamBotCard[] }>({ action: 'bots', teamId: team.id, generation: team.generation });
-        if (!closed) { setBots(result.bots); setBotStatus(''); }
+        if (!closed) {
+          setBots(result.bots); setBotStatus(''); clearTimeout(deadline);
+          const expirations = result.bots.filter(bot => bot.online && bot.onlineUntil && bot.onlineUntil > Date.now()).map(bot => bot.onlineUntil!);
+          if (expirations.length) deadline = setTimeout(() => void refresh(), Math.max(1, Math.min(...expirations) - Date.now()));
+        }
       } catch { if (!closed) { setBots([]); setBotStatus(t('Bot availability could not be verified.', '未能确认 Bot 可用状态。')); } }
-      finally { running = false; }
+      finally { running = false; if (again && !closed) { again = false; void refresh(); } }
     };
-    void refresh(); const timer = setInterval(() => void refresh(), 15000);
-    return () => { closed = true; clearInterval(timer); };
+    void refresh(); const stop = api.onMessagesChanged(signal => { if (!signal || signal.bots) void refresh(); });
+    return () => { closed = true; stop(); clearTimeout(deadline); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, team.id, team.generation]);
   useEffect(() => {
-    let closed = false, running = false;
+    let closed = false, running = false, again = false;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     const refresh = async () => {
-      if (!selected || !triggers || running) return; running = true;
+      if (!selected || !triggers) return;
+      if (running) { again = true; return; } running = true;
       const ids = triggers.split(','), values: Record<string, TeamBotState> = {};
-      // Bound request concurrency and retain settled states; old history never polls forever.
-      for (let offset = 0; offset < ids.length && !closed; offset += 4) {
-        await Promise.all(ids.slice(offset, offset + 4).map(async triggerId => {
-          const key = JSON.stringify([uid, team.id, team.generation, selected, triggerId]);
-          if (checkedRuns.current.has(key)) { const cached = checkedRuns.current.get(key); if (cached) values[triggerId] = cached; return; }
-          try {
-            const state = await api.messages<TeamBotState>({ action: 'botState', teamId: team.id, generation: team.generation, conversationId: selected, triggerId });
-            if (closed) return;
-            values[triggerId] = state;
-            if (['completed', 'failed', 'missed', 'cancelled', 'recovered', 'revoked'].includes(state.state)) checkedRuns.current.set(key, state);
-          } catch (error) { if (!closed && error instanceof Error && error.message === 'TRIGGER_REQUIRED') checkedRuns.current.set(key, null); }
-        }));
-      }
+      const keys = new Map(ids.map(triggerId => [triggerId, JSON.stringify([uid, team.id, team.generation, selected, triggerId])]));
+      const missing = ids.filter(triggerId => {
+        const key = keys.get(triggerId)!;
+        if (!checkedRuns.current.has(key)) return true;
+        const cached = checkedRuns.current.get(key);
+        if (cached) values[triggerId] = cached;
+        return false;
+      });
+      try {
+        for (let offset = 0; offset < missing.length && !closed; offset += 30) {
+          const result = await api.messages<{ states: Record<string, TeamBotState | null> }>({ action: 'botStates', teamId: team.id, generation: team.generation, conversationId: selected, triggerIds: missing.slice(offset, offset + 30) });
+          if (closed) return;
+          for (const [triggerId, state] of Object.entries(result.states)) {
+            if (state) values[triggerId] = state;
+            if (!state || ['completed', 'failed', 'missed', 'cancelled', 'recovered', 'revoked'].includes(state.state)) {
+              checkedRuns.current.set(keys.get(triggerId)!, state);
+              if (checkedRuns.current.size > 512) checkedRuns.current.delete(checkedRuns.current.keys().next().value!);
+            }
+          }
+        }
+      } catch { /* A failed observation cannot authorize question or recovery controls. */ }
       if (!closed) setRunStates({ conversationId: selected, values });
+      clearTimeout(deadline);
+      const expirations = Object.values(values).filter(state => ['claimed', 'running'].includes(state.state) && (state.leaseUntil ?? 0) > Date.now()).map(state => state.leaseUntil!);
+      if (!closed && expirations.length) deadline = setTimeout(() => void refresh(), Math.max(1, Math.min(...expirations) - Date.now()));
       running = false;
+      if (again && !closed) { again = false; void refresh(); }
     };
-    void refresh(); const timer = setInterval(() => void refresh(), 5000);
-    return () => { closed = true; clearInterval(timer); };
+    void refresh();
+    const stop = api.onMessagesChanged(signal => { if (signal && !signal.bots && signal.conversationId !== selected) return; for (const [key, value] of checkedRuns.current) if (!value) checkedRuns.current.delete(key); void refresh(); });
+    return () => { closed = true; stop(); clearTimeout(deadline); };
   }, [api, uid, selected, triggers, team.id, team.generation]);
   const name = (id: string) => members.find(member => member.uid === id)?.displayName ?? (id === uid ? t('You', '你') : t('Member', '成员'));
   const submit = () => attempt(async () => {
@@ -158,13 +188,13 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
   });
   return <section className="team-messaging" aria-label={t('Team conversations', '团队会话')}>
     <header className="teams-team-header"><div><h2>{team.name}</h2><p>{t('Conversations · platform readable', '会话 · 平台可读')}</p></div><button onClick={onClose}>{t('Back to members', '返回成员')}</button></header>
-    <p role="status" className="teams-hint">{model?.offline ? t('Saved on this device. Reconnect to confirm access and send pending messages.', '当前显示本机缓存。联网后确认权限并发送待发消息。') : t('Connected. Message history is saved on this device.', '已连接。消息历史保存在本机。')}</p>
+    <p role="status" className="teams-hint">{model?.offline ? t('Saved on this device. Reconnect to confirm access and send pending messages.', '当前显示本机缓存。联网后确认权限并发送待发消息。') : t('Connected. Recently loaded messages are available offline.', '已连接，已加载的近期消息可离线查看。')}</p>
     {error || model?.error ? <p role="alert" className="teams-error">{errorText(error || model?.error || "")}</p> : null}
     {model?.state.creation ? <p role="status">{t("Creating conversation…", "正在创建会话…")} {model.state.creation.title} {model.state.creation.error ? errorText(model.state.creation.error) : ""} <button disabled={Boolean(model.state.creation.attempted && !model.state.creation.error) || (model.state.creation.leaseUntil ?? 0) > Date.now()} onClick={() => void attempt(() => model.discardCreation())}>{t("Discard", "丢弃")}</button></p> : null}
     <BotDirectory api={api} uid={uid} team={team} members={members} bots={bots} zh={zh} busy={busy} status={botStatus} attempt={attempt} onOpen={bot => teamBotUsable(bot) ? model?.create('bot_dm', bot.name, [uid], [bot.key]) ?? Promise.resolve() : Promise.reject(new Error('BOT_USE_REQUIRED'))} onChanged={async () => { const result = await api.messages<{ bots: TeamBotCard[] }>({ action: 'bots', teamId: team.id, generation: team.generation }); setBots(result.bots); }} />
     <div className="team-message-layout"><aside>
-      <button disabled={busy} onClick={() => void model?.refresh()}>{t('Sync messages', '同步消息')}</button>
-      <nav aria-label={t('Conversations', '会话')}>{model?.state.conversations.map(value => <button key={value.id} className="team-thread" aria-current={value.id === selected ? 'page' : undefined} onClick={() => model.select(value.id)}><b>{value.title}</b><span>{({ dm: t('Direct', '私聊'), group: t('Group', '群聊'), channel: t('Channel', '频道'), bot_dm: 'Bot' })[value.kind]} · {Math.max(0, value.lastSeq - value.lastReadSeq)} {t('unread', '未读')}</span></button>)}</nav>
+      <button disabled={busy} onClick={() => model?.reconnect()}>{t('Reconnect', '重新连接')}</button>
+      <ConversationNavigation conversations={model?.state.conversations ?? EMPTY_CONVERSATIONS} selected={selected} onSelect={selectConversation} zh={zh} />
       <details><summary>{t('New conversation', '新建会话')}</summary><form onSubmit={event => { event.preventDefault(); void attempt(async () => { if (botParties.some(key => !bots.some(bot => bot.key === key && teamBotUsable(bot)))) throw new Error('BOT_USE_REQUIRED'); await model?.create(kind, title.trim(), [uid, ...parties], botParties); setTitle(''); setParties([]); setBotParties([]); }); }}>
         <label>{t('Title', '标题')}<input value={title} onChange={event => setTitle(event.target.value)} maxLength={120} required /></label>
         <label>{t('Type', '类型')}<select value={kind} onChange={event => { setKind(event.target.value as typeof kind); setParties([]); setBotParties([]); }}><option value="dm">{t('Direct message', '私聊')}</option><option value="group">{t('Group', '群聊')}</option><option value="channel">{t('Channel', '频道')}</option></select></label>
@@ -178,13 +208,13 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
       </form></details>
     </aside><div className="team-message-detail">
       {conversation ? <><header className="teams-team-header"><h3>{conversation.title}</h3><button disabled={busy || model?.offline} onClick={() => void attempt(() => model!.markRead())}>{t('Mark read', '标为已读')}</button></header>
-        {messages.length > shown ? <button onClick={() => setShown(value => value + 100)}>{t('Show earlier messages', '显示更早消息')}</button> : null}
-        <ol className="team-messages" aria-label={t('Messages', '消息')}>{messages.slice(-shown).map(message => <li key={message.id} data-message-id={message.id} data-message-seq={message.seq}>
+        <div className="teams-row-actions"><button disabled={start === 0} onClick={() => setHistoryEnd(start)}>{t('Show earlier messages', '显示更早消息')}</button><button disabled={end === messages.length} onClick={() => setHistoryEnd(end + 100 >= messages.length ? undefined : end + 100)}>{t('Show newer messages', '显示更新消息')}</button><small role="status">{messages.length ? start + 1 : 0}–{end} / {messages.length}</small></div>
+        <ol className="team-messages" aria-label={t('Messages', '消息')}>{visibleMessages.map(message => <li key={message.id} data-message-id={message.id} data-message-seq={message.seq}>
           <header><b>{message.author.kind === 'bot' ? bots.find(bot => bot.key === message.author.botKey)?.name ?? 'Bot' : name(message.author.uid)}</b>{message.author.kind === 'bot' ? <small>{t('Owner', '所有者')}: {name(message.author.uid)}</small> : null}<time>{message.createdAt ? new Date(message.createdAt).toLocaleString() : ''}</time>{message.editedAt ? <small>{t('Edited', '已编辑')}</small> : null}</header>
-          {message.replyTo ? <blockquote>{messages.find(value => value.id === message.replyTo)?.recalled ? t('Recalled message', '已撤回消息') : messages.find(value => value.id === message.replyTo)?.text ?? t('Reply to an earlier message', '回复早前的消息')}</blockquote> : null}
+          {message.replyTo ? <blockquote>{messageById.get(message.replyTo)?.recalled ? t('Recalled message', '已撤回消息') : messageById.get(message.replyTo)?.text ?? t('Reply to an earlier message', '回复早前的消息')}</blockquote> : null}
           <p>{message.recalled ? <em>{t('Message recalled', '消息已撤回')}</em> : message.text}</p>
           {message.question && !message.recalled ? <BotQuestion message={message} uid={uid} generation={team.generation} state={message.triggerId ? states[message.triggerId] : undefined} model={model!} busy={busy} zh={zh} attempt={attempt} /> : null}
-          {(messageTriggers[message.id] ?? []).filter(triggerId => states[triggerId] && !messages.slice(messages.indexOf(message) + 1).some(value => messageTriggers[value.id]?.includes(triggerId))).map(triggerId => <BotRun key={triggerId} state={states[triggerId]!} triggerId={triggerId} conversationId={selected} model={model!} uid={uid} zh={zh} busy={busy} attempt={attempt} />)}
+          {(messageTriggers[message.id] ?? []).filter(triggerId => states[triggerId] && latestMessageByTrigger.get(triggerId) === message.id).map(triggerId => <BotRun key={triggerId} state={states[triggerId]!} triggerId={triggerId} conversationId={selected} model={model!} uid={uid} zh={zh} busy={busy} attempt={attempt} />)}
           {!message.recalled ? <div className="teams-row-actions"><button onClick={() => { setReply(message); setEditing(undefined); }}>{t('Reply', '回复')}</button>{message.author.uid === uid && message.author.kind === 'user' ? <><button onClick={() => { setEditing(message); setReply(undefined); setText(message.text); }}>{t('Edit', '编辑')}</button><button className="teams-danger" onClick={() => setRecall(message)}>{t('Recall', '撤回')}</button></> : null}</div> : null}
         </li>)}</ol>
         {pending.map(intent => <div key={intent.changeId} className="team-pending"><small>{(intent.error ? errorText(intent.error) : '') || (intent.attempted ? t('Waiting for server confirmation. Retries keep the same message identity.', '等待服务器确认，重试会沿用同一条消息。') : t('Pending · sends when connected', '待发送 · 联网后发送'))}</small><p>{intent.operation === 'recall' ? t('Recall message', '撤回消息') : intent.text}</p><button disabled={Boolean(intent.attempted && !intent.error) || (intent.leaseUntil ?? 0) > Date.now()} onClick={() => void attempt(() => model!.discard(intent.changeId))}>{t('Discard', '丢弃')}</button></div>)}
@@ -200,6 +230,19 @@ export function MessagesPanel({ api, uid, team, members, zh, onClose }: {
     {recall ? <div className="teams-modal"><section role="alertdialog" aria-modal="true" aria-label={t('Recall message?', '撤回消息？')}><h2>{t('Recall this message for everyone?', '为所有人撤回此消息？')}</h2><div><button autoFocus onClick={() => setRecall(undefined)}>{t('Cancel', '取消')}</button><button disabled={busy} className="teams-danger" onClick={() => void attempt(async () => { await model?.queue('recall', '', recall.id); setRecall(undefined); })}>{t('Recall', '撤回')}</button></div></section></div> : null}
   </section>;
 }
+
+const EMPTY_MESSAGES: TeamMessage[] = [];
+const EMPTY_CONVERSATIONS: TeamConversation[] = [];
+const ConversationNavigation = memo(function ConversationNavigation({ conversations, selected, onSelect, zh }: {
+  conversations: TeamConversation[]; selected: string; onSelect(id: string): void; zh: boolean;
+}): ReactElement {
+  const [page, setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil(conversations.length / 50)), current = Math.min(page, pages - 1);
+  return <nav aria-label={zh ? '会话' : 'Conversations'}>
+    <div className="teams-row-actions"><button disabled={current === 0} onClick={() => setPage(current - 1)}>{zh ? '上一页' : 'Previous'}</button><span role="status">{current + 1} / {pages}</span><button disabled={current + 1 === pages} onClick={() => setPage(current + 1)}>{zh ? '下一页' : 'Next'}</button></div>
+    {conversations.slice(current * 50, (current + 1) * 50).map(value => <button key={value.id} className="team-thread" aria-current={value.id === selected ? 'page' : undefined} onClick={() => onSelect(value.id)}><b>{value.title}</b><span>{value.kind} · {Math.max(0, value.lastSeq - value.lastReadSeq)} {zh ? '未读' : 'unread'}</span></button>)}
+  </nav>;
+});
 
 function BotDirectory({ api, uid, team, members, bots, zh, busy, status, attempt, onOpen, onChanged }: {
   api: TeamsApi; uid: string; team: TeamSummary; members: TeamDetail['members']; bots: TeamBotCard[]; zh: boolean; busy: boolean; status: string;

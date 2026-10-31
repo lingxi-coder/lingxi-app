@@ -1,3 +1,4 @@
+import { FieldValue } from 'firebase-admin/firestore';
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { TeamConversationError } from './team-conversations.mjs';
@@ -122,6 +123,7 @@ export class TeamsStore {
         tx.create(this.index(user.uid, tid), { role: v.role, generation: next, joinedAt: now });
         tx.update(ref, { memberCount: team.data().memberCount + 1, updatedAt: now });
         tx.update(invitationRef, { uses: v.uses + 1 });
+        tx.set(ref.collection('signals').doc('membership'), { updatedAt: FieldValue.serverTimestamp() });
         return { teamId: tid, generation: next, alreadyMember: false };
       });
     }
@@ -179,6 +181,7 @@ export class TeamsStore {
         tx.delete(this.index(targetUid, ref.id));
         tx.update(ref, { memberCount: team.data().memberCount - 1, updatedAt: now });
       }
+      tx.set(ref.collection('signals').doc('membership'), { updatedAt: FieldValue.serverTimestamp() });
       return { ok: true };
     });
   }

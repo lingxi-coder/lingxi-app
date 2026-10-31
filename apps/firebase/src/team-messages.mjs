@@ -60,12 +60,11 @@ export class TeamMessagesStore {
       if (self.data().generation !== input.generation) fail(409, 'STALE_MEMBERSHIP');
       const threads = teamRef.collection('conversations');
       if (input.action === 'list') {
-        let query = threads.where('memberUids', 'array-contains', user.uid).orderBy('__name__').limit(100);
+        let query = threads.where('memberUids', 'array-contains', user.uid).orderBy('__name__').limit(101);
         if (input.after) query = query.startAfter(input.after);
-        const page = await tx.get(query);
-        const reads = page.empty ? [] : await tx.getAll(...page.docs.map(doc => doc.ref.collection('reads').doc(user.uid)));
-        return { conversations: page.docs.map((doc, index) => conversation(doc, reads[index].data(), input.generation)),
-          next: page.size === 100 ? page.docs.at(-1).id : null };
+        const page = await tx.get(query), docs = page.docs.slice(0, 100);
+        const reads = docs.length ? await tx.getAll(...docs.map(doc => doc.ref.collection('reads').doc(user.uid))) : [];
+        return { conversations: docs.map((doc, index) => conversation(doc, reads[index].data(), input.generation)), next: page.size > 100 ? docs.at(-1).id : null };
       }
       const ref = threads.doc(input.conversationId), current = await tx.get(ref), c = current.data();
       if (!c?.memberUids.includes(user.uid)) fail(403, 'CONVERSATION_REQUIRED');
@@ -74,7 +73,9 @@ export class TeamMessagesStore {
         const read = (await tx.get(readRef)).data();
         if (input.lastReadSeq > c.lastSeq) fail(409, 'INVALID_READ_CURSOR');
         const lastReadSeq = Math.max(read?.generation === input.generation ? read.lastReadSeq : 0, input.lastReadSeq);
-        tx.set(readRef, { lastReadSeq, generation: input.generation });
+        if (read?.generation !== input.generation || read.lastReadSeq !== lastReadSeq) {
+          tx.set(readRef, { lastReadSeq, generation: input.generation });
+        }
         return { lastReadSeq };
       }
       if (input.action === 'sync') {

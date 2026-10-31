@@ -49,7 +49,7 @@ const sharedSources = [
 
 export default defineConfig({
   plugins: [react(), compilerDocumentation()],
-  resolve: { alias: sharedSources, dedupe: ['react', 'react-dom'] },
+  resolve: { alias: sharedSources, dedupe: ['react', 'react-dom', 'firebase'] },
   define: { __LINGXI_WEB_VERSION__: JSON.stringify(version) },
   // The dev server only serves files under the app by default; the shared sources are two directories up.
   server: { fs: {

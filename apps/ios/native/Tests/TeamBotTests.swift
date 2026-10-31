@@ -1,3 +1,6 @@
+import FirebaseAuth
+import FirebaseCore
+import FirebaseFirestore
 import XCTest
 @testable import LingxiCode
 
@@ -47,8 +50,9 @@ final class TeamBotTests: XCTestCase {
         projection.botOutbox = [intent]
         let message = try message()
         let conversation = TeamMessageConversation(id: "thread_0001", kind: "bot_dm", title: "Bot", participants: ["user:alice", key], lastSeq: 3, lastChangeSeq: 1, lastReadSeq: 0)
-        try projection.apply(TeamMessagePage(conversation: conversation, changes: [TeamMessageChange(id: "receipt_0001", seq: 1, messageId: message.id, operation: "create")], messages: [message], hasMore: false))
-        XCTAssertEqual(projection.threads[conversation.id]?.cursor, 1)
+        projection.conversations = [conversation]
+        projection.threads[conversation.id] = TeamMessageProjection.Thread(messages: [message])
+        XCTAssertEqual(projection.threads[conversation.id]?.messages.first?.id, message.id)
         XCTAssertEqual(projection.botOutbox?.first?.error, "BOT_USE_REQUIRED")
     }
     func testLostAnswerAckThenNewQuestionKeepsExactRetryAndCurrentQuestion() throws {
@@ -57,8 +61,9 @@ final class TeamBotTests: XCTestCase {
         let current = TeamBotState(state: "running", ownerUid: "owner", botKey: key, origin: TeamBotOrigin(uid: "alice", generation: 7), leaseUntil: 2000, questionId: "question_0002", answered: false)
         var projection = TeamMessageProjection(version: 1, uid: "alice", teamId: "team_0001", generation: 7)
         projection.botOutbox = [old]
-        projection.threads["thread_0001"] = TeamMessageProjection.Thread(cursor: 3, messages: [newMessage])
+        projection.threads["thread_0001"] = TeamMessageProjection.Thread(messages: [newMessage])
         let restored = try JSONDecoder().decode(TeamMessageProjection.self, from: JSONEncoder().encode(projection))
+        XCTAssertTrue(restored.threads.isEmpty, "History must be restored by the Firestore SDK")
         let retry = try XCTUnwrap(restored.botOutbox?.first)
         XCTAssertEqual(retry.body["questionId"] as? String, "question_0001")
         XCTAssertEqual(retry.body["answerId"] as? String, "answer_00001")
@@ -110,13 +115,13 @@ final class TeamBotTests: XCTestCase {
         let intent = TeamBotIntent(action: "botAnswer", conversationId: "thread_0001", triggerId: "trigger_0001", questionId: "question_0001", answerId: "answer_00001", answers: answers, botKey: nil, text: nil, attempted: true, leaseUntil: 1234)
         var projection = TeamMessageProjection(version: 1, uid: "alice", teamId: "team_0001", generation: 7)
         projection.botOutbox = [intent]
-        projection.threads["thread_0001"] = TeamMessageProjection.Thread(cursor: 3, messages: [try message()])
+        projection.threads["thread_0001"] = TeamMessageProjection.Thread(messages: [try message()])
         projection.creation = TeamMessageCreation(teamId: "team_0001", generation: 7, conversationId: "thread_0001", kind: "bot_dm", title: "Bot", participantUids: ["alice"], botKeys: [key])
         projection.outbox = [TeamMessageIntent(teamId: "team_0001", generation: 7, conversationId: "thread_0001", messageId: "message_0001", changeId: "change_0001", operation: "create", text: "Do this", replyTo: nil, targets: [key])]
         let restored = try JSONDecoder().decode(TeamMessageProjection.self, from: JSONEncoder().encode(projection))
+        XCTAssertTrue(restored.threads.isEmpty, "History must be restored by the Firestore SDK")
         let retry = try XCTUnwrap(restored.botOutbox?.first)
-        XCTAssertEqual(restored.threads["thread_0001"]?.messages.first?.origin, TeamBotOrigin(uid: "alice", generation: 7))
-        XCTAssertEqual(restored.threads["thread_0001"]?.messages.first?.question?.id, "question_0001")
+        XCTAssertEqual(retry.questionId, "question_0001")
         XCTAssertEqual(retry.answerId, intent.answerId)
         XCTAssertEqual(retry.answers, answers)
         XCTAssertEqual(retry.attempted, true)
@@ -131,9 +136,9 @@ final class TeamBotTests: XCTestCase {
     func testAtomicFileReopenRetainsAttemptedAnswerBody() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("teams-bot-tests-" + UUID().uuidString)
         let intent = TeamBotIntent(action: "botAnswer", conversationId: "thread_0001", triggerId: "trigger_0001", questionId: "question_0001", answerId: "answer_00001", answers: ["Which file?": "report.txt"], botKey: nil, text: nil, attempted: true, leaseUntil: 1234)
-        let original = TeamMessageFiles(directory: directory)
+        let original = TeamCommandFiles(directory: directory)
         _ = try await original.update(uid: "alice", teamId: "team_0001", generation: 7) { $0.botOutbox = [intent] }
-        let reopened = TeamMessageFiles(directory: directory)
+        let reopened = TeamCommandFiles(directory: directory)
         let restored = try await reopened.update(uid: "alice", teamId: "team_0001", generation: 7) { _ in }
         XCTAssertEqual(restored.botOutbox?.first?.answerId, intent.answerId)
         XCTAssertEqual(restored.botOutbox?.first?.answers, intent.answers)
@@ -147,5 +152,69 @@ final class TeamBotTests: XCTestCase {
         XCTAssertFalse(TeamBotIntent.validAnswers(["Which file?": " ", "Which format?": "text"], for: question))
         XCTAssertFalse(TeamBotIntent.validAnswers(["Which file?": String(repeating: "😀", count: 1001), "Which format?": "text"], for: question))
         XCTAssertTrue(TeamBotIntent.validAnswers(["Which file?": "a", "Which format?": "text"], for: question))
+    }
+}
+
+@MainActor
+final class TeamFirestoreCacheTests: XCTestCase {
+    private let base = URL(string: "http://127.0.0.1:41791")!
+    private func request(_ path: String) async throws -> [String: Any] {
+        let url = base.appendingPathComponent(path).appending(queryItems: [URLQueryItem(name: "client", value: "ios")])
+        let (data, response) = try await URLSession.shared.data(from: url)
+        let status = (response as? HTTPURLResponse)?.statusCode
+        print("TEAMS_CACHE control \(path) \(status ?? 0)")
+        XCTAssertEqual(status, 200, path)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+    private func until(_ condition: @MainActor () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(20)
+        while !condition() {
+            if Date() >= deadline { XCTFail("SDK cache condition timed out"); throw TeamMessageFailure(code: "TEST_TIMEOUT") }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+    private func delete(_ app: FirebaseApp) async {
+        await withCheckedContinuation { continuation in app.delete { _ in continuation.resume() } }
+    }
+    func testSDKCacheReopensOfflineAndStreamsOldChangesReadMarksAndRevocation() async throws {
+        guard ProcessInfo.processInfo.environment["TEAM_CACHE_EMULATOR"] == "1" else { throw XCTSkip("Explicit local emulator acceptance only") }
+        let phase = ProcessInfo.processInfo.environment["TEAM_CACHE_PHASE"]
+        XCTAssertTrue(phase == "warm" || phase == "offline", "Explicit warm/offline phase required")
+        let fixture = try await request("fixture")
+        let uid = try XCTUnwrap(fixture["uid"] as? String), teamId = try XCTUnwrap(fixture["teamId"] as? String), id = try XCTUnwrap(fixture["conversationId"] as? String)
+        let customToken = try XCTUnwrap(fixture["customToken"] as? String)
+        let options = FirebaseOptions(googleAppID: "1:123456789:ios:0123456789abcdef", gcmSenderID: "123456789")
+        options.projectID = "demo-lingxi-teams-t0"; options.apiKey = "AIzaSyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        let name = "teams-cache-acceptance"
+        FirebaseApp.configure(name: name, options: options)
+        let app = try XCTUnwrap(FirebaseApp.app(name: name)), auth = Auth.auth(app: app), db = Firestore.firestore(app: app)
+        let team = TeamSummary(id: teamId, name: "SDK cache fixture", memberCount: 1, role: "owner", generation: 1)
+        let model = TeamMessagingModel(apiRoot: base.appendingPathComponent("v1/teams/messages"), auth: auth, db: db)
+        do {
+            auth.useEmulator(withHost: "127.0.0.1", port: 9098); db.useEmulator(withHost: "127.0.0.1", port: 8085)
+            // The SDK rejects disabling TLS while its host is still the production default.
+            let settings = db.settings; settings.isSSLEnabled = false; db.settings = settings
+            if phase == "warm" { _ = try await auth.signIn(withCustomToken: customToken) }
+            else { XCTAssertEqual(auth.currentUser?.uid, uid); try await db.disableNetwork() }
+            print("TEAMS_CACHE authenticated phase \(phase ?? "missing")")
+            model.start(uid: uid, team: team); model.select(id)
+            print("TEAMS_CACHE model selected")
+            try await until { model.cache?.threads[id]?.messages.count == 125 }
+            if phase == "warm" {
+                try await until { !model.offline && model.cache?.threads[id]?.messages.first?.text == "Body 1" && model.cache?.conversations.first?.lastReadSeq == 0 }
+                print("TEAMS_CACHE warm-server-snapshot 125")
+            } else {
+                XCTAssertTrue(model.offline)
+                print("TEAMS_CACHE disk-cache-offline-process-restart 125")
+                _ = try await request("edit")
+                XCTAssertEqual(model.cache?.threads[id]?.messages.first?.text, "Body 1")
+                try await db.enableNetwork(); try await until { model.cache?.threads[id]?.messages.first?.text == "Edited oldest" }
+                XCTAssertEqual(model.cache?.threads[id]?.messages[1].text, ""); XCTAssertEqual(model.cache?.threads[id]?.messages[1].recalled, true)
+                _ = try await request("read"); try await until { model.cache?.conversations.first?.lastReadSeq == 120 }
+                _ = try await request("revoke"); try await until { model.revoked }; XCTAssertNil(model.cache)
+                print("TEAMS_CACHE old-edit-recall-read-revocation PASS")
+            }
+            model.stop(); try await db.terminate(); await delete(app)
+        } catch { print("TEAMS_CACHE failure count \(model.cache?.threads[id]?.messages.count ?? -1) offline \(model.offline) error \(model.error)"); model.stop(); try? await db.terminate(); await delete(app); throw error }
     }
 }

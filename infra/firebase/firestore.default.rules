@@ -127,6 +127,8 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastActiveAt'])
           && request.resource.data.lastActiveAt == request.time;
       }
+      // Trusted writes contain only a timestamp and an opaque card identity.
+      match /signals/{key} { allow get, list: if isMember(tid); }
       match /bots/{key} {
         // The authenticated API filters inactive/tombstoned cards for their
         // owner. Direct reads would bypass that visibility boundary. Rules'

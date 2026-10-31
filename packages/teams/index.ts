@@ -34,6 +34,7 @@ export interface DesktopTeamsApi {
   onChanged: TeamsApi['onChanged'];
   messages<T>(uid: string, command: MessageCommand): Promise<T>;
   onMessagesChanged: MessageApi['onMessagesChanged'];
+  watchMessages(uid: string, scope: import('./messages').MessageScope, conversationId: string, next: (snapshot: import('./messages').MessageSnapshot) => void): () => void;
 }
 export class TeamsApiError extends Error {
   constructor(public readonly code: string, public readonly status: number) { super(code); }

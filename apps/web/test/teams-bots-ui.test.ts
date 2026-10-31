@@ -8,7 +8,7 @@ import type { TeamsApi } from '../../../packages/teams';
 import type { TeamBotCard } from '../../../packages/teams/bots';
 import * as botsModule from '../../../packages/teams/bots';
 import * as messagesModule from '../../../packages/teams/messages';
-import type { MessageCommand, MessageProjection, MessageStorage, TeamMessage } from '../../../packages/teams/messages';
+import type { MessageCommand, PendingCommands, CommandStorage, TeamMessage } from '../../../packages/teams/messages';
 import { textOf } from './support/render';
 
 const require = createRequire(import.meta.url), { create, act } = require('react-test-renderer');
@@ -17,7 +17,7 @@ const team = { id: 'test-team', name: 'Fixture team', generation: 7, role: 'memb
 const members = ['alice', 'owner', 'reader'].map(uid => ({ uid, displayName: uid, generation: 7, role: 'member' as const }));
 const question: TeamMessage = { id: 'question-message', seq: 1, author: { kind: 'bot', uid: 'owner', botKey }, kind: 'question', text: 'Choose a value',
   triggerId: 'trigger01', origin: { uid: 'alice', generation: 7 }, question: { id: 'question01', questions: ['Which value?'] }, createdAt: null, changeSeq: 1, changeId: 'change001' };
-function loadPanel(storage: MessageStorage): typeof import('../../../packages/teams/MessagesPanel.js').MessagesPanel {
+function loadPanel(storage: CommandStorage): typeof import('../../../packages/teams/MessagesPanel.js').MessagesPanel {
   // Shared packages have no standalone React install. Resolve rendering dependencies
   // through this Web package, as Vite does, without changing application resolution.
   const source = readFileSync(new URL('../../../packages/teams/MessagesPanel.tsx', import.meta.url), 'utf8');
@@ -29,8 +29,8 @@ function loadPanel(storage: MessageStorage): typeof import('../../../packages/te
         return messagesModule;
       case './bots.js':
         return botsModule;
-      case './message-storage.js':
-        return { indexedDbMessageStorage: () => storage };
+      case './command-storage.js':
+        return { indexedDbCommandStorage: () => storage };
       default:
         return require(id);
     }
@@ -48,19 +48,22 @@ for (const uid of ['alice', 'reader']) test(`T3 rendered question grants answer 
     if (renderer) await act(async () => renderer.unmount());
     if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow); else Reflect.deleteProperty(globalThis, 'window');
   });
-  const records = new Map<string, MessageProjection>();
-  const storage: MessageStorage = { async update(key, reduce) { const value = reduce(structuredClone(records.get(key))); records.set(key, structuredClone(value)); return structuredClone(value); } };
+  const records = new Map<string, PendingCommands>();
+  const storage: CommandStorage = { async load(key) { return structuredClone(records.get(key)); }, async update(key, reduce) { const value = reduce(structuredClone(records.get(key))); records.set(key, structuredClone(value)); return structuredClone(value); } };
   const calls: MessageCommand[] = [];
   const conversation = { id: 'test-chat', kind: 'group', title: 'Shared thread', participants: ['user:alice', 'user:reader', botKey], lastSeq: 1, lastChangeSeq: 1, lastReadSeq: 0 };
   const api: TeamsApi = {
     async list() { return { teams: [team] }; }, async detail() { return { team, members, invites: [] }; }, async execute() { return {}; },
+    watchMessages(scope, id, next) {
+      let closed = false;
+      queueMicrotask(() => { if (closed) return; next({ uid, ...scope, kind: 'directory', fromCache: false, conversations: [conversation as messagesModule.TeamConversation] }); if (id) next({ uid, ...scope, kind: 'messages', conversationId: id, fromCache: false, messages: [question] }); });
+      return () => { closed = true; };
+    },
     onChanged: () => () => {}, onMessagesChanged: () => () => {},
     async messages<T>(command: MessageCommand): Promise<T> {
       calls.push(command);
       if (command.action === 'bots') return { bots: [{ key: botKey, ownerUid: 'owner', hostId: 'h'.repeat(22), botId: 'b'.repeat(22), name: 'Fixture Bot', description: 'Shared helper', revision: 1, use: 'listed', uids: ['alice'], permitted: uid === 'alice', online: false }] } as T;
-      if (command.action === 'list') return { conversations: [conversation], next: null } as T;
-      if (command.action === 'sync') return { conversation, changes: command.after ? [] : [{ id: question.changeId, seq: 1, messageId: question.id, operation: 'create' }], messages: command.after ? [] : [question], hasMore: false } as T;
-      if (command.action === 'botState') return { state: 'running', ownerUid: 'owner', botKey, origin: question.origin, questionId: question.question!.id, leaseUntil: Date.now() + 100000, answered: false } as T;
+      if (command.action === 'botStates') return { states: Object.fromEntries(command.triggerIds.map(id => [id, { state: 'running', ownerUid: 'owner', botKey, origin: question.origin, questionId: question.question!.id, leaseUntil: Date.now() + 100000, answered: false }])) } as T;
       return {} as T;
     },
   };
@@ -93,21 +96,24 @@ test('T3 owner unbind retains the tombstone revision for rebind and disables Bot
     if (renderer) await act(async () => renderer.unmount());
     if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow); else Reflect.deleteProperty(globalThis, 'window');
   });
-  const records = new Map<string, MessageProjection>();
-  const storage: MessageStorage = { async update(key, reduce) { const value = reduce(structuredClone(records.get(key))); records.set(key, structuredClone(value)); return structuredClone(value); } };
+  const records = new Map<string, PendingCommands>();
+  const storage: CommandStorage = { async load(key) { return structuredClone(records.get(key)); }, async update(key, reduce) { const value = reduce(structuredClone(records.get(key))); records.set(key, structuredClone(value)); return structuredClone(value); } };
   let card: TeamBotCard = { key: botKey, ownerUid: 'owner', hostId: 'h'.repeat(22), botId: 'b'.repeat(22), name: 'Fixture Bot', description: '', revision: 7, use: 'all', uids: [], permitted: true, online: true, enabled: true };
   const calls: MessageCommand[] = [], binds: { expectedRevision: number }[] = [];
   const conversation = { id: 'test-chat', kind: 'bot_dm', title: 'Existing Bot thread', participants: ['user:owner', botKey], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0 };
   const api: TeamsApi = {
     async list() { return { teams: [team] }; }, async detail() { return { team, members, invites: [] }; }, async execute() { return {}; },
+    watchMessages(scope, id, next) {
+      let closed = false;
+      queueMicrotask(() => { if (closed) return; next({ uid: 'owner', ...scope, kind: 'directory', fromCache: false, conversations: [conversation as messagesModule.TeamConversation] }); if (id) next({ uid: 'owner', ...scope, kind: 'messages', conversationId: id, fromCache: false, messages: [] }); });
+      return () => { closed = true; };
+    },
     onChanged: () => () => {}, onMessagesChanged: () => () => {},
     async localBots() { return [{ botId: card.botId, name: card.name, description: '' }]; },
     async bindLocalBot(input) { binds.push(input); card = { ...card, revision: 9, enabled: true, permitted: true }; return { botKey, revision: 9 }; },
     async messages<T>(command: MessageCommand): Promise<T> {
       calls.push(command);
       if (command.action === 'bots') return { bots: [{ ...card }] } as T;
-      if (command.action === 'list') return { conversations: [conversation], next: null } as T;
-      if (command.action === 'sync') return { conversation, changes: [], messages: [], hasMore: false } as T;
       if (command.action === 'unbindBot') { assert.equal(command.expectedRevision, 7); card = { ...card, revision: 8, enabled: false, permitted: false }; }
       return {} as T;
     },
@@ -145,10 +151,13 @@ test('T3 two owner windows keep the audience draft revision after refreshed card
     if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow); else Reflect.deleteProperty(globalThis, 'window');
   });
   let card: TeamBotCard = { key: botKey, ownerUid: 'owner', hostId: 'h'.repeat(22), botId: 'b'.repeat(22), name: 'Fixture Bot', description: '', revision: 7, use: 'listed', uids: ['alice'], permitted: true, online: true, enabled: true };
-  const revisions: number[] = [], records = new Map<string, MessageProjection>();
-  const storage: MessageStorage = { async update(key, reduce) { const value = reduce(structuredClone(records.get(key))); records.set(key, structuredClone(value)); return structuredClone(value); } };
+  const revisions: number[] = [], records = new Map<string, PendingCommands>();
+  const storage: CommandStorage = { async load(key) { return structuredClone(records.get(key)); }, async update(key, reduce) { const value = reduce(structuredClone(records.get(key))); records.set(key, structuredClone(value)); return structuredClone(value); } };
   const api: TeamsApi = {
     async list() { return { teams: [team] }; }, async detail() { return { team, members, invites: [] }; }, async execute() { return {}; },
+    watchMessages(scope, _id, next) {
+      queueMicrotask(() => next({ uid: 'owner', ...scope, kind: 'directory', fromCache: false, conversations: [] })); return () => {};
+    },
     onChanged: () => () => {}, onMessagesChanged: () => () => {},
     async localBots() { return [{ botId: card.botId, name: card.name, description: '' }]; },
     async bindLocalBot(input) {

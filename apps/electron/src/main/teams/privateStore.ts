@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
+import { lstat, mkdir, open, readdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { TeamBotTarget } from './process';
 
@@ -55,6 +56,38 @@ function createPrivate(path: string, value: string): void {
   const parent = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try { fsyncSync(parent); } finally { closeSync(parent); }
 }
+async function directory(path: string): Promise<string> {
+  try { await mkdir(path, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  const info = await lstat(path);
+  if (!info.isDirectory() || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid())) throw new Error('UNSAFE_TEAM_STORAGE');
+  return path;
+}
+async function read(path: string, maxBytes: number): Promise<string> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.nlink !== 1 || (info.mode & 0o077) !== 0 || info.size > maxBytes
+      || (process.getuid && info.uid !== process.getuid())) throw new Error('UNSAFE_TEAM_STORAGE');
+    const bytes = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await file.read(bytes, length, bytes.length - length, length);
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    if (length > maxBytes) throw new Error('UNSAFE_TEAM_STORAGE');
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length));
+  } finally { await file.close(); }
+}
+async function syncDirectory(path: string): Promise<void> {
+  const file = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { await file.sync(); } finally { await file.close(); }
+}
+async function create(path: string, value: string): Promise<void> {
+  const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try { await file.writeFile(value); await file.sync(); } finally { await file.close(); }
+  await syncDirectory(dirname(path));
+}
 function pendingText(value: PendingTeamTarget, uid: string): string {
   const target = value?.target;
   if (!value || Object.keys(value).sort().join(',') !== 'sequence,snapshot,target,version' || value.version !== 1
@@ -72,6 +105,12 @@ function pendingText(value: PendingTeamTarget, uid: string): string {
 export class TeamPrivateStore {
   readonly root: string;
   readonly hostId: string;
+  private operation: Promise<unknown> = Promise.resolve();
+  private serial<T>(run: () => Promise<T>): Promise<T> {
+    const result = this.operation.then(run);
+    this.operation = result.catch(() => undefined);
+    return result;
+  }
   constructor(userData: string) {
     const actual = realpathSync.native(userData);
     this.root = privateDirectory(join(actual, 'team-bot-host'));
@@ -81,68 +120,72 @@ export class TeamPrivateStore {
     this.hostId = readPrivate(hostPath, 22);
     if (!/^[A-Za-z0-9_-]{22}$/u.test(this.hostId)) throw new Error('UNSAFE_TEAM_STORAGE');
   }
-  owner(uid: string): { journal: string; runtime: string; snapshots: string; pending: string; home: string; tmp: string } {
+  async owner(uid: string): Promise<{ journal: string; runtime: string; snapshots: string; pending: string; home: string; tmp: string }> {
     if (!/^[A-Za-z0-9_-]{1,128}$/u.test(uid)) throw new Error('BOT_ACCOUNT_UNSUPPORTED');
-    privateDirectory(this.root);
-    const root = privateDirectory(join(this.root, digest(uid)));
-    return { journal: privateDirectory(join(root, 'journal')), runtime: privateDirectory(join(root, 'runtime')),
-      snapshots: privateDirectory(join(root, 'snapshots')), pending: privateDirectory(join(root, 'pending')),
-      home: privateDirectory(join(root, 'host-home')), tmp: privateDirectory(join(root, 'host-tmp')) };
+    await directory(this.root);
+    const root = await directory(join(this.root, digest(uid)));
+    return { journal: await directory(join(root, 'journal')), runtime: await directory(join(root, 'runtime')),
+      snapshots: await directory(join(root, 'snapshots')), pending: await directory(join(root, 'pending')),
+      home: await directory(join(root, 'host-home')), tmp: await directory(join(root, 'host-tmp')) };
   }
   /** Durable discovery precedes spawning. No credential, attempt or mutable model state. */
-  savePending(uid: string, value: PendingTeamTarget): void {
-    const text = pendingText(value, uid), path = join(this.owner(uid).pending, digest(JSON.stringify(value.target)));
-    try { createPrivate(path, text); }
+  savePending(uid: string, value: PendingTeamTarget): Promise<void> { return this.serial(async () => {
+    const text = pendingText(value, uid), path = join((await this.owner(uid)).pending, digest(JSON.stringify(value.target)));
+    try { await create(path, text); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    if (readPrivate(path, 4096) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
-  }
-  pending(uid: string): PendingTeamTarget[] {
-    const root = this.owner(uid).pending, names = readdirSync(root);
+    if (await read(path, 4096) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
+  }); }
+  pending(uid: string): Promise<PendingTeamTarget[]> { return this.serial(async () => {
+    const root = (await this.owner(uid)).pending, names = await readdir(root);
     if (names.length > 1000) throw new Error('UNSAFE_TEAM_STORAGE');
-    return names.map(name => {
+    const values: PendingTeamTarget[] = [];
+    for (const name of names) {
       if (!/^[a-f0-9]{64}$/u.test(name)) throw new Error('UNSAFE_TEAM_STORAGE');
-      const text = readPrivate(join(root, name), 4096), value = JSON.parse(text) as PendingTeamTarget;
+      let text: string;
+      try { text = await read(join(root, name), 4096); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+      const value = JSON.parse(text) as PendingTeamTarget;
       if (pendingText(value, uid) !== text || digest(JSON.stringify(value.target)) !== name) throw new Error('UNSAFE_TEAM_STORAGE');
-      return value;
-    }).sort((left, right) => left.sequence - right.sequence);
-  }
+      values.push(value);
+    }
+    return values.sort((left, right) => left.sequence - right.sequence);
+  }); }
   /** A concurrent settlement may have removed a previously listed entry. */
-  hasPending(uid: string, value: PendingTeamTarget): boolean {
-    const text = pendingText(value, uid), path = join(this.owner(uid).pending, digest(JSON.stringify(value.target)));
+  hasPending(uid: string, value: PendingTeamTarget): Promise<boolean> { return this.serial(async () => {
+    const text = pendingText(value, uid), path = join((await this.owner(uid)).pending, digest(JSON.stringify(value.target)));
     try {
-      if (readPrivate(path, 4096) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
+      if (await read(path, 4096) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
       throw error;
     }
-  }
+  }); }
   /** Called only after an authenticated host settlement ACK or unstarted proof. */
-  settlePending(uid: string, value: PendingTeamTarget): void {
-    const text = pendingText(value, uid), root = this.owner(uid).pending, path = join(root, digest(JSON.stringify(value.target)));
-    if (readPrivate(path, 4096) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
-    unlinkSync(path);
-    const directory = openSync(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-    try { fsyncSync(directory); } finally { closeSync(directory); }
-  }
-  saveSnapshot(uid: string, value: TeamPersonaSnapshot): string {
+  settlePending(uid: string, value: PendingTeamTarget): Promise<void> { return this.serial(async () => {
+    const text = pendingText(value, uid), root = (await this.owner(uid)).pending, path = join(root, digest(JSON.stringify(value.target)));
+    if (await read(path, 4096) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
+    await unlink(path);
+    await syncDirectory(root);
+  }); }
+  saveSnapshot(uid: string, value: TeamPersonaSnapshot): Promise<string> { return this.serial(async () => {
     this.validateSnapshot(value);
     const text = JSON.stringify(value);
     if (Buffer.byteLength(text) > 192 * 1024) throw new Error('INVALID_TEAM_SNAPSHOT');
-    const key = digest(text), path = join(this.owner(uid).snapshots, key);
-    try { createPrivate(path, text); }
+    const key = digest(text), path = join((await this.owner(uid)).snapshots, key);
+    try { await create(path, text); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    if (readPrivate(path, 192 * 1024) !== text) throw new Error('INVALID_TEAM_SNAPSHOT');
+    if (await read(path, 192 * 1024) !== text) throw new Error('INVALID_TEAM_SNAPSHOT');
     return key;
-  }
-  snapshot(uid: string, key: string): TeamPersonaSnapshot {
+  }); }
+  snapshot(uid: string, key: string): Promise<TeamPersonaSnapshot> { return this.serial(async () => {
     if (!/^[a-f0-9]{64}$/u.test(key)) throw new Error('INVALID_TEAM_SNAPSHOT');
-    const text = readPrivate(join(this.owner(uid).snapshots, key), 192 * 1024);
+    const text = await read(join((await this.owner(uid)).snapshots, key), 192 * 1024);
     if (digest(text) !== key) throw new Error('INVALID_TEAM_SNAPSHOT');
     const value = JSON.parse(text) as TeamPersonaSnapshot;
     this.validateSnapshot(value);
     return value;
-  }
+  }); }
   private validateSnapshot(value: TeamPersonaSnapshot): void {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_TEAM_SNAPSHOT');
     const { instructions, ...route } = value;

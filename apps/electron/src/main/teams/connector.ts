@@ -3,7 +3,7 @@ import type { TeamSummary } from '../../../../../packages/teams/index.js';
 import type { TeamConversation } from '../../../../../packages/teams/messages.js';
 import type { BotContent } from '../bots/content.js';
 import type { BotStore, BotTeamBinding } from '../bots/store.js';
-import { TeamPrivateStore, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot } from './privateStore.js';
+import { type PendingTeamTarget, TeamPrivateStore, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot } from './privateStore.js';
 import { runTeamHost, TeamHostFailure, type TeamBotTarget, type TeamHostProcessOptions, type TeamHostResult } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
 
@@ -28,10 +28,12 @@ export interface TeamConnectorOptions {
   permission(input: Parameters<TeamHostProcessOptions['permission']>[0] & { accountEpoch: number; assertCurrent(): void }, signal: AbortSignal): Promise<boolean>;
   platform?: NodeJS.Platform;
   run?: (options: TeamHostProcessOptions) => Promise<TeamHostResult>;
-  pollMs?: number;
+  retryMs?: number;
   now?: () => number;
+  maxConcurrent?: number;
 }
-interface Active { signature: string; controller: AbortController; promise: Promise<void> }
+interface QueuePage { cursor: number; triggers: Array<{ id: string; seq: number }>; hasMore: boolean }
+interface Active { signature: string; controller: AbortController; promise: Promise<void>; ready: Promise<void>; settling?: boolean }
 function scopeKey(teamId: string, botKey: string): string {
   return JSON.stringify([teamId, botKey]);
 }
@@ -43,20 +45,26 @@ export class TeamConnector implements LocalTeamHost {
   private refresh?: Promise<void>;
   private readonly active = new Map<string, Active>();
   private readonly blocked = new Map<string, string>();
+  private readonly slots = new Set<Active>();
+  private readonly scans = new Map<string, string>();
+  private readonly emptyQueues = new Map<string, string>();
+  private readonly observations = new Map<string, { triggerId: string; delay: number; until: number }>();
+  private readonly scheduled = new Map<string, number>();
+  private admissions = 0;
   private readonly heartbeats = new Map<string, number>();
   private readonly statuses = new Map<string, string>();
   private readonly bindingOperations = new Set<string>();
   private readonly stops: Array<() => void>;
-  private readonly timer: ReturnType<typeof setInterval>;
+  private timer?: ReturnType<typeof setTimeout>;
+  private failedDiscovery = false;
   private revision = 0;
   private notifyingStatus = false;
   constructor(private readonly options: TeamConnectorOptions) {
     this.stops = [options.service.onChanged(event => {
       if (event.invalidated) this.cancelAll();
       this.wake();
-    }), options.service.onMessagesChanged(() => { if (!this.notifyingStatus) this.wake(); })];
-    this.timer = setInterval(() => this.wake(), options.pollMs ?? 5000);
-    this.timer.unref(); this.wake();
+    }), options.service.onMessagesChanged(() => { if (!this.notifyingStatus) { this.observations.clear(); this.wake(); } })];
+    this.wake();
   }
   private available(): void { if ((this.options.platform ?? process.platform) !== 'darwin') throw new Error('TEAM_HOST_MACOS_REQUIRED'); }
   async localBots(uid: string): Promise<LocalTeamBot[]> {
@@ -100,7 +108,8 @@ export class TeamConnector implements LocalTeamHost {
     const credential = await this.options.modelCredential(route.credential_id); service.assertHostContext(context);
     if (!credential) throw new Error('TEAM_MODEL_UNAVAILABLE');
     await selection.assertCurrent(); service.assertHostContext(context);
-    const snapshot = this.options.privateStore.saveSnapshot(uid, { instructions, ...route });
+    const snapshot = await this.options.privateStore.saveSnapshot(uid, { instructions, ...route }); service.assertHostContext(context);
+    await selection.assertCurrent(); service.assertHostContext(context);
     this.stopBinding(input.teamId, botKey);
     // Save the intended revision first. A lost bind response can then be discovered,
     // while a rejected request never matches the server card and cannot execute.
@@ -122,11 +131,12 @@ export class TeamConnector implements LocalTeamHost {
   stopBinding(teamId: string, botKey: string): void {
     const prefix = scopeKey(teamId, botKey);
     for (const [key, active] of this.active) if (key.startsWith(`${prefix}:`)) { active.controller.abort(); this.active.delete(key); }
-    this.heartbeats.delete(prefix);
+    this.heartbeats.delete(prefix); this.scans.delete(prefix); this.scheduled.delete(prefix);
+    for (const map of [this.emptyQueues, this.observations, this.blocked]) for (const key of map.keys()) if (key.startsWith(`${prefix}:`)) map.delete(key);
   }
   /** Called synchronously before local Bot deletion/settings changes are published. */
   localChanged(): void { this.cancelAll(); this.wake(); }
-  invalidate(): void { this.cancelAll(); this.blocked.clear(); this.heartbeats.clear(); this.statuses.clear(); this.wake(); }
+  invalidate(): void { this.cancelAll(); this.scans.clear(); this.emptyQueues.clear(); this.observations.clear(); this.scheduled.clear(); this.blocked.clear(); this.heartbeats.clear(); this.statuses.clear(); this.wake(); }
   runStatus(uid: string, teamId: string, conversationId: string, triggerId: string): string | undefined {
     this.context(uid); return this.statuses.get(JSON.stringify([uid, teamId, conversationId, triggerId]));
   }
@@ -147,12 +157,32 @@ export class TeamConnector implements LocalTeamHost {
     this.refresh = (async () => {
       while (this.pending && !this.closed) {
         this.pending = false;
-        try { await this.discover(); } catch { this.cancelAll(); }
+        this.failedDiscovery = false;
+        try { await this.discover(); } catch { this.failedDiscovery = true; this.cancelAll(); }
       }
-    })().finally(() => { this.refresh = undefined; if (this.pending) this.wake(); });
+    })().finally(() => { this.refresh = undefined; if (this.pending) this.wake(); else this.schedule(); });
+  }
+  private schedule(): void {
+    clearTimeout(this.timer); this.timer = undefined;
+    if (this.closed) return;
+    const now = (this.options.now ?? Date.now)();
+    const deadlines = [...this.heartbeats.values()].map(value => value + 20000);
+    for (const value of this.observations.values()) if (value.until > now) deadlines.push(value.until);
+    if (this.scans.size && this.slots.size < (this.options.maxConcurrent ?? 4)) deadlines.push(now + 1);
+    if (this.failedDiscovery) deadlines.push(now + (this.options.retryMs ?? 5000));
+    if (!deadlines.length) return;
+    const delay = this.failedDiscovery ? this.options.retryMs ?? 5000 : Math.max(1, Math.min(...deadlines) - now);
+    this.timer = setTimeout(() => this.wake(), delay); this.timer.unref();
   }
   /** Exposed for deterministic lifecycle tests and trusted app shutdown only. */
-  async idle(): Promise<void> { await this.refresh; }
+  async idle(): Promise<void> {
+    do {
+      await this.refresh;
+      await Promise.all([...this.slots].map(value => value.ready));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await Promise.all([...this.slots].filter(value => value.settling).map(value => value.promise));
+    } while (this.refresh);
+  }
   private async discover(): Promise<void> {
     const context = this.options.service.hostContext();
     if (!context) { this.cancelAll(); return; }
@@ -160,79 +190,131 @@ export class TeamConnector implements LocalTeamHost {
     const assert = () => { service.assertHostContext(context); if (this.closed || version !== this.revision) throw new Error('INVALID_SESSION'); };
     const own = this.options.store.list().flatMap(bot => (bot.teams ?? []).filter(binding => binding.ownerUid === context.uid).map(binding => ({ bot, binding })));
     if (!own.length) { this.cancelAll(); return; }
-    const pendingTargets = this.options.privateStore.pending(context.uid);
+    const pendingTargets = await this.options.privateStore.pending(context.uid); assert();
     const { teams } = await service.list(context.uid); assert();
-    const wanted = new Set<string>();
+    type Candidate = { bot: ReturnType<BotStore['list']>[number]; binding: BotTeamBinding; conversation?: TeamConversation; pending?: PendingTeamTarget };
+    const groups: Array<{ scope: string; candidates: Candidate[] }> = [];
+    const validScopes = new Set<string>();
     for (const team of teams) {
       const local = own.filter(value => value.binding.teamId === team.id && value.binding.generation === team.generation);
       if (!local.length) continue;
-      const { bots } = await service.hostMessages<{ bots: TeamBotCard[] }>(context, { action: 'bots', teamId: team.id, generation: team.generation }); assert();
-      const matches = local.flatMap(value => {
-        const card = bots.find(card => card.enabled !== false && card.key === value.binding.botKey && card.ownerUid === context.uid && card.hostId === this.options.privateStore.hostId
-          && card.botId === value.bot.bot_id && card.revision === value.binding.revision
-          && card.use === value.binding.use && JSON.stringify([...card.uids].sort()) === JSON.stringify(value.binding.uids));
-        return card ? [{ ...value, card }] : [];
-      });
-      if (!matches.length) continue;
-      const conversations: TeamConversation[] = [];
-      const pages = new Set<string>(); let after: string | undefined;
-      do {
-        const page = await service.hostMessages<{ conversations: TeamConversation[]; next?: string | null }>(context, { action: 'list', teamId: team.id,
-          generation: team.generation, ...(after ? { after } : {}) }); assert();
-        conversations.push(...page.conversations);
-        if (conversations.length > 10_000 || (page.next && pages.has(page.next))) throw new Error('INVALID_BOT_QUEUE');
-        after = page.next ?? undefined; if (after) pages.add(after);
-      } while (after);
-      for (const { bot, binding } of matches) {
-        const scope = scopeKey(team.id, binding.botKey), now = (this.options.now ?? Date.now)();
-        if (now - (this.heartbeats.get(scope) ?? -Infinity) >= 20_000) {
-          await service.hostMessages(context, { action: 'heartbeatBot', teamId: team.id, generation: team.generation, botKey: binding.botKey, revision: binding.revision }); assert();
-          this.heartbeats.set(scope, now);
-        }
-        for (const conversation of conversations) {
-          if (!conversation.participants.includes(binding.botKey)) continue;
-          const key = `${scope}:${conversation.id}`, signature = JSON.stringify([context.uid, context.epoch, binding]);
-          wanted.add(key);
-          const active = this.active.get(key);
-          if (active?.signature === signature) continue;
-          active?.controller.abort(); this.active.delete(key);
-          // A finish response can be lost AFTER the backend advanced its cursor.
-          // The durable index, not a queue entry, discovers that exact result.
-          let pending = pendingTargets.find(value => value.target.ownerUid === context.uid && value.target.ownerGeneration === team.generation
-            && value.target.teamId === team.id && value.target.conversationId === conversation.id && value.target.botKey === binding.botKey
-            && value.target.hostId === this.options.privateStore.hostId && value.target.botId === bot.bot_id
-            && value.target.botRevision === binding.revision && value.snapshot === binding.snapshot);
-          // Discovery awaited HTTP since listing the index. An active host can
-          // have acknowledged settlement meanwhile; never revive that entry.
-          if (pending && !this.options.privateStore.hasPending(context.uid, pending)) pending = undefined;
-          const retry = pending !== undefined;
-          if (!pending) {
-            const queue = await service.hostMessages<{ cursor: number; triggers: Array<{ id: string; seq: number }>; hasMore: boolean }>(context,
-              { action: 'botQueue', teamId: team.id, generation: team.generation, conversationId: conversation.id, botKey: binding.botKey, after: 0 }); assert();
-            if (!Number.isSafeInteger(queue.cursor) || queue.cursor < 0 || !Array.isArray(queue.triggers)) throw new Error('INVALID_BOT_QUEUE');
-            const trigger = queue.triggers[0];
-            if (!trigger) { this.blocked.delete(key); continue; }
-            if (!/^[A-Za-z0-9_-]{8,64}$/u.test(trigger.id) || !Number.isSafeInteger(trigger.seq) || trigger.seq <= queue.cursor) throw new Error('INVALID_BOT_QUEUE');
-            pending = { version: 1, snapshot: binding.snapshot, sequence: trigger.seq,
-              target: { ownerUid: context.uid, ownerGeneration: team.generation, hostId: this.options.privateStore.hostId,
-                botId: bot.bot_id, botRevision: binding.revision, teamId: team.id, conversationId: conversation.id, botKey: binding.botKey, triggerId: trigger.id } };
-            this.options.privateStore.savePending(context.uid, pending);
+      try {
+        const { bots } = await service.hostMessages<{ bots: TeamBotCard[] }>(context, { action: 'bots', teamId: team.id, generation: team.generation }); assert();
+        for (const { bot, binding } of local) {
+          const card = bots.find(card => card.enabled !== false && card.key === binding.botKey && card.ownerUid === context.uid && card.hostId === this.options.privateStore.hostId
+            && card.botId === bot.bot_id && card.revision === binding.revision && card.use === binding.use
+            && JSON.stringify([...card.uids].sort()) === JSON.stringify(binding.uids));
+          if (!card) continue;
+          const scope = scopeKey(team.id, binding.botKey), now = (this.options.now ?? Date.now)();
+          validScopes.add(scope);
+          if (now - (this.heartbeats.get(scope) ?? -Infinity) >= 20_000) {
+            await service.hostMessages(context, { action: 'heartbeatBot', teamId: team.id, generation: team.generation, botKey: binding.botKey, revision: binding.revision }); assert();
+            this.heartbeats.set(scope, now);
           }
+          // One bounded page per Bot per pass. Ordinary human-only threads cannot
+          // consume this scan, and a large directory resumes on the next pass.
+          const after = this.scans.get(scope);
+          const page = await service.hostMessages<{ conversations: TeamConversation[]; next?: string | null }>(context,
+            { action: 'botConversations', teamId: team.id, generation: team.generation, botKey: binding.botKey, ...(after ? { after } : {}) }); assert();
+          if (!Array.isArray(page.conversations) || page.conversations.length > 100
+            || page.next && (!/^[A-Za-z0-9_-]{8,64}$/u.test(page.next) || after && page.next <= after)) throw new Error('INVALID_BOT_QUEUE');
+          if (page.next) this.scans.set(scope, page.next); else this.scans.delete(scope);
+          const saved = pendingTargets.filter(value => value.target.ownerUid === context.uid && value.target.ownerGeneration === team.generation
+            && value.target.teamId === team.id && value.target.botKey === binding.botKey && value.target.hostId === this.options.privateStore.hostId
+            && value.target.botId === bot.bot_id && value.target.botRevision === binding.revision && value.snapshot === binding.snapshot);
+          const savedIds = new Set(saved.map(value => value.target.conversationId));
+          groups.push({ scope, candidates: [
+            ...saved.map(pending => ({ bot, binding, pending })),
+            ...page.conversations.filter(conversation => conversation.participants.includes(binding.botKey) && !savedIds.has(conversation.id))
+              .map(conversation => ({ bot, binding, conversation })),
+          ] });
+        }
+      } catch (error) {
+        assert();
+        const code = error instanceof Error ? error.message : '';
+        if (['INVALID_SESSION', 'SIGN_IN_REQUIRED'].includes(code)) throw error;
+        // A failed Team cannot cancel independent Teams. Stop only this Team on
+        // an authorization/protocol failure; transient HTTP errors defer discovery.
+        if (['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'BOT_OWNER_REQUIRED', 'BOT_REVISION_CONFLICT', 'INVALID_BOT_QUEUE'].includes(code)) {
+          for (const { binding } of local) { validScopes.delete(scopeKey(team.id, binding.botKey)); this.stopBinding(team.id, binding.botKey); }
+        } else { this.failedDiscovery = true; for (const { binding } of local) validScopes.add(scopeKey(team.id, binding.botKey)); }
+      }
+    }
+    assert();
+    for (const [key, active] of this.active) if (![...validScopes].some(scope => key.startsWith(`${scope}:`))) active.controller.abort();
+    for (const map of [this.scans, this.heartbeats, this.scheduled]) for (const scope of map.keys()) if (!validScopes.has(scope)) map.delete(scope);
+    groups.sort((a, b) => (this.scheduled.get(a.scope) ?? 0) - (this.scheduled.get(b.scope) ?? 0));
+    const limit = this.options.maxConcurrent ?? 4;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 16) throw new Error('INVALID_HOST_CONCURRENCY');
+    // Round robin across Bots; the resumable scan rotates their conversations.
+    while (groups.some(group => group.candidates.length) && this.slots.size < limit) {
+      for (const group of groups) {
+        if (!validScopes.has(group.scope)) { group.candidates = []; continue; }
+        if (this.slots.size >= limit) break;
+        const candidate = group.candidates.shift();
+        if (!candidate) continue;
+        const { bot, binding, conversation } = candidate, scope = group.scope;
+        const id = candidate.pending?.target.conversationId ?? conversation!.id;
+        const key = `${scope}:${id}`, signature = JSON.stringify([context.uid, context.epoch, binding]);
+        const active = this.active.get(key);
+        if (active) { if (active.signature !== signature) active.controller.abort(); continue; }
+        let pending = candidate.pending;
+        if (pending && !await this.options.privateStore.hasPending(context.uid, pending)) pending = undefined;
+        assert();
+        const retry = pending !== undefined;
+        if (!pending) {
+          if (!conversation) continue;
+          const queueVersion = JSON.stringify([signature, conversation.lastChangeSeq]);
+          if (Number.isSafeInteger(conversation.lastChangeSeq) && this.emptyQueues.get(key) === queueVersion) continue;
+          let queue: QueuePage;
+          try {
+            queue = await service.hostMessages<QueuePage>(context,
+              { action: 'botQueue', teamId: binding.teamId, generation: binding.generation, conversationId: id, botKey: binding.botKey, after: 0 }); assert();
+            if (!Number.isSafeInteger(queue.cursor) || queue.cursor < 0 || !Array.isArray(queue.triggers) || queue.triggers.length > 30) throw new Error('INVALID_BOT_QUEUE');
+            const head = queue.triggers[0];
+            if (head && (!/^[A-Za-z0-9_-]{8,64}$/u.test(head.id) || !Number.isSafeInteger(head.seq) || head.seq <= queue.cursor)) throw new Error('INVALID_BOT_QUEUE');
+          } catch (error) {
+            assert();
+            const code = error instanceof Error ? error.message : '';
+            if (['INVALID_SESSION', 'SIGN_IN_REQUIRED'].includes(code)) throw error;
+            if (['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'BOT_OWNER_REQUIRED', 'BOT_REVISION_CONFLICT', 'INVALID_BOT_QUEUE'].includes(code)) { validScopes.delete(scope); this.stopBinding(binding.teamId, binding.botKey); }
+            else if (code !== 'CONVERSATION_REQUIRED') this.failedDiscovery = true;
+            continue;
+          }
+          const trigger = queue.triggers[0];
+          if (!trigger) { this.emptyQueues.set(key, queueVersion); if (this.emptyQueues.size > 4096) this.emptyQueues.delete(this.emptyQueues.keys().next().value!); this.blocked.delete(key); continue; }
+          this.emptyQueues.delete(key);
+          // A slot is available before persisting a new execution identity.
+          pending = { version: 1, snapshot: binding.snapshot, sequence: trigger.seq,
+            target: { ownerUid: context.uid, ownerGeneration: binding.generation, hostId: this.options.privateStore.hostId,
+              botId: bot.bot_id, botRevision: binding.revision, teamId: binding.teamId, conversationId: id, botKey: binding.botKey, triggerId: trigger.id } };
+          await this.options.privateStore.savePending(context.uid, pending); assert();
+        }
+        const observation = this.observations.get(key);
+        if (observation?.triggerId === pending.target.triggerId && observation.until > (this.options.now ?? Date.now)()) continue;
           const durable = pending, target = durable.target;
           if (this.blocked.get(key) === target.triggerId && !retry) continue;
           const controller = new AbortController();
-          const record: Active = { signature, controller, promise: Promise.resolve() };
+          let ready!: () => void;
+          const record: Active = { signature, controller, promise: Promise.resolve(), ready: new Promise(resolve => { ready = resolve; }) };
           let advanced = false;
-          this.active.set(key, record);
-          record.promise = this.execute(context, target, binding, controller, assert, retry).then(result => {
+          this.active.set(key, record); this.slots.add(record);
+          this.scheduled.set(scope, ++this.admissions);
+          record.promise = this.execute(context, target, binding, controller, assert, retry, ready).then(async result => {
+            record.settling = true;
             if (controller.signal.aborted) return;
             assert();
             if (result.status === 'unstarted' && !retry) throw new Error('TEAM_HOST_PROTOCOL');
             if (result.status === 'settled' || result.status === 'unstarted') {
-              this.options.privateStore.settlePending(context.uid, durable); this.blocked.delete(key);
+              await this.options.privateStore.settlePending(context.uid, durable);
+              assert(); if (controller.signal.aborted) return;
+              this.observations.delete(key); this.blocked.delete(key);
               this.status(target); advanced = true;
             } else if (result.status === 'recovery_required') {
               this.status(target, 'recovery_required'); this.blocked.set(key, target.triggerId);
+              const prior = this.observations.get(key);
+              const delay = Math.min(prior?.triggerId === target.triggerId ? prior.delay * 2 : 10000, 60000);
+              this.observations.set(key, { triggerId: target.triggerId, delay, until: (this.options.now ?? Date.now)() + delay });
             } else if (result.state === 'result_pending') {
               this.status(target, 'result_pending');
             }
@@ -265,20 +347,19 @@ export class TeamConnector implements LocalTeamHost {
             }
             // Same journal + queue head on retry; never invent a new attempt.
           }).finally(() => {
+            this.slots.delete(record);
             if (this.active.get(key) === record) this.active.delete(key);
-            if (advanced && !controller.signal.aborted) this.wake();
+            if (advanced || controller.signal.aborted) this.wake(); else this.schedule();
           });
-        }
       }
     }
-    assert();
-    for (const [key, active] of this.active) if (!wanted.has(key)) { active.controller.abort(); this.active.delete(key); }
   }
-  private async execute(context: TeamAccountContext, target: TeamBotTarget, binding: BotTeamBinding, controller: AbortController, assert: () => void, retry: boolean): Promise<TeamHostResult> {
-    const binaries = this.options.binaries(), roots = this.options.privateStore.owner(context.uid);
+  private async execute(context: TeamAccountContext, target: TeamBotTarget, binding: BotTeamBinding, controller: AbortController, assert: () => void, retry: boolean, ready: () => void): Promise<TeamHostResult> {
+    try {
+    const binaries = this.options.binaries(), roots = await this.options.privateStore.owner(context.uid); assert();
     let snapshot: TeamPersonaSnapshot | undefined, key: string | undefined;
     if (!retry) {
-      snapshot = this.options.privateStore.snapshot(context.uid, binding.snapshot);
+      snapshot = await this.options.privateStore.snapshot(context.uid, binding.snapshot); assert();
       key = await this.options.modelCredential(snapshot.credential_id).catch(() => undefined); assert();
     }
     if (controller.signal.aborted) throw new Error('INVALID_SESSION');
@@ -298,6 +379,7 @@ export class TeamConnector implements LocalTeamHost {
       permission: async (input, signal) => {
         assertCurrent(); const allow = await this.options.permission({ ...input, accountEpoch: context.epoch, assertCurrent }, signal).catch(() => false); assertCurrent(); return allow === true;
       } });
+    } finally { ready(); }
   }
-  close(): void { if (this.closed) return; this.closed = true; clearInterval(this.timer); this.stops.forEach(stop => stop()); this.cancelAll(); }
+  close(): void { if (this.closed) return; this.closed = true; clearTimeout(this.timer); this.stops.forEach(stop => stop()); this.cancelAll(); }
 }

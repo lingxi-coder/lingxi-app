@@ -2,7 +2,7 @@ import type { MessageScope, TeamMessage } from './messages';
 
 export interface TeamBotCard {
   key: string; ownerUid: string; hostId: string; botId: string; name: string; description: string;
-  revision: number; use: 'all' | 'listed'; uids: string[]; permitted: boolean; online: boolean; enabled?: boolean;
+  revision: number; use: 'all' | 'listed'; uids: string[]; permitted: boolean; online: boolean; onlineUntil?: number; enabled?: boolean;
 }
 export interface LocalTeamBot { botId: string; name: string; description: string; model?: string }
 export interface BindLocalTeamBotInput extends MessageScope {
@@ -25,6 +25,7 @@ export type TeamBotCommand = TeamBotAnswer
   | MessageScope & { action: 'bots' }
   | MessageScope & { action: 'unbindBot'; botKey: string; expectedRevision: number }
   | MessageScope & { action: 'botState'; conversationId: string; triggerId: string; questionId?: string }
+  | MessageScope & { action: 'botStates'; conversationId: string; triggerIds: string[] }
   | TeamBotRecovery;
 
 export function isQuestionRecipient(message: TeamMessage, uid: string, generation: number): boolean {

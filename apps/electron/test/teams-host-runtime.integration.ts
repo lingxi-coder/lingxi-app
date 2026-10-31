@@ -16,15 +16,15 @@ import { TeamConnector } from '../src/main/teams/connector';
 import { TeamPrivateStore } from '../src/main/teams/privateStore';
 import { runTeamHost, type TeamHostBootstrap } from '../src/main/teams/process';
 import { TeamOwnerApprovalBroker } from '../src/main/remoteControl/teamApprovals';
-import { verifyTeamIdentifier } from '../scripts/credential-broker.mjs';
+const { verifyTeamIdentifier } = await import(new URL('../scripts/credential-broker.mjs', import.meta.url).href);
 
 const productRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const backendRequire = createRequire(new URL('../../firebase/package.json', import.meta.url));
 const { initializeApp, deleteApp } = backendRequire('firebase-admin/app');
 const { getAuth } = backendRequire('firebase-admin/auth');
 const { getFirestore } = backendRequire('firebase-admin/firestore');
-const { TeamsStore, createTeamsHandler } = await import('../../firebase/src/teams.mjs');
-const { triggerIdentity, botOutputIdentity } = await import('../../firebase/src/team-bots.mjs');
+const { TeamsStore, createTeamsHandler } = await import(new URL('../../firebase/src/teams.mjs', import.meta.url).href);
+const { triggerIdentity, botOutputIdentity } = await import(new URL('../../firebase/src/team-bots.mjs', import.meta.url).href);
 const projectId = 'demo-lingxi-teams-t0';
 assert.equal(process.platform, 'darwin', 'this actual sandboxed worker fixture is macOS only');
 assert.equal(process.env.FIRESTORE_EMULATOR_HOST, '127.0.0.1:8085');
@@ -100,9 +100,9 @@ function safeCode(error: unknown): string {
     : error instanceof Error ? error.message : '';
   return /^[A-Za-z][A-Za-z0-9_/-]{0,79}$/u.test(candidate) ? candidate : error instanceof assert.AssertionError ? 'ASSERTION_FAILED' : 'UNEXPECTED_ERROR';
 }
-function diagnostics(): Record<string, unknown> {
+async function diagnostics(): Promise<Record<string, unknown>> {
   let pendingCount: number | string = 0, hostStatus: string | undefined;
-  try { pendingCount = new TeamPrivateStore(userData).pending(ownerUid).length; } catch (error) { pendingCount = safeCode(error); }
+  try { pendingCount = (await new TeamPrivateStore(userData).pending(ownerUid)).length; } catch (error) { pendingCount = safeCode(error); }
   try { if (desktopTriggerId) hostStatus = connector?.runStatus(ownerUid, teamId, 'desktop-runtime-thread', desktopTriggerId); } catch { hostStatus = 'invalid_session'; }
   const actionCounts: Record<string, number> = {};
   for (const action of actions) {
@@ -115,12 +115,12 @@ function diagnostics(): Record<string, unknown> {
     hostOutcomes: hostOutcomes.slice(-12), hostLaunchCount: hostLaunches.length, activeChildren: children.size,
     ownerApprovalCount: approvals.length, modelRequestCount: modelRequests.length, pendingCount, hostStatus };
 }
-function progress(label: string): void {
+async function progress(label: string): Promise<void> {
   phase = label;
-  const value = diagnostics(); writeFileSync(join(output, 'progress.json'), JSON.stringify(value, null, 2), { mode: 0o600 });
+  const value = await diagnostics(); writeFileSync(join(output, 'progress.json'), JSON.stringify(value, null, 2), { mode: 0o600 });
   console.log(JSON.stringify(value));
 }
-const progressTimer = setInterval(() => progress(phase), 5000); progressTimer.unref();
+const progressTimer = setInterval(() => { void progress(phase).catch(() => { failed = true; }); }, 5000); progressTimer.unref();
 
 async function body(request: IncomingMessage, limit = 4 * 1024 * 1024): Promise<string> {
   const chunks: Buffer[] = []; let bytes = 0;
@@ -131,14 +131,14 @@ function json(response: ServerResponse, value: unknown, status = 200): void {
   response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value));
 }
 async function waitFor<T>(label: string, predicate: () => Promise<T | undefined | false> | T | undefined | false, timeoutMs = 90_000, ignoreFailure = false): Promise<T> {
-  progress(label);
+  await progress(label);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (failed && !ignoreFailure) { progress(`failed: ${label}`); throw new Error(`fixture failed while waiting for ${label}`); }
+    if (failed && !ignoreFailure) { await progress(`failed: ${label}`); throw new Error(`fixture failed while waiting for ${label}`); }
     const value = await predicate(); if (value !== undefined && value !== false) return value as T;
     await new Promise(resolveWait => setTimeout(resolveWait, 200));
   }
-  progress(`timeout: ${label}`); throw new Error(`fixture timeout: ${label}`);
+  await progress(`timeout: ${label}`); throw new Error(`fixture timeout: ${label}`);
 }
 async function token(uid: string): Promise<{ idToken: string; refreshToken: string }> {
   const existing = credentials.get(uid); if (existing) return existing;
@@ -256,7 +256,7 @@ const modelServer = createServer(async (request, response) => {
     }
     const data = sse(block, reason); response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Content-Length': Buffer.byteLength(data) }); response.end(data);
   } catch (error) {
-    discoveryTrace.modelFailure = safeCode(error); progress('synthetic model failure');
+    discoveryTrace.modelFailure = safeCode(error); await progress('synthetic model failure');
     failed = true; json(response, { error: { type: 'invalid_request_error', message: 'synthetic fixture model assertion failed' } }, 500);
   }
 });
@@ -298,7 +298,7 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname.startsWith('/_acceptance/')) {
       const uid = url.searchParams.get('uid') ?? '';
       if (!allowedUids.has(uid)) { json(response, { error: { code: 'INVALID_FIXTURE_UID' } }, 400); return; }
-      if (url.pathname === '/_acceptance/diagnostics') { json(response, diagnostics()); return; }
+      if (url.pathname === '/_acceptance/diagnostics') { json(response, await diagnostics()); return; }
       if (url.pathname === '/_acceptance/bootstrap') {
         const seeded = ['ios-human', 'android-human', 'web-human', 'web-observer'].includes(uid) ? await seed(uid) : undefined;
         json(response, { customToken: await auth.createCustomToken(uid), detail: await teams.detail(uid, teamId), baseURL: base,
@@ -326,7 +326,7 @@ const server = createServer(async (request, response) => {
       ...(command.action === 'finishBot' ? { resultDigest: createHash('sha256').update(JSON.stringify([command.outcome, command.text])).digest('hex') } : {}) });
     response.writeHead(status, Object.fromEntries(result.headers)); response.end(status === result.status ? resultText : JSON.stringify({ error: { code: 'SERVICE_UNAVAILABLE' } }));
   } catch (error) {
-    discoveryTrace.backendFailure = safeCode(error); progress('unexpected fixture backend failure');
+    discoveryTrace.backendFailure = safeCode(error); await progress('unexpected fixture backend failure');
     failed = true; json(response, { error: { code: 'FIXTURE_FAILURE' } }, 500);
   }
 });
@@ -362,7 +362,7 @@ async function startConnector(): Promise<void> {
       return value;
     } catch (error) { discoveryTrace.hostActionError = { action: command.action, code: safeCode(error) }; throw error; }
   };
-  connector = new TeamConnector({ service, store, content: new BotContent(store), privateStore, pollMs: 250,
+  connector = new TeamConnector({ service, store, content: new BotContent(store), privateStore, retryMs: 250,
     binaries: () => binaries, defaultModel: () => MODEL,
     modelRoute: async () => ({ route: { model_provider: 'anthropic', model_protocol: 'anthropic_messages', model_id: MODEL,
       model_endpoint: 'https://api.anthropic.com', credential_id: 'anthropic-api-key',
@@ -384,7 +384,7 @@ async function startConnector(): Promise<void> {
       const modelAddress = modelServer.address(); assert.ok(modelAddress && typeof modelAddress !== 'string');
       const bootstrap = { ...input.bootstrap, endpoint,
         ...(input.bootstrap.snapshot ? { snapshot: { ...input.bootstrap.snapshot, model_endpoint: `http://127.0.0.1:${modelAddress.port}`,
-          model_profile: { ...input.bootstrap.snapshot.model_profile, base_url: `http://127.0.0.1:${modelAddress.port}` } } } : {}) } as TeamHostBootstrap;
+          model_profile: { ...input.bootstrap.snapshot.model_profile, base_url: `http://127.0.0.1:${modelAddress.port}` } } } : {}) } as unknown as TeamHostBootstrap;
       try {
         const result = await runTeamHost({ ...input, bootstrap, spawnProcess: (executable, args, options) => {
           assert.deepEqual(args, []); assert.equal(executable, binaries.host);
@@ -465,7 +465,7 @@ try {
   await waitFor('finish ACK loss recorded', () => hostOutcomes.some(value => value.triggerId === desktopTriggerId && value.code === 'RESULT_PENDING') ? true : undefined);
   await stopConnector();
   const stableHostId = new TeamPrivateStore(userData).hostId;
-  assert.ok(new TeamPrivateStore(userData).pending(ownerUid).some(value => value.target.triggerId === desktopTriggerId));
+  assert.ok((await new TeamPrivateStore(userData).pending(ownerUid)).some(value => value.target.triggerId === desktopTriggerId));
   await startConnector();
   await waitFor('durable exact-result retry ACK after restart', () => hostOutcomes.some(value => value.triggerId === desktopTriggerId && value.status === 'settled') ? true : undefined);
   const ref = db.doc(`teams/${teamId}/conversations/${conversationId}`), run = (await ref.collection('botRuns').doc(desktopTriggerId).get()).data();
@@ -475,9 +475,9 @@ try {
   assert.ok(finish.length >= 2); assert.equal(new Set(finish.map(value => value.resultDigest)).size, 1);
   assert.equal(actions.filter(action => action.action === 'startBot' && action.triggerId === desktopTriggerId && action.execute === true).length, 1);
   assert.equal(modelRequests.filter(value => value.plan === 'desktop').length, 3);
-  const evidence = files(new TeamPrivateStore(userData).owner(ownerUid).runtime).filter(path => path.endsWith('/workspace/team-acceptance.txt'));
+  const evidence = files((await new TeamPrivateStore(userData).owner(ownerUid)).runtime).filter(path => path.endsWith('/workspace/team-acceptance.txt'));
   assert.equal(evidence.length, 1); assert.equal(readFileSync(evidence[0]!, 'utf8'), 'once\n');
-  assert.ok(!files(new TeamPrivateStore(userData).owner(ownerUid).runtime).some(path => path.endsWith('/owner-secret.txt')));
+  assert.ok(!files((await new TeamPrivateStore(userData).owner(ownerUid)).runtime).some(path => path.endsWith('/owner-secret.txt')));
   await stopConnector();
   const offlineMessageId = 'offline-runtime-message', offlineTrigger = triggerIdentity(offlineMessageId, botKey), offlineText = `T3 offline queued request ${runId}`;
   registerSourcePlan(plans, { ...thread, messageId: offlineMessageId }, offlineText, 'offline');
@@ -497,7 +497,7 @@ try {
   if (process.env.TEAM_T3_NATIVE === '1') {
     ready = true;
     writeFileSync(join(outputRoot, 'ready.json'), JSON.stringify({ ...report, ready, authPort: 9098, firestorePort: 8085, bootstrapURL: `${base}/_acceptance/bootstrap`, stateURL: `${base}/_acceptance/state` }, null, 2), { mode: 0o600 });
-    progress('ready for native acceptance');
+    await progress('ready for native acceptance');
     console.log(JSON.stringify({ fixture: 'teams-main-runtime', ready: true, readyFile: join(outputRoot, 'ready.json'), projectId, teamId, baseURL: base }));
     await stopped;
   } else console.log(JSON.stringify({ fixture: 'teams-main-runtime', passed: true, report: join(output, 'result.json'), checks: report.checks }));

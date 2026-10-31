@@ -10,11 +10,12 @@ struct TeamBotCard: Decodable, Identifiable, Sendable {
     let enabled: Bool
     let permitted: Bool
     let online: Bool
+    var onlineUntil: Double? = nil
     var id: String { key }
     var selectable: Bool { enabled && permitted }
 }
 struct TeamBotOrigin: Codable, Sendable, Equatable { let uid: String; let generation: Int }
-struct TeamBotQuestion: Codable, Sendable { let id: String; let questions: [String] }
+struct TeamBotQuestion: Codable, Equatable, Sendable { let id: String; let questions: [String] }
 struct TeamBotState: Decodable, Sendable {
     let state: String
     let ownerUid: String
@@ -41,7 +42,7 @@ struct TeamBotState: Decodable, Sendable {
 
 /// The exact answer or settlement is saved before transport. A lost response,
 /// page exit or process restart must resend the same ID and body.
-struct TeamBotIntent: Codable, Identifiable, Sendable {
+struct TeamBotIntent: Codable, Equatable, Identifiable, Sendable {
     let action: String
     let conversationId: String
     let triggerId: String

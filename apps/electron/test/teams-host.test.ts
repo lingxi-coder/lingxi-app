@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { initializeApp, deleteApp } from 'firebase/app';
 import { getFirestore, terminate } from 'firebase/firestore';
-import { TeamsService } from '../src/main/teams/service';
+import { TeamsService, type TeamAccountContext } from '../src/main/teams/service';
 import { AccountService } from '../src/main/account';
 import { TeamOwnerApprovalBroker } from '../src/main/remoteControl/teamApprovals';
 import { TeamConnector, type TeamHostApi } from '../src/main/teams/connector';
@@ -26,11 +26,11 @@ function syntheticRoute(overrides: Partial<TeamModelRoute> = {}): TeamModelRoute
     model_profile: { profile_name: 'anthropic', fixture: 'one frozen native SDK profile' }, ...overrides };
 }
 
-test('actual main discovery never SDK-reads Bot cards and a failed conversation watch falls back without a retry storm', async t => {
+test('actual main discovery never SDK-reads Bot cards and failed conversation/signal watches remain fenced until reauthentication', async t => {
   const f = botFixture(t), privateStore = new TeamPrivateStore(f.userData);
   const bot = f.store.create({ name: 'HTTP-only Bot', model: 'anthropic/claude-synthetic' });
   const botKey = `bot:owner:${privateStore.hostId}:${bot.bot_id}`;
-  const snapshot = privateStore.saveSnapshot('owner', { instructions: 'Frozen', ...syntheticRoute() });
+  const snapshot = await privateStore.saveSnapshot('owner', { instructions: 'Frozen', ...syntheticRoute() });
   f.store.setTeamBindings(bot.bot_id, [{ ownerUid: 'owner', teamId, generation: 1, botKey, revision: 1, snapshot, use: 'all', uids: [] }]);
   const app = initializeApp({ projectId: 'demo-teams-fallback', apiKey: 'synthetic', appId: 'synthetic' }, `teams-fallback-${Date.now()}`), db = getFirestore(app);
   let watchCalls = 0, heartbeatCalls = 0, requests = 0;
@@ -49,20 +49,20 @@ test('actual main discovery never SDK-reads Bot cards and a failed conversation 
     const command = JSON.parse(String(init?.body));
     if (command.action === 'bots') return Response.json({ bots: [{ key: botKey, ownerUid: 'owner', hostId: privateStore.hostId, botId: bot.bot_id,
       revision: 1, use: 'all', uids: [], enabled: true, permitted: true, online: true }] });
-    if (command.action === 'list') return Response.json({ conversations: [], next: null });
+    if (command.action === 'botConversations') return Response.json({ conversations: [], next: null });
     if (command.action === 'heartbeatBot') { heartbeatCalls++; return Response.json({ ok: true }); }
     throw new Error('unexpected transport action');
   });
   await service.hostMessages(service.hostContext()!, { action: 'bots', teamId, generation: 1 });
   assert.equal(watchCalls, 0, 'raw Bot SDK reads are denied by policy and must never be attempted');
-  const connector = new TeamConnector({ service, store: f.store, privateStore, content: new BotContent(f.store), platform: 'darwin', pollMs: 60_000,
+  const connector = new TeamConnector({ service, store: f.store, privateStore, content: new BotContent(f.store), platform: 'darwin', retryMs: 60_000,
     binaries: () => ({ host: '/unused', worker: '/unused' }), defaultModel: () => 'anthropic/claude-synthetic',
     modelRoute: async () => { throw new Error('unused'); }, modelCredential: async () => 'synthetic', permission: async () => false,
     run: async () => { throw new Error('no queued work'); } });
   service.attachHost(connector);
   t.after(async () => { service.close(); await terminate(db); await deleteApp(app); });
   await connector.idle(); await tick(); await connector.idle(); await tick();
-  assert.equal(watchCalls, 1, 'failed watch stays fenced for this account/membership, while HTTP fallback continues');
+  assert.equal(watchCalls, 2, 'conversation and sanitized signal watches are each created once for this account/membership');
   assert.equal(heartbeatCalls, 1); assert.ok(requests < 12, 'listener failure must not cause immediate infinite discovery');
 });
 
@@ -151,7 +151,7 @@ function hostFixture(t: { after(fn: () => void): void }, options: { lostBind?: b
     list: async () => ({ teams: [{ id: teamId, name: 'Synthetic', role: 'owner', generation: 1, memberCount: 2 }] }),
     onChanged: callback => { events.on('change', callback); return () => { events.off('change', callback); }; },
     onMessagesChanged: callback => { events.on('messages', callback); return () => { events.off('messages', callback); }; },
-    async hostMessages<T>(value, command): Promise<T> {
+    async hostMessages<T>(value: TeamAccountContext, command: Record<string, unknown>): Promise<T> {
       service.assertHostContext(value); calls.push(command);
       if (command.action === 'bindBot') {
         cards = [{ key: `bot:owner:${privateStore.hostId}:${bot.bot_id}`, ownerUid: 'owner', hostId: privateStore.hostId,
@@ -161,12 +161,12 @@ function hostFixture(t: { after(fn: () => void): void }, options: { lostBind?: b
       }
       if (command.action === 'bots') return { bots: cards } as T;
       if (command.action === 'heartbeatBot') return { ok: true } as T;
-      if (command.action === 'list') return { conversations: [{ id: threadId, participants: cards.map(card => card.key) }], next: null } as T;
+      if (command.action === 'botConversations') return { conversations: [{ id: threadId, participants: cards.map(card => card.key) }], next: null } as T;
       if (command.action === 'botQueue') return { cursor, triggers: queue, hasMore: false } as T;
       throw new Error('unexpected command');
     },
   };
-  const make = () => new TeamConnector({ service, store: f.store, content, privateStore, platform: 'darwin', pollMs: 60_000,
+  const make = () => new TeamConnector({ service, store: f.store, content, privateStore, platform: 'darwin', retryMs: 60_000,
     binaries: () => ({ host: '/fixed/host', worker: '/fixed/worker' }), defaultModel: () => 'wrong-default',
     modelRoute: async selected => {
       if (selected !== `${route.model_provider}/${route.model_id}` && selected !== route.model_id) throw new Error('TEAM_MODEL_UNSUPPORTED');
@@ -174,7 +174,8 @@ function hostFixture(t: { after(fn: () => void): void }, options: { lostBind?: b
     },
     modelCredential: async id => { credentialCalls++; credentialIds.push(id); return options.credential ? options.credential() : 'synthetic-model'; }, permission: async () => false,
     run: async input => {
-      assert.ok(privateStore.pending('owner').some(value => value.target.triggerId === input.bootstrap.target.triggerId), 'durable discovery must precede launching');
+      const saved = JSON.parse(readFileSync(join(privateStore.root, digest('owner'), 'pending', digest(JSON.stringify(input.bootstrap.target))), 'utf8'));
+      assert.equal(saved.target.triggerId, input.bootstrap.target.triggerId, 'durable discovery must precede launching');
       runs.push(input);
       if (options.run) return options.run(input);
       return new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
@@ -205,7 +206,7 @@ test('lost bind response discovers saved immutable instructions and stable ident
   assert.equal(f.runs[1]!.bootstrap.journal_root, first.journal_root);
   assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result');
   assert.equal(f.runs[1]!.bootstrap.snapshot, undefined, 'restart observes saved work without a model credential or fresh execution');
-  assert.equal(f.privateStore.snapshot('owner', f.store.get(f.bot.bot_id).teams![0]!.snapshot).instructions, 'Immutable persona');
+  assert.equal((await f.privateStore.snapshot('owner', f.store.get(f.bot.bot_id).teams![0]!.snapshot)).instructions, 'Immutable persona');
   assert.notEqual(first.runtime_root, f.store.homeDir(f.bot.bot_id));
   assert.equal(new TeamPrivateStore(f.userData).hostId, f.privateStore.hostId);
 });
@@ -219,7 +220,7 @@ test('a committed finish with lost ACK is durably retried after restart before t
     return new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
   } });
   await f.bind(); await f.connector.idle(); await tick();
-  assert.equal(f.privateStore.pending('owner')[0]!.target.triggerId, 'trigger01');
+  assert.equal((await f.privateStore.pending('owner'))[0]!.target.triggerId, 'trigger01');
   f.connector.close(); const credentialCount = f.credentialCalls();
   const restarted = f.make(); t.after(() => restarted.close());
   await restarted.idle(); await tick(); await restarted.idle(); await tick();
@@ -228,7 +229,7 @@ test('a committed finish with lost ACK is durably retried after restart before t
   ]);
   assert.equal(f.runs[1]!.bootstrap.snapshot, undefined);
   assert.equal(f.credentialCalls() - credentialCount, 1, 'only the newer fresh head may resolve a model credential');
-  assert.deepEqual(f.privateStore.pending('owner').map(value => value.target.triggerId), ['trigger02']);
+  assert.deepEqual((await f.privateStore.pending('owner')).map(value => value.target.triggerId), ['trigger02']);
 });
 
 test('an HTTP await cannot revive a pending entry that an active host settled meanwhile', async t => {
@@ -238,8 +239,8 @@ test('an HTTP await cannot revive a pending entry that an active host settled me
     return new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
   } });
   await f.bind(); await f.connector.idle(); await tick();
-  const indexed = f.privateStore.pending('owner')[0]!;
-  assert.throws(() => f.privateStore.hasPending('owner', { ...indexed, snapshot: 'f'.repeat(64) }), /UNSAFE_TEAM_STORAGE/u);
+  const indexed = (await f.privateStore.pending('owner'))[0]!;
+  await assert.rejects(() => f.privateStore.hasPending('owner', { ...indexed, snapshot: 'f'.repeat(64) }), /UNSAFE_TEAM_STORAGE/u);
   let entered!: () => void, resume!: () => void, pause = true;
   const waiting = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { resume = resolve; });
   const actualList = f.service.list.bind(f.service);
@@ -250,8 +251,8 @@ test('an HTTP await cannot revive a pending entry that an active host settled me
   };
   f.events.emit('messages'); await waiting;
   f.settle(); finish({ status: 'settled', state: 'completed' }); await tick();
-  assert.equal(f.privateStore.pending('owner').length, 0);
-  assert.equal(f.privateStore.hasPending('owner', indexed), false);
+  assert.equal((await f.privateStore.pending('owner')).length, 0);
+  assert.equal(await f.privateStore.hasPending('owner', indexed), false);
   resume(); await f.connector.idle(); await tick();
   assert.deepEqual(f.runs.map(run => [run.bootstrap.mode, run.bootstrap.target.triggerId]), [['run', 'trigger01'], ['run', 'trigger02']]);
   assert.equal(f.connector.runStatus('owner', teamId, threadId, 'trigger01'), undefined, 'acknowledged work must not acquire a misleading retrying status');
@@ -282,7 +283,7 @@ test('remote owner recovery can settle a blocked pending index without restartin
   assert.deepEqual(f.runs.map(run => [run.bootstrap.mode, run.bootstrap.target.triggerId]), [
     ['run', 'trigger01'], ['retry_result', 'trigger01'], ['run', 'trigger02'],
   ]);
-  assert.deepEqual(f.privateStore.pending('owner').map(value => value.target.triggerId), ['trigger02']);
+  assert.deepEqual((await f.privateStore.pending('owner')).map(value => value.target.triggerId), ['trigger02']);
 });
 
 test('nonadvancing observations wait for polling or external hints instead of their own status echo', async t => {
@@ -385,13 +386,13 @@ test('OpenAI Responses freezes the selected native profile and resolves only its
   assert.deepEqual(f.credentialIds, ['openai-selected', 'openai-selected']);
   assert.equal('credential_id' in snapshot, false, 'worker gets the selected key, not owner credential lookup capabilities');
   const binding = f.store.get(f.bot.bot_id).teams![0]!;
-  const saved = f.privateStore.snapshot('owner', binding.snapshot);
+  const saved = await f.privateStore.snapshot('owner', binding.snapshot);
   assert.equal(saved.credential_id, 'openai-selected'); assert.equal('model_api_key' in saved, false);
   f.changeRoute({ ...route, model_protocol: 'open_ai_chat', model_endpoint: 'https://other.example/v1', credential_id: 'sibling' });
   f.connector.close(); const restarted = f.make(); t.after(() => restarted.close()); await restarted.idle(); await tick();
   assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result'); assert.equal(f.runs[1]!.bootstrap.snapshot, undefined);
   assert.deepEqual(f.credentialIds, ['openai-selected', 'openai-selected'], 'result recovery must never resolve an updated or sibling route');
-  assert.deepEqual(f.privateStore.snapshot('owner', binding.snapshot), saved);
+  assert.deepEqual(await f.privateStore.snapshot('owner', binding.snapshot), saved);
 });
 
 test('configured connection and provider-local model identities survive without prefix inference', async t => {
@@ -409,7 +410,7 @@ test('native connection profile identity preserves uppercase connection IDs', as
   const f = hostFixture(t, { model: 'vendor:CN#0/claude-synthetic', route });
   await f.bind(); await f.connector.idle(); await tick();
   assert.equal(f.runs[0]!.bootstrap.snapshot!.model_provider, 'vendor:CN#0');
-  assert.equal(f.privateStore.snapshot('owner', f.store.get(f.bot.bot_id).teams![0]!.snapshot).model_provider, 'vendor:CN#0');
+  assert.equal((await f.privateStore.snapshot('owner', f.store.get(f.bot.bot_id).teams![0]!.snapshot)).model_provider, 'vendor:CN#0');
   assert.deepEqual(f.credentialIds, ['selected-cn-key', 'selected-cn-key']);
 });
 
@@ -432,19 +433,19 @@ test('unsafe route endpoints fail closed before credential resolution', async t 
 
 test('legacy snapshot bytes remain untouched while indexed pending results use observation only', async t => {
   const f = hostFixture(t); await f.bind(); await f.connector.idle(); await tick(); f.connector.close(); await tick();
-  const pending = f.privateStore.pending('owner')[0]!, binding = f.store.get(f.bot.bot_id).teams![0]!;
+  const pending = (await f.privateStore.pending('owner'))[0]!, binding = f.store.get(f.bot.bot_id).teams![0]!;
   const bytes = JSON.stringify({ instructions: 'Legacy immutable persona', model_id: 'claude-synthetic', model_endpoint: 'https://api.anthropic.com' });
-  const snapshot = digest(bytes), path = join(f.privateStore.owner('owner').snapshots, snapshot);
+  const snapshot = digest(bytes), path = join((await f.privateStore.owner('owner')).snapshots, snapshot);
   writeFileSync(path, bytes, { mode: 0o600 });
-  f.privateStore.settlePending('owner', pending); f.privateStore.savePending('owner', { ...pending, snapshot });
+  await f.privateStore.settlePending('owner', pending); await f.privateStore.savePending('owner', { ...pending, snapshot });
   f.store.setTeamBindings(f.bot.bot_id, [{ ...binding, snapshot }]);
   const credentialCount = f.credentialCalls(), restarted = f.make(); t.after(() => restarted.close());
   await restarted.idle(); await tick();
   assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result'); assert.equal(f.runs[1]!.bootstrap.snapshot, undefined);
   assert.equal(f.credentialCalls(), credentialCount); assert.equal(readFileSync(path, 'utf8'), bytes);
-  assert.throws(() => f.privateStore.snapshot('owner', snapshot), /INVALID_TEAM_SNAPSHOT/u, 'fresh execution requires a valid current immutable route');
+  await assert.rejects(() => f.privateStore.snapshot('owner', snapshot), /INVALID_TEAM_SNAPSHOT/u, 'fresh execution requires a valid current immutable route');
   restarted.close(); await tick();
-  f.privateStore.settlePending('owner', f.privateStore.pending('owner')[0]!);
+  await f.privateStore.settlePending('owner', (await f.privateStore.pending('owner'))[0]!);
   const fresh = f.make(); t.after(() => fresh.close()); await fresh.idle(); await tick();
   assert.equal(f.runs.length, 2, 'old unstarted bindings cannot launch a worker with the current default route');
   assert.equal(f.credentialCalls(), credentialCount); assert.equal(readFileSync(path, 'utf8'), bytes);
@@ -520,12 +521,12 @@ test('snapshot copies only regular bounded persona and SKILL text, refusing link
   const file = join(skills, 'synthetic', 'SKILL.md'); rmSync(file); symlinkSync(join(home, 'LINGXI.md'), file);
   await assert.rejects(f.content.teamInstructions(f.bot.bot_id));
   rmSync(file); linkSync(join(home, 'LINGXI.md'), file); await assert.rejects(f.content.teamInstructions(f.bot.bot_id));
-  const roots = f.privateStore.owner('owner'); chmodSync(roots.journal, 0o755);
-  assert.throws(() => f.privateStore.owner('owner'), /UNSAFE_TEAM_STORAGE/u);
+  const roots = await f.privateStore.owner('owner'); chmodSync(roots.journal, 0o755);
+  await assert.rejects(() => f.privateStore.owner('owner'), /UNSAFE_TEAM_STORAGE/u);
 });
 
-function fakeProcess() {
-  const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+function fakeProcess(): ChildProcessWithoutNullStreams & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough } {
+  const child = new EventEmitter() as ChildProcessWithoutNullStreams & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough };
   Object.assign(child, { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null,
     kill: () => { Object.assign(child, { exitCode: 0 }); child.emit('close', 0); return true; } });
   return child;
@@ -613,4 +614,50 @@ test('packaged binary resolution ignores all development overrides', t => {
     host: join(f.root, 'bin', 'harness-team-host'), worker: join(f.root, 'bin', 'harness-team-worker'),
   });
   assert.throws(() => resolveTeamBinaries({ isPackaged: false, environment: {} }), /TEAM_RUNTIME_UNAVAILABLE/u);
+});
+
+test('aggregate host slots stay bounded while cancelled processes drain', async t => {
+  const releases: (() => void)[] = []; let active = 0, highest = 0;
+  const f = hostFixture(t, { run: () => new Promise(resolve => { active++; highest = Math.max(highest, active); let done = false; releases.push(() => { if (!done) { done = true; active--; resolve({ status: 'settled' }); } }); }) });
+  t.after(() => { f.connector.close(); releases.forEach(release => release()); });
+  const original = f.service.hostMessages.bind(f.service);
+  f.service.hostMessages = async (context, command) => command.action === 'botConversations'
+    ? { conversations: Array.from({ length: 10 }, (_, index) => ({ id: `thread-${index}`, participants: [f.store.get(f.bot.bot_id).teams![0]!.botKey], lastChangeSeq: 1 })), next: null } as never
+    : original(context, command);
+  await f.bind(); await f.connector.idle(); assert.equal(f.runs.length, 4); assert.equal(highest, 4);
+  f.connector.invalidate(); await f.connector.idle(); assert.equal(f.runs.length, 4, 'abort does not free an occupied process slot');
+  releases[0]!(); await tick(); await f.connector.idle(); assert.equal(f.runs.length, 5); assert.equal(highest, 4);
+});
+
+test('unchanged empty Bot queues are skipped until their conversation changes', async t => {
+  const f = hostFixture(t); let probes = 0, changed = false;
+  const original = f.service.hostMessages.bind(f.service);
+  f.service.hostMessages = async (context, command) => {
+    if (command.action === 'botConversations') return { conversations: Array.from({ length: 3 }, (_, index) => ({ id: `thread-${index}`, participants: [f.store.get(f.bot.bot_id).teams![0]!.botKey], lastChangeSeq: changed && index === 0 ? 2 : 1 })), next: null } as never;
+    if (command.action === 'botQueue') { probes++; return { cursor: 0, triggers: [], hasMore: false } as never; }
+    return original(context, command);
+  };
+  await f.bind(); await f.connector.idle(); assert.equal(probes, 3);
+  f.events.emit('messages'); await f.connector.idle(); assert.equal(probes, 3);
+  changed = true; f.events.emit('messages'); await f.connector.idle(); assert.equal(probes, 4);
+});
+
+test('one inaccessible conversation does not abort a healthy host', async t => {
+  const f = hostFixture(t), original = f.service.hostMessages.bind(f.service);
+  f.service.hostMessages = async (context, command) => {
+    if (command.action === 'botConversations') return { conversations: ['bad-chat01', 'good-chat01'].map(id => ({ id, participants: [f.store.get(f.bot.bot_id).teams![0]!.botKey], lastChangeSeq: 1 })), next: null } as never;
+    if (command.action === 'botQueue' && command.conversationId === 'bad-chat01') throw new Error('CONVERSATION_REQUIRED');
+    return original(context, command);
+  };
+  await f.bind(); await f.connector.idle(); assert.equal(f.runs.length, 1); assert.equal(f.runs[0]!.bootstrap.target.conversationId, 'good-chat01');
+  f.events.emit('messages'); await f.connector.idle(); assert.equal(f.runs[0]!.signal.aborted, false);
+});
+
+test('durable recovery observations back off without resolving another model credential', async t => {
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  const f = hostFixture(t, { run: async () => ({ status: 'recovery_required' }) });
+  await f.bind(); await f.connector.idle(); assert.equal(f.runs.length, 1); const credentials = f.credentialCalls();
+  f.events.emit('change', {}); await f.connector.idle(); assert.equal(f.runs.length, 1);
+  now += 10001; f.events.emit('change', {}); await f.connector.idle(); assert.equal(f.runs.length, 2);
+  assert.equal(f.credentialCalls(), credentials); assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result');
 });

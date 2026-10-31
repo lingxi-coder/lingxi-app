@@ -95,17 +95,19 @@ struct TeamMessagesPage: View {
     }
     private func transcript(_ conversation: TeamMessageConversation) -> some View {
         let messages = model.cache?.threads[conversation.id]?.messages ?? []
-        let latestByTrigger = messages.reduce(into: [String: String]()) { result, message in
+        let visible = Array(messages.suffix(shown))
+        let messageById = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+        let latestByTrigger = visible.reduce(into: [String: String]()) { result, message in
             for trigger in message.botTriggers(in: conversation) { result[trigger] = message.id }
         }
         return Section {
             Button("teams_mark_read") { perform { try await model.markRead() } }.disabled(model.offline || busy)
             if messages.count > shown { Button("teams_messages_earlier") { shown += 100; model.showBotHistory(limit: shown) } }
-            ForEach(Array(messages.suffix(shown))) { message in
+            ForEach(visible) { message in
                 VStack(alignment: .leading, spacing: 8) {
                     HStack { Text(message.author.kind == "bot" ? botName(message.author.botKey) : name(message.author.uid)).font(.caption.bold()); Spacer(); if let date = message.createdAt.flatMap({ Self.timestamp.date(from: $0) }) { Text(date, style: .time).font(.caption).foregroundStyle(.secondary) } }
                     if let replyID = message.replyTo {
-                        let source = messages.first { $0.id == replyID }
+                        let source = messageById[replyID]
                         Text(source?.recalled == true ? String(localized: "teams_message_recalled") : source?.text ?? String(localized: "teams_message_reply")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                     }
                     Text(message.recalled == true ? String(localized: "teams_message_recalled") : message.text).textSelection(.enabled)

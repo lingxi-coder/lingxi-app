@@ -7,7 +7,6 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.MetadataChanges
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,10 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
 data class TeamSummary(val id: String, val name: String, val memberCount: Int, val role: String, val generation: Long)
 data class TeamMember(val uid: String, val displayName: String, val role: String, val generation: Long)
@@ -134,27 +130,11 @@ class TeamsViewModel internal constructor(private val apiRoot: String = "https:/
         check(user.uid == uid)
         val token = requireNotNull(user.getIdToken(false).await().token)
         check(auth.currentUser?.uid == uid)
-        val result = withContext(Dispatchers.IO) {
-            val connection = URL("$apiRoot/v1/teams$path").openConnection() as HttpURLConnection
-            try {
-                connection.connectTimeout = 20000; connection.readTimeout = 20000; connection.instanceFollowRedirects = false; connection.useCaches = false
-                connection.setRequestProperty("Authorization", "Bearer $token")
-                if (body != null) {
-                    connection.requestMethod = "POST"; connection.doOutput = true; connection.setRequestProperty("Content-Type", "application/json")
-                    connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-                }
-                val success = connection.responseCode in 200..299
-                val stream = if (success) connection.inputStream else connection.errorStream
-                val json = JSONObject(stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "{}")
-                if (!success) throw ApiFailure(json.optJSONObject("error")?.optString("code") ?: "SERVICE_UNAVAILABLE")
-                json
-            } finally { connection.disconnect() }
-        }
+        val result = TeamHttp.request("$apiRoot/v1/teams$path", token, body)
         check(auth.currentUser?.uid == uid)
         return result
     }
-    private class ApiFailure(val code: String) : Exception()
-    private fun errorCode(error: Exception) = (error as? ApiFailure)?.code ?: "SERVICE_UNAVAILABLE"
+    private fun errorCode(error: Exception) = (error as? TeamMessageFailure)?.code ?: "SERVICE_UNAVAILABLE"
     override fun onCleared() { stop() }
     companion object {
         internal fun summary(value: JSONObject) = TeamSummary(value.getString("id"), value.getString("name"), value.getInt("memberCount"), value.getString("role"), value.getLong("generation"))

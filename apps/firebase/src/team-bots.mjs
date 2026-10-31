@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { FieldValue } from 'firebase-admin/firestore';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u);
@@ -13,9 +14,11 @@ const target = { ...scope, botKey: key };
 const thread = { ...target, conversationId: id };
 const run = { ...thread, triggerId: id, attemptId: id };
 const terminal = new Set(['completed', 'failed', 'missed', 'cancelled', 'recovered', 'revoked']);
-export const botActions = new Set(['bots', 'bindBot', 'unbindBot', 'heartbeatBot', 'botQueue', 'claimBot', 'startBot', 'finishBot', 'botQuestion', 'botAnswer', 'botPoll', 'recoverBot', 'botState', 'botWait']);
+export const botActions = new Set(['bots', 'bindBot', 'unbindBot', 'heartbeatBot', 'botConversations', 'botStates', 'botQueue', 'claimBot', 'startBot', 'finishBot', 'botQuestion', 'botAnswer', 'botPoll', 'recoverBot', 'botState', 'botWait']);
 export const botCommand = z.discriminatedUnion('action', [
   z.object({ action: z.literal('bots'), ...scope }).strict(),
+  z.object({ action: z.literal('botConversations'), ...target, after: id.optional() }).strict(),
+  z.object({ action: z.literal('botStates'), ...scope, conversationId: id, triggerIds: z.array(id).min(1).max(30).refine(values => new Set(values).size === values.length) }).strict(),
   z.object({ action: z.literal('bindBot'), ...scope, hostId: localId, botId: localId, expectedRevision: cursor,
     name: z.string().trim().min(1).max(80), description: z.string().max(500), use: z.enum(['all', 'listed']), uids: z.array(uid).max(200) }).strict(),
   z.object({ action: z.literal('unbindBot'), ...target, expectedRevision: positive }).strict(),
@@ -109,7 +112,7 @@ export class TeamBotsStore {
           if (!enabled && b.ownerUid !== user.uid) return [];
           return [{ key: doc.id, ownerUid: b.ownerUid, hostId: b.hostId, botId: b.botId, name: b.name, description: b.description,
             revision: b.revision, enabled, use: b.use, uids: b.uids, permitted: enabled && botPermits(b, user.uid),
-            online: enabled && now.getTime() - (b.lastSeen?.toMillis?.() ?? 0) < 60000 }];
+            onlineUntil: (b.lastSeen?.toMillis?.() ?? 0) + 60000, online: enabled && now.getTime() - (b.lastSeen?.toMillis?.() ?? 0) < 60000 }];
         }) };
       }
       if (input.action === 'bindBot') {
@@ -123,19 +126,48 @@ export class TeamBotsStore {
         const revision = (old?.revision ?? 0) + 1;
         tx.set(ref, { ownerUid: user.uid, ownerGeneration: input.generation, hostId: input.hostId, botId: input.botId,
           name: input.name, description: input.description, use: input.use, uids: input.uids.sort(), revision, enabled: true, lastSeen: now });
+        tx.set(team.collection('signals').doc(botDigest(botKey)), { updatedAt: FieldValue.serverTimestamp() });
         return { botKey, revision };
       }
       if (input.action === 'botAnswer') return this.answer(tx, team, user, input, now);
       if (input.action === 'botState') return this.status(tx, team, user, input, now);
+      if (input.action === 'botStates') {
+        // Cache only reads in this authenticated transaction, never authorization
+        // across requests. Every trigger still traverses the full status checks.
+        const reads = new Map([[team.path, Promise.resolve(teamDoc)], [team.collection('members').doc(user.uid).path, Promise.resolve(member)]]);
+        const reader = { getAll(...refs) {
+          const missing = [...new Map(refs.filter(ref => !reads.has(ref.path)).map(ref => [ref.path, ref])).values()];
+          if (missing.length) {
+            const values = tx.getAll(...missing);
+            missing.forEach((ref, index) => reads.set(ref.path, values.then(docs => docs[index])));
+          }
+          return Promise.all(refs.map(ref => reads.get(ref.path)));
+        }, get(ref) { return this.getAll(ref).then(values => values[0]); } };
+        const states = await Promise.all(input.triggerIds.map(async triggerId => {
+          try { return [triggerId, await this.status(reader, team, user, { ...input, triggerId }, now)]; }
+          catch (error) { if (error.code === 'TRIGGER_REQUIRED') return [triggerId, null]; throw error; }
+        }));
+        return { states: Object.fromEntries(states) };
+      }
       const cardRef = team.collection('bots').doc(input.botKey), card = (await tx.get(cardRef)).data();
       if (!card || card.ownerUid !== user.uid || card.ownerGeneration !== input.generation) fail(403, 'BOT_OWNER_REQUIRED');
+      if (input.action === 'botConversations') {
+        let query = team.collection('conversations').where('participants', 'array-contains', input.botKey).orderBy('__name__').limit(100);
+        if (input.after) query = query.startAfter(input.after);
+        const page = await tx.get(query);
+        if (page.docs.some(doc => !doc.data().memberUids.includes(user.uid))) fail(403, 'CONVERSATION_REQUIRED');
+        return { conversations: page.docs.map(doc => ({ id: doc.id, participants: doc.data().participants, lastChangeSeq: doc.data().lastChangeSeq })),
+          next: page.size === 100 ? page.docs.at(-1).id : null };
+      }
       if (input.action === 'unbindBot') {
         if (input.expectedRevision !== card.revision) fail(409, 'BOT_REVISION_CONFLICT');
-        tx.update(cardRef, { enabled: false, revision: card.revision + 1 }); return { ok: true };
+        tx.update(cardRef, { enabled: false, revision: card.revision + 1 });
+        tx.set(team.collection('signals').doc(botDigest(input.botKey)), { updatedAt: FieldValue.serverTimestamp() }); return { ok: true };
       }
       if (input.action === 'heartbeatBot') {
         if (!card.enabled || input.revision !== card.revision) fail(409, 'BOT_REVISION_CONFLICT');
-        tx.update(cardRef, { lastSeen: now }); return { ok: true };
+        tx.update(cardRef, { lastSeen: now });
+        tx.set(team.collection('signals').doc(botDigest(input.botKey)), { updatedAt: FieldValue.serverTimestamp() }); return { ok: true };
       }
       const ref = team.collection('conversations').doc(input.conversationId), c = (await tx.get(ref)).data();
       if (!c?.memberUids.includes(user.uid) || !c.participants.includes(input.botKey)) fail(403, 'CONVERSATION_REQUIRED');
@@ -167,6 +199,7 @@ export class TeamBotsStore {
         && originalChange.data()?.executionIntent?.targets.includes(trigger.botKey)
         && originalChange.data().executionIntent.triggerIds.includes(input.triggerId);
       if (!valid) {
+        tx.update(ref, { botUpdatedAt: FieldValue.serverTimestamp() });
         tx.set(runRef, { ...state, state: 'revoked', finishedAt: now });
         settleCursor(); return { state: 'revoked' };
       }
@@ -178,10 +211,12 @@ export class TeamBotsStore {
         if (!state || !['claimed', 'running', 'recovery'].includes(state.state)
           || (['claimed', 'running'].includes(state.state) && state.leaseUntil > now.getTime())) fail(409, 'RECOVERY_NOT_REQUIRED');
         const replyId = appendBotMessage(tx, ref, c, trigger, input.triggerId, 'reply', input.text, now);
+        tx.update(ref, { botUpdatedAt: FieldValue.serverTimestamp() });
         tx.set(runRef, { ...state, state: 'recovered', replyId, recoveryDigest: botDigest(input.text), finishedAt: now });
         settleCursor(); return { state: 'recovered', replyId };
       }
       if (state?.state === 'running' && state.leaseUntil <= now.getTime()) {
+        tx.update(ref, { botUpdatedAt: FieldValue.serverTimestamp() });
         tx.update(runRef, { state: 'recovery' }); return { state: 'recovery' };
       }
       if (state?.state === 'recovery') return { state: 'recovery' };
@@ -189,8 +224,10 @@ export class TeamBotsStore {
         if (state?.state === 'running' || (state?.state === 'claimed' && state.leaseUntil > now.getTime() && state.attemptId !== input.attemptId)) return { state: 'busy' };
         if (now.getTime() - trigger.at.toMillis() > 86400000) {
           const replyId = appendBotMessage(tx, ref, c, trigger, input.triggerId, 'reply', 'This request expired while the Bot was offline. Please send a new request.', now);
+          tx.update(ref, { botUpdatedAt: FieldValue.serverTimestamp() });
           tx.set(runRef, { state: 'missed', replyId, finishedAt: now }); settleCursor(); return { state: 'missed', replyId };
         }
+        tx.update(ref, { botUpdatedAt: FieldValue.serverTimestamp() });
         tx.set(runRef, { state: 'claimed', attemptId: input.attemptId, leaseUntil: now.getTime() + 30000 });
         tx.set(cursorRef, { seq: currentCursor, activeTriggerId: input.triggerId });
         return { state: 'claimed', origin: { uid: trigger.actorUid, generation: trigger.generation }, text: original.text, messageId: trigger.messageId, seq: trigger.seq };
@@ -203,6 +240,7 @@ export class TeamBotsStore {
         if (state.state !== 'claimed') fail(409, 'BOT_LEASE_REQUIRED');
         const leaseUntil = now.getTime() + 300000;
         const statusId = appendBotMessage(tx, ref, c, trigger, input.triggerId, 'started', 'Processing on the Bot owner’s computer.', now);
+        tx.update(ref, { botUpdatedAt: FieldValue.serverTimestamp() });
         tx.update(runRef, { state: 'running', leaseUntil, statusId, startedAt: now });
         // The host consumes this authenticated snapshot, never an earlier claim
         // body or renderer-supplied principal. Only the one-shot transition
@@ -225,11 +263,13 @@ export class TeamBotsStore {
         appendBotMessage(tx, ref, c, trigger, input.triggerId, `approval:${input.waitId}:${input.waiting ? 'requested' : 'resolved'}`,
           input.waiting ? 'Waiting for the Bot owner’s approval.' : 'The Bot owner’s approval request has been resolved.', now);
         tx.set(waitRef, { ...wait, triggerId: input.triggerId, attemptId: input.attemptId, [input.waiting ? 'requested' : 'resolved']: true });
+        tx.update(ref, { botUpdatedAt: FieldValue.serverTimestamp() });
         if (!wait) tx.update(runRef, { approvalCount: (state.approvalCount ?? 0) + 1 });
         return { ok: true };
       }
       if (input.action === 'finishBot') {
         const replyId = appendBotMessage(tx, ref, c, trigger, input.triggerId, 'reply', input.text, now);
+        tx.update(ref, { botUpdatedAt: FieldValue.serverTimestamp() });
         tx.update(runRef, { state: input.outcome, replyId, resultDigest: botDigest(JSON.stringify([input.outcome, input.text])), finishedAt: now });
         settleCursor(); return { state: input.outcome, replyId };
       }
@@ -240,6 +280,7 @@ export class TeamBotsStore {
         if (existing) { if (existing.requestDigest !== requestDigest) fail(409, 'QUESTION_CONFLICT'); return { ok: true }; }
         const question = { id: input.questionId, questions: input.questions };
         appendBotMessage(tx, ref, c, trigger, input.triggerId, `question:${input.questionId}`, input.text, now, { question });
+        tx.update(ref, { botUpdatedAt: FieldValue.serverTimestamp() });
         tx.create(questionRef, { ...value, requestDigest }); tx.update(runRef, { questionId: input.questionId }); return { ok: true };
       }
       if (input.action === 'botPoll') {
@@ -291,6 +332,7 @@ export class TeamBotsStore {
     validateBot(card.data(), trigger.botKey, owner.data(), user.uid);
     if (card.data().revision !== trigger.botRevision || original.data()?.recalled || original.data()?.changeId !== trigger.changeId) fail(403, 'QUESTION_RECIPIENT_REQUIRED');
     if (Object.keys(input.answers).length !== question.questions.length || question.questions.some(value => !(value in input.answers))) fail(400, 'INVALID_ANSWER');
+    tx.update(ref, { botUpdatedAt: FieldValue.serverTimestamp() });
     tx.update(questionDoc.ref, { answers: input.answers, answerId: input.answerId, answerDigest: digest, answeredAt: now }); return { ok: true };
   }
 }

@@ -67,3 +67,5 @@ export async function openTeamsFirestoreSession(options: TeamsFirestoreOptions):
     throw error;
   }
 }
+
+export { collection, doc, onSnapshot, query, where } from 'firebase/firestore';

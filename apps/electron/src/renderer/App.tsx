@@ -3,7 +3,6 @@ import { useI18n } from './i18n/useI18n';
 import { LocalApps } from './components/LocalApps';
 import './components/LocalApps.css';
 import { Bots } from './components/Bots';
-import { Teams } from './components/Teams';
 import './components/Bots.css';
 import { useBots } from './bridge/useBots';
 import { botScopesKey } from './bridge/botRoutines';
@@ -17,6 +16,8 @@ import { SideChatPanel } from './components/SideChatPanel';
 import { conversationPlans } from './bridge/planDocuments';
 import { selectedGitScope } from './bridge/gitScope';
 import {
+  lazy,
+  Suspense,
   useEffect,
   useCallback,
   useLayoutEffect,
@@ -65,6 +66,8 @@ interface SessionPickerRequest {
   query: string;
   opener: HTMLElement | null;
 }
+
+const Teams = lazy(() => import('./components/Teams').then(module => ({ default: module.Teams })));
 
 export function App() {
   const { locale, preference } = useI18n();
@@ -460,7 +463,7 @@ export function App() {
           <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
-          {page === 'teams' && <Teams zh={locale.startsWith('zh')} initialInvite={teamInvite} onInviteHandled={handledTeamInvite} />}
+          {page === 'teams' && <Suspense fallback={<p role="status">{locale.startsWith('zh') ? '正在加载团队…' : 'Loading Teams…'}</p>}><Teams zh={locale.startsWith('zh')} initialInvite={teamInvite} onInviteHandled={handledTeamInvite} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}

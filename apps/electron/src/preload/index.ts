@@ -467,6 +467,13 @@ const api: LingxiApi = {
     detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
     messages: (uid, command) => teamsRequest({ type: 'messages', uid, command }),
     onMessagesChanged: callback => subscribe('lingxi:teams:messages', callback),
+    watchMessages: (uid, scope, conversationId, next) => {
+      const leaseId = crypto.randomUUID();
+      let closed = false;
+      const stop = subscribe('lingxi:teams:snapshot', (event: { leaseId: string; snapshot: import('../../../../packages/teams/messages').MessageSnapshot }) => { if (event.leaseId === leaseId && event.snapshot.uid === uid) next(event.snapshot); });
+      void teamsRequest({ type: 'watchMessages', uid, scope, conversationId, leaseId }).catch(error => { if (!closed) next({ uid, ...scope, kind: 'error', fromCache: true, error: error instanceof Error ? error.message : 'MESSAGE_LISTENER_FAILED' }); });
+      return () => { closed = true; stop(); void teamsRequest({ type: 'unwatchMessages', uid, leaseId }).catch(() => undefined); };
+    },
     execute: (uid, command) => teamsRequest({ type: 'execute', uid, command }),
     onChanged: callback => subscribe('lingxi:teams:changed', callback),
   },

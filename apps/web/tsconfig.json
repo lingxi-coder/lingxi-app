@@ -49,6 +49,9 @@
       ],
       "react/jsx-dev-runtime": [
         "./node_modules/@types/react/jsx-dev-runtime"
+      ],
+      "firebase/*": [
+        "./node_modules/firebase/*"
       ]
     }
   },

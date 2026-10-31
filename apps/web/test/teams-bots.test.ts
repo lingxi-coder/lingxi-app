@@ -2,21 +2,23 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { canRecoverBot, isQuestionRecipient, teamBotTriggerId, teamBotUsable, type TeamBotCommand, type TeamBotState } from '../../../packages/teams/bots';
-import { TeamMessaging, applyMessagePage, emptyProjection, type MessageApi, type MessageCommand, type MessageProjection, type MessageStorage, type TeamConversation, type TeamMessage } from '../../../packages/teams/messages';
+import { TeamMessaging, emptyProjection, type MessageApi, type MessageCommand, type PendingCommands, type CommandStorage, type TeamConversation, type TeamMessage } from '../../../packages/teams/messages';
 const scope = { teamId: 'test-team', generation: 7 }, uid = 'alice';
 const botKey = `bot:owner:${'h'.repeat(22)}:${'b'.repeat(22)}`;
 const conversation: TeamConversation = { id: 'test-chat', kind: 'group', title: 'Fixture', participants: ['user:alice', botKey], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0 };
 const question: TeamMessage = { id: 'question-message', seq: 1, author: { kind: 'bot', uid: 'owner', botKey }, kind: 'question', text: 'Choose a value',
   triggerId: 'trigger01', origin: { uid, generation: 7 }, question: { id: 'question01', questions: ['Which value?', 'Why?'] }, createdAt: null, changeSeq: 1, changeId: 'change001' };
 function storage() {
-  const records = new Map<string, MessageProjection>();
-  return { records, async update(key, reduce) { const value = reduce(structuredClone(records.get(key))); records.set(key, structuredClone(value)); return structuredClone(value); } } satisfies MessageStorage & { records: Map<string, MessageProjection> };
+  const records = new Map<string, PendingCommands>();
+  return { records, async load(key) { return structuredClone(records.get(key)); }, async update(key, reduce) { const value = reduce(structuredClone(records.get(key))); records.set(key, structuredClone(value)); return structuredClone(value); } } satisfies CommandStorage & { records: Map<string, PendingCommands> };
 }
 const until = async (condition: () => boolean) => { const end = Date.now() + 3000; while (!condition()) { if (Date.now() > end) throw new Error('Condition timed out'); await new Promise(resolve => setTimeout(resolve, 5)); } };
 function apiWith(write: (command: MessageCommand) => Promise<unknown>): MessageApi {
-  return { onMessagesChanged: () => () => {}, async messages<T>(command: MessageCommand): Promise<T> {
-    if (command.action === 'list') return { conversations: [conversation], next: null } as T;
-    if (command.action === 'sync') return { conversation, changes: [], messages: [], hasMore: false } as T;
+  return { watchMessages(current, _id, next) {
+    let closed = false;
+    queueMicrotask(() => { if (!closed) for (const account of ['alice', 'owner']) next({ uid: account, ...current, kind: 'directory', fromCache: false, conversations: [conversation] }); });
+    return () => { closed = true; };
+  }, onMessagesChanged: () => () => {}, async messages<T>(command: MessageCommand): Promise<T> {
     return await write(command) as T;
   } };
 }
@@ -27,7 +29,8 @@ test('T3 question recipient is the original UID and generation, never the owner 
   assert.equal(isQuestionRecipient(question, uid, 8), false);
   assert.equal(isQuestionRecipient({ ...question, recalled: true }, uid, 7), false);
   assert.equal(isQuestionRecipient({ ...question, author: { kind: 'user', uid } }, uid, 7), false);
-  const state = applyMessagePage(emptyProjection(uid, scope), conversation.id, { conversation, changes: [{ id: question.changeId, seq: 1, messageId: question.id, operation: 'create' }], messages: [question], hasMore: false });
+  const state = emptyProjection(uid, scope);
+  state.threads[conversation.id] = { messages: [question] };
   assert.deepEqual(state.threads[conversation.id]!.messages[0], question);
 });
 
@@ -113,7 +116,7 @@ test('T3 concurrent windows claim one durable answer and refuse a different seco
 
 test('T3 failed durable answer commit never starts transport', async () => {
   let sends = 0;
-  const model = new TeamMessaging(apiWith(async () => { sends++; return {}; }), { async update() { throw new Error('STORAGE_FAILED'); } }, uid, scope);
+  const model = new TeamMessaging(apiWith(async () => { sends++; return {}; }), { async load() { throw new Error('STORAGE_FAILED'); }, async update() { throw new Error('STORAGE_FAILED'); } }, uid, scope);
   model.selected = conversation.id;
   await assert.rejects(model.answer(question, { 'Which value?': '42', 'Why?': 'Evidence' }), /STORAGE_FAILED/);
   assert.equal(sends, 0); model.close();
@@ -186,14 +189,14 @@ test('T3 new recovery rejects a renewed lease, another owner and result delivery
 
 test('T3 recovery storage failure never sends a settlement', async () => {
   const backing = storage(); let fail = false, sends = 0;
-  const durable: MessageStorage = { async update(key, reduce) { if (fail) throw new Error('STORAGE_FAILED'); return backing.update(key, reduce); } };
+  const durable: CommandStorage = { load: backing.load, async update(key, reduce) { if (fail) throw new Error('STORAGE_FAILED'); return backing.update(key, reduce); } };
   const api = apiWith(async command => {
     if (command.action === 'botState') { fail = true; return { state: 'recovery', ownerUid: 'owner', botKey, origin: { uid, generation: 7 }, answered: false }; }
     sends++; return {};
   });
   const model = new TeamMessaging(api, durable, 'owner', scope);
   await assert.rejects(model.recover(conversation.id, 'trigger01', 'Result'), /STORAGE_FAILED/);
-  assert.equal(sends, 0); assert.equal([...backing.records.values()][0]!.recoveryOutbox, undefined); model.close();
+  assert.equal(sends, 0); assert.equal([...backing.records.values()][0]?.recoveryOutbox, undefined); model.close();
 });
 
 const rejectsExecutorCommand = () => {

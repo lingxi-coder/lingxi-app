@@ -35,11 +35,11 @@ internal data class TeamBotQuestion(val id: String, val questions: List<String>)
     companion object { fun parse(v: JSONObject) = TeamBotQuestion(v.getString("id"), v.getJSONArray("questions").strings()) }
 }
 
-internal data class TeamBotCard(val key: String, val ownerUid: String, val name: String, val description: String, val revision: Long, val use: String, val permitted: Boolean, val online: Boolean, val enabled: Boolean = true) {
+internal data class TeamBotCard(val key: String, val ownerUid: String, val name: String, val description: String, val revision: Long, val use: String, val permitted: Boolean, val online: Boolean, val enabled: Boolean = true, val onlineUntil: Long = 0) {
     val selectable get() = enabled && permitted
     fun canUnbind(uid: String) = enabled && ownerUid == uid
     val inactiveLabel get() = "Inactive · revision $revision. Rebind on Desktop."
-    companion object { fun parse(v: JSONObject) = TeamBotCard(v.getString("key"), v.getString("ownerUid"), v.getString("name"), v.getString("description"), v.getLong("revision"), v.getString("use"), v.getBoolean("permitted"), v.getBoolean("online"), v.optBoolean("enabled", true)) }
+    companion object { fun parse(v: JSONObject) = TeamBotCard(v.getString("key"), v.getString("ownerUid"), v.getString("name"), v.getString("description"), v.getLong("revision"), v.getString("use"), v.getBoolean("permitted"), v.getBoolean("online"), v.optBoolean("enabled", true), v.optLong("onlineUntil")) }
 }
 
 /** Preserve selected keys until the human clears them; never downgrade a Bot draft to plain text. */

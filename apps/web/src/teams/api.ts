@@ -1,13 +1,15 @@
-import { collection, onSnapshot, query, where, doc, type Firestore } from 'firebase/firestore';
+import * as firestore from 'firebase/firestore';
+import { collection, onSnapshot, type Firestore } from 'firebase/firestore';
 import { teamsTransport, type TeamsApi, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../packages/teams';
-import type { MessageCommand } from '../../../../packages/teams/messages';
-import type { User } from 'firebase/auth';
+import { watchFirestoreMessages } from '../../../../packages/teams/firestore.js';
+import type { MessageSignal, MessageCommand } from '../../../../packages/teams/messages';
+import { getAuth, type User } from 'firebase/auth';
 
-export function webTeamsApi(user: User, db: Firestore): TeamsApi & { close(): void } {
+export function webTeamsApi(user: User, db: Firestore, currentUid: () => string | undefined = () => getAuth(db.app).currentUser?.uid): TeamsApi & { close(): void } {
   let closed = false;
-  const request = teamsTransport('', async () => { const token = await user.getIdToken(); if (closed) throw new Error('INVALID_SESSION'); return token; });
+  const request = teamsTransport('', async () => { if (currentUid() !== user.uid) throw new Error('INVALID_SESSION'); const token = await user.getIdToken(); if (closed || currentUid() !== user.uid) throw new Error('INVALID_SESSION'); return token; });
   const callbacks = new Set<(event: { invalidated?: boolean }) => void>();
-  const messageCallbacks = new Set<() => void>();
+  const messageCallbacks = new Set<(signal?: MessageSignal) => void>();
   const messageStops = new Map<string, () => void>();
   const stops = new Map<string, () => void>();
   const failed = new Map<string, number>();
@@ -19,9 +21,9 @@ export function webTeamsApi(user: User, db: Firestore): TeamsApi & { close(): vo
       snapshot => emit(snapshot.metadata.fromCache), () => { stops.get(key)?.(); stops.delete(key); failed.set(key, generation); emit(true); }));
   };
   const checked = async <T>(path = '', body?: unknown): Promise<T> => {
-    if (closed) throw new Error('INVALID_SESSION');
+    if (closed || currentUid() !== user.uid) throw new Error('INVALID_SESSION');
     const result = await request<T>(path, body);
-    if (closed) throw new Error('INVALID_SESSION');
+    if (closed || currentUid() !== user.uid) throw new Error('INVALID_SESSION');
     return result;
   };
   return {
@@ -32,19 +34,17 @@ export function webTeamsApi(user: User, db: Firestore): TeamsApi & { close(): vo
       watch(teamId, ['teams', teamId, 'members'], current.team.generation); return current;
     },
     execute: (command: TeamCommand) => checked<TeamResult>('', command),
-    async messages<T>(command: MessageCommand): Promise<T> {
-      const key = `${command.teamId}:${command.generation}`;
-      if (!messageStops.has(key)) {
-        messageStops.set(key, onSnapshot(query(collection(db, 'teams', command.teamId, 'conversations'), where('memberUids', 'array-contains', user.uid)),
-          { includeMetadataChanges: true }, snapshot => { if (!closed && !snapshot.metadata.fromCache) for (const cb of messageCallbacks) cb(); },
-          () => { if (!closed) for (const cb of messageCallbacks) cb(); }));
-      }
-      if (command.action === 'sync') {
-        const readKey = `${key}:${command.conversationId}`;
-        if (!messageStops.has(readKey)) messageStops.set(readKey, onSnapshot(doc(db, 'teams', command.teamId, 'conversations', command.conversationId, 'reads', user.uid),
-          snapshot => { if (!closed && !snapshot.metadata.fromCache) for (const cb of messageCallbacks) cb(); }, () => { if (!closed) for (const cb of messageCallbacks) cb(); }));
-      }
-      return checked<T>('/messages', command);
+    messages: <T>(command: MessageCommand) => checked<T>('/messages', command),
+    watchMessages(scope, conversationId, next) {
+      if (closed || currentUid() !== user.uid) throw new Error('INVALID_SESSION');
+      const key = crypto.randomUUID();
+      const stop = watchFirestoreMessages(firestore, db, user.uid, scope, conversationId, snapshot => {
+        if (closed) return;
+        next(snapshot);
+        if (snapshot.kind === 'signal' || snapshot.kind === 'error') for (const callback of messageCallbacks) callback(snapshot.kind === 'signal' ? snapshot.signal : undefined);
+      }, () => !closed && currentUid() === user.uid);
+      messageStops.set(key, stop);
+      return () => { stop(); messageStops.delete(key); };
     },
     onMessagesChanged(callback) { messageCallbacks.add(callback); return () => { messageCallbacks.delete(callback); if (!messageCallbacks.size) { for (const stop of messageStops.values()) stop(); messageStops.clear(); } }; },
     onChanged(callback) { callbacks.add(callback); return () => { callbacks.delete(callback); }; },
